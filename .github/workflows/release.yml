@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: agent-wechat/agent-wechat
+  WECHAT_DEB_URL_AMD64: https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb
+  WECHAT_DEB_URL_ARM64: https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build artifacts
+        run: pnpm build
+
+      - name: Verify tag matches package versions
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          for pkg in packages/cli/package.json packages/openclaw-extension/package.json; do
+            VERSION="$(jq -r '.version' "$pkg")"
+            if [ "$VERSION" != "$TAG" ]; then
+              echo "Version mismatch: $pkg has $VERSION but tag is $TAG"
+              exit 1
+            fi
+          done
+
+      - name: Publish @agent-wechat/cli
+        working-directory: packages/cli
+        run: npm publish --access public --provenance
+
+      - name: Publish @agent-wechat/wechat
+        working-directory: packages/openclaw-extension
+        run: npm publish --access public --provenance
+
+  build-amd64:
+    runs-on: ubuntu-latest
+    needs:
+      - publish-npm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Docker build context
+        run: |
+          rm -rf docker/agent-server-rust
+          mkdir -p docker/agent-server-rust
+          cp packages/agent-server-rust/Cargo.toml docker/agent-server-rust/
+          if [ -f packages/agent-server-rust/Cargo.lock ]; then
+            cp packages/agent-server-rust/Cargo.lock docker/agent-server-rust/
+          fi
+          cp -r packages/agent-server-rust/src docker/agent-server-rust/
+          cp -r packages/agent-server-rust/migrations docker/agent-server-rust/
+
+      - name: Download WeChat package (amd64)
+        run: curl -fL "$WECHAT_DEB_URL_AMD64" -o docker/wechat.deb
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (amd64)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-amd64
+            type=semver,pattern={{major}}.{{minor}},suffix=-amd64
+            type=raw,value=latest-amd64
+
+      - name: Build and push amd64 image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:amd64,mode=max
+          provenance: false
+          push: true
+
+  build-arm64:
+    runs-on: ubuntu-latest
+    needs:
+      - publish-npm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Docker build context
+        run: |
+          rm -rf docker/agent-server-rust
+          mkdir -p docker/agent-server-rust
+          cp packages/agent-server-rust/Cargo.toml docker/agent-server-rust/
+          if [ -f packages/agent-server-rust/Cargo.lock ]; then
+            cp packages/agent-server-rust/Cargo.lock docker/agent-server-rust/
+          fi
+          cp -r packages/agent-server-rust/src docker/agent-server-rust/
+          cp -r packages/agent-server-rust/migrations docker/agent-server-rust/
+
+      - name: Download WeChat package (arm64)
+        run: curl -fL "$WECHAT_DEB_URL_ARM64" -o docker/wechat.deb
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (arm64)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-arm64
+            type=semver,pattern={{major}}.{{minor}},suffix=-arm64
+            type=raw,value=latest-arm64
+
+      - name: Build and push arm64 image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          platforms: linux/arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:arm64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache:arm64,mode=max
+          provenance: false
+          push: true
+
+  create-manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    needs:
+      - build-amd64
+      - build-arm64
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for manifest
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Create and push multi-arch manifest
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            ${{ needs.build-amd64.outputs.image-digest }} \
+            ${{ needs.build-arm64.outputs.image-digest }}
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}

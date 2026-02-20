@@ -7,6 +7,13 @@ OpenClaw channel plugin for WeChat. Polls the agent-wechat REST API for inbound 
 - A running agent-wechat container (provides the REST API on port 6174)
 - OpenClaw installed and configured
 
+## Install From npm
+
+```bash
+openclaw plugins install @agent-wechat/wechat
+openclaw plugins enable wechat
+```
+
 ## Development Setup
 
 ### 1. Build

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command, Option } from "commander";
-import { WeChatClient, type WeChatClientOptions } from "@thisnick/agent-wechat-shared";
+import { WeChatClient } from "@thisnick/agent-wechat-shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
 import { spawn, execSync } from "child_process";
 import { randomBytes } from "crypto";
@@ -9,16 +9,13 @@ import fs from "fs";
 import qrTerminal from "qrcode-terminal";
 import os from "os";
 import path from "path";
-import { fileURLToPath } from "url";
 
 const VERSION = "0.1.0";
 const CONTAINER_NAME = "agent-wechat";
 const DEFAULT_PORT = 6174;
 const VNC_PORT = 5900;
-
-// Get monorepo root (cli is at packages/cli)
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
+const DEFAULT_REMOTE_IMAGE_REPO = process.env.AGENT_WECHAT_IMAGE_REPO || "ghcr.io/agent-wechat/agent-wechat";
+const DEFAULT_REMOTE_IMAGE_TAG = process.env.AGENT_WECHAT_IMAGE_TAG || "latest";
 
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
@@ -59,10 +56,62 @@ function getConfig(): Config {
   };
 }
 
-function getImageTag(): string {
+function getLocalImageTag(): string {
   const arch = os.arch();
   if (arch === "arm64") return "agent-wechat:arm64";
   return "agent-wechat:amd64";
+}
+
+function getRemoteImageTag(): string {
+  return `${DEFAULT_REMOTE_IMAGE_REPO}:${DEFAULT_REMOTE_IMAGE_TAG}`;
+}
+
+function imageExists(image: string): boolean {
+  try {
+    execSync(`docker image inspect ${image}`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveImageTag(explicitImage?: string): string {
+  const explicit = explicitImage?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const envImage = process.env.AGENT_WECHAT_IMAGE?.trim();
+  if (envImage) {
+    return envImage;
+  }
+
+  const localImage = getLocalImageTag();
+  if (imageExists(localImage)) {
+    return localImage;
+  }
+  return getRemoteImageTag();
+}
+
+function ensureImageAvailable(image: string): void {
+  if (imageExists(image)) {
+    return;
+  }
+
+  if (image.includes("/")) {
+    console.log(`Image ${image} not found locally. Pulling...`);
+    try {
+      execSync(`docker pull ${image}`, { stdio: "inherit" });
+      return;
+    } catch {
+      console.error(`Failed to pull image: ${image}`);
+      process.exit(1);
+    }
+  }
+
+  console.error(`Image ${image} not found.`);
+  console.error(`Run 'pnpm build:image' first, or set AGENT_WECHAT_IMAGE to a published image.`);
+  process.exit(1);
 }
 
 // Create program
@@ -103,7 +152,10 @@ function getSubscriptionOptions(): SubscriptionClientOptions {
 program
   .command("up")
   .description("Start the WeChat container")
-  .action(cmdUp);
+  .option("--image <image>", "Docker image reference (overrides default resolution)")
+  .action(async (opts: { image?: string }) => {
+    await cmdUp(opts.image);
+  });
 
 program
   .command("down")
@@ -760,8 +812,8 @@ async function cmdSessionDelete(client: WeChatClient, idOrName: string) {
 // Container Commands Implementation
 // ============================================
 
-async function cmdUp() {
-  const image = getImageTag();
+async function cmdUp(explicitImage?: string) {
+  const image = resolveImageTag(explicitImage);
 
   // Check if container already exists
   try {
@@ -784,17 +836,10 @@ async function cmdUp() {
     // No container found, continue to create
   }
 
-  // Check if image exists
-  try {
-    execSync(`docker image inspect ${image}`, { stdio: "ignore" });
-  } catch {
-    console.error(`Image ${image} not found.`);
-    console.error(`Run 'pnpm build:image' first to build the image.`);
-    process.exit(1);
-  }
+  ensureImageAvailable(image);
 
   // Ensure auth token exists
-  const token = ensureToken();
+  ensureToken();
 
   console.log(`Starting container ${CONTAINER_NAME} from ${image}...`);
 

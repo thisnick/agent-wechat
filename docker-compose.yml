@@ -6,7 +6,7 @@
 
 services:
   agent-wechat:
-    image: agent-wechat:arm64 # or agent-wechat:amd64
+    image: ghcr.io/agent-wechat/agent-wechat:latest
     container_name: agent-wechat
     security_opt:
       - seccomp=unconfined

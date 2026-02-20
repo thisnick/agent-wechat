@@ -1,27 +1,34 @@
 {
-  "name": "@thisnick/agent-wechat-cli",
+  "name": "@agent-wechat/cli",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "bin": {
     "wx": "./dist/cli.js"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/cli.js --banner:js='#!/usr/bin/env node' && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "dev": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/cli.js --banner:js='#!/usr/bin/env node' --watch",
+    "prepack": "npm run build",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@thisnick/agent-wechat-shared": "workspace:*",
     "commander": "^14.0.3",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
+    "@thisnick/agent-wechat-shared": "workspace:*",
     "@types/node": "^22",
     "@types/qrcode-terminal": "^0.12.2",
+    "esbuild": "^0.25.0",
     "typescript": "^5.4.5"
   }
 }

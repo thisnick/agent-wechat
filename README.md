@@ -2,6 +2,22 @@
 
 WeChat automation via deterministic FSM. Runs WeChat in a Docker container with UI automation.
 
+## Install (Published CLI)
+
+```bash
+npm i -g @agent-wechat/cli
+wx up
+```
+
+By default, `wx up` uses local images when available (`agent-wechat:arm64` / `agent-wechat:amd64`), then falls back to `ghcr.io/agent-wechat/agent-wechat:latest`.
+
+Override image selection with:
+
+- `wx up --image <image-ref>`
+- `AGENT_WECHAT_IMAGE`
+- `AGENT_WECHAT_IMAGE_REPO`
+- `AGENT_WECHAT_IMAGE_TAG`
+
 ## Requirements
 
 - Docker (via Colima on macOS, or Docker Desktop)
@@ -75,6 +91,17 @@ pnpm dev:deploy
 # Type check Rust code
 cd packages/agent-server-rust && cargo check
 ```
+
+## OpenClaw Extension
+
+Install the plugin with:
+
+```bash
+openclaw plugins install @agent-wechat/wechat
+openclaw plugins enable wechat
+```
+
+For release instructions, see `docs/release.md`.
 
 ## Ports
 

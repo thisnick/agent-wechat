@@ -8,6 +8,8 @@
     "build": "turbo run build",
     "build:watch": "turbo watch build",
     "typecheck": "turbo run typecheck",
+    "changeset": "pnpm dlx @changesets/cli",
+    "changeset:version": "pnpm dlx @changesets/cli version",
     "build:image": "bash scripts/build-images-local.sh",
     "build:image:arm64": "bash scripts/build-images-local.sh --arch arm64",
     "build:image:amd64": "bash scripts/build-images-local.sh --arch amd64",
