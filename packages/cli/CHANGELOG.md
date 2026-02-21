@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.2.2
+
+### Patch Changes
+
+- [`32e6d04`](https://github.com/thisnick/agent-wechat/commit/32e6d04eb4aca78f6143feb3b0b4c86d08a39f44) Thanks [@thisnick](https://github.com/thisnick)! - Use versioned Docker image tags matching CLI version, fix release workflow version parsing
+
 ## 0.2.1
 
 ### Patch Changes
