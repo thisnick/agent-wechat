@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.2.1
+
+### Patch Changes
+
+- [`ff4e228`](https://github.com/thisnick/agent-wechat/commit/ff4e2288b0f89d3f4ea8e78778a6f31f8d86352d) Thanks [@thisnick](https://github.com/thisnick)! - Auto-pull Docker image in `wx up` when not found locally, add README docs for both packages
+
 ## 0.2.0
 
 ### Minor Changes
