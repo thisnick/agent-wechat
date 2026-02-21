@@ -1,11 +1,13 @@
 {
   "name": "@agent-wechat/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "bin": {
     "wx": "./dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "esbuild src/cli.ts --bundle --format=esm --platform=node --outfile=dist/cli.js --banner:js='#!/usr/bin/env node\nimport{createRequire}from\"module\";const require=createRequire(import.meta.url);' --external:qrcode-terminal",
     "typecheck": "tsc --noEmit"

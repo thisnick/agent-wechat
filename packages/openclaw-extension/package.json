@@ -1,8 +1,11 @@
 {
   "name": "@agent-wechat/wechat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "files": ["dist", "openclaw.plugin.json"],
+  "files": [
+    "dist",
+    "openclaw.plugin.json"
+  ],
   "scripts": {
     "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:openclaw"
   },
@@ -11,12 +14,16 @@
     "esbuild": "^0.25.0"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "channel": {
       "id": "wechat",
       "label": "WeChat",
       "selectionLabel": "WeChat (微信)",
-      "aliases": ["weixin"],
+      "aliases": [
+        "weixin"
+      ],
       "order": 80
     },
     "install": {
