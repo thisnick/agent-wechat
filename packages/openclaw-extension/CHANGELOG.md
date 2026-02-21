@@ -1,5 +1,15 @@
 # @agent-wechat/wechat
 
+## 0.2.3
+
+### Patch Changes
+
+- [`91d6750`](https://github.com/thisnick/agent-wechat/commit/91d67504ffc3965c046ea28e13e2d9d3d5fedaf3) Thanks [@thisnick](https://github.com/thisnick)! - - Use versioned Docker image tags matching CLI version, with fallback to latest
+  - Inject version from package.json at build time
+  - Fix release workflow Docker tag parsing for scoped packages
+  - Increase media poll retries from 5 to 15
+  - Add setup docs to both package READMEs
+
 ## 0.2.2
 
 ### Patch Changes
