@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.2.4
+
+### Patch Changes
+
+- [`09aa334`](https://github.com/thisnick/agent-wechat/commit/09aa334d9fef0a67ab092f5f68e10540bd8af9bf) Thanks [@thisnick](https://github.com/thisnick)! - Fix image media retrieval for newly received images by using message_resource.db as the primary file lookup instead of hardlink.db, which has an indexing delay.
+
 ## 0.2.3
 
 ### Patch Changes
