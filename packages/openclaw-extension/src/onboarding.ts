@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { WeChatClient } from "@agent-wechat/shared";
-import type { ResolvedWeChatAccount } from "./types.js";
+import { resolveWeChatAccount } from "./types.js";
 import { loginTerminal } from "./login.js";
 
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
@@ -22,49 +22,30 @@ function readOrGenerateToken(): string {
   return token;
 }
 
-export interface OnboardingStatus {
-  configured: boolean;
-  lines: string[];
-}
-
-export interface WizardPrompter {
-  text(opts: { message: string; default?: string }): Promise<string>;
-  select<T extends string>(opts: {
-    message: string;
-    choices: { label: string; value: T }[];
-  }): Promise<T>;
-  multiText(opts: {
-    message: string;
-    hint?: string;
-  }): Promise<string[]>;
-  confirm(opts: { message: string; default?: boolean }): Promise<boolean>;
-  note?(message: string, title?: string): Promise<void>;
-  log?(message: string): void;
-}
-
 export const wechatOnboardingAdapter = {
-  getStatus: async ({
-    account,
-  }: {
-    account: ResolvedWeChatAccount;
-  }): Promise<OnboardingStatus> => {
-    if (!account.serverUrl) {
+  channel: "wechat" as const,
+
+  getStatus: async ({ cfg }: { cfg: any }) => {
+    const account = resolveWeChatAccount(cfg as Record<string, unknown>);
+    if (!account?.serverUrl) {
       return {
+        channel: "wechat" as const,
         configured: false,
-        lines: ["Not configured. Run: openclaw channels setup wechat"],
+        statusLines: ["Not configured. Run: openclaw channels setup wechat"],
       };
     }
 
     const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
-    const lines: string[] = [];
+    const statusLines: string[] = [];
 
     try {
       await client.status();
-      lines.push(`Connected to ${account.serverUrl}`);
+      statusLines.push(`Connected to ${account.serverUrl}`);
     } catch {
       return {
+        channel: "wechat" as const,
         configured: true,
-        lines: [
+        statusLines: [
           `Server URL: ${account.serverUrl}`,
           "Cannot reach server — is the agent-wechat container running?",
         ],
@@ -74,58 +55,53 @@ export const wechatOnboardingAdapter = {
     try {
       const auth = await client.authStatus();
       if (auth.status === "logged_in") {
-        lines.push(
+        statusLines.push(
           `Logged in${auth.loggedInUser ? ` as ${auth.loggedInUser}` : ""}`,
         );
       } else {
-        lines.push("Not logged in. Run: openclaw channels login --channel wechat");
+        statusLines.push("Not logged in. Run: openclaw channels login --channel wechat");
       }
     } catch {
-      lines.push("Could not check auth status");
+      statusLines.push("Could not check auth status");
     }
 
-    lines.push(`DM policy: ${account.dmPolicy}`);
+    statusLines.push(`DM policy: ${account.dmPolicy}`);
     if (account.allowFrom.length > 0) {
-      lines.push(`Allowed senders: ${account.allowFrom.join(", ")}`);
+      statusLines.push(`Allowed senders: ${account.allowFrom.join(", ")}`);
     }
-    lines.push(`Group policy: ${account.groupPolicy}`);
+    statusLines.push(`Group policy: ${account.groupPolicy}`);
 
-    return { configured: true, lines };
+    return { channel: "wechat" as const, configured: true, statusLines };
   },
 
-  configure: async ({
-    prompter,
-    cfg,
-    setCfg,
-  }: {
-    prompter: WizardPrompter;
-    cfg: Record<string, unknown>;
-    setCfg: (path: string, value: unknown) => void;
-  }): Promise<void> => {
+  configure: async ({ prompter, cfg }: { prompter: any; cfg: any }) => {
+    const wechatCfg: Record<string, unknown> = {
+      ...(cfg?.channels?.wechat ?? {}),
+    };
+
     // 1. Server URL
-    const existingUrl =
-      (cfg as any)?.channels?.wechat?.serverUrl ?? "http://localhost:6174";
+    const existingUrl = (wechatCfg.serverUrl as string) ?? "http://localhost:6174";
     const serverUrl = await prompter.text({
       message: "Agent-wechat server URL",
-      default: existingUrl,
+      initialValue: existingUrl,
     });
-    setCfg("channels.wechat.serverUrl", serverUrl);
+    wechatCfg.serverUrl = serverUrl;
 
     // 1b. Auth token — read from file/generate if empty
-    const existingToken = (cfg as any)?.channels?.wechat?.token ?? "";
+    const existingToken = (wechatCfg.token as string) ?? "";
     const localDefault = existingToken || readOrGenerateToken();
     const token = await prompter.text({
       message: "Auth token (leave empty to use local token)",
-      default: localDefault,
+      initialValue: localDefault,
     });
-    setCfg("channels.wechat.token", token || localDefault);
+    wechatCfg.token = token || localDefault;
 
     // 2. Test connection
     const client = new WeChatClient({ baseUrl: serverUrl, token: token || undefined });
     try {
       await client.status();
     } catch {
-      setCfg("channels.wechat.enabled", false);
+      wechatCfg.enabled = false;
       throw new Error(
         `Cannot reach ${serverUrl}. Ensure the agent-wechat container is running.`,
       );
@@ -137,63 +113,49 @@ export const wechatOnboardingAdapter = {
       if (auth.status !== "logged_in") {
         const wantsLink = await prompter.confirm({
           message: "WeChat not logged in. Link now?",
-          default: true,
+          initialValue: true,
         });
         if (wantsLink) {
-          await prompter.note?.(
+          await prompter.note(
             "Starting login — watch for QR code or phone confirmation.",
             "WeChat Login",
           );
           try {
             await loginTerminal(client, {
-              onEvent: (event) => {
+              onEvent: (event: any) => {
                 switch (event.type) {
                   case "status":
-                    prompter.log?.(`Status: ${event.message}`);
+                    prompter.note?.(event.message, "Status");
                     break;
                   case "qr":
-                    prompter.log?.("Scan this QR code with WeChat:\n");
-                    if (event.qrData) {
-                      try {
-                        const qrTerminalMod = require("qrcode-terminal");
-                        const qrInput = event.qrBinaryData
-                          ? Buffer.from(event.qrBinaryData as number[]).toString("utf-8")
-                          : event.qrData;
-                        qrTerminalMod.generate(qrInput, { small: true }, (qr: string) => {
-                          prompter.log?.(qr);
-                        });
-                      } catch {
-                        if (event.qrDataUrl) {
-                          prompter.log?.("(QR data URL available — open in browser to scan)");
-                        }
-                      }
-                    }
-                    prompter.log?.("\nWaiting for scan...\n");
+                    prompter.note?.("Scan QR code with WeChat", "Login");
                     break;
                   case "phone_confirm":
-                    prompter.log?.(
-                      `\n${event.message || "Please confirm login on your phone"}\n`,
+                    prompter.note?.(
+                      event.message || "Please confirm login on your phone",
+                      "Confirm",
                     );
                     break;
                   case "login_success":
-                    prompter.log?.("\nLogin successful!");
+                    prompter.note?.("Login successful!", "Done");
                     break;
                   case "login_timeout":
-                    prompter.log?.("\nLogin timed out.");
+                    prompter.note?.("Login timed out. Please try again.", "Timeout");
                     break;
                   case "error":
-                    prompter.log?.(`\nError: ${event.message}`);
+                    prompter.note?.(`Error: ${event.message}`, "Error");
                     break;
                 }
               },
             });
           } catch (err) {
-            prompter.log?.(
+            prompter.note?.(
               `Login failed: ${err instanceof Error ? err.message : String(err)}`,
+              "Error",
             );
           }
         } else {
-          await prompter.note?.(
+          await prompter.note(
             "Run `openclaw channels login --channel wechat` later to link.",
             "WeChat",
           );
@@ -206,55 +168,46 @@ export const wechatOnboardingAdapter = {
     // 4. DM policy
     const dmPolicy = await prompter.select({
       message: "DM (direct message) policy",
-      choices: [
-        { label: "Disabled — ignore all DMs", value: "disabled" as const },
-        {
-          label: "Allowlist — only respond to specific senders",
-          value: "allowlist" as const,
-        },
-        { label: "Open — respond to all DMs", value: "open" as const },
+      options: [
+        { label: "Disabled — ignore all DMs", value: "disabled" },
+        { label: "Allowlist — only respond to specific senders", value: "allowlist" },
+        { label: "Open — respond to all DMs", value: "open" },
       ],
     });
-    setCfg("channels.wechat.dmPolicy", dmPolicy);
+    wechatCfg.dmPolicy = dmPolicy;
 
-    // 5. Allowlist
+    // 5. Allowlist (comma-separated)
     if (dmPolicy === "allowlist") {
-      const allowFrom = await prompter.multiText({
-        message: "Allowed WeChat IDs (wxid_xxx), one per line",
-        hint: "Enter wxid values, press Enter after each. Empty line to finish.",
+      const raw = await prompter.text({
+        message: "Allowed WeChat IDs (comma-separated wxid_xxx values)",
       });
-      setCfg("channels.wechat.allowFrom", allowFrom);
+      wechatCfg.allowFrom = raw.split(",").map((s: string) => s.trim()).filter(Boolean);
     }
 
     // 6. Group policy
     const groupPolicy = await prompter.select({
       message: "Group chat policy",
-      choices: [
-        {
-          label: "Disabled — ignore all group messages",
-          value: "disabled" as const,
-        },
-        {
-          label: "Allowlist — only respond in specific groups",
-          value: "allowlist" as const,
-        },
-        {
-          label: "Open — respond in all groups (when mentioned)",
-          value: "open" as const,
-        },
+      options: [
+        { label: "Disabled — ignore all group messages", value: "disabled" },
+        { label: "Allowlist — only respond in specific groups", value: "allowlist" },
+        { label: "Open — respond in all groups (when mentioned)", value: "open" },
       ],
     });
-    setCfg("channels.wechat.groupPolicy", groupPolicy);
+    wechatCfg.groupPolicy = groupPolicy;
 
     if (groupPolicy === "allowlist") {
-      const groupAllowFrom = await prompter.multiText({
-        message: "Allowed group IDs (xxx@chatroom), one per line",
-        hint: "Enter chatroom IDs, press Enter after each. Empty line to finish.",
+      const raw = await prompter.text({
+        message: "Allowed group IDs (comma-separated xxx@chatroom values)",
       });
-      setCfg("channels.wechat.groupAllowFrom", groupAllowFrom);
+      wechatCfg.groupAllowFrom = raw.split(",").map((s: string) => s.trim()).filter(Boolean);
     }
 
-    // 7. Enable
-    setCfg("channels.wechat.enabled", true);
+    // 7. Enable and return modified config
+    wechatCfg.enabled = true;
+    const newCfg = {
+      ...cfg,
+      channels: { ...cfg.channels, wechat: wechatCfg },
+    };
+    return { cfg: newCfg };
   },
 };

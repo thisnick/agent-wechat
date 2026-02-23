@@ -7,11 +7,15 @@
     "openclaw.plugin.json"
   ],
   "scripts": {
-    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:openclaw"
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:openclaw",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@agent-wechat/shared": "workspace:*",
-    "esbuild": "^0.25.0"
+    "@types/node": "^22",
+    "esbuild": "^0.25.0",
+    "openclaw": "^2026.2.22",
+    "typescript": "^5.4.5"
   },
   "openclaw": {
     "extensions": [

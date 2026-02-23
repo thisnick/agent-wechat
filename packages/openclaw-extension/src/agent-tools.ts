@@ -29,7 +29,8 @@ export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
       },
       required: ["action"],
     },
-    execute: async (_toolCallId: string, args: Record<string, unknown>) => {
+    execute: async (_toolCallId: string, params: unknown) => {
+      const args = params as Record<string, unknown>;
       const action = args.action as "start" | "logout" | "status";
       const force = args.force as boolean | undefined;
       const timeoutMs = args.timeoutMs as number | undefined;

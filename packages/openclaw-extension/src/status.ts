@@ -1,15 +1,3 @@
-import type { ResolvedWeChatAccount } from "./types.js";
-
-export interface AccountSnapshot {
-  accountId: string;
-  account: ResolvedWeChatAccount;
-  running: boolean;
-  connected: boolean;
-  linked?: boolean;
-  authStatus?: string;
-  lastError?: string;
-}
-
 export interface StatusIssue {
   channel: string;
   accountId: string;
@@ -18,9 +6,9 @@ export interface StatusIssue {
   fix: string;
 }
 
-export async function collectWeChatStatusIssues(
-  accounts: AccountSnapshot[],
-): Promise<StatusIssue[]> {
+export function collectWeChatStatusIssues(
+  accounts: Array<{ accountId: string; connected?: boolean; linked?: boolean; lastError?: string | null; authStatus?: string }>,
+): StatusIssue[] {
   const issues: StatusIssue[] = [];
 
   for (const snapshot of accounts) {
