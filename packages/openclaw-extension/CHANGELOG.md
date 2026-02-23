@@ -1,5 +1,16 @@
 # @agent-wechat/wechat
 
+## 0.3.1
+
+### Patch Changes
+
+- [`0b45fba`](https://github.com/thisnick/agent-wechat/commit/0b45fba481778f5f7791b9787621270e1a9d1a23) Thanks [@thisnick](https://github.com/thisnick)! - Fix group message mention gating not working
+
+  The monitor was not checking `msg.isMentioned` before dispatching group messages, so all group messages were processed regardless of `requireMention` config. Now:
+
+  - Skips group messages that require mention but weren't mentioned
+  - Sets `WasMentioned` in the inbound context for framework-level mention awareness
+
 ## 0.3.0
 
 ### Minor Changes
