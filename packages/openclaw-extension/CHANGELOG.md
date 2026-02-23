@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.5.0
+
+### Minor Changes
+
+- [`9b1e871`](https://github.com/thisnick/agent-wechat/commit/9b1e871d8666216fa295c44400e1108eeb34a4ef) Thanks [@thisnick](https://github.com/thisnick)! - Buffer non-mentioned group messages and inject as history context when a mention arrives. Only the latest media attachment is preserved to avoid flooding the agent.
+
 ## 0.4.1
 
 ### Patch Changes
