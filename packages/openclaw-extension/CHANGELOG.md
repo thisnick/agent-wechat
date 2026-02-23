@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.4.1
+
+### Patch Changes
+
+- [#29](https://github.com/thisnick/agent-wechat/pull/29) [`5e53df8`](https://github.com/thisnick/agent-wechat/commit/5e53df8eadd9b37d7812b00bc9c96303dffb52a0) Thanks [@thisnick](https://github.com/thisnick)! - Remove unreliable shell-out for heartbeat wake; auth notifications use passive system events instead.
+
 ## 0.4.0
 
 ### Minor Changes
