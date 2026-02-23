@@ -1,5 +1,17 @@
 # @agent-wechat/wechat
 
+## 0.3.0
+
+### Minor Changes
+
+- [`3dba4d7`](https://github.com/thisnick/agent-wechat/commit/3dba4d7c3381fc73bd5e0732bdaf6f89341b480b) Thanks [@thisnick](https://github.com/thisnick)! - Add WeChat crash recovery and auth status enum
+
+  - Auto-restart WeChat in entrypoint with crash-loop backoff (3s delay, 30s backoff after 5 rapid restarts)
+  - Replace `isLoggedIn: boolean` with `status: "logged_in" | "logged_out" | "app_not_running" | "unknown"` in auth endpoint
+  - Detect WeChat process not running via `find_wechat_pid()` check before a11y observation
+  - Notify agent on auth state transitions (session lost, server unreachable, first-poll not authenticated)
+  - Add `app_not_running` diagnostic in openclaw extension status checks
+
 ## 0.2.4
 
 ### Patch Changes
