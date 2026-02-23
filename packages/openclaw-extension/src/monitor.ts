@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import { WeChatClient } from "@agent-wechat/shared";
 import type { Chat, Message, MediaResult, AuthStatus } from "@agent-wechat/shared";
 import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
@@ -109,23 +108,6 @@ function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
   }
 }
 
-/**
- * Enqueue a system event AND wake the heartbeat runner so the agent processes
- * it immediately. Uses the same pattern as openclaw-agentmail.
- */
-function enqueueAndWakeSystemEvent(
-  text: string,
-  contextKey: string,
-  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
-): void {
-  enqueueWeChatSystemEvent(text, contextKey);
-  try {
-    execSync("openclaw system event --mode now", { timeout: 5000, stdio: "ignore" });
-  } catch {
-    log?.info?.("Failed to trigger heartbeat wake — agent will see event on next prompt");
-  }
-}
-
 export async function startWeChatMonitor(
   opts: WeChatMonitorOptions,
 ): Promise<void> {
@@ -170,11 +152,11 @@ export async function startWeChatMonitor(
             const msg = auth.status === "app_not_running"
               ? "[WeChat] Application stopped. It will restart automatically — credentials may be cached, so you can try reconnecting using the wechat_login tool."
               : "[WeChat] Session ended. You can try reconnecting using the wechat_login tool — if credentials are cached, login may complete automatically.";
-            enqueueAndWakeSystemEvent(msg, "wechat:auth_lost", log);
+            enqueueWeChatSystemEvent(msg, "wechat:auth_lost");
           } else if (prevStatus === undefined && !isLinked) {
-            enqueueAndWakeSystemEvent(
+            enqueueWeChatSystemEvent(
               "[WeChat] Not logged in. Use the wechat_login tool to authenticate — if credentials are cached from a previous session, login may complete automatically.",
-              "wechat:auth_required", log,
+              "wechat:auth_required",
             );
           }
           prevStatus = auth.status;
@@ -193,9 +175,9 @@ export async function startWeChatMonitor(
             lastError: String(err),
           });
           if (prevStatus === "logged_in") {
-            enqueueAndWakeSystemEvent(
+            enqueueWeChatSystemEvent(
               "[WeChat] Cannot reach agent-wechat server. The container may have stopped.",
-              "wechat:server_unreachable", log,
+              "wechat:server_unreachable",
             );
           }
           prevStatus = undefined;
