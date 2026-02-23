@@ -116,6 +116,10 @@ export async function startWeChatMonitor(
 
   // Track last-seen message ID per chat
   const lastSeenId = new Map<string, number>();
+
+  // Buffer non-mentioned group messages for catch-up context
+  const groupHistory = new Map<string, ProcessedMessage[]>();
+  const GROUP_HISTORY_LIMIT = 50;
   let lastAuthCheck = 0;
   let prevStatus: AuthStatus["status"] | undefined = undefined;
 
@@ -221,6 +225,9 @@ export async function startWeChatMonitor(
             account,
             cfg,
             log,
+            undefined,
+            groupHistory,
+            GROUP_HISTORY_LIMIT,
           );
         }
       }
@@ -238,7 +245,7 @@ export async function startWeChatMonitor(
         log?.info?.(
           `[wechat:${account.accountId}] Catch-up: ${chatId} lastMsgLocalId=${chat.lastMsgLocalId} > lastSeenId=${prevSeen}`,
         );
-        await processUnreadChat(client, chat, lastSeenId, account, cfg, log, true);
+        await processUnreadChat(client, chat, lastSeenId, account, cfg, log, true, groupHistory, GROUP_HISTORY_LIMIT);
       }
     } catch (err) {
       log?.error?.(
@@ -420,6 +427,7 @@ async function dispatchSegment(
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
   remainingSegments?: number,
+  groupHistory?: Map<string, ProcessedMessage[]>,
 ): Promise<void> {
   const core = getWeChatRuntime();
   const lastMsg = segment[segment.length - 1];
@@ -673,10 +681,36 @@ async function dispatchSegment(
       direction: "inbound",
       at: timestamp,
     });
+
+    // Clear group history after successful dispatch
+    if (isGroup && groupHistory) {
+      groupHistory.set(chatId, []);
+    }
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to dispatch segment (last msg ${msg.localId}): ${err}`,
     );
+  }
+}
+
+function bufferGroupHistory(
+  groupHistory: Map<string, ProcessedMessage[]>,
+  chatId: string,
+  pm: ProcessedMessage,
+  limit: number,
+): void {
+  const history = groupHistory.get(chatId) ?? [];
+  history.push(pm);
+  while (history.length > limit) {
+    history.shift();
+  }
+  // LRU: refresh key insertion order
+  groupHistory.delete(chatId);
+  groupHistory.set(chatId, history);
+  // Evict oldest groups if too many tracked
+  if (groupHistory.size > 1000) {
+    const first = groupHistory.keys().next().value;
+    if (first) groupHistory.delete(first);
   }
 }
 
@@ -688,6 +722,8 @@ async function processUnreadChat(
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
   skipOpen?: boolean,
+  groupHistory?: Map<string, ProcessedMessage[]>,
+  groupHistoryLimit?: number,
 ): Promise<void> {
   // Re-resolve account from hot-reloaded config so policy changes take effect
   const liveAccount =
@@ -775,6 +811,51 @@ async function processUnreadChat(
     }
   }
 
+  // Group history catch-up: buffer or inject based on mention status
+  const isGroup = chatId.includes("@chatroom");
+  if (isGroup && groupHistory) {
+    const wechatCfg = (cfg as any)?.channels?.wechat;
+    const groupEntry = wechatCfg?.groups?.[chatId];
+    const defaultEntry = wechatCfg?.groups?.["*"];
+    const requireMention = groupEntry?.requireMention ?? defaultEntry?.requireMention ?? true;
+
+    if (requireMention) {
+      const hasMention = processed.some(pm => pm.isMentioned);
+      if (!hasMention) {
+        // No mention — buffer all messages and skip dispatch
+        const limit = groupHistoryLimit ?? 50;
+        for (const pm of processed) {
+          bufferGroupHistory(groupHistory, chatId, pm, limit);
+        }
+        log?.info?.(`[wechat:${liveAccount.accountId}] Buffered ${processed.length} msg(s) for group history in ${chatId}`);
+        const maxId = Math.max(...newMessages.map((m) => m.localId));
+        lastSeenId.set(chatId, maxId);
+        return;
+      }
+
+      // Mention found — pull buffered history and prepend
+      const buffered = groupHistory.get(chatId) ?? [];
+      if (buffered.length > 0) {
+        // Mark buffered messages as mentioned so they pass the gate in dispatchSegment
+        for (const pm of buffered) { pm.isMentioned = true; }
+        processed.unshift(...buffered);
+        groupHistory.set(chatId, []);
+        log?.info?.(`[wechat:${liveAccount.accountId}] Injected ${buffered.length} buffered msg(s) as history in ${chatId}`);
+      }
+
+      // Strip media from all but the latest message that has it (across entire combined list)
+      let latestMediaIdx = -1;
+      for (let i = processed.length - 1; i >= 0; i--) {
+        if (processed[i].mediaPath) { latestMediaIdx = i; break; }
+      }
+      for (let i = 0; i < processed.length; i++) {
+        if (processed[i].mediaPath && i !== latestMediaIdx) {
+          processed[i] = { ...processed[i], mediaPath: undefined, mediaMime: undefined, hasMedia: false };
+        }
+      }
+    }
+  }
+
   // Split into segments at media boundaries and dispatch each
   if (processed.length > 0) {
     const segments = buildSegments(processed);
@@ -783,7 +864,7 @@ async function processUnreadChat(
     );
     for (let i = 0; i < segments.length; i++) {
       const remaining = segments.length - i - 1;
-      await dispatchSegment(segments[i], client, chatId, chat, liveAccount, cfg, log, remaining);
+      await dispatchSegment(segments[i], client, chatId, chat, liveAccount, cfg, log, remaining, groupHistory);
     }
   }
 
