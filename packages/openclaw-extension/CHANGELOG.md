@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.4.0
+
+### Minor Changes
+
+- [#27](https://github.com/thisnick/agent-wechat/pull/27) [`8b07604`](https://github.com/thisnick/agent-wechat/commit/8b076041933b892d3361398646ddf1deb2268fc5) Thanks [@thisnick](https://github.com/thisnick)! - Proactive auth notifications: agent is notified immediately when WeChat auth is lost and can attempt re-login using cached credentials. Aligned all types with latest openclaw plugin SDK.
+
 ## 0.3.1
 
 ### Patch Changes
