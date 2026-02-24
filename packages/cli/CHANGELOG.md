@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.6.0
+
+### Minor Changes
+
+- [#33](https://github.com/thisnick/agent-wechat/pull/33) [`0cdae88`](https://github.com/thisnick/agent-wechat/commit/0cdae8861159464ed4a64005ebda70616e3ba2a7) Thanks [@thisnick](https://github.com/thisnick)! - Add container-level transparent proxy via redsocks. Use `wx up --proxy user:pass@host:port` or set the `PROXY` env var to route all container traffic through an upstream HTTP CONNECT or SOCKS5 proxy. Removes app-level proxy UI automation from the login flow.
+
 ## 0.5.0
 
 ## 0.4.1
