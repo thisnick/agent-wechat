@@ -265,7 +265,9 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubscriptionEvent>();
     let cancel = CancellationToken::new();
     let cancel_for_exec = cancel.clone();
-    let new_account = params.new_account;
+    let login_params = LoginParams {
+        new_account: params.new_account,
+    };
 
     // Spawn the execution loop in a separate task
     let exec_handle = tokio::spawn(async move {
@@ -274,7 +276,6 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
             create_context(session, &db)
         };
         let plan = LoginPlan;
-        let login_params = LoginParams { new_account };
         let emit = move |event: SubscriptionEvent| {
             let _ = tx.send(event);
         };

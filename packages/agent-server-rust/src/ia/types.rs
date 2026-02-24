@@ -105,6 +105,7 @@ pub enum MainWindowView {
     LoginAccount,
     LoginPhoneConfirm,
     LoginLoading,
+    NetworkProxySettings,
     Chat,
     ChatOpen,
 }
@@ -148,6 +149,10 @@ pub struct MainWindowState {
     pub more_button_bounds: Option<Bounds>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_menu_item_bounds: Option<Bounds>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_save_failed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +207,8 @@ impl Default for AppState {
                 maximize_button_bounds: None,
                 more_button_bounds: None,
                 settings_menu_item_bounds: None,
+                proxy_enabled: None,
+                proxy_save_failed: None,
             },
             popup: None,
             contact_card: None,

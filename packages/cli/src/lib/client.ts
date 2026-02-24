@@ -8,11 +8,16 @@ export interface SubscriptionClientOptions {
 }
 
 // Subscription client interface for WebSocket-based subscriptions
+export interface LoginSubscriptionInput {
+  timeoutMs?: number;
+  newAccount?: boolean;
+}
+
 export interface SubscriptionClient {
   status: {
     loginSubscription: {
       subscribe: (
-        input: { timeoutMs?: number; newAccount?: boolean },
+        input: LoginSubscriptionInput,
         callbacks: {
           onData: (event: LoginSubscriptionEvent) => void;
           onError?: (err: Error) => void;

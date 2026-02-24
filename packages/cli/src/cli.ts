@@ -101,7 +101,8 @@ function getSubscriptionOptions(): SubscriptionClientOptions {
 program
   .command("up")
   .description("Start the WeChat container")
-  .action(cmdUp);
+  .option("--proxy <url>", "Transparent proxy (user:pass@host:port)")
+  .action((opts) => cmdUp(opts));
 
 program
   .command("down")
@@ -368,7 +369,11 @@ async function cmdStatus(client: WeChatClient) {
   console.log("Login State:", JSON.stringify(status.loginState, null, 2));
 }
 
-async function cmdLogin(options: SubscriptionClientOptions, timeoutMs: number = 300_000, newAccount: boolean = false) {
+async function cmdLogin(
+  options: SubscriptionClientOptions,
+  timeoutMs: number = 300_000,
+  newAccount: boolean = false,
+) {
   console.log(newAccount ? "Initiating login with new account...\n" : "Initiating login...\n");
 
   const { client, close } = createSubscriptionClient(options);
@@ -388,7 +393,10 @@ async function cmdLogin(options: SubscriptionClientOptions, timeoutMs: number = 
   try {
     await new Promise<void>((resolve, reject) => {
       subscription = client.status.loginSubscription.subscribe(
-        { timeoutMs, newAccount },
+        {
+          timeoutMs,
+          newAccount,
+        },
         {
           onData: (event) => {
             switch (event.type) {
@@ -758,7 +766,7 @@ async function cmdSessionDelete(client: WeChatClient, idOrName: string) {
 // Container Commands Implementation
 // ============================================
 
-async function cmdUp() {
+async function cmdUp(opts: { proxy?: string } = {}) {
   let image = getImageTag();
 
   // Check if container already exists
@@ -818,13 +826,19 @@ async function cmdUp() {
     "--name", CONTAINER_NAME,
     "--security-opt", "seccomp=unconfined",
     "--cap-add=SYS_PTRACE",
+    "--cap-add=NET_ADMIN",
     "-p", `${DEFAULT_PORT}:${DEFAULT_PORT}`,
     "-p", `127.0.0.1:${VNC_PORT}:${VNC_PORT}`,
     "-v", `${CONTAINER_NAME}-data:/data`,
     "-v", `${CONTAINER_NAME}-wechat-home:/home/wechat`,
     "-v", `${TOKEN_PATH}:/data/auth-token:ro`,
-    image,
   ];
+
+  if (opts.proxy) {
+    dockerArgs.push("-e", `PROXY=${opts.proxy}`);
+  }
+
+  dockerArgs.push(image);
 
   try {
     execSync(`docker ${dockerArgs.join(" ")}`, { stdio: "inherit" });

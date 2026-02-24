@@ -146,11 +146,46 @@ impl IAState for LoginLoadingState {
     }
 }
 
+/// network_proxy_settings: WeChat network proxy settings page.
+struct NetworkProxySettingsState;
+
+impl IAState for NetworkProxySettingsState {
+    fn fsm(&self) -> &str { "mainWindow" }
+    fn id(&self) -> &str { "network_proxy_settings" }
+
+    fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
+        let title = query_selector(args.a11y, r#"label[name="Network proxy settings"]"#);
+        let checkbox = query_selector(args.a11y, r#"check-box[name="Use proxy"]"#);
+        let identified = title.is_some() && checkbox.is_some();
+        Ok(IdentifyResult {
+            identified,
+            frame: if identified { find_main_frame_hint(args.a11y) } else { None },
+        })
+    }
+
+    fn reduce(&self, args: &ReduceArgs) -> AppState {
+        let checkbox = query_selector(args.a11y, r#"check-box[name="Use proxy"]"#);
+        let is_checked = checkbox
+            .and_then(|n| n.states.as_ref())
+            .map(|s| s.iter().any(|st| st == "CHECKED"))
+            .unwrap_or(false);
+
+        let has_discard = query_selector(args.a11y, r#"label[name="Discard changes?"]"#).is_some();
+
+        let mut state = args.prev.clone();
+        state.main_window.view = MainWindowView::NetworkProxySettings;
+        state.main_window.proxy_enabled = Some(is_checked);
+        state.main_window.proxy_save_failed = Some(has_discard);
+        state
+    }
+}
+
 use base64::Engine;
 
 /// All login states (order matters — first match wins).
 pub static LOGIN_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> = std::sync::LazyLock::new(|| {
     vec![
+        Box::new(NetworkProxySettingsState),
         Box::new(LoginQrState),
         Box::new(LoginAccountState),
         Box::new(LoginPhoneConfirmState),

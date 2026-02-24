@@ -43,7 +43,7 @@ wx messages send <chatId> --text "Hello"
 
 | Command | Description |
 |---------|-------------|
-| `wx up` | Start the agent-wechat container |
+| `wx up [--proxy user:pass@host:port]` | Start the agent-wechat container |
 | `wx down` | Stop and remove the container |
 | `wx logs` | Tail container logs |
 | `wx status` | Show container and login status |
@@ -146,6 +146,14 @@ This starts a container named `agent-wechat` with:
 - Persistent volumes for data and WeChat home directory
 - Auth token from `~/.config/agent-wechat/token` (auto-generated on first run)
 
+To route all container traffic through a proxy:
+
+```bash
+wx up --proxy user:pass@host:port
+```
+
+This sets up a transparent proxy (redsocks + iptables) inside the container — invisible to WeChat. Prefix with `socks5://` for SOCKS5 proxies.
+
 ### Option 2: Docker Compose (production / networked)
 
 For production or when running alongside other services (e.g., OpenClaw), use the `docker-compose.yml` in the repo root as a reference:
@@ -159,6 +167,7 @@ services:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
+      - NET_ADMIN
     ports:
       - "6174:6174"
       - "127.0.0.1:5900:5900"
@@ -166,6 +175,8 @@ services:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat
       - ~/.config/agent-wechat/token:/data/auth-token:ro
+    environment:
+      - PROXY=${PROXY:-}    # optional: user:pass@host:port
     restart: unless-stopped
 
 volumes:

@@ -60,6 +60,8 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   --security-opt seccomp=unconfined \
   --cap-add=SYS_PTRACE \
+  --cap-add=NET_ADMIN \
+  ${PROXY:+-e "PROXY=$PROXY"} \
   -p "$DEFAULT_PORT:$DEFAULT_PORT" \
   -p "127.0.0.1:$VNC_PORT:$VNC_PORT" \
   -p 1234:1234 \

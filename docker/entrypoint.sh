@@ -24,6 +24,85 @@ if [ -f /tmp/.X99-lock ]; then
 fi
 
 # ============================================
+# Transparent proxy via redsocks (optional)
+# ============================================
+if [ -n "${PROXY:-}" ]; then
+  REDSOCKS_TYPE="http-connect"
+  PROXY_VAL="$PROXY"
+
+  # Strip optional scheme prefix
+  if echo "$PROXY_VAL" | grep -q '^socks5://'; then
+    REDSOCKS_TYPE="socks5"
+    PROXY_VAL="${PROXY_VAL#socks5://}"
+  elif echo "$PROXY_VAL" | grep -q '^http://'; then
+    PROXY_VAL="${PROXY_VAL#http://}"
+  fi
+
+  # Parse user:pass@host:port or host:port
+  PROXY_USER=""
+  PROXY_PASS=""
+  if echo "$PROXY_VAL" | grep -q '@'; then
+    PROXY_USERINFO="${PROXY_VAL%%@*}"
+    PROXY_HOSTPORT="${PROXY_VAL##*@}"
+    PROXY_USER="${PROXY_USERINFO%%:*}"
+    PROXY_PASS="${PROXY_USERINFO#*:}"
+  else
+    PROXY_HOSTPORT="$PROXY_VAL"
+  fi
+
+  # Split host:port
+  PROXY_HOST=$(echo "$PROXY_HOSTPORT" | rev | cut -d: -f2- | rev)
+  PROXY_PORT=$(echo "$PROXY_HOSTPORT" | rev | cut -d: -f1 | rev)
+
+  echo "Configuring transparent proxy: $PROXY_HOST:$PROXY_PORT ($REDSOCKS_TYPE)"
+
+  # Generate redsocks config
+  cat > /tmp/redsocks.conf <<REDSOCKS_EOF
+base {
+    log_debug = off;
+    log_info = on;
+    daemon = on;
+    redirector = iptables;
+}
+
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = 12345;
+    ip = $PROXY_HOST;
+    port = $PROXY_PORT;
+    type = $REDSOCKS_TYPE;
+$([ -n "$PROXY_USER" ] && echo "    login = \"$PROXY_USER\";")
+$([ -n "$PROXY_PASS" ] && echo "    password = \"$PROXY_PASS\";")
+}
+REDSOCKS_EOF
+
+  # Create dedicated user for redsocks (iptables uid exclusion prevents redirect loop)
+  id -u redsocks >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redsocks
+  chown redsocks /tmp/redsocks.conf
+
+  # Start redsocks as dedicated user
+  su -s /bin/sh -c "redsocks -c /tmp/redsocks.conf" redsocks
+
+  # iptables: redirect all outgoing TCP through redsocks
+  # Skip redsocks' own traffic to prevent redirect loop
+  # Skip local/private ranges to preserve internal services
+  iptables -t nat -N REDSOCKS
+  iptables -t nat -A REDSOCKS -m owner --uid-owner redsocks -j RETURN
+  iptables -t nat -A REDSOCKS -d 0.0.0.0/8 -j RETURN
+  iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+  iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
+  iptables -t nat -A REDSOCKS -d 169.254.0.0/16 -j RETURN
+  iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
+  iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
+  iptables -t nat -A REDSOCKS -d 224.0.0.0/4 -j RETURN
+  iptables -t nat -A REDSOCKS -d 240.0.0.0/4 -j RETURN
+  iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports 12345
+  iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
+
+  echo "Transparent proxy configured."
+fi
+
+# ============================================
 # Start Xvfb
 # ============================================
 Xvfb "$DISPLAY" -screen 0 1280x800x24 &

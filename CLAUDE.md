@@ -119,7 +119,7 @@ enum Action {
 
 **States** (`src/ia/states/`):
 - `base.rs` - Shared commands: `window_control_commands` (maximize, minimize, close, sticky)
-- `login.rs` - Login states: `login_qr`, `login_account`, `login_phone_confirm`, `login_loading`
+- `login.rs` - Login states: `login_qr`, `login_account`, `login_phone_confirm`, `login_loading`, `network_proxy_settings`
 - `chat.rs` - Main chat view with chat list and messages
 - `popup.rs` - Error/confirm/info popups
 
@@ -129,21 +129,25 @@ Currently empty — all login emissions (QR, phone_confirm, login_success, statu
 
 **Plans** (`src/plans/login.rs`):
 
-Login plan phases: `authenticating → maximized → detecting_user → setup → done`
+Login plan phases: `initializing → authenticating → maximizing → detecting_user → extracting_keys → done`
 
 ```
+initializing     Exit proxy settings page if landed on it
+     ↓
 authenticating   Wait for QR scan, phone confirm, loading
      ↓           (transitions when view reaches "chat")
-maximized        Send maximize command
+maximizing       Send maximize command
      ↓
 detecting_user   Find WeChat PID, resolve account directory
      ↓           If stored credentials are valid → skip to done
-setup            Post-login setup (~20s), store credentials
+extracting_keys  Extract and store DB credentials (~20s)
      ↓
 done             Emit login_success, goal check passes
 ```
 
 The plan handles all emissions directly via `plan_state` (QR changes, phone_confirm, status messages, login_success) rather than using effect watchers.
+
+**Network proxy**: Configured at the container level via the `PROXY` env var (transparent proxy using redsocks + iptables). The login plan does NOT drive WeChat's in-app proxy UI — if the proxy settings page is encountered, the plan simply navigates back.
 
 **Plans** (`src/plans/chat_open.rs`):
 
@@ -216,6 +220,7 @@ find_ancestor(&button, "frame")  // Find containing frame
 
 ```bash
 pnpm cli up              # Start container
+pnpm cli up --proxy user:pass@host:port  # Start with transparent proxy
 pnpm cli down            # Stop container
 pnpm cli status          # Check server + login state
 pnpm cli auth login      # Login flow
@@ -252,6 +257,7 @@ The `dev:deploy` script builds the Rust binary for `aarch64-unknown-linux-gnu` (
 - `AGENT_WECHAT_URL` - Override server URL (default: http://localhost:6174)
 - `AGENT_WECHAT_TOKEN` - Override auth token (default: read from `~/.config/agent-wechat/token`)
 - `AGENT_DB_PATH` - Override SQLite DB path (default: /data/agent.db)
+- `PROXY` - Transparent proxy for container traffic (format: `user:pass@host:port`, prefix `socks5://` for SOCKS5)
 
 ## Security
 

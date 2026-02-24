@@ -12,6 +12,7 @@ services:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
+      - NET_ADMIN
     ports:
       - "6174:6174"
       - "127.0.0.1:5900:5900" # VNC localhost-only
@@ -19,6 +20,8 @@ services:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat
       - ~/.config/agent-wechat/token:/data/auth-token:ro
+    environment:
+      - PROXY=${PROXY:-}
     restart: unless-stopped
 
 volumes:

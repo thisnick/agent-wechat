@@ -54,7 +54,7 @@ wx down
 
 | Command | Description |
 |---------|-------------|
-| `wx up` | Start the WeChat container (auto-pulls image) |
+| `wx up [--proxy user:pass@host:port]` | Start the WeChat container (auto-pulls image) |
 | `wx down` | Stop and remove container |
 | `wx logs` | Stream container logs |
 | `wx status` | Show server and login status |
@@ -113,6 +113,7 @@ services:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
+      - NET_ADMIN           # for transparent proxy (optional)
     ports:
       - "6174:6174"
       - "127.0.0.1:5900:5900"  # VNC localhost-only
@@ -120,6 +121,8 @@ services:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat
       - ~/.config/agent-wechat/token:/data/auth-token:ro
+    environment:
+      - PROXY=${PROXY:-}    # optional: user:pass@host:port
     restart: unless-stopped
 
 volumes:

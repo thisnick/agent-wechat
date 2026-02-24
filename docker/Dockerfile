@@ -63,6 +63,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     # Clipboard (for paste-image tool)
     xclip \
+    # Transparent proxy
+    redsocks iptables \
     # SQLCipher build deps (temp, for compiling sqlcipher CLI)
     libssl-dev build-essential tcl \
     # Python packages for tools

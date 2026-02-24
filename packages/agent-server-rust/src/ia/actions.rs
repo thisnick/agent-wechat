@@ -85,6 +85,16 @@ pub fn click_bounds(bounds: &Bounds) -> Action {
     )
 }
 
+pub fn click_selector(selector: &str) -> Action {
+    Action::ClickSelector {
+        selector: selector.to_string(),
+    }
+}
+
+pub fn click_back() -> Action {
+    click_selector(r#"push-button[name="Back"]"#)
+}
+
 pub fn sequence(actions: Vec<Action>) -> Action {
     Action::Sequence { actions }
 }
