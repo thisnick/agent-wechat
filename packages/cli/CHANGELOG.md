@@ -1,5 +1,14 @@
 # @agent-wechat/cli
 
+## 0.7.2
+
+### Patch Changes
+
+- [#39](https://github.com/thisnick/agent-wechat/pull/39) [`65289a7`](https://github.com/thisnick/agent-wechat/commit/65289a7ecd8f0107166fbe28dcd71352d7863d9f) Thanks [@thisnick](https://github.com/thisnick)! - Fix binary publish job in release workflow
+
+  - Remove read-only flag from Docker source mount that prevented container startup (exit code 125)
+  - Create GitHub Release before uploading binary assets (release not found error)
+
 ## 0.7.1
 
 ### Patch Changes
