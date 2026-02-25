@@ -1,5 +1,14 @@
 # @agent-wechat/cli
 
+## 0.7.0
+
+### Minor Changes
+
+- [#35](https://github.com/thisnick/agent-wechat/pull/35) [`fa0d64a`](https://github.com/thisnick/agent-wechat/commit/fa0d64aa74af8b0e973984977d09dee27a0c96a7) Thanks [@thisnick](https://github.com/thisnick)! - Add binary artifact publishing and CLI update command
+
+  - Release workflow now publishes standalone `agent-server` binaries (amd64/arm64) as GitHub Release assets alongside Docker images
+  - New `wx update` command downloads the binary matching the CLI version and hot-swaps it into the running container via `docker cp` + process restart
+
 ## 0.6.0
 
 ### Minor Changes
