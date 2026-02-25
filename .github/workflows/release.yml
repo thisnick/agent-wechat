@@ -65,6 +65,61 @@ jobs:
         env:
           NPM_CONFIG_PROVENANCE: true
 
+  publish-binary:
+    name: Binary (${{ matrix.arch }})
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
+          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary in Docker
+        run: |
+          RUST_DIR="packages/agent-server-rust"
+          BUILDER_IMAGE="rust:1.93-bookworm"
+
+          docker run --rm \
+            --platform ${{ matrix.platform }} \
+            -v "$PWD/$RUST_DIR:/build:ro" \
+            -v "agent-wechat-cargo-cache-${{ matrix.arch }}:/build/target" \
+            -v "agent-wechat-cargo-registry-${{ matrix.arch }}:/usr/local/cargo/registry" \
+            -w /build \
+            "$BUILDER_IMAGE" \
+            cargo build --release
+
+          # Extract binary from cache volume
+          TMP_CT=$(docker create \
+            -v "agent-wechat-cargo-cache-${{ matrix.arch }}:/target:ro" \
+            "$BUILDER_IMAGE")
+          docker cp "$TMP_CT:/target/release/agent-server" ./agent-server
+          docker rm "$TMP_CT" > /dev/null
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ASSET="agent-server-${VERSION}-linux-${{ matrix.arch }}"
+          mv agent-server "$ASSET"
+          chmod +x "$ASSET"
+          gh release upload "v${VERSION}" "$ASSET" --clobber
+
   publish-docker:
     name: Docker (${{ matrix.arch }})
     needs: release

@@ -335,6 +335,15 @@ messagesCmd
   });
 
 // ============================================
+// Update Command
+// ============================================
+
+program
+  .command("update")
+  .description("Update the agent-server binary in the running container to match CLI version")
+  .action(cmdUpdate);
+
+// ============================================
 // Debug Commands
 // ============================================
 
@@ -760,6 +769,106 @@ async function cmdSessionDelete(client: WeChatClient, idOrName: string) {
     console.error(`Failed to delete session.`);
     process.exit(1);
   }
+}
+
+// ============================================
+// Update Command Implementation
+// ============================================
+
+async function cmdUpdate() {
+  const version = VERSION;
+  console.log(`Updating agent-server to v${version}...`);
+
+  // Find running container
+  let container: string;
+  try {
+    container = execSync(
+      `docker ps --filter "name=agent-wechat" --format "{{.Names}}" | head -1`,
+      { encoding: "utf-8" }
+    ).trim();
+  } catch {
+    container = "";
+  }
+  if (!container) {
+    console.error("No running agent-wechat container found.");
+    process.exit(1);
+  }
+
+  // Detect container architecture
+  let arch: string;
+  const containerArch = execSync(
+    `docker inspect --format "{{.Architecture}}" "${container}"`,
+    { encoding: "utf-8" }
+  ).trim();
+  switch (containerArch) {
+    case "amd64":
+      arch = "amd64";
+      break;
+    case "arm64":
+      arch = "arm64";
+      break;
+    default:
+      // Fallback to host arch
+      const uname = execSync("uname -m", { encoding: "utf-8" }).trim();
+      arch = uname === "x86_64" ? "amd64" : "arm64";
+  }
+
+  const assetName = `agent-server-${version}-linux-${arch}`;
+  const tmpFile = path.join(os.tmpdir(), assetName);
+
+  // Download binary from GitHub Releases
+  console.log(`Downloading ${assetName}...`);
+  try {
+    execSync(
+      `gh release download "v${version}" --repo thisnick/agent-wechat -p "${assetName}" -D "${os.tmpdir()}" --clobber`,
+      { stdio: "inherit" }
+    );
+  } catch {
+    console.error(
+      `Failed to download ${assetName} from GitHub Releases.\n` +
+      `Make sure v${version} has been released with binary assets.\n` +
+      `You may need to install the GitHub CLI: https://cli.github.com`
+    );
+    process.exit(1);
+  }
+
+  // Deploy into container
+  console.log(`Deploying to ${container}...`);
+  execSync(`docker cp "${tmpFile}" "${container}:/opt/agent-server/agent-server"`, {
+    stdio: "inherit",
+  });
+
+  // Restart server process (entrypoint loop brings it back)
+  execSync(
+    `docker exec "${container}" pkill -f "/opt/agent-server/agent-server" 2>/dev/null || true`,
+    { stdio: "inherit" }
+  );
+
+  // Clean up
+  try {
+    fs.unlinkSync(tmpFile);
+  } catch {
+    // ignore
+  }
+
+  console.log("Server restarting with new binary.");
+
+  // Wait for health check
+  console.log("Waiting for server...");
+  const config = getConfig();
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const resp = await fetch(`${config.serverUrl}/health`);
+      if (resp.ok) {
+        console.log("Server is ready!");
+        return;
+      }
+    } catch {
+      // not ready yet
+    }
+  }
+  console.log("Server did not become ready in time. Check logs with: wx logs");
 }
 
 // ============================================
