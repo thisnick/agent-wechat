@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.7.6
+
+### Patch Changes
+
+- [#44](https://github.com/thisnick/agent-wechat/pull/44) [`feb823c`](https://github.com/thisnick/agent-wechat/commit/feb823c5add5bd5f08e451fa6dbfdff37b2d6e40) Thanks [@thisnick](https://github.com/thisnick)! - Re-extract DB credentials when new message databases appear after login
+
 ## 0.7.5
 
 ### Patch Changes
