@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 0.7.1
+
+### Patch Changes
+
+- [#37](https://github.com/thisnick/agent-wechat/pull/37) [`d043f9c`](https://github.com/thisnick/agent-wechat/commit/d043f9c7f1fd0ed8f9aa1081643540c0d9487f22) Thanks [@thisnick](https://github.com/thisnick)! - Fix binary publish job in release workflow
+
+  - Remove read-only flag from Docker source mount that prevented container startup (exit code 125)
+
 ## 0.7.0
 
 ### Minor Changes
