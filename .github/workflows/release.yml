@@ -96,7 +96,7 @@ jobs:
 
           docker run --rm \
             --platform ${{ matrix.platform }} \
-            -v "$PWD/$RUST_DIR:/build:ro" \
+            -v "$PWD/$RUST_DIR:/build" \
             -v "agent-wechat-cargo-cache-${{ matrix.arch }}:/build/target" \
             -v "agent-wechat-cargo-registry-${{ matrix.arch }}:/usr/local/cargo/registry" \
             -w /build \
