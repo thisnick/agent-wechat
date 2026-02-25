@@ -118,6 +118,7 @@ jobs:
           ASSET="agent-server-${VERSION}-linux-${{ matrix.arch }}"
           mv agent-server "$ASSET"
           chmod +x "$ASSET"
+          gh release create "v${VERSION}" --title "v${VERSION}" --notes "Release v${VERSION}" 2>/dev/null || true
           gh release upload "v${VERSION}" "$ASSET" --clobber
 
   publish-docker:
