@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.7.3
+
+### Patch Changes
+
+- [`6617da2`](https://github.com/thisnick/agent-wechat/commit/6617da2970b314e8f829587840b7b0764770bd54) Thanks [@thisnick](https://github.com/thisnick)! - Fix container architecture detection in `wx update` command
+
 ## 0.7.2
 
 ### Patch Changes
