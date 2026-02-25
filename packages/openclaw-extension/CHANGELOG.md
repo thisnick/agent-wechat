@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.7.5
+
+### Patch Changes
+
+- [`109bb0f`](https://github.com/thisnick/agent-wechat/commit/109bb0f088c0291bea4adcdfd7f25347dc52d59b) Thanks [@thisnick](https://github.com/thisnick)! - Document hosted instance support and token configuration in README
+
 ## 0.7.4
 
 ## 0.7.3
