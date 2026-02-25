@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.7.4
+
+### Patch Changes
+
+- [`dc1e1c8`](https://github.com/thisnick/agent-wechat/commit/dc1e1c8342030c88b665a7b526eac96b75634b42) Thanks [@thisnick](https://github.com/thisnick)! - Fix `wx update`: use native fetch instead of gh CLI, chmod +x after docker cp, reliable arch detection via container uname
+
 ## 0.7.3
 
 ### Patch Changes
