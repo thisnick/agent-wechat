@@ -41,8 +41,31 @@ pub async fn list_messages(
         None => return Json(Vec::new()),
     };
 
-    let db = get_db();
-    let keys = get_stored_keys(&db, &session.id, &logged_in_user);
+    let mut keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, &logged_in_user)
+    };
+
+    // Lazy key extraction: if message_*.db files exist on disk without stored keys, re-extract
+    let on_disk = list_account_dbs(&logged_in_user);
+    let has_missing_message_db = on_disk.iter().any(|name| {
+        name.starts_with("message_")
+            && name.ends_with(".db")
+            && !name.contains("fts")
+            && !name.contains("resource")
+            && !keys.contains_key(name.as_str())
+    });
+    if has_missing_message_db {
+        if let Some(pid) = find_wechat_pid() {
+            let extracted = extract_keys_async(pid).await;
+            if !extracted.is_empty() {
+                let db = get_db();
+                store_keys(&db, &session.id, &logged_in_user, &extracted);
+                keys = get_stored_keys(&db, &session.id, &logged_in_user);
+            }
+        }
+    }
+
     if !keys.keys().any(|k| k.starts_with("message_") && k.ends_with(".db") && !k.contains("fts") && !k.contains("resource")) {
         return Json(Vec::new());
     }
