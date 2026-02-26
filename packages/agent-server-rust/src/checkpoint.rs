@@ -3,16 +3,19 @@ use crate::sessions;
 use crate::tools::wechat_db::get_db_path;
 use crate::tools::wechat_keys::get_stored_keys;
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Set of DB names whose journal mode has already been logged.
+static LOGGED_MODES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// Spawn a background task that periodically checkpoints WeChat's WAL-mode databases.
 ///
-/// WeChat writes to SQLite databases using WAL (Write-Ahead Logging) mode, which
-/// defers flushing data from the WAL file to the main DB file. Our reads use
-/// `immutable=1` (which skips the WAL entirely) for stability, so we need to
-/// trigger periodic checkpoints to keep the main DB file up to date.
-///
-/// Uses PASSIVE checkpoint mode, which never blocks WeChat's writer.
+/// If a database uses WAL, the checkpoint flushes the WAL to the main DB file.
+/// If a database uses DELETE (or any non-WAL) journal mode, the checkpoint is
+/// skipped — there is no WAL file to flush, and reads already see the main DB
+/// directly.
 pub fn spawn_checkpoint_task() {
     tokio::spawn(async {
         loop {
@@ -45,13 +48,17 @@ fn run_checkpoints() {
         }
 
         let db_path = get_db_path(&account_dir, db_name);
-        if let Err(e) = checkpoint_db(&db_path, hex_key) {
+        if let Err(e) = checkpoint_db(&db_path, hex_key, db_name) {
             tracing::debug!("[checkpoint] {db_name}: {e}");
         }
     }
 }
 
-fn checkpoint_db(db_path: &str, hex_key: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn checkpoint_db(
+    db_path: &str,
+    hex_key: &str,
+    db_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -61,7 +68,21 @@ fn checkpoint_db(db_path: &str, hex_key: &str) -> Result<(), Box<dyn std::error:
         "PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4;"
     ))?;
 
-    conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+    // Detect and log journal mode (once per DB name)
+    let mode: String = conn.query_row("PRAGMA journal_mode;", [], |r| r.get(0))?;
+
+    {
+        let mut guard = LOGGED_MODES.lock().unwrap();
+        let set = guard.get_or_insert_with(HashSet::new);
+        if set.insert(db_name.to_string()) {
+            tracing::info!("[checkpoint] {db_name}: journal_mode={mode}");
+        }
+    }
+
+    if mode == "wal" {
+        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+    }
+    // DELETE / PERSIST / TRUNCATE / OFF / MEMORY — no WAL to checkpoint
 
     Ok(())
 }
