@@ -252,6 +252,20 @@ pnpm build                    # Rebuild CLI after changes
 
 The `dev:deploy` script builds the Rust binary for `aarch64-unknown-linux-gnu` (or `x86_64`) in a Docker builder, copies it into the running container, and restarts the server process.
 
+### Changesets
+
+Always add a changeset when making user-facing changes (features, fixes, behavior changes). Run `pnpm changeset` or create a `.changeset/<name>.md` file manually:
+
+```markdown
+---
+"@agent-wechat/wechat": patch
+---
+
+Short description of the change.
+```
+
+Use `patch` for fixes, `minor` for new features, `major` for breaking changes.
+
 ## Environment Variables
 
 - `AGENT_WECHAT_URL` - Override server URL (default: http://localhost:6174)
@@ -395,7 +409,7 @@ Image `.dat` files use a two-layer encoding: AES-128-ECB for the header and sing
 - Python extract-keys script exits non-zero if any DB key not found — catch error, read JSON output file anyway (partial success)
 - hardlink.db has indexing delay — use `message_resource.db` as primary lookup for image files
 - hardlink.db `dir2id` stores md5(chatId) not raw chatId
-- WeChat DBs are read with `READ_ONLY` + `busy_timeout=200ms` (short-lived connections). WeChat may use DELETE journal mode (not WAL), so `immutable=1` was removed — it skipped change-detection and returned stale data. A background checkpoint task still runs for any DBs that do use WAL (PASSIVE mode, 3s interval).
+- WeChat DBs are read with `READ_ONLY` + `busy_timeout=200ms` (short-lived connections). WeChat may use DELETE journal mode (not WAL), so `immutable=1` was removed — it skipped change-detection and returned stale data.
 
 ## Current Status
 
