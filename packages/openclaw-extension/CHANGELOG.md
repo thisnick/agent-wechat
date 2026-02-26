@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.7.9
+
+### Patch Changes
+
+- [#53](https://github.com/thisnick/agent-wechat/pull/53) [`68a9a4e`](https://github.com/thisnick/agent-wechat/commit/68a9a4ea3871a7a4ee951ed29841fb5431924949) Thanks [@thisnick](https://github.com/thisnick)! - Fix stale WeChat DB reads by replacing immutable=1 with READ_ONLY + busy_timeout. WeChat DBs likely use DELETE journal mode where immutable=1 skips change-detection entirely. Also adds journal_mode logging to confirm the actual mode.
+
 ## 0.7.8
 
 ### Patch Changes
