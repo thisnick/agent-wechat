@@ -20,7 +20,12 @@ fi
 # Copy image to clipboard (backgrounded — xclip blocks until
 # the selection is consumed, so it must run in parallel with the paste)
 xclip -selection clipboard -t "$MIME" -i < "$FILE" >/dev/null 2>&1 &
-sleep 0.1
+
+# Scale delay by file size so xclip has time to buffer large images before
+# Ctrl+V fires. Base: 200ms; add ~100ms per MB, capped at 2s.
+FILE_BYTES=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+DELAY=$(awk "BEGIN { d = 0.2 + ($FILE_BYTES / 1048576) * 0.1; if (d > 2.0) d = 2.0; printf \"%.2f\", d }")
+sleep "$DELAY"
 
 # Paste using Ctrl+V (consumes the clipboard, letting xclip exit)
 xdotool key ctrl+v
