@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.7.8
+
+### Patch Changes
+
+- [#51](https://github.com/thisnick/agent-wechat/pull/51) [`2d035a7`](https://github.com/thisnick/agent-wechat/commit/2d035a78544cee2b949a64cadaeee32ab0314400) Thanks [@thisnick](https://github.com/thisnick)! - Add periodic WAL checkpoint for fresh WeChat DB reads. A background task runs PASSIVE checkpoint every 3s, flushing WAL to the main DB file so immutable=1 reads see up-to-date data.
+
 ## 0.7.7
 
 ### Patch Changes
