@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.7.7
+
+### Patch Changes
+
+- [`f637558`](https://github.com/thisnick/agent-wechat/commit/f6375585be4939f6ed43c610910d585bee35a287) Thanks [@thisnick](https://github.com/thisnick)! - Rewrite README with improved setup flow, prerequisites, and limitations
+
 ## 0.7.6
 
 ### Patch Changes
