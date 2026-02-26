@@ -89,10 +89,15 @@ jobs:
           VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Build builder image (Ubuntu 22.04 + Rust)
+        run: |
+          docker build -t agent-wechat-builder:latest \
+            -f docker/Dockerfile.builder docker/
+
       - name: Build binary in Docker
         run: |
           RUST_DIR="packages/agent-server-rust"
-          BUILDER_IMAGE="rust:1.93-bookworm"
+          BUILDER_IMAGE="agent-wechat-builder:latest"
 
           docker run --rm \
             --platform ${{ matrix.platform }} \

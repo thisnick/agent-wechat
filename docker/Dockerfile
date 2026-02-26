@@ -1,16 +1,29 @@
 # ============================================
 # Stage 1: Build the Rust server binary
 # ============================================
-FROM rust:1.93-bookworm AS builder
+# Use the same Ubuntu version as the runtime stage so the compiled binary
+# links against a compatible glibc (2.35).  Building on a newer distro
+# (e.g. Debian Bookworm with glibc 2.36) can produce binaries that fail
+# at runtime with "GLIBC_2.36 not found".
+FROM ubuntu:22.04 AS builder
 
 ARG BUILD_MODE=release
 
+ENV DEBIAN_FRONTEND=noninteractive
+# Rust installation
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:$PATH"
+
 WORKDIR /build
 
-# Install build dependencies for bundled sqlcipher + openssl
+# Install build dependencies + Rust toolchain
 RUN apt-get update && apt-get install -y \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    curl build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+       | sh -s -- -y --default-toolchain stable --profile minimal \
+    && rustup show
 
 # Copy manifests first for dependency caching
 COPY agent-server-rust/Cargo.toml agent-server-rust/Cargo.lock* ./

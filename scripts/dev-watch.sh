@@ -10,7 +10,8 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RUST_DIR="$ROOT_DIR/packages/agent-server-rust"
-BUILDER_IMAGE="rust:1.93-bookworm"
+# Use Ubuntu 22.04-based builder to match runtime glibc (2.35)
+BUILDER_IMAGE="agent-wechat-builder:latest"
 CACHE_VOLUME="agent-wechat-cargo-cache"
 
 CONTAINER=""
@@ -54,6 +55,10 @@ case "$CONTAINER_ARCH" in
     esac
     ;;
 esac
+
+# Build the builder image (cached after first run)
+echo "==> Ensuring builder image exists (Ubuntu 22.04 + Rust)"
+docker build -q -t "$BUILDER_IMAGE" -f "$ROOT_DIR/docker/Dockerfile.builder" "$ROOT_DIR/docker"
 
 echo "Watching $RUST_DIR"
 echo "  Builder:   $BUILDER_IMAGE ($PLATFORM)"
