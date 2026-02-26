@@ -121,6 +121,33 @@ jobs:
           gh release create "v${VERSION}" --title "v${VERSION}" --notes "Release v${VERSION}" 2>/dev/null || true
           gh release upload "v${VERSION}" "$ASSET" --clobber
 
+  publish-tools:
+    name: Docker Tools
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
+          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package tools
+        run: |
+          tar -czf "docker-tools-${{ steps.version.outputs.version }}.tar.gz" -C docker tools
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "v${VERSION}" --title "v${VERSION}" --notes "Release v${VERSION}" 2>/dev/null || true
+          gh release upload "v${VERSION}" "docker-tools-${VERSION}.tar.gz" --clobber
+
   publish-docker:
     name: Docker (${{ matrix.arch }})
     needs: release
