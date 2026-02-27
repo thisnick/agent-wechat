@@ -3,11 +3,13 @@ import { FileBox } from 'file-box'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { createRequire } from 'module'
 
 import { WeChatClient } from '@agent-wechat/shared'
 import type { Chat, Contact, Message, LoginSubscriptionEvent } from '@agent-wechat/shared'
 
-import { VERSION } from './config.js'
+const require = createRequire(import.meta.url)
+const { version: VERSION } = require('../package.json')
 import {
   chatToContactPayload,
   contactToContactPayload,
