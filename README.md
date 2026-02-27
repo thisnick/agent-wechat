@@ -7,6 +7,7 @@ A programmable WeChat interface. Runs WeChat Linux in a Docker container with a 
 | Package | npm | Description |
 |---------|-----|-------------|
 | [`@agent-wechat/cli`](./packages/cli) | [![npm](https://img.shields.io/npm/v/@agent-wechat/cli)](https://www.npmjs.com/package/@agent-wechat/cli) | CLI for managing the Docker container and interacting with WeChat |
+| [`@agent-wechat/wechaty-puppet`](./packages/wechaty-puppet) | [![npm](https://img.shields.io/npm/v/@agent-wechat/wechaty-puppet)](https://www.npmjs.com/package/@agent-wechat/wechaty-puppet) | [Wechaty](https://wechaty.js.org) puppet for agent-wechat |
 | [`@agent-wechat/wechat`](./packages/openclaw-extension) | [![npm](https://img.shields.io/npm/v/@agent-wechat/wechat)](https://www.npmjs.com/package/@agent-wechat/wechat) | [OpenClaw](https://openclaw.ai) extension for AI agent integration |
 
 ## What It Does
