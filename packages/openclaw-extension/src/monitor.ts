@@ -5,6 +5,7 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
 import {
+  normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
   resolveWeChatInboundAccessDecision,
   resolveWeChatMentionGate,
@@ -271,6 +272,7 @@ async function prepareMessage(
   const isGroup = chatId.includes("@chatroom");
   const senderId = msg.sender ?? chatId;
   const senderName = msg.senderName ?? msg.sender ?? chat.name;
+  const wasMentioned = isGroup && (msg.isMentioned === true);
 
   const access = resolveWeChatInboundAccessDecision({
     isGroup,
@@ -368,7 +370,10 @@ async function prepareMessage(
   return {
     msg,
     rawBody,
-    commandBody: rawBody,
+    commandBody: normalizeWeChatCommandBody(rawBody, {
+      isGroup,
+      wasMentioned,
+    }),
     mediaPath,
     mediaMime,
     senderName,
@@ -376,7 +381,7 @@ async function prepareMessage(
     isGroup,
     timestamp,
     hasMedia,
-    isMentioned: isGroup && (msg.isMentioned === true),
+    isMentioned: wasMentioned,
   };
 }
 
@@ -438,7 +443,8 @@ async function dispatchSegment(
     `${mediaPath ? ` media=${mediaPath}` : ""}`,
   );
 
-  const hasControlCommand = allowTextCommands && core.channel.text.hasControlCommand(commandBody, cfg);
+  const hasControlCommand =
+    allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg);
   const commandAuthorized = await resolveWeChatCommandAuthorization({
     cfg,
     rawBody: commandBody,
@@ -848,7 +854,8 @@ async function processUnreadChat(
   const isGroup = chatId.includes("@chatroom");
   let clearBufferedHistory = false;
   const hasControlCommandInWindow =
-    allowTextCommands && processed.some((pm) => core.channel.text.hasControlCommand(pm.commandBody, cfg));
+    allowTextCommands &&
+    processed.some((pm) => core.channel.commands.isControlCommandMessage(pm.commandBody, cfg));
   if (isGroup && groupHistory) {
     if (policy.requireMention) {
       const hasMention = processed.some(pm => pm.isMentioned);

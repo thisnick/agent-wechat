@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ResolvedWeChatAccount } from "./types.ts";
 import {
+  normalizeWeChatCommandBody,
   normalizeWeChatAllowFrom,
   normalizeWeChatId,
   resolveWeChatCommandAuthorization,
@@ -42,6 +43,37 @@ test("normalizeWeChatAllowFrom dedupes and preserves wildcard", () => {
     "wechat:wxid_xyz",
   ]);
   assert.deepEqual(entries, ["wxid_abc", "*", "wxid_xyz"]);
+});
+
+test("normalizeWeChatCommandBody strips leading mentions before slash commands in groups", () => {
+  assert.equal(
+    normalizeWeChatCommandBody("  @agent /compact  ", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "/compact",
+  );
+  assert.equal(
+    normalizeWeChatCommandBody("@agent\u2005/compact focus", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "/compact focus",
+  );
+  assert.equal(
+    normalizeWeChatCommandBody("@agent hello /compact", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "@agent hello /compact",
+  );
+  assert.equal(
+    normalizeWeChatCommandBody("@agent /compact", {
+      isGroup: true,
+      wasMentioned: false,
+    }),
+    "@agent /compact",
+  );
 });
 
 test("resolveWeChatPolicyContext resolves overrides and effective allowlists", () => {

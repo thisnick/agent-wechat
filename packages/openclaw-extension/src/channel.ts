@@ -10,7 +10,7 @@ import { WeChatClient } from "@agent-wechat/shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatLoginTool } from "./agent-tools.js";
-import { normalizeWeChatId } from "./access-control.js";
+import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
 
 const meta: ChannelMeta = {
   id: "wechat",
@@ -137,6 +137,15 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       }
       return wechat.groups?.["*"]?.requireMention ?? true;
     },
+  },
+
+  // ---- Mention adapter ----
+  mentions: {
+    stripMentions: ({ text, ctx }) =>
+      normalizeWeChatCommandBody(text, {
+        isGroup: ctx.ChatType === "group",
+        wasMentioned: ctx.WasMentioned === true,
+      }),
   },
 
   // ---- Messaging adapter ----

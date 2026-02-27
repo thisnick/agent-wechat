@@ -38,6 +38,10 @@ export type WeChatMentionGateResult = {
   shouldBypassMention: boolean;
 };
 
+const INVISIBLE_TEXT_RE = /[\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g;
+const MENTION_SEPARATOR_RE = /[\s\u2005]+/u;
+const WECHAT_MENTION_TOKEN_RE = /^[@＠][^\s\u2005]+$/u;
+
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
 }
@@ -80,6 +84,47 @@ export function normalizeWeChatAllowFrom(values: Array<string | number> | null |
     .map((entry) => (entry === "*" ? "*" : normalizeWeChatId(entry)))
     .filter(Boolean);
   return unique(normalized);
+}
+
+function findCommandTokenStart(input: string): number {
+  const match = /(?:^|\s)([/!][A-Za-z])/u.exec(input);
+  if (!match) {
+    return -1;
+  }
+  const whole = match[0] ?? "";
+  const startsWithSpace = whole.startsWith(" ");
+  return (match.index ?? 0) + (startsWithSpace ? 1 : 0);
+}
+
+export function normalizeWeChatCommandBody(
+  raw: string,
+  params?: { isGroup?: boolean; wasMentioned?: boolean },
+): string {
+  const trimmed = raw.replace(INVISIBLE_TEXT_RE, "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const isGroup = params?.isGroup === true;
+  const wasMentioned = params?.wasMentioned === true;
+  if (!isGroup || !wasMentioned) {
+    return trimmed;
+  }
+  const commandStart = findCommandTokenStart(trimmed);
+  if (commandStart < 0) {
+    return trimmed;
+  }
+  const prefix = trimmed.slice(0, commandStart).trim();
+  if (!prefix) {
+    return trimmed.slice(commandStart).trimStart();
+  }
+  const prefixTokens = prefix
+    .split(MENTION_SEPARATOR_RE)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (prefixTokens.length > 0 && prefixTokens.every((token) => WECHAT_MENTION_TOKEN_RE.test(token))) {
+    return trimmed.slice(commandStart).trimStart();
+  }
+  return trimmed;
 }
 
 export function isWeChatSenderAllowed(
