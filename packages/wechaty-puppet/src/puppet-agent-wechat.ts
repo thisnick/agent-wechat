@@ -145,29 +145,33 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
   }
 
   private handleLoginEvent(event: LoginSubscriptionEvent): void {
-    if ('qr' in event) {
-      const qr = event.qr as { qrData?: string; qrDataUrl?: string }
-      const qrcode = qr.qrData ?? qr.qrDataUrl ?? ''
-      this.emit('scan', {
-        qrcode,
-        status: PUPPET.types.ScanStatus.Waiting,
-      })
-    } else if ('phone_confirm' in event) {
-      this.emit('scan', {
-        qrcode: '',
-        status: PUPPET.types.ScanStatus.Scanned,
-      })
-    } else if ('login_success' in event) {
-      const data = event.login_success as { userId?: string }
-      const userId = data.userId ?? 'unknown'
-      void this.onLoginSuccess(userId)
-    } else if ('login_timeout' in event) {
-      this.emit('error', { data: 'Login timed out' })
-    } else if ('error' in event) {
-      const data = event.error as { message?: string }
-      this.emit('error', { data: data.message ?? 'Login error' })
-    } else if ('status' in event) {
-      log.verbose('PuppetAgentWeChat', 'Login status: %s', JSON.stringify(event.status))
+    switch (event.type) {
+      case 'qr': {
+        const qrcode = event.qrData ?? event.qrDataUrl ?? ''
+        this.emit('scan', {
+          qrcode,
+          status: PUPPET.types.ScanStatus.Waiting,
+        })
+        break
+      }
+      case 'phone_confirm':
+        this.emit('scan', {
+          qrcode: '',
+          status: PUPPET.types.ScanStatus.Scanned,
+        })
+        break
+      case 'login_success':
+        void this.onLoginSuccess(event.userId ?? 'unknown')
+        break
+      case 'login_timeout':
+        this.emit('error', { data: 'Login timed out' })
+        break
+      case 'error':
+        this.emit('error', { data: event.message ?? 'Login error' })
+        break
+      case 'status':
+        log.verbose('PuppetAgentWeChat', 'Login status: %s', event.message)
+        break
     }
   }
 

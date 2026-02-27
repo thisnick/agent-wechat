@@ -4,7 +4,11 @@ Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bri
 
 ## Prerequisites
 
-- **An agent-wechat server** running (Docker container or via `wx up`)
+- **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/thisnick/agent-wechat):
+  ```bash
+  npx @agent-wechat/cli up     # starts the Docker container
+  npx @agent-wechat/cli login   # scan QR to log in
+  ```
 - **Node.js >= 22**
 
 ## Install
@@ -27,8 +31,7 @@ const bot = WechatyBuilder.build({
 })
 
 bot.on('scan', (qrcode, status) => {
-  console.log(`Scan QR code: status=${status}`)
-  // Use qrcode-terminal or similar to display the QR
+  console.log(`Scan QR Code to login: ${status}\nhttps://wechaty.js.org/qrcode/${encodeURIComponent(qrcode)}`)
 })
 
 bot.on('login', user => console.log(`Logged in: ${user}`))
@@ -85,4 +88,5 @@ The puppet connects to the agent-wechat REST API (Rust server running inside a D
 - **Messages**: Polls `GET /api/chats` for unreads, then `GET /api/messages/{chatId}` for new messages
 - **Sending**: `POST /api/messages/send` with text, image, or file payloads
 - **Media**: `GET /api/messages/{chatId}/media/{localId}` for image/voice/video downloads
-- **Contacts/Rooms**: Derived from `GET /api/chats` (contacts = non-group chats, rooms = group chats)
+- **Contacts**: Full address book via `GET /api/contacts`
+- **Rooms**: Derived from `GET /api/chats` (group chats)

@@ -30,12 +30,7 @@ const bot = WechatyBuilder.build({
 bot.on('scan', (qrcode, status) => {
   console.log(`[scan] status=${status}`)
   if (qrcode) {
-    try {
-      const qr = require('qrcode-terminal')
-      qr.generate(qrcode, { small: true })
-    } catch {
-      console.log(`  (install qrcode-terminal to display QR in terminal)`)
-    }
+    console.log(`Scan QR Code to login: https://wechaty.js.org/qrcode/${encodeURIComponent(qrcode)}`)
   }
 })
 

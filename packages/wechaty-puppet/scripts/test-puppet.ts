@@ -27,7 +27,7 @@ const puppet = new PuppetAgentWeChat({
 puppet.on('scan', (payload) => {
   console.log(`[scan] status=${payload.status}`)
   if (payload.qrcode) {
-    console.log(`[scan] qrcode available (${payload.qrcode.length} chars)`)
+    console.log(`Scan QR Code to login: https://wechaty.js.org/qrcode/${encodeURIComponent(payload.qrcode)}`)
   }
 })
 
