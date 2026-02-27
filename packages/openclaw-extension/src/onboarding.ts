@@ -197,7 +197,8 @@ export const wechatOnboardingAdapter = {
 
     if (groupPolicy === "allowlist") {
       const raw = await prompter.text({
-        message: "Allowed group IDs (comma-separated xxx@chatroom values)",
+        message:
+          "Allowed group sender IDs (comma-separated wxid_xxx values; use * to allow any sender)",
       });
       wechatCfg.groupAllowFrom = raw.split(",").map((s: string) => s.trim()).filter(Boolean);
     }

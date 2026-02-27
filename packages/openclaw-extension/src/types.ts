@@ -1,17 +1,22 @@
+export type WeChatDmPolicy = "allowlist" | "open" | "disabled";
+export type WeChatGroupPolicy = "open" | "disabled" | "allowlist";
+
+export type WeChatGroupConfig = {
+  enabled?: boolean;
+  requireMention?: boolean;
+  groupPolicy?: WeChatGroupPolicy;
+  allowFrom?: string[];
+};
+
 export type WeChatConfig = {
   enabled?: boolean;
   serverUrl: string;
   token?: string;
-  dmPolicy?: "allowlist" | "open" | "disabled";
+  dmPolicy?: WeChatDmPolicy;
   allowFrom?: string[];
-  groupPolicy?: "open" | "disabled" | "allowlist";
+  groupPolicy?: WeChatGroupPolicy;
   groupAllowFrom?: string[];
-  groups?: Record<
-    string,
-    {
-      requireMention?: boolean;
-    }
-  >;
+  groups?: Record<string, WeChatGroupConfig>;
   pollIntervalMs?: number;
   authPollIntervalMs?: number;
 };
@@ -21,14 +26,26 @@ export type ResolvedWeChatAccount = {
   enabled: boolean;
   serverUrl: string;
   token?: string;
-  dmPolicy: string;
+  dmPolicy: WeChatDmPolicy;
   allowFrom: string[];
-  groupPolicy: string;
+  groupPolicy: WeChatGroupPolicy;
   groupAllowFrom: string[];
-  groups: Record<string, { requireMention?: boolean }>;
+  groups: Record<string, WeChatGroupConfig>;
   pollIntervalMs: number;
   authPollIntervalMs: number;
 };
+
+function normalizeDmPolicy(policy: unknown): WeChatDmPolicy {
+  return policy === "allowlist" || policy === "open" || policy === "disabled"
+    ? policy
+    : "disabled";
+}
+
+function normalizeGroupPolicy(policy: unknown): WeChatGroupPolicy {
+  return policy === "open" || policy === "disabled" || policy === "allowlist"
+    ? policy
+    : "disabled";
+}
 
 // Defaults
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -48,9 +65,9 @@ export function resolveWeChatAccount(
     enabled: wechat.enabled !== false,
     serverUrl: wechat.serverUrl,
     token: wechat.token,
-    dmPolicy: wechat.dmPolicy ?? "disabled",
+    dmPolicy: normalizeDmPolicy(wechat.dmPolicy),
     allowFrom: wechat.allowFrom ?? [],
-    groupPolicy: wechat.groupPolicy ?? "disabled",
+    groupPolicy: normalizeGroupPolicy(wechat.groupPolicy),
     groupAllowFrom: wechat.groupAllowFrom ?? [],
     groups: wechat.groups ?? {},
     pollIntervalMs: wechat.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,

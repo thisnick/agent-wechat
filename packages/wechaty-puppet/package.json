@@ -30,11 +30,11 @@
   },
   "devDependencies": {
     "@agent-wechat/shared": "workspace:*",
-    "wechaty-puppet": "^1.20.2",
-    "esbuild": "^0.25.0",
     "@types/node": "^22",
+    "esbuild": "^0.25.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "wechaty-puppet": "^1.20.2"
   },
   "publishConfig": {
     "access": "public",

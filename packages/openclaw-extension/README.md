@@ -146,8 +146,8 @@ All config lives under `channels.wechat` in OpenClaw's config file:
 | `dmPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | Who can DM the bot |
 | `allowFrom` | string[] | `[]` | wxid allowlist for DMs (when policy is `allowlist`) |
 | `groupPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | Group message policy |
-| `groupAllowFrom` | string[] | `[]` | wxid allowlist for group senders |
-| `groups` | object | `{}` | Per-group overrides (e.g. `{ "id@chatroom": { "requireMention": false } }`) |
+| `groupAllowFrom` | string[] | `[]` | Global allowlist of group sender IDs (`wxid_...`) |
+| `groups` | object | `{}` | Per-group overrides (e.g. `{ "id@chatroom": { "requireMention": false, "enabled": true, "groupPolicy": "allowlist", "allowFrom": ["wxid_..."] } }`) |
 | `pollIntervalMs` | integer | `1000` | Message polling interval |
 | `authPollIntervalMs` | integer | `30000` | Auth status check interval |
 

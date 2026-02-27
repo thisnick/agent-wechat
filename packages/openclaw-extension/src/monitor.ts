@@ -4,6 +4,13 @@ import { createReplyPrefixOptions } from "openclaw/plugin-sdk";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
+import {
+  resolveWeChatCommandAuthorization,
+  resolveWeChatInboundAccessDecision,
+  resolveWeChatMentionGate,
+  resolveWeChatPolicyContext,
+  type WeChatPolicyContext,
+} from "./access-control.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34]); // image, voice
@@ -24,6 +31,7 @@ export interface WeChatMonitorOptions {
 type ProcessedMessage = {
   msg: Message;
   rawBody: string;
+  commandBody: string;
   mediaPath?: string;
   mediaMime?: string;
   senderName: string;
@@ -71,29 +79,6 @@ async function pollMedia(
     }
   }
   return null;
-}
-
-/**
- * Check whether a message is allowed through based on DM/group policies.
- */
-function isMessageAllowed(
-  account: ResolvedWeChatAccount,
-  isGroup: boolean,
-  senderId: string,
-): boolean {
-  if (isGroup) {
-    if (account.groupPolicy === "disabled") return false;
-    if (account.groupPolicy === "allowlist") {
-      return account.groupAllowFrom.includes(senderId);
-    }
-    return true; // "open"
-  }
-  // Direct message
-  if (account.dmPolicy === "disabled") return false;
-  if (account.dmPolicy === "allowlist") {
-    return account.allowFrom.includes(senderId);
-  }
-  return true; // "open"
 }
 
 function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
@@ -272,6 +257,7 @@ async function prepareMessage(
   chatId: string,
   chat: Chat,
   liveAccount: ResolvedWeChatAccount,
+  policy: WeChatPolicyContext,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
 ): Promise<ProcessedMessage | null> {
   const core = getWeChatRuntime();
@@ -286,9 +272,15 @@ async function prepareMessage(
   const senderId = msg.sender ?? chatId;
   const senderName = msg.senderName ?? msg.sender ?? chat.name;
 
-  // Policy check
-  if (!isMessageAllowed(liveAccount, isGroup, senderId)) {
-    log?.info?.(`[wechat:${liveAccount.accountId}] Blocked by policy: ${isGroup ? "group" : "dm"} from ${senderId}`);
+  const access = resolveWeChatInboundAccessDecision({
+    isGroup,
+    senderId,
+    policy,
+  });
+  if (!access.allowed) {
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] Blocked by policy (${access.reason}) from ${senderId}`,
+    );
     return null;
   }
 
@@ -376,6 +368,7 @@ async function prepareMessage(
   return {
     msg,
     rawBody,
+    commandBody: rawBody,
     mediaPath,
     mediaMime,
     senderName,
@@ -424,14 +417,16 @@ async function dispatchSegment(
   chatId: string,
   chat: Chat,
   liveAccount: ResolvedWeChatAccount,
+  policy: WeChatPolicyContext,
+  storeAllowFrom: string[],
+  allowTextCommands: boolean,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
   remainingSegments?: number,
-  groupHistory?: Map<string, ProcessedMessage[]>,
-): Promise<void> {
+): Promise<boolean> {
   const core = getWeChatRuntime();
   const lastMsg = segment[segment.length - 1];
-  const { isGroup, senderId, senderName, timestamp, rawBody, msg } = lastMsg;
+  const { isGroup, senderId, senderName, timestamp, rawBody, commandBody, msg } = lastMsg;
 
   // Find the media attachment in this batch (at most one per batch)
   const mediaMsg = segment.find((pm) => pm.mediaPath);
@@ -443,18 +438,43 @@ async function dispatchSegment(
     `${mediaPath ? ` media=${mediaPath}` : ""}`,
   );
 
-  // Mention gating: skip group messages that require mention but weren't mentioned
-  if (isGroup) {
-    const wechatCfg = (cfg as any)?.channels?.wechat;
-    const groupEntry = wechatCfg?.groups?.[chatId];
-    const defaultEntry = wechatCfg?.groups?.["*"];
-    const requireMention = groupEntry?.requireMention ?? defaultEntry?.requireMention ?? true;
-    if (requireMention && !lastMsg.isMentioned) {
-      log?.info?.(
-        `[wechat:${liveAccount.accountId}] Skipping group message (mention required, not mentioned) in ${chatId}`,
-      );
-      return;
-    }
+  const hasControlCommand = allowTextCommands && core.channel.text.hasControlCommand(commandBody, cfg);
+  const commandAuthorized = await resolveWeChatCommandAuthorization({
+    cfg,
+    rawBody: commandBody,
+    isGroup,
+    senderId,
+    dmPolicy: policy.dmPolicy,
+    allowFromForCommands: isGroup ? policy.effectiveGroupAllowFrom : policy.effectiveAllowFrom,
+    deps: {
+      shouldComputeCommandAuthorized: (raw, loadedCfg) =>
+        core.channel.commands.shouldComputeCommandAuthorized(raw, loadedCfg),
+      resolveCommandAuthorizedFromAuthorizers: (params) =>
+        core.channel.commands.resolveCommandAuthorizedFromAuthorizers(params),
+      readAllowFromStore: async () => storeAllowFrom,
+    },
+  });
+  if (isGroup && allowTextCommands && hasControlCommand && commandAuthorized !== true) {
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] Dropping unauthorized group control command from ${senderId} in ${chatId}`,
+    );
+    return false;
+  }
+
+  const mentionGate = resolveWeChatMentionGate({
+    isGroup,
+    requireMention: policy.requireMention,
+    canDetectMention: true,
+    wasMentioned: segment.some((pm) => pm.isMentioned),
+    allowTextCommands,
+    hasControlCommand,
+    commandAuthorized: commandAuthorized === true,
+  });
+  if (isGroup && mentionGate.shouldSkip) {
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] Skipping group segment (mention required) in ${chatId}`,
+    );
+    return false;
   }
 
   try {
@@ -552,7 +572,7 @@ async function dispatchSegment(
       Body: body,
       BodyForAgent: rawBody,
       RawBody: rawBody,
-      CommandBody: rawBody,
+      CommandBody: commandBody,
       InboundHistory: inboundHistory,
       From: isGroup ? `wechat:group:${chatId}` : `wechat:${senderId}`,
       To: `wechat:${chatId}`,
@@ -565,7 +585,8 @@ async function dispatchSegment(
       Provider: "wechat",
       Surface: "wechat",
       MessageSid: `wechat:${chatId}:${msg.localId}`,
-      WasMentioned: isGroup ? lastMsg.isMentioned : undefined,
+      WasMentioned: isGroup ? mentionGate.effectiveWasMentioned : undefined,
+      CommandAuthorized: commandAuthorized,
       OriginatingChannel: "wechat",
       OriginatingTo: `wechat:${chatId}`,
       ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
@@ -682,14 +703,12 @@ async function dispatchSegment(
       at: timestamp,
     });
 
-    // Clear group history after successful dispatch
-    if (isGroup && groupHistory) {
-      groupHistory.set(chatId, []);
-    }
+    return true;
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to dispatch segment (last msg ${msg.localId}): ${err}`,
     );
+    return false;
   }
 }
 
@@ -725,11 +744,25 @@ async function processUnreadChat(
   groupHistory?: Map<string, ProcessedMessage[]>,
   groupHistoryLimit?: number,
 ): Promise<void> {
+  const core = getWeChatRuntime();
   // Re-resolve account from hot-reloaded config so policy changes take effect
   const liveAccount =
     resolveWeChatAccount(cfg as Record<string, unknown>, account.accountId) ??
     account;
   const chatId = chat.username ?? chat.id;
+  const storeAllowFrom = await core.channel.pairing
+    .readAllowFromStore("wechat", process.env, liveAccount.accountId)
+    .catch(() => [] as string[]);
+  const policy = resolveWeChatPolicyContext({
+    account: liveAccount,
+    cfg: cfg as any,
+    chatId,
+    storeAllowFrom,
+  });
+  const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
+    cfg,
+    surface: "wechat",
+  });
 
   // Open the chat (triggers media downloads + clear unreads)
   if (!skipOpen) {
@@ -805,7 +838,7 @@ async function processUnreadChat(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}, content=${(msg.content || "").slice(0, 50)}`,
     );
-    const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, log);
+    const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, policy, log);
     if (pm) {
       processed.push(pm);
     }
@@ -813,15 +846,13 @@ async function processUnreadChat(
 
   // Group history catch-up: buffer or inject based on mention status
   const isGroup = chatId.includes("@chatroom");
+  let clearBufferedHistory = false;
+  const hasControlCommandInWindow =
+    allowTextCommands && processed.some((pm) => core.channel.text.hasControlCommand(pm.commandBody, cfg));
   if (isGroup && groupHistory) {
-    const wechatCfg = (cfg as any)?.channels?.wechat;
-    const groupEntry = wechatCfg?.groups?.[chatId];
-    const defaultEntry = wechatCfg?.groups?.["*"];
-    const requireMention = groupEntry?.requireMention ?? defaultEntry?.requireMention ?? true;
-
-    if (requireMention) {
+    if (policy.requireMention) {
       const hasMention = processed.some(pm => pm.isMentioned);
-      if (!hasMention) {
+      if (!hasMention && !hasControlCommandInWindow) {
         // No mention — buffer all messages and skip dispatch
         const limit = groupHistoryLimit ?? 50;
         for (const pm of processed) {
@@ -833,38 +864,76 @@ async function processUnreadChat(
         return;
       }
 
-      // Mention found — pull buffered history and prepend
-      const buffered = groupHistory.get(chatId) ?? [];
-      if (buffered.length > 0) {
-        // Mark buffered messages as mentioned so they pass the gate in dispatchSegment
-        for (const pm of buffered) { pm.isMentioned = true; }
-        processed.unshift(...buffered);
-        groupHistory.set(chatId, []);
-        log?.info?.(`[wechat:${liveAccount.accountId}] Injected ${buffered.length} buffered msg(s) as history in ${chatId}`);
-      }
+      if (hasMention) {
+        clearBufferedHistory = true;
+        // Mention found — pull buffered history and prepend
+        const buffered = groupHistory.get(chatId) ?? [];
+        if (buffered.length > 0) {
+          // Mark buffered messages as mentioned so they remain historical context.
+          for (const pm of buffered) {
+            pm.isMentioned = true;
+          }
+          processed.unshift(...buffered);
+          log?.info?.(
+            `[wechat:${liveAccount.accountId}] Injected ${buffered.length} buffered msg(s) as history in ${chatId}`,
+          );
+        }
 
-      // Strip media from all but the latest message that has it (across entire combined list)
-      let latestMediaIdx = -1;
-      for (let i = processed.length - 1; i >= 0; i--) {
-        if (processed[i].mediaPath) { latestMediaIdx = i; break; }
-      }
-      for (let i = 0; i < processed.length; i++) {
-        if (processed[i].mediaPath && i !== latestMediaIdx) {
-          processed[i] = { ...processed[i], mediaPath: undefined, mediaMime: undefined, hasMedia: false };
+        // Strip media from all but the latest message that has it (across entire combined list)
+        let latestMediaIdx = -1;
+        for (let i = processed.length - 1; i >= 0; i--) {
+          if (processed[i].mediaPath) {
+            latestMediaIdx = i;
+            break;
+          }
+        }
+        for (let i = 0; i < processed.length; i++) {
+          if (processed[i].mediaPath && i !== latestMediaIdx) {
+            processed[i] = {
+              ...processed[i],
+              mediaPath: undefined,
+              mediaMime: undefined,
+              hasMedia: false,
+            };
+          }
         }
       }
+    } else {
+      // Mention is disabled for this group; clear stale buffered entries once we reply.
+      clearBufferedHistory = true;
     }
   }
 
   // Split into segments at media boundaries and dispatch each
   if (processed.length > 0) {
-    const segments = buildSegments(processed);
+    const segments = hasControlCommandInWindow
+      ? processed.map((pm) => [pm])
+      : buildSegments(processed);
     log?.info?.(
       `[wechat:${liveAccount.accountId}] ${chatId}: ${processed.length} dispatchable msg(s) in ${segments.length} segment(s)`,
     );
+    let allDispatched = true;
     for (let i = 0; i < segments.length; i++) {
       const remaining = segments.length - i - 1;
-      await dispatchSegment(segments[i], client, chatId, chat, liveAccount, cfg, log, remaining, groupHistory);
+      const dispatched = await dispatchSegment(
+        segments[i],
+        client,
+        chatId,
+        chat,
+        liveAccount,
+        policy,
+        storeAllowFrom,
+        allowTextCommands,
+        cfg,
+        log,
+        hasControlCommandInWindow ? undefined : remaining,
+      );
+      if (!dispatched) {
+        allDispatched = false;
+      }
+    }
+    if (clearBufferedHistory && allDispatched && groupHistory) {
+      groupHistory.set(chatId, []);
     }
   }
 

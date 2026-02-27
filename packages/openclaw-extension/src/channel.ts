@@ -10,6 +10,7 @@ import { WeChatClient } from "@agent-wechat/shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatLoginTool } from "./agent-tools.js";
+import { normalizeWeChatId } from "./access-control.js";
 
 const meta: ChannelMeta = {
   id: "wechat",
@@ -59,7 +60,13 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
           additionalProperties: {
             type: "object",
             properties: {
+              enabled: { type: "boolean" },
               requireMention: { type: "boolean" },
+              groupPolicy: {
+                type: "string",
+                enum: ["open", "allowlist", "disabled"],
+              },
+              allowFrom: { type: "array", items: { type: "string" } },
             },
           },
         },
@@ -108,6 +115,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       allowFromPath: "channels.wechat.allowFrom",
       policyPath: "channels.wechat.dmPolicy",
       approveHint: "Add the wxid to channels.wechat.allowFrom",
+      normalizeEntry: (raw: string) => raw.replace(/^wechat:/i, "").trim(),
     }),
   },
 
@@ -116,10 +124,18 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     resolveRequireMention: ({ cfg, groupId }) => {
       const wechat = (cfg as any)?.channels?.wechat;
       if (!wechat) return true;
-      if (groupId && wechat.groups?.[groupId]?.requireMention != null) {
-        return wechat.groups[groupId].requireMention;
+      if (!groupId) {
+        return wechat.groups?.["*"]?.requireMention ?? true;
       }
-      return true; // Default: require mention in groups
+      const exact = wechat.groups?.[groupId];
+      if (exact?.requireMention != null) {
+        return exact.requireMention;
+      }
+      const normalizedGroupId = normalizeWeChatId(groupId);
+      if (normalizedGroupId && wechat.groups?.[normalizedGroupId]?.requireMention != null) {
+        return wechat.groups[normalizedGroupId].requireMention;
+      }
+      return wechat.groups?.["*"]?.requireMention ?? true;
     },
   },
 

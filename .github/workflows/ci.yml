@@ -43,6 +43,9 @@ jobs:
       - name: Test
         run: pnpm --filter @agent-wechat/wechaty-puppet test
 
+      - name: Test (WeChat extension)
+        run: pnpm --filter @agent-wechat/wechat test
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
