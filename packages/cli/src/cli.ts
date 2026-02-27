@@ -271,6 +271,32 @@ chatsCmd
   });
 
 // ============================================
+// Contacts Commands
+// ============================================
+
+const contactsCmd = program
+  .command("contacts")
+  .description("Contact management commands");
+
+contactsCmd
+  .command("list")
+  .description("List all contacts from WeChat address book")
+  .option("-l, --limit <number>", "Maximum number of contacts", "200")
+  .option("-o, --offset <number>", "Skip first N contacts", "0")
+  .option("-j, --json", "Output as JSON")
+  .action(async (opts) => {
+    await cmdContacts(getClient(), parseInt(opts.limit, 10), parseInt(opts.offset, 10), opts.json ?? false);
+  });
+
+contactsCmd
+  .command("find <name>")
+  .description("Search contacts by name")
+  .option("-j, --json", "Output as JSON")
+  .action(async (name: string, opts) => {
+    await cmdContactsFind(getClient(), name, opts.json ?? false);
+  });
+
+// ============================================
 // Messages Commands
 // ============================================
 
@@ -654,6 +680,53 @@ async function cmdChatOpen(client: WeChatClient, chatId: string, clearUnreads?: 
   } else {
     console.error(`Failed: ${result.error}`);
     process.exit(1);
+  }
+}
+
+async function cmdContacts(client: WeChatClient, limit: number = 200, offset: number = 0, json: boolean = false) {
+  const contacts = await client.listContacts(limit, offset);
+
+  if (json) {
+    console.log(JSON.stringify(contacts, null, 2));
+    return;
+  }
+
+  if (contacts.length === 0) {
+    console.log("No contacts found. Make sure you're logged in.");
+    return;
+  }
+
+  console.log(`Found ${contacts.length} contact(s):\n`);
+
+  const maxIdLen = Math.max(10, ...contacts.map(c => c.username.length));
+  const idHeader = "Username".padEnd(maxIdLen);
+  console.log(`${idHeader}  Type        Name`);
+  console.log("-".repeat(maxIdLen + 30));
+  for (const c of contacts) {
+    const id = c.username.padEnd(maxIdLen);
+    const type = c.contactType.padEnd(10);
+    const name = c.remark ? `${c.nickName} (${c.remark})` : c.nickName;
+    console.log(`${id}  ${type}  ${name}`);
+  }
+}
+
+async function cmdContactsFind(client: WeChatClient, name: string, json: boolean = false) {
+  const contacts = await client.findContacts(name);
+
+  if (json) {
+    console.log(JSON.stringify(contacts, null, 2));
+    return;
+  }
+
+  if (contacts.length === 0) {
+    console.log(`No contacts found matching "${name}"`);
+    return;
+  }
+
+  console.log(`Found ${contacts.length} matching contact(s):\n`);
+  for (const c of contacts) {
+    const name = c.remark ? `${c.nickName} (${c.remark})` : c.nickName;
+    console.log(`  ${c.username}: ${name} [${c.contactType}]`);
   }
 }
 

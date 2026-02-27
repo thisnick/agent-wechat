@@ -370,6 +370,29 @@ pub struct Chat {
 }
 
 // ============================================
+// Contact types (shared — generates TypeScript)
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Contact {
+    pub username: String,
+    pub nick_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub small_head_url: Option<String>,
+    /// "individual", "official", "chatroom", or "openim"
+    pub contact_type: String,
+}
+
+// ============================================
 // Message types (shared — generates TypeScript)
 // ============================================
 

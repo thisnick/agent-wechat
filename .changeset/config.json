@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/@changesets/config@3.1.2/schema.json",
   "changelog": ["@changesets/changelog-github", { "repo": "thisnick/agent-wechat" }],
   "commit": false,
-  "fixed": [["@agent-wechat/cli", "@agent-wechat/wechat"]],
+  "fixed": [["@agent-wechat/cli", "@agent-wechat/wechat", "@agent-wechat/wechaty-puppet"]],
   "linked": [],
   "access": "public",
   "baseBranch": "main",

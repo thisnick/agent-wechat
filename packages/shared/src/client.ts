@@ -1,5 +1,6 @@
 import type {
   Chat,
+  Contact,
   Message,
   SendResult,
   MediaResult,
@@ -151,6 +152,19 @@ export class WeChatClient {
     return this.post(
       `/api/chats/${encodeURIComponent(chatId)}/open${qs({ clearUnreads })}`,
     );
+  }
+
+  // ---- Contacts ----
+
+  async listContacts(
+    limit?: number,
+    offset?: number,
+  ): Promise<Contact[]> {
+    return this.get(`/api/contacts${qs({ limit, offset })}`);
+  }
+
+  async findContacts(name: string): Promise<Contact[]> {
+    return this.get(`/api/contacts/find${qs({ name })}`);
   }
 
   // ---- Messages ----

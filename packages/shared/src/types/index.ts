@@ -4,6 +4,7 @@
 // ============================================
 
 export type { Chat } from "./generated/Chat.js";
+export type { Contact } from "./generated/Contact.js";
 export type { Message } from "./generated/Message.js";
 export type { LoginSubscriptionEvent } from "./generated/LoginSubscriptionEvent.js";
 export type { SendParams } from "./generated/SendParams.js";
