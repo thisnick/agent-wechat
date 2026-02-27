@@ -10,17 +10,6 @@ on:
       - 'turbo.json'
       - 'tsconfig.json'
       - '.github/workflows/ci.yml'
-  push:
-    branches-ignore:
-      - main
-    paths:
-      - 'packages/**'
-      - 'pnpm-lock.yaml'
-      - 'package.json'
-      - 'pnpm-workspace.yaml'
-      - 'turbo.json'
-      - 'tsconfig.json'
-      - '.github/workflows/ci.yml'
 
 jobs:
   build-and-check:
