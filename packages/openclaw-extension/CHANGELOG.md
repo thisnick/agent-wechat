@@ -1,5 +1,19 @@
 # @agent-wechat/wechat
 
+## 0.8.1
+
+### Patch Changes
+
+- [#65](https://github.com/thisnick/agent-wechat/pull/65) [`e695cb5`](https://github.com/thisnick/agent-wechat/commit/e695cb5a1de0e747bd85037c29eb77ec484bcf1a) Thanks [@thisnick](https://github.com/thisnick)! - Harden WeChat inbound policy and command handling to align with OpenClaw channel security patterns.
+
+  - Add centralized access-control logic for DM/group policy resolution and inbound decisions.
+  - Normalize WeChat IDs/allowlists (including wildcard support) before authorization checks.
+  - Compute and pass `CommandAuthorized` in inbound context and block unauthorized group control commands.
+  - Apply mention gating with authorized command bypass behavior and fix segment-level mention handling.
+  - Disable NO_REPLY command-window batching by isolating command-bearing messages into per-message dispatch.
+  - Add group override support (`enabled`, `groupPolicy`, `allowFrom`) and align onboarding/docs semantics for `groupAllowFrom`.
+  - Add unit tests for policy resolution, authorization, and mention/command gating behavior.
+
 ## 0.8.0
 
 ## 0.7.10

@@ -1,5 +1,11 @@
 # @agent-wechat/wechaty-puppet
 
+## 0.8.1
+
+### Patch Changes
+
+- [#63](https://github.com/thisnick/agent-wechat/pull/63) [`67f92fe`](https://github.com/thisnick/agent-wechat/commit/67f92fee2a4e1f1440b7f6982f6962e6652e3dd5) Thanks [@thisnick](https://github.com/thisnick)! - Fix login event handling — QR scan events were not emitted due to incorrect event discriminator
+
 ## 0.8.0
 
 ### Minor Changes
