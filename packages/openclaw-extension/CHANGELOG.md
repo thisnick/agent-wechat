@@ -1,5 +1,16 @@
 # @agent-wechat/wechat
 
+## 0.8.2
+
+### Patch Changes
+
+- [#66](https://github.com/thisnick/agent-wechat/pull/66) [`d730a10`](https://github.com/thisnick/agent-wechat/commit/d730a100a22a92d68bfa629a7f2c632befe3265c) Thanks [@thisnick](https://github.com/thisnick)! - Restore reliable group command handling for mention-prefixed commands such as `@agent /compact`.
+
+  - Normalize WeChat command bodies so leading group mention tokens are stripped before command detection/authorization.
+  - Use command-aware detection (`isControlCommandMessage`) in monitor gating paths.
+  - Add a WeChat mention adapter so downstream command parsing also sees normalized command text.
+  - Add tests covering mention-prefixed command normalization behavior.
+
 ## 0.8.1
 
 ### Patch Changes

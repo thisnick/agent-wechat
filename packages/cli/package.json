@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/cli",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "type": "module",
   "bin": {
     "wx": "./dist/cli.js"
