@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.7.10
+
+### Patch Changes
+
+- [#56](https://github.com/thisnick/agent-wechat/pull/56) [`59e6061`](https://github.com/thisnick/agent-wechat/commit/59e6061e6836b683e734e80b7f9df82aca40d050) Thanks [@thisnick](https://github.com/thisnick)! - Revert READ_ONLY + busy_timeout DB reads back to immutable=1 with WAL checkpoint task. The READ_ONLY approach from #53 did not work as expected.
+
 ## 0.7.9
 
 ### Patch Changes
