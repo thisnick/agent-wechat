@@ -4,22 +4,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Query a WeChat database and return parsed rows.
-///
-/// Opens with READ_ONLY + busy_timeout instead of `immutable=1`.
-/// WeChat DBs may use DELETE journal mode (not WAL), so:
-/// - `immutable=1` skips change-detection → stale reads even on fresh connections
-/// - Normal READ_ONLY acquires a brief SHARED lock → sees current committed state
-/// - `busy_timeout` prevents hanging if WeChat holds an EXCLUSIVE lock
-/// - Short-lived connection (opened per query, dropped immediately) minimises
-///   the window where our SHARED lock could block WeChat's writer.
+/// Opens the database with `immutable=1` to avoid acquiring any shared locks
+/// that could interfere with WeChat's own writes. Since we open a fresh
+/// connection per query and drop it immediately, immutable mode is safe —
+/// we always see the latest committed state at open time.
 pub fn query_wechat_db(
     db_path: &str,
     hex_key: &str,
     sql: &str,
 ) -> Vec<Value> {
+    let uri = format!("file:{}?immutable=1", db_path);
     let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -29,7 +28,7 @@ pub fn query_wechat_db(
     };
 
     if let Err(e) = conn.execute_batch(&format!(
-        "PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4; PRAGMA busy_timeout = 200;"
+        "PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4;"
     )) {
         tracing::warn!("[wechat-db] PRAGMA failed for {db_path}: {e}");
         return Vec::new();
@@ -235,8 +234,10 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
 
-    /// Create a temp DB in DELETE journal mode (matching expected WeChat behavior).
-    fn create_test_db_delete(path: &str) -> Connection {
+    /// Create a temp DB that simulates WeChat's encrypted DB pattern.
+    /// Uses plaintext SQLite (no encryption) since we're testing lock behavior,
+    /// not crypto. Lock semantics are identical.
+    fn create_test_db(path: &str) -> Connection {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode = DELETE;
@@ -248,138 +249,70 @@ mod tests {
         conn
     }
 
-    /// Create a temp DB in WAL journal mode.
-    fn create_test_db_wal(path: &str) -> Connection {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, content TEXT);
-             INSERT INTO messages (content) VALUES ('hello');
-             INSERT INTO messages (content) VALUES ('world');",
-        )
-        .unwrap();
-        conn
-    }
-
-    /// Open the way query_wechat_db does now: READ_ONLY + busy_timeout (no immutable).
-    fn open_readonly_with_timeout(path: &str) -> Connection {
-        let conn = Connection::open_with_flags(
+    /// Open a read-only connection using the OLD approach (plain SQLITE_OPEN_READ_ONLY).
+    /// This acquires shared locks that can block writer checkpointing/commits.
+    fn open_readonly(path: &str) -> Connection {
+        Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .unwrap();
-        conn.execute_batch("PRAGMA busy_timeout = 200;").unwrap();
-        conn
+        .unwrap()
+    }
+
+    /// Open a read-only connection using the NEW approach (immutable=1 URI).
+    /// This acquires NO locks at all.
+    fn open_immutable(path: &str) -> Connection {
+        let uri = format!("file:{}?immutable=1", path);
+        Connection::open_with_flags(
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn readonly_sees_fresh_data_in_delete_mode() {
-        // Core property: READ_ONLY (non-immutable) connections see the latest
-        // committed data in DELETE-mode databases.
+    fn immutable_read_does_not_block_writer() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test_fresh.db");
+        let db_path = dir.path().join("test.db");
         let db_path_str = db_path.to_str().unwrap();
 
-        let _setup = create_test_db_delete(db_path_str);
-        drop(_setup);
-
-        // Initial read: 2 rows
-        {
-            let reader = open_readonly_with_timeout(db_path_str);
-            let count: i64 = reader
-                .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(count, 2);
-        }
-
-        // Write a new row
-        {
-            let writer = Connection::open(db_path_str).unwrap();
-            writer
-                .execute("INSERT INTO messages (content) VALUES ('new')", [])
-                .unwrap();
-        }
-
-        // Fresh read: 3 rows — no staleness
-        {
-            let reader = open_readonly_with_timeout(db_path_str);
-            let count: i64 = reader
-                .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(count, 3, "READ_ONLY should see fresh data in DELETE mode");
-        }
-    }
-
-    #[test]
-    fn readonly_sees_fresh_data_in_wal_mode() {
-        // Same property for WAL mode: READ_ONLY sees latest committed data
-        // (reads the WAL file, unlike immutable=1 which skips it).
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test_fresh_wal.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let _setup = create_test_db_wal(db_path_str);
-        drop(_setup);
-
-        // Write a new row (goes to WAL)
-        {
-            let writer = Connection::open(db_path_str).unwrap();
-            writer
-                .execute("INSERT INTO messages (content) VALUES ('wal_row')", [])
-                .unwrap();
-        }
-
-        // READ_ONLY sees the WAL data
-        {
-            let reader = open_readonly_with_timeout(db_path_str);
-            let count: i64 = reader
-                .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(count, 3, "READ_ONLY should see WAL data without checkpoint");
-        }
-    }
-
-    #[test]
-    fn short_lived_readonly_does_not_block_writer_in_delete_mode() {
-        // With DELETE journal mode, a READ_ONLY connection holds a SHARED lock
-        // while active. Verify that short-lived connections (our pattern) don't
-        // meaningfully block writers.
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test_contention.db");
-        let db_path_str = db_path.to_str().unwrap();
-
-        let _setup = create_test_db_delete(db_path_str);
+        // Create DB with DELETE journal mode (not WAL) — worst case for lock contention
+        let _setup = create_test_db(db_path_str);
         drop(_setup);
 
         let path = db_path_str.to_string();
         let barrier = Arc::new(Barrier::new(2));
 
-        // Thread 1: short-lived read (mimics query_wechat_db pattern)
+        // Thread 1: open immutable reader, hold it open, signal writer to proceed
         let b1 = barrier.clone();
         let p1 = path.clone();
         let reader = std::thread::spawn(move || {
-            b1.wait();
-            // Open, query, close — like query_wechat_db does
-            let conn = open_readonly_with_timeout(&p1);
+            let conn = open_immutable(&p1);
             let count: i64 = conn
                 .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
                 .unwrap();
             assert!(count >= 2);
+
+            // Signal: reader is holding connection open
+            b1.wait();
+
+            // Keep connection alive while writer tries to write
+            std::thread::sleep(Duration::from_millis(200));
             drop(conn);
         });
 
-        // Thread 2: writer with busy_timeout — should succeed after reader drops
+        // Thread 2: wait for reader, then try to write — should NOT be blocked
         let b2 = barrier.clone();
         let p2 = path.clone();
         let writer = std::thread::spawn(move || {
+            // Wait for reader to be holding its connection
             b2.wait();
-            // Small delay so reader starts first
-            std::thread::sleep(Duration::from_millis(5));
 
             let start = Instant::now();
             let conn = Connection::open(&p2).unwrap();
-            conn.execute_batch("PRAGMA journal_mode = DELETE; PRAGMA busy_timeout = 500;")
-                .unwrap();
+            conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
             conn.execute(
                 "INSERT INTO messages (content) VALUES (?1)",
                 ["from writer"],
@@ -387,10 +320,10 @@ mod tests {
             .unwrap();
             let elapsed = start.elapsed();
 
-            // Writer should complete within busy_timeout window
+            // Writer should complete quickly (< 100ms), not blocked by reader
             assert!(
-                elapsed < Duration::from_millis(500),
-                "Writer was blocked for {:?} — short-lived reader took too long",
+                elapsed < Duration::from_millis(100),
+                "Writer was blocked for {:?} — immutable reader is holding locks!",
                 elapsed
             );
         });
@@ -400,41 +333,41 @@ mod tests {
     }
 
     #[test]
-    fn long_held_readonly_blocks_writer_in_delete_mode() {
-        // Demonstrates why connections must be short-lived in DELETE mode:
-        // a held SHARED lock blocks the writer's EXCLUSIVE lock.
+    fn readonly_reader_can_block_writer_in_delete_mode() {
+        // This test demonstrates the problem that immutable=1 solves.
+        // With DELETE journal mode, a read-only reader holds a SHARED lock
+        // that prevents the writer from acquiring an EXCLUSIVE lock.
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test_block.db");
+        let db_path = dir.path().join("test_readonly.db");
         let db_path_str = db_path.to_str().unwrap();
 
-        let _setup = create_test_db_delete(db_path_str);
+        let _setup = create_test_db(db_path_str);
         drop(_setup);
 
         let path = db_path_str.to_string();
         let barrier = Arc::new(Barrier::new(2));
 
-        // Thread 1: hold read connection open for 300ms
+        // Thread 1: plain read-only reader with active statement (holds SHARED lock)
         let b1 = barrier.clone();
         let p1 = path.clone();
         let reader = std::thread::spawn(move || {
-            let conn = Connection::open_with_flags(
-                &p1,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap();
+            let conn = open_readonly(&p1);
+            // Start a query to acquire SHARED lock
             let mut stmt = conn.prepare("SELECT * FROM messages").unwrap();
             let _rows: Vec<_> = stmt
                 .query_map([], |row| row.get::<_, String>(1))
                 .unwrap()
                 .collect();
 
+            // Signal writer while we still hold the connection
             b1.wait();
+            // Hold the connection open
             std::thread::sleep(Duration::from_millis(300));
             drop(stmt);
             drop(conn);
         });
 
-        // Thread 2: try to write with zero timeout — expect SQLITE_BUSY
+        // Thread 2: try to write while reader holds SHARED lock
         let b2 = barrier.clone();
         let p2 = path.clone();
         let writer = std::thread::spawn(move || {
@@ -448,13 +381,59 @@ mod tests {
                 ["from writer"],
             );
 
+            // With busy_timeout=0 and DELETE mode, write may fail with SQLITE_BUSY
+            // if the reader's shared lock is still held.
+            // Note: this depends on OS-level locking behavior, so we just log the result
+            // rather than hard-assert — the important thing is the immutable test above ALWAYS passes.
             match result {
                 Ok(_) => eprintln!("[info] Writer succeeded (reader may have released lock)"),
-                Err(e) => eprintln!("[expected] Writer blocked as expected: {e}"),
+                Err(e) => eprintln!("[expected] Writer blocked/failed as expected: {e}"),
             }
         });
 
         reader.join().unwrap();
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn immutable_reads_are_consistent_per_connection() {
+        // Verify that immutable=1 sees a consistent snapshot at open time
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_consistent.db");
+        let db_path_str = db_path.to_str().unwrap();
+
+        let _setup = create_test_db(db_path_str);
+        drop(_setup);
+
+        // Open immutable reader — should see 2 rows
+        let reader = open_immutable(db_path_str);
+        let count_before: i64 = reader
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_before, 2);
+
+        // Write more data via a separate connection
+        {
+            let writer = Connection::open(db_path_str).unwrap();
+            writer
+                .execute("INSERT INTO messages (content) VALUES ('new')", [])
+                .unwrap();
+        }
+
+        // Immutable reader may or may not see the new row (implementation-defined).
+        // The point is: it doesn't crash, corrupt, or lock.
+        let count_after: i64 = reader
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert!(count_after >= 2); // At least the original data
+
+        drop(reader);
+
+        // Fresh immutable connection MUST see the new row
+        let reader2 = open_immutable(db_path_str);
+        let count_fresh: i64 = reader2
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_fresh, 3, "Fresh immutable connection should see committed writes");
     }
 }

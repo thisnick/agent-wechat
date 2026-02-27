@@ -409,7 +409,7 @@ Image `.dat` files use a two-layer encoding: AES-128-ECB for the header and sing
 - Python extract-keys script exits non-zero if any DB key not found — catch error, read JSON output file anyway (partial success)
 - hardlink.db has indexing delay — use `message_resource.db` as primary lookup for image files
 - hardlink.db `dir2id` stores md5(chatId) not raw chatId
-- WeChat DBs are read with `READ_ONLY` + `busy_timeout=200ms` (short-lived connections). WeChat may use DELETE journal mode (not WAL), so `immutable=1` was removed — it skipped change-detection and returned stale data.
+- WeChat DBs are read with `immutable=1` (skips WAL); a background task checkpoints every 3s (PASSIVE mode) to flush WAL → main DB so reads see fresh data
 
 ## Current Status
 

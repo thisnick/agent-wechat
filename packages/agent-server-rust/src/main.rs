@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod checkpoint;
 mod context;
 mod db;
 mod effects;
@@ -47,6 +48,9 @@ async fn main() {
     sessions::manager::initialize_sessions()
         .await
         .expect("Failed to initialize sessions");
+
+    // Periodically checkpoint WeChat DBs so immutable reads see fresh data
+    checkpoint::spawn_checkpoint_task();
 
     // Build router
     let app = router::build_router();
