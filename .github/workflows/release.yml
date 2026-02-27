@@ -64,9 +64,6 @@ jobs:
           fi
         env:
           NPM_CONFIG_PROVENANCE: true
-          # NPM_TOKEN needed for first publish of new packages (OIDC requires package to exist).
-          # Remove after @agent-wechat/wechaty-puppet is published and OIDC is configured.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-binary:
     name: Binary (${{ matrix.arch }})
