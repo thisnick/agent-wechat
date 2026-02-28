@@ -17,6 +17,7 @@ pub struct ExecutionResult {
 }
 
 const EXECUTION_TIMEOUT_MS: u64 = 300_000; // 5 minutes
+const UNKNOWN_STATE_TIMEOUT_MS: u64 = 60_000; // 1 minute
 const MAX_STEPS: u32 = 500;
 
 /// Run the FSM execution loop with a generic plan.
@@ -52,7 +53,6 @@ where
 
     let execution_start = std::time::Instant::now();
     let mut unknown_state_since: Option<std::time::Instant> = None;
-    let unknown_state_timeout_ms = plan.unknown_state_timeout_ms();
 
     for step in 0..MAX_STEPS {
         // Check execution timeout
@@ -94,31 +94,17 @@ where
                 unknown_state_since = Some(std::time::Instant::now());
             }
             let elapsed = unknown_state_since.unwrap().elapsed();
-            if let Some(timeout_ms) = unknown_state_timeout_ms {
-                if elapsed.as_millis() as u64 > timeout_ms {
-                    tracing::error!("[exec] Unknown state timeout after {}s", elapsed.as_secs());
-                    return (ExecutionResult {
-                        success: false,
-                        error: Some(format!(
-                            "Unknown state for {}s - no matching IAState found",
-                            elapsed.as_secs()
-                        )),
-                    }, plan_state);
-                }
-            }
-            tracing::warn!("[exec] Unknown state ({}s), waiting...", elapsed.as_secs());
-            emit(SubscriptionEvent {
-                event_type: "status".to_string(),
-                data: [(
-                    "message".to_string(),
-                    serde_json::Value::String(format!(
-                        "Unknown UI state ({}s), waiting...",
+            if elapsed.as_millis() as u64 > UNKNOWN_STATE_TIMEOUT_MS {
+                tracing::error!("[exec] Unknown state timeout after {}s", elapsed.as_secs());
+                return (ExecutionResult {
+                    success: false,
+                    error: Some(format!(
+                        "Unknown state for {}s - no matching IAState found",
                         elapsed.as_secs()
                     )),
-                )]
-                .into_iter()
-                .collect(),
-            });
+                }, plan_state);
+            }
+            tracing::warn!("[exec] Unknown state ({}s), waiting...", elapsed.as_secs());
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             continue;
         }
