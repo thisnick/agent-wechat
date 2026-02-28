@@ -32,6 +32,8 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
   private client!: WeChatClient
   private pollTimer?: ReturnType<typeof setInterval>
   private loginHandle?: { close: () => void }
+  private loginTerminalSeen = false
+  private loginFailureEmitted = false
   private lastSeenId = new Map<string, number>()
 
   // In-memory stores
@@ -127,6 +129,8 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
 
   private startLoginSubscription(): void {
     log.verbose('PuppetAgentWeChat', 'startLoginSubscription()')
+    this.loginTerminalSeen = false
+    this.loginFailureEmitted = false
 
     this.loginHandle = this.client.loginSubscribe({
       timeoutMs: 300_000,
@@ -134,14 +138,34 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
         this.handleLoginEvent(event)
       },
       onError: (err: Error) => {
-        log.error('PuppetAgentWeChat', 'Login WS error: %s', err.message)
-        this.emit('error', { data: err.message })
+        const message = err.message?.trim() || 'WebSocket error'
+        const settled = this.loginTerminalSeen || Boolean(this.currentUserId)
+        if (settled) {
+          log.verbose('PuppetAgentWeChat', 'Ignoring login WS error after terminal state: %s', message)
+          return
+        }
+        log.error('PuppetAgentWeChat', 'Login WS error: %s', message)
+        this.emitLoginFailure(message)
+        this.loginTerminalSeen = true
       },
       onClose: () => {
         log.verbose('PuppetAgentWeChat', 'Login WS closed')
         this.loginHandle = undefined
+        const settled = this.loginTerminalSeen || Boolean(this.currentUserId)
+        if (!settled) {
+          const message = 'Login connection closed before completion'
+          log.error('PuppetAgentWeChat', message)
+          this.emitLoginFailure(message)
+          this.loginTerminalSeen = true
+        }
       },
     })
+  }
+
+  private emitLoginFailure(message: string): void {
+    if (this.loginFailureEmitted) return
+    this.loginFailureEmitted = true
+    this.emit('error', { data: message })
   }
 
   private handleLoginEvent(event: LoginSubscriptionEvent): void {
@@ -161,13 +185,20 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
         })
         break
       case 'login_success':
+        this.loginTerminalSeen = true
+        if (this.loginHandle) {
+          this.loginHandle.close()
+          this.loginHandle = undefined
+        }
         void this.onLoginSuccess(event.userId ?? 'unknown')
         break
       case 'login_timeout':
-        this.emit('error', { data: 'Login timed out' })
+        this.loginTerminalSeen = true
+        this.emitLoginFailure('Login timed out')
         break
       case 'error':
-        this.emit('error', { data: event.message ?? 'Login error' })
+        this.loginTerminalSeen = true
+        this.emitLoginFailure(event.message ?? 'Login error')
         break
       case 'status':
         log.verbose('PuppetAgentWeChat', 'Login status: %s', event.message)
