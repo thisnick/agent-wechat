@@ -1,5 +1,16 @@
 # @agent-wechat/cli
 
+## 0.8.4
+
+### Patch Changes
+
+- [#70](https://github.com/thisnick/agent-wechat/pull/70) [`6c27002`](https://github.com/thisnick/agent-wechat/commit/6c27002c3356cd34e84da77b0a44aaf6556146ed) Thanks [@thisnick](https://github.com/thisnick)! - Harden Wechaty puppet login websocket handling and clarify CLI status behavior.
+
+  - Treat websocket `error`/`close` callbacks as non-fatal once a terminal login event has been seen.
+  - Normalize empty websocket error messages to a stable fallback.
+  - Close the login subscription handle immediately after `login_success` to reduce late transport noise.
+  - Make `wx status` report explicit container up/down state, and only show server/login details when the container is running.
+
 ## 0.8.3
 
 ## 0.8.2
