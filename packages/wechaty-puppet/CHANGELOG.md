@@ -1,5 +1,16 @@
 # @agent-wechat/wechaty-puppet
 
+## 0.8.3
+
+### Patch Changes
+
+- [#68](https://github.com/thisnick/agent-wechat/pull/68) [`c8a4ec9`](https://github.com/thisnick/agent-wechat/commit/c8a4ec92ced516451155c4c0655ca46aee46e09e) Thanks [@thisnick](https://github.com/thisnick)! - Clarify that WeChat login can be completed through the puppet QR flow without requiring a separate CLI login step.
+
+  Also improve login websocket behavior for puppet clients:
+
+  - Remove noisy unknown-UI waiting status messages during login (`Unknown UI state ({}s), waiting...`) while keeping the existing hard-coded unknown-state timeout behavior.
+  - Ensure the server sends a terminal login event (`login_success`, `login_timeout`, or `error`) before closing the login websocket, instead of closing without a final event.
+
 ## 0.8.2
 
 ## 0.8.1

@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/wechaty-puppet",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Wechaty Puppet for agent-wechat — bridges Wechaty bots to WeChat via the agent-wechat REST/WebSocket server",
   "type": "module",
   "main": "./dist/mod.js",
