@@ -285,6 +285,9 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
     // Main loop: bridge events to WebSocket, handle timeout + disconnect
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(params.timeout_ms));
     tokio::pin!(timeout);
+    let mut sent_terminal = false;
+    let mut client_disconnected = false;
+    let mut server_timeout = false;
 
     loop {
         tokio::select! {
@@ -292,9 +295,13 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
                 match event {
                     Some(evt) => {
                         let ws_event = subscription_event_to_login_event(evt);
+                        if is_terminal_login_event(&ws_event) {
+                            sent_terminal = true;
+                        }
                         let msg = serde_json::to_string(&ws_event).unwrap();
                         if socket.send(Message::Text(msg.into())).await.is_err() {
                             cancel.cancel();
+                            client_disconnected = true;
                             break;
                         }
                     }
@@ -303,8 +310,12 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
             }
             _ = &mut timeout => {
                 cancel.cancel();
+                server_timeout = true;
+                sent_terminal = true;
                 let msg = serde_json::to_string(&LoginSubscriptionEvent::LoginTimeout).unwrap();
-                let _ = socket.send(Message::Text(msg.into())).await;
+                if socket.send(Message::Text(msg.into())).await.is_err() {
+                    client_disconnected = true;
+                }
                 break;
             }
             msg = socket.recv() => {
@@ -312,6 +323,7 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
                     Some(Ok(_)) => continue,
                     _ => {
                         cancel.cancel();
+                        client_disconnected = true;
                         break;
                     }
                 }
@@ -319,8 +331,38 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
         }
     }
 
-    // Wait for execution to finish (cleanup)
-    let _ = exec_handle.await;
+    // Wait for execution to finish and emit a fallback terminal event if needed.
+    let exec_result = exec_handle.await.ok();
+    if !client_disconnected && !sent_terminal {
+        let fallback = match exec_result {
+            Some(result) if result.success => LoginSubscriptionEvent::LoginSuccess { user_id: None },
+            Some(result) => {
+                let message = result.error.unwrap_or_else(|| "Login failed".to_string());
+                if message.starts_with("Unknown state for")
+                    || message.starts_with("Execution timeout after")
+                    || (server_timeout && message == "Aborted")
+                {
+                    LoginSubscriptionEvent::LoginTimeout
+                } else {
+                    LoginSubscriptionEvent::Error { message }
+                }
+            }
+            None => LoginSubscriptionEvent::Error {
+                message: "Login execution task failed".to_string(),
+            },
+        };
+        let msg = serde_json::to_string(&fallback).unwrap();
+        let _ = socket.send(Message::Text(msg.into())).await;
+    }
+}
+
+fn is_terminal_login_event(event: &LoginSubscriptionEvent) -> bool {
+    matches!(
+        event,
+        LoginSubscriptionEvent::LoginSuccess { .. }
+            | LoginSubscriptionEvent::LoginTimeout
+            | LoginSubscriptionEvent::Error { .. }
+    )
 }
 
 /// Convert generic SubscriptionEvent (from plans) to typed LoginSubscriptionEvent (for WS).
