@@ -398,10 +398,56 @@ program
 // ============================================
 
 async function cmdStatus(client: WeChatClient) {
-  const status = await client.status();
-  console.log("Container:", status.container);
-  console.log("Version:", status.version);
-  console.log("Login State:", JSON.stringify(status.loginState, null, 2));
+  const container = getContainerRuntimeState();
+  if (container === "up") {
+    console.log("Container: up");
+  } else if (container === "down") {
+    console.log("Container: down");
+    return;
+  } else {
+    console.log("Container: unknown (Docker unavailable)");
+    return;
+  }
+
+  try {
+    const status = await client.status();
+    console.log("Server: reachable");
+    console.log("Version:", status.version);
+  } catch (err) {
+    console.log("Server: unreachable");
+    console.log(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  try {
+    const auth = await client.authStatus();
+    if (auth.status === "logged_in") {
+      console.log(`Login: logged in${auth.loggedInUser ? ` as ${auth.loggedInUser}` : ""}`);
+    } else {
+      console.log(`Login: ${auth.status.replace(/_/g, " ")}`);
+    }
+  } catch {
+    console.log("Login: unknown (auth status unavailable)");
+  }
+}
+
+function getContainerRuntimeState(): "up" | "down" | "unknown" {
+  try {
+    const existing = execSync(`docker ps -aq -f "name=^${CONTAINER_NAME}$"`, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (!existing) {
+      return "down";
+    }
+    const running = execSync(`docker ps -q -f "name=^${CONTAINER_NAME}$"`, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return running ? "up" : "down";
+  } catch {
+    return "unknown";
+  }
 }
 
 async function cmdLogin(

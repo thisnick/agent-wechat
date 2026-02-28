@@ -46,7 +46,7 @@ wx messages send <chatId> --text "Hello"
 | `wx up [--proxy user:pass@host:port]` | Start the agent-wechat container |
 | `wx down` | Stop and remove the container |
 | `wx logs` | Tail container logs |
-| `wx status` | Show container and login status |
+| `wx status` | Show container up/down status and login status (when available) |
 
 ### Auth
 
