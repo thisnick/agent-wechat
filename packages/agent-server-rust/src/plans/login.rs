@@ -37,6 +37,13 @@ impl Plan for LoginPlan {
 
     fn id(&self) -> &str { "login" }
 
+    fn unknown_state_timeout_ms(&self) -> Option<u64> {
+        // Login can transiently land in unclassified intermediary UI states.
+        // Let the outer websocket timeout control terminal behavior instead of
+        // failing early with an execution error.
+        None
+    }
+
     fn initial_plan_state(&self) -> LoginPlanState {
         LoginPlanState {
             phase: LoginPhase::Initializing,

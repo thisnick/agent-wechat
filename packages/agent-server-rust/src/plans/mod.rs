@@ -18,6 +18,13 @@ pub trait Plan: Send + Sync {
 
     fn id(&self) -> &str;
 
+    /// Maximum time to tolerate unrecognized UI state before failing.
+    ///
+    /// Returning `None` disables unknown-state failure for the plan.
+    fn unknown_state_timeout_ms(&self) -> Option<u64> {
+        Some(60_000)
+    }
+
     fn initial_plan_state(&self) -> Self::PlanState;
 
     fn is_goal_reached(

@@ -7,8 +7,8 @@ Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bri
 - **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/thisnick/agent-wechat):
   ```bash
   npx @agent-wechat/cli up     # starts the Docker container
-  npx @agent-wechat/cli login   # scan QR to log in
   ```
+  Login is not required as a separate CLI step; you can log in through the puppet QR flow.
 - **Node.js >= 22**
 
 ## Install
