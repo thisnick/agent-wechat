@@ -39,8 +39,7 @@ export type WeChatMentionGateResult = {
 };
 
 const INVISIBLE_TEXT_RE = /[\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g;
-const MENTION_SEPARATOR_RE = /[\s\u2005]+/u;
-const WECHAT_MENTION_TOKEN_RE = /^[@＠][^\s\u2005]+$/u;
+const WECHAT_MENTION_START_RE = /^[@＠]/u;
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
@@ -113,15 +112,26 @@ export function normalizeWeChatCommandBody(
   if (commandStart < 0) {
     return trimmed;
   }
-  const prefix = trimmed.slice(0, commandStart).trim();
+  const rawPrefix = trimmed.slice(0, commandStart);
+  const prefix = rawPrefix.trim();
   if (!prefix) {
     return trimmed.slice(commandStart).trimStart();
   }
-  const prefixTokens = prefix
-    .split(MENTION_SEPARATOR_RE)
+  // WeChat terminates each @-mention with a hair space (U+2005).
+  // Split on hair space to preserve spaces within display names
+  // (e.g. "@Agent Name\u2005" is a single mention token).
+  // The hair space may be within rawPrefix (between multiple mentions)
+  // or at trimmed[commandStart] (between last mention and the command).
+  const hasHairSpace = rawPrefix.includes("\u2005") || trimmed[commandStart] === "\u2005";
+  if (!hasHairSpace) {
+    return trimmed;
+  }
+  const mentionRegion = rawPrefix + (trimmed[commandStart] === "\u2005" ? "\u2005" : "");
+  const prefixTokens = mentionRegion
+    .split(/\u2005+/)
     .map((token) => token.trim())
     .filter(Boolean);
-  if (prefixTokens.length > 0 && prefixTokens.every((token) => WECHAT_MENTION_TOKEN_RE.test(token))) {
+  if (prefixTokens.length > 0 && prefixTokens.every((token) => WECHAT_MENTION_START_RE.test(token))) {
     return trimmed.slice(commandStart).trimStart();
   }
   return trimmed;

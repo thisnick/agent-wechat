@@ -47,7 +47,7 @@ test("normalizeWeChatAllowFrom dedupes and preserves wildcard", () => {
 
 test("normalizeWeChatCommandBody strips leading mentions before slash commands in groups", () => {
   assert.equal(
-    normalizeWeChatCommandBody("  @agent /compact  ", {
+    normalizeWeChatCommandBody("@agent\u2005/compact", {
       isGroup: true,
       wasMentioned: true,
     }),
@@ -73,6 +73,46 @@ test("normalizeWeChatCommandBody strips leading mentions before slash commands i
       wasMentioned: false,
     }),
     "@agent /compact",
+  );
+  // Multi-word agent name with hair space separator
+  assert.equal(
+    normalizeWeChatCommandBody("@Agent Name\u2005/compact", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "/compact",
+  );
+  // Multi-word name with command args
+  assert.equal(
+    normalizeWeChatCommandBody("@Agent Name\u2005/compact focus", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "/compact focus",
+  );
+  // Multiple multi-word mentions
+  assert.equal(
+    normalizeWeChatCommandBody("@Agent Name\u2005@Other Person\u2005/status", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "/status",
+  );
+  // No hair space — no stripping (not a real WeChat mention)
+  assert.equal(
+    normalizeWeChatCommandBody("@Agent Name /compact", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "@Agent Name /compact",
+  );
+  // Full-width @ with multi-word name
+  assert.equal(
+    normalizeWeChatCommandBody("\uFF20Agent Name\u2005/compact", {
+      isGroup: true,
+      wasMentioned: true,
+    }),
+    "/compact",
   );
 });
 
