@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.8.5
+
+### Patch Changes
+
+- [#72](https://github.com/thisnick/agent-wechat/pull/72) [`6be485a`](https://github.com/thisnick/agent-wechat/commit/6be485a7d7554d7e72e9e789ac011708eaa8f289) Thanks [@thisnick](https://github.com/thisnick)! - Fix @agent /command regex to support multi-word agent display names by using WeChat's hair space (U+2005) as the mention boundary instead of splitting on all whitespace
+
 ## 0.8.4
 
 ## 0.8.3
