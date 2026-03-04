@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.9.3
+
+### Patch Changes
+
+- [#82](https://github.com/thisnick/agent-wechat/pull/82) [`06df0ad`](https://github.com/thisnick/agent-wechat/commit/06df0ad6a1b93989f09a26bee438695fd15e2232) Thanks [@thisnick](https://github.com/thisnick)! - Remove WAL checkpoint background task
+
 ## 0.9.2
 
 ### Patch Changes
