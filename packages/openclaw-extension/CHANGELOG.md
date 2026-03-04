@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.9.2
+
+### Patch Changes
+
+- [#80](https://github.com/thisnick/agent-wechat/pull/80) [`ed43536`](https://github.com/thisnick/agent-wechat/commit/ed43536f1feaa28e0c276627dc4fdfda22870e75) Thanks [@thisnick](https://github.com/thisnick)! - Fix window activation targeting wrong window (e.g. "What's New" popup instead of main WeChat window)
+
 ## 0.9.1
 
 ### Patch Changes
