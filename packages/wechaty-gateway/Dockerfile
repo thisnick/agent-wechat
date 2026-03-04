@@ -1,4 +1,4 @@
-FROM node:22-slim AS builder
+FROM node:24-slim AS builder
 
 WORKDIR /app
 
@@ -26,7 +26,7 @@ RUN pnpm build --filter=@agent-wechat/wechaty-gateway...
 
 # ---
 
-FROM node:22-slim
+FROM node:24-slim
 
 WORKDIR /app
 
