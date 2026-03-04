@@ -6,7 +6,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Copy workspace root files
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json .npmrc ./
 
 # Copy only the packages needed for the gateway
 COPY packages/shared/package.json packages/shared/
@@ -24,24 +24,17 @@ COPY packages/wechaty-gateway/ packages/wechaty-gateway/
 # Build all packages (turbo handles dependency order)
 RUN pnpm build --filter=@agent-wechat/wechaty-gateway...
 
+# Deploy: creates a self-contained directory with all deps resolved
+RUN pnpm --filter=@agent-wechat/wechaty-gateway deploy /deploy --prod
+
 # ---
 
 FROM node:24-slim
 
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
-
-COPY --from=builder /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml ./
-COPY --from=builder /app/packages/shared/package.json packages/shared/
-COPY --from=builder /app/packages/shared/dist/ packages/shared/dist/
-COPY --from=builder /app/packages/wechaty-puppet/package.json packages/wechaty-puppet/
-COPY --from=builder /app/packages/wechaty-puppet/dist/ packages/wechaty-puppet/dist/
-COPY --from=builder /app/packages/wechaty-gateway/package.json packages/wechaty-gateway/
-COPY --from=builder /app/packages/wechaty-gateway/dist/ packages/wechaty-gateway/dist/
-
-RUN pnpm install --frozen-lockfile --prod
+COPY --from=builder /deploy .
 
 EXPOSE 8788
 
-CMD ["node", "packages/wechaty-gateway/dist/main.js"]
+CMD ["node", "dist/main.js"]
