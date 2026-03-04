@@ -757,7 +757,7 @@ async function processUnreadChat(
     account;
   const chatId = chat.username ?? chat.id;
   const storeAllowFrom = await core.channel.pairing
-    .readAllowFromStore("wechat", process.env, liveAccount.accountId)
+    .readAllowFromStore({ channel: "wechat", accountId: liveAccount.accountId, env: process.env })
     .catch(() => [] as string[]);
   const policy = resolveWeChatPolicyContext({
     account: liveAccount,
