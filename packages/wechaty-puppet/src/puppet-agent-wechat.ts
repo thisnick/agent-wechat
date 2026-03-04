@@ -266,8 +266,10 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
       }
       if (auth.loggedInUser !== this.currentUserId) {
         log.warn('PuppetAgentWeChat', 'User changed from %s to %s', this.currentUserId, auth.loggedInUser)
+        this.stopPolling()
         await this.logout('User changed')
-        await super.login(auth.loggedInUser)
+        this.startLoginSubscription()
+        return
       }
 
       const chats = await this.client.listChats(50)
