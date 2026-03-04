@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.9.1
+
+### Patch Changes
+
+- [#78](https://github.com/thisnick/agent-wechat/pull/78) [`5540a7f`](https://github.com/thisnick/agent-wechat/commit/5540a7f11283b5491d4f07e931fda13b7120be69) Thanks [@thisnick](https://github.com/thisnick)! - Update openclaw dependency to >=2026.3.2 and adapt readAllowFromStore call to new object-parameter signature
+
 ## 0.9.0
 
 ## 0.8.5
