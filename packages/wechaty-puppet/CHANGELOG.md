@@ -1,5 +1,17 @@
 # @agent-wechat/wechaty-puppet
 
+## 0.9.0
+
+### Minor Changes
+
+- [#75](https://github.com/thisnick/agent-wechat/pull/75) [`30a2981`](https://github.com/thisnick/agent-wechat/commit/30a2981f9c728e09b686a37f5aca1687baa5a70d) Thanks [@thisnick](https://github.com/thisnick)! - Add Wechaty gateway package and puppet improvements for gRPC service hosting.
+
+  - New `packages/wechaty-gateway/` wraps PuppetAgentWeChat as a standard Wechaty gRPC puppet service
+  - Snapshot message baseline on connect to prevent historical message replay
+  - Guard against double login crash on PuppetServer client reconnect
+  - Emit heartbeat every poll cycle to keep gRPC watchdog alive
+  - Clear unreads via openChat after processing messages
+
 ## 0.8.5
 
 ## 0.8.4
