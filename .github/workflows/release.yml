@@ -251,3 +251,92 @@ jobs:
             -t "${IMAGE}:${{ steps.version.outputs.version }}" \
             -t "${IMAGE}:latest" \
             $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+
+  publish-wechaty-gateway:
+    name: Wechaty Gateway (${{ matrix.arch }})
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/wechaty-gateway/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }}-wechaty-gateway,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=wechaty-gateway-${{ matrix.arch }}
+          cache-to: type=gha,scope=wechaty-gateway-${{ matrix.arch }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          DIGEST="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wechaty-gateway-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-wechaty-gateway-manifest:
+    name: Wechaty Gateway Manifest
+    needs: [release, publish-wechaty-gateway]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: wechaty-gateway-digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: |
+          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
+          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create multi-arch manifest
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}-wechaty-gateway"
+          docker buildx imagetools create \
+            -t "${IMAGE}:${{ steps.version.outputs.version }}" \
+            -t "${IMAGE}:latest" \
+            $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
