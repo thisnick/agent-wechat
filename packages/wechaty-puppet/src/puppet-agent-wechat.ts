@@ -214,9 +214,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
   private async onLoginSuccess(userId: string): Promise<void> {
     log.info('PuppetAgentWeChat', 'Login success: %s', userId)
     await this.loadContacts()
-    if (!this.isLoggedIn) {
-      await super.login(userId)
-    }
+    await super.login(userId)
     await this.snapshotBaseline()
     this.startPolling()
     this.emit('ready', { data: 'ready' })
@@ -258,6 +256,20 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
 
   private async pollMessages(): Promise<void> {
     try {
+      const auth = await this.client.authStatus()
+      if (auth.status !== 'logged_in' || !auth.loggedInUser) {
+        log.warn('PuppetAgentWeChat', 'Account logged out, stopping poll')
+        this.stopPolling()
+        await this.logout('WeChat logged out')
+        this.startLoginSubscription()
+        return
+      }
+      if (auth.loggedInUser !== this.currentUserId) {
+        log.warn('PuppetAgentWeChat', 'User changed from %s to %s', this.currentUserId, auth.loggedInUser)
+        await this.logout('User changed')
+        await super.login(auth.loggedInUser)
+      }
+
       const chats = await this.client.listChats(50)
 
       // Update contact/room stores
