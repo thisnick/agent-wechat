@@ -1,0 +1,26 @@
+{
+  "name": "@agent-wechat/wechaty-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wechaty gRPC gateway wrapping @agent-wechat/wechaty-puppet",
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=esm --platform=node --outfile=dist/main.js --external:wechaty-puppet",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agent-wechat/wechaty-puppet": "workspace:*",
+    "@agent-wechat/shared": "workspace:*",
+    "wechaty-puppet-service": "^1.18.2",
+    "wechaty-puppet": "^1.20.2",
+    "file-box": "^1.4.15"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.5"
+  }
+}

@@ -87,13 +87,18 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
       token: this.token,
     })
 
-    // Check if already logged in
+    // Check if already logged in on the agent-wechat server
     try {
       const auth = await this.client.authStatus()
       if (auth.status === 'logged_in' && auth.loggedInUser) {
         log.info('PuppetAgentWeChat', 'Already logged in as %s', auth.loggedInUser)
         await this.loadContacts()
-        await super.login(auth.loggedInUser)
+        // Guard: PuppetServer may restart the puppet on client reconnect
+        // while currentUserId is still set from the previous session
+        if (!this.isLoggedIn) {
+          await super.login(auth.loggedInUser)
+        }
+        await this.snapshotBaseline()
         this.startPolling()
         this.emit('ready', { data: 'ready' })
         return
@@ -209,7 +214,10 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
   private async onLoginSuccess(userId: string): Promise<void> {
     log.info('PuppetAgentWeChat', 'Login success: %s', userId)
     await this.loadContacts()
-    await super.login(userId)
+    if (!this.isLoggedIn) {
+      await super.login(userId)
+    }
+    await this.snapshotBaseline()
     this.startPolling()
     this.emit('ready', { data: 'ready' })
   }
@@ -217,6 +225,20 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
   // ==================
   // Polling
   // ==================
+
+  private async snapshotBaseline(): Promise<void> {
+    try {
+      const chats = await this.client.listChats(200)
+      for (const chat of chats) {
+        if (chat.lastMsgLocalId) {
+          this.lastSeenId.set(chat.username, chat.lastMsgLocalId)
+        }
+      }
+      log.info('PuppetAgentWeChat', 'Baseline snapshot: %d chats', this.lastSeenId.size)
+    } catch (err) {
+      log.warn('PuppetAgentWeChat', 'snapshotBaseline error: %s', err)
+    }
+  }
 
   private startPolling(): void {
     if (this.pollTimer) return
@@ -269,6 +291,9 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     } catch (err) {
       log.warn('PuppetAgentWeChat', 'pollMessages error: %s', err)
     }
+
+    // Feed the watchdog so gRPC clients don't timeout
+    this.emit('heartbeat', { data: 'poll' })
   }
 
   private async processUnreadChat(chat: Chat): Promise<void> {
@@ -323,6 +348,13 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
 
     const maxId = Math.max(...newMessages.map(m => m.localId))
     this.lastSeenId.set(chatId, maxId)
+
+    // Clear unreads after processing
+    try {
+      await this.client.openChat(chatId, true)
+    } catch (err) {
+      log.warn('PuppetAgentWeChat', 'Failed to clear unreads for %s: %s', chatId, err)
+    }
   }
 
   private async loadContacts(): Promise<void> {

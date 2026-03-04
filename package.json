@@ -20,6 +20,8 @@
     "dev:deploy": "bash scripts/dev-deploy.sh",
     "dev:check": "cd packages/agent-server-rust && cargo watch -x check",
     "generate-types": "bash scripts/generate-types.sh",
+    "gateway": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx src/main.ts",
+    "gateway:test": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx scripts/test-gateway.ts",
     "release": "pnpm build && pnpm changeset publish",
     "version-packages": "pnpm changeset version && pnpm install --lockfile-only"
   },
