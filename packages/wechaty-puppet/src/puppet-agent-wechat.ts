@@ -261,14 +261,12 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
         log.warn('PuppetAgentWeChat', 'Account logged out, stopping poll')
         this.stopPolling()
         await this.logout('WeChat logged out')
-        this.startLoginSubscription()
         return
       }
       if (auth.loggedInUser !== this.currentUserId) {
         log.warn('PuppetAgentWeChat', 'User changed from %s to %s', this.currentUserId, auth.loggedInUser)
         this.stopPolling()
         await this.logout('User changed')
-        this.startLoginSubscription()
         return
       }
 
