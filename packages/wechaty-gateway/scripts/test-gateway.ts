@@ -77,6 +77,10 @@ puppet.on('message', async (payload) => {
   }
 })
 
+puppet.on('logout', (payload) => {
+  console.log(`[logout] ${payload.contactId} reason=${payload.data}`)
+})
+
 puppet.on('error', (payload) => {
   console.log(`[error]`, JSON.stringify(payload))
 })
