@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.9.4
+
+### Patch Changes
+
+- [#84](https://github.com/thisnick/agent-wechat/pull/84) [`f76123f`](https://github.com/thisnick/agent-wechat/commit/f76123f2dd49d9fe6e64bbed8107f3a476480dd5) Thanks [@thisnick](https://github.com/thisnick)! - Stop retrying media poll when server returns unsupported type, and add video (type 43) to media types
+
 ## 0.9.3
 
 ### Patch Changes
