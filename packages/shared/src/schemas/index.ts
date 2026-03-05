@@ -203,7 +203,7 @@ export const getMediaParamsSchema = z.object({
 });
 
 export const mediaResultSchema = z.object({
-  type: z.enum(["image", "emoji", "voice", "unsupported"]),
+  type: z.enum(["image", "emoji", "voice", "video", "unsupported"]),
   data: z.string().optional(),
   url: z.string().optional(),
   format: z.string(),
