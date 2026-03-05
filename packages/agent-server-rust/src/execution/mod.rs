@@ -49,6 +49,16 @@ where
 {
     let _plan_guard = PLAN_LOCK.lock().await;
 
+    // Pause health monitoring while an execution loop is active
+    crate::sessions::health_monitor::pause_monitoring();
+    struct ResumeOnDrop;
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            crate::sessions::health_monitor::resume_monitoring();
+        }
+    }
+    let _health_guard = ResumeOnDrop;
+
     let mut plan_state = plan.initial_plan_state();
     let session_id = context.session_id.clone();
 

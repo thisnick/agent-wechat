@@ -48,6 +48,10 @@ async fn main() {
         .await
         .expect("Failed to initialize sessions");
 
+    // Start background health monitor
+    sessions::health_monitor::spawn_health_monitor();
+    tracing::info!("WeChat health monitor started");
+
     // Build router
     let app = router::build_router();
 
