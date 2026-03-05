@@ -695,6 +695,9 @@ async function cmdMedia(client: WeChatClient, chatId: string, localId: number, o
   } else if (result.type === "image") {
     console.error("Image thumbnail not yet cached by WeChat. Try opening the chat in the app first.");
     process.exit(1);
+  } else if (result.type === "video") {
+    console.error("Video not yet downloaded by WeChat. Try playing the video in the app first.");
+    process.exit(1);
   } else {
     console.error(`Media type "${result.type}" has no downloadable data.`);
     process.exit(1);

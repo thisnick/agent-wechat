@@ -425,15 +425,13 @@ fn find_dat_via_hardlink(
     None
 }
 
-/// Fallback: look up the .dat filename from message_resource.db when hardlink.db
-/// hasn't been indexed yet. The packed_info blob in MessageResourceInfo contains
-/// the file hash used as the .dat filename.
-fn find_dat_via_resource_db(
+/// Look up the file hash for a message from message_resource.db.
+/// Returns the 32-char hex hash used in filenames on disk.
+fn find_file_hash_via_resource_db(
     account_dir: &str,
     keys: &HashMap<String, String>,
     chat_id: &str,
     local_id: i64,
-    create_time: i64,
 ) -> Option<String> {
     let resource_key = keys.get("message_resource.db")?;
     let resource_db = get_db_path(account_dir, "message_resource.db");
@@ -461,11 +459,21 @@ fn find_dat_via_resource_db(
     );
     let hex_info = info_rows.first()?.get("hex_info")?.as_str()?.to_string();
 
-    // Extract the 32-char file hash from protobuf blob
-    // Format: 12 22 0A 20 <32 bytes of ASCII hex hash>
-    // The hash starts at byte offset 4 and is 32 bytes (64 hex chars)
     let file_hash = extract_file_hash_from_packed_info(&hex_info)?;
     tracing::info!("[media:resource-db] file_hash={} for local_id={}", file_hash, local_id);
+    Some(file_hash)
+}
+
+/// Look up the .dat filename from message_resource.db. The packed_info blob in
+/// MessageResourceInfo contains the file hash used as the .dat filename.
+fn find_dat_via_resource_db(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+    create_time: i64,
+) -> Option<String> {
+    let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id)?;
 
     // Build path: msg/attach/<md5(chatId)>/<year-month>/Img/<hash>.dat
     let chat_hash = format!("{:x}", Md5::digest(chat_id.as_bytes()));
@@ -489,6 +497,100 @@ fn find_dat_via_resource_db(
 
     tracing::warn!("[media:resource-db] file not on disk yet for hash={}", file_hash);
     None
+}
+
+/// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
+/// Videos are stored unencrypted at msg/video/{YYYY-MM}/{hash}.mp4
+fn get_video_data(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+    create_time: i64,
+) -> MediaResult {
+    let dt = match chrono::DateTime::from_timestamp(create_time, 0) {
+        Some(dt) => dt,
+        None => return unsupported(),
+    };
+    let year_month = dt.format("%Y-%m").to_string();
+
+    // Try to get file hash from message_resource.db
+    let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id);
+
+    if let Some(ref hash) = file_hash {
+        for base in &account_base_paths(account_dir) {
+            let video_dir = Path::new(base).join("msg/video").join(&year_month);
+
+            // Try .mp4 first (full video)
+            let mp4_path = video_dir.join(format!("{hash}.mp4"));
+            if mp4_path.exists() {
+                if let Ok(data) = fs::read(&mp4_path) {
+                    tracing::info!("[media:video] found mp4 for local_id={}, size={}", local_id, data.len());
+                    return MediaResult {
+                        media_type: "video".into(),
+                        data: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &data,
+                        )),
+                        url: None,
+                        format: "mp4".into(),
+                        filename: format!("msg_{local_id}.mp4"),
+                    };
+                }
+            }
+
+            // Try cover .jpg (full-size cover image)
+            let cover_path = video_dir.join(format!("{hash}.jpg"));
+            if cover_path.exists() {
+                if let Ok(data) = fs::read(&cover_path) {
+                    tracing::info!("[media:video] found cover for local_id={}", local_id);
+                    return MediaResult {
+                        media_type: "video".into(),
+                        data: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &data,
+                        )),
+                        url: None,
+                        format: "jpeg".into(),
+                        filename: format!("msg_{local_id}_cover.jpg"),
+                    };
+                }
+            }
+
+            // Try _thumb.jpg
+            let thumb_path = video_dir.join(format!("{hash}_thumb.jpg"));
+            if thumb_path.exists() {
+                if let Ok(data) = fs::read(&thumb_path) {
+                    tracing::info!("[media:video] found thumb for local_id={}", local_id);
+                    return MediaResult {
+                        media_type: "video".into(),
+                        data: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &data,
+                        )),
+                        url: None,
+                        format: "jpeg".into(),
+                        filename: format!("msg_{local_id}_thumb.jpg"),
+                    };
+                }
+            }
+        }
+    }
+
+    // Fallback: try cached thumbnail from WeChat's cache dir
+    if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
+        return thumb;
+    }
+
+    // Video exists but no file found on disk
+    tracing::warn!("[media:video] no video file found for local_id={}", local_id);
+    MediaResult {
+        media_type: "video".into(),
+        data: None,
+        url: None,
+        format: "mp4".into(),
+        filename: format!("msg_{local_id}.mp4"),
+    }
 }
 
 /// Extract the 32-char hex file hash from a MessageResourceInfo packed_info blob.
@@ -886,6 +988,10 @@ pub fn get_message_media(
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
             }
+        }
+        43 => {
+            // Video
+            get_video_data(account_dir, keys, chat_id, local_id, create_time)
         }
         34 => {
             // Voice
