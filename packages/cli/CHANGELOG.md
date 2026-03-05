@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.10.0
+
+### Minor Changes
+
+- [#90](https://github.com/thisnick/agent-wechat/pull/90) [`20d16a1`](https://github.com/thisnick/agent-wechat/commit/20d16a18b0ec24e6d517224c9b644bab4a9bfa6e) Thanks [@thisnick](https://github.com/thisnick)! - Add WeChat health monitor to detect and kill unresponsive processes
+
 ## 0.9.5
 
 ### Patch Changes
