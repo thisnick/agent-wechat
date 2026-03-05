@@ -9,7 +9,11 @@ use crate::tools::exec::ExecOptions;
 use crate::tools::screenshot::capture_screenshot;
 use crate::effects::collect_effects;
 use crate::db::get_db;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+/// Only one plan can run at a time — they all drive the GUI.
+static PLAN_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub struct ExecutionResult {
     pub success: bool,
@@ -43,6 +47,8 @@ where
     PS: Send,
     PA: Send,
 {
+    let _plan_guard = PLAN_LOCK.lock().await;
+
     let mut plan_state = plan.initial_plan_state();
     let session_id = context.session_id.clone();
 
