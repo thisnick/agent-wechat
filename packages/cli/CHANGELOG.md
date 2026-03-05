@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.9.5
+
+### Patch Changes
+
+- [#87](https://github.com/thisnick/agent-wechat/pull/87) [`191a7d4`](https://github.com/thisnick/agent-wechat/commit/191a7d43068530e9562f269f61193e6ad04ba2f9) Thanks [@thisnick](https://github.com/thisnick)! - Add mutex to ensure only one plan execution runs at a time
+
 ## 0.9.4
 
 ## 0.9.3
