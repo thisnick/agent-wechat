@@ -14,7 +14,7 @@ import {
 } from "./access-control.js";
 
 // Message types that may have downloadable media
-const MEDIA_TYPES = new Set([3, 34]); // image, voice
+const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
 
 // History context markers (match openclaw's built-in markers)
 const HISTORY_CONTEXT_MARKER = "[Chat messages since your last reply - for context]";
@@ -71,7 +71,11 @@ async function pollMedia(
 ): Promise<MediaResult | null> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = await client.getMedia(chatId, localId);
-    if (result.data && result.type !== "unsupported") {
+    if (result.type === "unsupported") {
+      // Server knows this message type has no media — no point retrying
+      return null;
+    }
+    if (result.data) {
       return result;
     }
     if (attempt < maxAttempts) {
