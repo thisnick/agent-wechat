@@ -1,6 +1,6 @@
 # agent-wechat
 
-A programmable WeChat interface. Runs WeChat Linux in a Docker container with a REST API for reading chats, messages, and media, sending messages, and managing login — all via deterministic FSM-based UI automation.
+A programmable WeChat interface. Controls a WeChat client running in a Docker container, exposing a REST API for chats, messages, media, and login management.
 
 ## Packages
 
@@ -16,8 +16,6 @@ A programmable WeChat interface. Runs WeChat Linux in a Docker container with a 
 - **Send** text messages, images, and files
 - **Login** via QR code displayed in your terminal
 - **Monitor** for new messages in real-time
-
-All data is read directly from WeChat's local databases — no screen scraping for chat data.
 
 ## Requirements
 
@@ -77,7 +75,6 @@ wx down
 │        ↕                                            │
 │   agent-server (Rust/Axum, port 6174)               │
 │     - FSM engine for UI automation                  │
-│     - Direct WeChat DB reads for chat data          │
 │     - REST + WebSocket API                          │
 └──────────────────────┬──────────────────────────────┘
                        │ HTTP / WebSocket
@@ -86,7 +83,6 @@ wx down
 ```
 
 - **UI automation**: Login, open chats, send messages — all via deterministic FSM (no LLM needed)
-- **Data access**: Chats, messages, media read directly from WeChat's local SQLite databases
 - **API**: REST endpoints for all operations, WebSocket for login flow and events
 
 ## Docker Setup
