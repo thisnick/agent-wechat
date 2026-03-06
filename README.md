@@ -1,6 +1,6 @@
 # agent-wechat
 
-A programmable WeChat interface. Controls a WeChat client running in a Docker container, providing CLI and REST API access to chats, messages, and media.
+A programmable WeChat interface. Controls a WeChat client running in a Docker container — receive and send messages, see chat heads, and more via API, CLI, Wechaty puppet, or OpenClaw plugin.
 
 ## Packages
 
