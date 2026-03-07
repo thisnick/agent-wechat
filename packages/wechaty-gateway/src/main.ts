@@ -45,7 +45,11 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 
 function registerWithChatie(registryToken: string, grpcPort: number) {
   const endpoint = 'wss://api.chatie.io/v0/websocket'
-  const protocol = `io|agent-wechat|0.0.0.0|${grpcPort}`
+  // The protocol string format is: io|{id}|{serviceIp}|{servicePort}
+  // serviceIp is read by the registry to advertise the host. Use WECHATY_PUPPET_SERVICE_IP
+  // to set the public IP explicitly (required when running behind a proxy/in Docker).
+  const serviceIp = process.env['WECHATY_PUPPET_SERVICE_IP'] || '0.0.0.0'
+  const protocol = `io|agent-wechat|${serviceIp}|${grpcPort}`
 
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 
