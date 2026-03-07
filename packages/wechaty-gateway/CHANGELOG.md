@@ -1,5 +1,14 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.10.2
+
+### Patch Changes
+
+- [#99](https://github.com/thisnick/agent-wechat/pull/99) [`7fc2fa1`](https://github.com/thisnick/agent-wechat/commit/7fc2fa192b50094cd5798843a9a47bd8f47274d3) Thanks [@thisnick](https://github.com/thisnick)! - Use WECHATY_PUPPET_SERVICE_IP for chatie.io registry to advertise correct public IP
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.10.2
+
 ## 0.10.1
 
 ### Patch Changes
