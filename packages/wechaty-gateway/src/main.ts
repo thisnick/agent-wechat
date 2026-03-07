@@ -4,6 +4,7 @@ import WebSocket from 'ws'
 
 const port = process.env['WECHATY_PUPPET_SERVER_PORT'] || '8788'
 const rawToken = process.env['WECHATY_TOKEN']
+const host = process.env['WECHATY_HOST']
 
 if (!rawToken) {
   console.error('WECHATY_TOKEN is required')
@@ -11,8 +12,9 @@ if (!rawToken) {
 }
 
 // wechaty-puppet-service requires an SNI prefix in the token (since v0.30).
-// When TLS is disabled (gateway behind Caddy), use "insecure_" prefix.
-const token = rawToken.includes('_') ? rawToken : `insecure_${rawToken}`
+// When behind Caddy, use the public hostname so clients can verify the TLS cert.
+// Falls back to "insecure_" for local dev.
+const token = host ? `${host}_${rawToken}` : rawToken.includes('_') ? rawToken : `insecure_${rawToken}`
 
 const puppet = new PuppetAgentWeChat({
   serverUrl: process.env['AGENT_WECHAT_URL'] || 'http://localhost:6174',
@@ -29,10 +31,11 @@ const server = new PuppetServer({
 await server.start()
 console.log(`Wechaty gateway listening on port ${port}`)
 
-// Register with chatie.io service discovery so clients can resolve token → endpoint.
-// The public port (e.g. 8443) is what Caddy exposes; the registry returns our public IP + this port.
-const publicPort = parseInt(process.env['WECHATY_PUPPET_PUBLIC_PORT'] || '8443', 10)
-registerWithChatie(token, publicPort)
+// Register with chatie.io service discovery if we have a public hostname.
+if (host) {
+  const publicPort = parseInt(process.env['WECHATY_PUPPET_PUBLIC_PORT'] || '8443', 10)
+  registerWithChatie(token, host, publicPort)
+}
 
 // Graceful shutdown
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
@@ -43,12 +46,9 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   })
 }
 
-function registerWithChatie(registryToken: string, grpcPort: number) {
+function registerWithChatie(registryToken: string, serviceHost: string, grpcPort: number) {
   const endpoint = 'wss://api.chatie.io/v0/websocket'
-  // The protocol string format is: io|{version}|{id}|{serviceHost}|{servicePort}
-  // (matches wechaty's DEFAULT_PROTOCOL "io|0.0.1" + id + host + port)
-  // Derive the advertised hostname from the token's SNI prefix (e.g. "huan.agent-wx.app").
-  const serviceHost = registryToken.slice(0, registryToken.lastIndexOf('_'))
+  // Protocol format: io|{version}|{id}|{serviceHost}|{servicePort}
   const protocol = `io|0.0.1|agent-wechat|${serviceHost}|${grpcPort}`
 
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -59,7 +59,7 @@ function registerWithChatie(registryToken: string, grpcPort: number) {
     })
 
     ws.on('open', () => {
-      console.log('[registry] registered with chatie.io (port %d)', grpcPort)
+      console.log('[registry] registered with chatie.io (%s:%d)', serviceHost, grpcPort)
     })
 
     ws.on('message', (data) => {
