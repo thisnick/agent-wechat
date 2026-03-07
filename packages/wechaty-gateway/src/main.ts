@@ -3,22 +3,22 @@ import { PuppetAgentWeChat } from '@agent-wechat/wechaty-puppet'
 import WebSocket from 'ws'
 
 const port = process.env['WECHATY_PUPPET_SERVER_PORT'] || '8788'
-const rawToken = process.env['WECHATY_TOKEN']
+const rawToken = process.env['AGENT_WECHAT_TOKEN']
 const host = process.env['WECHATY_HOST']
 
 if (!rawToken) {
-  console.error('WECHATY_TOKEN is required')
+  console.error('AGENT_WECHAT_TOKEN is required')
   process.exit(1)
 }
 
 // wechaty-puppet-service requires an SNI prefix in the token (since v0.30).
 // When behind Caddy, use the public hostname so clients can verify the TLS cert.
 // Falls back to "insecure_" for local dev.
-const token = host ? `${host}_${rawToken}` : rawToken.includes('_') ? rawToken : `insecure_${rawToken}`
+const token = host ? `${host}_${rawToken}` : `insecure_${rawToken}`
 
 const puppet = new PuppetAgentWeChat({
   serverUrl: process.env['AGENT_WECHAT_URL'] || 'http://localhost:6174',
-  token: process.env['AGENT_WECHAT_TOKEN'],
+  token: rawToken,
 })
 
 const server = new PuppetServer({
