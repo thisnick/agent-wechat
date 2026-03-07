@@ -91,10 +91,16 @@ importers:
       wechaty-puppet-service:
         specifier: ^1.18.2
         version: 1.18.2(brolog@1.14.2)(redux@4.2.1)(wechaty-puppet@1.20.2(rxjs@7.8.2))(wechaty@1.20.2(@swc/core@1.15.18)(brolog@1.14.2)(redux@4.2.1)(rxjs@7.8.2))
+      ws:
+        specifier: ^8.19.0
+        version: 8.19.0
     devDependencies:
       '@types/node':
         specifier: ^22
         version: 22.19.11
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       esbuild:
         specifier: ^0.25.0
         version: 0.25.12
@@ -7659,7 +7665,7 @@ snapshots:
 
   centra@2.7.0:
     dependencies:
-      follow-redirects: 1.15.11(debug@2.6.9)
+      follow-redirects: 1.15.11
     transitivePeerDependencies:
       - debug
 
