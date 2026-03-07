@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.10.1
+
+### Patch Changes
+
+- [#94](https://github.com/thisnick/agent-wechat/pull/94) [`83f3991`](https://github.com/thisnick/agent-wechat/commit/83f399199b4c01a4575b12cfc7900737b2694f0a) Thanks [@thisnick](https://github.com/thisnick)! - feat: add video media support (type 43)
+
 ## 0.10.0
 
 ### Minor Changes

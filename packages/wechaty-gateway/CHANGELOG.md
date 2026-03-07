@@ -1,5 +1,14 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.10.1
+
+### Patch Changes
+
+- [#98](https://github.com/thisnick/agent-wechat/pull/98) [`6e84a15`](https://github.com/thisnick/agent-wechat/commit/6e84a1546cf2f69b36d7daf69a1d487a7fdc2da3) Thanks [@thisnick](https://github.com/thisnick)! - Register with chatie.io service discovery on startup so clients can resolve token to endpoint
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.10.1
+
 ## 0.10.0
 
 ### Patch Changes
