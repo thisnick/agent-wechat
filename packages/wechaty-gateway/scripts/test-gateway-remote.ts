@@ -52,15 +52,10 @@ if (!endpoint) {
 }
 
 const host = endpoint.split(':')[0]!
-// Prefix token with hostname as SNI so wechaty uses it for TLS server name verification.
-const prefixedToken = token.includes('_') ? token : `${host}_${token}`
 
 const puppet = new PuppetService({
-  token: prefixedToken,
+  token: token,
   endpoint,
-  // serverName for TLS SNI, caCert empty to bypass wechaty's bundled self-signed cert
-  // (GRPC_DEFAULT_SSL_ROOTS_FILE_PATH set above provides the real system CAs)
-  tls: { serverName: host },
 })
 
 puppet.on('scan', (payload) => {

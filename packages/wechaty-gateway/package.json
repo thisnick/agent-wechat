@@ -11,11 +11,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agent-wechat/wechaty-puppet": "workspace:*",
     "@agent-wechat/shared": "workspace:*",
-    "wechaty-puppet-service": "^1.18.2",
+    "@agent-wechat/wechaty-puppet": "workspace:*",
+    "file-box": "^1.4.15",
     "wechaty-puppet": "^1.20.2",
-    "file-box": "^1.4.15"
+    "wechaty-puppet-service": "^1.18.2"
   },
   "devDependencies": {
     "@types/node": "^22",
