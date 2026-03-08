@@ -144,24 +144,10 @@ fi
 # Start VNC (internal only, accessed via noVNC)
 # ============================================
 if [ "${ENABLE_VNC:-1}" = "1" ]; then
-  # -shared: allow multiple connections (needed for vncdotool)
-  # -xkb: better keyboard handling
-  # -listen 127.0.0.1: internal only (noVNC/websockify connects locally)
-  VNC_AUTH_ARGS="-nopw"
-  # Reuse the agent auth token to derive VNC password (VNC limits to 8 chars)
-  _TOKEN="${AGENT_WECHAT_TOKEN:-}"
-  if [ -z "$_TOKEN" ] && [ -f /data/auth-token ]; then
-    _TOKEN="$(cat /data/auth-token | tr -d '[:space:]')"
-  fi
-  if [ -n "$_TOKEN" ]; then
-    _VNC_PW=$(printf '%s' "${_TOKEN}vnc-salt" | sha256sum | head -c 8)
-    VNC_AUTH_ARGS="-passwd $_VNC_PW"
-  fi
-  # shellcheck disable=SC2086
-  x11vnc -display "$DISPLAY" -forever $VNC_AUTH_ARGS -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
-  if [ -n "${_VNC_PW:-}" ]; then
-    echo "VNC password: $_VNC_PW"
-  fi
+  # -nopw: auth is handled by agent-server proxy (full token auth)
+  # -viewonly: no remote input
+  # -listen 127.0.0.1: internal only (websockify connects locally)
+  x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
 fi
 
 # ============================================
@@ -169,8 +155,10 @@ fi
 # ============================================
 if [ "${ENABLE_VNC:-1}" = "1" ] && [ -d /opt/novnc ]; then
   NOVNC_PORT="${NOVNC_PORT:-6080}"
-  websockify --web /opt/novnc "$NOVNC_PORT" localhost:5900 &
-  echo "noVNC: http://localhost:$NOVNC_PORT/vnc.html?autoconnect=true"
+  # websockify on localhost only — accessed via agent-server's /vnc/ proxy (with full token auth)
+  websockify --web /opt/novnc 127.0.0.1:"$NOVNC_PORT" localhost:5900 &
+  AGENT_PORT="${AGENT_PORT:-6174}"
+  echo "noVNC: http://localhost:$AGENT_PORT/vnc/?token=<your-token>&autoconnect=true"
 fi
 
 # ============================================

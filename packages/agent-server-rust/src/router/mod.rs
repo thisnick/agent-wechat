@@ -6,6 +6,7 @@ mod events;
 mod messages;
 mod sessions;
 mod status;
+mod vnc;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -61,6 +62,10 @@ pub fn build_router() -> Router {
         .route("/api/ws/login", get(status::login_ws))
         // Events WebSocket
         .route("/api/ws/events", get(events::events_ws))
+        // VNC: WebSocket proxy + static files (behind auth)
+        .route("/vnc/websockify", get(vnc::vnc_ws))
+        .route("/vnc/{*path}", get(vnc::vnc_static))
+        .route("/vnc/", get(vnc::vnc_static))
         // Middleware: auth → body limit → CORS (applied bottom-up)
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB for media uploads

@@ -32,8 +32,15 @@ pub fn get_token() -> &'static str {
 }
 
 pub async fn auth_middleware(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+
     // Health endpoint is exempt
-    if req.uri().path() == "/health" {
+    if path == "/health" {
+        return next.run(req).await;
+    }
+
+    // noVNC static assets are exempt (the WebSocket endpoint /vnc/websockify still requires auth)
+    if path.starts_with("/vnc/") && path != "/vnc/websockify" {
         return next.run(req).await;
     }
 

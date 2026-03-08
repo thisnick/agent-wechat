@@ -1,25 +1,6 @@
 use crate::db::get_db;
 use crate::ia::types::Session;
 use rusqlite::params;
-use std::hash::{DefaultHasher, Hash, Hasher};
-
-/// Derive an 8-char VNC password from the auth token.
-/// VNC protocol limits passwords to 8 characters; longer values are silently truncated.
-/// We hash the token and encode as base-62 to maximize entropy within the 8-char limit.
-fn derive_vnc_password(token: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    token.hash(&mut hasher);
-    "vnc-salt".hash(&mut hasher);
-    let hash = hasher.finish();
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut result = String::with_capacity(8);
-    let mut val = hash;
-    for _ in 0..8 {
-        result.push(CHARSET[(val % 62) as usize] as char);
-        val /= 62;
-    }
-    result
-}
 
 /// Convert a DB row to a Session.
 fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
@@ -222,22 +203,18 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
         .spawn();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    // 5. VNC (internal only, accessed via noVNC)
+    // 5. VNC (localhost only — auth enforced by agent-server proxy)
     let vnc_port = session.vnc_port.to_string();
-    let mut vnc_args = vec!["-display", display.as_str(), "-forever", "-shared", "-viewonly", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"];
-    let vnc_password = derive_vnc_password(crate::router::auth::get_token());
-    tracing::info!("VNC password for session {}: {}", session.name, vnc_password);
-    vnc_args.extend(["-passwd", vnc_password.as_str()]);
     let _ = std::process::Command::new("x11vnc")
-        .args(&vnc_args)
+        .args(["-display", display.as_str(), "-forever", "-nopw", "-shared", "-viewonly", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"])
         .spawn();
 
-    // 5b. noVNC (websockify)
+    // 5b. noVNC (websockify on localhost only — proxied via agent-server with auth)
     if std::path::Path::new("/opt/novnc").exists() {
-        let novnc_port = session.novnc_port.to_string();
+        let novnc_bind = format!("127.0.0.1:{}", session.novnc_port);
         let vnc_target = format!("localhost:{}", session.vnc_port);
         let _ = std::process::Command::new("websockify")
-            .args(["--web", "/opt/novnc", &novnc_port, &vnc_target])
+            .args(["--web", "/opt/novnc", &novnc_bind, &vnc_target])
             .spawn();
     }
 

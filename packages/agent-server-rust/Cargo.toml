@@ -46,6 +46,9 @@ tokio-stream = "0.1"
 # For WebSocket streaming
 async-stream = "0.3"
 
+# WebSocket client (for VNC proxy)
+tokio-tungstenite = "0.26"
+
 # Async trait support
 async-trait = "0.1"
 
