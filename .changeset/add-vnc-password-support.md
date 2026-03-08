@@ -2,4 +2,4 @@
 "@agent-wechat/cli": patch
 ---
 
-Secure noVNC by proxying through the agent server with full token auth. VNC and websockify now only listen on localhost. Access noVNC via the agent server at /vnc/ with your auth token.
+Secure noVNC with VNC password authentication. x11vnc now requires a password (set via VNC_PASSWORD or AGENT_WECHAT_TOKEN env var, min 6 chars). noVNC shows a password prompt on connect, or pass ?password=xxx in the URL. VNC and websockify listen on localhost only.
