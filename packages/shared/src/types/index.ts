@@ -32,7 +32,6 @@ export interface Session {
   display: string;
   dbusAddress?: string;
   vncPort: number;
-  novncPort: number;
   status: SessionStatus;
   loginState: LoginState;
   loggedInUser?: string;  // WeChat account dir (e.g. "wxid_xxx_abc123")

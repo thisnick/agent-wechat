@@ -1,3 +1,4 @@
-ALTER TABLE sessions ADD COLUMN novnc_port INTEGER;
-UPDATE sessions SET novnc_port = vnc_port + 180 WHERE novnc_port IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_novnc_port ON sessions(novnc_port);
+-- V2 intentionally left empty.
+-- Previously added novnc_port column, but noVNC is now proxied through the
+-- agent server so no separate port tracking is needed. The websockify port
+-- is derived at runtime from vnc_port + 180.

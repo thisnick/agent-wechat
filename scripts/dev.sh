@@ -12,7 +12,6 @@ set -e
 
 CONTAINER_NAME="agent-wechat"
 DEFAULT_PORT=6174
-NOVNC_PORT=6080
 
 # Determine architecture
 ARCH=$(uname -m)
@@ -63,7 +62,6 @@ docker run -d \
   --cap-add=NET_ADMIN \
   ${PROXY:+-e "PROXY=$PROXY"} \
   -p "$DEFAULT_PORT:$DEFAULT_PORT" \
-  -p "127.0.0.1:$NOVNC_PORT:$NOVNC_PORT" \
   -p 1234:1234 \
   -v "$CONTAINER_NAME-data:/data" \
   -v "$CONTAINER_NAME-wechat-home:/home/wechat" \
@@ -73,8 +71,9 @@ docker run -d \
 
 echo ""
 echo "Dev container started!"
+TOKEN=$(cat "$TOKEN_PATH")
 echo "  API: http://localhost:$DEFAULT_PORT"
-echo "  noVNC: http://localhost:$NOVNC_PORT/vnc.html?autoconnect=true (localhost-only)"
+echo "  noVNC: http://localhost:$DEFAULT_PORT/vnc/?token=$TOKEN&autoconnect=true"
 echo ""
 echo "Waiting for server..."
 

@@ -4,34 +4,22 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 
 /// Proxy a noVNC WebSocket connection to the local websockify instance.
 /// Auth is enforced by the middleware layer before this handler runs.
 pub async fn vnc_ws(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_vnc_ws(socket, 6080))
+    // noVNC requires the "binary" subprotocol — must echo it back or the client drops the connection
+    ws.protocols(["binary"])
+        .on_upgrade(|socket| handle_vnc_ws(socket, 6080))
 }
 
 async fn handle_vnc_ws(ws: WebSocket, websockify_port: u16) {
-    let tcp = match TcpStream::connect(format!("127.0.0.1:{websockify_port}")).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to connect to websockify: {e}");
-            return;
-        }
-    };
-
     let ws_url = format!("ws://127.0.0.1:{websockify_port}/websockify");
-    let req = tokio_tungstenite::tungstenite::handshake::client::Request::builder()
-        .uri(&ws_url)
-        .header("Sec-WebSocket-Protocol", "binary")
-        .body(())
-        .unwrap();
 
-    let (upstream, _) = match tokio_tungstenite::client_async(req, tcp).await {
+    let (upstream, _) = match tokio_tungstenite::connect_async(&ws_url).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("WebSocket handshake with websockify failed: {e}");
+            tracing::error!("WebSocket connection to websockify failed: {e}");
             return;
         }
     };

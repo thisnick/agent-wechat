@@ -160,6 +160,6 @@ ENV AGENT_PORT=6174
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 6174 6080 1234
+EXPOSE 6174 1234
 
 ENTRYPOINT ["/entrypoint.sh"]

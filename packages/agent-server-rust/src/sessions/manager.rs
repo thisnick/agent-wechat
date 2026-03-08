@@ -11,7 +11,6 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         display: row.get("display")?,
         dbus_address: row.get("dbus_address")?,
         vnc_port: row.get("vnc_port")?,
-        novnc_port: row.get("novnc_port")?,
         status: row.get("status")?,
         login_state: row.get("login_state")?,
         logged_in_user: row.get("logged_in_user")?,
@@ -89,7 +88,6 @@ pub async fn create_session(name: &str) -> Result<Session, String> {
             )
             .ok();
         let vnc_port = max_port.unwrap_or(5900) + 1;
-        let novnc_port = vnc_port + 180; // VNC 5901 -> noVNC 6081
 
         // Create Linux user
         let _ = std::process::Command::new("useradd")
@@ -97,9 +95,9 @@ pub async fn create_session(name: &str) -> Result<Session, String> {
             .output();
 
         db.execute(
-            "INSERT INTO sessions (id, name, linux_user, display, vnc_port, novnc_port, status, login_state, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'stopped', 'logged_out', ?7, ?7)",
-            params![id, name, linux_user, display, vnc_port, novnc_port, now],
+            "INSERT INTO sessions (id, name, linux_user, display, vnc_port, status, login_state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'stopped', 'logged_out', ?6, ?6)",
+            params![id, name, linux_user, display, vnc_port, now],
         )
         .map_err(|e| format!("Failed to create session: {e}"))?;
 
@@ -129,8 +127,8 @@ pub async fn get_or_create_default_session() -> Result<Session, String> {
         let dbus_address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
 
         db.execute(
-            "INSERT INTO sessions (id, name, linux_user, display, dbus_address, vnc_port, novnc_port, status, login_state, created_at, updated_at)
-             VALUES (?1, 'default', 'wechat', ':99', ?2, 5900, 6080, 'running', 'logged_out', ?3, ?3)",
+            "INSERT INTO sessions (id, name, linux_user, display, dbus_address, vnc_port, status, login_state, created_at, updated_at)
+             VALUES (?1, 'default', 'wechat', ':99', ?2, 5900, 'running', 'logged_out', ?3, ?3)",
             params![id, dbus_address, now],
         )
         .map_err(|e| format!("Failed to create default session: {e}"))?;
@@ -211,7 +209,8 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
 
     // 5b. noVNC (websockify on localhost only — proxied via agent-server with auth)
     if std::path::Path::new("/opt/novnc").exists() {
-        let novnc_bind = format!("127.0.0.1:{}", session.novnc_port);
+        let websockify_port = session.vnc_port + 180; // VNC 5900 -> websockify 6080
+        let novnc_bind = format!("127.0.0.1:{}", websockify_port);
         let vnc_target = format!("localhost:{}", session.vnc_port);
         let _ = std::process::Command::new("websockify")
             .args(["--web", "/opt/novnc", &novnc_bind, &vnc_target])

@@ -284,7 +284,7 @@ All HTTP and WebSocket endpoints require a bearer token. The token is auto-gener
 - **WebSocket**: `?token=<token>` query param (native WebSocket doesn't support headers)
 - **Required**: Server refuses to start without a token (no token file or env var = startup error)
 - **Health**: `/health` is always accessible without auth
-- **noVNC**: Browser-based VNC at `http://localhost:6080/vnc.html?autoconnect=true` (localhost-only) — use SSH tunnel for remote access
+- **noVNC**: Browser-based VNC at `http://localhost:6174/vnc/?token=<token>&autoconnect=true` — proxied through agent server with full token auth
 
 | Command | Purpose |
 |---------|---------|
