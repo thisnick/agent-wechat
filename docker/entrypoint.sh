@@ -144,23 +144,9 @@ fi
 # Start VNC (internal only, accessed via noVNC)
 # ============================================
 if [ "${ENABLE_VNC:-1}" = "1" ]; then
-  # Require a VNC password (falls back to AGENT_WECHAT_TOKEN if VNC_PASSWORD not set)
-  VNC_PWD="${VNC_PASSWORD:-${AGENT_WECHAT_TOKEN:-}}"
-  if [ -z "$VNC_PWD" ]; then
-    echo "ERROR: VNC_PASSWORD or AGENT_WECHAT_TOKEN must be set (min 6 chars)." >&2
-    exit 1
-  fi
-  if [ "${#VNC_PWD}" -lt 6 ]; then
-    echo "ERROR: VNC password too short (min 6 chars)." >&2
-    exit 1
-  fi
-
-  # Write password to a file (avoids exposing it in ps output)
-  # Note: VNC protocol only uses the first 8 chars for auth
-  VNC_PASSWDFILE="/tmp/.vncpasswd"
-  x11vnc -storepasswd "$VNC_PWD" "$VNC_PASSWDFILE" >/dev/null 2>&1
-
-  x11vnc -display "$DISPLAY" -forever -rfbauth "$VNC_PASSWDFILE" -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
+  # -nopw: no VNC-level password (localhost only; auth enforced by agent-server proxy with full token)
+  # -viewonly: no remote input
+  x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
 fi
 
 # ============================================
@@ -171,7 +157,7 @@ if [ "${ENABLE_VNC:-1}" = "1" ] && [ -d /opt/novnc ]; then
   # websockify on localhost only — accessed via agent-server's /vnc/ proxy (with full token auth)
   websockify --web /opt/novnc 127.0.0.1:"$NOVNC_PORT" localhost:5900 &
   AGENT_PORT="${AGENT_PORT:-6174}"
-  echo "noVNC: http://localhost:$AGENT_PORT/vnc/?token=<your-token>&password=<vnc-password>&autoconnect=true"
+  echo "noVNC: http://localhost:$AGENT_PORT/vnc/?token=<your-token>&autoconnect=true"
 fi
 
 # ============================================
