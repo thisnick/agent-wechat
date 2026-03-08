@@ -205,8 +205,15 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
 
     // 5. VNC (internal only, accessed via noVNC)
     let vnc_port = session.vnc_port.to_string();
+    let mut vnc_args = vec!["-display", display.as_str(), "-forever", "-shared", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"];
+    let vnc_password = std::env::var("VNC_PASSWORD").ok();
+    if let Some(ref pw) = vnc_password {
+        vnc_args.extend(["-passwd", pw.as_str()]);
+    } else {
+        vnc_args.push("-nopw");
+    }
     let _ = std::process::Command::new("x11vnc")
-        .args(["-display", display.as_str(), "-forever", "-nopw", "-shared", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"])
+        .args(&vnc_args)
         .spawn();
 
     // 5b. noVNC (websockify)

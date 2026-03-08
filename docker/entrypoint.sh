@@ -147,7 +147,12 @@ if [ "${ENABLE_VNC:-1}" = "1" ]; then
   # -shared: allow multiple connections (needed for vncdotool)
   # -xkb: better keyboard handling
   # -listen 127.0.0.1: internal only (noVNC/websockify connects locally)
-  x11vnc -display "$DISPLAY" -forever -nopw -shared -xkb -rfbport 5900 -listen 127.0.0.1 &
+  VNC_AUTH_ARGS="-nopw"
+  if [ -n "${VNC_PASSWORD:-}" ]; then
+    VNC_AUTH_ARGS="-passwd $VNC_PASSWORD"
+  fi
+  # shellcheck disable=SC2086
+  x11vnc -display "$DISPLAY" -forever $VNC_AUTH_ARGS -shared -xkb -rfbport 5900 -listen 127.0.0.1 &
 fi
 
 # ============================================
