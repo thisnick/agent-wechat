@@ -14,7 +14,7 @@ const VERSION = PKG_VERSION;
 const CONTAINER_NAME = "agent-wechat";
 const GHCR_IMAGE = "ghcr.io/thisnick/agent-wechat";
 const DEFAULT_PORT = 6174;
-const VNC_PORT = 5900;
+const NOVNC_PORT = 6080;
 
 // Get monorepo root (cli is at packages/cli)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -841,7 +841,7 @@ async function cmdSessionList(client: WeChatClient) {
     const login = session.loginState.status === "logged_in" ? "logged in" : session.loginState.status;
     console.log(`  ${session.id}: ${session.name}`);
     console.log(`    Status: ${status}, Login: ${login}`);
-    console.log(`    Display: ${session.display}, VNC: ${session.vncPort}`);
+    console.log(`    Display: ${session.display}, noVNC: ${session.novncPort}`);
     console.log(`    User: ${session.linuxUser}`);
     if (session.errorMessage) {
       console.log(`    Error: ${session.errorMessage}`);
@@ -858,7 +858,7 @@ async function cmdSessionCreate(client: WeChatClient, name: string) {
   console.log(`  Name: ${session.name}`);
   console.log(`  User: ${session.linuxUser}`);
   console.log(`  Display: ${session.display}`);
-  console.log(`  VNC Port: ${session.vncPort}`);
+  console.log(`  noVNC Port: ${session.novncPort}`);
   console.log(`\nStart the session with: pnpm cli session start ${session.name}`);
 }
 
@@ -868,7 +868,7 @@ async function cmdSessionStart(client: WeChatClient, idOrName: string) {
   console.log(`Session started!`);
   console.log(`  Status: ${session.status}`);
   console.log(`  Display: ${session.display}`);
-  console.log(`  VNC Port: ${session.vncPort}`);
+  console.log(`  noVNC Port: ${session.novncPort}`);
   if (session.dbusAddress) {
     console.log(`  D-Bus: ${session.dbusAddress}`);
   }
@@ -1003,13 +1003,13 @@ async function cmdUp(opts: { proxy?: string } = {}) {
       if (running) {
         console.log(`Container ${CONTAINER_NAME} is already running.`);
         console.log(`API: http://localhost:${DEFAULT_PORT}`);
-        console.log(`VNC: localhost:${VNC_PORT}`);
+        console.log(`noVNC: http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=true`);
         return;
       }
       console.log(`Starting existing container ${CONTAINER_NAME}...`);
       execSync(`docker start ${CONTAINER_NAME}`, { stdio: "inherit" });
       console.log(`API: http://localhost:${DEFAULT_PORT}`);
-      console.log(`VNC: localhost:${VNC_PORT}`);
+      console.log(`noVNC: http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=true`);
       return;
     }
   } catch {
@@ -1054,7 +1054,7 @@ async function cmdUp(opts: { proxy?: string } = {}) {
     "--cap-add=SYS_PTRACE",
     "--cap-add=NET_ADMIN",
     "-p", `${DEFAULT_PORT}:${DEFAULT_PORT}`,
-    "-p", `127.0.0.1:${VNC_PORT}:${VNC_PORT}`,
+    "-p", `127.0.0.1:${NOVNC_PORT}:${NOVNC_PORT}`,
     "-v", `${CONTAINER_NAME}-data:/data`,
     "-v", `${CONTAINER_NAME}-wechat-home:/home/wechat`,
     "-v", `${TOKEN_PATH}:/data/auth-token:ro`,
@@ -1070,7 +1070,7 @@ async function cmdUp(opts: { proxy?: string } = {}) {
     execSync(`docker ${dockerArgs.join(" ")}`, { stdio: "inherit" });
     console.log(`\nContainer started successfully!`);
     console.log(`API: http://localhost:${DEFAULT_PORT}`);
-    console.log(`VNC: localhost:${VNC_PORT}`);
+    console.log(`noVNC: http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=true`);
     console.log(`\nWaiting for server to be ready...`);
 
     for (let i = 0; i < 30; i++) {

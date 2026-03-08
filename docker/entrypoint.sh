@@ -141,12 +141,22 @@ if [ -x /usr/libexec/at-spi-bus-launcher ]; then
 fi
 
 # ============================================
-# Start VNC (optional)
+# Start VNC (internal only, accessed via noVNC)
 # ============================================
 if [ "${ENABLE_VNC:-1}" = "1" ]; then
   # -shared: allow multiple connections (needed for vncdotool)
   # -xkb: better keyboard handling
-  x11vnc -display "$DISPLAY" -forever -nopw -shared -xkb -rfbport 5900 &
+  # -listen 127.0.0.1: internal only (noVNC/websockify connects locally)
+  x11vnc -display "$DISPLAY" -forever -nopw -shared -xkb -rfbport 5900 -listen 127.0.0.1 &
+fi
+
+# ============================================
+# Start noVNC (browser-based VNC via websockify)
+# ============================================
+if [ "${ENABLE_VNC:-1}" = "1" ] && [ -d /opt/novnc ]; then
+  NOVNC_PORT="${NOVNC_PORT:-6080}"
+  websockify --web /opt/novnc "$NOVNC_PORT" localhost:5900 &
+  echo "noVNC: http://localhost:$NOVNC_PORT/vnc.html?autoconnect=true"
 fi
 
 # ============================================

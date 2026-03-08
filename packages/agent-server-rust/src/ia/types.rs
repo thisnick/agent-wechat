@@ -318,6 +318,7 @@ pub struct Session {
     #[ts(optional)]
     pub dbus_address: Option<String>,
     pub vnc_port: i32,
+    pub novnc_port: i32,
     pub status: String,
     pub login_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -15,7 +15,7 @@ services:
       - NET_ADMIN
     ports:
       - "6174:6174"
-      - "127.0.0.1:5900:5900" # VNC localhost-only
+      - "127.0.0.1:6080:6080" # noVNC (browser-based VNC)
     volumes:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat

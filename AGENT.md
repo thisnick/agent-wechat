@@ -284,7 +284,7 @@ All HTTP and WebSocket endpoints require a bearer token. The token is auto-gener
 - **WebSocket**: `?token=<token>` query param (native WebSocket doesn't support headers)
 - **Required**: Server refuses to start without a token (no token file or env var = startup error)
 - **Health**: `/health` is always accessible without auth
-- **VNC**: Bound to `127.0.0.1` (localhost-only) — use SSH tunnel for remote access
+- **noVNC**: Browser-based VNC at `http://localhost:6080/vnc.html?autoconnect=true` (localhost-only) — use SSH tunnel for remote access
 
 | Command | Purpose |
 |---------|---------|
@@ -306,7 +306,7 @@ Environment variable `AGENT_WECHAT_TOKEN` overrides the token file on both host 
 
 | Table | Purpose |
 |-------|---------|
-| `sessions` | Multi-user sessions (display, VNC port, login state, `logged_in_user`) |
+| `sessions` | Multi-user sessions (display, VNC port, noVNC port, login state, `logged_in_user`) |
 | `wechat_keys` | Credentials per (session, account, db_name) |
 | `sync_state` | Key-value store for sync progress |
 | `context` | FSM AppState persistence (JSON blob) |
@@ -561,6 +561,7 @@ interface Session {
   display: string;
   dbusAddress?: string;
   vncPort: number;
+  novncPort: number;
   status: string;
   loginState: string;
   loggedInUser?: string;

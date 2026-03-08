@@ -77,6 +77,14 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install frida-tools silk-python
 
 # ============================================
+# noVNC (browser-based VNC viewer) + websockify
+# ============================================
+ARG NOVNC_VERSION=1.5.0
+RUN pip3 install websockify \
+    && curl -L https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz | tar xz -C /opt \
+    && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc
+
+# ============================================
 # SQLCipher 4 CLI (needed for wechat-db reads)
 # ============================================
 RUN cd /tmp \
@@ -152,6 +160,6 @@ ENV AGENT_PORT=6174
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 6174 5900 1234
+EXPOSE 6174 6080 1234
 
 ENTRYPOINT ["/entrypoint.sh"]
