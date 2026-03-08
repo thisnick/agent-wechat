@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.11.1
+
+### Patch Changes
+
+- [#106](https://github.com/thisnick/agent-wechat/pull/106) [`66ee117`](https://github.com/thisnick/agent-wechat/commit/66ee117ad9f52c9adefd2cac21ed007828737c79) Thanks [@thisnick](https://github.com/thisnick)! - Fix SQLite migration error: use CREATE UNIQUE INDEX instead of UNIQUE column constraint in ALTER TABLE for novnc_port, since SQLite does not support adding UNIQUE columns via ALTER TABLE.
+
 ## 0.11.0
 
 ### Minor Changes
