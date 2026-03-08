@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 0.11.0
+
+### Minor Changes
+
+- [#101](https://github.com/thisnick/agent-wechat/pull/101) [`470a907`](https://github.com/thisnick/agent-wechat/commit/470a9076a32ea1a83a8901ff636be9531754415f) Thanks [@thisnick](https://github.com/thisnick)! - Encrypt agent.db at rest using SQLCipher with the auth token as the encryption key. Existing unencrypted databases are automatically migrated on startup. If decryption fails (e.g. token changed), the database is discarded and recreated fresh.
+
+- [#104](https://github.com/thisnick/agent-wechat/pull/104) [`50aacf0`](https://github.com/thisnick/agent-wechat/commit/50aacf0c2d09983e75a8847fb394252d4a8548bc) Thanks [@thisnick](https://github.com/thisnick)! - Replace raw VNC port (5900) with noVNC browser-based viewer on port 6080. x11vnc now listens on 127.0.0.1 only (internal to the container), and websockify serves the noVNC web client. Access the desktop at `http://localhost:6080/vnc.html?autoconnect=true`. No VNC client installation needed.
+
 ## 0.10.2
 
 ## 0.10.1
