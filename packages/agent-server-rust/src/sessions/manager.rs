@@ -205,7 +205,7 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
 
     // 5. VNC (internal only, accessed via noVNC)
     let vnc_port = session.vnc_port.to_string();
-    let mut vnc_args = vec!["-display", display.as_str(), "-forever", "-shared", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"];
+    let mut vnc_args = vec!["-display", display.as_str(), "-forever", "-shared", "-viewonly", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"];
     let vnc_password = crate::router::auth::get_token().to_string();
     vnc_args.extend(["-passwd", vnc_password.as_str()]);
     let _ = std::process::Command::new("x11vnc")

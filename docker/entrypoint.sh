@@ -157,7 +157,7 @@ if [ "${ENABLE_VNC:-1}" = "1" ]; then
     VNC_AUTH_ARGS="-passwd $_VNC_PW"
   fi
   # shellcheck disable=SC2086
-  x11vnc -display "$DISPLAY" -forever $VNC_AUTH_ARGS -shared -xkb -rfbport 5900 -listen 127.0.0.1 &
+  x11vnc -display "$DISPLAY" -forever $VNC_AUTH_ARGS -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
 fi
 
 # ============================================
