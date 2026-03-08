@@ -2,4 +2,4 @@
 "@agent-wechat/cli": patch
 ---
 
-Secure noVNC with VNC password authentication. x11vnc now requires a password (set via VNC_PASSWORD or AGENT_WECHAT_TOKEN env var, min 6 chars). noVNC shows a password prompt on connect, or pass ?password=xxx in the URL. VNC and websockify listen on localhost only.
+Secure noVNC with full-token auth on the WebSocket proxy (no 8-char VNC limit). Opening /vnc/ shows a login prompt for your token. Direct access via ?token=xxx&autoconnect=true also works. VNC and websockify listen on localhost only.
