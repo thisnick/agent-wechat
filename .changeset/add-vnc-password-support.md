@@ -2,4 +2,4 @@
 "@agent-wechat/cli": patch
 ---
 
-Add VNC password support via VNC_PASSWORD environment variable. When set, noVNC will prompt for a password before connecting. Without it, behavior is unchanged (no password).
+Secure noVNC with the agent auth token (AGENT_WECHAT_TOKEN) as VNC password. noVNC now prompts for a password before connecting.

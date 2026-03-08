@@ -148,8 +148,13 @@ if [ "${ENABLE_VNC:-1}" = "1" ]; then
   # -xkb: better keyboard handling
   # -listen 127.0.0.1: internal only (noVNC/websockify connects locally)
   VNC_AUTH_ARGS="-nopw"
-  if [ -n "${VNC_PASSWORD:-}" ]; then
-    VNC_AUTH_ARGS="-passwd $VNC_PASSWORD"
+  # Reuse the agent auth token as VNC password
+  _VNC_PW="${AGENT_WECHAT_TOKEN:-}"
+  if [ -z "$_VNC_PW" ] && [ -f /data/auth-token ]; then
+    _VNC_PW="$(cat /data/auth-token | tr -d '[:space:]')"
+  fi
+  if [ -n "$_VNC_PW" ]; then
+    VNC_AUTH_ARGS="-passwd $_VNC_PW"
   fi
   # shellcheck disable=SC2086
   x11vnc -display "$DISPLAY" -forever $VNC_AUTH_ARGS -shared -xkb -rfbport 5900 -listen 127.0.0.1 &
