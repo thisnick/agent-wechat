@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.11.2
+
+### Patch Changes
+
+- [#108](https://github.com/thisnick/agent-wechat/pull/108) [`97bc89d`](https://github.com/thisnick/agent-wechat/commit/97bc89db4ac279926be285651ad8452f0e95b1e8) Thanks [@thisnick](https://github.com/thisnick)! - Secure noVNC with full-token auth on the WebSocket proxy (no 8-char VNC limit). Opening /vnc/ shows a login prompt for your token. Direct access via ?token=xxx&autoconnect=true also works. VNC and websockify listen on localhost only.
+
 ## 0.11.1
 
 ### Patch Changes
