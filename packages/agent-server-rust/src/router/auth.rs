@@ -27,7 +27,7 @@ pub fn init_token() {
     AUTH_TOKEN.set(token).ok();
 }
 
-fn get_token() -> &'static str {
+pub fn get_token() -> &'static str {
     AUTH_TOKEN.get().expect("init_token() must be called first")
 }
 
