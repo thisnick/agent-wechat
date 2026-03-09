@@ -116,11 +116,15 @@ pub fn store_single_key(
 }
 
 /// Verify a single key against a database file.
-/// Opens read-only to avoid journal/WAL contention with WeChat.
+/// Opens with immutable=1 to avoid acquiring any locks that could interfere
+/// with WeChat's own writes/checkpoints.
 pub fn verify_key(db_path: &str, hex_key: &str) -> bool {
+    let uri = format!("file:{}?immutable=1", db_path);
     let conn = match Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) {
         Ok(c) => c,
         Err(_) => return false,
