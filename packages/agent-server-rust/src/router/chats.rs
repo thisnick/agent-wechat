@@ -9,7 +9,8 @@ use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan};
 use crate::sessions::manager::get_session;
 use crate::tools::wechat_chats;
-use crate::tools::wechat_keys::get_stored_keys;
+use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
+use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, store_keys};
 
 #[derive(Deserialize)]
 pub struct ListParams {
@@ -33,8 +34,29 @@ pub async fn list_chats(Query(params): Query<ListParams>) -> Json<Vec<Chat>> {
         None => return Json(Vec::new()),
     };
 
-    let db = get_db();
-    let keys = get_stored_keys(&db, &session.id, &logged_in_user);
+    let mut keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, &logged_in_user)
+    };
+
+    // Lazy key extraction: if session.db or contact.db exist on disk without stored keys, re-extract
+    if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
+        let on_disk = list_account_dbs(&logged_in_user);
+        let has_missing = on_disk.iter().any(|name| {
+            (name == "session.db" || name == "contact.db") && !keys.contains_key(name.as_str())
+        });
+        if has_missing {
+            if let Some(pid) = find_wechat_pid() {
+                let extracted = extract_keys_async(pid).await;
+                if !extracted.is_empty() {
+                    let db = get_db();
+                    store_keys(&db, &session.id, &logged_in_user, &extracted);
+                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
+                }
+            }
+        }
+    }
+
     if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
         return Json(Vec::new());
     }
@@ -57,8 +79,29 @@ pub async fn get_chat(Path(id): Path<String>) -> Json<Option<Chat>> {
         None => return Json(None),
     };
 
-    let db = get_db();
-    let keys = get_stored_keys(&db, &session.id, &logged_in_user);
+    let mut keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, &logged_in_user)
+    };
+
+    // Lazy key extraction: if session.db or contact.db exist on disk without stored keys, re-extract
+    if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
+        let on_disk = list_account_dbs(&logged_in_user);
+        let has_missing = on_disk.iter().any(|name| {
+            (name == "session.db" || name == "contact.db") && !keys.contains_key(name.as_str())
+        });
+        if has_missing {
+            if let Some(pid) = find_wechat_pid() {
+                let extracted = extract_keys_async(pid).await;
+                if !extracted.is_empty() {
+                    let db = get_db();
+                    store_keys(&db, &session.id, &logged_in_user, &extracted);
+                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
+                }
+            }
+        }
+    }
+
     Json(wechat_chats::get_chat_by_username(&logged_in_user, &keys, &id))
 }
 
@@ -77,8 +120,29 @@ pub async fn find_chats(Query(params): Query<FindParams>) -> Json<Vec<Chat>> {
         None => return Json(Vec::new()),
     };
 
-    let db = get_db();
-    let keys = get_stored_keys(&db, &session.id, &logged_in_user);
+    let mut keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, &logged_in_user)
+    };
+
+    // Lazy key extraction: if session.db or contact.db exist on disk without stored keys, re-extract
+    if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
+        let on_disk = list_account_dbs(&logged_in_user);
+        let has_missing = on_disk.iter().any(|name| {
+            (name == "session.db" || name == "contact.db") && !keys.contains_key(name.as_str())
+        });
+        if has_missing {
+            if let Some(pid) = find_wechat_pid() {
+                let extracted = extract_keys_async(pid).await;
+                if !extracted.is_empty() {
+                    let db = get_db();
+                    store_keys(&db, &session.id, &logged_in_user, &extracted);
+                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
+                }
+            }
+        }
+    }
+
     Json(wechat_chats::find_chats_by_name(
         &logged_in_user,
         &keys,
