@@ -37,6 +37,7 @@ pub fn spawn_health_monitor() {
         tracing::info!("[health] WeChat health monitor started");
 
         let mut last_identified = Instant::now();
+        let mut was_running = false;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
@@ -58,9 +59,20 @@ pub fn spawn_health_monitor() {
 
             // Check if WeChat process is even running
             let wechat_pid = match find_wechat_pid() {
-                Some(pid) => pid,
+                Some(pid) => {
+                    if !was_running {
+                        tracing::info!("[health] WeChat process found (pid={})", pid);
+                        was_running = true;
+                    }
+                    pid
+                }
                 None => {
-                    // No WeChat process — nothing to kill, reset timer
+                    if was_running {
+                        tracing::warn!(
+                            "[health] WeChat process disappeared (likely crashed), waiting for entrypoint to restart it"
+                        );
+                        was_running = false;
+                    }
                     last_identified = Instant::now();
                     continue;
                 }
