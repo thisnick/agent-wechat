@@ -170,7 +170,7 @@ fi
 # ============================================
 # Launch WeChat once — the agent-server health monitor handles restarts
 # ============================================
-/opt/agent-server/launch-wechat.sh &
+launch-wechat &
 
 # ============================================
 # Initialize data directory

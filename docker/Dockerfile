@@ -131,7 +131,6 @@ RUN chmod +x /opt/tools/*
 # Copy Rust binary from builder
 # ============================================
 COPY --from=builder /output/agent-server /opt/agent-server/agent-server
-COPY launch-wechat.sh /opt/agent-server/launch-wechat.sh
 
 # ============================================
 # Debug support (gdbserver for remote debugging)

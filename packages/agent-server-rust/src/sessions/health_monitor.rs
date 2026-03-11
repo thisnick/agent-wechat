@@ -37,7 +37,7 @@ pub fn resume_monitoring() {
 
 /// Spawn WeChat process for the given session using the shared launch script.
 fn spawn_wechat(session: &crate::ia::types::Session) {
-    let result = std::process::Command::new("/opt/agent-server/launch-wechat.sh")
+    let result = std::process::Command::new("/opt/tools/launch-wechat")
         .env("DISPLAY", &session.display)
         .env(
             "DBUS_SESSION_BUS_ADDRESS",
