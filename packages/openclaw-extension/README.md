@@ -14,80 +14,7 @@ OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [
 
 ## Setup
 
-### 1. Install the extension
-
-```bash
-openclaw plugins install @agent-wechat/wechat
-```
-
-### 2. Configure the channel
-
-```bash
-# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
-
-# Override server URL and token
-openclaw channels add --channel wechat --url <url> --token <token>
-```
-
-Or edit `~/.openclaw/openclaw.json` directly:
-
-```json
-{
-  "channels": {
-    "wechat": {
-      "enabled": true,
-      "serverUrl": "http://localhost:6174",
-      "dmPolicy": "open",
-      "groupPolicy": "open"
-    }
-  }
-}
-```
-
-For local setups, the token is automatically read from `~/.config/agent-wechat/token` (shared with the CLI and container), so you don't need to set it in the config. When connecting to a remote server, add the `token` field.
-
-### 3. Restart the gateway
-
-Restart your OpenClaw gateway so it picks up the new channel config:
-
-```bash
-openclaw gateway restart
-```
-
-### 4. Log in to WeChat
-
-Ask your bot to log in to WeChat:
-
-> "Log in to WeChat"
-
-Your bot should generate a QR code image. Alternatively, use the CLI:
-
-```bash
-openclaw channels login --channel wechat
-```
-
-### 5. Scan the QR code
-
-Display the QR code on a screen separate from the phone running WeChat. WeChat's login QR scanner uses the camera only — it cannot scan from the phone's photo gallery.
-
-Scan the QR code using WeChat's built-in scanner (tap **+** > **Scan**) with the account you want the bot to use. Then tap **Login** on the confirmation screen.
-
-You only need to do this once — the session persists across container restarts.
-
-### 6. Configure DM and group policies
-
-Once connected, configure how the bot handles direct messages and group chats. You can ask your bot to help you, or edit the config directly. See the Configuration Reference below.
-
-## Limitations
-
-- **The WeChat account must stay logged in on your phone.** Logging out on the phone disconnects the bot. One workaround: after the bot is logged in, you can uninstall and reinstall WeChat on your phone — the bot session persists. On Android, you can also run WeChat in a separate profile (Work Profile or Private Space) to keep the bot account isolated.
-
-- **Only one desktop session.** Once the bot is logged in as a "desktop" client, you cannot simultaneously use WeChat on another computer or WeChat Web.
-
-- **Infrastructure updates disconnect the bot.** If the agent-wechat server restarts or updates, the bot will be disconnected. When this happens, ask your bot to log in again. If the disconnection was brief, you may not need a new QR code scan.
-
-## Starting the agent-wechat Server
+### 1. Start the agent-wechat Server
 
 If you need to run the server yourself:
 
@@ -133,6 +60,79 @@ docker compose up -d
 ```
 
 If running alongside OpenClaw on the same Docker network, set `serverUrl` to `http://agent-wechat:6174` in the channel config.
+
+### 2. Install the extension
+
+```bash
+openclaw plugins install @agent-wechat/wechat
+```
+
+### 3. Configure the channel
+
+```bash
+# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
+openclaw channels add --channel wechat
+
+# Override server URL and token
+openclaw channels add --channel wechat --url <url> --token <token>
+```
+
+Or edit `~/.openclaw/openclaw.json` directly:
+
+```json
+{
+  "channels": {
+    "wechat": {
+      "enabled": true,
+      "serverUrl": "http://localhost:6174",
+      "dmPolicy": "open",
+      "groupPolicy": "open"
+    }
+  }
+}
+```
+
+For local setups, the token is automatically read from `~/.config/agent-wechat/token` (shared with the CLI and container), so you don't need to set it in the config. When connecting to a remote server, add the `token` field.
+
+### 4. Restart the gateway
+
+Restart your OpenClaw gateway so it picks up the new channel config:
+
+```bash
+openclaw gateway restart
+```
+
+### 5. Log in to WeChat
+
+Ask your bot to log in to WeChat:
+
+> "Log in to WeChat"
+
+Your bot should generate a QR code image. Alternatively, use the CLI:
+
+```bash
+openclaw channels login --channel wechat
+```
+
+### 6. Scan the QR code
+
+Display the QR code on a screen separate from the phone running WeChat. WeChat's login QR scanner uses the camera only — it cannot scan from the phone's photo gallery.
+
+Scan the QR code using WeChat's built-in scanner (tap **+** > **Scan**) with the account you want the bot to use. Then tap **Login** on the confirmation screen.
+
+You only need to do this once — the session persists across container restarts.
+
+### 7. Configure DM and group policies
+
+Once connected, configure how the bot handles direct messages and group chats. You can ask your bot to help you, or edit the config directly. See the Configuration Reference below.
+
+## Limitations
+
+- **The WeChat account must stay logged in on your phone.** Logging out on the phone disconnects the bot. One workaround: after the bot is logged in, you can uninstall and reinstall WeChat on your phone — the bot session persists. On Android, you can also run WeChat in a separate profile (Work Profile or Private Space) to keep the bot account isolated.
+
+- **Only one desktop session.** Once the bot is logged in as a "desktop" client, you cannot simultaneously use WeChat on another computer or WeChat Web.
+
+- **Infrastructure updates disconnect the bot.** If the agent-wechat server restarts or updates, the bot will be disconnected. When this happens, ask your bot to log in again. If the disconnection was brief, you may not need a new QR code scan.
 
 ## Configuration Reference
 
