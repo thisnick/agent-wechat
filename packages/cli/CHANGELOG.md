@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.11.4
+
+### Patch Changes
+
+- [#116](https://github.com/thisnick/agent-wechat/pull/116) [`42c80f6`](https://github.com/thisnick/agent-wechat/commit/42c80f6d050d0210402f0a9fa00bf107cadd6db1) Thanks [@thisnick](https://github.com/thisnick)! - Move WeChat restart logic from entrypoint bash loop into agent-server health monitor
+
 ## 0.11.3
 
 ### Patch Changes
