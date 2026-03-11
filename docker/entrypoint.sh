@@ -168,47 +168,19 @@ if command -v pulseaudio >/dev/null 2>&1; then
 fi
 
 # ============================================
-# Start WeChat with auto-restart (background supervisor)
+# Launch WeChat once — the agent-server health monitor handles restarts
 # Disable Qt HiDPI scaling so AT-SPI coordinates match actual screen pixels
 # ============================================
-(
-  RESTART_DELAY=3
-  MAX_RAPID_RESTARTS=5
-  RAPID_WINDOW=60
-  restart_count=0
-  window_start=$(date +%s)
-
-  while true; do
-    su -s /bin/bash -c "DISPLAY=$DISPLAY \
-      DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS \
-      QT_ACCESSIBILITY=1 \
-      QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 \
-      QT_AUTO_SCREEN_SCALE_FACTOR=0 \
-      QT_ENABLE_HIGHDPI_SCALING=0 \
-      QT_SCALE_FACTOR=1 \
-      GTK_MODULES=gail:atk-bridge \
-      HOME=$WECHAT_HOME \
-      /usr/bin/wechat" wechat
-
-    echo "WeChat exited ($?), restarting in ${RESTART_DELAY}s..."
-
-    NOW=$(date +%s)
-    if [ $((NOW - window_start)) -gt $RAPID_WINDOW ]; then
-      restart_count=0
-      window_start=$NOW
-    fi
-    restart_count=$((restart_count + 1))
-
-    if [ $restart_count -ge $MAX_RAPID_RESTARTS ]; then
-      echo "WeChat crash loop detected, backing off to 30s..."
-      sleep 30
-      restart_count=0
-      window_start=$(date +%s)
-    else
-      sleep $RESTART_DELAY
-    fi
-  done
-) &
+su -s /bin/bash -c "DISPLAY=$DISPLAY \
+  DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS \
+  QT_ACCESSIBILITY=1 \
+  QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 \
+  QT_AUTO_SCREEN_SCALE_FACTOR=0 \
+  QT_ENABLE_HIGHDPI_SCALING=0 \
+  QT_SCALE_FACTOR=1 \
+  GTK_MODULES=gail:atk-bridge \
+  HOME=$WECHAT_HOME \
+  /usr/bin/wechat &" wechat
 
 # ============================================
 # Initialize data directory
