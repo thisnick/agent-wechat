@@ -49,7 +49,7 @@ BUILD_PROFILES = {
         "CUR_SESS_OFF": 0x40,
         "CUR_SESS_UNAME_OFF": 0x98,
         "VEC_KEY_OFF": 0x168,
-        "VEC_LOOKUP_OFF": 0x392c1d0,
+        "VEC_MAP_OFF": 0xe8,
     },
 }
 
@@ -284,26 +284,31 @@ def enumerate_sessions(pid, profile):
     cur_sess_off = profile["CUR_SESS_OFF"]
     cur_sess_uname_off = profile["CUR_SESS_UNAME_OFF"]
     vec_key_off = profile["VEC_KEY_OFF"]
-    vec_lookup_off = profile.get("VEC_LOOKUP_OFF")  # x86_64 only
+    vec_map_off = profile.get("VEC_MAP_OFF")  # x86_64 only
 
     # Manager validation: check "normal_key" string at VEC_KEY_OFF.
     # On x86_64 multiple managers share the same vtable; this picks the right one.
     validate_js = f'var k = readStdString(hit.address.add(0x{vec_key_off:x})); if (k !== "normal_key") return;'
 
     # Architecture-specific vector access
-    if vec_lookup_off is not None:
-        # x86_64: vector behind lookup function keyed by "normal_key"
+    if vec_map_off is not None:
+        # x86_64: walk unordered_map linked list to find "normal_key" vector
         vec_access_js = f"""
-    // x86_64: vector accessed via lookup function with key "normal_key"
-    var lookupFn = new NativeFunction(b.add(0x{vec_lookup_off:x}), "pointer", ["pointer", "pointer"]);
-    var keyPtr = manager.add(0x{vec_key_off:x});
-    var vecResult = lookupFn(ctrl, keyPtr);
-    if (!vecResult || vecResult.isNull()) {{
-        console.log("ERROR: lookup returned null");
-        console.log("SCRIPT_DONE");
+    // x86_64: walk unordered_map linked list to find "normal_key" vector
+    // Layout: ctrl+0x{vec_map_off:x} → inner → inner+0x18 = hashmap
+    //   hashmap+0x10 = first node; each node: next(+0), hash(+8), key(+0x10), value(+0x28)
+    var hmInner = ctrl.add(0x{vec_map_off:x}).readPointer();
+    var hmNode = hmInner.add(0x18 + 0x10).readPointer();
+    var vectorBegin = ptr(0), vectorEnd = ptr(0);
+    for (var _i = 0; _i < 20 && hmNode && !hmNode.isNull(); _i++) {{
+        var nodeKey = readStdString(hmNode.add(0x10));
+        if (nodeKey === "normal_key") {{
+            vectorBegin = hmNode.add(0x28).readPointer();
+            vectorEnd = hmNode.add(0x30).readPointer();
+            break;
+        }}
+        hmNode = hmNode.readPointer();
     }}
-    var vectorBegin = vecResult.readPointer();
-    var vectorEnd = vecResult.add(8).readPointer();
 """
     else:
         # aarch64: vector directly at controller+0x0/0x8
