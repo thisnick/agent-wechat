@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.11.5
+
+### Patch Changes
+
+- [#118](https://github.com/thisnick/agent-wechat/pull/118) [`fe27f34`](https://github.com/thisnick/agent-wechat/commit/fe27f344a8dc7746ebcf2ea5bf2bd5e886e2dd4e) Thanks [@thisnick](https://github.com/thisnick)! - Replace x86_64 NativeFunction lookup with pure memory hashmap walk in chat-select to prevent crashes
+
 ## 0.11.4
 
 ### Patch Changes
