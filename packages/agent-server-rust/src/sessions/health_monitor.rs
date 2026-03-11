@@ -35,30 +35,16 @@ pub fn resume_monitoring() {
     MONITORING_PAUSED.store(false, Ordering::Relaxed);
 }
 
-/// Spawn WeChat process for the given session.
+/// Spawn WeChat process for the given session using the shared launch script.
 fn spawn_wechat(session: &crate::ia::types::Session) {
-    let display = &session.display;
-    let linux_user = &session.linux_user;
-    let home_dir = format!("/home/{linux_user}");
-    let dbus_address = session.dbus_address.as_deref().unwrap_or("");
-
-    let result = std::process::Command::new("su")
-        .args([
-            "-s", "/bin/bash", "-c",
-            &format!(
-                "DISPLAY={display} \
-                 DBUS_SESSION_BUS_ADDRESS={dbus_address} \
-                 QT_ACCESSIBILITY=1 \
-                 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 \
-                 QT_AUTO_SCREEN_SCALE_FACTOR=0 \
-                 QT_ENABLE_HIGHDPI_SCALING=0 \
-                 QT_SCALE_FACTOR=1 \
-                 GTK_MODULES=gail:atk-bridge \
-                 HOME={home_dir} \
-                 /usr/bin/wechat &"
-            ),
-            linux_user.as_str(),
-        ])
+    let result = std::process::Command::new("/opt/agent-server/launch-wechat.sh")
+        .env("DISPLAY", &session.display)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            session.dbus_address.as_deref().unwrap_or(""),
+        )
+        .env("WECHAT_HOME", format!("/home/{}", session.linux_user))
+        .env("WECHAT_USER", &session.linux_user)
         .spawn();
 
     match result {
