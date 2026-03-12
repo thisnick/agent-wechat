@@ -113,7 +113,6 @@ services:
       - NET_ADMIN           # for transparent proxy (optional)
     ports:
       - "6174:6174"
-      - "127.0.0.1:5900:5900"  # VNC localhost-only
     volumes:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat
@@ -143,5 +142,4 @@ See [CLAUDE.md](./CLAUDE.md) for full technical documentation.
 
 | Port | Service |
 |------|---------|
-| 6174 | Agent server REST API |
-| 5900 | VNC (view WeChat UI) |
+| 6174 | Agent server REST API + VNC web viewer at `/vnc/` |

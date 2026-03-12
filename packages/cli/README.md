@@ -141,8 +141,7 @@ wx up
 ```
 
 This starts a container named `agent-wechat` with:
-- **Port 6174** — REST API (exposed to all interfaces)
-- **Port 5900** — VNC (localhost only — use SSH tunnel for remote access)
+- **Port 6174** — REST API + VNC web viewer at `/vnc/` (exposed to all interfaces)
 - Persistent volumes for data and WeChat home directory
 - Auth token from `~/.config/agent-wechat/token` (auto-generated on first run)
 
@@ -170,7 +169,6 @@ services:
       - NET_ADMIN
     ports:
       - "6174:6174"
-      - "127.0.0.1:5900:5900"
     volumes:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat

@@ -38,7 +38,6 @@ services:
       - SYS_PTRACE
     ports:
       - "6174:6174"
-      - "127.0.0.1:5900:5900"
     volumes:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat
