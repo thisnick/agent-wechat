@@ -37,12 +37,11 @@ pub fn resume_monitoring() {
 
 /// Spawn WeChat process for the given session using the shared launch script.
 fn spawn_wechat(session: &crate::ia::types::Session) {
+    // Use DBUS_SESSION_BUS_ADDRESS from our own environment (inherited from
+    // entrypoint.sh) rather than the DB value. The entrypoint's D-Bus session
+    // is the one AT-SPI is connected to, so WeChat must use it for a11y to work.
     let result = std::process::Command::new("/opt/tools/launch-wechat")
         .env("DISPLAY", &session.display)
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            session.dbus_address.as_deref().unwrap_or(""),
-        )
         .env("WECHAT_HOME", format!("/home/{}", session.linux_user))
         .env("WECHAT_USER", &session.linux_user)
         .spawn();
