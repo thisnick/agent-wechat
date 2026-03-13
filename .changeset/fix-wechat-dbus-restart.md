@@ -1,5 +1,5 @@
 ---
-"@agent-wechat/cli": patch
+"@agent-wechat/agent-server": patch
 ---
 
 Fix WeChat restart kill loop caused by wrong DBUS_SESSION_BUS_ADDRESS

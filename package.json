@@ -24,7 +24,7 @@
     "gateway:test": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx scripts/test-gateway.ts",
     "gateway:test:remote": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx scripts/test-gateway-remote.ts",
     "release": "pnpm build && pnpm changeset publish",
-    "version-packages": "pnpm changeset version && pnpm install --lockfile-only"
+    "version-packages": "pnpm changeset version && bash scripts/sync-cargo-version.sh && pnpm install --lockfile-only"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",
