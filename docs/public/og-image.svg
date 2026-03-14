@@ -1,0 +1,76 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="400" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- Accent bar at top -->
+  <rect x="0" y="0" width="1200" height="4" fill="url(#accent)"/>
+
+  <!-- Decorative grid pattern -->
+  <g opacity="0.04" stroke="#94a3b8" stroke-width="1">
+    <line x1="200" y1="0" x2="200" y2="630"/>
+    <line x1="400" y1="0" x2="400" y2="630"/>
+    <line x1="600" y1="0" x2="600" y2="630"/>
+    <line x1="800" y1="0" x2="800" y2="630"/>
+    <line x1="1000" y1="0" x2="1000" y2="630"/>
+    <line x1="0" y1="126" x2="1200" y2="126"/>
+    <line x1="0" y1="252" x2="1200" y2="252"/>
+    <line x1="0" y1="378" x2="1200" y2="378"/>
+    <line x1="0" y1="504" x2="1200" y2="504"/>
+  </g>
+
+  <!-- WeChat-inspired icon -->
+  <g transform="translate(80, 180)">
+    <!-- Chat bubble 1 -->
+    <rect x="0" y="40" width="100" height="70" rx="16" fill="#38bdf8" opacity="0.2" stroke="#38bdf8" stroke-width="2"/>
+    <circle cx="30" cy="75" r="5" fill="#38bdf8" opacity="0.6"/>
+    <circle cx="50" cy="75" r="5" fill="#38bdf8" opacity="0.6"/>
+    <circle cx="70" cy="75" r="5" fill="#38bdf8" opacity="0.6"/>
+
+    <!-- Chat bubble 2 (robot/agent) -->
+    <rect x="40" y="0" width="100" height="70" rx="16" fill="#818cf8" opacity="0.2" stroke="#818cf8" stroke-width="2"/>
+    <text x="90" y="44" font-family="monospace" font-size="28" fill="#818cf8" text-anchor="middle">{'>'}_</text>
+
+    <!-- Connection line -->
+    <line x1="90" y1="70" x2="50" y2="40" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.5"/>
+  </g>
+
+  <!-- Title -->
+  <text x="260" y="240" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="64" font-weight="700" fill="#f8fafc" letter-spacing="-1">agent-wechat</text>
+
+  <!-- Description -->
+  <text x="260" y="300" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="28" fill="#94a3b8">A programmable WeChat interface for</text>
+  <text x="260" y="340" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="28" fill="#94a3b8">AI agents and automation.</text>
+
+  <!-- Feature pills -->
+  <g transform="translate(260, 390)">
+    <rect x="0" y="0" width="120" height="36" rx="18" fill="#38bdf8" opacity="0.12" stroke="#38bdf8" stroke-width="1" opacity="0.3"/>
+    <text x="60" y="23" font-family="monospace" font-size="14" fill="#38bdf8" text-anchor="middle">REST API</text>
+
+    <rect x="140" y="0" width="80" height="36" rx="18" fill="#818cf8" opacity="0.12" stroke="#818cf8" stroke-width="1" opacity="0.3"/>
+    <text x="180" y="23" font-family="monospace" font-size="14" fill="#818cf8" text-anchor="middle">CLI</text>
+
+    <rect x="240" y="0" width="120" height="36" rx="18" fill="#34d399" opacity="0.12" stroke="#34d399" stroke-width="1" opacity="0.3"/>
+    <text x="300" y="23" font-family="monospace" font-size="14" fill="#34d399" text-anchor="middle">Wechaty</text>
+
+    <rect x="380" y="0" width="140" height="36" rx="18" fill="#fbbf24" opacity="0.12" stroke="#fbbf24" stroke-width="1" opacity="0.3"/>
+    <text x="450" y="23" font-family="monospace" font-size="14" fill="#fbbf24" text-anchor="middle">OpenClaw</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="80" y="560" font-family="monospace" font-size="18" fill="#475569">github.com/thisnick/agent-wechat</text>
+
+  <!-- Docs badge -->
+  <rect x="1000" y="540" width="120" height="36" rx="8" fill="#38bdf8" opacity="0.15" stroke="#38bdf8" stroke-width="1"/>
+  <text x="1060" y="564" font-family="monospace" font-size="16" fill="#38bdf8" text-anchor="middle">docs</text>
+</svg>

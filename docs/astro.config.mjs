@@ -15,6 +15,43 @@ export default defineConfig({
       title: 'agent-wechat',
       description: 'A programmable WeChat interface for AI agents and automation.',
       customCss: ['./src/styles/custom.css'],
+      head: [
+        {
+          tag: 'meta',
+          attrs: {
+            property: 'og:image',
+            content: 'https://thisnick.github.io/agent-wechat/og-image.svg',
+          },
+        },
+        {
+          tag: 'meta',
+          attrs: {
+            property: 'og:image:width',
+            content: '1200',
+          },
+        },
+        {
+          tag: 'meta',
+          attrs: {
+            property: 'og:image:height',
+            content: '630',
+          },
+        },
+        {
+          tag: 'meta',
+          attrs: {
+            name: 'twitter:card',
+            content: 'summary_large_image',
+          },
+        },
+        {
+          tag: 'meta',
+          attrs: {
+            name: 'twitter:image',
+            content: 'https://thisnick.github.io/agent-wechat/og-image.svg',
+          },
+        },
+      ],
       social: {
         github: 'https://github.com/thisnick/agent-wechat',
       },
