@@ -1,0 +1,14 @@
+---
+import Default from '@astrojs/starlight/components/Head.astro';
+
+const { entry } = Astro.locals.starlightRoute;
+const slug = entry.id.replace(/\.(md|mdx)$/, '').replace(/\/index$/, '') || 'index';
+const ogImagePath = `/agent-wechat/og/${slug}.png`;
+const ogImageUrl = Astro.site ? new URL(ogImagePath, Astro.site).href : ogImagePath;
+---
+
+<Default {...Astro.props}><slot /></Default>
+<meta property="og:image" content={ogImageUrl} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:image" content={ogImageUrl} />

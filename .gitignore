@@ -21,6 +21,8 @@ packages/agent-server-rust/bindings/
 # Build caches
 .turbo
 docs/.astro
+docs/public/og-image.png
+docs/public/og/
 
 # Local data
 .data

@@ -1,57 +1,26 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { remarkBasePath } from './remark-base-path.mjs';
+import { ogImage } from './og-image-integration.mjs';
 
 const base = '/agent-wechat';
+const site = 'https://thisnick.github.io';
 
 export default defineConfig({
-  site: 'https://thisnick.github.io',
+  site,
   base,
   markdown: {
     remarkPlugins: [remarkBasePath(base)],
   },
   integrations: [
+    ogImage(),
     starlight({
       title: 'agent-wechat',
       description: 'A programmable WeChat interface for AI agents and automation.',
       customCss: ['./src/styles/custom.css'],
-      head: [
-        {
-          tag: 'meta',
-          attrs: {
-            property: 'og:image',
-            content: 'https://thisnick.github.io/agent-wechat/og-image.svg',
-          },
-        },
-        {
-          tag: 'meta',
-          attrs: {
-            property: 'og:image:width',
-            content: '1200',
-          },
-        },
-        {
-          tag: 'meta',
-          attrs: {
-            property: 'og:image:height',
-            content: '630',
-          },
-        },
-        {
-          tag: 'meta',
-          attrs: {
-            name: 'twitter:card',
-            content: 'summary_large_image',
-          },
-        },
-        {
-          tag: 'meta',
-          attrs: {
-            name: 'twitter:image',
-            content: 'https://thisnick.github.io/agent-wechat/og-image.svg',
-          },
-        },
-      ],
+      components: {
+        Head: './src/components/Head.astro',
+      },
       social: {
         github: 'https://github.com/thisnick/agent-wechat',
       },
