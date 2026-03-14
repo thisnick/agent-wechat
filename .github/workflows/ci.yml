@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'packages/**'
+      - 'docs/**'
       - 'pnpm-lock.yaml'
       - 'package.json'
       - 'pnpm-workspace.yaml'
@@ -17,6 +18,7 @@ jobs:
     outputs:
       ts: ${{ steps.filter.outputs.ts }}
       rust: ${{ steps.filter.outputs.rust }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v4
@@ -37,6 +39,10 @@ jobs:
               - '.github/workflows/ci.yml'
             rust:
               - 'packages/agent-server-rust/**'
+              - '.github/workflows/ci.yml'
+            docs:
+              - 'docs/**'
+              - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
 
   ts:
@@ -88,3 +94,28 @@ jobs:
 
       - name: Cargo test
         run: cargo test --manifest-path packages/agent-server-rust/Cargo.toml
+
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter @agent-wechat/docs
+
+      - name: Build docs
+        run: pnpm --filter @agent-wechat/docs build
