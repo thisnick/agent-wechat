@@ -12,3 +12,11 @@ VERSION=$(node -p "require('$RUST_DIR/package.json').version")
 sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$RUST_DIR/Cargo.toml"
 
 echo "Synced Cargo.toml version to $VERSION"
+
+# Update Cargo.lock to reflect the new version
+if command -v cargo &> /dev/null; then
+  (cd "$RUST_DIR" && cargo update --workspace)
+  echo "Updated Cargo.lock"
+else
+  echo "Warning: cargo not found, Cargo.lock not updated" >&2
+fi
