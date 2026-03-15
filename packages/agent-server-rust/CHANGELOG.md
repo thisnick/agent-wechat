@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.11.7
+
+### Patch Changes
+
+- [#129](https://github.com/thisnick/agent-wechat/pull/129) [`22f132d`](https://github.com/thisnick/agent-wechat/commit/22f132d362c7362151ad670557de83d3d0ce2f29) Thanks [@thisnick](https://github.com/thisnick)! - Fix VNC redirect encoding by passing token as a separate query parameter instead of embedding it in the URL path
+
 ## 0.11.6
 
 ### Patch Changes
