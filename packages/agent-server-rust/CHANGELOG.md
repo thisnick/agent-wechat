@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.11.8
+
+### Patch Changes
+
+- [#132](https://github.com/thisnick/agent-wechat/pull/132) [`771a1c1`](https://github.com/thisnick/agent-wechat/commit/771a1c1540a6d1846a440a095121be876a7c7916) Thanks [@thisnick](https://github.com/thisnick)! - Fix VNC WebSocket auth: keep token embedded in the noVNC `path` query param so it is passed to the WebSocket connection, and remove it from the visible URL for security
+
 ## 0.11.7
 
 ### Patch Changes
