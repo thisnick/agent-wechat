@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.11.9
+
+### Patch Changes
+
+- [#134](https://github.com/thisnick/agent-wechat/pull/134) [`2ceb514`](https://github.com/thisnick/agent-wechat/commit/2ceb51456bfb0cbc6fe96cba4aa3e2c25f653373) Thanks [@thisnick](https://github.com/thisnick)! - Keep token query param in VNC URL so the page works when accessed directly via bookmark or shared link
+
 ## 0.11.8
 
 ### Patch Changes
