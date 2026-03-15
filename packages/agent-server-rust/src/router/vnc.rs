@@ -143,9 +143,11 @@ async fn serve_novnc_with_token(query: &str) -> Response {
             var autoconnect = {};
             // Set URL params that noVNC reads
             var url = new URL(window.location);
-            url.searchParams.set('path', 'vnc/websockify');
+            url.searchParams.set('path', 'vnc/websockify?token=' + encodeURIComponent(token));
             if (autoconnect) url.searchParams.set('autoconnect', 'true');
-            // Keep token as a separate query param — noVNC natively passes it to the WebSocket connection
+            // Remove our token param from the visible URL (keep it out of browser history);
+            // the token is embedded inside the 'path' param which noVNC uses for the WebSocket URL.
+            url.searchParams.delete('token');
             window.history.replaceState({{}}, '', url);
         }})();
         </script>"#,
