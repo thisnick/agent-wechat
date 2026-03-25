@@ -222,6 +222,20 @@ BUILD_PROFILES = {
             "41ec867286d3b4af910b6c5bb8c9ee49"
         ),
     },
+    # WeChat Linux 4.x aarch64 (BuildID: 3eda8254...)
+    "3eda8254": {
+        "image_xor_mask": bytes.fromhex(
+            "ce41c7c149777ded7b5b2f29d277e277"
+            "dcc8a3dc80f5b623ebe0befe633dd9a8"
+        ),
+    },
+    # WeChat Linux 4.x x86_64 (BuildID: eba86b80...)
+    "eba86b80": {
+        "image_xor_mask": bytes.fromhex(
+            "29c63ae609ae3c9826a786367d9a4c3a"
+            "7146d19c2fcbfac10f6ed2aa2a4034f4"
+        ),
+    },
 }
 
 

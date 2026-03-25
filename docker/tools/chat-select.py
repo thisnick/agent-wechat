@@ -51,6 +51,31 @@ BUILD_PROFILES = {
         "VEC_KEY_OFF": 0x168,
         "VEC_MAP_OFF": 0xe8,
     },
+    # WeChat Linux 4.x aarch64 (BuildID: 3eda8254...)
+    "3eda8254": {
+        "ARCH": "aarch64",
+        "SELECT_SESSION": 0x3937ff8,
+        "USERNAME_OFF": 0x120,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0x7ce8ea8,
+        "CTRL_OFF": 0xd8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x120,
+        "VEC_KEY_OFF": 0x158,
+    },
+    # WeChat Linux 4.x x86_64 (BuildID: eba86b80...)
+    "eba86b80": {
+        "ARCH": "x86_64",
+        "SELECT_SESSION": 0x3988e60,
+        "USERNAME_OFF": 0x120,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0x8197d10,
+        "CTRL_OFF": 0x180,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x98,
+        "VEC_KEY_OFF": 0x168,
+        "VEC_MAP_OFF": 0xe8,
+    },
 }
 
 FRIDA_BIN = shutil.which("frida") or "/usr/local/bin/frida"
@@ -504,15 +529,18 @@ function readFilteredUsername(filteredIdx) {{
 
 console.log("READY target_filtered=" + TARGET + " -> " + readFilteredUsername(TARGET));
 
-var count = 0;
-Interceptor.attach(addr, {{
+var hook = Interceptor.attach(addr, {{
     onEnter: function(args) {{
         var orig = args[1].toInt32();
-        if (count >= 2) return;
         console.log("REDIRECT " + orig + " -> " + TARGET + " (" + readFilteredUsername(TARGET) + ")");
         args[1] = ptr(TARGET);
         this.context.{reg} = TARGET;
-        count++;
+    }},
+    onLeave: function(retval) {{
+        // Detach after selectSession returns so the prologue is restored
+        // while no thread is inside the function.
+        hook.detach();
+        console.log("DETACHED");
     }}
 }});
 """)
@@ -526,7 +554,7 @@ Interceptor.attach(addr, {{
                                  timeout=5, capture_output=True, text=True)
     log(f"[chat-select] Click result: {click_result.stdout.strip()}")
 
-    # Read output looking for REDIRECT confirmation
+    # Read output looking for DETACHED confirmation (hook fires once then detaches)
     lines = []
     start = time.time()
     while time.time() - start < 5:
@@ -535,7 +563,7 @@ Interceptor.attach(addr, {{
             break
         line = line.rstrip()
         lines.append(line)
-        if "REDIRECT" in line:
+        if "DETACHED" in line:
             break
 
     kill_frida(proc)
