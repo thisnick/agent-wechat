@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.11.12
+
+### Patch Changes
+
+- [#141](https://github.com/thisnick/agent-wechat/pull/141) [`5bd2938`](https://github.com/thisnick/agent-wechat/commit/5bd2938bda04def5d38b9e32146c3c5b26d45baf) Thanks [@thisnick](https://github.com/thisnick)! - Return "pending" instead of "unsupported" when voice data is not yet available in the database, so the extension retries instead of giving up.
+
 ## 0.11.11
 
 ### Patch Changes

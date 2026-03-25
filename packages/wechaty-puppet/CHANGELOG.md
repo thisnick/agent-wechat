@@ -1,5 +1,7 @@
 # @agent-wechat/wechaty-puppet
 
+## 0.11.12
+
 ## 0.11.11
 
 ## 0.11.10
