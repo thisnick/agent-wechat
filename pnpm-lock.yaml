@@ -75,8 +75,8 @@ importers:
         specifier: ^0.25.0
         version: 0.25.12
       openclaw:
-        specifier: 2026.3.23-2
-        version: 2026.3.23-2(@napi-rs/canvas@0.1.97)
+        specifier: '>=2026.3.23 <2027.0.0'
+        version: 2026.3.23(@napi-rs/canvas@0.1.97)
       typescript:
         specifier: ^5.4.5
         version: 5.9.3
@@ -4125,8 +4125,8 @@ packages:
       zod:
         optional: true
 
-  openclaw@2026.3.23-2:
-    resolution: {integrity: sha512-xjBXnzL9LkOlsWZd2y8VHzn9SuHMbTbHtuBFzZJjAnx+qm6yIvXpnCnVWh8iaOkuN8a6nOiLl5WAcgRK1k3+LQ==}
+  openclaw@2026.3.23:
+    resolution: {integrity: sha512-CSenO9Q+WePEzhzr3vIgx70GLanQVLcwgtItxT7gy1XtE7uiAVLBTqOxn2nc6BGGX3R3u9RqOpUh/vyAPvameA==}
     engines: {node: '>=22.16.0'}
     hasBin: true
     peerDependencies:
@@ -7163,8 +7163,8 @@ snapshots:
   '@mistralai/mistralai@1.14.1':
     dependencies:
       ws: 8.20.0
-      zod: 4.3.6
-      zod-to-json-schema: 3.25.1(zod@4.3.6)
+      zod: 3.25.76
+      zod-to-json-schema: 3.25.1(zod@3.25.76)
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -8957,7 +8957,7 @@ snapshots:
   file-box@1.5.5:
     dependencies:
       brolog: 1.14.2
-      clone-class: 1.1.3
+      clone-class: 1.0.3
       jimp: 0.16.13
       jsqr: 1.4.0
       mime: 3.0.0
@@ -10520,7 +10520,7 @@ snapshots:
       ws: 8.20.0
       zod: 4.3.6
 
-  openclaw@2026.3.23-2(@napi-rs/canvas@0.1.97):
+  openclaw@2026.3.23(@napi-rs/canvas@0.1.97):
     dependencies:
       '@agentclientprotocol/sdk': 0.16.1(zod@4.3.6)
       '@anthropic-ai/vertex-sdk': 0.14.4(zod@4.3.6)
@@ -11959,7 +11959,7 @@ snapshots:
       wechaty-grpc: 1.5.2
       wechaty-puppet: 1.20.2(rxjs@7.8.2)
       wechaty-redux: 1.20.2(brolog@1.14.2)(wechaty-puppet@1.20.2(rxjs@7.8.2))(wechaty@1.20.2(@swc/core@1.15.18)(brolog@1.14.2)(redux@4.2.1)(rxjs@7.8.2))
-      wechaty-token: 1.1.2
+      wechaty-token: 1.0.6
     transitivePeerDependencies:
       - brolog
       - debug
