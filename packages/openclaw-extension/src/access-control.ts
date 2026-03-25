@@ -1,11 +1,13 @@
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import {
   buildChannelKeyCandidates,
-  resolveAllowlistProviderRuntimeGroupPolicy,
   resolveChannelEntryMatchWithFallback,
+} from "openclaw/plugin-sdk/channel-targets";
+import {
+  resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
-  resolveSenderCommandAuthorization,
-  type OpenClawConfig,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/config-runtime";
+import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk/command-auth";
 import type { ResolvedWeChatAccount, WeChatDmPolicy, WeChatGroupPolicy } from "./types.js";
 
 type WeChatGroupEntry = NonNullable<ResolvedWeChatAccount["groups"]>[string];

@@ -1,10 +1,10 @@
-import type { ChannelPlugin, ChannelMeta } from "openclaw/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
+import type { ChannelPlugin } from "openclaw/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { resolveWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { startWeChatMonitor } from "./monitor.js";
-import { wechatOnboardingAdapter } from "./onboarding.js";
+
 import { collectWeChatStatusIssues } from "./status.js";
 import { WeChatClient } from "@agent-wechat/shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
@@ -12,7 +12,7 @@ import { loginStart, loginWait, loginTerminal } from "./login.js";
 import { createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
 
-const meta: ChannelMeta = {
+const meta: ChannelPlugin["meta"] = {
   id: "wechat",
   label: "WeChat",
   selectionLabel: "WeChat (微信)",
@@ -511,6 +511,4 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     },
   },
 
-  // ---- Onboarding adapter ----
-  onboarding: wechatOnboardingAdapter,
 };
