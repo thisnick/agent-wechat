@@ -132,7 +132,7 @@ export interface GetMediaParams {
 // Note: MediaResult kept handwritten (Rust uses plain string for type,
 // TS has richer string literal union)
 export interface MediaResult {
-  type: "image" | "emoji" | "voice" | "file" | "video" | "unsupported";
+  type: "image" | "emoji" | "voice" | "file" | "video" | "pending" | "unsupported";
   data?: string;      // base64 for image/voice/file
   url?: string;       // CDN URL for emoji
   format: string;

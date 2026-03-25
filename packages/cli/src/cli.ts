@@ -692,6 +692,10 @@ async function cmdMedia(client: WeChatClient, chatId: string, localId: number, o
     console.error("No media found for this message (unsupported type or not found).");
     process.exit(1);
   }
+  if (result.type === "pending") {
+    console.error("Media not yet available. WeChat may still be downloading it — try again shortly.");
+    process.exit(1);
+  }
 
   const outFile = outputPath ?? result.filename;
 

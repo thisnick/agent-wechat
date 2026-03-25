@@ -25,6 +25,16 @@ fn unsupported() -> MediaResult {
     }
 }
 
+fn pending() -> MediaResult {
+    MediaResult {
+        media_type: "pending".into(),
+        data: None,
+        url: None,
+        format: String::new(),
+        filename: String::new(),
+    }
+}
+
 fn account_base_paths(account_dir: &str) -> [String; 2] {
     [
         format!("/home/wechat/xwechat_files/{account_dir}"),
@@ -582,15 +592,9 @@ fn get_video_data(
         return thumb;
     }
 
-    // Video exists but no file found on disk
+    // Video exists but no file found on disk yet
     tracing::warn!("[media:video] no video file found for local_id={}", local_id);
-    MediaResult {
-        media_type: "video".into(),
-        data: None,
-        url: None,
-        format: "mp4".into(),
-        filename: format!("msg_{local_id}.mp4"),
-    }
+    pending()
 }
 
 /// Extract the 32-char hex file hash from a MessageResourceInfo packed_info blob.
@@ -855,7 +859,7 @@ fn get_voice_data(
         };
     }
 
-    unsupported()
+    pending()
 }
 
 // ── File attachment ──────────────────────────────────────────────────────────
@@ -895,13 +899,7 @@ fn get_file_attachment(
     }
 
     // File not yet downloaded by WeChat
-    MediaResult {
-        media_type: "file".into(),
-        data: None,
-        url: None,
-        format: ext,
-        filename,
-    }
+    pending()
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
