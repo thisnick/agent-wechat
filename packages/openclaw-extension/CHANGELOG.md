@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.11.11
+
+### Patch Changes
+
+- [#139](https://github.com/thisnick/agent-wechat/pull/139) [`c10d6ab`](https://github.com/thisnick/agent-wechat/commit/c10d6abc1dd96b1c4c6ef1b65968a62d6e0ace08) Thanks [@thisnick](https://github.com/thisnick)! - Add build profiles for new WeChat builds (3eda8254 aarch64, eba86b80 x86_64) with updated chat selection offsets and image XOR masks. Detach Frida hook after selectSession returns to restore function prologue.
+
 ## 0.11.10
 
 ### Patch Changes
