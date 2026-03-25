@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.11.10
+
+### Patch Changes
+
+- [#137](https://github.com/thisnick/agent-wechat/pull/137) [`9cb14d9`](https://github.com/thisnick/agent-wechat/commit/9cb14d9d0c153045805011b480b1fad780b9865c) Thanks [@thisnick](https://github.com/thisnick)! - Update openclaw dependency and fix breaking changes from plugin SDK refactor. Imports moved to dedicated subpaths (`channel-targets`, `config-runtime`, `command-auth`, `account-id`, `channel-reply-pipeline`). Removed deprecated `onboarding` adapter.
+
 ## 0.11.9
 
 ## 0.11.8
