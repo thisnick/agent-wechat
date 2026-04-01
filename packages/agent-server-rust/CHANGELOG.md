@@ -1,5 +1,15 @@
 # @agent-wechat/agent-server
 
+## 0.11.13
+
+### Patch Changes
+
+- [#143](https://github.com/thisnick/agent-wechat/pull/143) [`ba19907`](https://github.com/thisnick/agent-wechat/commit/ba19907d72d2e3a347923eb96a5c69ed9c5dc643) Thanks [@kyan-du](https://github.com/kyan-du)! - fix: handle non-ASCII filenames in file send
+
+  - Use portable `iconv` check instead of GNU-only `grep -P` for non-ASCII path detection in paste-file
+  - Sanitize filenames to ASCII-safe temp paths so WeChat (Qt/POSIX locale) can open them
+  - Return proper error responses on base64 decode or file write failures instead of silent success
+
 ## 0.11.12
 
 ### Patch Changes
