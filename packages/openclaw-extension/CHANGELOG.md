@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.11.15
+
+### Patch Changes
+
+- [#150](https://github.com/thisnick/agent-wechat/pull/150) [`80621fe`](https://github.com/thisnick/agent-wechat/commit/80621fec95a51b815785f92fa28403092caa0abd) Thanks [@thisnick](https://github.com/thisnick)! - fix(ci): pin npm to 11.12.1 for OIDC trusted publishing in release workflow
+
 ## 0.11.14
 
 ### Patch Changes
