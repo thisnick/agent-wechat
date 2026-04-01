@@ -30,7 +30,8 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
-      # npm bundled with Node 22 supports OIDC provenance; no upgrade needed
+      # npm >= 11 required for OIDC trusted publishing
+      - run: npm install -g npm@11.12.1
 
       - run: pnpm install --frozen-lockfile
 
