@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.11.14
+
+### Patch Changes
+
+- [#148](https://github.com/thisnick/agent-wechat/pull/148) [`52056d9`](https://github.com/thisnick/agent-wechat/commit/52056d9b91243adcd890bf351af4a4a0e6c27604) Thanks [@thisnick](https://github.com/thisnick)! - Remove dead onboarding adapter that was deprecated in v0.11.10 but never deleted
+
 ## 0.11.13
 
 ## 0.11.12

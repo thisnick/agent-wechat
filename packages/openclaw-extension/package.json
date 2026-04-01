@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/wechat",
-  "version": "0.11.13",
+  "version": "0.11.14",
   "type": "module",
   "files": [
     "dist",
