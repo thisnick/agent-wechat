@@ -3,6 +3,7 @@ import type {
   Contact,
   Message,
   SendResult,
+  ReceivePaymentResult,
   MediaResult,
   LoginResult,
   LoginSubscriptionEvent,
@@ -190,6 +191,31 @@ export class WeChatClient {
 
   async sendMessage(params: SendParams): Promise<SendResult> {
     return this.post("/api/messages/send", params);
+  }
+
+  async receiveTransfer(
+    chatId: string,
+    transactionId?: string,
+    localId?: number,
+  ): Promise<ReceivePaymentResult> {
+    return this.post(
+      `/api/messages/${encodeURIComponent(chatId)}/transfer/receive`,
+      { transactionId, localId },
+    );
+  }
+
+  async receiveRedPacket(
+    chatId: string,
+    options?: {
+      localId?: number;
+      sendId?: string;
+      payMsgId?: string;
+    },
+  ): Promise<ReceivePaymentResult> {
+    return this.post(
+      `/api/messages/${encodeURIComponent(chatId)}/red-packet/receive`,
+      options ?? {},
+    );
   }
 
   // ---- Debug ----

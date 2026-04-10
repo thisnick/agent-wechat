@@ -50,6 +50,8 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        .route("/api/messages/{chat_id}/transfer/receive", post(messages::receive_transfer))
+        .route("/api/messages/{chat_id}/red-packet/receive", post(messages::receive_red_packet))
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))

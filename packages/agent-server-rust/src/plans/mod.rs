@@ -2,6 +2,7 @@ pub mod auth_status;
 pub mod chat_open;
 pub mod login;
 pub mod logout;
+pub mod receive_transfer;
 pub mod send_message;
 
 use crate::ia::types::{AppState, IdentifiedStates, SelectedAction, A11yNode};
