@@ -168,8 +168,31 @@ export const messageSchema = z.object({
   sender: z.string().optional(),
   senderName: z.string().optional(),
   type: z.number().int(),
+  kind: z.string(),
+  appMsgType: z.number().int().optional(),
   content: z.string(),
   timestamp: z.string(),
+  isMentioned: z.boolean().optional(),
+  isSelf: z.boolean().optional(),
+  isReceived: z.boolean().optional(),
+  receivedAt: z.string().optional(),
+  reply: z.object({
+    sender: z.string().optional(),
+    content: z.string(),
+  }).optional(),
+  payment: z.object({
+    kind: z.string(),
+    appMsgType: z.number().int().optional(),
+    amountText: z.string().optional(),
+    amountCents: z.number().int().optional(),
+    currency: z.string().optional(),
+    transactionId: z.string().optional(),
+    transferId: z.string().optional(),
+    sendId: z.string().optional(),
+    payMsgId: z.string().optional(),
+    receiverTitle: z.string().optional(),
+    nativeUrl: z.string().optional(),
+  }).optional(),
 });
 
 export const listMessagesParamsSchema = z.object({
@@ -195,6 +218,22 @@ export const sendResultSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
   error: z.string().optional(),
+});
+
+export const receivePaymentResultSchema = z.object({
+  success: z.boolean(),
+  kind: z.string(),
+  error: z.string().optional(),
+  localId: z.number().int().optional(),
+  isReceived: z.boolean().optional(),
+  receivedAt: z.string().optional(),
+  amountText: z.string().optional(),
+  amountCents: z.number().int().optional(),
+  currency: z.string().optional(),
+  transactionId: z.string().optional(),
+  transferId: z.string().optional(),
+  sendId: z.string().optional(),
+  payMsgId: z.string().optional(),
 });
 
 export const getMediaParamsSchema = z.object({
@@ -237,6 +276,7 @@ export type Message = z.infer<typeof messageSchema>;
 export type ListMessagesParams = z.infer<typeof listMessagesParamsSchema>;
 export type SendParams = z.infer<typeof sendParamsSchema>;
 export type SendResult = z.infer<typeof sendResultSchema>;
+export type ReceivePaymentResult = z.infer<typeof receivePaymentResultSchema>;
 export type GetMediaParams = z.infer<typeof getMediaParamsSchema>;
 export type MediaResult = z.infer<typeof mediaResultSchema>;
 export type AgentConfig = z.infer<typeof agentConfigSchema>;

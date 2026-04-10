@@ -58,6 +58,29 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function formatPaymentBody(msg: Message): string | undefined {
+  if (msg.kind !== "transfer" && msg.kind !== "red_packet") {
+    return undefined;
+  }
+
+  const label = msg.kind === "transfer" ? "Transfer" : "Red packet";
+  const status = msg.isReceived == null
+    ? undefined
+    : msg.isReceived
+      ? "received"
+      : "unreceived";
+  const parts = [label];
+
+  if (msg.payment?.amountText) {
+    parts.push(msg.payment.amountText);
+  }
+  if (status) {
+    parts.push(status);
+  }
+
+  return `[${parts.join(" - ")}] ${msg.content || ""}`.trim();
+}
+
 /**
  * Poll for media data, retrying until data is available or max attempts reached.
  */
@@ -296,9 +319,10 @@ async function prepareMessage(
   let hasMedia = false;
 
   const baseType = msg.type & 0x7fffffff;
+  const isPaymentMessage = msg.kind === "transfer" || msg.kind === "red_packet";
   // Type 49 (appmsg) may contain file attachments — the server resolves subtypes
   // and returns type="file" for subtype 6. Try fetching media for type 49 as well.
-  const mayHaveMedia = MEDIA_TYPES.has(baseType) || baseType === 49;
+  const mayHaveMedia = !isPaymentMessage && (MEDIA_TYPES.has(baseType) || baseType === 49);
 
   if (mayHaveMedia) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
@@ -345,7 +369,7 @@ async function prepareMessage(
   }
 
   const timestamp = new Date(msg.timestamp).getTime();
-  let rawBody = msg.content || "";
+  let rawBody = formatPaymentBody(msg) ?? msg.content ?? "";
   if (mediaPath && mediaMime) {
     if (!rawBody) {
       if (mediaMime.startsWith("audio/")) {
