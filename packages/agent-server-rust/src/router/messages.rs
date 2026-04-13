@@ -3,18 +3,23 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::create_context;
 use crate::db::get_db;
+use crate::db::queries::{get_payment_receipts, mark_payment_received, remove_payment_receipts};
 use crate::execution::run_execution_loop;
-use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
+use crate::ia::types::{
+    MediaResult, Message, PaymentInfo, ReceivePaymentResult, SendResult, SubscriptionEvent,
+};
+use crate::plans::receive_transfer::{ReceiveTransferParams, ReceiveTransferPlan};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
+use crate::sessions::manager::get_session;
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
-use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
+use crate::tools::wechat_keys::{extract_keys_async, get_image_keys, get_stored_keys, store_keys};
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
-use crate::sessions::manager::get_session;
 
 #[derive(Deserialize)]
 pub struct ListParams {
@@ -66,17 +71,25 @@ pub async fn list_messages(
         }
     }
 
-    if !keys.keys().any(|k| k.starts_with("message_") && k.ends_with(".db") && !k.contains("fts") && !k.contains("resource")) {
+    if !keys.keys().any(|k| {
+        k.starts_with("message_")
+            && k.ends_with(".db")
+            && !k.contains("fts")
+            && !k.contains("resource")
+    }) {
         return Json(Vec::new());
     }
 
-    Json(wechat_messages::list_messages(
+    let mut messages = wechat_messages::list_messages(
         &logged_in_user,
         &keys,
         &chat_id,
         params.limit,
         params.offset,
-    ))
+    );
+    apply_payment_receipt_state(&session.id, &chat_id, &mut messages);
+
+    Json(messages)
 }
 
 pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
@@ -196,9 +209,17 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
             "image/gif" => ".gif",
             _ => ".png",
         };
-        let path = format!("/tmp/send_image_{}{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), ext);
-        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data) {
+        let path = format!(
+            "/tmp/send_image_{}{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            ext
+        );
+        if let Ok(bytes) =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)
+        {
             if std::fs::write(&path, &bytes).is_ok() {
                 image_mime = Some(img.mime_type.clone());
                 image_path = Some(path);
@@ -214,18 +235,30 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         // path stays portable across locales.  The dot is preserved so that
         // file extensions survive (e.g. "遗憾.pdf" → "__.pdf"); the mangled
         // stem is acceptable since this is a transient temp path.
-        let safe_name: String = f.filename.chars().map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        }).collect();
-        let path = format!("/tmp/send_file_{}_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), safe_name);
+        let safe_name: String = f
+            .filename
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = format!(
+            "/tmp/send_file_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            safe_name
+        );
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &f.data) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
-                Ok(_) => { file_path = Some(path); }
+                Ok(_) => {
+                    file_path = Some(path);
+                }
                 Err(e) => {
                     return Json(SendResult {
                         success: false,
@@ -273,4 +306,553 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         success: result.success,
         error: result.error,
     })
+}
+
+#[derive(Deserialize)]
+pub struct ReceiveTransferInput {
+    #[serde(rename = "transactionId")]
+    transaction_id: Option<String>,
+    #[serde(rename = "localId")]
+    local_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct ReceiveRedPacketInput {
+    #[serde(rename = "localId")]
+    local_id: Option<i64>,
+    #[serde(rename = "sendId")]
+    send_id: Option<String>,
+    #[serde(rename = "payMsgId")]
+    pay_msg_id: Option<String>,
+}
+
+fn payment_result(
+    kind: &str,
+    success: bool,
+    error: Option<String>,
+    local_id: Option<i64>,
+    is_received: Option<bool>,
+    received_at: Option<String>,
+    payment: Option<&PaymentInfo>,
+) -> ReceivePaymentResult {
+    ReceivePaymentResult {
+        success,
+        kind: kind.to_string(),
+        error,
+        local_id,
+        is_received,
+        received_at,
+        amount_text: payment.and_then(|p| p.amount_text.clone()),
+        amount_cents: payment.and_then(|p| p.amount_cents),
+        currency: payment.and_then(|p| p.currency.clone()),
+        transaction_id: payment.and_then(|p| p.transaction_id.clone()),
+        transfer_id: payment.and_then(|p| p.transfer_id.clone()),
+        send_id: payment.and_then(|p| p.send_id.clone()),
+        pay_msg_id: payment.and_then(|p| p.pay_msg_id.clone()),
+    }
+}
+
+fn apply_payment_receipt_state(session_id: &str, chat_id: &str, messages: &mut [Message]) {
+    let receipts = {
+        let db = get_db();
+        get_payment_receipts(&db, session_id, chat_id)
+    };
+
+    let stale_receipts = reconcile_payment_receipt_state(messages, &receipts);
+    if !stale_receipts.is_empty() {
+        let db = get_db();
+        remove_payment_receipts(&db, session_id, chat_id, &stale_receipts);
+    }
+}
+
+fn reconcile_payment_receipt_state(
+    messages: &mut [Message],
+    receipts: &HashMap<i64, String>,
+) -> Vec<i64> {
+    let mut stale_receipts = Vec::new();
+
+    for message in messages {
+        if message.payment.is_none() {
+            continue;
+        }
+
+        let is_transfer = message
+            .payment
+            .as_ref()
+            .is_some_and(|payment| payment.kind == "transfer");
+
+        if is_transfer {
+            if message.is_received == Some(true) {
+                message.received_at = receipts.get(&message.local_id).cloned();
+            } else {
+                if receipts.contains_key(&message.local_id) {
+                    stale_receipts.push(message.local_id);
+                }
+                message.is_received = Some(false);
+                message.received_at = None;
+            }
+            continue;
+        }
+
+        if let Some(received_at) = receipts.get(&message.local_id) {
+            message.is_received = Some(true);
+            message.received_at = Some(received_at.clone());
+        } else if message.is_received != Some(true) {
+            message.is_received = Some(false);
+            message.received_at = None;
+        }
+    }
+
+    stale_receipts
+}
+
+async fn load_logged_in_session_and_keys() -> Result<
+    (
+        crate::ia::types::Session,
+        String,
+        std::collections::HashMap<String, String>,
+    ),
+    ReceivePaymentResult,
+> {
+    let session = get_session("default").ok_or_else(|| {
+        payment_result(
+            "unknown",
+            false,
+            Some("No session available".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+    })?;
+
+    let logged_in_user = session.logged_in_user.clone().ok_or_else(|| {
+        payment_result(
+            "unknown",
+            false,
+            Some("NOT_LOGGED_IN".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+    })?;
+
+    let mut keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, &logged_in_user)
+    };
+
+    let on_disk = list_account_dbs(&logged_in_user);
+    let has_missing_db = on_disk.iter().any(|name| {
+        (name.starts_with("message_")
+            && name.ends_with(".db")
+            && !name.contains("fts")
+            && !name.contains("resource"))
+            && !keys.contains_key(name.as_str())
+    });
+
+    if has_missing_db {
+        if let Some(pid) = find_wechat_pid() {
+            let extracted = extract_keys_async(pid).await;
+            if !extracted.is_empty() {
+                let db = get_db();
+                store_keys(&db, &session.id, &logged_in_user, &extracted);
+                keys = get_stored_keys(&db, &session.id, &logged_in_user);
+            }
+        }
+    }
+
+    if !keys.keys().any(|k| {
+        k.starts_with("message_")
+            && k.ends_with(".db")
+            && !k.contains("fts")
+            && !k.contains("resource")
+    }) {
+        return Err(payment_result(
+            "unknown",
+            false,
+            Some("MESSAGE_DB_UNAVAILABLE".to_string()),
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    Ok((session, logged_in_user, keys))
+}
+
+fn find_payment_message<'a>(
+    messages: &'a [Message],
+    kind: &str,
+    local_id: Option<i64>,
+    transaction_id: Option<&str>,
+    send_id: Option<&str>,
+    pay_msg_id: Option<&str>,
+) -> Option<&'a Message> {
+    messages.iter().find(|message| {
+        let payment = match &message.payment {
+            Some(payment) if payment.kind == kind => payment,
+            _ => return false,
+        };
+
+        if let Some(local_id) = local_id {
+            return message.local_id == local_id;
+        }
+
+        if let Some(transaction_id) = transaction_id {
+            return payment.transaction_id.as_deref() == Some(transaction_id);
+        }
+
+        if let Some(send_id) = send_id {
+            return payment.send_id.as_deref() == Some(send_id);
+        }
+
+        if let Some(pay_msg_id) = pay_msg_id {
+            return payment.pay_msg_id.as_deref() == Some(pay_msg_id);
+        }
+
+        true
+    })
+}
+
+fn is_receivable_transfer_message(message: &Message) -> bool {
+    match message.payment.as_ref() {
+        Some(payment) if payment.kind == "transfer" => {
+            message.is_self != Some(true) && message.is_received != Some(true)
+        }
+        _ => false,
+    }
+}
+
+fn find_transfer_message_for_receive<'a>(
+    messages: &'a [Message],
+    local_id: Option<i64>,
+    transaction_id: Option<&str>,
+) -> Option<&'a Message> {
+    if local_id.is_some() || transaction_id.is_some() {
+        return find_payment_message(messages, "transfer", local_id, transaction_id, None, None);
+    }
+
+    messages
+        .iter()
+        .find(|message| is_receivable_transfer_message(message))
+}
+
+fn reload_transfer_message_state(
+    logged_in_user: &str,
+    keys: &std::collections::HashMap<String, String>,
+    session_id: &str,
+    chat_id: &str,
+    local_id: i64,
+    transaction_id: Option<&str>,
+) -> Option<Message> {
+    let mut messages = wechat_messages::list_messages(logged_in_user, keys, chat_id, 200, 0);
+    apply_payment_receipt_state(session_id, chat_id, &mut messages);
+
+    find_payment_message(
+        &messages,
+        "transfer",
+        Some(local_id),
+        transaction_id,
+        None,
+        None,
+    )
+    .cloned()
+    .or_else(|| {
+        transaction_id.and_then(|tx| {
+            find_payment_message(&messages, "transfer", None, Some(tx), None, None).cloned()
+        })
+    })
+}
+
+async fn wait_for_transfer_received_state(
+    logged_in_user: &str,
+    keys: &std::collections::HashMap<String, String>,
+    session_id: &str,
+    chat_id: &str,
+    local_id: i64,
+    transaction_id: Option<&str>,
+    max_attempts: usize,
+    poll_interval_ms: u64,
+) -> Option<Message> {
+    let mut last_observed = None;
+
+    for attempt in 0..max_attempts {
+        let observed = reload_transfer_message_state(
+            logged_in_user,
+            keys,
+            session_id,
+            chat_id,
+            local_id,
+            transaction_id,
+        );
+        if observed.as_ref().and_then(|message| message.is_received) == Some(true) {
+            return observed;
+        }
+        last_observed = observed;
+
+        if attempt + 1 < max_attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms)).await;
+        }
+    }
+
+    last_observed
+}
+
+pub async fn receive_transfer(
+    Path(chat_id): Path<String>,
+    Json(input): Json<ReceiveTransferInput>,
+) -> Json<ReceivePaymentResult> {
+    let (session, logged_in_user, keys) = match load_logged_in_session_and_keys().await {
+        Ok(value) => value,
+        Err(result) => return Json(result),
+    };
+
+    let mut messages = wechat_messages::list_messages(&logged_in_user, &keys, &chat_id, 200, 0);
+    apply_payment_receipt_state(&session.id, &chat_id, &mut messages);
+    let message = match find_transfer_message_for_receive(
+        &messages,
+        input.local_id,
+        input.transaction_id.as_deref(),
+    ) {
+        Some(message) => message.clone(),
+        None => {
+            return Json(payment_result(
+                "transfer",
+                false,
+                Some("TRANSFER_NOT_FOUND".to_string()),
+                input.local_id,
+                None,
+                None,
+                None,
+            ))
+        }
+    };
+
+    let payment = match message.payment.as_ref() {
+        Some(payment) => payment,
+        None => {
+            return Json(payment_result(
+                "transfer",
+                false,
+                Some("MESSAGE_IS_NOT_TRANSFER".to_string()),
+                Some(message.local_id),
+                None,
+                None,
+                None,
+            ))
+        }
+    };
+
+    if message.is_received == Some(true) {
+        return Json(payment_result(
+            "transfer",
+            true,
+            None,
+            Some(message.local_id),
+            Some(true),
+            message.received_at.clone(),
+            Some(payment),
+        ));
+    }
+
+    if message.is_self == Some(true) {
+        return Json(payment_result(
+            "transfer",
+            false,
+            Some("TRANSFER_NOT_RECEIVABLE".to_string()),
+            Some(message.local_id),
+            Some(false),
+            None,
+            Some(payment),
+        ));
+    }
+
+    let session_id = session.id.clone();
+    let mut context = {
+        let db = get_db();
+        create_context(session, &db)
+    };
+
+    let plan = ReceiveTransferPlan;
+    let params = ReceiveTransferParams {
+        chat_id: chat_id.clone(),
+        transaction_id: payment.transaction_id.clone(),
+        amount_text: payment.amount_text.clone(),
+        is_self: message.is_self == Some(true),
+        explicit_target: input.local_id.is_some() || input.transaction_id.is_some(),
+    };
+    let cancel = CancellationToken::new();
+    let noop_emit = |_: SubscriptionEvent| {};
+
+    let (result, plan_state) =
+        run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
+
+    let execution_confirmed = result.success && plan_state.received;
+    let observed_message = if execution_confirmed {
+        wait_for_transfer_received_state(
+            &logged_in_user,
+            &keys,
+            &session_id,
+            &chat_id,
+            message.local_id,
+            payment.transaction_id.as_deref(),
+            6,
+            100,
+        )
+        .await
+    } else {
+        wait_for_transfer_received_state(
+            &logged_in_user,
+            &keys,
+            &session_id,
+            &chat_id,
+            message.local_id,
+            payment.transaction_id.as_deref(),
+            48,
+            250,
+        )
+        .await
+    };
+    let observed_received = observed_message
+        .as_ref()
+        .and_then(|message| message.is_received)
+        == Some(true);
+    let effective_success = observed_received || execution_confirmed;
+    let effective_error = if effective_success {
+        None
+    } else {
+        result
+            .error
+            .or_else(|| Some("TRANSFER_NOT_RECEIVED".to_string()))
+    };
+
+    let (is_received, received_at) = if effective_success {
+        let received_at = {
+            let db = get_db();
+            mark_payment_received(&db, &session_id, &chat_id, message.local_id)
+        };
+        (Some(true), Some(received_at))
+    } else {
+        (Some(false), None)
+    };
+
+    Json(payment_result(
+        "transfer",
+        effective_success,
+        effective_error,
+        Some(message.local_id),
+        is_received,
+        received_at,
+        Some(payment),
+    ))
+}
+
+pub async fn receive_red_packet(
+    Path(chat_id): Path<String>,
+    Json(input): Json<ReceiveRedPacketInput>,
+) -> Json<ReceivePaymentResult> {
+    let (session, logged_in_user, keys) = match load_logged_in_session_and_keys().await {
+        Ok(value) => value,
+        Err(result) => return Json(result),
+    };
+
+    let mut messages = wechat_messages::list_messages(&logged_in_user, &keys, &chat_id, 200, 0);
+    apply_payment_receipt_state(&session.id, &chat_id, &mut messages);
+    let message = match find_payment_message(
+        &messages,
+        "red_packet",
+        input.local_id,
+        None,
+        input.send_id.as_deref(),
+        input.pay_msg_id.as_deref(),
+    ) {
+        Some(message) => message,
+        None => {
+            return Json(payment_result(
+                "red_packet",
+                false,
+                Some("RED_PACKET_NOT_FOUND".to_string()),
+                input.local_id,
+                None,
+                None,
+                None,
+            ))
+        }
+    };
+
+    Json(payment_result(
+        "red_packet",
+        false,
+        Some("UNSUPPORTED_ON_LINUX_WECHAT_CLIENT".to_string()),
+        Some(message.local_id),
+        message.is_received,
+        message.received_at.clone(),
+        message.payment.as_ref(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_payment_receipt_state;
+    use crate::ia::types::{Message, PaymentInfo};
+    use std::collections::HashMap;
+
+    fn transfer_message(local_id: i64, is_received: Option<bool>) -> Message {
+        Message {
+            local_id,
+            server_id: local_id,
+            chat_id: "chat".to_string(),
+            sender: Some("sender".to_string()),
+            sender_name: Some("sender".to_string()),
+            msg_type: 49,
+            kind: "transfer".to_string(),
+            app_msg_type: Some(2000),
+            content: "微信转账".to_string(),
+            timestamp: "2026-04-11T00:00:00+00:00".to_string(),
+            is_mentioned: None,
+            is_self: Some(false),
+            is_received,
+            received_at: None,
+            reply: None,
+            payment: Some(PaymentInfo {
+                kind: "transfer".to_string(),
+                app_msg_type: Some(2000),
+                amount_text: Some("￥0.30".to_string()),
+                amount_cents: Some(30),
+                currency: Some("CNY".to_string()),
+                transaction_id: Some(format!("tx-{local_id}")),
+                transfer_id: Some(format!("tr-{local_id}")),
+                send_id: None,
+                pay_msg_id: None,
+                receiver_title: None,
+                native_url: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn stale_transfer_receipts_are_cleared_without_forcing_received_state() {
+        let mut messages = vec![
+            transfer_message(12, Some(false)),
+            transfer_message(16, Some(true)),
+        ];
+        let receipts = HashMap::from([
+            (12_i64, "2026-04-11T09:50:57Z".to_string()),
+            (16_i64, "2026-04-11T10:17:30Z".to_string()),
+        ]);
+
+        let stale = reconcile_payment_receipt_state(&mut messages, &receipts);
+
+        assert_eq!(stale, vec![12]);
+        assert_eq!(messages[0].is_received, Some(false));
+        assert_eq!(messages[0].received_at, None);
+        assert_eq!(messages[1].is_received, Some(true));
+        assert_eq!(
+            messages[1].received_at.as_deref(),
+            Some("2026-04-11T10:17:30Z")
+        );
+    }
 }

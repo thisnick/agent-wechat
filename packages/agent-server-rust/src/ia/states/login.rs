@@ -1,34 +1,54 @@
+use super::base::extract_window_control_bounds;
 use crate::ia::helpers::find_frame_for;
-use crate::ia::selectors::{query_selector};
+use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::qr::decode_qr_from_base64;
-use super::base::extract_window_control_bounds;
 
 /// login_qr: WeChat shows a QR code to scan.
 struct LoginQrState;
 
 impl IAState for LoginQrState {
-    fn fsm(&self) -> &str { "mainWindow" }
-    fn id(&self) -> &str { "login_qr" }
+    fn fsm(&self) -> &str {
+        "mainWindow"
+    }
+    fn id(&self) -> &str {
+        "login_qr"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let scan_label = query_selector(args.a11y, r#"label[name*="Scan to log in"]"#);
         if scan_label.is_none() {
-            return Ok(IdentifyResult { identified: false, frame: None });
+            return Ok(IdentifyResult {
+                identified: false,
+                frame: None,
+            });
         }
 
-        let has_transfer = query_selector(args.a11y, r#"push-button[name*="Transfer files only"]"#).is_some();
+        let has_transfer =
+            query_selector(args.a11y, r#"push-button[name*="Transfer files only"]"#).is_some();
         if !has_transfer {
-            return Ok(IdentifyResult { identified: false, frame: None });
+            return Ok(IdentifyResult {
+                identified: false,
+                frame: None,
+            });
         }
 
         let qr = decode_qr_from_base64(args.screenshot);
-        let has_wechat_qr = qr.as_ref().map(|r| r.data.starts_with("http://weixin.qq.com/x/")).unwrap_or(false);
+        let has_wechat_qr = qr
+            .as_ref()
+            .map(|r| r.data.starts_with("http://weixin.qq.com/x/"))
+            .unwrap_or(false);
         if !has_wechat_qr {
-            return Ok(IdentifyResult { identified: false, frame: None });
+            return Ok(IdentifyResult {
+                identified: false,
+                frame: None,
+            });
         }
 
-        Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"label[name*="Scan to log in"]"#) })
+        Ok(IdentifyResult {
+            identified: true,
+            frame: find_frame_for(args.a11y, r#"label[name*="Scan to log in"]"#),
+        })
     }
 
     fn reduce(&self, args: &ReduceArgs) -> AppState {
@@ -54,22 +74,36 @@ impl IAState for LoginQrState {
 struct LoginAccountState;
 
 impl IAState for LoginAccountState {
-    fn fsm(&self) -> &str { "mainWindow" }
-    fn id(&self) -> &str { "login_account" }
+    fn fsm(&self) -> &str {
+        "mainWindow"
+    }
+    fn id(&self) -> &str {
+        "login_account"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let log_in_btn = query_selector(args.a11y, r#"push-button[name="Log In"]"#)
             .or_else(|| query_selector(args.a11y, r#"push-button[name="Open WeChat"]"#));
         if log_in_btn.is_none() {
-            return Ok(IdentifyResult { identified: false, frame: None });
+            return Ok(IdentifyResult {
+                identified: false,
+                frame: None,
+            });
         }
 
-        let has_switch = query_selector(args.a11y, r#"push-button[name="Switch Account"]"#).is_some();
+        let has_switch =
+            query_selector(args.a11y, r#"push-button[name="Switch Account"]"#).is_some();
         if !has_switch {
-            return Ok(IdentifyResult { identified: false, frame: None });
+            return Ok(IdentifyResult {
+                identified: false,
+                frame: None,
+            });
         }
 
-        Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"push-button[name="Switch Account"]"#) })
+        Ok(IdentifyResult {
+            identified: true,
+            frame: find_frame_for(args.a11y, r#"push-button[name="Switch Account"]"#),
+        })
     }
 
     fn reduce(&self, args: &ReduceArgs) -> AppState {
@@ -90,14 +124,28 @@ impl IAState for LoginAccountState {
 struct LoginPhoneConfirmState;
 
 impl IAState for LoginPhoneConfirmState {
-    fn fsm(&self) -> &str { "mainWindow" }
-    fn id(&self) -> &str { "login_phone_confirm" }
+    fn fsm(&self) -> &str {
+        "mainWindow"
+    }
+    fn id(&self) -> &str {
+        "login_phone_confirm"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
-        let confirm = query_selector(args.a11y, r#"label[name=/Comfirm on phone|Confirm.*phone|手机确认/i]"#);
+        let confirm = query_selector(
+            args.a11y,
+            r#"label[name=/Comfirm on phone|Confirm.*phone|手机确认/i]"#,
+        );
         Ok(IdentifyResult {
             identified: confirm.is_some(),
-            frame: if confirm.is_some() { find_frame_for(args.a11y, r#"label[name=/Comfirm on phone|Confirm.*phone|手机确认/i]"#) } else { None },
+            frame: if confirm.is_some() {
+                find_frame_for(
+                    args.a11y,
+                    r#"label[name=/Comfirm on phone|Confirm.*phone|手机确认/i]"#,
+                )
+            } else {
+                None
+            },
         })
     }
 
@@ -113,16 +161,26 @@ impl IAState for LoginPhoneConfirmState {
 struct LoginLoadingState;
 
 impl IAState for LoginLoadingState {
-    fn fsm(&self) -> &str { "mainWindow" }
-    fn id(&self) -> &str { "login_loading" }
+    fn fsm(&self) -> &str {
+        "mainWindow"
+    }
+    fn id(&self) -> &str {
+        "login_loading"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         // Case 1: "Entering" or "Loading X%" labels
         if query_selector(args.a11y, r#"label[name="Entering"]"#).is_some() {
-            return Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"label[name="Entering"]"#) });
+            return Ok(IdentifyResult {
+                identified: true,
+                frame: find_frame_for(args.a11y, r#"label[name="Entering"]"#),
+            });
         }
         if query_selector(args.a11y, r#"label[name*="Loading"]"#).is_some() {
-            return Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"label[name*="Loading"]"#) });
+            return Ok(IdentifyResult {
+                identified: true,
+                frame: find_frame_for(args.a11y, r#"label[name*="Loading"]"#),
+            });
         }
 
         // Case 2: Nav buttons but no Chats list
@@ -132,10 +190,16 @@ impl IAState for LoginLoadingState {
         let has_chats = query_selector(args.a11y, r#"list[name="Chats"]"#).is_some();
 
         if main_btn.is_some() && has_contacts && !has_chats {
-            return Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"push-button[name="Contacts"]"#) });
+            return Ok(IdentifyResult {
+                identified: true,
+                frame: find_frame_for(args.a11y, r#"push-button[name="Contacts"]"#),
+            });
         }
 
-        Ok(IdentifyResult { identified: false, frame: None })
+        Ok(IdentifyResult {
+            identified: false,
+            frame: None,
+        })
     }
 
     fn reduce(&self, args: &ReduceArgs) -> AppState {
@@ -150,8 +214,12 @@ impl IAState for LoginLoadingState {
 struct NetworkProxySettingsState;
 
 impl IAState for NetworkProxySettingsState {
-    fn fsm(&self) -> &str { "mainWindow" }
-    fn id(&self) -> &str { "network_proxy_settings" }
+    fn fsm(&self) -> &str {
+        "mainWindow"
+    }
+    fn id(&self) -> &str {
+        "network_proxy_settings"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let title = query_selector(args.a11y, r#"label[name="Network proxy settings"]"#);
@@ -159,7 +227,11 @@ impl IAState for NetworkProxySettingsState {
         let identified = title.is_some() && checkbox.is_some();
         Ok(IdentifyResult {
             identified,
-            frame: if identified { find_frame_for(args.a11y, r#"label[name="Network proxy settings"]"#) } else { None },
+            frame: if identified {
+                find_frame_for(args.a11y, r#"label[name="Network proxy settings"]"#)
+            } else {
+                None
+            },
         })
     }
 
@@ -183,12 +255,13 @@ impl IAState for NetworkProxySettingsState {
 use base64::Engine;
 
 /// All login states (order matters — first match wins).
-pub static LOGIN_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> = std::sync::LazyLock::new(|| {
-    vec![
-        Box::new(NetworkProxySettingsState),
-        Box::new(LoginQrState),
-        Box::new(LoginAccountState),
-        Box::new(LoginPhoneConfirmState),
-        Box::new(LoginLoadingState),
-    ]
-});
+pub static LOGIN_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> =
+    std::sync::LazyLock::new(|| {
+        vec![
+            Box::new(NetworkProxySettingsState),
+            Box::new(LoginQrState),
+            Box::new(LoginAccountState),
+            Box::new(LoginPhoneConfirmState),
+            Box::new(LoginLoadingState),
+        ]
+    });

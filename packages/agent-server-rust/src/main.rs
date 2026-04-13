@@ -5,10 +5,10 @@ mod db;
 mod effects;
 mod execution;
 mod ia;
-mod tools;
 mod plans;
 mod router;
 mod sessions;
+mod tools;
 
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;

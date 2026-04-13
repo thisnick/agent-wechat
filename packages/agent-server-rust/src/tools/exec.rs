@@ -27,11 +27,7 @@ impl Default for ExecOptions {
 ///
 /// If a session is provided, the command runs with that session's
 /// DISPLAY and DBUS_SESSION_BUS_ADDRESS environment.
-pub async fn exec_command(
-    command: &str,
-    args: &[&str],
-    options: &ExecOptions,
-) -> CommandResult {
+pub async fn exec_command(command: &str, args: &[&str], options: &ExecOptions) -> CommandResult {
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert("QT_ACCESSIBILITY".into(), "1".into());
     env.insert("QT_LINUX_ACCESSIBILITY_ALWAYS_ON".into(), "1".into());
@@ -44,18 +40,13 @@ pub async fn exec_command(
         );
         env.insert("HOME".into(), format!("/home/{}", session.linux_user));
     } else {
-        env.entry("DISPLAY".into())
-            .or_insert_with(|| ":99".into());
+        env.entry("DISPLAY".into()).or_insert_with(|| ":99".into());
     }
 
     let timeout = std::time::Duration::from_millis(options.timeout_ms);
 
     let result = tokio::time::timeout(timeout, async {
-        let output = Command::new(command)
-            .args(args)
-            .envs(&env)
-            .output()
-            .await;
+        let output = Command::new(command).args(args).envs(&env).output().await;
 
         match output {
             Ok(out) => CommandResult {

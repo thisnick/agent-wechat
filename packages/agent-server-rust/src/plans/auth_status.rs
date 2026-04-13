@@ -10,9 +10,13 @@ impl Plan for AuthStatusPlan {
     type PlanState = ();
     type Params = AuthStatusParams;
 
-    fn id(&self) -> &str { "auth_status" }
+    fn id(&self) -> &str {
+        "auth_status"
+    }
 
-    fn initial_plan_state(&self) -> () { () }
+    fn initial_plan_state(&self) -> () {
+        ()
+    }
 
     /// Goal reached immediately — we just want one observation.
     fn is_goal_reached(&self, _state: &AppState, _plan_state: &()) -> bool {

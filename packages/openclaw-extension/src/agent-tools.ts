@@ -1,12 +1,23 @@
 import type { ResolvedWeChatAccount } from "./types.js";
 import { WeChatClient } from "@agent-wechat/shared";
-import { loginStart, getActiveLoginState } from "./login.js";
 
-export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
-  const client = new WeChatClient({
+function createClient(account: ResolvedWeChatAccount) {
+  return new WeChatClient({
     baseUrl: account.serverUrl,
     token: account.token,
   });
+}
+
+function normalizeChatId(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const chatId = raw.replace(/^wechat:/i, "").trim();
+  return chatId || null;
+}
+
+export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
+  const client = createClient(account);
 
   return {
     label: "WeChat Login",
@@ -56,6 +67,8 @@ export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
         }
 
         case "start": {
+          const { getActiveLoginState, loginStart } = await import("./login.js");
+
           // Check for existing active login session
           const existing = getActiveLoginState(account.accountId);
           if (existing.active && !force) {
@@ -156,6 +169,96 @@ export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
             };
           }
         }
+      }
+    },
+  };
+}
+
+export function createWeChatReceiveTransferTool(account: ResolvedWeChatAccount) {
+  const client = createClient(account);
+
+  return {
+    label: "WeChat Transfer",
+    name: "wechat_receive_transfer",
+    description:
+      "Receive an incoming WeChat transfer in a chat. Use this when the current WeChat message is an unreceived transfer. Prefer passing the localId from the transfer message when available. If localId or transactionId are omitted, the latest receivable transfer in the chat is used.",
+    parameters: {
+      type: "object",
+      properties: {
+        chatId: {
+          type: "string",
+          description:
+            "WeChat chat ID for the transfer, for example a wxid, a contact username, or a wechat: prefixed chat target from the current conversation context.",
+        },
+        localId: {
+          type: "number",
+          description:
+            "Optional local message ID for the exact transfer to receive. Prefer the localId shown in the current transfer message when available.",
+        },
+        transactionId: {
+          type: "string",
+          description:
+            "Optional transfer transaction ID. Use this when localId is unavailable.",
+        },
+      },
+      required: ["chatId"],
+    },
+    execute: async (_toolCallId: string, params: unknown) => {
+      const args = params as Record<string, unknown>;
+      const chatId = normalizeChatId(args.chatId);
+      const localId = typeof args.localId === "number"
+        ? args.localId
+        : undefined;
+      const transactionId = typeof args.transactionId === "string" &&
+          args.transactionId.trim()
+        ? args.transactionId.trim()
+        : undefined;
+
+      if (!chatId) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Failed to receive the WeChat transfer: chatId is required.",
+          }],
+          details: { error: true, reason: "missing_chat_id" },
+        };
+      }
+
+      try {
+        const result = await client.receiveTransfer(
+          chatId,
+          transactionId,
+          localId,
+        );
+        const amount = result.amountText ? ` ${result.amountText}` : "";
+        const details = [
+          `Received the WeChat transfer${amount} in ${chatId}.`,
+          result.localId != null ? `Local ID: ${result.localId}` : undefined,
+          result.transactionId
+            ? `Transaction ID: ${result.transactionId}`
+            : undefined,
+          result.transferId ? `Transfer ID: ${result.transferId}` : undefined,
+          result.receivedAt ? `Received at: ${result.receivedAt}` : undefined,
+        ].filter(Boolean);
+
+        if (result.success) {
+          return {
+            content: [{ type: "text" as const, text: details.join("\n") }],
+            details: result,
+          };
+        }
+
+        const failureText = `Failed to receive the WeChat transfer in ${chatId}: ${result.error ?? "Unknown error"}.`;
+        return {
+          content: [{ type: "text" as const, text: failureText }],
+          details: result,
+        };
+      } catch (err) {
+        const text = `Failed to receive the WeChat transfer in ${chatId}: ${err instanceof Error ? err.message : String(err)}`;
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { error: true },
+        };
       }
     },
   };

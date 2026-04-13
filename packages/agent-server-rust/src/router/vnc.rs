@@ -31,8 +31,12 @@ async fn handle_vnc_ws(ws: WebSocket, websockify_port: u16) {
     let client_to_upstream = async {
         while let Some(Ok(msg)) = ws_rx.next().await {
             let tung_msg = match msg {
-                Message::Binary(data) => tokio_tungstenite::tungstenite::Message::Binary(data.into()),
-                Message::Text(text) => tokio_tungstenite::tungstenite::Message::Text(text.as_str().into()),
+                Message::Binary(data) => {
+                    tokio_tungstenite::tungstenite::Message::Binary(data.into())
+                }
+                Message::Text(text) => {
+                    tokio_tungstenite::tungstenite::Message::Text(text.as_str().into())
+                }
                 Message::Ping(data) => tokio_tungstenite::tungstenite::Message::Ping(data.into()),
                 Message::Pong(data) => tokio_tungstenite::tungstenite::Message::Pong(data.into()),
                 Message::Close(_) => break,
@@ -47,8 +51,12 @@ async fn handle_vnc_ws(ws: WebSocket, websockify_port: u16) {
     let upstream_to_client = async {
         while let Some(Ok(msg)) = up_rx.next().await {
             let axum_msg = match msg {
-                tokio_tungstenite::tungstenite::Message::Binary(data) => Message::Binary(data.into()),
-                tokio_tungstenite::tungstenite::Message::Text(text) => Message::Text(text.as_str().into()),
+                tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                    Message::Binary(data.into())
+                }
+                tokio_tungstenite::tungstenite::Message::Text(text) => {
+                    Message::Text(text.as_str().into())
+                }
                 tokio_tungstenite::tungstenite::Message::Ping(data) => Message::Ping(data.into()),
                 tokio_tungstenite::tungstenite::Message::Pong(data) => Message::Pong(data.into()),
                 tokio_tungstenite::tungstenite::Message::Close(_) => break,

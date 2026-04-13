@@ -8,11 +8,7 @@ use std::process::Command;
 /// that could interfere with WeChat's own writes. Since we open a fresh
 /// connection per query and drop it immediately, immutable mode is safe —
 /// we always see the latest committed state at open time.
-pub fn query_wechat_db(
-    db_path: &str,
-    hex_key: &str,
-    sql: &str,
-) -> Vec<Value> {
+pub fn query_wechat_db(db_path: &str, hex_key: &str, sql: &str) -> Vec<Value> {
     let uri = format!("file:{}?immutable=1", db_path);
     let conn = match Connection::open_with_flags(
         &uri,
@@ -42,11 +38,7 @@ pub fn query_wechat_db(
         }
     };
 
-    let col_names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
     let rows = stmt.query_map([], |row| {
         let mut map = Map::new();
@@ -434,6 +426,9 @@ mod tests {
         let count_fresh: i64 = reader2
             .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count_fresh, 3, "Fresh immutable connection should see committed writes");
+        assert_eq!(
+            count_fresh, 3,
+            "Fresh immutable connection should see committed writes"
+        );
     }
 }

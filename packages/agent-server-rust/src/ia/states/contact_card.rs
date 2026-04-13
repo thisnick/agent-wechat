@@ -5,8 +5,12 @@ use crate::ia::types::*;
 struct ContactCardStateImpl;
 
 impl IAState for ContactCardStateImpl {
-    fn fsm(&self) -> &str { "contactCard" }
-    fn id(&self) -> &str { "contact_card" }
+    fn fsm(&self) -> &str {
+        "contactCard"
+    }
+    fn id(&self) -> &str {
+        "contact_card"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let wechat_id_label = query_selector(args.a11y, r#"label[name=/^(WeChat ID:|微信号:)$/]"#);

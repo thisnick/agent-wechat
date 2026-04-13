@@ -368,6 +368,32 @@ messagesCmd
     await cmdSend(getClient(), chatId, opts.text, image, file);
   });
 
+messagesCmd
+  .command("transfer")
+  .description("Transfer commands")
+  .command("receive <chatId>")
+  .description("Receive an incoming transfer")
+  .option("-t, --transactionId <id>", "Optional transaction ID to receive")
+  .option("-l, --localId <id>", "Optional local message ID to receive", (v) => parseInt(v, 10))
+  .action(async (chatId: string, opts: { transactionId?: string; localId?: number }) => {
+    await cmdReceiveTransfer(getClient(), chatId, opts.transactionId, opts.localId);
+  });
+
+messagesCmd
+  .command("red-packet")
+  .description("Red packet commands")
+  .command("receive <chatId>")
+  .description("Attempt to receive a red packet")
+  .option("-l, --localId <id>", "Optional local message ID", (v) => parseInt(v, 10))
+  .option("--sendId <id>", "Optional red-packet send ID")
+  .option("--payMsgId <id>", "Optional red-packet pay message ID")
+  .action(async (
+    chatId: string,
+    opts: { localId?: number; sendId?: string; payMsgId?: string },
+  ) => {
+    await cmdReceiveRedPacket(getClient(), chatId, opts);
+  });
+
 // ============================================
 // Update Command
 // ============================================
@@ -617,15 +643,19 @@ const APPMSG_SUB_TYPES: Record<number, string> = {
   63: "livestream",
 };
 
-function getMsgTypeLabel(rawType: number): string {
+function getMsgTypeLabel(msg: { type: number; kind?: string; appMsgType?: number }): string {
+  if (msg.kind && msg.kind !== "unknown") {
+    return msg.kind;
+  }
+
+  const rawType = msg.type;
   const base = rawType & 0xFFFFFFFF;
-  const sub = Math.floor(rawType / 0x100000000);
 
   const baseLabel = MSG_BASE_TYPES[base];
   if (!baseLabel) return `type:${rawType}`;
 
-  if (base === 49 && sub > 0) {
-    return APPMSG_SUB_TYPES[sub] ?? `appmsg:${sub}`;
+  if (base === 49 && msg.appMsgType != null) {
+    return APPMSG_SUB_TYPES[msg.appMsgType] ?? `appmsg:${msg.appMsgType}`;
   }
   return baseLabel;
 }
@@ -648,7 +678,7 @@ async function cmdMessages(client: WeChatClient, chatId: string, limit: number =
 
   // Compute column widths
   const maxIdLen = Math.max(2, ...sorted.map(m => String(m.localId).length));
-  const maxTypeLen = Math.max(4, ...sorted.map(m => getMsgTypeLabel(m.type).length));
+  const maxTypeLen = Math.max(4, ...sorted.map(m => getMsgTypeLabel(m).length));
   const formatSender = (m: (typeof sorted)[number]) => {
     const name = m.senderName;
     const id = m.sender;
@@ -668,7 +698,7 @@ async function cmdMessages(client: WeChatClient, chatId: string, limit: number =
 
   for (const msg of sorted) {
     const time = new Date(msg.timestamp).toLocaleString();
-    const typeLabel = getMsgTypeLabel(msg.type);
+    const typeLabel = getMsgTypeLabel(msg);
     const id = String(msg.localId).padEnd(maxIdLen);
     const mention = hasAnyMention ? (msg.isMentioned ? "Y" : "").padEnd(5) : "";
     const sender = formatSender(msg).padEnd(maxSenderLen);
@@ -677,6 +707,9 @@ async function cmdMessages(client: WeChatClient, chatId: string, limit: number =
       const rSender = msg.reply.sender ? `${msg.reply.sender}: ` : "";
       const rSnippet = msg.reply.content.length > 40 ? msg.reply.content.slice(0, 40) + "..." : msg.reply.content;
       preview = `[Re: ${rSender}${rSnippet}] ${preview}`;
+    }
+    if (msg.isReceived != null) {
+      preview = `[${msg.isReceived ? "received" : "unreceived"}] ${preview}`;
     }
 
     console.log(`${id}  ${time.padEnd(22)}  ${mention}${typeLabel.padEnd(maxTypeLen)}  ${sender}  ${preview}`);
@@ -813,6 +846,95 @@ async function cmdSend(client: WeChatClient, chatId: string, text?: string, imag
     console.error(`Failed to send message: ${result.error || "Unknown error"}`);
     process.exit(1);
   }
+}
+
+async function cmdReceiveTransfer(
+  client: WeChatClient,
+  chatId: string,
+  transactionId?: string,
+  localId?: number,
+) {
+  console.log(`Receiving transfer for ${chatId}...`);
+  const result = await client.receiveTransfer(chatId, transactionId, localId);
+
+  if (result.success) {
+    console.log("Transfer received successfully!");
+    if (result.amountText) {
+      console.log(`Amount: ${result.amountText}`);
+    }
+    if (result.localId != null) {
+      console.log(`Local ID: ${result.localId}`);
+    }
+    if (result.transactionId) {
+      console.log(`Transaction ID: ${result.transactionId}`);
+    }
+    if (result.transferId) {
+      console.log(`Transfer ID: ${result.transferId}`);
+    }
+    if (result.receivedAt) {
+      console.log(`Received At: ${result.receivedAt}`);
+    }
+  } else if (result.error === "NOT_LOGGED_IN") {
+    console.error("Not logged in. Run: pnpm cli auth login");
+    process.exit(1);
+  } else {
+    console.error(`Failed to receive transfer: ${result.error || "Unknown error"}`);
+    if (result.amountText) {
+      console.error(`Amount: ${result.amountText}`);
+    }
+    if (result.localId != null) {
+      console.error(`Local ID: ${result.localId}`);
+    }
+    process.exit(1);
+  }
+}
+
+async function cmdReceiveRedPacket(
+  client: WeChatClient,
+  chatId: string,
+  opts: { localId?: number; sendId?: string; payMsgId?: string },
+) {
+  console.log(`Receiving red packet for ${chatId}...`);
+  const result = await client.receiveRedPacket(chatId, opts);
+
+  if (result.success) {
+    console.log("Red packet received successfully!");
+    if (result.amountText) {
+      console.log(`Amount: ${result.amountText}`);
+    }
+    return;
+  }
+
+  if (result.error === "NOT_LOGGED_IN") {
+    console.error("Not logged in. Run: pnpm cli auth login");
+    process.exit(1);
+  }
+
+  if (result.error === "UNSUPPORTED_ON_LINUX_WECHAT_CLIENT") {
+    console.error("Red packet receipt is not supported by the Linux WeChat client.");
+    if (result.localId != null) {
+      console.error(`Local ID: ${result.localId}`);
+    }
+    if (result.sendId) {
+      console.error(`Send ID: ${result.sendId}`);
+    }
+    if (result.payMsgId) {
+      console.error(`PayMsg ID: ${result.payMsgId}`);
+    }
+    process.exit(1);
+  }
+
+  console.error(`Failed to receive red packet: ${result.error || "Unknown error"}`);
+  if (result.localId != null) {
+    console.error(`Local ID: ${result.localId}`);
+  }
+  if (result.sendId) {
+    console.error(`Send ID: ${result.sendId}`);
+  }
+  if (result.payMsgId) {
+    console.error(`PayMsg ID: ${result.payMsgId}`);
+  }
+  process.exit(1);
 }
 
 async function cmdScreenshot(client: WeChatClient, outputPath: string) {

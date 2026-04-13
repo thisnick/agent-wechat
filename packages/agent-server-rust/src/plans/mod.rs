@@ -2,9 +2,10 @@ pub mod auth_status;
 pub mod chat_open;
 pub mod login;
 pub mod logout;
+pub mod receive_transfer;
 pub mod send_message;
 
-use crate::ia::types::{AppState, IdentifiedStates, SelectedAction, A11yNode};
+use crate::ia::types::{A11yNode, AppState, IdentifiedStates, SelectedAction};
 
 /// Plan trait — defines a goal-oriented sequence of actions.
 ///
@@ -20,11 +21,7 @@ pub trait Plan: Send + Sync {
 
     fn initial_plan_state(&self) -> Self::PlanState;
 
-    fn is_goal_reached(
-        &self,
-        state: &AppState,
-        plan_state: &Self::PlanState,
-    ) -> bool;
+    fn is_goal_reached(&self, state: &AppState, plan_state: &Self::PlanState) -> bool;
 
     async fn select_action(
         &self,

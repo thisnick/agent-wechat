@@ -1,14 +1,14 @@
 pub mod actions;
 
-use base64::Engine;
 use crate::context::Context;
-use crate::ia::{find_state_by_id, identify_states};
+use crate::db::get_db;
+use crate::effects::collect_effects;
 use crate::ia::types::*;
+use crate::ia::{find_state_by_id, identify_states};
 use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::screenshot::capture_screenshot;
-use crate::effects::collect_effects;
-use crate::db::get_db;
+use base64::Engine;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -73,20 +73,26 @@ where
     for step in 0..MAX_STEPS {
         // Check execution timeout
         if execution_start.elapsed().as_millis() as u64 > EXECUTION_TIMEOUT_MS {
-            return (ExecutionResult {
-                success: false,
-                error: Some(format!(
-                    "Execution timeout after {}s",
-                    execution_start.elapsed().as_secs()
-                )),
-            }, plan_state);
+            return (
+                ExecutionResult {
+                    success: false,
+                    error: Some(format!(
+                        "Execution timeout after {}s",
+                        execution_start.elapsed().as_secs()
+                    )),
+                },
+                plan_state,
+            );
         }
 
         if cancel.is_cancelled() {
-            return (ExecutionResult {
-                success: false,
-                error: Some("Aborted".to_string()),
-            }, plan_state);
+            return (
+                ExecutionResult {
+                    success: false,
+                    error: Some("Aborted".to_string()),
+                },
+                plan_state,
+            );
         }
 
         // 1. OBSERVE: get a11y tree + screenshot
@@ -112,13 +118,16 @@ where
             let elapsed = unknown_state_since.unwrap().elapsed();
             if elapsed.as_millis() as u64 > UNKNOWN_STATE_TIMEOUT_MS {
                 tracing::error!("[exec] Unknown state timeout after {}s", elapsed.as_secs());
-                return (ExecutionResult {
-                    success: false,
-                    error: Some(format!(
-                        "Unknown state for {}s - no matching IAState found",
-                        elapsed.as_secs()
-                    )),
-                }, plan_state);
+                return (
+                    ExecutionResult {
+                        success: false,
+                        error: Some(format!(
+                            "Unknown state for {}s - no matching IAState found",
+                            elapsed.as_secs()
+                        )),
+                    },
+                    plan_state,
+                );
             }
             tracing::warn!("[exec] Unknown state ({}s), waiting...", elapsed.as_secs());
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -243,28 +252,38 @@ where
 
         // 7. EXECUTE: run the action (emits fire inline via callback)
         if let Some(sel) = &selected {
-            actions::execute_action(&sel.action, sel.frame.as_ref(), &exec_options, &a11y, emit).await;
+            actions::execute_action(&sel.action, sel.frame.as_ref(), &exec_options, &a11y, emit)
+                .await;
         }
 
         // 8. GOAL CHECK (after action)
         if plan.is_goal_reached(&context.state, &plan_state) {
-            return (ExecutionResult {
-                success: true,
-                error: None,
-            }, plan_state);
+            return (
+                ExecutionResult {
+                    success: true,
+                    error: None,
+                },
+                plan_state,
+            );
         }
 
         // No action = stuck (only if plan returns None)
         if selected.is_none() {
-            return (ExecutionResult {
-                success: false,
-                error: Some("No action selected".to_string()),
-            }, plan_state);
+            return (
+                ExecutionResult {
+                    success: false,
+                    error: Some("No action selected".to_string()),
+                },
+                plan_state,
+            );
         }
     }
 
-    (ExecutionResult {
-        success: false,
-        error: Some("Max steps reached".to_string()),
-    }, plan_state)
+    (
+        ExecutionResult {
+            success: false,
+            error: Some("Max steps reached".to_string()),
+        },
+        plan_state,
+    )
 }

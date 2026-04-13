@@ -11,9 +11,13 @@ impl Plan for LogoutPlan {
     type PlanState = ();
     type Params = LogoutParams;
 
-    fn id(&self) -> &str { "logout" }
+    fn id(&self) -> &str {
+        "logout"
+    }
 
-    fn initial_plan_state(&self) -> () { () }
+    fn initial_plan_state(&self) -> () {
+        ()
+    }
 
     fn is_goal_reached(&self, state: &AppState, _plan_state: &()) -> bool {
         !state.main_window.is_logged_in
@@ -29,7 +33,10 @@ impl Plan for LogoutPlan {
         _session_id: &str,
     ) -> Option<SelectedAction> {
         let settings_frame = identified.settings.as_ref().and_then(|s| s.frame.clone());
-        let main_frame = identified.main_window.as_ref().and_then(|m| m.frame.clone());
+        let main_frame = identified
+            .main_window
+            .as_ref()
+            .and_then(|m| m.frame.clone());
 
         // 1. Settings confirmation modal → click OK
         if let Some(ref settings) = state.settings {

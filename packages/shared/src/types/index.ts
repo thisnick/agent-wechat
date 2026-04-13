@@ -6,7 +6,9 @@
 export type { Chat } from "./generated/Chat.js";
 export type { Contact } from "./generated/Contact.js";
 export type { Message } from "./generated/Message.js";
+export type { PaymentInfo } from "./generated/PaymentInfo.js";
 export type { LoginSubscriptionEvent } from "./generated/LoginSubscriptionEvent.js";
+export type { ReceivePaymentResult } from "./generated/ReceivePaymentResult.js";
 export type { SendParams } from "./generated/SendParams.js";
 export type { ImageData } from "./generated/ImageData.js";
 export type { FileData } from "./generated/FileData.js";
@@ -127,6 +129,19 @@ export interface SendResult {
 export interface GetMediaParams {
   chatId: string;
   localId: number;
+}
+
+export interface ReceiveTransferParams {
+  chatId: string;
+  transactionId?: string;
+  localId?: number;
+}
+
+export interface ReceiveRedPacketParams {
+  chatId: string;
+  localId?: number;
+  sendId?: string;
+  payMsgId?: string;
 }
 
 // Note: MediaResult kept handwritten (Rust uses plain string for type,
