@@ -1,5 +1,6 @@
 import type { ChannelPlugin } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { resolveWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
@@ -11,6 +12,81 @@ import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
+
+async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<string> {
+  const account = resolveWeChatAccount(cfg as Record<string, unknown>);
+  if (!account?.serverUrl) throw new Error("No serverUrl configured");
+  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
+  const result = await client.sendMessage({ chatId: to, text });
+  if (!result.success) throw new Error(result.error ?? "Send failed");
+  return `wechat:${to}:${Date.now()}`;
+}
+
+async function sendWeChatMedia(
+  cfg: unknown,
+  to: string,
+  text: string,
+  mediaUrl: string | undefined,
+): Promise<string> {
+  const account = resolveWeChatAccount(cfg as Record<string, unknown>);
+  if (!account?.serverUrl) throw new Error("No serverUrl configured");
+  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
+  if (!mediaUrl) {
+    const result = await client.sendMessage({ chatId: to, text: text || undefined });
+    if (!result.success) throw new Error(result.error ?? "Send failed");
+    return `wechat:${to}:${Date.now()}`;
+  }
+
+  const fsmod = await import("fs/promises");
+  const pathmod = await import("path");
+  let base64: string;
+  let mimeType: string;
+  let filename: string;
+  if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+    const res = await fetch(mediaUrl);
+    const buffer = await res.arrayBuffer();
+    base64 = Buffer.from(buffer).toString("base64");
+    mimeType = res.headers.get("content-type") ?? "application/octet-stream";
+    const urlPath = new URL(mediaUrl).pathname;
+    filename = pathmod.basename(urlPath) || "file";
+  } else {
+    const buf = await fsmod.readFile(mediaUrl);
+    base64 = buf.toString("base64");
+    filename = pathmod.basename(mediaUrl);
+    const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
+    const extMime: Record<string, string> = {
+      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+      gif: "image/gif", webp: "image/webp",
+    };
+    mimeType = extMime[ext] ?? "application/octet-stream";
+  }
+
+  const isImage = mimeType.startsWith("image/");
+  const result = isImage
+    ? await client.sendMessage({ chatId: to, text: text || undefined, image: { data: base64, mimeType } })
+    : await client.sendMessage({ chatId: to, text: text || undefined, file: { data: base64, filename } });
+  if (!result.success) throw new Error(result.error ?? "Send media failed");
+  return `wechat:${to}:${Date.now()}`;
+}
+
+const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
+  id: "wechat",
+  capabilities: {
+    text: true,
+    media: true,
+    messageSendingHooks: true,
+  },
+  outbound: {
+    sendText: async ({ cfg, to, text }) => ({
+      channel: "wechat",
+      messageId: await sendWeChatText(cfg, to, text),
+    }),
+    sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
+      channel: "wechat",
+      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
+    }),
+  },
+});
 
 const meta: ChannelPlugin["meta"] = {
   id: "wechat",
@@ -160,94 +236,20 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     },
   },
 
-  // ---- Outbound adapter ----
+  // ---- Outbound adapter (legacy compat path; new message adapter below is preferred in 2026.5+) ----
   outbound: {
     deliveryMode: "direct",
-    sendText: async ({ cfg, to, text }) => {
-      const account = resolveWeChatAccount(
-        cfg as unknown as Record<string, unknown>,
-      );
-      if (!account?.serverUrl) {
-        throw new Error("No serverUrl configured");
-      }
-      const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
-      const result = await client.sendMessage({ chatId: to, text });
-      if (!result.success) {
-        throw new Error(result.error ?? "Send failed");
-      }
-      return {
-        channel: "wechat" as const,
-        messageId: `wechat:${to}:${Date.now()}`,
-      };
-    },
-    sendMedia: async ({ cfg, to, text, mediaUrl }) => {
-      const account = resolveWeChatAccount(
-        cfg as unknown as Record<string, unknown>,
-      );
-      if (!account?.serverUrl) {
-        throw new Error("No serverUrl configured");
-      }
-      const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
-      if (mediaUrl) {
-        const fsmod = await import("fs/promises");
-        const pathmod = await import("path");
-
-        let base64: string;
-        let mimeType: string;
-        let filename: string;
-        if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-          const res = await fetch(mediaUrl);
-          const buffer = await res.arrayBuffer();
-          base64 = Buffer.from(buffer).toString("base64");
-          mimeType = res.headers.get("content-type") ?? "application/octet-stream";
-          const urlPath = new URL(mediaUrl).pathname;
-          filename = pathmod.basename(urlPath) || "file";
-        } else {
-          const buf = await fsmod.readFile(mediaUrl);
-          base64 = buf.toString("base64");
-          filename = pathmod.basename(mediaUrl);
-          const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
-          const extMime: Record<string, string> = {
-            png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-            gif: "image/gif", webp: "image/webp",
-          };
-          mimeType = extMime[ext] ?? "application/octet-stream";
-        }
-
-        const isImage = mimeType.startsWith("image/");
-        const result = isImage
-          ? await client.sendMessage({
-              chatId: to,
-              text: text || undefined,
-              image: { data: base64, mimeType },
-            })
-          : await client.sendMessage({
-              chatId: to,
-              text: text || undefined,
-              file: { data: base64, filename },
-            });
-        if (!result.success) {
-          throw new Error(result.error ?? "Send media failed");
-        }
-        return {
-          channel: "wechat" as const,
-          messageId: `wechat:${to}:${Date.now()}`,
-        };
-      }
-      // Text-only fallback
-      const result = await client.sendMessage({
-        chatId: to,
-        text: text || undefined,
-      });
-      if (!result.success) {
-        throw new Error(result.error ?? "Send failed");
-      }
-      return {
-        channel: "wechat" as const,
-        messageId: `wechat:${to}:${Date.now()}`,
-      };
-    },
+    sendText: async ({ cfg, to, text }) => ({
+      channel: "wechat" as const,
+      messageId: await sendWeChatText(cfg, to, text),
+    }),
+    sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
+      channel: "wechat" as const,
+      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
+    }),
   },
+
+  message: wechatMessageAdapter,
 
   // ---- Gateway adapter ----
   gateway: {
@@ -266,7 +268,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     },
 
     loginWithQrStart: async ({ accountId, force, timeoutMs }) => {
-      const cfg = getWeChatRuntime().config.loadConfig();
+      const cfg = getWeChatRuntime().config.current();
       const account = resolveWeChatAccount(
         cfg as Record<string, unknown>,
         accountId ?? undefined,
@@ -287,7 +289,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     },
 
     logoutAccount: async ({ accountId }) => {
-      const cfg = getWeChatRuntime().config.loadConfig();
+      const cfg = getWeChatRuntime().config.current();
       const account = resolveWeChatAccount(
         cfg as Record<string, unknown>,
         accountId ?? undefined,

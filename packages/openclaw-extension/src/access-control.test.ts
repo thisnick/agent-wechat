@@ -221,16 +221,19 @@ test("resolveWeChatCommandAuthorization computes only for command-like bodies", 
       }
       return params.authorizers.some((entry) => entry.configured && entry.allowed);
     },
-    readAllowFromStore: async () => ["wxid_store"],
+    // openclaw 2026.5+ only consults the pairing-store allowlist when the DM policy is
+    // neither "open" nor "allowlist". For "allowlist" policies, command owners come
+    // from the configured allowFrom list (passed via allowFromForCommands).
+    readAllowFromStore: async () => [],
   };
 
   const authorized = await resolveWeChatCommandAuthorization({
     cfg,
     rawBody: "/status",
     isGroup: false,
-    senderId: "wechat:wxid_store",
-    dmPolicy: "open",
-    allowFromForCommands: [],
+    senderId: "wechat:wxid_owner",
+    dmPolicy: "allowlist",
+    allowFromForCommands: ["wxid_owner"],
     deps,
   });
   assert.equal(authorized, true);
@@ -239,9 +242,9 @@ test("resolveWeChatCommandAuthorization computes only for command-like bodies", 
     cfg,
     rawBody: "hello",
     isGroup: false,
-    senderId: "wechat:wxid_store",
-    dmPolicy: "open",
-    allowFromForCommands: [],
+    senderId: "wechat:wxid_owner",
+    dmPolicy: "allowlist",
+    allowFromForCommands: ["wxid_owner"],
     deps,
   });
   assert.equal(skipped, undefined);

@@ -15,7 +15,7 @@
     "@agent-wechat/shared": "workspace:*",
     "@types/node": "^22",
     "esbuild": "^0.25.0",
-    "openclaw": ">=2026.3.23 <2027.0.0",
+    "openclaw": "^2026.5.12",
     "typescript": "^5.4.5"
   },
   "openclaw": {

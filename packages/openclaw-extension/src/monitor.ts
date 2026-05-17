@@ -123,8 +123,8 @@ export async function startWeChatMonitor(
 
   while (!abortSignal.aborted) {
     try {
-      // Reload config each iteration so hot-reloads take effect
-      const cfg = getWeChatRuntime().config.loadConfig();
+      // Read the runtime config snapshot each iteration; the host updates it on hot-reload.
+      const cfg = getWeChatRuntime().config.current();
 
       // ---- Auth polling (every authPollIntervalMs) ----
       const now = Date.now();
