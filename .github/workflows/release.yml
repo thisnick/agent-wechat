@@ -30,19 +30,14 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
-      # npm >= 11.5 required for OIDC trusted publishing. Skip the install when
-      # the runner image already ships a compatible npm, since self-install on
-      # Node 22.22.2's bundled npm fails with MODULE_NOT_FOUND: 'promise-retry'.
-      - name: Ensure npm >= 11.5 for OIDC trusted publishing
+      # npm >= 11.5 required for OIDC trusted publishing. Use Corepack to
+      # activate it, because the bundled npm 10.9.7 in the Node 22.22.2 runner
+      # image is broken at the arborist rebuild step (MODULE_NOT_FOUND:
+      # 'promise-retry') and cannot install anything — including itself.
+      - name: Activate npm 11.12.1 via Corepack
         run: |
-          CURRENT=$(npm --version)
-          REQUIRED=11.5.0
-          if [ "$(printf '%s\n%s\n' "$REQUIRED" "$CURRENT" | sort -V | head -1)" = "$REQUIRED" ]; then
-            echo "npm $CURRENT is sufficient (>= $REQUIRED), skipping upgrade"
-          else
-            echo "Upgrading npm $CURRENT -> 11.12.1"
-            npm install -g npm@11.12.1
-          fi
+          corepack enable npm
+          corepack prepare npm@11.12.1 --activate
           echo "Active npm: $(npm --version)"
 
       - run: pnpm install --frozen-lockfile
