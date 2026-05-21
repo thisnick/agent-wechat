@@ -24,9 +24,16 @@ use crate::tools::qr::{decode_qr_from_base64, to_data_url};
 use crate::tools::screenshot::capture_screenshot;
 
 pub async fn get_status() -> Json<serde_json::Value> {
+    let session = get_session("default");
+    let login_status = session
+        .as_ref()
+        .and_then(|s| s.logged_in_user.as_ref())
+        .map(|u| "logged_in".to_string())
+        .unwrap_or_else(|| "logged_out".to_string());
+
     Json(serde_json::json!({
         "container": "running",
-        "loginState": { "status": "logged_out" },
+        "loginState": { "status": login_status },
         "version": "0.1.0"
     }))
 }
