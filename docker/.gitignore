@@ -1,0 +1,6 @@
+# graila build: staged Rust source (copied from packages/ by build script)
+/agent-server-rust/
+# graila build-robustness: vendored upstream tarballs (pre-fetched, not committed).
+# See Dockerfile comments for the exact pre-fetch curl commands.
+/novnc-*.tar.gz
+/sqlcipher-*.tar.gz
