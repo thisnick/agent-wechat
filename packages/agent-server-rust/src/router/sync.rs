@@ -73,6 +73,18 @@ impl RescanResponse {
 /// `logged_in_user` was never persisted (issue #153). Token-protected by the
 /// global auth middleware. Body is ignored (no params required).
 pub async fn rescan() -> Json<RescanResponse> {
+    // 0. Best-effort: dismiss any whitelisted popup (e.g. the Weixin update
+    //    window) that could obscure the main UI / disrupt detection. Safe and
+    //    side-effect free if none is present.
+    let popups = crate::tools::ui_popups::close_known_popups().await;
+    if popups.popup_detected {
+        tracing::info!(
+            "[rescan] pre_close_popups detected={} closed={}",
+            popups.popup_detected,
+            popups.popup_closed
+        );
+    }
+
     // 1. Resolve the session.
     let session = match get_session("default") {
         Some(s) => s,
