@@ -146,7 +146,9 @@ fi
 if [ "${ENABLE_VNC:-1}" = "1" ]; then
   # -nopw: no VNC-level password (localhost only; auth enforced by agent-server proxy with full token)
   # -viewonly: no remote input
-  x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
+  # -nobell: do not forward XBell events to VNC clients (suppresses the noVNC
+  #          browser-side beep WeChat emits on notifications) — graila patch.
+  x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -nobell -rfbport 5900 -listen 127.0.0.1 &
 fi
 
 # ============================================

@@ -231,12 +231,21 @@ fn filesystem_account_candidates() -> Vec<(String, std::time::SystemTime)> {
 ///                          if multiple, pick the most-recently-modified.
 /// Logs are REDACTED: method + candidate_count + selected only (never the wxid).
 pub fn find_account_dir(wechat_pid: i64) -> Option<String> {
+    find_account_dir_with_method(wechat_pid).0
+}
+
+/// Like [`find_account_dir`] but also returns which detection method resolved
+/// the account directory, for observability / the rescan endpoint. The method
+/// string is one of: `pid_fd`, `related_pid_fd`, `filesystem_fallback`, `none`.
+/// The returned values never include the wxid (the dir name is in `.0`, but the
+/// method tag in `.1` is always safe to surface in API responses / logs).
+pub fn find_account_dir_with_method(wechat_pid: i64) -> (Option<String>, &'static str) {
     // 1. Original: the given PID.
     if let Some(acct) = scan_pid_fd_for_account(wechat_pid) {
         tracing::info!(
             "[account-detect] method=pid_fd candidate_count=1 selected=true account=<redacted>"
         );
-        return Some(acct);
+        return (Some(acct), "pid_fd");
     }
 
     // 2. Fallback: any WeChat-related process may hold the DB fds.
@@ -250,7 +259,7 @@ pub fn find_account_dir(wechat_pid: i64) -> Option<String> {
                 "[account-detect] method=related_pid_fd scanned_pids={} selected=true account=<redacted>",
                 related.len()
             );
-            return Some(acct);
+            return (Some(acct), "related_pid_fd");
         }
     }
 
@@ -267,8 +276,9 @@ pub fn find_account_dir(wechat_pid: i64) -> Option<String> {
         tracing::warn!(
             "[account-detect] all methods failed (pid_fd + related_pid_fd + filesystem); logged_in_user will not be set"
         );
+        return (None, "none");
     }
-    selected
+    (selected, "filesystem_fallback")
 }
 
 /// List all .db files that exist on disk for a given account.
