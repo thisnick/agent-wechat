@@ -60,6 +60,9 @@ pub fn build_router() -> Router {
         .route("/api/sync/rescan", post(sync::rescan))
         // UI hygiene: close whitelisted popups (e.g. Weixin version-update window).
         .route("/api/ui/close-known-popups", post(ui::close_known_popups_handler))
+        // Version-robust open-chat (a11y search) — fallback for outbound send
+        // when the frida chat-select BUILD_PROFILE is missing (new WeChat builds).
+        .route("/api/ui/open-chat", post(ui::open_chat_handler))
         // Sessions
         .route("/api/sessions", get(sessions::list_sessions).post(sessions::create_session))
         .route("/api/sessions/{id}", get(sessions::get_session).delete(sessions::delete_session))

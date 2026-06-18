@@ -126,10 +126,42 @@ impl Plan for SendMessagePlan {
                     });
 
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let mut result = open_chat(&params.chat_id, force, click_xy).await;
 
                     if !result.ok {
-                        return None;
+                        // Version-robust fallback: the frida chat-select fast-path
+                        // failed (e.g. unknown BUILD_PROFILE on newer WeChat builds,
+                        // AW-FORK-7). Open via a11y search instead so send no longer
+                        // dies at "No action selected". Redacted diagnostics only.
+                        tracing::warn!(
+                            "[send] open_chat fast_path_failed fallback=a11y_search prev_error_present={}",
+                            result.error.is_some()
+                        );
+                        let fb = crate::tools::ui_open_chat::open_chat_a11y_search(
+                            &params.chat_id,
+                            false,
+                        )
+                        .await;
+                        if fb.open_confirmed || fb.result_clicked {
+                            tracing::info!(
+                                "[send] fallback=a11y_search result_clicked={} open_confirmed={}",
+                                fb.result_clicked,
+                                fb.open_confirmed
+                            );
+                            result = OpenChatResult {
+                                ok: true,
+                                username: None,
+                                index: None,
+                                skipped: Some(false),
+                                error: None,
+                            };
+                        } else {
+                            tracing::warn!(
+                                "[send] fallback=a11y_search failed error={:?}",
+                                fb.error
+                            );
+                            return None;
+                        }
                     }
 
                     let skipped = result.skipped.unwrap_or(false);
