@@ -71,6 +71,13 @@ pub struct OpenChatResponse {
 /// search path (id → display name via decrypted DB → search box → first
 /// result). Body: `{ "chatId": "...", "dryRun": false }`. Redacted: never
 /// returns the chat name/id or any chat content.
+///
+/// OPERATIONAL DISCIPLINE: do NOT use `dryRun:false` as a pre-send "precheck".
+/// `dryRun:false` types into the UI and may keyboard-open; if a composer is
+/// focused it can produce a stray send (AW-FORK-8C). For a pre-send check use
+/// `dryRun:true` only, or let `SendMessagePlan` perform its own send-safe open.
+/// (The keyboard fallback here is now focus-guarded — it never presses Return
+/// unless the search box is the focused element — but the discipline still holds.)
 pub async fn open_chat_handler(Json(req): Json<OpenChatRequest>) -> Json<OpenChatResponse> {
     let o = open_chat_a11y_search(&req.chat_id, req.dry_run).await;
     Json(OpenChatResponse {

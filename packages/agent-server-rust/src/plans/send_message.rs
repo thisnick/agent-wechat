@@ -122,6 +122,26 @@ impl Plan for SendMessagePlan {
                     let mut result = open_chat(&params.chat_id, force, click_xy).await;
 
                     if !result.ok {
+                        // Already-open shortcut (AW-FORK-8D): if a composer pair is
+                        // already present (mainWindow=chat_open), the target chat is
+                        // open — skip the a11y re-search entirely. This avoids the
+                        // unreliable already-open re-search (candidate_lists=0) that
+                        // made the send fail in AW-FORK-8C, and never re-types into a
+                        // focused composer.
+                        if main_state_id == Some("chat_open")
+                            && find_edit_and_send_button(a11y).is_some()
+                        {
+                            tracing::info!(
+                                "[send] already_chat_open composer_present=true skip_reopen=true"
+                            );
+                            result = OpenChatResult {
+                                ok: true,
+                                username: None,
+                                index: None,
+                                skipped: Some(true),
+                                error: None,
+                            };
+                        } else {
                         // Version-robust fallback: the frida chat-select fast-path
                         // failed (e.g. unknown BUILD_PROFILE on newer WeChat builds,
                         // AW-FORK-7). Open via a11y search instead so send no longer
@@ -152,6 +172,7 @@ impl Plan for SendMessagePlan {
                                 fb.error
                             );
                             return None;
+                        }
                         }
                     }
 

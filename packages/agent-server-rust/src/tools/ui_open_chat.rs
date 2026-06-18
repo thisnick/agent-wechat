@@ -276,6 +276,56 @@ async fn click_at(x: i32, y: i32) {
     let _ = xdotool(&["mousemove", xs.as_str(), ys.as_str(), "click", "1"]).await;
 }
 
+/// True iff the currently-FOCUSED editable node is the search box (its center
+/// lies within the known search-box rect). Used to gate any keyboard `Return`:
+/// if focus is a chat composer (or unknown, or no search rect), this returns
+/// false so we never press Return into a composer (AW-FORK-8D stray-send fix).
+fn focused_editable_is_search_box(tree: &Value, search_rect: Option<Rect>) -> bool {
+    let search = match search_rect {
+        Some(r) => r,
+        None => return false, // coordinate-fallback search box → cannot verify → unsafe
+    };
+    let mut nodes = Vec::new();
+    collect(tree, &mut nodes);
+    for n in &nodes {
+        let role = role_of(n);
+        if has_state(n, "FOCUSED")
+            && has_state(n, "EDITABLE")
+            && (role.contains("text") || role.contains("entry") || role.contains("field"))
+        {
+            return match rect_of(n) {
+                Some(r) => {
+                    let cx = r.x + r.w / 2;
+                    let cy = r.y + r.h / 2;
+                    cx >= search.x - 5
+                        && cx <= search.x + search.w + 5
+                        && cy >= search.y - 5
+                        && cy <= search.y + search.h + 5
+                }
+                None => false,
+            };
+        }
+    }
+    false
+}
+
+/// Issue Down+Return to open the first search result — but ONLY after verifying
+/// the focused editable is the search box. Returns true if the keys were sent,
+/// false if blocked (unsafe focus → never press Return into a composer).
+async fn safe_keyboard_open(search_rect: Option<Rect>) -> bool {
+    let tree = match a11y_tree().await {
+        Some(t) => t,
+        None => return false,
+    };
+    if !focused_editable_is_search_box(&tree, search_rect) {
+        tracing::warn!("[open-chat] keyboard_fallback_blocked unsafe_focus=true focused_kind=composer_or_unknown");
+        return false;
+    }
+    let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
+    let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
+    true
+}
+
 /// Open a chat by id using the version-robust a11y search path.
 /// Options controlling open-chat behavior. `send_safe` (used by the outbound
 /// send path) forbids ANY keyboard fallback (Down/Return) so the open step can
@@ -357,12 +407,12 @@ pub async fn open_chat_a11y_search_with_options(
     let search_box = find_search_box_node(&tree);
     // Coordinate fallback: WeChat's search field sits near the top-left.
     // search_depth = usize::MAX when not found → forces the keyboard fallback.
-    let (search_depth, sx, sy) = match &search_box {
+    let (search_depth, search_rect, sx, sy) = match &search_box {
         Some((d, r)) => {
             out.search_box_present = true;
-            (*d, r.x + r.w / 2, r.y + r.h / 2)
+            (*d, Some(*r), r.x + r.w / 2, r.y + r.h / 2)
         }
-        None => (usize::MAX, win.x + (win.w as f64 * 0.12) as i32, win.y + 45),
+        None => (usize::MAX, None, win.x + (win.w as f64 * 0.12) as i32, win.y + 45),
     };
 
     tracing::info!(
@@ -413,16 +463,19 @@ pub async fn open_chat_a11y_search_with_options(
         }
         None => {
             if opts.allow_keyboard_fallback {
-                // No distinguishable results list → keyboard fallback: with the
-                // search box focused, Down+Return opens the first result.
+                // No distinguishable results list → keyboard fallback, but ONLY
+                // if the search box is focused (never Return into a composer).
                 tracing::info!(
-                    "[open-chat] search_results lists_count={} candidate_lists=0 keyboard_fallback=true",
+                    "[open-chat] search_results lists_count={} candidate_lists=0 keyboard_fallback_attempt=true",
                     lists_count
                 );
-                let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
-                let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
-                keyboard_fallback = true;
-                out.result_clicked = true;
+                if safe_keyboard_open(search_rect).await {
+                    keyboard_fallback = true;
+                    out.result_clicked = true;
+                } else {
+                    out.error = Some("keyboard_fallback_unsafe_focus");
+                    return out;
+                }
             } else {
                 // Send-safe: NEVER press Return (could send a stray message into
                 // a focused composer). Fail closed instead.
@@ -444,12 +497,14 @@ pub async fn open_chat_a11y_search_with_options(
     let mut confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
     if !confirmed && !keyboard_fallback {
         if opts.allow_keyboard_fallback {
-            tracing::info!("[open-chat] click_not_confirmed retry keyboard_fallback=true");
-            let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
-            let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
-            keyboard_fallback = true;
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
+            tracing::info!("[open-chat] click_not_confirmed retry keyboard_fallback_attempt=true");
+            if safe_keyboard_open(search_rect).await {
+                keyboard_fallback = true;
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
+            } else {
+                tracing::warn!("[open-chat] retry keyboard_fallback_blocked unsafe_focus=true");
+            }
         } else {
             tracing::warn!("[open-chat] click_not_confirmed send_safe=true no_keyboard_retry");
         }
