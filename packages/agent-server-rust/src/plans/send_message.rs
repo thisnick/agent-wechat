@@ -1,6 +1,6 @@
 use super::Plan;
 use crate::ia::actions;
-use crate::ia::selectors::query_selector;
+use crate::ia::selectors::{is_send_button_name, query_selector};
 use crate::ia::types::*;
 use crate::tools::chat_select::{open_chat, OpenChatResult};
 use crate::tools::exec::{exec_command, ExecOptions};
@@ -30,25 +30,15 @@ pub struct SendMessagePlanState {
 }
 
 fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    let send_btn = query_selector(a11y, r#"push-button[name="Send(S)"]"#)?;
-    // Find sibling EDITABLE text node via parent
-    // Since we don't have parent refs in the tree-based approach,
-    // we search the tree for the pattern
-    find_edit_near_send(a11y, send_btn)
-}
-
-fn find_edit_near_send<'a>(
-    root: &'a A11yNode,
-    _send_btn: &A11yNode,
-) -> Option<(&'a A11yNode, &'a A11yNode)> {
-    // Walk tree looking for a parent that has both an EDITABLE text and Send(S) button
-    find_edit_send_pair(root)
+    // Locale-robust: scan for an EDITABLE-text + send-button pair anywhere in the
+    // tree (the send button is "Send(S)" on EN clients, "发送(S)" on ZH clients).
+    find_edit_send_pair(a11y)
 }
 
 fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
     if let Some(children) = &node.children {
         let send_btn = children.iter().find(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
+            c.role == "push-button" && is_send_button_name(&c.name)
         });
         let edit_node = children.iter().find(|c| {
             c.role == "text"

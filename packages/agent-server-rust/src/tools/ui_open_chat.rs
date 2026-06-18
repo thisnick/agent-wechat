@@ -15,6 +15,7 @@ use super::exec::{exec_command, ExecOptions};
 use super::wechat_chats;
 use super::wechat_keys::get_stored_keys;
 use crate::db::get_db;
+use crate::ia::selectors::is_send_button_name;
 use crate::sessions::manager::get_session;
 use serde_json::Value;
 
@@ -172,14 +173,29 @@ fn find_first_result(tree: &Value, below_y: i32) -> Option<Rect> {
     best
 }
 
-/// True if a message composer (Send button) is present → a chat is open.
+/// True if a message composer is present → a chat is open. Locale-robust: the
+/// send button is "Send(S)" on EN clients, "发送(S)" on ZH clients (the EMDE
+/// locale). Confirmed via a send-like push-button; logs redacted counts only.
 fn chat_is_open(tree: &Value) -> bool {
     let mut nodes = Vec::new();
     collect(tree, &mut nodes);
-    nodes.iter().any(|n| {
-        role_of(n) == "push-button"
-            && n.get("name").and_then(|v| v.as_str()) == Some("Send(S)")
-    })
+    let mut send_like = 0usize;
+    let mut editable = 0usize;
+    for n in &nodes {
+        let name = n.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if role_of(n) == "push-button" && is_send_button_name(name) {
+            send_like += 1;
+        }
+        if role_of(n).contains("text") && has_state(n, "EDITABLE") {
+            editable += 1;
+        }
+    }
+    tracing::info!(
+        "[open-chat] confirm editable_count={} send_button_count={}",
+        editable,
+        send_like
+    );
+    send_like > 0
 }
 
 /// Largest visible Weixin window (the main UI).

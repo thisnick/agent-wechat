@@ -2,6 +2,21 @@ use super::types::A11yNode;
 use regex::Regex;
 
 // ============================================
+// Locale-robust control matching
+// ============================================
+
+/// True if an accessibility node name looks like WeChat's "Send" button,
+/// regardless of UI language. WeChat's composer send button is "Send(S)" on an
+/// English client but "发送(S)" on a Chinese client (the actual locale on our
+/// EMDE deploy). Matching only the English form made open-confirmation and the
+/// send Confirming phase false-negative (AW-FORK-7B). Intended for use on
+/// push-button nodes only, so the broad contains-match is safe.
+pub fn is_send_button_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.to_ascii_lowercase().contains("send") || trimmed.contains("发送")
+}
+
+// ============================================
 // Ancestor Traversal
 // ============================================
 
@@ -544,6 +559,19 @@ mod tests {
         // Descendant (space) should find list-items anywhere under root
         let results = query_selector_all(&tree, r#"list-item"#);
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_is_send_button_name_locale() {
+        assert!(is_send_button_name("Send(S)"));
+        assert!(is_send_button_name("Send"));
+        assert!(is_send_button_name("send"));
+        assert!(is_send_button_name(" Send(S) "));
+        assert!(is_send_button_name("发送"));
+        assert!(is_send_button_name("发送(S)"));
+        assert!(!is_send_button_name(""));
+        assert!(!is_send_button_name("Cancel"));
+        assert!(!is_send_button_name("取消"));
     }
 
     #[test]
