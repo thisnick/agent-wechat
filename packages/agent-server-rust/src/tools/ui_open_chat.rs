@@ -277,7 +277,45 @@ async fn click_at(x: i32, y: i32) {
 }
 
 /// Open a chat by id using the version-robust a11y search path.
+/// Options controlling open-chat behavior. `send_safe` (used by the outbound
+/// send path) forbids ANY keyboard fallback (Down/Return) so the open step can
+/// never inject a stray message into a focused composer — the root cause of the
+/// AW-FORK-8 duplicate-send defect.
+#[derive(Clone, Copy)]
+pub struct OpenChatOptions {
+    pub dry_run: bool,
+    pub allow_keyboard_fallback: bool,
+    pub send_safe: bool,
+}
+
+impl OpenChatOptions {
+    /// Standalone `/api/ui/open-chat`: keyboard fallback allowed.
+    pub fn endpoint(dry_run: bool) -> Self {
+        OpenChatOptions { dry_run, allow_keyboard_fallback: true, send_safe: false }
+    }
+    /// Send path: click-only, no keyboard fallback, fail closed.
+    pub fn send_safe() -> Self {
+        OpenChatOptions { dry_run: false, allow_keyboard_fallback: false, send_safe: true }
+    }
+}
+
+/// Open a chat by id (endpoint default: keyboard fallback allowed).
 pub async fn open_chat_a11y_search(chat_id: &str, dry_run: bool) -> OpenChatOutcome {
+    open_chat_a11y_search_with_options(chat_id, OpenChatOptions::endpoint(dry_run)).await
+}
+
+/// Send-safe open: click-only, never presses Return, so it cannot send a
+/// message. Fails closed (`open_not_confirmed_send_safe` /
+/// `keyboard_fallback_suppressed`) rather than risk a stray send.
+pub async fn open_chat_a11y_search_send_safe(chat_id: &str) -> OpenChatOutcome {
+    open_chat_a11y_search_with_options(chat_id, OpenChatOptions::send_safe()).await
+}
+
+/// Open a chat by id using the version-robust a11y search path.
+pub async fn open_chat_a11y_search_with_options(
+    chat_id: &str,
+    opts: OpenChatOptions,
+) -> OpenChatOutcome {
     let mut out = OpenChatOutcome {
         method: "a11y_search",
         chat_id_present: !chat_id.is_empty(),
@@ -328,12 +366,13 @@ pub async fn open_chat_a11y_search(chat_id: &str, dry_run: bool) -> OpenChatOutc
     };
 
     tracing::info!(
-        "[open-chat] method=a11y_search search_box_present={} dry_run={}",
+        "[open-chat] method=a11y_search search_box_present={} dry_run={} send_safe={}",
         out.search_box_present,
-        dry_run
+        opts.dry_run,
+        opts.send_safe
     );
 
-    if dry_run {
+    if opts.dry_run {
         // Resolve + detect only; no typing/clicking.
         return out;
     }
@@ -373,34 +412,55 @@ pub async fn open_chat_a11y_search(chat_id: &str, dry_run: bool) -> OpenChatOutc
             out.result_clicked = true;
         }
         None => {
-            // No distinguishable results list → keyboard fallback: with the
-            // search box focused, Down+Return opens the first result.
-            tracing::info!(
-                "[open-chat] search_results lists_count={} candidate_lists=0 keyboard_fallback=true",
-                lists_count
-            );
-            let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
-            let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
-            keyboard_fallback = true;
-            out.result_clicked = true;
+            if opts.allow_keyboard_fallback {
+                // No distinguishable results list → keyboard fallback: with the
+                // search box focused, Down+Return opens the first result.
+                tracing::info!(
+                    "[open-chat] search_results lists_count={} candidate_lists=0 keyboard_fallback=true",
+                    lists_count
+                );
+                let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
+                let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
+                keyboard_fallback = true;
+                out.result_clicked = true;
+            } else {
+                // Send-safe: NEVER press Return (could send a stray message into
+                // a focused composer). Fail closed instead.
+                tracing::warn!(
+                    "[open-chat] keyboard_fallback_suppressed send_safe={} lists_count={} candidate_lists=0",
+                    opts.send_safe,
+                    lists_count
+                );
+                out.error = Some("keyboard_fallback_suppressed");
+                return out;
+            }
         }
     }
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-    // 6. Confirm a chat opened (locale-robust composer detection). If a click
-    //    didn't confirm, try the keyboard fallback once before giving up.
+    // 6. Confirm a chat opened (locale-robust composer detection). In endpoint
+    //    mode, a click that didn't confirm may retry via keyboard fallback. In
+    //    send-safe mode we NEVER press Return — fail closed instead.
     let mut confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
     if !confirmed && !keyboard_fallback {
-        tracing::info!("[open-chat] click_not_confirmed retry keyboard_fallback=true");
-        let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
-        let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
-        keyboard_fallback = true;
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
+        if opts.allow_keyboard_fallback {
+            tracing::info!("[open-chat] click_not_confirmed retry keyboard_fallback=true");
+            let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
+            let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
+            keyboard_fallback = true;
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
+        } else {
+            tracing::warn!("[open-chat] click_not_confirmed send_safe=true no_keyboard_retry");
+        }
     }
     out.open_confirmed = confirmed;
     if !out.open_confirmed {
-        out.error = Some("open_not_confirmed");
+        out.error = Some(if opts.send_safe {
+            "open_not_confirmed_send_safe"
+        } else {
+            "open_not_confirmed"
+        });
     }
     tracing::info!(
         "[open-chat] method=a11y_search result_clicked={} open_confirmed={} keyboard_fallback={}",

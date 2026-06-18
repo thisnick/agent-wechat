@@ -27,6 +27,8 @@ pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
     pub confirm_attempts: u32,
+    /// Guard: a single send plan run may emit at most one actual send action.
+    pub send_action_executed: bool,
 }
 
 fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
@@ -74,6 +76,7 @@ impl Plan for SendMessagePlan {
             phase: SendMessagePhase::Opening,
             open_result: None,
             confirm_attempts: 0,
+            send_action_executed: false,
         }
     }
 
@@ -124,20 +127,18 @@ impl Plan for SendMessagePlan {
                         // AW-FORK-7). Open via a11y search instead so send no longer
                         // dies at "No action selected". Redacted diagnostics only.
                         tracing::warn!(
-                            "[send] open_chat fast_path_failed fallback=a11y_search prev_error_present={}",
+                            "[send] open_chat fast_path_failed fallback=a11y_search send_safe=true keyboard_fallback_allowed=false prev_error_present={}",
                             result.error.is_some()
                         );
-                        let fb = crate::tools::ui_open_chat::open_chat_a11y_search(
+                        // SEND-SAFE: click-only open, never presses Return, so it
+                        // cannot inject a stray message (AW-FORK-8B). Require an
+                        // explicit open_confirmed; do NOT proceed on a mere click.
+                        let fb = crate::tools::ui_open_chat::open_chat_a11y_search_send_safe(
                             &params.chat_id,
-                            false,
                         )
                         .await;
-                        if fb.open_confirmed || fb.result_clicked {
-                            tracing::info!(
-                                "[send] fallback=a11y_search result_clicked={} open_confirmed={}",
-                                fb.result_clicked,
-                                fb.open_confirmed
-                            );
+                        if fb.open_confirmed {
+                            tracing::info!("[send] fallback=a11y_search send_safe open_confirmed=true");
                             result = OpenChatResult {
                                 ok: true,
                                 username: None,
@@ -147,7 +148,7 @@ impl Plan for SendMessagePlan {
                             };
                         } else {
                             tracing::warn!(
-                                "[send] fallback=a11y_search failed error={:?}",
+                                "[send] open_chat send_safe_failed error={:?}",
                                 fb.error
                             );
                             return None;
@@ -202,8 +203,21 @@ impl Plan for SendMessagePlan {
                 SendMessagePhase::Inputting => {
                     let found = find_edit_and_send_button(a11y);
                     if found.is_none() {
+                        tracing::warn!("[send] composer_not_found");
                         return None;
                     }
+
+                    // Single-send guard: never emit a second send action within one
+                    // plan run (AW-FORK-8B defense-in-depth against duplicates).
+                    if plan_state.send_action_executed {
+                        tracing::warn!("[send] send_action_guard_triggered");
+                        plan_state.phase = SendMessagePhase::Done;
+                        return None;
+                    }
+                    plan_state.send_action_executed = true;
+                    tracing::info!(
+                        "[send] composer_pair_found=true composer_cleared=true send_action_count=1"
+                    );
 
                     plan_state.phase = SendMessagePhase::Confirming;
 
