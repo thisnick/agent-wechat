@@ -42,6 +42,7 @@ impl OpenChatOutcome {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Rect {
     x: i32,
     y: i32,
@@ -107,6 +108,24 @@ fn collect<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
+/// Like `collect` but records each node's depth (root = 0).
+fn collect_with_depth<'a>(node: &'a Value, depth: usize, out: &mut Vec<(usize, &'a Value)>) {
+    out.push((depth, node));
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for c in children {
+            collect_with_depth(c, depth + 1, out);
+        }
+    }
+}
+
+/// Direct `list-item` children of a node.
+fn list_item_children(node: &Value) -> Vec<&Value> {
+    node.get("children")
+        .and_then(|c| c.as_array())
+        .map(|arr| arr.iter().filter(|c| role_of(c) == "list-item").collect())
+        .unwrap_or_default()
+}
+
 fn rect_of(node: &Value) -> Option<Rect> {
     let b = node.get("bounds")?;
     let x = b.get("x")?.as_f64()?;
@@ -135,42 +154,73 @@ fn role_of(node: &Value) -> &str {
     node.get("role").and_then(|v| v.as_str()).unwrap_or("")
 }
 
-/// Find the search box: the topmost EDITABLE text/entry node. In the chat-list
-/// state (no chat open) this is WeChat's search field.
-fn find_search_box(tree: &Value) -> Option<Rect> {
-    let mut nodes = Vec::new();
-    collect(tree, &mut nodes);
-    let mut best: Option<Rect> = None;
-    for n in &nodes {
+/// Find the search box with its tree depth: prefer a FOCUSED EDITABLE
+/// text/entry node, else the topmost EDITABLE one. In the chat-list state this
+/// is WeChat's search field. The depth lets us distinguish the (deep)
+/// search-results list from the (shallow) main chat-list.
+fn find_search_box_node(tree: &Value) -> Option<(usize, Rect)> {
+    let mut pairs = Vec::new();
+    collect_with_depth(tree, 0, &mut pairs);
+    let mut focused: Option<(usize, Rect)> = None;
+    let mut topmost: Option<(usize, Rect)> = None;
+    for (depth, n) in &pairs {
         let role = role_of(n);
-        let editable = has_state(n, "EDITABLE");
-        if editable && (role.contains("text") || role.contains("entry") || role.contains("field")) {
+        if has_state(n, "EDITABLE")
+            && (role.contains("text") || role.contains("entry") || role.contains("field"))
+        {
             if let Some(r) = rect_of(n) {
-                // Prefer the topmost candidate (search box sits above the chat list).
-                if best.as_ref().map(|b| r.y < b.y).unwrap_or(true) {
-                    best = Some(r);
+                if topmost.map(|(_, b)| r.y < b.y).unwrap_or(true) {
+                    topmost = Some((*depth, r));
+                }
+                if has_state(n, "FOCUSED") && focused.map(|(_, b)| r.y < b.y).unwrap_or(true) {
+                    focused = Some((*depth, r));
                 }
             }
         }
     }
-    best
+    focused.or(topmost)
 }
 
-/// Find the first search-result row to click: topmost `list-item` with bounds.
-fn find_first_result(tree: &Value, below_y: i32) -> Option<Rect> {
-    let mut nodes = Vec::new();
-    collect(tree, &mut nodes);
-    let mut best: Option<Rect> = None;
-    for n in &nodes {
-        if role_of(n) == "list-item" {
-            if let Some(r) = rect_of(n) {
-                if r.y >= below_y && best.as_ref().map(|b| r.y < b.y).unwrap_or(true) {
-                    best = Some(r);
-                }
-            }
+/// Choose the first row of the **search-results** list (not the main chat-list).
+/// Returns (lists_count, candidate_lists_count, Some((depth, item_count, first_item_rect))).
+///
+/// WeChat 4.1.1 renders search results as a SEPARATE, deeper `list` than the
+/// main conversation list. The main chat-list is shallow (small depth) with many
+/// items; the search-results list is deeper than the focused search box, with a
+/// small item count, appearing below the search box. Selecting the global
+/// topmost `list-item` (the old logic) wrongly hit a main-chat-list row.
+fn select_result_first_item(
+    pairs: &[(usize, &Value)],
+    search_depth: usize,
+    search_y: i32,
+) -> (usize, usize, Option<(usize, usize, Rect)>) {
+    let mut lists_count = 0usize;
+    let mut candidates: Vec<(usize, usize, Rect)> = Vec::new();
+    for (depth, n) in pairs {
+        if role_of(n) != "list" {
+            continue;
+        }
+        lists_count += 1;
+        let items = list_item_children(n);
+        if items.is_empty() {
+            continue;
+        }
+        let first = match rect_of(items[0]) {
+            Some(r) => r,
+            None => continue,
+        };
+        // Search-results list heuristic: deeper than the search box, modest item
+        // count (the main chat-list has many), first row at/below the search box.
+        if *depth > search_depth && items.len() < 10 && first.y >= search_y {
+            candidates.push((*depth, items.len(), first));
         }
     }
-    best
+    let chosen = candidates.iter().copied().min_by(|a, b| {
+        let da = (a.2.y - search_y).abs();
+        let db = (b.2.y - search_y).abs();
+        da.cmp(&db).then(b.0.cmp(&a.0))
+    });
+    (lists_count, candidates.len(), chosen)
 }
 
 /// True if a message composer is present → a chat is open. Locale-robust: the
@@ -266,14 +316,15 @@ pub async fn open_chat_a11y_search(chat_id: &str, dry_run: bool) -> OpenChatOutc
         return out;
     }
     let tree = tree.unwrap();
-    let search_box = find_search_box(&tree);
+    let search_box = find_search_box_node(&tree);
     // Coordinate fallback: WeChat's search field sits near the top-left.
-    let (sx, sy) = match &search_box {
-        Some(r) => {
+    // search_depth = usize::MAX when not found → forces the keyboard fallback.
+    let (search_depth, sx, sy) = match &search_box {
+        Some((d, r)) => {
             out.search_box_present = true;
-            (r.x + r.w / 2, r.y + r.h / 2)
+            (*d, r.x + r.w / 2, r.y + r.h / 2)
         }
-        None => (win.x + (win.w as f64 * 0.12) as i32, win.y + 45),
+        None => (usize::MAX, win.x + (win.w as f64 * 0.12) as i32, win.y + 45),
     };
 
     tracing::info!(
@@ -295,7 +346,7 @@ pub async fn open_chat_a11y_search(chat_id: &str, dry_run: bool) -> OpenChatOutc
     let _ = xdotool(&["type", "--clearmodifiers", "--", name.as_str()]).await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    // 5. Click the first search result (below the search box).
+    // 5. Click the first row of the SEARCH-RESULTS list (not a main chat-list row).
     let after_type = match a11y_tree().await {
         Some(t) => t,
         None => {
@@ -303,30 +354,59 @@ pub async fn open_chat_a11y_search(chat_id: &str, dry_run: bool) -> OpenChatOutc
             return out;
         }
     };
-    let result = find_first_result(&after_type, sy + 1);
-    let result = match result {
-        Some(r) => r,
-        None => {
-            out.error = Some("result_not_found");
-            tracing::warn!("[open-chat] method=a11y_search result_not_found");
-            return out;
+    let mut pairs = Vec::new();
+    collect_with_depth(&after_type, 0, &mut pairs);
+    let (lists_count, candidate_lists, chosen) =
+        select_result_first_item(&pairs, search_depth, sy);
+
+    let mut keyboard_fallback = false;
+    match chosen {
+        Some((sel_depth, sel_items, first)) => {
+            tracing::info!(
+                "[open-chat] search_results lists_count={} candidate_lists={} selected_depth={} selected_items={}",
+                lists_count,
+                candidate_lists,
+                sel_depth,
+                sel_items
+            );
+            click_at(first.x + first.w / 2, first.y + first.h / 2).await;
+            out.result_clicked = true;
         }
-    };
-    click_at(result.x + result.w / 2, result.y + result.h / 2).await;
-    out.result_clicked = true;
+        None => {
+            // No distinguishable results list → keyboard fallback: with the
+            // search box focused, Down+Return opens the first result.
+            tracing::info!(
+                "[open-chat] search_results lists_count={} candidate_lists=0 keyboard_fallback=true",
+                lists_count
+            );
+            let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
+            let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
+            keyboard_fallback = true;
+            out.result_clicked = true;
+        }
+    }
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-    // 6. Confirm a chat opened (message composer / Send button present).
-    if let Some(confirm_tree) = a11y_tree().await {
-        out.open_confirmed = chat_is_open(&confirm_tree);
+    // 6. Confirm a chat opened (locale-robust composer detection). If a click
+    //    didn't confirm, try the keyboard fallback once before giving up.
+    let mut confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
+    if !confirmed && !keyboard_fallback {
+        tracing::info!("[open-chat] click_not_confirmed retry keyboard_fallback=true");
+        let _ = xdotool(&["key", "--clearmodifiers", "Down"]).await;
+        let _ = xdotool(&["key", "--clearmodifiers", "Return"]).await;
+        keyboard_fallback = true;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
     }
+    out.open_confirmed = confirmed;
     if !out.open_confirmed {
         out.error = Some("open_not_confirmed");
     }
     tracing::info!(
-        "[open-chat] method=a11y_search result_clicked={} open_confirmed={}",
+        "[open-chat] method=a11y_search result_clicked={} open_confirmed={} keyboard_fallback={}",
         out.result_clicked,
-        out.open_confirmed
+        out.open_confirmed,
+        keyboard_fallback
     );
     out
 }
