@@ -28,8 +28,20 @@ pub struct OpenChatOutcome {
     pub search_box_present: bool,
     pub result_clicked: bool,
     pub open_confirmed: bool,
+    /// AW-FORK-20: a send-safe Escape was issued before searching because another
+    /// chat was open (so the search-results list becomes detectable).
+    pub pre_search_unfocus: bool,
     /// One of the specific error codes (see module/endpoint docs); None on success.
     pub error: Option<&'static str>,
+}
+
+/// AW-FORK-20: whether to issue a send-safe pre-search "unfocus" (Escape). With a
+/// chat already open, the post-type search-results list can't be distinguished
+/// from the main chat list (candidate_lists=0) and a send-safe open fails closed
+/// (AW-FORK-19C). We Escape back to the no-chat-open layout first — only in
+/// send-safe mode, and only when a chat is actually open.
+pub fn needs_pre_search_unfocus(send_safe: bool, chat_open: bool) -> bool {
+    send_safe && chat_open
 }
 
 impl OpenChatOutcome {
@@ -407,7 +419,7 @@ pub async fn open_chat_a11y_search_with_options(
     let search_box = find_search_box_node(&tree);
     // Coordinate fallback: WeChat's search field sits near the top-left.
     // search_depth = usize::MAX when not found → forces the keyboard fallback.
-    let (search_depth, search_rect, sx, sy) = match &search_box {
+    let (mut search_depth, mut search_rect, mut sx, mut sy) = match &search_box {
         Some((d, r)) => {
             out.search_box_present = true;
             (*d, Some(*r), r.x + r.w / 2, r.y + r.h / 2)
@@ -423,8 +435,43 @@ pub async fn open_chat_a11y_search_with_options(
     );
 
     if opts.dry_run {
-        // Resolve + detect only; no typing/clicking.
+        // Resolve + detect only; no typing/clicking (no Escape either).
         return out;
+    }
+
+    // AW-FORK-20: send-safe reliability when ANOTHER chat is already open. With a
+    // chat open, the post-type search-results list can't be distinguished from the
+    // main chat list (candidate_lists=0), so a send-safe open fails closed
+    // (AW-FORK-19C). Before searching, if a chat is open, press Escape to return to
+    // the no-chat-open layout where the results list is detectable. Escape NEVER
+    // sends a message; we still never press Enter or type into a composer. If
+    // Escape fails to clear it, the later candidate_lists=0 guard still fails closed
+    // (safe — no mis-route).
+    if needs_pre_search_unfocus(opts.send_safe, chat_is_open(&tree)) {
+        let _ = xdotool(&["key", "--clearmodifiers", "Escape"]).await;
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        let mut t2 = a11y_tree().await;
+        if t2.as_ref().map(|t| chat_is_open(t)).unwrap_or(false) {
+            // Still open → one more Escape.
+            let _ = xdotool(&["key", "--clearmodifiers", "Escape"]).await;
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            t2 = a11y_tree().await;
+        }
+        let chat_open_after = t2.as_ref().map(|t| chat_is_open(t)).unwrap_or(false);
+        // Re-locate the search box from the refreshed tree (coords may shift).
+        if let Some(t) = &t2 {
+            if let Some((d, r)) = find_search_box_node(t) {
+                search_depth = d;
+                search_rect = Some(r);
+                sx = r.x + r.w / 2;
+                sy = r.y + r.h / 2;
+            }
+        }
+        out.pre_search_unfocus = true;
+        tracing::info!(
+            "[open-chat] send_safe pre_search_unfocus attempted=true method=escape chat_open_before=true chat_open_after={}",
+            chat_open_after
+        );
     }
 
     // 4. Focus search, clear, type the resolved name.
@@ -524,4 +571,29 @@ pub async fn open_chat_a11y_search_with_options(
         keyboard_fallback
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_pre_search_unfocus;
+
+    // AW-FORK-19C regression: a send-safe open while ANOTHER chat is open must
+    // Escape back to the no-chat-open layout first (else candidate_lists=0 → fail
+    // closed → no delivery).
+    #[test]
+    fn send_safe_with_chat_open_needs_unfocus() {
+        assert!(needs_pre_search_unfocus(true, true));
+    }
+
+    #[test]
+    fn send_safe_with_no_chat_open_skips_unfocus() {
+        assert!(!needs_pre_search_unfocus(true, false));
+    }
+
+    // Endpoint (non-send-safe) mode keeps its keyboard fallback; no Escape pre-step.
+    #[test]
+    fn non_send_safe_never_unfocuses() {
+        assert!(!needs_pre_search_unfocus(false, true));
+        assert!(!needs_pre_search_unfocus(false, false));
+    }
 }
