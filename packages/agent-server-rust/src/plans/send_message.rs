@@ -64,6 +64,32 @@ fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
     None
 }
 
+/// AW-FORK-19: whether a send may reuse the currently-open chat or must re-open
+/// the intended target first.
+///
+/// A present composer alone must NEVER imply the target chat is open. The old
+/// `already_chat_open => skip_reopen` shortcut (AW-FORK-8D) made exactly that
+/// assumption and mis-routed a group send into a still-open *private* chat
+/// (AW-FORK-18E). Skipping the open is only safe when the currently-open chat's
+/// identity has been positively verified to equal the intended target. The UI
+/// layer has no reliable open-chat-identity read today, so callers pass `false`
+/// and we always re-open the target (fail closed if that can't be confirmed).
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendOpenDecision {
+    /// Must open the intended target before typing/sending.
+    ForceOpenTarget,
+    /// Safe to reuse the already-open chat (only when verified as the target).
+    SkipOpen,
+}
+
+pub fn decide_send_open_policy(current_open_is_verified_target: bool) -> SendOpenDecision {
+    if current_open_is_verified_target {
+        SendOpenDecision::SkipOpen
+    } else {
+        SendOpenDecision::ForceOpenTarget
+    }
+}
+
 #[async_trait::async_trait]
 impl Plan for SendMessagePlan {
     type PlanState = SendMessagePlanState;
@@ -122,57 +148,65 @@ impl Plan for SendMessagePlan {
                     let mut result = open_chat(&params.chat_id, force, click_xy).await;
 
                     if !result.ok {
-                        // Already-open shortcut (AW-FORK-8D): if a composer pair is
-                        // already present (mainWindow=chat_open), the target chat is
-                        // open — skip the a11y re-search entirely. This avoids the
-                        // unreliable already-open re-search (candidate_lists=0) that
-                        // made the send fail in AW-FORK-8C, and never re-types into a
-                        // focused composer.
-                        if main_state_id == Some("chat_open")
-                            && find_edit_and_send_button(a11y).is_some()
-                        {
-                            tracing::info!(
-                                "[send] already_chat_open composer_present=true skip_reopen=true"
-                            );
-                            result = OpenChatResult {
-                                ok: true,
-                                username: None,
-                                index: None,
-                                skipped: Some(true),
-                                error: None,
-                            };
-                        } else {
-                        // Version-robust fallback: the frida chat-select fast-path
-                        // failed (e.g. unknown BUILD_PROFILE on newer WeChat builds,
-                        // AW-FORK-7). Open via a11y search instead so send no longer
-                        // dies at "No action selected". Redacted diagnostics only.
-                        tracing::warn!(
-                            "[send] open_chat fast_path_failed fallback=a11y_search send_safe=true keyboard_fallback_allowed=false prev_error_present={}",
-                            result.error.is_some()
-                        );
-                        // SEND-SAFE: click-only open, never presses Return, so it
-                        // cannot inject a stray message (AW-FORK-8B). Require an
-                        // explicit open_confirmed; do NOT proceed on a mere click.
-                        let fb = crate::tools::ui_open_chat::open_chat_a11y_search_send_safe(
-                            &params.chat_id,
-                        )
-                        .await;
-                        if fb.open_confirmed {
-                            tracing::info!("[send] fallback=a11y_search send_safe open_confirmed=true");
-                            result = OpenChatResult {
-                                ok: true,
-                                username: None,
-                                index: None,
-                                skipped: Some(false),
-                                error: None,
-                            };
-                        } else {
-                            tracing::warn!(
-                                "[send] open_chat send_safe_failed error={:?}",
-                                fb.error
-                            );
-                            return None;
-                        }
+                        // AW-FORK-19 — CROSS-CHAT-SAFE OPEN. The frida fast-path
+                        // failed (it always does on WeChat 4.1.1.x: unknown
+                        // BUILD_PROFILE, AW-FORK-7). We must open the *intended
+                        // target* by name and must NEVER reuse whatever chat is
+                        // already open. The removed `already_chat_open =>
+                        // skip_reopen` shortcut assumed any open composer was the
+                        // target, which mis-routed a group send into a still-open
+                        // private chat (AW-FORK-18E). A present composer alone does
+                        // not prove the target is open, so we always re-open it.
+                        match decide_send_open_policy(/* verified target */ false) {
+                            SendOpenDecision::SkipOpen => {
+                                // Only reachable once a reliable open-chat-identity
+                                // check exists (not today); reuse the open chat.
+                                tracing::info!(
+                                    "[send] skip_reopen=true reason=verified_target_open"
+                                );
+                                result = OpenChatResult {
+                                    ok: true,
+                                    username: None,
+                                    index: None,
+                                    skipped: Some(true),
+                                    error: None,
+                                };
+                            }
+                            SendOpenDecision::ForceOpenTarget => {
+                                tracing::info!(
+                                    "[send] target_open_policy=always_open skip_reopen=false reason=cross_chat_safety mainWindow_open={} prev_error_present={}",
+                                    main_state_id == Some("chat_open"),
+                                    result.error.is_some()
+                                );
+                                // SEND-SAFE: click-only open, never presses Return,
+                                // so it cannot inject a stray (AW-FORK-8B). Resolves
+                                // chat_id -> name -> search -> click the target row.
+                                let fb = crate::tools::ui_open_chat::open_chat_a11y_search_send_safe(
+                                    &params.chat_id,
+                                )
+                                .await;
+                                if fb.open_confirmed {
+                                    tracing::info!(
+                                        "[send] target_open_required=true target_open_ok=true resolved_name_present={}",
+                                        fb.resolved_name_present
+                                    );
+                                    result = OpenChatResult {
+                                        ok: true,
+                                        username: None,
+                                        index: None,
+                                        skipped: Some(false),
+                                        error: None,
+                                    };
+                                } else {
+                                    // FAIL CLOSED: never fall back to sending into
+                                    // whatever chat is currently open.
+                                    tracing::warn!(
+                                        "[send] target_open_required=true target_open_ok=false error={:?} fail_closed=true",
+                                        fb.error
+                                    );
+                                    return None;
+                                }
+                            }
                         }
                     }
 
@@ -321,5 +355,27 @@ impl Plan for SendMessagePlan {
                 SendMessagePhase::Done => return None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decide_send_open_policy, SendOpenDecision};
+
+    // AW-FORK-18E regression: a chat being open (composer present) is NOT a
+    // verified target, so a send must force-open the intended target. This is the
+    // exact case that previously mis-routed a group send into a private chat.
+    #[test]
+    fn composer_present_alone_forces_target_open() {
+        assert_eq!(
+            decide_send_open_policy(false),
+            SendOpenDecision::ForceOpenTarget
+        );
+    }
+
+    // Skipping the open is only allowed when the open chat is the verified target.
+    #[test]
+    fn only_verified_target_may_skip_open() {
+        assert_eq!(decide_send_open_policy(true), SendOpenDecision::SkipOpen);
     }
 }
