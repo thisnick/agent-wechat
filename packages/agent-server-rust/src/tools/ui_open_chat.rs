@@ -208,23 +208,44 @@ fn select_result_first_item(
 ) -> (usize, usize, Option<(usize, usize, Rect)>) {
     let mut lists_count = 0usize;
     let mut candidates: Vec<(usize, usize, Rect)> = Vec::new();
+    // AW-FORK-21 diagnostic: per-list shape + which heuristic condition excluded it.
+    // Sanitized (numbers/booleans only — no text, names, or chat content).
+    let mut diag: Vec<(usize, usize, i32, i32, usize, i32, bool, bool, bool)> = Vec::new();
     for (depth, n) in pairs {
         if role_of(n) != "list" {
             continue;
         }
+        let idx = lists_count;
         lists_count += 1;
         let items = list_item_children(n);
-        if items.is_empty() {
-            continue;
-        }
-        let first = match rect_of(items[0]) {
-            Some(r) => r,
-            None => continue,
-        };
+        let list_rect = rect_of(n).unwrap_or(Rect { x: -1, y: -1, w: -1, h: -1 });
+        let first = items.first().and_then(|it| rect_of(it));
+        let first_y = first.map(|r| r.y).unwrap_or(-1);
+        let cond_deeper = *depth > search_depth;
+        let cond_items = !items.is_empty() && items.len() < 10;
+        let cond_below = first.map(|r| r.y >= search_y).unwrap_or(false);
+        diag.push((
+            idx, *depth, list_rect.y, list_rect.h, items.len(), first_y,
+            cond_deeper, cond_items, cond_below,
+        ));
         // Search-results list heuristic: deeper than the search box, modest item
         // count (the main chat-list has many), first row at/below the search box.
-        if *depth > search_depth && items.len() < 10 && first.y >= search_y {
-            candidates.push((*depth, items.len(), first));
+        if cond_deeper && cond_items && cond_below {
+            if let Some(r) = first {
+                candidates.push((*depth, items.len(), r));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        tracing::info!(
+            "[open-chat-diagnostic] candidate_lists=0 lists_count={} search_depth={} search_y={}",
+            lists_count, search_depth, search_y
+        );
+        for (idx, depth, list_y, list_h, item_count, first_y, c_deep, c_items, c_below) in &diag {
+            tracing::info!(
+                "[open-chat-diagnostic] list idx={} depth={} list_y={} list_h={} item_count={} first_item_y={} cond_deeper_than_search={} cond_items_lt10={} cond_first_at_or_below_search={}",
+                idx, depth, list_y, list_h, item_count, first_y, c_deep, c_items, c_below
+            );
         }
     }
     let chosen = candidates.iter().copied().min_by(|a, b| {
