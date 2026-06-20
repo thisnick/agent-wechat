@@ -214,23 +214,92 @@ fn find_search_box_node(tree: &Value) -> Option<(usize, Rect)> {
     chosen.map(|(d, r, _)| (d, r))
 }
 
-/// Choose the first row of the **search-results** list (not the main chat-list).
-/// Returns (lists_count, candidate_lists_count, Some((depth, item_count, first_item_rect))).
-///
-/// WeChat 4.1.1 renders search results as a SEPARATE, deeper `list` than the
-/// main conversation list. The main chat-list is shallow (small depth) with many
-/// items; the search-results list is deeper than the focused search box, with a
-/// small item count, appearing below the search box. Selecting the global
-/// topmost `list-item` (the old logic) wrongly hit a main-chat-list row.
-fn select_result_first_item(
+/// AW-FORK-22: normalize a chat name for matching (trim, lowercase, drop
+/// zero-width chars, collapse internal whitespace).
+fn normalize_name(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !matches!(*c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}'))
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// AW-FORK-22: system chats that must NEVER be chosen as a send target.
+fn is_denied_system_chat(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "file transfer" | "weixin team" | "文件传输助手" | "微信团队"
+    )
+}
+
+/// Collect every descendant `name` string of a node (the row's label may sit on a
+/// child of the list-item).
+fn collect_names(node: &Value, out: &mut Vec<String>) {
+    if let Some(name) = node.get("name").and_then(|v| v.as_str()) {
+        if !name.trim().is_empty() {
+            out.push(name.to_string());
+        }
+    }
+    if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        for c in children {
+            collect_names(c, out);
+        }
+    }
+}
+
+/// AW-FORK-22: among search-result rows, pick the one whose (normalized) name
+/// EXACTLY equals the target. Denylist system chats. Require a UNIQUE match: 0 =>
+/// `no_matching_target`, >1 => `ambiguous_matches`. NEVER falls back to the first
+/// row (that strayed a group send to a wrong private chat, §63). Rows are
+/// `(descendant_names, rect)`. Returns `(denied, exact_matches, selected, fail)`.
+fn pick_matching_row(
+    rows: &[(Vec<String>, Rect)],
+    target_norm: &str,
+) -> (usize, usize, Option<Rect>, Option<&'static str>) {
+    let mut denied = 0usize;
+    let mut matches: Vec<Rect> = Vec::new();
+    for (names, rect) in rows {
+        let norms: Vec<String> = names
+            .iter()
+            .map(|n| normalize_name(n))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if norms.iter().any(|s| is_denied_system_chat(s)) {
+            denied += 1;
+            continue;
+        }
+        if !target_norm.is_empty() && norms.iter().any(|s| s == target_norm) {
+            matches.push(*rect);
+        }
+    }
+    match matches.len() {
+        1 => (denied, 1, Some(matches[0]), None),
+        0 => (denied, 0, None, Some("no_matching_target")),
+        n => (denied, n, None, Some("ambiguous_matches")),
+    }
+}
+
+struct ResultSelection {
+    candidate_lists: usize,
+    rows_total: usize,
+    denied_count: usize,
+    exact_matches: usize,
+    selected: Option<Rect>,
+    fail_reason: Option<&'static str>,
+}
+
+/// AW-FORK-22: select the search-result row matching the resolved target (by name
+/// + denylist) instead of blindly clicking the first row (§63 stray). Keeps the
+/// AW-FORK-21 candidate-list-shape diagnostics for the no-results case.
+fn select_result_matching_target(
     pairs: &[(usize, &Value)],
     search_depth: usize,
     search_y: i32,
-) -> (usize, usize, Option<(usize, usize, Rect)>) {
+    target_norm: &str,
+) -> ResultSelection {
     let mut lists_count = 0usize;
-    let mut candidates: Vec<(usize, usize, Rect)> = Vec::new();
-    // AW-FORK-21 diagnostic: per-list shape + which heuristic condition excluded it.
-    // Sanitized (numbers/booleans only — no text, names, or chat content).
+    let mut candidate_lists = 0usize;
+    let mut rows: Vec<(Vec<String>, Rect)> = Vec::new();
     let mut diag: Vec<(usize, usize, i32, i32, usize, i32, bool, bool, bool)> = Vec::new();
     for (depth, n) in pairs {
         if role_of(n) != "list" {
@@ -245,19 +314,19 @@ fn select_result_first_item(
         let cond_deeper = *depth > search_depth;
         let cond_items = !items.is_empty() && items.len() < 10;
         let cond_below = first.map(|r| r.y >= search_y).unwrap_or(false);
-        diag.push((
-            idx, *depth, list_rect.y, list_rect.h, items.len(), first_y,
-            cond_deeper, cond_items, cond_below,
-        ));
-        // Search-results list heuristic: deeper than the search box, modest item
-        // count (the main chat-list has many), first row at/below the search box.
+        diag.push((idx, *depth, list_rect.y, list_rect.h, items.len(), first_y, cond_deeper, cond_items, cond_below));
         if cond_deeper && cond_items && cond_below {
-            if let Some(r) = first {
-                candidates.push((*depth, items.len(), r));
+            candidate_lists += 1;
+            for it in &items {
+                if let Some(r) = rect_of(it) {
+                    let mut names = Vec::new();
+                    collect_names(it, &mut names);
+                    rows.push((names, r));
+                }
             }
         }
     }
-    if candidates.is_empty() {
+    if candidate_lists == 0 {
         tracing::info!(
             "[open-chat-diagnostic] candidate_lists=0 lists_count={} search_depth={} search_y={}",
             lists_count, search_depth, search_y
@@ -269,12 +338,15 @@ fn select_result_first_item(
             );
         }
     }
-    let chosen = candidates.iter().copied().min_by(|a, b| {
-        let da = (a.2.y - search_y).abs();
-        let db = (b.2.y - search_y).abs();
-        da.cmp(&db).then(b.0.cmp(&a.0))
-    });
-    (lists_count, candidates.len(), chosen)
+    let (denied_count, exact_matches, selected, fail_reason) = pick_matching_row(&rows, target_norm);
+    ResultSelection {
+        candidate_lists,
+        rows_total: rows.len(),
+        denied_count,
+        exact_matches,
+        selected,
+        fail_reason,
+    }
 }
 
 /// True if a message composer is present → a chat is open. Locale-robust: the
@@ -534,70 +606,40 @@ pub async fn open_chat_a11y_search_with_options(
     };
     let mut pairs = Vec::new();
     collect_with_depth(&after_type, 0, &mut pairs);
-    let (lists_count, candidate_lists, chosen) =
-        select_result_first_item(&pairs, search_depth, sy);
-
-    let mut keyboard_fallback = false;
-    match chosen {
-        Some((sel_depth, sel_items, first)) => {
-            tracing::info!(
-                "[open-chat] search_results lists_count={} candidate_lists={} selected_depth={} selected_items={}",
-                lists_count,
-                candidate_lists,
-                sel_depth,
-                sel_items
-            );
-            click_at(first.x + first.w / 2, first.y + first.h / 2).await;
+    // AW-FORK-22: click the search-result row whose name MATCHES the resolved
+    // target — never the blind first row (that strayed a group send to a wrong
+    // private chat, §63). No unique match → fail closed (no click, no keyboard
+    // fallback), for BOTH send-safe and endpoint modes.
+    let target_norm = normalize_name(&name);
+    let sel = select_result_matching_target(&pairs, search_depth, sy, &target_norm);
+    tracing::info!(
+        "[open-chat] result_match rows={} candidate_lists={} denied={} exact_matches={} selected={}",
+        sel.rows_total,
+        sel.candidate_lists,
+        sel.denied_count,
+        sel.exact_matches,
+        sel.selected.is_some()
+    );
+    match sel.selected {
+        Some(rect) => {
+            click_at(rect.x + rect.w / 2, rect.y + rect.h / 2).await;
             out.result_clicked = true;
         }
         None => {
-            if opts.allow_keyboard_fallback {
-                // No distinguishable results list → keyboard fallback, but ONLY
-                // if the search box is focused (never Return into a composer).
-                tracing::info!(
-                    "[open-chat] search_results lists_count={} candidate_lists=0 keyboard_fallback_attempt=true",
-                    lists_count
-                );
-                if safe_keyboard_open(search_rect).await {
-                    keyboard_fallback = true;
-                    out.result_clicked = true;
-                } else {
-                    out.error = Some("keyboard_fallback_unsafe_focus");
-                    return out;
-                }
-            } else {
-                // Send-safe: NEVER press Return (could send a stray message into
-                // a focused composer). Fail closed instead.
-                tracing::warn!(
-                    "[open-chat] keyboard_fallback_suppressed send_safe={} lists_count={} candidate_lists=0",
-                    opts.send_safe,
-                    lists_count
-                );
-                out.error = Some("keyboard_fallback_suppressed");
-                return out;
-            }
+            tracing::warn!(
+                "[open-chat] result_match_fail reason={} fail_closed=true",
+                sel.fail_reason.unwrap_or("result_no_match")
+            );
+            out.error = Some(sel.fail_reason.unwrap_or("result_no_match"));
+            return out;
         }
     }
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-    // 6. Confirm a chat opened (locale-robust composer detection). In endpoint
-    //    mode, a click that didn't confirm may retry via keyboard fallback. In
-    //    send-safe mode we NEVER press Return — fail closed instead.
-    let mut confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
-    if !confirmed && !keyboard_fallback {
-        if opts.allow_keyboard_fallback {
-            tracing::info!("[open-chat] click_not_confirmed retry keyboard_fallback_attempt=true");
-            if safe_keyboard_open(search_rect).await {
-                keyboard_fallback = true;
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
-            } else {
-                tracing::warn!("[open-chat] retry keyboard_fallback_blocked unsafe_focus=true");
-            }
-        } else {
-            tracing::warn!("[open-chat] click_not_confirmed send_safe=true no_keyboard_retry");
-        }
-    }
+    // 6. Confirm a chat opened (locale-robust composer detection). With
+    //    target-aware row matching (AW-FORK-22) we no longer keyboard-fallback; if
+    //    the matched click didn't open a chat, fail closed.
+    let confirmed = a11y_tree().await.map(|t| chat_is_open(&t)).unwrap_or(false);
     out.open_confirmed = confirmed;
     if !out.open_confirmed {
         out.error = Some(if opts.send_safe {
@@ -607,20 +649,22 @@ pub async fn open_chat_a11y_search_with_options(
         });
     }
     tracing::info!(
-        "[open-chat] method=a11y_search result_clicked={} open_confirmed={} keyboard_fallback={}",
+        "[open-chat] method=a11y_search result_clicked={} open_confirmed={}",
         out.result_clicked,
-        out.open_confirmed,
-        keyboard_fallback
+        out.open_confirmed
     );
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_search_editable, Rect};
+    use super::{choose_search_editable, is_denied_system_chat, normalize_name, pick_matching_row, Rect};
 
     fn r(y: i32) -> Rect {
         Rect { x: 0, y, w: 200, h: 30 }
+    }
+    fn row(name: &str, y: i32) -> (Vec<String>, Rect) {
+        (vec![name.to_string()], r(y))
     }
 
     // AW-FORK-21 regression: with a chat open, the FOCUSED composer sits at the
@@ -649,6 +693,72 @@ mod tests {
     #[test]
     fn no_editable_is_none() {
         assert!(choose_search_editable(&[]).is_none());
+    }
+
+    // AW-FORK-22 result matching ------------------------------------------------
+
+    #[test]
+    fn normalize_trims_lowercases_collapses() {
+        assert_eq!(normalize_name("  GRAILA  Test \u{200b}Group "), "graila test group");
+    }
+
+    #[test]
+    fn denylist_blocks_system_chats() {
+        assert!(is_denied_system_chat("file transfer"));
+        assert!(is_denied_system_chat("文件传输助手"));
+        assert!(is_denied_system_chat("微信团队"));
+        assert!(!is_denied_system_chat("graila test group"));
+    }
+
+    // §63 regression: first row is a WRONG private chat; the exact target is a
+    // later row → that later row must be selected (no first-row fallback).
+    #[test]
+    fn exact_target_selected_not_first_row() {
+        let rows = vec![row("Some Other Person", 100), row("GRAILA Test Group", 140)];
+        let (_, exact, sel, fail) = pick_matching_row(&rows, &normalize_name("GRAILA Test Group"));
+        assert_eq!(exact, 1);
+        assert_eq!(sel.unwrap().y, 140);
+        assert!(fail.is_none());
+    }
+
+    #[test]
+    fn denied_system_row_skipped_target_selected() {
+        let rows = vec![row("File Transfer", 100), row("GRAILA Test Group", 140)];
+        let (denied, _, sel, _) = pick_matching_row(&rows, &normalize_name("GRAILA Test Group"));
+        assert_eq!(denied, 1);
+        assert_eq!(sel.unwrap().y, 140);
+    }
+
+    #[test]
+    fn no_matching_target_fails_closed() {
+        let rows = vec![row("Someone Else", 100), row("Another Chat", 140)];
+        let (_, _, sel, fail) = pick_matching_row(&rows, &normalize_name("GRAILA Test Group"));
+        assert!(sel.is_none());
+        assert_eq!(fail, Some("no_matching_target"));
+    }
+
+    #[test]
+    fn ambiguous_matches_fail_closed() {
+        let rows = vec![row("GRAILA Test Group", 100), row("graila test group", 140)];
+        let (_, _, sel, fail) = pick_matching_row(&rows, &normalize_name("GRAILA Test Group"));
+        assert!(sel.is_none());
+        assert_eq!(fail, Some("ambiguous_matches"));
+    }
+
+    #[test]
+    fn only_denied_row_no_match() {
+        let rows = vec![row("Weixin Team", 100)];
+        let (denied, _, sel, fail) = pick_matching_row(&rows, &normalize_name("Weixin Team"));
+        assert_eq!(denied, 1);
+        assert!(sel.is_none());
+        assert_eq!(fail, Some("no_matching_target"));
+    }
+
+    #[test]
+    fn empty_target_never_matches() {
+        let rows = vec![row("Anything", 100)];
+        let (_, _, sel, _) = pick_matching_row(&rows, "");
+        assert!(sel.is_none());
     }
 }
 
