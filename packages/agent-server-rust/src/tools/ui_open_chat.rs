@@ -170,27 +170,48 @@ fn role_of(node: &Value) -> &str {
 /// text/entry node, else the topmost EDITABLE one. In the chat-list state this
 /// is WeChat's search field. The depth lets us distinguish the (deep)
 /// search-results list from the (shallow) main chat-list.
+/// AW-FORK-21B: choose the search box from EDITABLE candidates as the **topmost**
+/// one (smallest y). The WeChat search field sits at the top-left of the main
+/// window; a chat's message composer sits at the BOTTOM and is FOCUSED while a
+/// chat is open. The old `focused.or(topmost)` let a focused bottom composer win,
+/// so the resolved name was typed into the composer and no search results appeared
+/// (`candidate_lists=0`, AW-FORK-21). Never prefer a focused editable here.
+/// Candidates are `(depth, rect, focused)`.
+fn choose_search_editable(candidates: &[(usize, Rect, bool)]) -> Option<(usize, Rect, bool)> {
+    candidates.iter().copied().min_by_key(|(_, r, _)| r.y)
+}
+
 fn find_search_box_node(tree: &Value) -> Option<(usize, Rect)> {
     let mut pairs = Vec::new();
     collect_with_depth(tree, 0, &mut pairs);
-    let mut focused: Option<(usize, Rect)> = None;
-    let mut topmost: Option<(usize, Rect)> = None;
+    let mut candidates: Vec<(usize, Rect, bool)> = Vec::new();
     for (depth, n) in &pairs {
         let role = role_of(n);
         if has_state(n, "EDITABLE")
             && (role.contains("text") || role.contains("entry") || role.contains("field"))
         {
             if let Some(r) = rect_of(n) {
-                if topmost.map(|(_, b)| r.y < b.y).unwrap_or(true) {
-                    topmost = Some((*depth, r));
-                }
-                if has_state(n, "FOCUSED") && focused.map(|(_, b)| r.y < b.y).unwrap_or(true) {
-                    focused = Some((*depth, r));
-                }
+                candidates.push((*depth, r, has_state(n, "FOCUSED")));
             }
         }
     }
-    focused.or(topmost)
+    let chosen = choose_search_editable(&candidates);
+    if let Some((_, r, _)) = &chosen {
+        let focused_y = candidates
+            .iter()
+            .filter(|(_, _, f)| *f)
+            .map(|(_, rr, _)| rr.y)
+            .min()
+            .unwrap_or(-1);
+        let ignored = candidates.iter().any(|(_, rr, f)| *f && rr.y > r.y);
+        tracing::info!(
+            "[open-chat] search_box_policy=topmost_editable search_box_selected_y={} focused_editable_y={} focused_editable_ignored_as_composer={}",
+            r.y,
+            focused_y,
+            ignored
+        );
+    }
+    chosen.map(|(d, r, _)| (d, r))
 }
 
 /// Choose the first row of the **search-results** list (not the main chat-list).
@@ -596,6 +617,43 @@ pub async fn open_chat_a11y_search_with_options(
 
 #[cfg(test)]
 mod tests {
+    use super::{choose_search_editable, Rect};
+
+    fn r(y: i32) -> Rect {
+        Rect { x: 0, y, w: 200, h: 30 }
+    }
+
+    // AW-FORK-21 regression: with a chat open, the FOCUSED composer sits at the
+    // bottom; the search box is the topmost editable. The topmost must win.
+    #[test]
+    fn topmost_editable_beats_focused_bottom_composer() {
+        let search_box = (14usize, r(69), false); // top, not focused
+        let composer = (16usize, r(697), true); // bottom, focused
+        let chosen = choose_search_editable(&[composer, search_box]).unwrap();
+        assert_eq!(chosen.1.y, 69);
+        assert!(!chosen.2, "must not pick the focused composer");
+    }
+
+    #[test]
+    fn focused_does_not_auto_win() {
+        let top = (14usize, r(45), false);
+        let focused_bottom = (16usize, r(700), true);
+        assert_eq!(choose_search_editable(&[top, focused_bottom]).unwrap().1.y, 45);
+    }
+
+    #[test]
+    fn single_editable_is_chosen() {
+        assert_eq!(choose_search_editable(&[(14usize, r(50), true)]).unwrap().1.y, 50);
+    }
+
+    #[test]
+    fn no_editable_is_none() {
+        assert!(choose_search_editable(&[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod unfocus_tests {
     use super::needs_pre_search_unfocus;
 
     // AW-FORK-19C regression: a send-safe open while ANOTHER chat is open must
