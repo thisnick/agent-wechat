@@ -1,5 +1,5 @@
 {
-  "name": "@agent-wechat/wechat",
+  "name": "@agent-wechat/agent-wechat",
   "version": "0.11.15",
   "type": "module",
   "files": [
@@ -29,7 +29,7 @@
       "order": 80
     },
     "install": {
-      "npmSpec": "@agent-wechat/wechat"
+      "npmSpec": "@agent-wechat/agent-wechat"
     },
     "channelConfigs": {
       "agent-wechat": {
