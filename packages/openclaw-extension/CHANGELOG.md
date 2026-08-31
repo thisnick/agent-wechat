@@ -1,5 +1,32 @@
 # @agent-wechat/wechat
 
+## 0.12.0
+
+### Minor Changes
+
+- [#162](https://github.com/thisnick/agent-wechat/pull/162) [`ee25d8f`](https://github.com/thisnick/agent-wechat/commit/ee25d8ff5b22272956c14dc0ab7169fae919aab1) Thanks [@thisnick](https://github.com/thisnick)! - Update for openclaw 2026.5+ compatibility:
+
+  - Add `channelConfigs` metadata to `openclaw.plugin.json` so the gateway can validate config and load setup surfaces before the plugin runtime imports (silences the "channel plugin manifest declares wechat without channelConfigs metadata" warning).
+  - Replace deprecated `runtime.config.loadConfig()` calls with `runtime.config.current()`.
+  - Add a `message` adapter via `createChannelMessageAdapterFromOutbound` from `openclaw/plugin-sdk/channel-message`. The legacy `outbound` adapter is kept for older openclaw versions.
+  - Bump the `openclaw` peer dependency floor to `^2026.5.12`.
+
+  The deprecated `outbound` adapter and `dispatchReplyWithBufferedBlockDispatcher` ingest flow continue to work via openclaw's compat shims; a follow-up release will migrate the monitor's dispatch path to `core.channel.turn.runPrepared(...)`.
+
+- [#174](https://github.com/thisnick/agent-wechat/pull/174) [`2cdd77b`](https://github.com/thisnick/agent-wechat/commit/2cdd77b6ec040b4745c647c3dab1c6d8079309cc) Thanks [@thisnick](https://github.com/thisnick)! - Rename the OpenClaw plugin/channel id from `wechat` to `agent-wechat` and restore compatibility with OpenClaw 2026.8.x.
+
+  OpenClaw's bundled official plugin catalog now reserves `wechat` (and `weixin`) as aliases of Tencent's `@tencent-weixin/openclaw-weixin` plugin, and the catalog is compiled into the openclaw JS bundle — so the id `wechat` gets hijacked: `plugins install` writes `plugins.entries.openclaw-weixin`, and `channels add --channel wechat` tries to install the Tencent plugin instead of this one. Patching `dist/channel-catalog.json` no longer helps.
+
+  Changes:
+
+  - Plugin id and channel id are now `agent-wechat`; config lives under `channels.agent-wechat`.
+  - Dropped the `weixin` alias (catalog-reserved).
+  - Imports moved from the removed bare `openclaw/plugin-sdk` export to `openclaw/plugin-sdk/core` (works on hosts >=2026.5.12, required on 2026.8.x).
+  - `channelConfigs` metadata added to `package.json#openclaw` so 2026.8.x setup surfaces get the config schema.
+  - `wechat:`-prefixed targets and allowlist entries are still accepted.
+
+  Migration: rename the `channels.wechat` key to `channels.agent-wechat` and `plugins.entries.wechat` (or a stray `plugins.entries.openclaw-weixin`) to `plugins.entries.agent-wechat` in `openclaw.json`, then restart the gateway. Session/routing keys change with the channel id, so active conversation sessions reset.
+
 ## 0.11.15
 
 ### Patch Changes
