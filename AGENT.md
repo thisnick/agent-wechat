@@ -258,7 +258,7 @@ Always add a changeset when making user-facing changes (features, fixes, behavio
 
 ```markdown
 ---
-"@agent-wechat/wechat": patch
+"@agent-wechat/agent-wechat": patch
 ---
 
 Short description of the change.

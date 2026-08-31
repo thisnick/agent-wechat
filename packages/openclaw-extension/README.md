@@ -1,4 +1,4 @@
-# @agent-wechat/wechat
+# @agent-wechat/agent-wechat
 
 OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [agent-wechat](https://github.com/thisnick/agent-wechat).
 
@@ -65,7 +65,7 @@ If running alongside OpenClaw on the same Docker network, set `serverUrl` to `ht
 ### 2. Install the extension
 
 ```bash
-openclaw plugins install @agent-wechat/wechat
+openclaw plugins install @agent-wechat/agent-wechat
 ```
 
 ### 3. Configure the channel

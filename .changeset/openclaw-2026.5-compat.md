@@ -1,5 +1,5 @@
 ---
-"@agent-wechat/wechat": minor
+"@agent-wechat/agent-wechat": minor
 ---
 
 Update for openclaw 2026.5+ compatibility:

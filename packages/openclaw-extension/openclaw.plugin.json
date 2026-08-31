@@ -1,5 +1,8 @@
 {
   "id": "agent-wechat",
+  "legacyPluginIds": [
+    "wechat"
+  ],
   "channels": [
     "agent-wechat"
   ],

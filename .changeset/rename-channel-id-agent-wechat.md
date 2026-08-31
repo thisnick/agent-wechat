@@ -1,5 +1,5 @@
 ---
-"@agent-wechat/wechat": minor
+"@agent-wechat/agent-wechat": minor
 ---
 
 Rename the OpenClaw plugin/channel id from `wechat` to `agent-wechat` and restore compatibility with OpenClaw 2026.8.x.
