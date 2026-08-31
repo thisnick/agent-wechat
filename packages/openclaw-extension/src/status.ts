@@ -14,7 +14,7 @@ export function collectWeChatStatusIssues(
   for (const snapshot of accounts) {
     if (snapshot.connected === false) {
       issues.push({
-        channel: "wechat",
+        channel: "agent-wechat",
         accountId: snapshot.accountId,
         kind: "runtime",
         message: snapshot.lastError
@@ -24,7 +24,7 @@ export function collectWeChatStatusIssues(
       });
     } else if (snapshot.authStatus === "app_not_running") {
       issues.push({
-        channel: "wechat",
+        channel: "agent-wechat",
         accountId: snapshot.accountId,
         kind: "runtime",
         message: "WeChat application is not running. It should restart automatically.",
@@ -32,11 +32,11 @@ export function collectWeChatStatusIssues(
       });
     } else if (snapshot.linked === false) {
       issues.push({
-        channel: "wechat",
+        channel: "agent-wechat",
         accountId: snapshot.accountId,
         kind: "auth",
         message: "WeChat session not authenticated.",
-        fix: "Run: openclaw channels login --channel wechat",
+        fix: "Run: openclaw channels login --channel agent-wechat",
       });
     }
   }

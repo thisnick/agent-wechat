@@ -1,5 +1,5 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk/core";
 import { wechatPlugin } from "./src/channel.js";
 import { setWeChatRuntime } from "./src/runtime.js";
 
@@ -10,7 +10,7 @@ const plugin: {
   configSchema: ReturnType<typeof emptyPluginConfigSchema>;
   register: (api: OpenClawPluginApi) => void;
 } = {
-  id: "wechat",
+  id: "agent-wechat",
   name: "WeChat",
   description: "WeChat channel via agent-wechat container",
   configSchema: emptyPluginConfigSchema(),

@@ -72,10 +72,10 @@ openclaw plugins install @agent-wechat/wechat
 
 ```bash
 # Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
+openclaw channels add --channel agent-wechat
 
 # Override server URL and token
-openclaw channels add --channel wechat --url <url> --token <token>
+openclaw channels add --channel agent-wechat --url <url> --token <token>
 ```
 
 Or edit `~/.openclaw/openclaw.json` directly:
@@ -83,7 +83,7 @@ Or edit `~/.openclaw/openclaw.json` directly:
 ```json
 {
   "channels": {
-    "wechat": {
+    "agent-wechat": {
       "enabled": true,
       "serverUrl": "http://localhost:6174",
       "dmPolicy": "open",
@@ -92,6 +92,8 @@ Or edit `~/.openclaw/openclaw.json` directly:
   }
 }
 ```
+
+> **Upgrading from ≤0.11.x?** The channel id changed from `wechat` to `agent-wechat` (OpenClaw's official plugin registry now reserves `wechat`/`weixin` as aliases of Tencent's `openclaw-weixin` plugin, which hijacked this channel's id). Rename the `channels.wechat` key to `channels.agent-wechat` and any `plugins.entries.wechat` key to `plugins.entries.agent-wechat` in `openclaw.json`, then restart the gateway. Allowlist entries and group settings carry over unchanged.
 
 For local setups, the token is automatically read from `~/.config/agent-wechat/token` (shared with the CLI and container), so you don't need to set it in the config. When connecting to a remote server, add the `token` field.
 
@@ -112,7 +114,7 @@ Ask your bot to log in to WeChat:
 Your bot should generate a QR code image. Alternatively, use the CLI:
 
 ```bash
-openclaw channels login --channel wechat
+openclaw channels login --channel agent-wechat
 ```
 
 ### 6. Scan the QR code
@@ -137,7 +139,7 @@ Once connected, configure how the bot handles direct messages and group chats. Y
 
 ## Configuration Reference
 
-All config lives under `channels.wechat` in OpenClaw's config file:
+All config lives under `channels.agent-wechat` in OpenClaw's config file:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
