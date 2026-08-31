@@ -56,8 +56,8 @@ export function resolveWeChatAccount(
   cfg: Record<string, unknown>,
   accountId?: string,
 ): ResolvedWeChatAccount | null {
-  const wechat = (cfg as { channels?: { wechat?: WeChatConfig } }).channels
-    ?.wechat;
+  const wechat = (cfg as { channels?: { "agent-wechat"?: WeChatConfig } })
+    .channels?.["agent-wechat"];
   if (!wechat?.serverUrl) return null;
 
   return {

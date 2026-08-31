@@ -491,7 +491,7 @@ async function dispatchSegment(
     // Resolve routing using the last (triggering) message
     const route = core.channel.routing.resolveAgentRoute({
       cfg,
-      channel: "wechat",
+      channel: "agent-wechat",
       accountId: liveAccount.accountId,
       peer: {
         kind: isGroup ? "group" : "direct",
@@ -592,12 +592,12 @@ async function dispatchSegment(
       ConversationLabel: fromLabel,
       SenderName: senderName || undefined,
       SenderId: senderId,
-      Provider: "wechat",
-      Surface: "wechat",
+      Provider: "agent-wechat",
+      Surface: "agent-wechat",
       MessageSid: `wechat:${chatId}:${msg.localId}`,
       WasMentioned: isGroup ? mentionGate.effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
-      OriginatingChannel: "wechat",
+      OriginatingChannel: "agent-wechat",
       OriginatingTo: `wechat:${chatId}`,
       ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
       ...(msg.reply ? {
@@ -622,7 +622,7 @@ async function dispatchSegment(
     const { onModelSelected, ...prefixOptions } = createChannelReplyPipeline({
       cfg,
       agentId: route.agentId,
-      channel: "wechat",
+      channel: "agent-wechat",
       accountId: liveAccount.accountId,
     });
 
@@ -640,7 +640,7 @@ async function dispatchSegment(
 
           const tableMode = core.channel.text.resolveMarkdownTableMode({
             cfg,
-            channel: "wechat",
+            channel: "agent-wechat",
             accountId: liveAccount.accountId,
           });
           const text = core.channel.text.convertMarkdownTables(
@@ -707,7 +707,7 @@ async function dispatchSegment(
 
     // Record activity
     core.channel.activity?.record?.({
-      channel: "wechat",
+      channel: "agent-wechat",
       accountId: liveAccount.accountId,
       direction: "inbound",
       at: timestamp,
@@ -761,7 +761,7 @@ async function processUnreadChat(
     account;
   const chatId = chat.username ?? chat.id;
   const storeAllowFrom = await core.channel.pairing
-    .readAllowFromStore({ channel: "wechat", accountId: liveAccount.accountId, env: process.env })
+    .readAllowFromStore({ channel: "agent-wechat", accountId: liveAccount.accountId, env: process.env })
     .catch(() => [] as string[]);
   const policy = resolveWeChatPolicyContext({
     account: liveAccount,
@@ -771,7 +771,7 @@ async function processUnreadChat(
   });
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg,
-    surface: "wechat",
+    surface: "agent-wechat",
   });
 
   // Open the chat (triggers media downloads + clear unreads)

@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import {
   buildChannelKeyCandidates,
   resolveChannelEntryMatchWithFallback,
@@ -75,7 +75,7 @@ export function normalizeWeChatId(raw: string): string {
   if (!trimmed) {
     return "";
   }
-  return trimmed.replace(/^wechat:/i, "").trim();
+  return trimmed.replace(/^(agent-)?wechat:/i, "").trim();
 }
 
 export function normalizeWeChatAllowFrom(values: Array<string | number> | null | undefined): string[] {
@@ -201,7 +201,7 @@ export function resolveWeChatPolicyContext(params: {
 
   const defaultGroupPolicy = resolveDefaultGroupPolicy(params.cfg);
   const { groupPolicy: fallbackGroupPolicy } = resolveAllowlistProviderRuntimeGroupPolicy({
-    providerConfigPresent: params.cfg.channels?.wechat !== undefined,
+    providerConfigPresent: params.cfg.channels?.["agent-wechat"] !== undefined,
     groupPolicy: normalizeGroupPolicy(params.account.groupPolicy),
     defaultGroupPolicy: normalizeGroupPolicy(defaultGroupPolicy),
   });

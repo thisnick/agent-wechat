@@ -1,4 +1,4 @@
-import type { ChannelPlugin } from "openclaw/plugin-sdk";
+import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
 import type { ResolvedWeChatAccount } from "./types.js";
@@ -19,7 +19,7 @@ async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<s
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   const result = await client.sendMessage({ chatId: to, text });
   if (!result.success) throw new Error(result.error ?? "Send failed");
-  return `wechat:${to}:${Date.now()}`;
+  return `agent-wechat:${to}:${Date.now()}`;
 }
 
 async function sendWeChatMedia(
@@ -34,7 +34,7 @@ async function sendWeChatMedia(
   if (!mediaUrl) {
     const result = await client.sendMessage({ chatId: to, text: text || undefined });
     if (!result.success) throw new Error(result.error ?? "Send failed");
-    return `wechat:${to}:${Date.now()}`;
+    return `agent-wechat:${to}:${Date.now()}`;
   }
 
   const fsmod = await import("fs/promises");
@@ -66,11 +66,11 @@ async function sendWeChatMedia(
     ? await client.sendMessage({ chatId: to, text: text || undefined, image: { data: base64, mimeType } })
     : await client.sendMessage({ chatId: to, text: text || undefined, file: { data: base64, filename } });
   if (!result.success) throw new Error(result.error ?? "Send media failed");
-  return `wechat:${to}:${Date.now()}`;
+  return `agent-wechat:${to}:${Date.now()}`;
 }
 
 const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
-  id: "wechat",
+  id: "agent-wechat",
   capabilities: {
     text: true,
     media: true,
@@ -78,28 +78,27 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
   },
   outbound: {
     sendText: async ({ cfg, to, text }) => ({
-      channel: "wechat",
+      channel: "agent-wechat",
       messageId: await sendWeChatText(cfg, to, text),
     }),
     sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
-      channel: "wechat",
+      channel: "agent-wechat",
       messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
     }),
   },
 });
 
 const meta: ChannelPlugin["meta"] = {
-  id: "wechat",
+  id: "agent-wechat",
   label: "WeChat",
   selectionLabel: "WeChat (微信)",
   blurb: "WeChat messaging via agent-wechat container.",
   docsPath: "wechat",
-  aliases: ["weixin"],
   order: 80,
 };
 
 export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
-  id: "wechat",
+  id: "agent-wechat",
   meta,
   gatewayMethods: ["web.login.start", "web.login.wait"],
 
@@ -111,7 +110,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     reply: true,
   },
 
-  reload: { configPrefixes: ["channels.wechat"] },
+  reload: { configPrefixes: ["channels.agent-wechat"] },
 
   configSchema: {
     schema: {
@@ -180,7 +179,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     isEnabled: (account) => account.enabled && !!account.serverUrl,
     isConfigured: (account) => !!account.serverUrl,
     unconfiguredReason: () =>
-      "No serverUrl configured. Run: openclaw channels setup wechat",
+      "No serverUrl configured. Run: openclaw channels setup agent-wechat",
   },
 
   // ---- Security adapter ----
@@ -188,17 +187,17 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     resolveDmPolicy: ({ account }) => ({
       policy: account.dmPolicy ?? "disabled",
       allowFrom: account.allowFrom ?? [],
-      allowFromPath: "channels.wechat.allowFrom",
-      policyPath: "channels.wechat.dmPolicy",
-      approveHint: "Add the wxid to channels.wechat.allowFrom",
-      normalizeEntry: (raw: string) => raw.replace(/^wechat:/i, "").trim(),
+      allowFromPath: "channels.agent-wechat.allowFrom",
+      policyPath: "channels.agent-wechat.dmPolicy",
+      approveHint: "Add the wxid to channels.agent-wechat.allowFrom",
+      normalizeEntry: (raw: string) => raw.replace(/^(agent-)?wechat:/i, "").trim(),
     }),
   },
 
   // ---- Groups adapter ----
   groups: {
     resolveRequireMention: ({ cfg, groupId }) => {
-      const wechat = (cfg as any)?.channels?.wechat;
+      const wechat = (cfg as any)?.channels?.["agent-wechat"];
       if (!wechat) return true;
       if (!groupId) {
         return wechat.groups?.["*"]?.requireMention ?? true;
@@ -226,10 +225,10 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
 
   // ---- Messaging adapter ----
   messaging: {
-    normalizeTarget: (raw) => raw.replace(/^wechat:/i, "").trim() || undefined,
+    normalizeTarget: (raw) => raw.replace(/^(agent-)?wechat:/i, "").trim() || undefined,
     targetResolver: {
       looksLikeId: (raw) => {
-        const stripped = raw.replace(/^wechat:/i, "").trim();
+        const stripped = raw.replace(/^(agent-)?wechat:/i, "").trim();
         return stripped.includes("@chatroom") || stripped.startsWith("wxid_");
       },
       hint: "WeChat ID (wxid_xxx or xxx@chatroom)",
@@ -240,11 +239,11 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   outbound: {
     deliveryMode: "direct",
     sendText: async ({ cfg, to, text }) => ({
-      channel: "wechat" as const,
+      channel: "agent-wechat" as const,
       messageId: await sendWeChatText(cfg, to, text),
     }),
     sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
-      channel: "wechat" as const,
+      channel: "agent-wechat" as const,
       messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
     }),
   },
@@ -274,7 +273,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         accountId ?? undefined,
       );
       if (!account?.serverUrl) {
-        return { message: "No serverUrl configured. Run: openclaw channels setup wechat" };
+        return { message: "No serverUrl configured. Run: openclaw channels setup agent-wechat" };
       }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
 
@@ -319,7 +318,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       );
       if (!account?.serverUrl) {
         throw new Error(
-          "No serverUrl configured. Run: openclaw channels setup wechat",
+          "No serverUrl configured. Run: openclaw channels setup agent-wechat",
         );
       }
 
@@ -502,8 +501,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         ...cfg,
         channels: {
           ...cfg.channels,
-          wechat: {
-            ...cfg.channels?.wechat,
+          "agent-wechat": {
+            ...cfg.channels?.["agent-wechat"],
             enabled: true,
             serverUrl,
             ...(token ? { token } : {}),
