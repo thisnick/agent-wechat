@@ -18,9 +18,11 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         xvfb_pid: row.get("xvfb_pid")?,
         dbus_pid: row.get("dbus_pid")?,
         error_message: row.get("error_message")?,
-        created_at: row.get::<_, Option<String>>("created_at")?
+        created_at: row
+            .get::<_, Option<String>>("created_at")?
             .unwrap_or_default(),
-        updated_at: row.get::<_, Option<String>>("updated_at")?
+        updated_at: row
+            .get::<_, Option<String>>("updated_at")?
             .unwrap_or_default(),
     })
 }
@@ -81,11 +83,7 @@ pub async fn create_session(name: &str) -> Result<Session, String> {
 
         // Get next VNC port
         let max_port: Option<i32> = db
-            .query_row(
-                "SELECT MAX(vnc_port) FROM sessions",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(vnc_port) FROM sessions", [], |row| row.get(0))
             .ok();
         let vnc_port = max_port.unwrap_or(5900) + 1;
 
@@ -141,8 +139,8 @@ pub async fn get_or_create_default_session() -> Result<Session, String> {
 
 /// Start a session (launches Xvfb, D-Bus, AT-SPI, WeChat).
 pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
-    let session = get_session(id_or_name)
-        .ok_or_else(|| format!("Session not found: {id_or_name}"))?;
+    let session =
+        get_session(id_or_name).ok_or_else(|| format!("Session not found: {id_or_name}"))?;
 
     if session.status == "running" {
         return Ok(session);
@@ -173,7 +171,13 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
 
     // 2. D-Bus
     let dbus_output = std::process::Command::new("su")
-        .args(["-s", "/bin/bash", "-c", "dbus-launch --sh-syntax", linux_user.as_str()])
+        .args([
+            "-s",
+            "/bin/bash",
+            "-c",
+            "dbus-launch --sh-syntax",
+            linux_user.as_str(),
+        ])
         .output();
 
     let dbus_address = dbus_output
@@ -204,7 +208,18 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
     // 5. VNC (localhost only — auth enforced by agent-server proxy)
     let vnc_port = session.vnc_port.to_string();
     let _ = std::process::Command::new("x11vnc")
-        .args(["-display", display.as_str(), "-forever", "-nopw", "-shared", "-viewonly", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"])
+        .args([
+            "-display",
+            display.as_str(),
+            "-forever",
+            "-nopw",
+            "-shared",
+            "-xkb",
+            "-rfbport",
+            &vnc_port,
+            "-listen",
+            "127.0.0.1",
+        ])
         .spawn();
 
     // 5b. noVNC (websockify on localhost only — proxied via agent-server with auth)
@@ -242,8 +257,8 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
 
 /// Stop a session.
 pub async fn stop_session(id_or_name: &str) -> Result<Session, String> {
-    let session = get_session(id_or_name)
-        .ok_or_else(|| format!("Session not found: {id_or_name}"))?;
+    let session =
+        get_session(id_or_name).ok_or_else(|| format!("Session not found: {id_or_name}"))?;
 
     if session.status == "stopped" {
         return Ok(session);
@@ -274,8 +289,8 @@ pub async fn stop_session(id_or_name: &str) -> Result<Session, String> {
 
 /// Delete a session.
 pub async fn delete_session(id_or_name: &str) -> Result<(), String> {
-    let session = get_session(id_or_name)
-        .ok_or_else(|| format!("Session not found: {id_or_name}"))?;
+    let session =
+        get_session(id_or_name).ok_or_else(|| format!("Session not found: {id_or_name}"))?;
 
     if session.status == "running" || session.status == "starting" {
         stop_session(&session.id).await?;
@@ -283,10 +298,23 @@ pub async fn delete_session(id_or_name: &str) -> Result<(), String> {
 
     {
         let db = get_db();
-        db.execute("DELETE FROM sync_state WHERE session_id = ?1", params![session.id]).ok();
-        db.execute("DELETE FROM wechat_keys WHERE session_id = ?1", params![session.id]).ok();
-        db.execute("DELETE FROM context WHERE session_id = ?1", params![session.id]).ok();
-        db.execute("DELETE FROM sessions WHERE id = ?1", params![session.id]).ok();
+        db.execute(
+            "DELETE FROM sync_state WHERE session_id = ?1",
+            params![session.id],
+        )
+        .ok();
+        db.execute(
+            "DELETE FROM wechat_keys WHERE session_id = ?1",
+            params![session.id],
+        )
+        .ok();
+        db.execute(
+            "DELETE FROM context WHERE session_id = ?1",
+            params![session.id],
+        )
+        .ok();
+        db.execute("DELETE FROM sessions WHERE id = ?1", params![session.id])
+            .ok();
     }
 
     let _ = std::process::Command::new("userdel")

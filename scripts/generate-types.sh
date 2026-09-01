@@ -22,7 +22,7 @@ TS_RS_EXPORT_DIR="$GENERATED_DIR" cargo test --quiet 2>/dev/null
 # Fix imports: ts-rs generates `from "./Foo"` but NodeNext requires `from "./Foo.js"`
 for f in "$GENERATED_DIR"/*.ts; do
   if grep -q 'from "./' "$f"; then
-    sed -i 's|from "\(\./[^"]*\)"|from "\1.js"|g' "$f"
+    perl -pi -e 's|from "(\./[^"]+)"|from "$1.js"|g' "$f"
   fi
 done
 

@@ -29,9 +29,9 @@ fn find_edit_area(a11y: &A11yNode) -> Option<&A11yNode> {
 
 fn find_edit_near_send(node: &A11yNode) -> Option<&A11yNode> {
     if let Some(children) = &node.children {
-        let has_send = children.iter().any(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
+        let has_send = children
+            .iter()
+            .any(|c| c.role == "push-button" && c.name == "Send(S)");
         let edit_node = children.iter().find(|c| {
             c.role == "text"
                 && c.states
@@ -61,7 +61,9 @@ impl Plan for ChatOpenPlan {
     type PlanState = ChatOpenPlanState;
     type Params = ChatOpenParams;
 
-    fn id(&self) -> &str { "chat_open" }
+    fn id(&self) -> &str {
+        "chat_open"
+    }
 
     fn initial_plan_state(&self) -> ChatOpenPlanState {
         ChatOpenPlanState {
@@ -87,7 +89,10 @@ impl Plan for ChatOpenPlan {
         if state.popup.is_some() && identified.popup.is_some() {
             return Some(SelectedAction {
                 action: actions::dismiss_popup(),
-                frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                frame: identified
+                    .main_window
+                    .as_ref()
+                    .and_then(|m| m.frame.clone()),
             });
         }
 
@@ -128,7 +133,10 @@ impl Plan for ChatOpenPlan {
                         if !skipped {
                             return Some(SelectedAction {
                                 action: actions::wait_short(),
-                                frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                                frame: identified
+                                    .main_window
+                                    .as_ref()
+                                    .and_then(|m| m.frame.clone()),
                             });
                         }
                         continue;
@@ -139,7 +147,10 @@ impl Plan for ChatOpenPlan {
                     tracing::info!("[chat_open] Opening → Done (no clear_unreads)");
                     return Some(SelectedAction {
                         action: actions::wait_short(),
-                        frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                        frame: identified
+                            .main_window
+                            .as_ref()
+                            .and_then(|m| m.frame.clone()),
                     });
                 }
 
@@ -158,12 +169,18 @@ impl Plan for ChatOpenPlan {
                     };
 
                     plan_state.phase = ChatOpenPhase::ClickingAudio;
-                    tracing::info!("[chat_open] Focusing → ClickingAudio, edit_bounds={:?}", edit_node.bounds);
+                    tracing::info!(
+                        "[chat_open] Focusing → ClickingAudio, edit_bounds={:?}",
+                        edit_node.bounds
+                    );
 
                     if let Some(bounds) = &edit_node.bounds {
                         return Some(SelectedAction {
                             action: actions::click_bounds(bounds),
-                            frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                            frame: identified
+                                .main_window
+                                .as_ref()
+                                .and_then(|m| m.frame.clone()),
                         });
                     }
                     continue;
@@ -171,7 +188,10 @@ impl Plan for ChatOpenPlan {
 
                 ChatOpenPhase::ClickingAudio => {
                     if main_state_id != Some("chat_open") {
-                        tracing::info!("[chat_open] ClickingAudio: wrong state {:?}", main_state_id);
+                        tracing::info!(
+                            "[chat_open] ClickingAudio: wrong state {:?}",
+                            main_state_id
+                        );
                         return None;
                     }
 
@@ -190,20 +210,30 @@ impl Plan for ChatOpenPlan {
                             seq.push(Action::Wait { ms: 500 });
                         }
                     }
-                    tracing::info!("[chat_open] ClickingAudio: found {} unplayed, sequence of {} actions", unplayed.len(), seq.len());
+                    tracing::info!(
+                        "[chat_open] ClickingAudio: found {} unplayed, sequence of {} actions",
+                        unplayed.len(),
+                        seq.len()
+                    );
 
                     plan_state.phase = ChatOpenPhase::Done;
 
                     if seq.is_empty() {
                         return Some(SelectedAction {
                             action: actions::wait_short(),
-                            frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                            frame: identified
+                                .main_window
+                                .as_ref()
+                                .and_then(|m| m.frame.clone()),
                         });
                     }
 
                     return Some(SelectedAction {
                         action: Action::Sequence { actions: seq },
-                        frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                        frame: identified
+                            .main_window
+                            .as_ref()
+                            .and_then(|m| m.frame.clone()),
                     });
                 }
 

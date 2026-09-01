@@ -9,7 +9,6 @@ use axum::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use base64::Engine;
 use crate::context::create_context;
 use crate::db::get_db;
 use crate::execution::run_execution_loop;
@@ -22,6 +21,7 @@ use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::qr::{decode_qr_from_base64, to_data_url};
 use crate::tools::screenshot::capture_screenshot;
+use base64::Engine;
 
 pub async fn get_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -70,9 +70,7 @@ pub async fn auth_status() -> Json<serde_json::Value> {
         }
     };
 
-    let screenshot = capture_screenshot(&exec_options)
-        .await
-        .unwrap_or_default();
+    let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
     let identified = identify_states(&a11y, &screenshot);
 
     // Load persisted state and apply reduce
@@ -279,7 +277,9 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
         let emit = move |event: SubscriptionEvent| {
             let _ = tx.send(event);
         };
-        run_execution_loop(&plan, &login_params, &mut context, &emit, cancel_for_exec).await.0
+        run_execution_loop(&plan, &login_params, &mut context, &emit, cancel_for_exec)
+            .await
+            .0
     });
 
     // Main loop: bridge events to WebSocket, handle timeout + disconnect
@@ -335,7 +335,9 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
     let exec_result = exec_handle.await.ok();
     if !client_disconnected && !sent_terminal {
         let fallback = match exec_result {
-            Some(result) if result.success => LoginSubscriptionEvent::LoginSuccess { user_id: None },
+            Some(result) if result.success => {
+                LoginSubscriptionEvent::LoginSuccess { user_id: None }
+            }
             Some(result) => {
                 let message = result.error.unwrap_or_else(|| "Login failed".to_string());
                 if message.starts_with("Unknown state for")

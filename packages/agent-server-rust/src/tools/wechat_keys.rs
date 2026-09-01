@@ -66,10 +66,7 @@ pub fn get_stored_keys(
 
     let rows = stmt
         .query_map(params![session_id, account_dir], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .unwrap();
 
@@ -150,11 +147,7 @@ pub fn verify_key(db_path: &str, hex_key: &str) -> bool {
 /// 1. Check that all required DB keys exist in stored_keys
 /// 2. Scan disk for additional required DBs (message_N, media_N) without keys
 /// 3. Spot-check one key for validity
-pub fn needs_key_extraction(
-    conn: &Connection,
-    session_id: &str,
-    account_dir: &str,
-) -> bool {
+pub fn needs_key_extraction(conn: &Connection, session_id: &str, account_dir: &str) -> bool {
     let stored_keys = get_stored_keys(conn, session_id, account_dir);
 
     if stored_keys.is_empty() {
@@ -205,7 +198,11 @@ pub fn needs_key_extraction(
     if !missing_on_disk.is_empty() {
         tracing::info!(
             "[wechat-keys] Missing keys for on-disk DBs: {}",
-            missing_on_disk.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            missing_on_disk
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         return true;
     }

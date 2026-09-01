@@ -11,10 +11,9 @@ pub async fn capture_screenshot(options: &ExecOptions) -> Result<String, String>
 
     let filepath = result.stdout.trim().to_string();
 
-    let buffer =
-        tokio::fs::read(&filepath)
-            .await
-            .map_err(|e| format!("Failed to read screenshot: {e}"))?;
+    let buffer = tokio::fs::read(&filepath)
+        .await
+        .map_err(|e| format!("Failed to read screenshot: {e}"))?;
 
     // Clean up temp file
     let _ = tokio::fs::remove_file(&filepath).await;

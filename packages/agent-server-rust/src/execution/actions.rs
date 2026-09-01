@@ -50,7 +50,9 @@ pub fn execute_action<'a>(
                         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                         exec_command("click", &args_ref, options).await;
                     } else {
-                        tracing::warn!("[action] click selector '{selector}' matched but no bounds");
+                        tracing::warn!(
+                            "[action] click selector '{selector}' matched but no bounds"
+                        );
                     }
                 } else {
                     tracing::warn!("[action] click selector '{selector}' — no match");

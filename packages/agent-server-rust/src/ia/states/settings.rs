@@ -11,13 +11,22 @@ fn find_settings_frame<'a>(a11y: &'a A11yNode) -> Option<&'a A11yNode> {
 struct SettingsModalState;
 
 impl IAState for SettingsModalState {
-    fn fsm(&self) -> &str { "settings" }
-    fn id(&self) -> &str { "settings_modal" }
+    fn fsm(&self) -> &str {
+        "settings"
+    }
+    fn id(&self) -> &str {
+        "settings_modal"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let frame = match find_settings_frame(args.a11y) {
             Some(f) => f,
-            None => return Ok(IdentifyResult { identified: false, frame: None }),
+            None => {
+                return Ok(IdentifyResult {
+                    identified: false,
+                    frame: None,
+                })
+            }
         };
 
         let has_ok = query_selector(frame, r#"push-button[name="OK"]"#).is_some();
@@ -51,13 +60,22 @@ impl IAState for SettingsModalState {
 struct SettingsStateImpl;
 
 impl IAState for SettingsStateImpl {
-    fn fsm(&self) -> &str { "settings" }
-    fn id(&self) -> &str { "settings" }
+    fn fsm(&self) -> &str {
+        "settings"
+    }
+    fn id(&self) -> &str {
+        "settings"
+    }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
         let frame = match find_settings_frame(args.a11y) {
             Some(f) => f,
-            None => return Ok(IdentifyResult { identified: false, frame: None }),
+            None => {
+                return Ok(IdentifyResult {
+                    identified: false,
+                    frame: None,
+                })
+            }
         };
 
         let has_ok = query_selector(frame, r#"push-button[name="OK"]"#).is_some();
@@ -87,9 +105,7 @@ impl IAState for SettingsStateImpl {
 
 /// Settings states — settings_modal first so it takes priority when modal is present.
 pub static SETTINGS_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> =
-    std::sync::LazyLock::new(|| {
-        vec![Box::new(SettingsModalState), Box::new(SettingsStateImpl)]
-    });
+    std::sync::LazyLock::new(|| vec![Box::new(SettingsModalState), Box::new(SettingsStateImpl)]);
 
 #[cfg(test)]
 mod tests {
@@ -111,10 +127,7 @@ mod tests {
     fn test_chat_view_no_settings() {
         let a11y = load_fixture("chat_view.json");
         let states = identify_states(&a11y, "");
-        assert_eq!(
-            states.main_window.as_ref().unwrap().state_id,
-            "chat"
-        );
+        assert_eq!(states.main_window.as_ref().unwrap().state_id, "chat");
         assert!(states.settings.is_none());
         assert!(states.popup.is_none());
     }
@@ -123,10 +136,7 @@ mod tests {
     fn test_more_menu_not_a_popup() {
         let a11y = load_fixture("more_menu_open.json");
         let states = identify_states(&a11y, "");
-        assert_eq!(
-            states.main_window.as_ref().unwrap().state_id,
-            "chat"
-        );
+        assert_eq!(states.main_window.as_ref().unwrap().state_id, "chat");
         // More menu is NOT identified as a popup
         assert!(states.popup.is_none());
         assert!(states.settings.is_none());
@@ -136,14 +146,8 @@ mod tests {
     fn test_settings_identified() {
         let a11y = load_fixture("settings_open.json");
         let states = identify_states(&a11y, "");
-        assert_eq!(
-            states.main_window.as_ref().unwrap().state_id,
-            "chat"
-        );
-        assert_eq!(
-            states.settings.as_ref().unwrap().state_id,
-            "settings"
-        );
+        assert_eq!(states.main_window.as_ref().unwrap().state_id, "chat");
+        assert_eq!(states.settings.as_ref().unwrap().state_id, "settings");
         // popup_confirm must NOT false-match inside Settings frame
         assert!(states.popup.is_none());
     }
@@ -152,14 +156,8 @@ mod tests {
     fn test_settings_confirm_modal() {
         let a11y = load_fixture("settings_confirm.json");
         let states = identify_states(&a11y, "");
-        assert_eq!(
-            states.main_window.as_ref().unwrap().state_id,
-            "chat"
-        );
-        assert_eq!(
-            states.settings.as_ref().unwrap().state_id,
-            "settings_modal"
-        );
+        assert_eq!(states.main_window.as_ref().unwrap().state_id, "chat");
+        assert_eq!(states.settings.as_ref().unwrap().state_id, "settings_modal");
         // popup must NOT false-match
         assert!(states.popup.is_none());
     }

@@ -12,6 +12,7 @@ import {
   resolveWeChatPolicyContext,
   type WeChatPolicyContext,
 } from "./access-control.js";
+import { formatPaymentBody } from "./payment-format.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -296,9 +297,10 @@ async function prepareMessage(
   let hasMedia = false;
 
   const baseType = msg.type & 0x7fffffff;
+  const isPaymentMessage = msg.kind === "transfer" || msg.kind === "red_packet";
   // Type 49 (appmsg) may contain file attachments — the server resolves subtypes
   // and returns type="file" for subtype 6. Try fetching media for type 49 as well.
-  const mayHaveMedia = MEDIA_TYPES.has(baseType) || baseType === 49;
+  const mayHaveMedia = !isPaymentMessage && (MEDIA_TYPES.has(baseType) || baseType === 49);
 
   if (mayHaveMedia) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
@@ -345,7 +347,7 @@ async function prepareMessage(
   }
 
   const timestamp = new Date(msg.timestamp).getTime();
-  let rawBody = msg.content || "";
+  let rawBody = formatPaymentBody(msg) ?? msg.content ?? "";
   if (mediaPath && mediaMime) {
     if (!rawBody) {
       if (mediaMime.startsWith("audio/")) {
@@ -599,6 +601,20 @@ async function dispatchSegment(
       CommandAuthorized: commandAuthorized,
       OriginatingChannel: "agent-wechat",
       OriginatingTo: `wechat:${chatId}`,
+      ...(msg.payment
+        ? {
+            PaymentKind: msg.payment.kind,
+            PaymentLocalId: msg.localId,
+            PaymentAmountText: msg.payment.amountText,
+            PaymentAmountCents: msg.payment.amountCents,
+            PaymentCurrency: msg.payment.currency,
+            PaymentIsReceived: msg.isReceived,
+            PaymentTransactionId: msg.payment.transactionId,
+            PaymentTransferId: msg.payment.transferId,
+            PaymentSendId: msg.payment.sendId,
+            PaymentPayMsgId: msg.payment.payMsgId,
+          }
+        : {}),
       ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
       ...(msg.reply ? {
         ReplyToBody: msg.reply.content.length > 50 ? msg.reply.content.slice(0, 50) + "..." : msg.reply.content,

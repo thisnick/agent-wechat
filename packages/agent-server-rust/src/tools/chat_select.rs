@@ -17,11 +17,7 @@ pub struct OpenChatResult {
 /// Open a chat in the WeChat UI using the chat-select tool.
 ///
 /// Args format: chat-select [--force] [--click-xy X Y] <username>
-pub async fn open_chat(
-    chat_id: &str,
-    force: bool,
-    click_xy: Option<(f64, f64)>,
-) -> OpenChatResult {
+pub async fn open_chat(chat_id: &str, force: bool, click_xy: Option<(f64, f64)>) -> OpenChatResult {
     let mut args: Vec<String> = Vec::new();
 
     if force {
@@ -39,12 +35,7 @@ pub async fn open_chat(
 
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let result = exec_command(
-        "chat-select",
-        &args_ref,
-        &ExecOptions::default(),
-    )
-    .await;
+    let result = exec_command("chat-select", &args_ref, &ExecOptions::default()).await;
 
     // Result JSON is on stdout regardless of exit code
     if let Ok(parsed) = serde_json::from_str::<OpenChatResult>(&result.stdout) {

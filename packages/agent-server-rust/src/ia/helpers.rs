@@ -40,7 +40,11 @@ pub fn get_bounds_center(bounds: &Bounds) -> (f64, f64) {
 pub fn frame_hint_from_node(node: &A11yNode) -> Option<FrameHint> {
     let bounds = node.bounds.clone()?;
     Some(FrameHint {
-        name: if node.name.is_empty() { None } else { Some(node.name.clone()) },
+        name: if node.name.is_empty() {
+            None
+        } else {
+            Some(node.name.clone())
+        },
         bounds,
         pid: node.window.as_ref().map(|w| w.pid),
     })
@@ -50,8 +54,16 @@ pub fn frame_hint_from_node(node: &A11yNode) -> Option<FrameHint> {
 /// Walks the tree top-down, preferring deeper frames so we get the tightest
 /// enclosing frame (e.g. "Settings" frame, not the root desktop-frame).
 pub fn find_frame_for(a11y: &A11yNode, selector: &str) -> Option<FrameHint> {
-    fn walk<'a>(node: &'a A11yNode, selector: &str, current_frame: Option<&'a A11yNode>) -> Option<&'a A11yNode> {
-        let frame = if node.role == "frame" { Some(node) } else { current_frame };
+    fn walk<'a>(
+        node: &'a A11yNode,
+        selector: &str,
+        current_frame: Option<&'a A11yNode>,
+    ) -> Option<&'a A11yNode> {
+        let frame = if node.role == "frame" {
+            Some(node)
+        } else {
+            current_frame
+        };
 
         // If this subtree contains the target, the deepest frame wins
         if query_selector(node, selector).is_some() {
@@ -70,4 +82,3 @@ pub fn find_frame_for(a11y: &A11yNode, selector: &str) -> Option<FrameHint> {
     }
     walk(a11y, selector, None).and_then(frame_hint_from_node)
 }
-

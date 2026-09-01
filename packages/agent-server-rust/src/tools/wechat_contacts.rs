@@ -75,10 +75,7 @@ pub fn list_contacts(
                 return None;
             }
 
-            let local_type = row
-                .get("local_type")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(3);
+            let local_type = row.get("local_type").and_then(|v| v.as_i64()).unwrap_or(3);
 
             Some(Contact {
                 username: username.to_string(),
@@ -146,10 +143,7 @@ pub fn find_contacts(
                 return None;
             }
 
-            let local_type = row
-                .get("local_type")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(3);
+            let local_type = row.get("local_type").and_then(|v| v.as_i64()).unwrap_or(3);
 
             Some(Contact {
                 username: username.to_string(),

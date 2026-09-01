@@ -50,12 +50,26 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        .route(
+            "/api/messages/{chat_id}/transfer/receive",
+            post(messages::receive_transfer),
+        )
+        .route(
+            "/api/messages/{chat_id}/red-packet/receive",
+            post(messages::receive_red_packet),
+        )
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))
         // Sessions
-        .route("/api/sessions", get(sessions::list_sessions).post(sessions::create_session))
-        .route("/api/sessions/{id}", get(sessions::get_session).delete(sessions::delete_session))
+        .route(
+            "/api/sessions",
+            get(sessions::list_sessions).post(sessions::create_session),
+        )
+        .route(
+            "/api/sessions/{id}",
+            get(sessions::get_session).delete(sessions::delete_session),
+        )
         .route("/api/sessions/{id}/start", post(sessions::start_session))
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         // WebSocket for login subscription

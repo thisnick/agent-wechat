@@ -151,9 +151,7 @@ pub fn spawn_health_monitor() {
                 }
             };
 
-            let screenshot = capture_screenshot(&exec_options)
-                .await
-                .unwrap_or_default();
+            let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
             let identified = identify_states(&a11y, &screenshot);
 
             if identified.main_window.is_some() {

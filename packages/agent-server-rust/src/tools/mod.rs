@@ -7,5 +7,5 @@ pub mod wechat_chats;
 pub mod wechat_contacts;
 pub mod wechat_db;
 pub mod wechat_keys;
-pub mod wechat_messages;
 pub mod wechat_media;
+pub mod wechat_messages;
