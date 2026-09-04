@@ -20,6 +20,7 @@ import sys
 import json
 import os
 import re
+import select
 import shutil
 
 # ── Per-build constants ──────────────────────────────────────────────────────
@@ -230,6 +231,50 @@ function readStdString(addr) {
 """
 
 
+def read_lines_until(proc, timeout, stop_on=None):
+    """Read output lines from proc.stdout until stop_on appears, EOF, or the
+    wall-clock deadline expires. Returns the lines read (rstripped).
+
+    A plain proc.stdout.readline() blocks indefinitely when the child stays
+    alive but silent (e.g. a frida hook that never fires), defeating any
+    time-based loop guard — that hang is what used to make `wx send` time out.
+    This reads the raw fd non-blocking behind select(), so the deadline holds
+    even for partial lines, and select() can never miss data stranded in a
+    Python-level buffer (we own the only buffer, kept on the proc object so
+    consecutive calls on the same proc don't lose bytes read past stop_on).
+    """
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
+    deadline = time.time() + timeout
+    buf = getattr(proc, "_read_buf", b"")
+    lines = []
+    try:
+        while True:
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                lines.append(line)
+                if stop_on and stop_on in line:
+                    return lines
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return lines  # deadline expired
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                return lines  # deadline expired waiting for output
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            except OSError:
+                return lines
+            if not chunk:
+                return lines  # EOF
+            buf += chunk
+    finally:
+        proc._read_buf = buf
+
+
 def run_frida_script(pid, script_path, timeout=30, stop_on="SCRIPT_DONE"):
     """Run a frida script, return output lines."""
     proc = subprocess.Popen(
@@ -237,19 +282,8 @@ def run_frida_script(pid, script_path, timeout=30, stop_on="SCRIPT_DONE"):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE, text=True, bufsize=1,
     )
-    lines = []
-    start = time.time()
     try:
-        while time.time() - start < timeout:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.rstrip()
-            lines.append(line)
-            if stop_on and stop_on in line:
-                break
-    except Exception:
-        pass
+        lines = read_lines_until(proc, timeout, stop_on=stop_on)
     finally:
         try:
             proc.stdin.close()
@@ -271,13 +305,7 @@ def run_frida_bg(pid, script_path):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE, text=True, bufsize=1,
     )
-    start = time.time()
-    while time.time() - start < 10:
-        line = proc.stdout.readline()
-        if not line:
-            break
-        if "READY" in line:
-            break
+    read_lines_until(proc, 10, stop_on="READY")
     return proc
 
 
@@ -554,17 +582,10 @@ var hook = Interceptor.attach(addr, {{
                                  timeout=5, capture_output=True, text=True)
     log(f"[chat-select] Click result: {click_result.stdout.strip()}")
 
-    # Read output looking for DETACHED confirmation (hook fires once then detaches)
-    lines = []
-    start = time.time()
-    while time.time() - start < 5:
-        line = proc.stdout.readline()
-        if not line:
-            break
-        line = line.rstrip()
-        lines.append(line)
-        if "DETACHED" in line:
-            break
+    # Read output looking for DETACHED confirmation (hook fires once then
+    # detaches). Bounded read: if the click did not produce a selectSession
+    # call the hook never fires and we give up after the deadline.
+    lines = read_lines_until(proc, 5, stop_on="DETACHED")
 
     kill_frida(proc)
 
@@ -633,9 +654,16 @@ def main():
     target_index = sessions[target]
     log(f"[chat-select] Target: {target} -> index {target_index}")
 
-    # Current-selection skip: if not forced and target already selected, skip
-    if not force and current_sel and current_sel == target:
-        log(f"[chat-select] Target already selected (current_sel={current_sel}), skipping")
+    # Already-selected short-circuit: if the target chat is ALREADY the current
+    # selection, the right-hand pane is already showing it — there is nothing
+    # to do. This holds even when force=True: clicking the already-selected
+    # chat list item does NOT trigger a selectSession() call, so the Frida
+    # hook never fires and select_by_index() would wait out its deadline and
+    # report a false "Hook did not fire" failure. current_sel is freshly read
+    # from WeChat's current-session pointer on every invocation, so there is
+    # no stale skip decision for force to override.
+    if current_sel == target:
+        log(f"[chat-select] Target already selected (current_sel={current_sel}), skipping (force={force})")
         result_json(True, username=target, index=target_index, skipped=True)
 
     # Find click coordinates: use --click-xy if provided, else fall back to a11y

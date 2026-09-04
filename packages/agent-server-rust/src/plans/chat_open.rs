@@ -1,5 +1,6 @@
 use super::Plan;
 use crate::ia::actions;
+use crate::ia::helpers::find_edit_and_send_button;
 use crate::ia::selectors::{query_selector, query_selector_all};
 use crate::ia::types::*;
 use crate::tools::chat_select::{open_chat, OpenChatResult};
@@ -24,36 +25,9 @@ pub enum ChatOpenPhase {
 }
 
 fn find_edit_area(a11y: &A11yNode) -> Option<&A11yNode> {
-    find_edit_near_send(a11y)
-}
-
-fn find_edit_near_send(node: &A11yNode) -> Option<&A11yNode> {
-    if let Some(children) = &node.children {
-        let has_send = children.iter().any(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
-        let edit_node = children.iter().find(|c| {
-            c.role == "text"
-                && c.states
-                    .as_ref()
-                    .map(|s| s.iter().any(|st| st == "EDITABLE"))
-                    .unwrap_or(false)
-        });
-
-        if has_send {
-            if let Some(edit) = edit_node {
-                return Some(edit);
-            }
-        }
-
-        // Recurse
-        for child in children {
-            if let Some(result) = find_edit_near_send(child) {
-                return Some(result);
-            }
-        }
-    }
-    None
+    // Ghost-frame-aware: ranks all edit+send pairs so a stale detached-chat
+    // composer is not picked over the live one (see ia::helpers).
+    find_edit_and_send_button(a11y).map(|(edit, _)| edit)
 }
 
 #[async_trait::async_trait]

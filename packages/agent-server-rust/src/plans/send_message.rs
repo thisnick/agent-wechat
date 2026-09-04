@@ -1,5 +1,6 @@
 use super::Plan;
 use crate::ia::actions;
+use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{open_chat, OpenChatResult};
@@ -27,49 +28,6 @@ pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
     pub confirm_attempts: u32,
-}
-
-fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    let send_btn = query_selector(a11y, r#"push-button[name="Send(S)"]"#)?;
-    // Find sibling EDITABLE text node via parent
-    // Since we don't have parent refs in the tree-based approach,
-    // we search the tree for the pattern
-    find_edit_near_send(a11y, send_btn)
-}
-
-fn find_edit_near_send<'a>(
-    root: &'a A11yNode,
-    _send_btn: &A11yNode,
-) -> Option<(&'a A11yNode, &'a A11yNode)> {
-    // Walk tree looking for a parent that has both an EDITABLE text and Send(S) button
-    find_edit_send_pair(root)
-}
-
-fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    if let Some(children) = &node.children {
-        let send_btn = children.iter().find(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
-        let edit_node = children.iter().find(|c| {
-            c.role == "text"
-                && c.states
-                    .as_ref()
-                    .map(|s| s.iter().any(|st| st == "EDITABLE"))
-                    .unwrap_or(false)
-        });
-
-        if let (Some(edit), Some(send)) = (edit_node, send_btn) {
-            return Some((edit, send));
-        }
-
-        // Recurse
-        for child in children {
-            if let Some(result) = find_edit_send_pair(child) {
-                return Some(result);
-            }
-        }
-    }
-    None
 }
 
 #[async_trait::async_trait]
@@ -125,7 +83,11 @@ impl Plan for SendMessagePlan {
                         ))
                     });
 
-                    let force = main_state_id == Some("chat");
+                    // Always run chat-select, even in state "chat_open": the open
+                    // chat may not be the target. This is cheap — chat-select
+                    // itself short-circuits when the target is already the
+                    // current selection.
+                    let force = true;
                     let result = open_chat(&params.chat_id, force, click_xy).await;
 
                     if !result.ok {
@@ -158,13 +120,7 @@ impl Plan for SendMessagePlan {
 
                     plan_state.phase = SendMessagePhase::Inputting;
 
-                    let is_focused = edit_node
-                        .states
-                        .as_ref()
-                        .map(|s| s.iter().any(|st| st == "FOCUSED"))
-                        .unwrap_or(false);
-
-                    if is_focused {
+                    if node_has_state(edit_node, "FOCUSED") {
                         continue;
                     }
 
@@ -236,13 +192,7 @@ impl Plan for SendMessagePlan {
                         None => return None,
                     };
 
-                    let is_disabled = send_btn
-                        .states
-                        .as_ref()
-                        .map(|s| s.iter().any(|st| st == "DISABLED"))
-                        .unwrap_or(false);
-
-                    if is_disabled {
+                    if node_has_state(send_btn, "DISABLED") {
                         plan_state.phase = SendMessagePhase::Done;
                         return Some(SelectedAction {
                             action: actions::wait_short(),

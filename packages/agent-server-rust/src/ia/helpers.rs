@@ -36,6 +36,98 @@ pub fn get_bounds_center(bounds: &Bounds) -> (f64, f64) {
     )
 }
 
+/// Check whether an a11y node carries the given state (e.g. "FOCUSED",
+/// "DISABLED", "EDITABLE").
+pub fn node_has_state(node: &A11yNode, state: &str) -> bool {
+    node.states
+        .as_ref()
+        .map(|s| s.iter().any(|st| st == state))
+        .unwrap_or(false)
+}
+
+/// The main application frame is named "Weixin" or "WeChat" depending on
+/// build/locale (the in-repo fixtures use "WeChat"; chat.rs matches both
+/// names for the nav button for the same reason).
+fn is_main_frame(node: &A11yNode) -> bool {
+    node.role == "frame" && (node.name == "Weixin" || node.name == "WeChat")
+}
+
+/// A candidate composer: the editable text input plus its sibling Send(S) button.
+struct ComposerPair<'a> {
+    edit: &'a A11yNode,
+    send: &'a A11yNode,
+    /// True if this pair lives under the main application frame
+    /// (as opposed to a detached/ghost chat frame leftover in the a11y tree).
+    in_main_frame: bool,
+}
+
+/// Find the composer (editable + Send button) to operate on.
+///
+/// WeChat's accessibility tree can contain *multiple* edit+send pairs:
+/// the live main-window composer plus stale "ghost" frames left behind by
+/// chats that were previously detached into separate windows. A naive
+/// depth-first "take the first pair" grabs the wrong (ghost) composer, whose
+/// input never receives text and whose Send stays DISABLED forever, causing
+/// plans to loop and ultimately fail with "No action selected".
+///
+/// To be robust we collect every candidate pair, then rank them so the
+/// genuinely active composer wins:
+///   1. editable currently FOCUSED          (strongest signal)
+///   2. Send button NOT disabled            (composer already has text)
+///   3. pair under the main application frame (not a ghost/detached frame)
+/// The first pair (DFS order) breaks any remaining ties.
+pub fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
+    let mut candidates: Vec<ComposerPair> = Vec::new();
+    collect_edit_send_pairs(a11y, false, &mut candidates);
+
+    // Rank lexicographically; `false` sorts before `true`, so each criterion
+    // is written as "false = preferred". DFS index breaks ties.
+    candidates
+        .iter()
+        .enumerate()
+        .min_by_key(|(idx, c)| {
+            (
+                !node_has_state(c.edit, "FOCUSED"),
+                node_has_state(c.send, "DISABLED"),
+                !c.in_main_frame,
+                *idx,
+            )
+        })
+        .map(|(_, c)| (c.edit, c.send))
+}
+
+/// Recursively collect all edit+send composer pairs, tracking whether each
+/// pair is inside the main application frame.
+fn collect_edit_send_pairs<'a>(
+    node: &'a A11yNode,
+    in_main_frame: bool,
+    out: &mut Vec<ComposerPair<'a>>,
+) {
+    // Once we enter the main frame, everything below it is in-main.
+    let in_main_frame = in_main_frame || is_main_frame(node);
+
+    if let Some(children) = &node.children {
+        let send_btn = children
+            .iter()
+            .find(|c| c.role == "push-button" && c.name == "Send(S)");
+        let edit_node = children
+            .iter()
+            .find(|c| c.role == "text" && node_has_state(c, "EDITABLE"));
+
+        if let (Some(edit), Some(send)) = (edit_node, send_btn) {
+            out.push(ComposerPair {
+                edit,
+                send,
+                in_main_frame,
+            });
+        }
+
+        for child in children {
+            collect_edit_send_pairs(child, in_main_frame, out);
+        }
+    }
+}
+
 /// Extract a FrameHint from an a11y frame node.
 pub fn frame_hint_from_node(node: &A11yNode) -> Option<FrameHint> {
     let bounds = node.bounds.clone()?;
