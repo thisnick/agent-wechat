@@ -80,20 +80,32 @@ RUN pip3 install frida-tools silk-python
 # noVNC (browser-based VNC viewer) + websockify
 # ============================================
 ARG NOVNC_VERSION=1.5.0
-RUN pip3 install websockify \
-    && curl -L https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz | tar xz -C /opt \
-    && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc
+# graila build-robustness patch: github.com archive downloads are unreliable
+# from our build network (no proxy inside the build), so the noVNC tarball is
+# vendored into the build context and COPY'd in instead of curl-from-github.
+# Pre-fetch on a host that can reach github (see patches/ notes), e.g.:
+#   curl -fL https://codeload.github.com/novnc/noVNC/tar.gz/refs/tags/v1.5.0 \
+#     -o docker/novnc-1.5.0.tar.gz
+RUN pip3 install websockify
+COPY novnc-${NOVNC_VERSION}.tar.gz /tmp/novnc.tar.gz
+RUN tar xz -C /opt -f /tmp/novnc.tar.gz \
+    && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc \
+    && rm -f /tmp/novnc.tar.gz
 
 # ============================================
 # SQLCipher 4 CLI (needed for wechat-db reads)
 # ============================================
+# graila build-robustness patch: vendored (github unreachable inside our build).
+# Pre-fetch: curl -fL https://codeload.github.com/sqlcipher/sqlcipher/tar.gz/refs/tags/v4.6.1 -o docker/sqlcipher-4.6.1.tar.gz
+ARG SQLCIPHER_VERSION=4.6.1
+COPY sqlcipher-${SQLCIPHER_VERSION}.tar.gz /tmp/sqlcipher.tar.gz
 RUN cd /tmp \
-    && curl -L https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz | tar xz \
-    && cd sqlcipher-4.6.1 \
+    && tar xz -f sqlcipher.tar.gz \
+    && cd sqlcipher-${SQLCIPHER_VERSION} \
     && ./configure --enable-tempstore=yes CFLAGS="-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_OPENSSL" LDFLAGS="-lcrypto" \
     && make -j$(nproc) \
     && cp sqlcipher /usr/local/bin/sqlcipher \
-    && cd / && rm -rf /tmp/sqlcipher-4.6.1
+    && cd / && rm -rf /tmp/sqlcipher-${SQLCIPHER_VERSION} /tmp/sqlcipher.tar.gz
 
 # ============================================
 # X11 socket directory

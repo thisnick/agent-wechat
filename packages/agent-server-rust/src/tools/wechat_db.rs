@@ -116,28 +116,169 @@ pub fn find_wechat_pid() -> Option<i64> {
     best_pid
 }
 
-/// Detect the WeChat account directory by scanning /proc/<pid>/fd.
-pub fn find_account_dir(wechat_pid: i64) -> Option<String> {
-    let fd_dir = format!("/proc/{wechat_pid}/fd");
-    let entries = std::fs::read_dir(&fd_dir).ok()?;
+/// Pure helper: extract the account dir name (e.g. `wxid_xxx`) from a path that
+/// points at a WeChat DB, e.g. `/home/wechat/xwechat_files/wxid_xxx/db_storage/..`.
+/// Returns None for unrelated paths. No I/O, fully unit-testable.
+pub fn account_dir_from_db_path(target: &str) -> Option<String> {
+    if !target.contains("db_storage") || !target.ends_with(".db") {
+        return None;
+    }
+    let idx = target.find("xwechat_files/")?;
+    let rest = &target[idx + "xwechat_files/".len()..];
+    let account_dir = rest.split('/').next()?;
+    if account_dir.is_empty() {
+        None
+    } else {
+        Some(account_dir.to_string())
+    }
+}
 
+/// Scan a single process's /proc/<pid>/fd for an open WeChat DB and derive the
+/// account dir. Tolerant of permission errors (returns None, never panics).
+fn scan_pid_fd_for_account(pid: i64) -> Option<String> {
+    let fd_dir = format!("/proc/{pid}/fd");
+    let entries = std::fs::read_dir(&fd_dir).ok()?;
     for entry in entries.flatten() {
         if let Ok(target) = std::fs::read_link(entry.path()) {
-            let target_str = target.to_string_lossy();
-            if target_str.contains("db_storage") && target_str.ends_with(".db") {
-                if let Some(idx) = target_str.find("xwechat_files/") {
-                    let rest = &target_str[idx + "xwechat_files/".len()..];
-                    if let Some(account_dir) = rest.split('/').next() {
-                        if !account_dir.is_empty() {
-                            return Some(account_dir.to_string());
-                        }
+            if let Some(acct) = account_dir_from_db_path(&target.to_string_lossy()) {
+                return Some(acct);
+            }
+        }
+    }
+    None
+}
+
+/// Enumerate PIDs of WeChat-related processes (main client + helper/renderer
+/// processes that may hold the DB file descriptors).
+fn related_wechat_pids() -> Vec<i64> {
+    let mut pids = Vec::new();
+    // -f matches the full command line; covers main + WeChatAppEx/RadiumWMPF helpers.
+    for pat in ["/usr/bin/wechat", "wechat", "WeChatAppEx", "RadiumWMPF"] {
+        if let Ok(output) = Command::new("pgrep").args(["-f", pat]).output() {
+            for s in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                if let Ok(pid) = s.parse::<i64>() {
+                    if !pids.contains(&pid) {
+                        pids.push(pid);
                     }
                 }
             }
         }
     }
+    pids
+}
 
-    None
+/// Whether an account dir on disk has the core DBs we need (session + contact).
+fn account_dir_has_core_dbs(account_dir: &str) -> bool {
+    let dbs = list_account_dbs(account_dir);
+    dbs.iter().any(|n| n == "session.db") && dbs.iter().any(|n| n == "contact.db")
+}
+
+/// Pure helper: pick the most-recently-modified candidate. No I/O.
+fn select_newest_candidate(
+    mut candidates: Vec<(String, std::time::SystemTime)>,
+) -> Option<String> {
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.into_iter().next().map(|(name, _)| name)
+}
+
+/// Filesystem fallback: scan xwechat_files/* for account dirs that contain the
+/// core DBs, returning (account_dir_name, mtime) candidates.
+fn filesystem_account_candidates() -> Vec<(String, std::time::SystemTime)> {
+    let bases = [
+        "/home/wechat/xwechat_files",
+        "/home/wechat/Documents/xwechat_files",
+    ];
+    let mut out: Vec<(String, std::time::SystemTime)> = Vec::new();
+    for base in bases {
+        let entries = match std::fs::read_dir(base) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Account dirs look like wxid_*; skip shared dirs like all_users.
+            if !name.starts_with("wxid_") {
+                continue;
+            }
+            if !account_dir_has_core_dbs(&name) {
+                continue;
+            }
+            let db_storage = entry.path().join("db_storage");
+            let mtime = std::fs::metadata(&db_storage)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if !out.iter().any(|(n, _)| n == &name) {
+                out.push((name, mtime));
+            }
+        }
+    }
+    out
+}
+
+/// Detect the WeChat account directory (returns the account dir NAME, e.g.
+/// `wxid_xxx`). Robust against the case where the main WeChat PID does not hold
+/// the DB file descriptors (the root cause of upstream issue #153: the DB fds
+/// are held by a helper/renderer process, so the original single-PID scan
+/// returned None -> `logged_in_user` was never persisted -> /api/chats empty).
+///
+/// Strategy (first hit wins):
+///   1. pid_fd            — scan the given PID's /proc/<pid>/fd (original behavior).
+///   2. related_pid_fd    — scan all WeChat-related PIDs' fds.
+///   3. filesystem        — scan xwechat_files/* for an account dir with core DBs;
+///                          if multiple, pick the most-recently-modified.
+/// Logs are REDACTED: method + candidate_count + selected only (never the wxid).
+pub fn find_account_dir(wechat_pid: i64) -> Option<String> {
+    find_account_dir_with_method(wechat_pid).0
+}
+
+/// Like [`find_account_dir`] but also returns which detection method resolved
+/// the account directory, for observability / the rescan endpoint. The method
+/// string is one of: `pid_fd`, `related_pid_fd`, `filesystem_fallback`, `none`.
+/// The returned values never include the wxid (the dir name is in `.0`, but the
+/// method tag in `.1` is always safe to surface in API responses / logs).
+pub fn find_account_dir_with_method(wechat_pid: i64) -> (Option<String>, &'static str) {
+    // 1. Original: the given PID.
+    if let Some(acct) = scan_pid_fd_for_account(wechat_pid) {
+        tracing::info!(
+            "[account-detect] method=pid_fd candidate_count=1 selected=true account=<redacted>"
+        );
+        return (Some(acct), "pid_fd");
+    }
+
+    // 2. Fallback: any WeChat-related process may hold the DB fds.
+    let related = related_wechat_pids();
+    for pid in &related {
+        if *pid == wechat_pid {
+            continue;
+        }
+        if let Some(acct) = scan_pid_fd_for_account(*pid) {
+            tracing::info!(
+                "[account-detect] method=related_pid_fd scanned_pids={} selected=true account=<redacted>",
+                related.len()
+            );
+            return (Some(acct), "related_pid_fd");
+        }
+    }
+
+    // 3. Fallback: filesystem scan.
+    let candidates = filesystem_account_candidates();
+    let count = candidates.len();
+    let selected = select_newest_candidate(candidates);
+    tracing::info!(
+        "[account-detect] method=filesystem_fallback candidate_count={} selected={} account=<redacted>",
+        count,
+        selected.is_some()
+    );
+    if selected.is_none() {
+        tracing::warn!(
+            "[account-detect] all methods failed (pid_fd + related_pid_fd + filesystem); logged_in_user will not be set"
+        );
+        return (None, "none");
+    }
+    (selected, "filesystem_fallback")
 }
 
 /// List all .db files that exist on disk for a given account.
@@ -435,5 +576,52 @@ mod tests {
             .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count_fresh, 3, "Fresh immutable connection should see committed writes");
+    }
+
+    // ---- account-dir detection (issue #153 fix) ----
+    use super::{account_dir_from_db_path, select_newest_candidate};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn account_dir_from_db_path_extracts_wxid() {
+        let p = "/home/wechat/xwechat_files/wxid_abc123/db_storage/session/session.db";
+        assert_eq!(account_dir_from_db_path(p), Some("wxid_abc123".to_string()));
+    }
+
+    #[test]
+    fn account_dir_from_db_path_handles_documents_variant() {
+        let p = "/home/wechat/Documents/xwechat_files/wxid_xyz/db_storage/contact/contact.db";
+        assert_eq!(account_dir_from_db_path(p), Some("wxid_xyz".to_string()));
+    }
+
+    #[test]
+    fn account_dir_from_db_path_rejects_unrelated_paths() {
+        assert_eq!(account_dir_from_db_path("/proc/61/maps"), None);
+        assert_eq!(account_dir_from_db_path("/home/wechat/.pki/nssdb/key4.db"), None);
+        // db_storage but not a .db file
+        assert_eq!(
+            account_dir_from_db_path("/home/wechat/xwechat_files/wxid_a/db_storage/"),
+            None
+        );
+    }
+
+    #[test]
+    fn select_newest_candidate_picks_latest_mtime() {
+        let older = UNIX_EPOCH + Duration::from_secs(1000);
+        let newer = UNIX_EPOCH + Duration::from_secs(2000);
+        let candidates = vec![
+            ("wxid_old".to_string(), older),
+            ("wxid_new".to_string(), newer),
+        ];
+        assert_eq!(select_newest_candidate(candidates), Some("wxid_new".to_string()));
+    }
+
+    #[test]
+    fn select_newest_candidate_single_and_empty() {
+        assert_eq!(
+            select_newest_candidate(vec![("wxid_only".to_string(), UNIX_EPOCH)]),
+            Some("wxid_only".to_string())
+        );
+        assert_eq!(select_newest_candidate(Vec::new()), None);
     }
 }

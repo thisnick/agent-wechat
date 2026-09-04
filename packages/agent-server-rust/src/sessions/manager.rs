@@ -204,7 +204,8 @@ pub async fn start_session(id_or_name: &str) -> Result<Session, String> {
     // 5. VNC (localhost only — auth enforced by agent-server proxy)
     let vnc_port = session.vnc_port.to_string();
     let _ = std::process::Command::new("x11vnc")
-        .args(["-display", display.as_str(), "-forever", "-nopw", "-shared", "-viewonly", "-xkb", "-rfbport", &vnc_port, "-listen", "127.0.0.1"])
+        // -nobell: suppress XBell -> noVNC browser beep (graila patch)
+        .args(["-display", display.as_str(), "-forever", "-nopw", "-shared", "-viewonly", "-xkb", "-nobell", "-rfbport", &vnc_port, "-listen", "127.0.0.1"])
         .spawn();
 
     // 5b. noVNC (websockify on localhost only — proxied via agent-server with auth)

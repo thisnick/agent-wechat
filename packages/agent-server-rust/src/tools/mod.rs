@@ -3,6 +3,8 @@ pub mod chat_select;
 pub mod exec;
 pub mod qr;
 pub mod screenshot;
+pub mod ui_open_chat;
+pub mod ui_popups;
 pub mod wechat_chats;
 pub mod wechat_contacts;
 pub mod wechat_db;

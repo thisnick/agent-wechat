@@ -305,6 +305,19 @@ async fn handle_detecting_user(
 
     plan_state.detect_retries += 1;
     if plan_state.detect_retries >= 10 {
+        // NOTE (graila patch): account-dir detection exhausted retries. The
+        // primary fix is in tools::wechat_db::find_account_dir (multi-PID +
+        // filesystem fallback for issue #153); reaching here means even that
+        // failed, so `logged_in_user` was NOT persisted and data APIs
+        // (/api/chats, /api/contacts, /api/messages) will return empty.
+        //
+        // Control flow is intentionally left unchanged (still emits a terminal
+        // event) to preserve the /api/ws/login client contract; we only surface
+        // the failure loudly so it is diagnosable instead of silent.
+        tracing::warn!(
+            "[login] account_dir_detection_failed retry_count={} next_action=emit_login_success_without_user note=logged_in_user_unset_data_apis_will_be_empty",
+            plan_state.detect_retries
+        );
         plan_state.phase = LoginPhase::Done;
         return Some(SelectedAction {
             action: actions::sequence(vec![

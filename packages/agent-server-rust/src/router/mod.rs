@@ -6,6 +6,8 @@ mod events;
 mod messages;
 mod sessions;
 mod status;
+mod sync;
+mod ui;
 mod vnc;
 
 use axum::{
@@ -53,6 +55,14 @@ pub fn build_router() -> Router {
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))
+        // Sync / recovery: re-detect account dir + keys for an already-logged-in
+        // client when login_user was never persisted (issue #153).
+        .route("/api/sync/rescan", post(sync::rescan))
+        // UI hygiene: close whitelisted popups (e.g. Weixin version-update window).
+        .route("/api/ui/close-known-popups", post(ui::close_known_popups_handler))
+        // Version-robust open-chat (a11y search) — fallback for outbound send
+        // when the frida chat-select BUILD_PROFILE is missing (new WeChat builds).
+        .route("/api/ui/open-chat", post(ui::open_chat_handler))
         // Sessions
         .route("/api/sessions", get(sessions::list_sessions).post(sessions::create_session))
         .route("/api/sessions/{id}", get(sessions::get_session).delete(sessions::delete_session))
