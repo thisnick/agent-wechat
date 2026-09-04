@@ -29,47 +29,97 @@ pub struct SendMessagePlanState {
     pub confirm_attempts: u32,
 }
 
+fn node_has_state(node: &A11yNode, state: &str) -> bool {
+    node.states
+        .as_ref()
+        .map(|s| s.iter().any(|st| st == state))
+        .unwrap_or(false)
+}
+
+/// A candidate composer: the editable text input plus its sibling Send(S) button.
+struct ComposerPair<'a> {
+    edit: &'a A11yNode,
+    send: &'a A11yNode,
+    /// True if this pair lives under the main "Weixin" application frame
+    /// (as opposed to a detached/ghost chat frame leftover in the a11y tree).
+    in_main_frame: bool,
+}
+
+/// Find the composer (editable + Send button) to operate on.
+///
+/// WeChat's accessibility tree can contain *multiple* edit+send pairs:
+/// the live main-window composer plus stale "ghost" frames left behind by
+/// chats that were previously detached into separate windows. A naive
+/// depth-first "take the first pair" grabs the wrong (ghost) composer, whose
+/// input never receives text and whose Send stays DISABLED forever, causing
+/// the plan to loop and ultimately fail with "No action selected".
+///
+/// To be robust we collect every candidate pair, then rank them so the
+/// genuinely active composer wins:
+///   1. editable currently FOCUSED                (strongest signal)
+///   2. Send button NOT disabled                  (composer already has text)
+///   3. pair under the main "Weixin" frame        (not a ghost/detached frame)
+/// The first pair (DFS order) breaks any remaining ties.
 fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    let send_btn = query_selector(a11y, r#"push-button[name="Send(S)"]"#)?;
-    // Find sibling EDITABLE text node via parent
-    // Since we don't have parent refs in the tree-based approach,
-    // we search the tree for the pattern
-    find_edit_near_send(a11y, send_btn)
+    let mut candidates: Vec<ComposerPair> = Vec::new();
+    collect_edit_send_pairs(a11y, false, &mut candidates);
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Pick the best candidate by preference, preserving DFS order on ties.
+    let best = candidates.iter().enumerate().min_by_key(|(idx, c)| {
+        let focused = node_has_state(c.edit, "FOCUSED");
+        let send_enabled = !node_has_state(c.send, "DISABLED");
+        // Lower key = higher priority. Each desirable property subtracts rank.
+        let mut score: i32 = 0;
+        if focused {
+            score -= 100;
+        }
+        if send_enabled {
+            score -= 10;
+        }
+        if c.in_main_frame {
+            score -= 1;
+        }
+        // Tie-break: earlier DFS position wins.
+        (score, *idx as i32)
+    });
+
+    best.map(|(_, c)| (c.edit, c.send))
 }
 
-fn find_edit_near_send<'a>(
-    root: &'a A11yNode,
-    _send_btn: &A11yNode,
-) -> Option<(&'a A11yNode, &'a A11yNode)> {
-    // Walk tree looking for a parent that has both an EDITABLE text and Send(S) button
-    find_edit_send_pair(root)
-}
+/// Recursively collect all edit+send composer pairs, tracking whether each
+/// pair is inside the main "Weixin" frame.
+fn collect_edit_send_pairs<'a>(
+    node: &'a A11yNode,
+    in_main_frame: bool,
+    out: &mut Vec<ComposerPair<'a>>,
+) {
+    // Once we enter the main "Weixin" frame, everything below it is in-main.
+    let in_main_frame = in_main_frame || (node.role == "frame" && node.name == "Weixin");
 
-fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
     if let Some(children) = &node.children {
-        let send_btn = children.iter().find(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
-        let edit_node = children.iter().find(|c| {
-            c.role == "text"
-                && c.states
-                    .as_ref()
-                    .map(|s| s.iter().any(|st| st == "EDITABLE"))
-                    .unwrap_or(false)
-        });
+        let send_btn = children
+            .iter()
+            .find(|c| c.role == "push-button" && c.name == "Send(S)");
+        let edit_node = children
+            .iter()
+            .find(|c| c.role == "text" && node_has_state(c, "EDITABLE"));
 
         if let (Some(edit), Some(send)) = (edit_node, send_btn) {
-            return Some((edit, send));
+            out.push(ComposerPair {
+                edit,
+                send,
+                in_main_frame,
+            });
         }
 
-        // Recurse
         for child in children {
-            if let Some(result) = find_edit_send_pair(child) {
-                return Some(result);
-            }
+            collect_edit_send_pairs(child, in_main_frame, out);
         }
     }
-    None
 }
 
 #[async_trait::async_trait]
