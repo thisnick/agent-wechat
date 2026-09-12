@@ -93,6 +93,47 @@ fn clean_content(content: &str, msg_type: i32) -> String {
                     }
                     parts.join("\n")
                 }
+                // Merged forward / chat history (19)
+                19 => {
+                    let mut parts = Vec::new();
+                    parts.push(format!("[Chat History] {title}"));
+                    // recorditem is XML-escaped inside the appmsg
+                    if let Some(record_raw) = extract_xml_tag(content, "recorditem") {
+                        let record = record_raw
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">")
+                            .replace("&amp;", "&")
+                            .replace("&quot;", "\"");
+                        // Extract each <dataitem> block
+                        let mut search_from = 0usize;
+                        while let Some(start) = record[search_from..].find("<dataitem") {
+                            let abs_start = search_from + start;
+                            if let Some(end_offset) = record[abs_start..].find("</dataitem>") {
+                                let item = &record[abs_start..abs_start + end_offset + "</dataitem>".len()];
+                                let sender_name = extract_xml_tag(item, "sourcename")
+                                    .or_else(|| extract_xml_tag(item, "displayname"))
+                                    .unwrap_or_default();
+                                let data_title = extract_xml_tag(item, "datatitle")
+                                    .or_else(|| extract_xml_tag(item, "datadesc"))
+                                    .unwrap_or_else(|| "[media]".to_string());
+                                if !sender_name.is_empty() {
+                                    parts.push(format!("{sender_name}: {data_title}"));
+                                } else {
+                                    parts.push(data_title);
+                                }
+                                search_from = abs_start + end_offset + "</dataitem>".len();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if parts.len() == 1 {
+                        // Only title, no items parsed — fall back to title
+                        title
+                    } else {
+                        parts.join("\n")
+                    }
+                }
                 _ => {
                     if title.is_empty() {
                         content.to_string()
