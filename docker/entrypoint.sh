@@ -56,8 +56,12 @@ if [ -n "${PROXY:-}" ]; then
 
   echo "Configuring transparent proxy: $PROXY_HOST:$PROXY_PORT ($REDSOCKS_TYPE)"
 
-  # Generate redsocks config
-  cat > /tmp/redsocks.conf <<REDSOCKS_EOF
+  # Keep credentials out of the shared sticky /tmp directory. Rewriting a
+  # config owned by redsocks there can fail under fs.protected_regular.
+  id -u redsocks >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redsocks
+  install -d -m 700 -o redsocks -g redsocks /run/agent-wechat-proxy
+  # Generate redsocks config with private permissions from creation.
+  (umask 077; cat > /run/agent-wechat-proxy/redsocks.conf <<REDSOCKS_EOF
 base {
     log_debug = off;
     log_info = on;
@@ -75,13 +79,12 @@ $([ -n "$PROXY_USER" ] && echo "    login = \"$PROXY_USER\";")
 $([ -n "$PROXY_PASS" ] && echo "    password = \"$PROXY_PASS\";")
 }
 REDSOCKS_EOF
+  )
 
-  # Create dedicated user for redsocks (iptables uid exclusion prevents redirect loop)
-  id -u redsocks >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin redsocks
-  chown redsocks /tmp/redsocks.conf
+  chown redsocks /run/agent-wechat-proxy/redsocks.conf
 
   # Start redsocks as dedicated user
-  su -s /bin/sh -c "redsocks -c /tmp/redsocks.conf" redsocks
+  su -s /bin/sh -c "redsocks -c /run/agent-wechat-proxy/redsocks.conf" redsocks
 
   # iptables: redirect all outgoing TCP through redsocks
   # Skip redsocks' own traffic to prevent redirect loop
@@ -105,7 +108,10 @@ fi
 # ============================================
 # Start Xvfb
 # ============================================
-Xvfb "$DISPLAY" -screen 0 1280x800x24 &
+# X11 shared-memory segments are owned by the GUI client. Run the X server
+# under the same user so Docker's restricted IPC capabilities do not prevent
+# it from attaching to WeChat's buffers (which leaves the UI visually stale).
+su -s /bin/bash -c "exec Xvfb '$DISPLAY' -screen 0 1280x800x24 -nolisten tcp" wechat &
 sleep 1
 
 # ============================================
@@ -146,7 +152,7 @@ fi
 if [ "${ENABLE_VNC:-1}" = "1" ]; then
   # -nopw: no VNC-level password (localhost only; auth enforced by agent-server proxy with full token)
   # -viewonly: no remote input
-  x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
+  su -s /bin/bash -c "exec x11vnc -display '$DISPLAY' -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1" wechat &
 fi
 
 # ============================================
