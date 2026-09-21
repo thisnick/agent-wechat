@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.12.1
+
+### Patch Changes
+
+- [#183](https://github.com/thisnick/agent-wechat/pull/183) [`1eafaf8`](https://github.com/thisnick/agent-wechat/commit/1eafaf8c830034f9047de3c910dd0fa370a16591) Thanks [@thisnick](https://github.com/thisnick)! - Support database and image access plus chat selection on WeChat Linux 4.1.13.23 for x86_64 (build ce28c347) and ARM64 (build e9f1cd04), including masked database credentials and the ARM build's ordered session-map layout.
+
 ## 0.12.0
 
 ### Minor Changes
