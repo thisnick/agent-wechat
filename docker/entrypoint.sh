@@ -173,6 +173,20 @@ fi
 launch-wechat &
 
 # ============================================
+# Start the persistent Weixin Channels browser bridge
+# The dedicated profile contains authentication state and must remain private.
+# ============================================
+if [ "${ENABLE_FINDER_BROWSER:-1}" = "1" ] && command -v finder-browser >/dev/null 2>&1; then
+  FINDER_BROWSER_PROFILE="${FINDER_BROWSER_PROFILE:-$WECHAT_HOME/.finder-browser-profile}"
+  mkdir -p "$FINDER_BROWSER_PROFILE"
+  chown -R wechat:wechat "$FINDER_BROWSER_PROFILE"
+  chmod 700 "$FINDER_BROWSER_PROFILE"
+  su -s /bin/bash -c \
+    "while true; do DISPLAY=$DISPLAY DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS HOME=$WECHAT_HOME FINDER_BROWSER_PROFILE=$FINDER_BROWSER_PROFILE /opt/tools/finder-browser >/dev/null 2>&1; sleep 2; done &" \
+    wechat
+fi
+
+# ============================================
 # Initialize data directory
 # ============================================
 DB_PATH="${AGENT_DB_PATH:-/data/agent.db}"

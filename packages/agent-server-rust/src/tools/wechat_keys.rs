@@ -3,6 +3,18 @@ use super::wechat_db::{get_db_path, list_account_dbs};
 use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashMap;
 
+const KEY_EXTRACTION_TIMEOUT_MS: u64 = 300_000;
+
+#[cfg(test)]
+mod tests {
+    use super::KEY_EXTRACTION_TIMEOUT_MS;
+
+    #[test]
+    fn old_clients_get_enough_time_for_key_extraction() {
+        assert_eq!(KEY_EXTRACTION_TIMEOUT_MS, 300_000);
+    }
+}
+
 /// Extract all WeChat DB credentials (async, non-blocking).
 /// Calls the Python extract-keys script.
 pub async fn extract_keys_async(wechat_pid: i64) -> HashMap<String, String> {
@@ -20,7 +32,7 @@ pub async fn extract_keys_async(wechat_pid: i64) -> HashMap<String, String> {
             &out_path,
         ],
         &ExecOptions {
-            timeout_ms: 120_000,
+            timeout_ms: KEY_EXTRACTION_TIMEOUT_MS,
             ..Default::default()
         },
     )

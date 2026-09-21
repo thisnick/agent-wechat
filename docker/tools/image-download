@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Fail-closed WeChat image fetch helper used by the agent API."""
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import subprocess
+import tempfile
+import time
+
+from PIL import Image
+
+RESAMPLE_BILINEAR = getattr(getattr(Image, "Resampling", Image), "BILINEAR")
+
+
+class DownloadError(Exception):
+    pass
+
+
+def fail(code):
+    print(json.dumps({"ok": False, "errorCode": code}))
+    raise SystemExit(1)
+
+
+def command(*args, timeout=15, check=True):
+    name = os.path.basename(str(args[0])).upper().replace("-", "_")
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise DownloadError(f"{name}_TIMEOUT") from error
+    if check and result.returncode != 0:
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            payload = {}
+        code = payload.get("errorCode") if isinstance(payload, dict) else None
+        raise DownloadError(code or f"{name}_FAILED")
+    return result
+
+
+def walk(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.get("children") or []:
+            yield from walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk(child)
+
+
+def tree():
+    result = command("/opt/tools/a11y-dump", "--format", "json", timeout=10)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise DownloadError("A11Y_RESPONSE_INVALID") from error
+
+
+def image_rows(value, geometry):
+    safe_top = geometry["Y"] + 70
+    safe_bottom = geometry["Y"] + geometry["HEIGHT"] - 105
+    rows = []
+    for node in walk(value):
+        bounds = node.get("bounds") or {}
+        try:
+            x = float(bounds["x"])
+            y = float(bounds["y"])
+            width = float(bounds["width"])
+            height = float(bounds["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            node.get("role") == "list-item"
+            and node.get("name") == "Image"
+            and width >= 500
+            and height >= 60
+            and x >= geometry["X"]
+            and y >= safe_top
+            and y + height <= safe_bottom
+        ):
+            rows.append(node)
+    return rows
+
+
+def _normalized_difference(left, right):
+    left = left.convert("RGB").resize((20, 20), RESAMPLE_BILINEAR)
+    right = right.convert("RGB").resize((20, 20), RESAMPLE_BILINEAR)
+    total = 0
+    for a, b in zip(left.getdata(), right.getdata()):
+        total += sum(abs(a[channel] - b[channel]) for channel in range(3))
+    return total / (20 * 20 * 3 * 255)
+
+
+def _best_row_match(screenshot, target, row):
+    bounds = row["bounds"]
+    left = max(0, round(float(bounds["x"]) + 48))
+    top = max(0, round(float(bounds["y"]) + 3))
+    right = min(screenshot.width, round(float(bounds["x"]) + float(bounds["width"]) - 8))
+    bottom = min(screenshot.height, round(float(bounds["y"]) + float(bounds["height"]) - 3))
+    ratio = target.width / target.height
+    min_height = max(48, round((bottom - top) * 0.55))
+    max_height = bottom - top
+    best = None
+    for height in range(min_height, max_height + 1, 4):
+        width = max(32, round(height * ratio))
+        if width > right - left:
+            continue
+        for y in range(top, bottom - height + 1, 4):
+            for x in range(left, right - width + 1, 4):
+                crop = screenshot.crop((x, y, x + width, y + height))
+                score = _normalized_difference(crop, target)
+                if best is None or score < best[0]:
+                    best = (score, x, y, width, height)
+    return best
+
+
+def find_unique_match(screenshot, target, rows, threshold=0.18):
+    matches = []
+    for row in rows:
+        bounds = row.get("bounds") or {}
+        try:
+            y = float(bounds["y"])
+            height = float(bounds["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if y < 0 or height < 60 or y + height > screenshot.height:
+            continue
+        best = _best_row_match(screenshot, target, row)
+        if best is not None and best[0] <= threshold:
+            score, x, top, width, match_height = best
+            matches.append(
+                {
+                    "score": score,
+                    "x": x + width // 2,
+                    "y": top + match_height // 2,
+                    "row": row,
+                }
+            )
+    if not matches:
+        raise DownloadError("IMAGE_CARD_NOT_FOUND")
+    if len(matches) != 1:
+        raise DownloadError("IMAGE_IDENTITY_AMBIGUOUS")
+    match = matches[0]
+    newest_y = max(float((row.get("bounds") or {}).get("y", -1)) for row in rows)
+    if float(match["row"]["bounds"]["y"]) != newest_y:
+        raise DownloadError("IMAGE_NOT_NEWEST_VISIBLE_MESSAGE")
+    return match
+
+
+def weixin_geometry():
+    result = command("xdotool", "search", "--onlyvisible", "--name", "^Weixin$")
+    ids = [value for value in result.stdout.splitlines() if value.isdigit()]
+    candidates = []
+    for window_id in ids:
+        result = command("xdotool", "getwindowgeometry", "--shell", window_id, check=False)
+        values = {}
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"X", "Y", "WIDTH", "HEIGHT"} and value.lstrip("-").isdigit():
+                values[key] = int(value)
+        if set(values) == {"X", "Y", "WIDTH", "HEIGHT"}:
+            candidates.append((values["WIDTH"] * values["HEIGHT"], window_id, values))
+    if not candidates:
+        raise DownloadError("WEIXIN_WINDOW_GEOMETRY_INVALID")
+    _area, window_id, values = max(candidates, key=lambda item: item[0])
+    if values["WIDTH"] < 700 or values["HEIGHT"] < 500:
+        raise DownloadError("WEIXIN_WINDOW_TOO_SMALL")
+    command("xdotool", "windowactivate", "--sync", window_id)
+    if command("xdotool", "getactivewindow").stdout.strip() != window_id:
+        raise DownloadError("WEIXIN_WINDOW_NOT_ACTIVE")
+    return values
+
+
+def capture():
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as output:
+        path = output.name
+    os.unlink(path)
+    try:
+        command("scrot", path, timeout=10)
+        with Image.open(path) as image:
+            return image.convert("RGB")
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def wait_for_full_image(image_dir, stem, thumbnail_size, timeout_seconds=120):
+    candidates = [image_dir / f"{stem}_h.dat", image_dir / f"{stem}.dat"]
+    previous = {}
+    stable = {}
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        for path in candidates:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if size > thumbnail_size and size == previous.get(path):
+                stable[path] = stable.get(path, 0) + 1
+                if stable[path] >= 2:
+                    return path, size
+            else:
+                stable[path] = 0
+            previous[path] = size
+        time.sleep(1)
+    raise DownloadError("IMAGE_CACHE_TIMEOUT")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chat-id", required=True)
+    parser.add_argument("--chat-name", required=True)
+    parser.add_argument("--local-id", required=True, type=int)
+    parser.add_argument("--thumbnail", required=True)
+    parser.add_argument("--image-dir", required=True)
+    parser.add_argument("--stem", required=True)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    image_dir = pathlib.Path(args.image_dir)
+    if (
+        re.fullmatch(r"[0-9a-f]{32}", args.stem) is None
+        or re.fullmatch(r"/home/wechat(?:/Documents)?/xwechat_files/[^/]+/msg/attach/[0-9a-f]{32}/\d{4}-\d{2}/Img", str(image_dir)) is None
+        or re.fullmatch(r"/tmp/agent-image-[0-9a-f-]+\.jpg", args.thumbnail) is None
+    ):
+        fail("IMAGE_TARGET_PATH_INVALID")
+    thumbnail_dat = image_dir / f"{args.stem}_t.dat"
+    try:
+        thumbnail_size = thumbnail_dat.stat().st_size
+    except OSError:
+        fail("IMAGE_THUMBNAIL_CACHE_MISSING")
+
+    try:
+        geometry = weixin_geometry()
+        selected = command(
+            "/opt/tools/chat-select", "--chat-name", args.chat_name, args.chat_id, timeout=60
+        )
+        selected_payload = json.loads(selected.stdout)
+        if not selected_payload.get("ok"):
+            raise DownloadError("CHAT_OPEN_FAILED")
+        time.sleep(1)
+        # The database gate guarantees this is the newest message. Move the
+        # message view to its end, then require a unique visual identity match.
+        scroll_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
+        scroll_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.50)
+        command("xdotool", "mousemove", str(scroll_x), str(scroll_y), "click", "--repeat", "10", "--delay", "50", "5")
+        time.sleep(0.8)
+        current_tree = tree()
+        rows = image_rows(current_tree, geometry)
+        with Image.open(args.thumbnail) as target_image:
+            match = find_unique_match(capture(), target_image.convert("RGB"), rows)
+        command("xdotool", "mousemove", str(match["x"]), str(match["y"]), "click", "1")
+        try:
+            path, size = wait_for_full_image(image_dir, args.stem, thumbnail_size)
+        finally:
+            command("xdotool", "key", "--clearmodifiers", "Escape", check=False)
+    except (DownloadError, json.JSONDecodeError) as error:
+        fail(str(error) if isinstance(error, DownloadError) else "CHAT_OPEN_RESPONSE_INVALID")
+
+    print(json.dumps({"ok": True, "sizeBytes": size, "variant": path.name[-6:]}))
+
+
+if __name__ == "__main__":
+    main()

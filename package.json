@@ -23,7 +23,6 @@
     "gateway": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx src/main.ts",
     "gateway:test": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx scripts/test-gateway.ts",
     "gateway:test:remote": "pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx scripts/test-gateway-remote.ts",
-    "release": "pnpm build && pnpm changeset publish",
     "version-packages": "pnpm changeset version && bash scripts/sync-cargo-version.sh && pnpm install --lockfile-only"
   },
   "devDependencies": {

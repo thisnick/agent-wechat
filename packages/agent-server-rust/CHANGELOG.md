@@ -1,5 +1,41 @@
 # @agent-wechat/agent-server
 
+## 0.13.2
+
+### Patch Changes
+
+- [`4f839d5`](https://github.com/thisnick/agent-wechat/commit/4f839d5c44786f4a3166408e21117465ffe52f28) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Retry image operations that failed under the previously broken UI download runtime.
+
+## 0.13.1
+
+### Patch Changes
+
+- [`10ed1bf`](https://github.com/thisnick/agent-wechat/commit/10ed1bf098edb185da0eacfc02cd55e438e90ec0) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Fix image download screenshots on existing-file-safe scrot builds and older Pillow releases.
+
+## 0.13.0
+
+### Minor Changes
+
+- [`05e67be`](https://github.com/thisnick/agent-wechat/commit/05e67be549db21bf93fb457fd0a78c9aa773257e) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Preserve Finder message source XML before display-oriented content cleanup and add a fail-closed probe for WeChat's built-in structured runtime endpoint.
+
+### Patch Changes
+
+- [`a9f692c`](https://github.com/thisnick/agent-wechat/commit/a9f692ce524a09debf8028a17b9e63a64d64de26) - Allow the newest image in a chat to be fetched after newer non-image messages arrive, while retaining exact thumbnail identity checks.
+
+## 0.12.2
+
+### Patch Changes
+
+- [`ef959c8`](https://github.com/thisnick/agent-wechat/commit/ef959c8319f20f0f2610aac8e4067582730051a7) Thanks [@Xiaohuidog](https://github.com/Xiaohuidog)! - Expose Finder share identifiers as optional structured message metadata while preserving the existing display content.
+
+## 0.12.1
+
+### Patch Changes
+
+- [`b9d8f91`](https://github.com/thisnick/agent-wechat/commit/b9d8f9184174c88b9af23799a23165d1457bfee5) - Recover newly received video media when resource metadata is unavailable, and stabilize accessible chat selection and rendering for WeChat build `d16278a4`.
+
+- [`9321900`](https://github.com/thisnick/agent-wechat/commit/9321900e1daf32af33dd482670aa41a652ca638b) - Add a bounded, idempotent image fetch operation that opens only the latest message after uniquely matching its visible thumbnail.
+
 ## 0.12.0
 
 ## 0.11.15

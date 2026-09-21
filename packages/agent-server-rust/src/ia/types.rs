@@ -406,6 +406,14 @@ pub struct ReplyInfo {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FinderInfo {
+    pub object_id: String,
+    pub object_nonce_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -435,6 +443,9 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reply: Option<ReplyInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub finder: Option<FinderInfo>,
 }
 
 // ============================================

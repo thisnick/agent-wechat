@@ -19,6 +19,10 @@ A programmable WeChat interface. Controls a WeChat client running in a Docker co
 - **Login** via QR code displayed in your terminal
 - **Monitor** for new messages in real-time
 
+Finder share messages keep their existing display `content` and also include an
+optional `finder` object with `objectId` and `objectNonceId` for structured
+downstream handling.
+
 ## Requirements
 
 - Docker (Colima on macOS, or Docker Desktop)

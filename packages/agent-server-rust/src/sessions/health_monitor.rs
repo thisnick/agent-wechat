@@ -8,11 +8,23 @@ use crate::tools::exec::ExecOptions;
 use crate::tools::screenshot::capture_screenshot;
 use crate::tools::wechat_db::find_wechat_pid;
 
+#[cfg(test)]
+mod tests {
+    use super::unresponsive_timeout_secs;
+
+    #[test]
+    fn logged_in_sessions_use_a_longer_recovery_window() {
+        assert_eq!(unresponsive_timeout_secs(false), 60);
+        assert_eq!(unresponsive_timeout_secs(true), 300);
+    }
+}
+
 /// How often to run the health scan (in seconds).
 const SCAN_INTERVAL_SECS: u64 = 1;
 
 /// Kill WeChat if no IA state has been identified for this long (in seconds).
 const UNRESPONSIVE_TIMEOUT_SECS: u64 = 60;
+const LOGGED_IN_UNRESPONSIVE_TIMEOUT_SECS: u64 = 300;
 
 /// Delay before restarting WeChat after a crash (in seconds).
 const RESTART_DELAY_SECS: u64 = 3;
@@ -146,7 +158,11 @@ pub fn spawn_health_monitor() {
                 Ok(tree) => tree,
                 Err(_) => {
                     // a11y failed — count as unresponsive, don't reset timer
-                    check_and_kill(wechat_pid, &last_identified);
+                    check_and_kill(
+                        wechat_pid,
+                        &last_identified,
+                        session.login_state == "logged_in",
+                    );
                     continue;
                 }
             };
@@ -161,16 +177,29 @@ pub fn spawn_health_monitor() {
                 last_identified = Instant::now();
             } else {
                 // No state identified — check timeout
-                check_and_kill(wechat_pid, &last_identified);
+                check_and_kill(
+                    wechat_pid,
+                    &last_identified,
+                    session.login_state == "logged_in",
+                );
             }
         }
     });
 }
 
 /// If time since last identified state exceeds the timeout, kill the WeChat process.
-fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
+fn unresponsive_timeout_secs(logged_in: bool) -> u64 {
+    if logged_in {
+        LOGGED_IN_UNRESPONSIVE_TIMEOUT_SECS
+    } else {
+        UNRESPONSIVE_TIMEOUT_SECS
+    }
+}
+
+fn check_and_kill(wechat_pid: i64, last_identified: &Instant, logged_in: bool) {
     let elapsed = last_identified.elapsed();
-    if elapsed.as_secs() >= UNRESPONSIVE_TIMEOUT_SECS {
+    let timeout_secs = unresponsive_timeout_secs(logged_in);
+    if elapsed.as_secs() >= timeout_secs {
         tracing::warn!(
             "[health] WeChat (pid={}) unresponsive for {}s, killing process",
             wechat_pid,
@@ -203,7 +232,7 @@ fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
         tracing::debug!(
             "[health] WeChat unresponsive for {}s (threshold: {}s)",
             elapsed.as_secs(),
-            UNRESPONSIVE_TIMEOUT_SECS
+            timeout_secs
         );
     }
 }

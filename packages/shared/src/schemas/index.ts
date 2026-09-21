@@ -170,6 +170,10 @@ export const messageSchema = z.object({
   type: z.number().int(),
   content: z.string(),
   timestamp: z.string(),
+  finder: z.object({
+    objectId: z.string().min(1),
+    objectNonceId: z.string().min(1),
+  }).optional(),
 });
 
 export const listMessagesParamsSchema = z.object({

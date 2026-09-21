@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Serial, fail-closed WeChat file save helper used by the agent API."""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+
+class DownloadError(Exception):
+    pass
+
+
+def fail(code):
+    print(json.dumps({"ok": False, "errorCode": code}))
+    raise SystemExit(1)
+
+
+def command(*args, timeout=15, check=True):
+    command_name = os.path.basename(str(args[0])).upper().replace("-", "_")
+    if command_name == "XDOTOOL" and len(args) > 1:
+        command_name = f"XDOTOOL_{str(args[1]).upper().replace('-', '_')}"
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise DownloadError(f"{command_name}_TIMEOUT") from error
+    if check and result.returncode != 0:
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            payload = {}
+        error_code = payload.get("errorCode") if isinstance(payload, dict) else None
+        if isinstance(error_code, str) and error_code:
+            raise DownloadError(error_code)
+        raise DownloadError(f"{command_name}_FAILED")
+    return result
+
+
+def walk(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.get("children") or []:
+            yield from walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk(child)
+
+
+def tree():
+    result = command("/opt/tools/a11y-dump", "--format", "json", timeout=10)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise DownloadError("A11Y_RESPONSE_INVALID") from error
+
+
+def center(bounds):
+    return (
+        round(float(bounds["x"]) + float(bounds["width"]) / 2),
+        round(float(bounds["y"]) + float(bounds["height"]) / 2),
+    )
+
+
+def named_node(value, role, names):
+    for node in walk(value):
+        if node.get("role") == role and node.get("name") in names and node.get("bounds"):
+            return node
+    raise DownloadError(f"{role.upper().replace('-', '_')}_NOT_FOUND")
+
+
+def matching_rows(value, filename):
+    rows = []
+    for node in walk(value):
+        bounds = node.get("bounds") or {}
+        name = node.get("name")
+        if (
+            node.get("role") == "list-item"
+            and isinstance(name, str)
+            and name.startswith("File\n")
+            and filename in name.splitlines()
+            and float(bounds.get("width", 0)) >= 500
+        ):
+            rows.append(node)
+    if len(rows) > 1:
+        raise DownloadError("FILE_IDENTITY_AMBIGUOUS")
+    return rows
+
+
+def weixin_geometry():
+    result = command("xdotool", "search", "--onlyvisible", "--name", "^Weixin$")
+    window_ids = [value for value in result.stdout.splitlines() if value.isdigit()]
+    if not window_ids:
+        raise DownloadError("WEIXIN_WINDOW_NOT_VISIBLE")
+    candidates = []
+    for candidate_id in window_ids:
+        geometry = command(
+            "xdotool", "getwindowgeometry", "--shell", candidate_id, check=False
+        )
+        if geometry.returncode != 0:
+            continue
+        values = {}
+        for line in geometry.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"X", "Y", "WIDTH", "HEIGHT"} and value.lstrip("-").isdigit():
+                values[key] = int(value)
+        if set(values) == {"X", "Y", "WIDTH", "HEIGHT"}:
+            candidates.append((values["WIDTH"] * values["HEIGHT"], candidate_id, values))
+    if not candidates:
+        raise DownloadError("WEIXIN_WINDOW_GEOMETRY_INVALID")
+    _area, window_id, values = max(candidates, key=lambda candidate: candidate[0])
+    command("xdotool", "windowactivate", "--sync", window_id)
+    active = command("xdotool", "getactivewindow").stdout.strip()
+    if active != window_id:
+        raise DownloadError("WEIXIN_WINDOW_NOT_ACTIVE")
+    if values["WIDTH"] < 700 or values["HEIGHT"] < 500:
+        raise DownloadError("WEIXIN_WINDOW_TOO_SMALL")
+    return values
+
+
+def scroll(geometry, button, repeat=4):
+    target_x = round(geometry["X"] + geometry["WIDTH"] * 0.72)
+    target_y = round(geometry["Y"] + geometry["HEIGHT"] * 0.48)
+    command(
+        "xdotool", "mousemove", str(target_x), str(target_y),
+        "click", "--repeat", str(repeat), "--delay", "60", button,
+    )
+    time.sleep(0.6)
+
+
+def find_row(filename, geometry, timeout_seconds=240):
+    safe_top = geometry["Y"] + 80
+    safe_bottom = geometry["Y"] + geometry["HEIGHT"] - 120
+    deadline = time.monotonic() + timeout_seconds
+
+    for _ in range(3):
+        rows = matching_rows(tree(), filename)
+        if not rows:
+            break
+        bounds = rows[0]["bounds"]
+        top = float(bounds["y"])
+        bottom = top + float(bounds["height"])
+        if top >= safe_top and bottom <= safe_bottom:
+            return rows[0]
+        scroll(geometry, "4" if top < safe_top else "5", repeat=1)
+
+    for _ in range(4):
+        if time.monotonic() >= deadline:
+            raise DownloadError("FILE_SEARCH_TIMEOUT")
+        scroll(geometry, "5", repeat=12)
+
+    last_signature = None
+    repeated = 0
+    while time.monotonic() < deadline:
+        current = tree()
+        rows = matching_rows(current, filename)
+        if rows:
+            bounds = rows[0]["bounds"]
+            top = float(bounds["y"])
+            bottom = top + float(bounds["height"])
+            if top >= safe_top and bottom <= safe_bottom:
+                return rows[0]
+            scroll(geometry, "4" if top < safe_top else "5", repeat=1)
+            continue
+        signature = tuple(
+            (str(node.get("name")), round(float((node.get("bounds") or {}).get("y", 0))))
+            for node in walk(current)
+            if node.get("role") == "list-item"
+        )
+        repeated = repeated + 1 if signature == last_signature else 0
+        last_signature = signature
+        if repeated >= 8:
+            break
+        scroll(geometry, "4")
+    raise DownloadError("FILE_CARD_NOT_FOUND_AFTER_SCROLL")
+
+
+def wait_for_complete(path):
+    previous = -1
+    stable = 0
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        if size > 0 and size == previous:
+            stable += 1
+            if stable >= 2:
+                return size
+        else:
+            stable = 0
+        previous = size
+        time.sleep(1)
+    raise DownloadError("FILE_SAVE_TIMEOUT")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chat-id", required=True)
+    parser.add_argument("--chat-name", required=True)
+    parser.add_argument("--local-id", required=True, type=int)
+    parser.add_argument("--filename", required=True)
+    parser.add_argument("--output", required=True)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    output_pattern = re.compile(
+        r"^/home/[a-z_][a-z0-9_-]*/Downloads/agent-file-"
+        r"[0-9a-f]{8}-[0-9a-f-]{27}\.(pdf|docx|xlsx|zip)$"
+    )
+    if output_pattern.fullmatch(args.output) is None:
+        fail("FILE_DOWNLOAD_OUTPUT_PATH_INVALID")
+    download_dir = os.path.dirname(args.output)
+    os.makedirs(download_dir, mode=0o700, exist_ok=True)
+    try:
+        os.unlink(args.output)
+    except FileNotFoundError:
+        pass
+
+    try:
+        geometry = weixin_geometry()
+        selected = command(
+            "/opt/tools/chat-select",
+            "--chat-name",
+            args.chat_name,
+            args.chat_id,
+            timeout=60,
+        )
+        try:
+            selected_result = json.loads(selected.stdout)
+        except json.JSONDecodeError as error:
+            raise DownloadError("CHAT_OPEN_RESPONSE_INVALID") from error
+        if not selected_result.get("ok"):
+            raise DownloadError("CHAT_OPEN_FAILED")
+        time.sleep(1)
+        row = find_row(args.filename, geometry)
+        bounds = row["bounds"]
+        x = round(float(bounds["x"]) + min(227, float(bounds["width"]) / 4))
+        y = center(bounds)[1]
+        command("xdotool", "mousemove", str(x), str(y), "click", "3")
+        time.sleep(0.5)
+        save_as = named_node(tree(), "menu-item", {"Save as…", "Save as..."})
+        command("xdotool", "mousemove", *map(str, center(save_as["bounds"])), "click", "1")
+        time.sleep(0.7)
+        dialog = tree()
+        filename_input = named_node(dialog, "text", {"File name:"})
+        save_button = named_node(dialog, "push-button", {"Save"})
+        command("xdotool", "mousemove", *map(str, center(filename_input["bounds"])), "click", "1")
+        command("xdotool", "key", "--clearmodifiers", "ctrl+a")
+        command("xdotool", "type", "--delay", "1", "--", args.output)
+        command("xdotool", "mousemove", *map(str, center(save_button["bounds"])), "click", "1")
+        size = wait_for_complete(args.output)
+    except DownloadError as error:
+        fail(str(error))
+
+    print(json.dumps({"ok": True, "sizeBytes": size, "localId": args.local_id}))
+
+
+if __name__ == "__main__":
+    main()

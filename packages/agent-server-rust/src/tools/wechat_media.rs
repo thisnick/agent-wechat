@@ -2,10 +2,11 @@ use crate::ia::types::MediaResult;
 use crate::tools::wechat_db::{get_db_path, query_wechat_db};
 use crate::tools::wechat_messages::{decode_message_content, extract_xml_tag, find_message_db, get_msg_table_name};
 use md5::{Digest, Md5};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 
 /// WeChat .dat file magic bytes: 07 08 56 32 08 07
 const DAT_MAGIC: [u8; 6] = [0x07, 0x08, 0x56, 0x32, 0x08, 0x07];
@@ -13,6 +14,19 @@ const DAT_MAGIC: [u8; 6] = [0x07, 0x08, 0x56, 0x32, 0x08, 0x07];
 struct ImageKeys {
     aes_key_hex: String,
     xor_byte: Option<u8>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ImageDownloadCacheTarget {
+    pub image_dir: PathBuf,
+    pub stem: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImageDatVariant {
+    HighResolution,
+    Medium,
+    Thumbnail,
 }
 
 fn unsupported() -> MediaResult {
@@ -33,6 +47,55 @@ fn pending() -> MediaResult {
         format: String::new(),
         filename: String::new(),
     }
+}
+
+fn image_filename(local_id: i64, extension: &str, thumbnail: bool) -> String {
+    if thumbnail {
+        format!("msg_{local_id}_thumb.{extension}")
+    } else {
+        format!("msg_{local_id}.{extension}")
+    }
+}
+
+fn parse_image_dat_name(name: &str) -> Option<(&str, ImageDatVariant)> {
+    if let Some(stem) = name.strip_suffix("_h.dat") {
+        Some((stem, ImageDatVariant::HighResolution))
+    } else if let Some(stem) = name.strip_suffix("_t.dat") {
+        Some((stem, ImageDatVariant::Thumbnail))
+    } else {
+        name.strip_suffix(".dat")
+            .map(|stem| (stem, ImageDatVariant::Medium))
+    }
+}
+
+fn find_best_image_dat(image_dir: &Path, stem: &str) -> Option<PathBuf> {
+    [
+        format!("{stem}_h.dat"),
+        format!("{stem}.dat"),
+        format!("{stem}_t.dat"),
+    ]
+    .into_iter()
+    .map(|name| image_dir.join(name))
+    .find(|path| path.is_file())
+}
+
+fn image_dat_variant_path(dat_path: &Path, variant: ImageDatVariant) -> Option<PathBuf> {
+    let (stem, _) = parse_image_dat_name(dat_path.file_name()?.to_str()?)?;
+    let suffix = match variant {
+        ImageDatVariant::HighResolution => "_h.dat",
+        ImageDatVariant::Medium => ".dat",
+        ImageDatVariant::Thumbnail => "_t.dat",
+    };
+    Some(dat_path.parent()?.join(format!("{stem}{suffix}")))
+}
+
+fn image_download_cache_target(dat_path: &Path) -> Option<(PathBuf, String)> {
+    let name = dat_path.file_name()?.to_str()?;
+    let (stem, variant) = parse_image_dat_name(name)?;
+    if variant != ImageDatVariant::Thumbnail {
+        return None;
+    }
+    Some((dat_path.parent()?.to_path_buf(), stem.to_string()))
 }
 
 fn account_base_paths(account_dir: &str) -> [String; 2] {
@@ -138,7 +201,7 @@ fn get_image_thumbnail(
                     )),
                     url: None,
                     format: "jpeg".into(),
-                    filename: format!("msg_{local_id}.jpg"),
+                    filename: image_filename(local_id, "jpg", true),
                 });
             }
         }
@@ -164,7 +227,7 @@ fn get_image_thumbnail(
                             )),
                             url: None,
                             format: "jpeg".into(),
-                            filename: format!("msg_{local_id}.jpg"),
+                            filename: image_filename(local_id, "jpg", true),
                         });
                     }
                 }
@@ -427,7 +490,13 @@ fn find_dat_via_hardlink(
             .join(date_dir)
             .join("Img")
             .join(file_name);
-        if dat_path.exists() {
+        if let (Some(image_dir), Some((stem, _))) =
+            (dat_path.parent(), parse_image_dat_name(file_name))
+        {
+            if let Some(best_path) = find_best_image_dat(image_dir, stem) {
+                return Some(best_path.to_string_lossy().to_string());
+            }
+        } else if dat_path.is_file() {
             return Some(dat_path.to_string_lossy().to_string());
         }
     }
@@ -491,22 +560,156 @@ fn find_dat_via_resource_db(
     let year_month = dt.format("%Y-%m").to_string();
 
     for base in &account_base_paths(account_dir) {
-        // Try mid-res .dat first, then _t.dat thumbnail
-        for suffix in &["", "_t"] {
-            let dat_path = Path::new(base)
-                .join("msg/attach")
-                .join(&chat_hash)
-                .join(&year_month)
-                .join("Img")
-                .join(format!("{file_hash}{suffix}.dat"));
-            if dat_path.exists() {
-                return Some(dat_path.to_string_lossy().to_string());
-            }
+        let image_dir = Path::new(base)
+            .join("msg/attach")
+            .join(&chat_hash)
+            .join(&year_month)
+            .join("Img");
+        if let Some(dat_path) = find_best_image_dat(&image_dir, &file_hash) {
+            return Some(dat_path.to_string_lossy().to_string());
         }
     }
 
     tracing::warn!("[media:resource-db] file not on disk yet for hash={}", file_hash);
     None
+}
+
+/// Resolve a cache file when the resource database cannot be read. The match
+/// must be unique within the same chat directory and a narrow receive-time
+/// window; otherwise fail closed instead of returning another message's image.
+fn find_unique_dat_by_time(image_dir: &Path, create_time: i64) -> Option<PathBuf> {
+    const BEFORE_SECONDS: i64 = 5;
+    const AFTER_SECONDS: i64 = 10;
+
+    let mut candidates: HashMap<
+        String,
+        (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>),
+    > = HashMap::new();
+    for entry in fs::read_dir(image_dir).ok()?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let (stem, variant) = match parse_image_dat_name(&name) {
+            Some(parsed) => parsed,
+            None => continue,
+        };
+        let modified = entry
+            .metadata()
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
+        if modified < create_time.saturating_sub(BEFORE_SECONDS)
+            || modified > create_time.saturating_add(AFTER_SECONDS)
+        {
+            continue;
+        }
+        let candidate = candidates.entry(stem.to_string()).or_default();
+        match variant {
+            ImageDatVariant::HighResolution => candidate.0 = Some(path),
+            ImageDatVariant::Medium => candidate.1 = Some(path),
+            ImageDatVariant::Thumbnail => candidate.2 = Some(path),
+        }
+    }
+
+    if candidates.len() != 1 {
+        return None;
+    }
+    let (high_resolution, medium, thumbnail) = candidates.into_values().next()?;
+    high_resolution.or(medium).or(thumbnail)
+}
+
+fn find_dat_via_timestamp(
+    account_dir: &str,
+    chat_id: &str,
+    create_time: i64,
+) -> Option<String> {
+    let chat_hash = format!("{:x}", Md5::digest(chat_id.as_bytes()));
+    let year_month = chrono::DateTime::from_timestamp(create_time, 0)?
+        .format("%Y-%m")
+        .to_string();
+
+    for base in &account_base_paths(account_dir) {
+        let image_dir = Path::new(base)
+            .join("msg/attach")
+            .join(&chat_hash)
+            .join(&year_month)
+            .join("Img");
+        if let Some(path) = find_unique_dat_by_time(&image_dir, create_time) {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Resolve a video hash from files written at the message receive time when
+/// message_resource.db is unavailable. Multiple distinct hashes fail closed.
+fn find_unique_video_hash_by_time(video_dir: &Path, create_time: i64) -> Option<String> {
+    const BEFORE_SECONDS: i64 = 5;
+    const AFTER_SECONDS: i64 = 5;
+
+    let mut candidates = HashSet::new();
+    for entry in fs::read_dir(video_dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let modified = path
+            .metadata()
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
+        if modified < create_time.saturating_sub(BEFORE_SECONDS)
+            || modified > create_time.saturating_add(AFTER_SECONDS)
+        {
+            continue;
+        }
+
+        let filename = path.file_name()?.to_str()?;
+        let hash = filename
+            .strip_suffix("_thumb.jpg")
+            .or_else(|| filename.strip_suffix(".jpg"))
+            .or_else(|| filename.strip_suffix(".mp4"));
+        if let Some(hash) = hash {
+            if hash.len() == 32
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                candidates.insert(hash.to_string());
+            }
+        }
+    }
+
+    if candidates.len() != 1 {
+        return None;
+    }
+    candidates.into_iter().next()
+}
+
+/// Resolve the exact thumbnail cache identity that a UI fetch must upgrade.
+/// A medium or high-resolution file means no UI action is needed; an ambiguous
+/// timestamp match returns None and therefore cannot produce a click target.
+pub fn get_image_download_cache_target(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+) -> Option<ImageDownloadCacheTarget> {
+    let (local_type, create_time, content) =
+        lookup_message_raw(account_dir, keys, chat_id, local_id)?;
+    if (local_type & 0xFFFF_FFFF) as i32 != 3 {
+        return None;
+    }
+    let path = find_dat_via_resource_db(account_dir, keys, chat_id, local_id, create_time)
+        .or_else(|| find_dat_via_hardlink(account_dir, keys, chat_id, &content))
+        .or_else(|| find_dat_via_timestamp(account_dir, chat_id, create_time))?;
+    let (image_dir, stem) = image_download_cache_target(Path::new(&path))?;
+    Some(ImageDownloadCacheTarget { image_dir, stem })
 }
 
 /// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
@@ -525,7 +728,20 @@ fn get_video_data(
     let year_month = dt.format("%Y-%m").to_string();
 
     // Try to get file hash from message_resource.db
-    let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id);
+    let file_hash =
+        find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id).or_else(|| {
+            for base in &account_base_paths(account_dir) {
+                let video_dir = Path::new(base).join("msg/video").join(&year_month);
+                if let Some(hash) = find_unique_video_hash_by_time(&video_dir, create_time) {
+                    tracing::info!(
+                        "[media:video] recovered unique timestamp hash for local_id={}",
+                        local_id
+                    );
+                    return Some(hash);
+                }
+            }
+            None
+        });
 
     if let Some(ref hash) = file_hash {
         for base in &account_base_paths(account_dir) {
@@ -621,6 +837,7 @@ fn decrypt_and_return(
     image_keys: &ImageKeys,
     local_id: i64,
 ) -> MediaResult {
+    let is_thumbnail = dat_path.ends_with("_t.dat");
     let dat = match fs::read(dat_path) {
         Ok(d) => d,
         Err(_) => {
@@ -629,7 +846,7 @@ fn decrypt_and_return(
                 data: None,
                 url: None,
                 format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                filename: image_filename(local_id, "jpg", is_thumbnail),
             }
         }
     };
@@ -642,7 +859,7 @@ fn decrypt_and_return(
                 data: None,
                 url: None,
                 format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                filename: image_filename(local_id, "jpg", is_thumbnail),
             }
         }
     };
@@ -655,7 +872,7 @@ fn decrypt_and_return(
                 data: None,
                 url: None,
                 format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                filename: image_filename(local_id, "jpg", is_thumbnail),
             }
         }
     };
@@ -678,14 +895,18 @@ fn decrypt_and_return(
                 )),
                 url: None,
                 format: cfmt,
-                filename: format!("msg_{local_id}.{cext}"),
+                filename: image_filename(local_id, &cext, is_thumbnail),
             };
         }
         // Try _t.dat thumbnail
-        let thumb_path = dat_path.replace(".dat", "_t.dat");
-        if Path::new(&thumb_path).exists() {
+        let thumb_path =
+            image_dat_variant_path(Path::new(dat_path), ImageDatVariant::Thumbnail);
+        if let Some(thumb_path) = thumb_path.filter(|path| path.is_file()) {
             if let Ok(thumb_dat) = fs::read(&thumb_path) {
-                if let Some(xb2) = resolve_xor_byte(&thumb_path, &thumb_dat, image_keys) {
+                let thumb_path_string = thumb_path.to_string_lossy();
+                if let Some(xb2) =
+                    resolve_xor_byte(thumb_path_string.as_ref(), &thumb_dat, image_keys)
+                {
                     if let Some(dec) =
                         decrypt_dat(&thumb_dat, &image_keys.aes_key_hex, xb2)
                     {
@@ -698,7 +919,7 @@ fn decrypt_and_return(
                             )),
                             url: None,
                             format: tf.into(),
-                            filename: format!("msg_{local_id}.{te}"),
+                            filename: image_filename(local_id, te, true),
                         };
                     }
                 }
@@ -714,7 +935,7 @@ fn decrypt_and_return(
         )),
         url: None,
         format: format.into(),
-        filename: format!("msg_{local_id}.{ext}"),
+        filename: image_filename(local_id, ext, is_thumbnail),
     }
 }
 
@@ -939,17 +1160,8 @@ pub fn get_message_media(
                 chat_id, local_id, create_time, content.len()
             );
 
-            // Try cached thumbnail first
-            if let Some(thumb) =
-                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
-            {
-                tracing::info!("[media] found thumbnail for local_id={}", local_id);
-                return thumb;
-            }
-            tracing::info!("[media] no thumbnail for local_id={}", local_id);
-
-
-            // Try .dat decryption if we have image keys
+            // Prefer the non-thumbnail .dat file. A cached thumbnail is only a
+            // temporary fallback while WeChat is still materializing the image.
             if let Some((aes_hex, xor_byte)) = image_keys_raw {
                 let image_keys = ImageKeys {
                     aes_key_hex: aes_hex,
@@ -970,6 +1182,13 @@ pub fn get_message_media(
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
 
+                if let Some(dat_path) =
+                    find_dat_via_timestamp(account_dir, chat_id, create_time)
+                {
+                    tracing::info!("[media] found unique timestamp fallback for local_id={}", local_id);
+                    return decrypt_and_return(&dat_path, &image_keys, local_id);
+                }
+
                 tracing::warn!(
                     "[media] no dat found for local_id={}, md5={}",
                     local_id, xml_attr(&content, "md5").unwrap_or_default()
@@ -977,6 +1196,14 @@ pub fn get_message_media(
             } else {
                 tracing::warn!("[media] no image keys available for local_id={}", local_id);
             }
+
+            if let Some(thumb) =
+                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
+            {
+                tracing::info!("[media] using thumbnail fallback for local_id={}", local_id);
+                return thumb;
+            }
+            tracing::info!("[media] no thumbnail fallback for local_id={}", local_id);
 
             // Image exists but can't be retrieved
             MediaResult {
@@ -1008,5 +1235,160 @@ pub fn get_message_media(
             }
             unsupported()
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_fallback_tests {
+    use super::{
+        find_best_image_dat, find_unique_dat_by_time, find_unique_video_hash_by_time,
+        image_dat_variant_path, image_download_cache_target, image_filename, ImageDatVariant,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
+
+    fn now_seconds() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn returns_the_only_image_written_near_the_message_time() {
+        let temporary = TempDir::new().unwrap();
+        let thumbnail = temporary.path().join("image-a_t.dat");
+        fs::write(&thumbnail, b"thumbnail").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            Some(thumbnail)
+        );
+    }
+
+    #[test]
+    fn rejects_two_distinct_images_in_the_same_time_window() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(temporary.path().join("image-a_t.dat"), b"first").unwrap();
+        fs::write(temporary.path().join("image-b_t.dat"), b"second").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            None
+        );
+    }
+
+    #[test]
+    fn prefers_full_image_over_thumbnail_with_the_same_hash() {
+        let temporary = TempDir::new().unwrap();
+        let full = temporary.path().join("image-a.dat");
+        fs::write(&full, b"full").unwrap();
+        fs::write(temporary.path().join("image-a_t.dat"), b"thumbnail").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            Some(full)
+        );
+    }
+
+    #[test]
+    fn prefers_high_resolution_over_medium_and_thumbnail() {
+        let temporary = TempDir::new().unwrap();
+        let high_resolution = temporary.path().join("image-a_h.dat");
+        fs::write(temporary.path().join("image-a_t.dat"), b"thumbnail").unwrap();
+        fs::write(temporary.path().join("image-a.dat"), b"medium").unwrap();
+        fs::write(&high_resolution, b"high-resolution").unwrap();
+
+        assert_eq!(
+            find_best_image_dat(temporary.path(), "image-a"),
+            Some(high_resolution.clone())
+        );
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            Some(high_resolution)
+        );
+    }
+
+    #[test]
+    fn keeps_distinct_high_resolution_images_fail_closed() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(temporary.path().join("image-a_h.dat"), b"first").unwrap();
+        fs::write(temporary.path().join("image-b_h.dat"), b"second").unwrap();
+
+        assert_eq!(
+            find_unique_dat_by_time(temporary.path(), now_seconds()),
+            None
+        );
+    }
+
+    #[test]
+    fn derives_thumbnail_sibling_from_high_resolution_path() {
+        let high_resolution = Path::new("/tmp/image-a_h.dat");
+
+        assert_eq!(
+            image_dat_variant_path(high_resolution, ImageDatVariant::Thumbnail),
+            Some(PathBuf::from("/tmp/image-a_t.dat"))
+        );
+    }
+
+    #[test]
+    fn labels_thumbnail_filenames_without_relying_on_dimensions() {
+        assert_eq!(image_filename(42, "jpg", true), "msg_42_thumb.jpg");
+        assert_eq!(image_filename(42, "jpg", false), "msg_42.jpg");
+    }
+
+    #[test]
+    fn recovers_unique_video_hash_from_thumbnail_timestamp() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(
+            temporary
+                .path()
+                .join("fb53192c862195880a63cc738a3f7be5_thumb.jpg"),
+            b"thumbnail",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_unique_video_hash_by_time(temporary.path(), now_seconds()),
+            Some("fb53192c862195880a63cc738a3f7be5".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_video_hashes_in_the_same_time_window() {
+        let temporary = TempDir::new().unwrap();
+        fs::write(
+            temporary
+                .path()
+                .join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_thumb.jpg"),
+            b"first",
+        )
+        .unwrap();
+        fs::write(
+            temporary
+                .path()
+                .join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_thumb.jpg"),
+            b"second",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_unique_video_hash_by_time(temporary.path(), now_seconds()),
+            None
+        );
+    }
+
+    #[test]
+    fn derives_a_download_target_only_from_an_exact_thumbnail_variant() {
+        let thumbnail = Path::new("/tmp/image-a_t.dat");
+        let medium = Path::new("/tmp/image-a.dat");
+
+        assert_eq!(
+            image_download_cache_target(thumbnail),
+            Some((PathBuf::from("/tmp"), "image-a".to_string()))
+        );
+        assert_eq!(image_download_cache_target(medium), None);
     }
 }

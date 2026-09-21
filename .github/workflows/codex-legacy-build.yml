@@ -1,0 +1,29 @@
+name: Codex Legacy Build
+
+on:
+  push:
+    branches:
+      - codex/old-wechat-f871-compat-20260921
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run focused tests
+        run: |
+          cargo test --manifest-path packages/agent-server-rust/Cargo.toml old_clients_get_enough_time_for_key_extraction
+          cargo test --manifest-path packages/agent-server-rust/Cargo.toml logged_in_sessions_use_a_longer_recovery_window
+      - name: Build Linux release binary
+        run: cargo build --manifest-path packages/agent-server-rust/Cargo.toml --release
+      - name: Upload agent binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-server-linux-amd64-legacy-compat
+          path: packages/agent-server-rust/target/release/agent-server
+          if-no-files-found: error

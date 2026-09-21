@@ -10,15 +10,14 @@ permissions:
   contents: write
   pull-requests: write
   packages: write
-  id-token: write
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
     outputs:
-      published: ${{ steps.publish.outputs.published }}
-      publishedPackages: ${{ steps.publish.outputs.publishedPackages }}
+      released: ${{ steps.artifact_release.outputs.released }}
+      releaseVersion: ${{ steps.artifact_release.outputs.releaseVersion }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,17 +27,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
-
-      # npm >= 11.5 required for OIDC trusted publishing. Use Corepack to
-      # activate it, because the bundled npm 10.9.7 in the Node 22.22.2 runner
-      # image is broken at the arborist rebuild step (MODULE_NOT_FOUND:
-      # 'promise-retry') and cannot install anything — including itself.
-      - name: Activate npm 11.12.1 via Corepack
-        run: |
-          corepack enable npm
-          corepack prepare npm@11.12.1 --activate
-          echo "Active npm: $(npm --version)"
 
       - run: pnpm install --frozen-lockfile
 
@@ -54,28 +42,35 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publish separately so npm can use OIDC (no NODE_AUTH_TOKEN needed)
-      - name: Publish to npm
-        id: publish
+      - name: Prepare artifact release
+        id: artifact_release
         if: steps.changesets.outputs.hasChangesets == 'false'
         run: |
-          OUTPUT=$(pnpm changeset publish 2>&1) || true
-          echo "$OUTPUT"
-          if echo "$OUTPUT" | grep -q "New tag:"; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            PACKAGES=$(echo "$OUTPUT" | grep "New tag:" | sed 's/.*New tag: *//' | jq -Rc 'split("@") | {name: (.[:-1] | join("@")), version: .[-1]}' | jq -sc '.')
-            echo "publishedPackages=$PACKAGES" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "publishedPackages=[]" >> "$GITHUB_OUTPUT"
+          VERSION=$(jq -r '.version' packages/agent-server-rust/package.json)
+          TAG="v${VERSION}"
+          TAG_SHA=""
+          if EXISTING_TAG_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha' 2>/dev/null); then
+            TAG_SHA="$EXISTING_TAG_SHA"
           fi
+          RELEASE_COMPLETE="false"
+          if EXISTING_RELEASE_COMPLETE=$(gh release view "$TAG" --json assets --jq 'any(.assets[]; .name == "release-complete.json")' 2>/dev/null); then
+            RELEASE_COMPLETE="$EXISTING_RELEASE_COMPLETE"
+          fi
+
+          if [ -z "$TAG_SHA" ] || [ "$TAG_SHA" = "$GITHUB_SHA" ] || [ "$RELEASE_COMPLETE" != "true" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "releaseVersion=$VERSION" >> "$GITHUB_OUTPUT"
         env:
-          NPM_CONFIG_PROVENANCE: true
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-binary:
     name: Binary (${{ matrix.arch }})
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: needs.release.outputs.released == 'true'
     strategy:
       matrix:
         include:
@@ -92,8 +87,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
-          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build binary in Docker
@@ -131,7 +125,7 @@ jobs:
   publish-tools:
     name: Docker Tools
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,8 +133,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
-          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Package tools
@@ -158,7 +151,7 @@ jobs:
   publish-docker:
     name: Docker (${{ matrix.arch }})
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: needs.release.outputs.released == 'true'
     strategy:
       matrix:
         include:
@@ -192,11 +185,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare image name
+        id: image
+        run: echo "name=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Extract version
         id: version
         run: |
-          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
-          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
@@ -205,7 +201,7 @@ jobs:
         with:
           context: docker
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
 
@@ -247,13 +243,12 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
-          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create multi-arch manifest
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}"
+          IMAGE=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
             -t "${IMAGE}:${{ steps.version.outputs.version }}" \
             -t "${IMAGE}:latest" \
@@ -262,7 +257,7 @@ jobs:
   publish-wechaty-gateway:
     name: Wechaty Gateway (${{ matrix.arch }})
     needs: release
-    if: needs.release.outputs.published == 'true'
+    if: needs.release.outputs.released == 'true'
     strategy:
       matrix:
         include:
@@ -287,6 +282,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Prepare image name
+        id: image
+        run: echo "name=$(echo "ghcr.io/${GITHUB_REPOSITORY}-wechaty-gateway" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -294,7 +293,7 @@ jobs:
           context: .
           file: packages/wechaty-gateway/Dockerfile
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/${{ github.repository }}-wechaty-gateway,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=wechaty-gateway-${{ matrix.arch }}
           cache-to: type=gha,scope=wechaty-gateway-${{ matrix.arch }},mode=max
 
@@ -336,14 +335,28 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          PUBLISHED='${{ needs.release.outputs.publishedPackages }}'
-          VERSION=$(echo "$PUBLISHED" | jq -r '.[0].version // "latest"')
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create multi-arch manifest
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}-wechaty-gateway"
+          IMAGE=$(echo "ghcr.io/${GITHUB_REPOSITORY}-wechaty-gateway" | tr '[:upper:]' '[:lower:]')
           docker buildx imagetools create \
             -t "${IMAGE}:${{ steps.version.outputs.version }}" \
             -t "${IMAGE}:latest" \
             $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+
+  finalize-release:
+    name: Finalize Release
+    needs: [release, publish-binary, publish-tools, merge-docker-manifest, merge-wechaty-gateway-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mark release complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION='${{ needs.release.outputs.releaseVersion }}'
+          echo "Release v${VERSION} completed by ${GITHUB_SHA}" > release-complete.json
+          gh release upload "v${VERSION}" release-complete.json --repo "$GITHUB_REPOSITORY" --clobber

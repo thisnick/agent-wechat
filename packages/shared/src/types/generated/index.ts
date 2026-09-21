@@ -5,6 +5,7 @@ export type { Bounds } from "./Bounds.js";
 export type { Chat } from "./Chat.js";
 export type { Contact } from "./Contact.js";
 export type { FileData } from "./FileData.js";
+export type { FinderInfo } from "./FinderInfo.js";
 export type { ImageData } from "./ImageData.js";
 export type { LoginSubscriptionEvent } from "./LoginSubscriptionEvent.js";
 export type { MediaResult } from "./MediaResult.js";

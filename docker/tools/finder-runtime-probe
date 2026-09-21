@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Report whether WeChat's built-in structured runtime endpoint is ready."""
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import socket
+
+
+ENDPOINT_FILE = "xweb_use_endpoint.json"
+UI_PORT_FILE = "UIDevToolsActivePort"
+SEARCH_ROOTS = ("tmp", "run", "home/wechat", "data")
+MAX_DEPTH = 9
+MAX_DIRECTORIES = 50_000
+
+
+def wechat_runtime_pids(proc_root=pathlib.Path("/proc")):
+    pids = []
+    if not proc_root.is_dir():
+        return pids
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            comm = (entry / "comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if comm == "WeChatAppEx":
+            pids.append(int(entry.name))
+    return sorted(pids)
+
+
+def exact_endpoint_files(root=pathlib.Path("/")):
+    found = set()
+    visited = 0
+    for relative_root in SEARCH_ROOTS:
+        search_root = root / relative_root
+        if not search_root.is_dir():
+            continue
+        base_depth = len(search_root.parts)
+        for current, directories, files in os.walk(search_root, followlinks=False):
+            visited += 1
+            if visited > MAX_DIRECTORIES:
+                return sorted(found)
+            current_path = pathlib.Path(current)
+            if len(current_path.parts) - base_depth >= MAX_DEPTH:
+                directories[:] = []
+            if ENDPOINT_FILE in files:
+                found.add(current_path / ENDPOINT_FILE)
+            if UI_PORT_FILE in files:
+                found.add(current_path / UI_PORT_FILE)
+    return sorted(found)
+
+
+def endpoint_metadata(path):
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return {"name": path.name, "readable": False}
+
+    result = {
+        "name": path.name,
+        "readable": True,
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        value = None
+
+    if isinstance(value, dict):
+        result["format"] = "json"
+        result["fields"] = sorted(str(key) for key in value)
+        result["hasCredential"] = any(
+            key in value for key in ("token", "credential", "access_key")
+        )
+        port = value.get("port")
+        if isinstance(port, int) and 0 < port < 65_536:
+            result["port"] = port
+            result["reachable"] = localhost_reachable(port)
+    else:
+        result["format"] = "text"
+        result["hasCredential"] = False
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        if lines and lines[0].isdigit():
+            port = int(lines[0])
+            if 0 < port < 65_536:
+                result["port"] = port
+                result["reachable"] = localhost_reachable(port)
+        result["lineCount"] = len(lines)
+    return result
+
+
+def localhost_reachable(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def probe(root=pathlib.Path("/"), proc_root=pathlib.Path("/proc")):
+    pids = wechat_runtime_pids(proc_root)
+    files = exact_endpoint_files(root)
+    endpoints = [endpoint_metadata(path) for path in files]
+    ready = any(item.get("reachable") is True for item in endpoints)
+    if ready:
+        status = "endpoint_ready"
+    elif pids:
+        status = "endpoint_not_found" if not endpoints else "endpoint_unreachable"
+    else:
+        status = "wechat_runtime_not_running"
+    return {
+        "ok": ready,
+        "status": status,
+        "runtimeProcessCount": len(pids),
+        "endpointFiles": endpoints,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path("/"))
+    parser.add_argument("--proc-root", type=pathlib.Path, default=pathlib.Path("/proc"))
+    args = parser.parse_args()
+    result = probe(args.root, args.proc_root)
+    print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+    raise SystemExit(0 if result["ok"] else 2)
+
+
+if __name__ == "__main__":
+    main()

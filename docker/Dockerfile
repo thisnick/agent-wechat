@@ -154,6 +154,18 @@ ENV PATH="/opt/tools:$PATH"
 ENV AGENT_DB_PATH=/data/agent.db
 ENV AGENT_PORT=6174
 
+# Kept near the end so image-only updates can reuse the large WeChat runtime layers.
+RUN apt-get update && apt-get install -y python3-pil \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep the optional browser runtime near the end so WeChat and SQLCipher layers
+# remain reusable when only the Finder browser bridge changes.
+ARG PLAYWRIGHT_VERSION=1.62.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN pip3 install "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/playwright
+
 # ============================================
 # Entrypoint
 # ============================================

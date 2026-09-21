@@ -1,6 +1,7 @@
 {
   "name": "@agent-wechat/agent-wechat",
   "version": "0.12.0",
+  "private": true,
   "type": "module",
   "files": [
     "dist",

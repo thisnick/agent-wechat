@@ -1,11 +1,14 @@
 use axum::{
     extract::{Path, Query},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::create_context;
+use crate::db::queries::{upsert_finder_message_source, FinderMessageSource};
 use crate::db::get_db;
 use crate::execution::run_execution_loop;
 use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
@@ -31,14 +34,14 @@ fn default_limit() -> i64 {
 pub async fn list_messages(
     Path(chat_id): Path<String>,
     Query(params): Query<ListParams>,
-) -> Json<Vec<Message>> {
+) -> Response {
     let session = match get_session("default") {
         Some(s) => s,
-        None => return Json(Vec::new()),
+        None => return Json(Vec::<Message>::new()).into_response(),
     };
     let logged_in_user = match &session.logged_in_user {
         Some(u) => u.clone(),
-        None => return Json(Vec::new()),
+        None => return Json(Vec::<Message>::new()).into_response(),
     };
 
     let mut keys = {
@@ -67,41 +70,98 @@ pub async fn list_messages(
     }
 
     if !keys.keys().any(|k| k.starts_with("message_") && k.ends_with(".db") && !k.contains("fts") && !k.contains("resource")) {
-        return Json(Vec::new());
+        return Json(Vec::<Message>::new()).into_response();
     }
 
-    Json(wechat_messages::list_messages(
+    let collected = wechat_messages::list_messages(
         &logged_in_user,
         &keys,
         &chat_id,
         params.limit,
         params.offset,
-    ))
+    );
+
+    {
+        let mut db = get_db();
+        let transaction = match db.transaction() {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                tracing::error!("[finder-source] failed to start storage transaction: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "FINDER_SOURCE_STORE_FAILED"})),
+                )
+                    .into_response();
+            }
+        };
+        for item in &collected {
+            let Some(source) = &item.finder_source else {
+                continue;
+            };
+            let input = FinderMessageSource {
+                session_id: &session.id,
+                account_dir: &logged_in_user,
+                chat_id: &chat_id,
+                local_id: item.message.local_id,
+                server_id: item.message.server_id,
+                object_id: &source.object_id,
+                object_nonce_id: &source.object_nonce_id,
+                raw_xml: &source.raw_xml,
+            };
+            if let Err(error) = upsert_finder_message_source(&transaction, &input) {
+                tracing::error!(
+                    "[finder-source] failed to store source for local_id={}: {error}",
+                    item.message.local_id
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "FINDER_SOURCE_STORE_FAILED"})),
+                )
+                    .into_response();
+            }
+        }
+        if let Err(error) = transaction.commit() {
+            tracing::error!("[finder-source] failed to commit source records: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "FINDER_SOURCE_STORE_FAILED"})),
+            )
+                .into_response();
+        }
+    }
+
+    Json(
+        collected
+            .into_iter()
+            .map(|item| item.message)
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
 }
 
-pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+pub async fn resolve_media(chat_id: &str, local_id: i64) -> MediaResult {
     let session = match get_session("default") {
         Some(s) => s,
         None => {
-            return Json(MediaResult {
+            return MediaResult {
                 media_type: "unsupported".to_string(),
                 data: None,
                 url: None,
                 format: String::new(),
                 filename: String::new(),
-            })
+            }
         }
     };
     let logged_in_user = match &session.logged_in_user {
         Some(u) => u.clone(),
         None => {
-            return Json(MediaResult {
+            return MediaResult {
                 media_type: "unsupported".to_string(),
                 data: None,
                 url: None,
                 format: String::new(),
                 filename: String::new(),
-            })
+            }
         }
     };
 
@@ -131,13 +191,17 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
-    Json(get_message_media(
+    get_message_media(
         &logged_in_user,
         &keys,
-        &chat_id,
+        chat_id,
         local_id,
         image_keys,
-    ))
+    )
+}
+
+pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+    Json(resolve_media(&chat_id, local_id).await)
 }
 
 #[derive(Deserialize)]

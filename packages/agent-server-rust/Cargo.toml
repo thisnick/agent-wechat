@@ -1,6 +1,6 @@
 [package]
 name = "agent-server"
-version = "0.12.0"
+version = "0.13.2"
 edition = "2021"
 
 [dependencies]
@@ -42,6 +42,7 @@ base64 = "0.22"
 regex = "1"
 futures = "0.3"
 tokio-stream = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # For WebSocket streaming
 async-stream = "0.3"

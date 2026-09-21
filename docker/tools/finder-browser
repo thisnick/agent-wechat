@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Persistent, loopback-only browser bridge for Weixin Channels share links."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import time
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+FINDER_ORIGIN = "https://channels.weixin.qq.com"
+POST_LIST_URL = f"{FINDER_ORIGIN}/platform/post/list?"
+AUTH_URL = f"{FINDER_ORIGIN}/cgi-bin/mmfinderassistant-bin/auth/auth_data"
+SHORT_LINK_URL = (
+    f"{FINDER_ORIGIN}/cgi-bin/mmfinderassistant-bin/post/get_object_short_link"
+)
+OBJECT_ID = re.compile(r"^[1-9][0-9]{5,31}$")
+NONCE_ID = re.compile(r"^[A-Za-z0-9._~+/=-]{6,512}$")
+
+
+def trusted_share_url(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    parsed = urlparse(value.strip())
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443):
+        return None
+    trusted = (
+        parsed.hostname == "weixin.qq.com" and parsed.path.startswith("/sph/")
+    ) or (
+        parsed.hostname == "channels.weixin.qq.com"
+        and parsed.path.startswith("/finder-preview/pages/sph")
+    )
+    return value.strip() if trusted else None
+
+
+def remote_error_code(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("errCode", payload.get("errcode"))
+    return value if isinstance(value, int) else None
+
+
+def resolved_share_url(payload: Any) -> str | None:
+    if remote_error_code(payload) != 0 or not isinstance(payload, dict):
+        return None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    for key in ("shortUrl", "short_url", "url"):
+        link = trusted_share_url(payload.get(key)) or trusted_share_url(data.get(key))
+        if link:
+            return link
+    return None
+
+
+class FinderBrowser:
+    def __init__(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        profile = Path(os.environ.get("FINDER_BROWSER_PROFILE", "/home/wechat/.finder-browser-profile"))
+        profile.mkdir(mode=0o700, parents=True, exist_ok=True)
+        profile.chmod(0o700)
+        self._playwright = sync_playwright().start()
+        self._context = self._playwright.chromium.launch_persistent_context(
+            str(profile),
+            headless=False,
+            viewport={"width": 1180, "height": 720},
+            args=["--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"],
+        )
+        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        try:
+            self._page.goto(POST_LIST_URL, wait_until="domcontentloaded", timeout=30_000)
+        except Exception:
+            pass
+        self._minimized = False
+
+    def close(self) -> None:
+        self._context.close()
+        self._playwright.stop()
+
+    def _fetch(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._page.evaluate(
+            """async ({url, payload}) => {
+              try {
+                const response = await fetch(url, {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: {
+                    'Accept': 'application/json, text/plain, */*',
+                    'Content-Type': 'application/json;charset=UTF-8',
+                    'X-Requested-With': 'XMLHttpRequest'
+                  },
+                  body: JSON.stringify(payload)
+                });
+                const text = await response.text();
+                let json = null;
+                try { json = text ? JSON.parse(text) : null; } catch (_) {}
+                return {ok: response.ok, status: response.status, json};
+              } catch (_) {
+                return {ok: false, status: 0, json: null};
+              }
+            }""",
+            {"url": url, "payload": payload},
+        )
+        return result if isinstance(result, dict) else {"ok": False, "status": 0, "json": None}
+
+    def status(self) -> str:
+        if not self._page.url.startswith(FINDER_ORIGIN):
+            try:
+                self._page.goto(POST_LIST_URL, wait_until="domcontentloaded", timeout=30_000)
+            except Exception:
+                return "unavailable"
+        result = self._fetch(AUTH_URL, {})
+        code = remote_error_code(result.get("json"))
+        if result.get("ok") and code == 0:
+            self._minimize()
+            return "logged_in"
+        current = self._page.url
+        if current.startswith(FINDER_ORIGIN):
+            return "login_required"
+        return "unavailable"
+
+    def resolve(self, object_id: str, nonce_id: str, scene: int) -> str:
+        if self.status() != "logged_in":
+            raise PermissionError("FINDER_BROWSER_LOGIN_REQUIRED")
+        result = self._fetch(
+            SHORT_LINK_URL,
+            {"exportId": object_id, "nonceId": nonce_id, "scene": scene},
+        )
+        if not result.get("ok"):
+            raise ConnectionError("FINDER_BROWSER_REQUEST_FAILED")
+        payload = result.get("json")
+        if remote_error_code(payload) not in (None, 0):
+            raise RuntimeError("FINDER_SHORT_LINK_REMOTE_REJECTED")
+        link = resolved_share_url(payload)
+        if not link:
+            raise ValueError("FINDER_SHORT_LINK_MISSING")
+        return link
+
+    def show(self) -> str:
+        if not self._page.url.startswith(FINDER_ORIGIN):
+            self._page.goto(POST_LIST_URL, wait_until="domcontentloaded", timeout=30_000)
+        subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--class", "chromium", "windowactivate", "%@"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        self._minimized = False
+        return self.status()
+
+    def _minimize(self) -> None:
+        if self._minimized:
+            return
+        subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--class", "chromium", "windowminimize", "%@"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        self._minimized = True
+
+
+class FinderHandler(BaseHTTPRequestHandler):
+    browser: FinderBrowser
+
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
+
+    def _reply(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path != "/status":
+            self._reply(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
+            return
+        try:
+            self._reply(HTTPStatus.OK, {"status": self.browser.status()})
+        except Exception:
+            self._reply(HTTPStatus.SERVICE_UNAVAILABLE, {"status": "unavailable"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/show":
+            try:
+                self._reply(HTTPStatus.OK, {"status": self.browser.show()})
+            except Exception:
+                self._reply(HTTPStatus.SERVICE_UNAVAILABLE, {"status": "unavailable"})
+            return
+        if self.path != "/resolve":
+            self._reply(HTTPStatus.NOT_FOUND, {"error": "NOT_FOUND"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 4096:
+                raise ValueError
+            payload = json.loads(self.rfile.read(length))
+            object_id = payload.get("objectId")
+            nonce_id = payload.get("objectNonceId")
+            scene = payload.get("scene", 40)
+            if not isinstance(object_id, str) or not OBJECT_ID.fullmatch(object_id):
+                self._reply(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "FINDER_OBJECT_ID_INVALID"})
+                return
+            if not isinstance(nonce_id, str) or not NONCE_ID.fullmatch(nonce_id):
+                self._reply(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "FINDER_NONCE_ID_INVALID"})
+                return
+            if scene not in (10, 40):
+                self._reply(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "FINDER_SCENE_INVALID"})
+                return
+            link = self.browser.resolve(object_id, nonce_id, scene)
+            self._reply(HTTPStatus.OK, {"shortUrl": link})
+        except PermissionError:
+            self._reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "FINDER_BROWSER_LOGIN_REQUIRED"})
+        except ConnectionError:
+            self._reply(HTTPStatus.BAD_GATEWAY, {"error": "FINDER_BROWSER_REQUEST_FAILED"})
+        except RuntimeError:
+            self._reply(HTTPStatus.BAD_GATEWAY, {"error": "FINDER_SHORT_LINK_REMOTE_REJECTED"})
+        except (ValueError, json.JSONDecodeError):
+            self._reply(HTTPStatus.BAD_GATEWAY, {"error": "FINDER_SHORT_LINK_MISSING"})
+        except Exception:
+            self._reply(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "FINDER_BROWSER_UNAVAILABLE"})
+
+
+def main() -> None:
+    browser = FinderBrowser()
+    FinderHandler.browser = browser
+    server = HTTPServer(("127.0.0.1", int(os.environ.get("FINDER_BROWSER_PORT", "9223"))), FinderHandler)
+    server.timeout = 2
+    last_check = 0.0
+    try:
+        while True:
+            server.handle_request()
+            if time.monotonic() - last_check >= 5:
+                try:
+                    browser.status()
+                except Exception:
+                    pass
+                last_check = time.monotonic()
+    finally:
+        server.server_close()
+        browser.close()
+
+
+if __name__ == "__main__":
+    main()
