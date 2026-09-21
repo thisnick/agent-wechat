@@ -1,5 +1,15 @@
 # @agent-wechat/agent-server
 
+## 0.12.2
+
+### Patch Changes
+
+- [#185](https://github.com/thisnick/agent-wechat/pull/185) [`d583f94`](https://github.com/thisnick/agent-wechat/commit/d583f9490e65264faf08244cf916cb98ed6818fd) Thanks [@thisnick](https://github.com/thisnick)! - Fix frozen container rendering by running Xvfb and x11vnc as the WeChat user, while preserving read-only VNC. Store proxy configuration in a private runtime directory so proxied containers can restart reliably.
+
+  Verify that chat selection opens the requested chat before reporting success, resolve reordered chats at click time, and keep repeated ARM chat selection from closing the active chat.
+
+  Support both Send and Send(S) buttons and the nested message composer layout in newer WeChat builds.
+
 ## 0.12.1
 
 ## 0.12.0
