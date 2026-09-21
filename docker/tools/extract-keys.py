@@ -17,6 +17,8 @@ import glob
 import argparse
 import time
 import struct
+import hashlib
+import hmac
 
 # ── DB access pattern ─────────────
 CIPHER_CTX_PATTERN = bytes([
@@ -76,8 +78,10 @@ def find_databases(account_dir=None):
     return dbs
 
 
-def extract_candidates(pid):
+def extract_candidates(pid, key_mask=None):
     """Extract DB access credentials from the running process."""
+    if key_mask is not None and len(key_mask) != 32:
+        raise ValueError("Database access mask must contain 32 bytes")
     regions = []
     with open(f"/proc/{pid}/maps") as f:
         for line in f:
@@ -131,6 +135,8 @@ def extract_candidates(pid):
             try:
                 raw = _read(addr, 32)
                 if is_key_like(raw):
+                    if key_mask is not None:
+                        raw = bytes(value ^ mask for value, mask in zip(raw, key_mask))
                     all_keys.add(raw.hex())
             except Exception:
                 pass
@@ -204,10 +210,36 @@ def test_key(db_path, key):
     return None
 
 
+def matches_sqlcipher4_page(key, page):
+    """Pre-screen a raw credential using a 4096-byte SQLCipher 4 first page.
+
+    The page has a 16-byte salt, a 16-byte IV, and a 64-byte SHA-512 HMAC.
+    A matching candidate still needs a successful schema query in test_key().
+    """
+    if len(page) != 4096:
+        return False
+    salt = bytes(value ^ 0x3a for value in page[:16])
+    hmac_key = hashlib.pbkdf2_hmac("sha512", bytes.fromhex(key), salt, 2, 32)
+    digest = hmac.new(hmac_key, page[16:4032] + struct.pack("<I", 1), "sha512").digest()
+    return hmac.compare_digest(digest, page[4032:4096])
+
+
 # ── Image access setup ────────────────────────────────────────────────────────
 # Per-build constants: keyed by BuildID prefix (first 8 hex chars).
 
 BUILD_PROFILES = {
+    # WeChat Linux v4.1.13.23 ARM64 (BuildID: e9f1cd045de714536a9e739aafa6d8362f317cd0)
+    "e9f1cd04": {
+        "db_xor_mask": bytes.fromhex(
+            "b8ec38291bd59c963f4654d8f9d7437e"
+            "1acc81a6cad6313c7bd0f5e73238d4af"
+        ),
+        "db_page_hmac": True,
+        "image_xor_mask": bytes.fromhex(
+            "ed5cfabf2d917d8126870f3102b9207d"
+            "77227ac7a8127092bdbed6bc40823e77"
+        ),
+    },
     # WeChat Linux v4.1.0.16 aarch64 (BuildID: 5233a112...)
     "5233a112": {
         "image_xor_mask": bytes.fromhex(
@@ -234,6 +266,18 @@ BUILD_PROFILES = {
         "image_xor_mask": bytes.fromhex(
             "29c63ae609ae3c9826a786367d9a4c3a"
             "7146d19c2fcbfac10f6ed2aa2a4034f4"
+        ),
+    },
+    # WeChat Linux v4.1.13.23 x86_64 (BuildID: ce28c3471d532eeb1f136482eeb4d0bdfd59c06e)
+    "ce28c347": {
+        "db_xor_mask": bytes.fromhex(
+            "b8ec38291bd59c963f4654d8f9d7437e"
+            "1acc81a6cad6313c7bd0f5e73238d4af"
+        ),
+        "db_page_hmac": True,
+        "image_xor_mask": bytes.fromhex(
+            "4e9379223c6eeed2ae11ed50510d0e15"
+            "3929e23541a7288ac021a10e6d4b4655"
         ),
     },
 }
@@ -270,7 +314,8 @@ def get_build_profile(pid):
             return BUILD_PROFILES[prefix]
         print(f"WARNING: Unknown BuildID {build_id}. Image key extraction may fail.")
     # Fall back to first profile (aarch64)
-    return next(iter(BUILD_PROFILES.values()))
+    # Preserve the historical fallback regardless of profile insertion order.
+    return BUILD_PROFILES["5233a112"]
 
 
 def extract_image_aes_key(pid, profile):
@@ -364,7 +409,7 @@ def main():
     profile = get_build_profile(pid)
 
     print("Extracting key candidates from memory...")
-    ctx_count, raw_keys = extract_candidates(pid)
+    ctx_count, raw_keys = extract_candidates(pid, profile.get("db_xor_mask"))
     print(f"  Structures found: {ctx_count}")
     print(f"  Candidates: {len(raw_keys)}")
 
@@ -393,8 +438,17 @@ def main():
         for db_path in remaining_dbs:
             db_name = os.path.basename(db_path)
             found = False
+            page = None
+            if profile.get("db_page_hmac"):
+                try:
+                    with open(db_path, "rb") as db_file:
+                        page = db_file.read(4096)
+                except OSError:
+                    pass
             for key in new_candidates:
                 tests += 1
+                if page is not None and not matches_sqlcipher4_page(key, page):
+                    continue
                 count = test_key(db_path, key)
                 if count is not None:
                     results[db_name] = {"key": key, "tables": count, "path": db_path}

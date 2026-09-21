@@ -26,6 +26,26 @@ import shutil
 # Keyed by first 8 hex chars of ELF BuildID (same pattern as extract-keys.py).
 
 BUILD_PROFILES = {
+    "e9f1cd04": {
+        "ARCH": "aarch64", "SELECT_SESSION": 0x48543d0,
+        "USERNAME_OFF": 0x130, "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0x9fe8c58, "CTRL_OFF": 0xf8,
+        "CUR_SESS_OFF": 0x40, "CUR_SESS_UNAME_OFF": 0x130,
+        "VEC_KEY_OFF": 0x178, "VECTOR_LAYOUT": "controller_map",
+    },
+    # WeChat Linux v4.1.13.23 x86_64 (BuildID: ce28c3471d532eeb1f136482eeb4d0bdfd59c06e)
+    "ce28c347": {
+        "ARCH": "x86_64",
+        "SELECT_SESSION": 0x48ae510,
+        "USERNAME_OFF": 0x130,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0xa6a7d78,
+        "CTRL_OFF": 0x1a8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x98,
+        "VEC_KEY_OFF": 0x178,
+        "VEC_MAP_OFF": 0xf8,
+    },
     # WeChat Linux v4.1.0.16 aarch64 (BuildID: 5233a112...)
     "5233a112": {
         "ARCH": "aarch64",
@@ -315,14 +335,14 @@ def enumerate_sessions(pid, profile):
     # On x86_64 multiple managers share the same vtable; this picks the right one.
     validate_js = f'var k = readStdString(hit.address.add(0x{vec_key_off:x})); if (k !== "normal_key") return;'
 
-    # Architecture-specific vector access
-    if vec_map_off is not None:
-        # x86_64: walk unordered_map linked list to find "normal_key" vector
+    # Per-build vector access: new ARM builds keep the map inside ctrl itself.
+    controller_map = profile.get("VECTOR_LAYOUT") == "controller_map"
+    if controller_map or vec_map_off is not None:
+        inner_js = "ctrl" if controller_map else f"ctrl.add(0x{vec_map_off:x}).readPointer()"
         vec_access_js = f"""
-    // x86_64: walk unordered_map linked list to find "normal_key" vector
-    // Layout: ctrl+0x{vec_map_off:x} → inner → inner+0x18 = hashmap
+    // Walk the build-specific controller's "normal_key" vector map.
     //   hashmap+0x10 = first node; each node: next(+0), hash(+8), key(+0x10), value(+0x28)
-    var hmInner = ctrl.add(0x{vec_map_off:x}).readPointer();
+    var hmInner = {inner_js};
     var hmNode = hmInner.add(0x18 + 0x10).readPointer();
     var vectorBegin = ptr(0), vectorEnd = ptr(0);
     for (var _i = 0; _i < 20 && hmNode && !hmNode.isNull(); _i++) {{
