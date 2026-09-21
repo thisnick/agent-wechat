@@ -1,0 +1,19 @@
+name: Python tools
+
+on:
+  pull_request:
+    paths:
+      - 'docker/tools/**.py'
+      - 'tests/test_*.py'
+      - '.github/workflows/python-tools.yml'
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # SQLCipher 4 integration is additionally exercised in research containers.
+      - run: python3 -m unittest discover -s tests -v
