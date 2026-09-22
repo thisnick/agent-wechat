@@ -11,12 +11,14 @@ use std::process::Command;
 #[serde(rename_all = "lowercase")]
 pub enum ImageQuality {
     #[default]
+    Legacy,
     Full,
     Thumbnail,
 }
 
 fn image_suffixes(quality: ImageQuality) -> &'static [&'static str] {
     match quality {
+        ImageQuality::Legacy => &["", "_t", "_h"],
         ImageQuality::Full => &["_h"],
         ImageQuality::Thumbnail => &["_t"],
     }
@@ -40,7 +42,7 @@ fn unsupported() -> MediaResult {
     }
 }
 
-fn pending() -> MediaResult {
+pub(crate) fn pending() -> MediaResult {
     MediaResult {
         media_type: "pending".into(),
         data: None,
@@ -55,6 +57,52 @@ fn account_base_paths(account_dir: &str) -> [String; 2] {
         format!("/home/wechat/xwechat_files/{account_dir}"),
         format!("/home/wechat/Documents/xwechat_files/{account_dir}"),
     ]
+}
+
+/// Native requests are hydrated only from stored, completed incoming DM rows.
+/// Group/self/voice/video construction has not been validated for these builds.
+pub fn download_metadata(account: &str, keys: &HashMap<String, String>, chat: &str, id: i64) -> Option<serde_json::Value> {
+    if id <= 0 || id > u32::MAX as i64 || chat == "filehelper" ||
+        chat.is_empty() || chat.len() > 128 ||
+        !chat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') { return None; }
+    let (name, key) = find_message_db(account, keys, chat)?;
+    let path = get_db_path(account, &name);
+    let table = get_msg_table_name(chat);
+    let rows = query_wechat_db(&path, &key, &format!(
+        "SELECT m.local_id, m.local_type, CAST(m.server_id AS TEXT) AS server_id,
+         CAST(m.sort_seq AS TEXT) AS sort_seq, m.create_time,
+         hex(m.message_content) AS body, m.WCDB_CT_message_content AS compressed,
+         n.user_name AS sender FROM \"{table}\" m
+         LEFT JOIN Name2Id n ON n.rowid=m.real_sender_id WHERE m.local_id={id} LIMIT 1;"
+    ));
+    let row = rows.first()?;
+    if row.get("sender")?.as_str()? != chat { return None; }
+    let kind = row.get("local_type")?.as_i64()?;
+    if kind != 3 && kind != (6i64 << 32 | 49) { return None; }
+    let content = decode_message_content(row.get("body")?.as_str()?, row.get("compressed")?.as_i64()? != 0);
+    if content.is_empty() || content.len() > 1024 * 1024 || content.contains('\0') { return None; }
+    if kind != 3 {
+        if !safe_attachment_name(&extract_xml_tag(&content, "title")?) { return None; }
+        extract_xml_tag(&content, "totallen")?.parse::<u64>().ok()?;
+        let hash = extract_xml_tag(&content, "md5")?;
+        if hash.len() != 32 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    }
+    // Resolve the exact account ID from the same database, not by splitting wxid.
+    let escaped = account.replace('\'', "''");
+    let names = query_wechat_db(&path, &key, &format!(
+        "SELECT user_name FROM Name2Id WHERE user_name='{escaped}' OR
+         substr('{escaped}',1,length(user_name)+1)=user_name||'_';"
+    ));
+    let matches: Vec<&str> = names.iter().filter_map(|r| r.get("user_name")?.as_str())
+        .filter(|name| *name == account || account.strip_prefix(*name).map(|tail|
+            tail.len() == 5 && tail.starts_with('_') && tail[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        ).unwrap_or(false)).collect();
+    if matches.len() != 1 || matches[0] == chat { return None; }
+    Some(serde_json::json!({
+        "accountId": matches[0], "chatId": chat, "local_id": id, "local_type": kind,
+        "server_id": row.get("server_id")?.as_str()?, "sort_seq": row.get("sort_seq")?.as_str()?,
+        "create_time": row.get("create_time")?.as_i64()?, "content": content,
+    }))
 }
 
 /// Look up a single message's raw content by localId.
@@ -423,7 +471,6 @@ fn find_dat_via_hardlink(
     if stem.len() != 32 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let file_name = format!("{stem}{}.dat", image_suffixes(quality)[0]);
     let dir1 = row.get("dir1")?.as_i64()?;
     let dir2 = row.get("dir2")?.as_i64()?;
 
@@ -445,6 +492,8 @@ fn find_dat_via_hardlink(
     let date_dir = dir_map.get(&dir2)?;
 
     for base in &account_base_paths(account_dir) {
+      for suffix in image_suffixes(quality) {
+        let file_name = format!("{stem}{suffix}.dat");
         let dat_path = Path::new(base)
             .join("msg/attach")
             .join(chat_dir)
@@ -454,6 +503,7 @@ fn find_dat_via_hardlink(
         if dat_path.exists() {
             return Some(dat_path.to_string_lossy().to_string());
         }
+      }
     }
     tracing::warn!("[media:hardlink] .dat file not found on disk for md5={}", image_md5);
     None
@@ -687,9 +737,10 @@ fn decrypt_and_return(
 
     let (format, ext) = detect_image_format(&decrypted);
 
-    // WXGF → convert via ffmpeg, fall back to thumbnail
+    // A different quality must not substitute for an incomplete requested image.
     if format == "wxgf" {
         if let Some((converted, cfmt)) = convert_media("wxgf2img", &decrypted) {
+            if convert_media("validate-image", &converted).is_none() { return pending(); }
             let cext = if cfmt == "jpeg" {
                 "jpg".to_string()
             } else {
@@ -706,30 +757,10 @@ fn decrypt_and_return(
                 filename: format!("msg_{local_id}.{cext}"),
             };
         }
-        // Try _t.dat thumbnail
-        let thumb_path = dat_path.replace(".dat", "_t.dat");
-        if Path::new(&thumb_path).exists() {
-            if let Ok(thumb_dat) = fs::read(&thumb_path) {
-                if let Some(xb2) = resolve_xor_byte(&thumb_path, &thumb_dat, image_keys) {
-                    if let Some(dec) =
-                        decrypt_dat(&thumb_dat, &image_keys.aes_key_hex, xb2)
-                    {
-                        let (tf, te) = detect_image_format(&dec);
-                        return MediaResult {
-                            media_type: "image".into(),
-                            data: Some(base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                &dec,
-                            )),
-                            url: None,
-                            format: tf.into(),
-                            filename: format!("msg_{local_id}.{te}"),
-                        };
-                    }
-                }
-            }
-        }
+        return pending();
     }
+
+    if convert_media("validate-image", &decrypted).is_none() { return pending(); }
 
     MediaResult {
         media_type: "image".into(),
@@ -996,7 +1027,7 @@ pub fn get_message_media(
                 chat_id, local_id, create_time, content.len()
             );
 
-            if quality == ImageQuality::Thumbnail {
+            if quality != ImageQuality::Full {
                 if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time)
                 {
                     return thumb;
@@ -1076,7 +1107,7 @@ mod quality_tests {
     fn full_resolution_never_selects_a_thumbnail_or_mid_size() {
         assert_eq!(image_suffixes(ImageQuality::Full), &["_h"]);
         assert_eq!(image_suffixes(ImageQuality::Thumbnail), &["_t"]);
-        assert_eq!(ImageQuality::default(), ImageQuality::Full);
+        assert_eq!(ImageQuality::default(), ImageQuality::Legacy);
     }
 
     #[test]

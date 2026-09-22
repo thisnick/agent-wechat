@@ -12,7 +12,8 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::{get_message_media, ImageQuality};
+use crate::tools::wechat_media::{get_message_media, download_metadata, pending, ImageQuality};
+use crate::tools::media_download::{ensure_queued, current_process};
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
 
@@ -140,7 +141,11 @@ pub async fn get_media(
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
-    // Database reads, image conversion and large-file hashing are blocking work.
+    // All cache checks and native metadata reads happen outside the async runtime.
+    let account = logged_in_user.clone();
+    let request_keys = keys.clone();
+    let request_chat = chat_id.clone();
+    let request_image_keys = image_keys.clone();
     let result = tokio::task::spawn_blocking(move || {
         get_message_media(
             &logged_in_user,
@@ -159,7 +164,31 @@ pub async fn get_media(
         format: String::new(),
         filename: String::new(),
     });
-    Json(result)
+    if result.data.is_some() || result.media_type == "unsupported" { return Json(result); }
+    let metadata_account = account.clone();
+    let metadata_keys = request_keys.clone();
+    let metadata_chat = request_chat.clone();
+    let metadata = tokio::task::spawn_blocking(move ||
+        download_metadata(&metadata_account, &metadata_keys, &metadata_chat, local_id)
+    ).await.ok().flatten();
+    let Some(metadata) = metadata else { return Json(result); };
+    let Some((_, identity)) = current_process(&account) else { return Json(pending()); };
+    if !ensure_queued(account.clone(), metadata).await { return Json(pending()); }
+    // A bounded HTTP wait; further GETs reuse the native submission for five minutes.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if current_process(&account).map(|(_, key)| key).as_ref() != Some(&identity) { return Json(pending()); }
+        let a = account.clone(); let k = request_keys.clone(); let c = request_chat.clone();
+        let i = request_image_keys.clone();
+        let found = tokio::task::spawn_blocking(move || get_message_media(&a, &k, &c, local_id, i, params.quality))
+            .await.unwrap_or_else(|_| pending());
+        if found.data.is_some() {
+            if current_process(&account).map(|(_, key)| key).as_ref() != Some(&identity) { return Json(pending()); }
+            return Json(found);
+        }
+    }
+    Json(pending())
 }
 
 #[derive(Deserialize)]
