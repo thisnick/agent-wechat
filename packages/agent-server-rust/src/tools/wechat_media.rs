@@ -59,12 +59,36 @@ fn account_base_paths(account_dir: &str) -> [String; 2] {
     ]
 }
 
-/// Native requests are hydrated only from stored, completed incoming DM rows.
-/// Group/self/voice/video construction has not been validated for these builds.
+fn native_user_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 &&
+        value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn native_group_id(value: &str) -> bool {
+    value.strip_suffix("@chatroom").map(|id|
+        !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_digit())
+    ).unwrap_or(false)
+}
+
+/// Group bodies may include a sender prefix that is separate from the native XML.
+fn native_message_body(chat: &str, sender: &str, account: &str, content: String) -> Option<String> {
+    if !native_user_id(sender) { return None; }
+    if native_group_id(chat) {
+        if let Some((prefix, body)) = content.split_once(":\n") {
+            if !prefix.starts_with('<') {
+                return (prefix == sender).then(|| body.to_string());
+            }
+        }
+    } else if sender != chat && sender != account { return None; }
+    if chat == "filehelper" && sender != account { return None; }
+    Some(content)
+}
+
+/// Native requests are hydrated from stored, completed message rows.
+/// Voice/video construction remains disabled until separately validated.
 pub fn download_metadata(account: &str, keys: &HashMap<String, String>, chat: &str, id: i64) -> Option<serde_json::Value> {
-    if id <= 0 || id > u32::MAX as i64 || chat == "filehelper" ||
-        chat.is_empty() || chat.len() > 128 ||
-        !chat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') { return None; }
+    if id <= 0 || id > u32::MAX as i64 ||
+        (!native_user_id(chat) && !native_group_id(chat)) { return None; }
     let (name, key) = find_message_db(account, keys, chat)?;
     let path = get_db_path(account, &name);
     let table = get_msg_table_name(chat);
@@ -76,7 +100,7 @@ pub fn download_metadata(account: &str, keys: &HashMap<String, String>, chat: &s
          LEFT JOIN Name2Id n ON n.rowid=m.real_sender_id WHERE m.local_id={id} LIMIT 1;"
     ));
     let row = rows.first()?;
-    if row.get("sender")?.as_str()? != chat { return None; }
+    let sender = row.get("sender")?.as_str()?;
     let kind = row.get("local_type")?.as_i64()?;
     if kind != 3 && kind != (6i64 << 32 | 49) { return None; }
     let content = decode_message_content(row.get("body")?.as_str()?, row.get("compressed")?.as_i64()? != 0);
@@ -98,8 +122,9 @@ pub fn download_metadata(account: &str, keys: &HashMap<String, String>, chat: &s
             tail.len() == 5 && tail.starts_with('_') && tail[1..].bytes().all(|b| b.is_ascii_hexdigit())
         ).unwrap_or(false)).collect();
     if matches.len() != 1 || matches[0] == chat { return None; }
+    let content = native_message_body(chat, sender, matches[0], content)?;
     Some(serde_json::json!({
-        "accountId": matches[0], "chatId": chat, "local_id": id, "local_type": kind,
+        "accountId": matches[0], "chatId": chat, "senderId": sender, "local_id": id, "local_type": kind,
         "server_id": row.get("server_id")?.as_str()?, "sort_seq": row.get("sort_seq")?.as_str()?,
         "create_time": row.get("create_time")?.as_i64()?, "content": content,
     }))
@@ -1102,6 +1127,20 @@ pub fn get_message_media(
 #[cfg(test)]
 mod quality_tests {
     use super::*;
+
+    #[test]
+    fn native_group_body_preserves_sender_identity() {
+        assert_eq!(native_message_body("123@chatroom", "sender", "account", "sender:\n<msg/>".into()), Some("<msg/>".into()));
+        assert_eq!(native_message_body("123@chatroom", "sender", "account", "<msg/>".into()), Some("<msg/>".into()));
+        assert_eq!(native_message_body("123@chatroom", "sender", "account", "other:\n<msg/>".into()), None);
+        assert_eq!(native_message_body("peer", "other", "account", "<msg/>".into()), None);
+        assert_eq!(native_message_body("peer", "account", "account", "<msg/>".into()), Some("<msg/>".into()));
+        assert_eq!(native_message_body("filehelper", "account", "account", "<msg/>".into()), Some("<msg/>".into()));
+        assert_eq!(native_message_body("filehelper", "filehelper", "account", "<msg/>".into()), None);
+        assert!(!native_group_id("group@chatroom"));
+        assert!(!native_group_id("123@chatroom/other"));
+        assert!(native_group_id("123@chatroom"));
+    }
 
     #[test]
     fn full_resolution_never_selects_a_thumbnail_or_mid_size() {

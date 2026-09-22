@@ -20,7 +20,7 @@ convert = load('media_convert', 'media-convert.py')
 
 class DownloadGuards(unittest.TestCase):
     def fixture(self, **updates):
-        value = dict(chatId='test-peer', accountId='test-account', local_id=42,
+        value = dict(chatId='test-peer', accountId='test-account', senderId='test-peer', local_id=42,
                      local_type=3, server_id='9007199254740993', sort_seq='123',
                      create_time=1790038000, content='<msg><img /></msg>')
         value.update(updates)
@@ -39,9 +39,22 @@ class DownloadGuards(unittest.TestCase):
                        dict(chatId='group@chatroom'), dict(chatId='filehelper'),
                        dict(chatId='test-account'), dict(chatId='a\nb'),
                        dict(accountId=''), dict(content='x\0y'),
+                       dict(senderId='other-peer'),
+                       dict(chatId='123@chatroom', senderId='other@chatroom'),
                        dict(content='x' * (1024 * 1024 + 1))]:
             with self.subTest(change=list(change)), self.assertRaises(ValueError):
                 worker.validate_metadata(self.fixture(**change))
+
+    def test_group_sender_is_separate_from_conversation(self):
+        result = worker.validate_metadata(self.fixture(chatId='123@chatroom'))
+        self.assertEqual(result['senderId'], 'test-peer')
+        self.assertEqual(result['chatId'], '123@chatroom')
+
+    def test_outgoing_and_file_transfer_keep_account_as_sender(self):
+        for chat in ('test-peer', '123@chatroom', 'filehelper'):
+            result = worker.validate_metadata(self.fixture(chatId=chat, senderId='test-account'))
+            self.assertEqual(result['senderId'], result['accountId'])
+            self.assertEqual(result['chatId'], chat)
 
     def test_requires_full_known_build_id(self):
         for build in worker.BUILDS:

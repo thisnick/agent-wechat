@@ -16,12 +16,19 @@ MAX_INPUT = 2 * 1024 * 1024
 def validate_metadata(value):
     if not isinstance(value, dict):
         raise ValueError('Expected object')
-    for field in ('chatId', 'accountId'):
+    for field in ('accountId', 'senderId'):
         text = value.get(field)
         if (not isinstance(text, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', text)):
             raise ValueError('Invalid peer')
-    if value['chatId'] == value['accountId'] or value['chatId'] == 'filehelper':
+    chat = value.get('chatId')
+    if not isinstance(chat, str) or not re.fullmatch(r'(?:[A-Za-z0-9_-]{1,128}|[0-9]{1,64}@chatroom)', chat):
+        raise ValueError('Invalid chat')
+    if chat == value['accountId']:
         raise ValueError('Unvalidated peer')
+    if chat == 'filehelper' and value['senderId'] != value['accountId']:
+        raise ValueError('File Transfer sender mismatch')
+    if not chat.endswith('@chatroom') and value['senderId'] not in (chat, value['accountId']):
+        raise ValueError('Sender mismatch')
     if type(value.get('local_type')) is not int or value['local_type'] not in (3, (6 << 32) | 49):
         raise ValueError('Unvalidated message type')
     for field in ('local_id', 'create_time'):
@@ -34,7 +41,7 @@ def validate_metadata(value):
     text = value.get('content')
     if not isinstance(text, str) or not text or '\0' in text or len(text.encode()) > 1024 * 1024:
         raise ValueError('Invalid body')
-    fields = ('chatId', 'accountId', 'local_id', 'local_type', 'server_id', 'sort_seq', 'create_time', 'content')
+    fields = ('chatId', 'accountId', 'senderId', 'local_id', 'local_type', 'server_id', 'sort_seq', 'create_time', 'content')
     return {field: value[field] for field in fields}
 
 
