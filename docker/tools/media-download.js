@@ -82,11 +82,15 @@ function manager() {
   finally { release(second); release(first); }
 }
 function queue(metadata) {
+  const outgoing = metadata.senderId === metadata.accountId;
+  const from = outgoing ? metadata.accountId : metadata.chatId;
+  const to = outgoing ? metadata.chatId : metadata.accountId;
   let model = null, request = null, service = null;
   const raw = Memory.alloc(0x278); constructRaw(raw);
   try {
-    putString(raw.add(0x18), metadata.chatId);
-    putString(raw.add(0x30), metadata.accountId);
+    putString(raw.add(0x18), from);
+    putString(raw.add(0x30), to);
+    putString(raw.add(0x48), metadata.senderId);
     setType(raw, Number(metadata.local_type) & 0xffffffff);
     putString(raw.add(0x130), metadata.content);
     raw.add(0xf4).writeU32(metadata.local_id);
@@ -101,7 +105,8 @@ function queue(metadata) {
     if (!m.readPointer().equals(base.add(p.model)) || r.isNull() ||
         r.add(0xf4).readU32() !== metadata.local_id ||
         r.add(0xf8).readU64().toString() !== metadata.server_id ||
-        stringAt(r.add(0x18)) !== metadata.chatId ||
+        stringAt(r.add(0x18)) !== from || stringAt(r.add(0x30)) !== to ||
+        stringAt(r.add(0x48)) !== metadata.senderId ||
         r.add(12).readU32() !== (metadata.local_type === 3 ? 3 : 49) ||
         (metadata.local_type !== 3 && m.add(8).readU64().toString() !== '25769803825')) throw Error('Message mismatch');
     service = manager();
