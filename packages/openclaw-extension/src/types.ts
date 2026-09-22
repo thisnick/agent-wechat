@@ -19,6 +19,8 @@ export type WeChatConfig = {
   groups?: Record<string, WeChatGroupConfig>;
   pollIntervalMs?: number;
   authPollIntervalMs?: number;
+  /** Maximum inbound attachment size kept in OpenClaw-managed storage. */
+  mediaMaxMb?: number;
 };
 
 export type ResolvedWeChatAccount = {
@@ -33,6 +35,7 @@ export type ResolvedWeChatAccount = {
   groups: Record<string, WeChatGroupConfig>;
   pollIntervalMs: number;
   authPollIntervalMs: number;
+  mediaMaxMb: number;
 };
 
 function normalizeDmPolicy(policy: unknown): WeChatDmPolicy {
@@ -50,6 +53,7 @@ function normalizeGroupPolicy(policy: unknown): WeChatGroupPolicy {
 // Defaults
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
 export const DEFAULT_AUTH_POLL_INTERVAL_MS = 30_000;
+export const DEFAULT_MEDIA_MAX_MB = 50;
 export const DEFAULT_ACCOUNT_ID = "default";
 
 export function resolveWeChatAccount(
@@ -73,5 +77,9 @@ export function resolveWeChatAccount(
     pollIntervalMs: wechat.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     authPollIntervalMs:
       wechat.authPollIntervalMs ?? DEFAULT_AUTH_POLL_INTERVAL_MS,
+    mediaMaxMb: Number.isInteger(wechat.mediaMaxMb) && (wechat.mediaMaxMb ?? 0) > 0 &&
+        (wechat.mediaMaxMb ?? 0) <= 1024
+      ? wechat.mediaMaxMb!
+      : DEFAULT_MEDIA_MAX_MB,
   };
 }

@@ -25,6 +25,7 @@ function baseAccount(overrides: Partial<ResolvedWeChatAccount> = {}): ResolvedWe
     groups: {},
     pollIntervalMs: 1000,
     authPollIntervalMs: 30000,
+    mediaMaxMb: 50,
     ...overrides,
   };
 }
