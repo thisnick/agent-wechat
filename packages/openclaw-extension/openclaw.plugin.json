@@ -91,6 +91,11 @@
           "authPollIntervalMs": {
             "type": "integer",
             "minimum": 1000
+          },
+          "mediaMaxMb": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1024
           }
         }
       }

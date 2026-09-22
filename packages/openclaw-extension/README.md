@@ -87,7 +87,8 @@ Or edit `~/.openclaw/openclaw.json` directly:
       "enabled": true,
       "serverUrl": "http://localhost:6174",
       "dmPolicy": "open",
-      "groupPolicy": "open"
+      "groupPolicy": "open",
+      "mediaMaxMb": 50
     }
   }
 }
@@ -153,6 +154,30 @@ All config lives under `channels.agent-wechat` in OpenClaw's config file:
 | `groups` | object | `{}` | Per-group overrides (e.g. `{ "id@chatroom": { "requireMention": false, "enabled": true, "groupPolicy": "allowlist", "allowFrom": ["wxid_..."] } }`) |
 | `pollIntervalMs` | integer | `1000` | Message polling interval |
 | `authPollIntervalMs` | integer | `30000` | Auth status check interval |
+| `mediaMaxMb` | integer | `50` | Maximum size of each inbound image, voice message, video, or file saved to OpenClaw-managed storage (1–1024 MiB) |
+
+### Incoming attachments and catch-up
+
+Incoming attachments are copied from the agent-wechat API into OpenClaw's own
+managed inbound-media store using its bounded atomic save. The returned path
+uses OpenClaw's media and sandbox plumbing, so it is available in the agent's
+environment rather than only inside the separate WeChat container.
+
+- DMs and groups with `requireMention: false` continue to dispatch every
+  allowed incoming message. Images use the model's media slot; file names and
+  local paths are included in the agent-visible message text.
+- Groups with `requireMention: true` persist their bounded catch-up state across
+  gateway restarts. When mentioned, unavailable attachments are retried, all
+  file paths are retained, and only the latest available image occupies the
+  model's single media slot. Earlier images and voice/video media remain as
+  explicit local-path references.
+- Pending, unsupported, oversized, and failed attachments are labeled with an
+  availability status; the plugin never invents a usable local path.
+
+`mediaMaxMb` is a per-attachment memory and storage bound. The current API uses
+JSON/base64 rather than streaming, so set it only as high as the OpenClaw host
+can safely decode. Native on-demand transfer is an agent-server capability;
+this plugin retries the media API but does not inject into WeChat itself.
 
 ## Development
 

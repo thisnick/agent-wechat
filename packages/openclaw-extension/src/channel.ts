@@ -147,6 +147,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         },
         pollIntervalMs: { type: "integer", minimum: 100 },
         authPollIntervalMs: { type: "integer", minimum: 1000 },
+        mediaMaxMb: { type: "integer", minimum: 1, maximum: 1024 },
       },
     },
   },
@@ -172,6 +173,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
           groups: {},
           pollIntervalMs: 1000,
           authPollIntervalMs: 30000,
+          mediaMaxMb: 50,
         };
       }
       return account;
