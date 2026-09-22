@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyCatchupAttachmentPolicy,
+  attachmentFallbackFilename,
+  attachmentSourceBody,
   buildMediaSegments,
   renderAttachmentBody,
   type MessageWithAttachment,
@@ -63,6 +65,17 @@ test("unavailable attachments expose status without a fake path", () => {
     filename: "report.pdf",
     status: "pending",
   });
-  assert.match(body, /File unavailable: report\.pdf \(pending\)/);
+  assert.match(body, /File pending: report\.pdf/);
   assert.doesNotMatch(body, /Local file/);
+});
+
+test("pending videos never expose raw message XML", () => {
+  const raw = '<msg><videomsg cdnvideourl="private" /></msg>';
+  const source = attachmentSourceBody(raw, "video");
+  const filename = attachmentFallbackFilename("video", 60, raw);
+  const body = renderAttachmentBody(source, { kind: "video", filename, status: "pending" });
+  assert.equal(source, "");
+  assert.equal(filename, "message-60.mp4");
+  assert.equal(body, "[Video pending: message-60.mp4]");
+  assert.doesNotMatch(body, /videomsg|cdnvideourl|private/);
 });

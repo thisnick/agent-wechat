@@ -33,8 +33,17 @@ function helper({sourceId = 1} = {}) {
     timeout: () => timer(),
     dispatch: () => {assert.equal(callbacks.idle(), 0); callbacks.destroyed();},
     stats: () => ({nativeCalls, removals, clears}),
+    spec: type => context.requestSpec(type),
   };
 }
+
+test('native request resources match observed media queues', () => {
+  const h = helper();
+  assert.deepEqual({...h.spec(3)}, {rawType: 3, resource: 3, priority: 100});
+  assert.deepEqual({...h.spec(43)}, {rawType: 43, resource: 32, priority: 0});
+  assert.deepEqual({...h.spec(25769803825)}, {rawType: 49, resource: 103, priority: 0});
+  assert.throws(() => h.spec(34), /Unsupported message type/);
+});
 
 test('an undispatched source is removed before its promise resolves', async () => {
   const h = helper();

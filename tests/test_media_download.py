@@ -1,8 +1,11 @@
 import importlib.util
+import io
+import json
+from types import SimpleNamespace
 from pathlib import Path
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,6 +34,35 @@ class DownloadGuards(unittest.TestCase):
         self.assertEqual(result['server_id'], '9007199254740993')
         self.assertNotIn('offsets', result)
         self.assertNotIn('dryRun', result)
+
+    def test_video_is_an_allowed_native_type(self):
+        result = worker.validate_metadata(self.fixture(
+            local_type=43,
+            content='<msg><videomsg length="3" md5="900150983cd24fb0d6963f7d28e17f72" /></msg>',
+        ))
+        self.assertEqual(result['local_type'], 43)
+
+    def test_eof_and_invalid_input_release_attachment(self):
+        for tail in (b'', b'invalid\n'):
+            session = Mock(is_detached=False)
+            script = session.create_script.return_value
+            script.exports_sync.enqueue.return_value = {'status': 'queued'}
+            request = json.dumps({'pid': 123, 'metadata': self.fixture()}).encode() + b'\n'
+            stdin = SimpleNamespace(buffer=io.BytesIO(request + tail))
+            with patch.dict('sys.modules', {'frida': SimpleNamespace(attach=lambda _: session)}), \
+                 patch.object(worker.sys, 'stdin', stdin), patch.object(worker.sys, 'stdout', io.StringIO()), \
+                 patch.object(worker, 'build_id', return_value=next(iter(worker.BUILDS))), \
+                 patch.object(worker.Path, 'read_text', return_value='(wechat) ' + ' '.join(['0'] * 20)):
+                worker.main()
+            script.unload.assert_called_once()
+            session.detach.assert_called_once()
+
+    def test_detaches_even_when_unload_fails(self):
+        session, script = Mock(is_detached=False), Mock()
+        script.unload.side_effect = RuntimeError('target exited')
+        with self.assertRaises(RuntimeError):
+            worker.close_attachment(session, script)
+        session.detach.assert_called_once()
 
     def test_rejects_unvalidated_targets_before_attach(self):
         for change in [dict(local_type=(74 << 32) | 49), dict(local_type=34),

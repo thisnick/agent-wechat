@@ -81,7 +81,14 @@ function manager() {
   } catch (e) { release(result); throw e; }
   finally { release(second); release(first); }
 }
+function requestSpec(localType) {
+  if (localType === 3) return { rawType: 3, resource: 3, priority: 100 };
+  if (localType === 43) return { rawType: 43, resource: 32, priority: 0 };
+  if (localType === 25769803825) return { rawType: 49, resource: 103, priority: 0 };
+  throw Error('Unsupported message type');
+}
 function queue(metadata) {
+  const spec = requestSpec(metadata.local_type);
   const outgoing = metadata.senderId === metadata.accountId;
   const from = outgoing ? metadata.accountId : metadata.chatId;
   const to = outgoing ? metadata.chatId : metadata.accountId;
@@ -107,14 +114,14 @@ function queue(metadata) {
         r.add(0xf8).readU64().toString() !== metadata.server_id ||
         stringAt(r.add(0x18)) !== from || stringAt(r.add(0x30)) !== to ||
         stringAt(r.add(0x48)) !== metadata.senderId ||
-        r.add(12).readU32() !== (metadata.local_type === 3 ? 3 : 49) ||
-        (metadata.local_type !== 3 && m.add(8).readU64().toString() !== '25769803825')) throw Error('Message mismatch');
+        r.add(12).readU32() !== spec.rawType ||
+        (metadata.local_type === 25769803825 && m.add(8).readU64().toString() !== '25769803825')) throw Error('Message mismatch');
     service = manager();
     const q = control(0x68, p.requestControl); request = box(q);
-    const resource = Memory.alloc(4); resource.writeU32(metadata.local_type === 3 ? 3 : 103);
+    const resource = Memory.alloc(4); resource.writeU32(spec.resource);
     const tag = Memory.alloc(1); tag.writeU8(0);
     constructRequest(tag, q.add(24), model, resource);
-    submit(service.readPointer(), request, metadata.local_type === 3 ? 100 : 0, 0);
+    submit(service.readPointer(), request, spec.priority, 0);
   } finally {
     if (request) release(request);
     if (service) release(service);

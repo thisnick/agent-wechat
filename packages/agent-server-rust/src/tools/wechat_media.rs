@@ -85,7 +85,7 @@ fn native_message_body(chat: &str, sender: &str, account: &str, content: String)
 }
 
 /// Native requests are hydrated from stored, completed message rows.
-/// Voice/video construction remains disabled until separately validated.
+/// Voice construction remains disabled until separately validated.
 pub fn download_metadata(account: &str, keys: &HashMap<String, String>, chat: &str, id: i64) -> Option<serde_json::Value> {
     if id <= 0 || id > u32::MAX as i64 ||
         (!native_user_id(chat) && !native_group_id(chat)) { return None; }
@@ -102,13 +102,17 @@ pub fn download_metadata(account: &str, keys: &HashMap<String, String>, chat: &s
     let row = rows.first()?;
     let sender = row.get("sender")?.as_str()?;
     let kind = row.get("local_type")?.as_i64()?;
-    if kind != 3 && kind != (6i64 << 32 | 49) { return None; }
+    if kind != 3 && kind != 43 && kind != (6i64 << 32 | 49) { return None; }
     let content = decode_message_content(row.get("body")?.as_str()?, row.get("compressed")?.as_i64()? != 0);
     if content.is_empty() || content.len() > 1024 * 1024 || content.contains('\0') { return None; }
-    if kind != 3 {
+    if kind == (6i64 << 32 | 49) {
         if !safe_attachment_name(&extract_xml_tag(&content, "title")?) { return None; }
         extract_xml_tag(&content, "totallen")?.parse::<u64>().ok()?;
         let hash = extract_xml_tag(&content, "md5")?;
+        if hash.len() != 32 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    } else if kind == 43 {
+        video_attr(&content, "length")?.parse::<u64>().ok()?;
+        let hash = video_attr(&content, "md5")?;
         if hash.len() != 32 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
     }
     // Resolve the exact account ID from the same database, not by splitting wxid.
@@ -193,6 +197,15 @@ fn xml_attr(xml: &str, attr: &str) -> Option<String> {
     } else {
         Some(val)
     }
+}
+
+/// Extract an exact video XML attribute without matching `rawlength`/`rawmd5`.
+fn video_attr(xml: &str, attr: &str) -> Option<String> {
+    let pat = format!(" {attr}=\"");
+    let start = xml.find(&pat)? + pat.len();
+    let end = xml[start..].find('"')? + start;
+    let val = xml[start..end].trim().to_string();
+    (!val.is_empty()).then_some(val)
 }
 
 // ── Image thumbnail from filesystem cache ────────────────────────────────────
@@ -609,7 +622,63 @@ fn find_dat_via_resource_db(
     None
 }
 
-/// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
+fn video_matches_message(data: &[u8], content: &str) -> bool {
+    let Some(expected_size) = video_attr(content, "length").and_then(|n| n.parse::<u64>().ok()) else {
+        return false;
+    };
+    if data.len() as u64 != expected_size { return false; }
+    let Some(expected_md5) = video_attr(content, "md5") else { return false; };
+    expected_md5.len() == 32
+        && expected_md5.bytes().all(|b| b.is_ascii_hexdigit())
+        && format!("{:x}", Md5::digest(data)).eq_ignore_ascii_case(&expected_md5)
+}
+
+/// Find the complete MP4 for a message. message_resource.db normally points at
+/// the MP4 basename, but self-sent videos can point at the thumbnail basename
+/// instead. In that case, inspect only MP4s from the message's month, discard
+/// files with the wrong size without reading them, and require the message MD5.
+fn find_matching_video(
+    video_dir: &Path,
+    preferred_hash: Option<&str>,
+    content: &str,
+) -> Option<Vec<u8>> {
+    let expected_size = video_attr(content, "length")?.parse::<u64>().ok()?;
+    let expected_md5 = video_attr(content, "md5")?;
+    if expected_md5.len() != 32 || !expected_md5.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let preferred_path = preferred_hash.map(|hash| video_dir.join(format!("{hash}.mp4")));
+    if let Some(path) = preferred_path.as_ref() {
+        if path.metadata().ok().map(|meta| meta.len()) == Some(expected_size) {
+            if let Ok(data) = fs::read(path) {
+                if video_matches_message(&data, content) {
+                    return Some(data);
+                }
+            }
+        }
+    }
+
+    let entries = fs::read_dir(video_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if preferred_path.as_ref() == Some(&path)
+            || path.extension().and_then(|ext| ext.to_str()) != Some("mp4")
+            || entry.metadata().ok().map(|meta| meta.len()) != Some(expected_size)
+        {
+            continue;
+        }
+        if let Ok(data) = fs::read(&path) {
+            if format!("{:x}", Md5::digest(&data)).eq_ignore_ascii_case(&expected_md5) {
+                return Some(data);
+            }
+        }
+    }
+    None
+}
+
+/// Get video data. Full quality returns only a complete message-matching MP4;
+/// legacy and thumbnail requests may return a cached cover while transfer waits.
 /// Videos are stored unencrypted at msg/video/{YYYY-MM}/{hash}.mp4
 fn get_video_data(
     account_dir: &str,
@@ -617,6 +686,8 @@ fn get_video_data(
     chat_id: &str,
     local_id: i64,
     create_time: i64,
+    content: &str,
+    quality: ImageQuality,
 ) -> MediaResult {
     let dt = match chrono::DateTime::from_timestamp(create_time, 0) {
         Some(dt) => dt,
@@ -627,27 +698,28 @@ fn get_video_data(
     // Try to get file hash from message_resource.db
     let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id);
 
-    if let Some(ref hash) = file_hash {
-        for base in &account_base_paths(account_dir) {
-            let video_dir = Path::new(base).join("msg/video").join(&year_month);
+    for base in &account_base_paths(account_dir) {
+        let video_dir = Path::new(base).join("msg/video").join(&year_month);
 
-            // Try .mp4 first (full video)
-            let mp4_path = video_dir.join(format!("{hash}.mp4"));
-            if mp4_path.exists() {
-                if let Ok(data) = fs::read(&mp4_path) {
-                    tracing::info!("[media:video] found mp4 for local_id={}, size={}", local_id, data.len());
-                    return MediaResult {
-                        media_type: "video".into(),
-                        data: Some(base64::Engine::encode(
-                            &base64::engine::general_purpose::STANDARD,
-                            &data,
-                        )),
-                        url: None,
-                        format: "mp4".into(),
-                        filename: format!("msg_{local_id}.mp4"),
-                    };
-                }
+        if quality != ImageQuality::Thumbnail {
+            if let Some(data) = find_matching_video(&video_dir, file_hash.as_deref(), content) {
+                tracing::info!("[media:video] found message-matching mp4 for local_id={}, size={}", local_id, data.len());
+                return MediaResult {
+                    media_type: "video".into(),
+                    data: Some(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &data,
+                    )),
+                    url: None,
+                    format: "mp4".into(),
+                    filename: format!("msg_{local_id}.mp4"),
+                };
             }
+        }
+
+        if quality == ImageQuality::Full { continue; }
+
+        if let Some(ref hash) = file_hash {
 
             // Try cover .jpg (full-size cover image)
             let cover_path = video_dir.join(format!("{hash}.jpg"));
@@ -687,9 +759,10 @@ fn get_video_data(
         }
     }
 
-    // Fallback: try cached thumbnail from WeChat's cache dir
-    if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
-        return thumb;
+    if quality != ImageQuality::Full {
+        if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
+            return thumb;
+        }
     }
 
     // Video exists but no file found on disk yet
@@ -1102,7 +1175,7 @@ pub fn get_message_media(
         }
         43 => {
             // Video
-            get_video_data(account_dir, keys, chat_id, local_id, create_time)
+            get_video_data(account_dir, keys, chat_id, local_id, create_time, &content, quality)
         }
         34 => {
             // Voice
@@ -1162,6 +1235,42 @@ mod quality_tests {
         assert!(!file_matches_message(b"ab", content));
         assert!(!file_matches_message(b"xyz", content));
         assert!(!file_matches_message(b"abc", "<totallen>3</totallen>"));
+    }
+
+    #[test]
+    fn incomplete_or_wrong_video_is_not_returned() {
+        let content = "<msg><videomsg length=\"3\" md5=\"900150983cd24fb0d6963f7d28e17f72\" /></msg>";
+        assert!(video_matches_message(b"abc", content));
+        assert!(!video_matches_message(b"ab", content));
+        assert!(!video_matches_message(b"xyz", content));
+        assert!(!video_matches_message(b"abc", "<msg><videomsg length=\"3\" /></msg>"));
+        assert!(video_matches_message(
+            b"abc",
+            "<msg><videomsg rawlength=\"9\" rawmd5=\"00000000000000000000000000000000\" length=\"3\" md5=\"900150983cd24fb0d6963f7d28e17f72\" /></msg>"
+        ));
+    }
+
+    #[test]
+    fn video_fallback_uses_exact_identity_when_resource_hash_is_a_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("thumbnail-hash.mp4"), b"xyz").unwrap();
+        fs::write(dir.path().join("actual-video-hash.mp4"), b"abc").unwrap();
+        fs::write(dir.path().join("same-size-wrong-video.mp4"), b"def").unwrap();
+        let content = "<msg><videomsg length=\"3\" md5=\"900150983cd24fb0d6963f7d28e17f72\" /></msg>";
+
+        assert_eq!(
+            find_matching_video(dir.path(), Some("thumbnail-hash"), content),
+            Some(b"abc".to_vec())
+        );
+    }
+
+    #[test]
+    fn video_fallback_rejects_files_without_an_exact_match() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("same-size-wrong-video.mp4"), b"def").unwrap();
+        let content = "<msg><videomsg length=\"3\" md5=\"900150983cd24fb0d6963f7d28e17f72\" /></msg>";
+
+        assert_eq!(find_matching_video(dir.path(), None, content), None);
     }
 
     #[test]
