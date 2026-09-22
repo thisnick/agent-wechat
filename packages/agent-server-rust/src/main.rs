@@ -63,6 +63,7 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+    tools::media_download::shutdown().await;
 }
 
 async fn shutdown_signal() {

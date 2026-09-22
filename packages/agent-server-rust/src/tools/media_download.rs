@@ -21,6 +21,17 @@ struct Queue {
 static QUEUE: OnceLock<Mutex<Queue>> = OnceLock::new();
 const RETRY_AFTER: Duration = Duration::from_secs(300);
 
+/// Drain the owning IPC task before closing stdin; the helper then unloads and
+/// detaches explicitly. A server restart must not interrupt a native callback.
+pub async fn shutdown() {
+    if let Some(queue) = QUEUE.get() {
+        let mut queue = queue.lock().await;
+        if let Some(worker) = queue.worker.take() {
+            worker.stop().await;
+        }
+    }
+}
+
 pub fn current_process(account: &str) -> Option<(i64, String)> {
     if get_session("default")?.logged_in_user.as_deref()? != account { return None; }
     let pid = find_wechat_pid()?;
@@ -31,6 +42,12 @@ pub fn current_process(account: &str) -> Option<(i64, String)> {
 }
 
 impl Worker {
+    async fn stop(self) {
+        let Worker { mut child, input, output: _, identity: _ } = self;
+        drop(input);
+        let _ = child.wait().await;
+    }
+
     fn start(identity: String) -> Option<Self> {
         let mut child = Command::new("python3")
             .arg("/opt/tools/media-download.py")
@@ -65,7 +82,7 @@ pub async fn ensure_queued(account: String, metadata: Value) -> bool {
         if queue.submitted.contains_key(&key) { return true; }
         if queue.submitted.len() >= 256 { return false; }
         if queue.worker.as_ref().map(|w| w.identity.as_str()) != Some(identity.as_str()) {
-            if let Some(mut old) = queue.worker.take() { let _ = old.child.kill().await; }
+            if let Some(old) = queue.worker.take() { old.stop().await; }
             queue.worker = Worker::start(identity);
         }
         if queue.worker.is_none() { return false; }
@@ -79,7 +96,7 @@ pub async fn ensure_queued(account: String, metadata: Value) -> bool {
             true
         } else {
             tracing::warn!("[media] native transfer unavailable; retaining retry cooldown");
-            if let Some(mut worker) = queue.worker.take() { let _ = worker.child.kill().await; }
+            if let Some(worker) = queue.worker.take() { worker.stop().await; }
             false
         }
     });

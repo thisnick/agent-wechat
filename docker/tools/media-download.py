@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Private line-delimited IPC worker; one attachment per WeChat process/account."""
 import json
+from contextlib import ExitStack
 from pathlib import Path
 import re
 import subprocess
@@ -29,7 +30,7 @@ def validate_metadata(value):
         raise ValueError('File Transfer sender mismatch')
     if not chat.endswith('@chatroom') and value['senderId'] not in (chat, value['accountId']):
         raise ValueError('Sender mismatch')
-    if type(value.get('local_type')) is not int or value['local_type'] not in (3, (6 << 32) | 49):
+    if type(value.get('local_type')) is not int or value['local_type'] not in (3, 43, (6 << 32) | 49):
         raise ValueError('Unvalidated message type')
     for field in ('local_id', 'create_time'):
         if type(value.get(field)) is not int or not 0 < value[field] <= 0xffffffff:
@@ -53,7 +54,18 @@ def build_id(pid):
     return found[0]
 
 
-def main():
+def close_attachment(session, script):
+    # The synchronous RPC has completed before EOF/error cleanup reaches here.
+    # Explicitly release callbacks before disconnecting from the target.
+    try:
+        if not session.is_detached and script is not None:
+            script.unload()
+    finally:
+        if not session.is_detached:
+            session.detach()
+
+
+def serve(cleanup):
     import frida
     session = script = None
     identity = None
@@ -77,6 +89,7 @@ def main():
             if session is None:
                 build = build_id(pid)
                 session = frida.attach(pid)
+                cleanup.callback(lambda: close_attachment(session, script))
                 source = Path(__file__).with_suffix('.js').read_text()
                 script = session.create_script('const buildId=' + json.dumps(build) + ';\n' + source)
                 script.load()
@@ -89,6 +102,11 @@ def main():
             # Never emit message XML, credentials, Frida source or native addresses.
             print('{"status":"error"}', flush=True)
             return
+
+
+def main():
+    with ExitStack() as cleanup:
+        serve(cleanup)
 
 
 if __name__ == '__main__':

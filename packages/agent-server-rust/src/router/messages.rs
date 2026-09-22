@@ -249,7 +249,19 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         };
         let path = format!("/tmp/send_image_{}{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), ext);
+        if img.data.len() > super::MAX_UPLOAD_BASE64_BYTES {
+            return Json(SendResult {
+                success: false,
+                error: Some("Image exceeds the 128 MiB upload limit".to_string()),
+            });
+        }
         if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data) {
+            if bytes.len() > super::MAX_UPLOAD_BYTES {
+                return Json(SendResult {
+                    success: false,
+                    error: Some("Image exceeds the 128 MiB upload limit".to_string()),
+                });
+            }
             if std::fs::write(&path, &bytes).is_ok() {
                 image_mime = Some(img.mime_type.clone());
                 image_path = Some(path);
@@ -274,9 +286,22 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         }).collect();
         let path = format!("/tmp/send_file_{}_{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), safe_name);
+        if f.data.len() > super::MAX_UPLOAD_BASE64_BYTES {
+            return Json(SendResult {
+                success: false,
+                error: Some("File exceeds the 128 MiB upload limit".to_string()),
+            });
+        }
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &f.data) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
-                Ok(_) => { file_path = Some(path); }
+                Ok(_) if bytes.len() <= super::MAX_UPLOAD_BYTES => { file_path = Some(path); }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&path);
+                    return Json(SendResult {
+                        success: false,
+                        error: Some("File exceeds the 128 MiB upload limit".to_string()),
+                    });
+                }
                 Err(e) => {
                     return Json(SendResult {
                         success: false,

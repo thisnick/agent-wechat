@@ -77,6 +77,23 @@ function safeDisplayName(name: string): string {
   return name.replace(/[\r\n\0]/g, " ").trim() || "attachment";
 }
 
+export function attachmentFallbackFilename(
+  kind: AttachmentKind,
+  localId: number,
+  originalBody = "",
+): string {
+  if (kind === "file" && originalBody && !originalBody.trimStart().startsWith("<")) {
+    return safeDisplayName(originalBody);
+  }
+  const extension = kind === "image" ? "jpg" : kind === "audio" ? "mp3" : kind === "video" ? "mp4" : "bin";
+  return `message-${localId}.${extension}`;
+}
+
+export function attachmentSourceBody(originalBody: string, kind: AttachmentKind | undefined): string {
+  if (!kind || kind === "file") return originalBody;
+  return originalBody.trimStart().startsWith("<") ? "" : originalBody;
+}
+
 export function renderAttachmentBody(
   originalBody: string,
   attachment: WeChatAttachment | undefined,
@@ -88,6 +105,9 @@ export function renderAttachmentBody(
     const label = attachment.kind === "file" ? "File" :
       attachment.kind === "image" ? "Image" :
         attachment.kind === "audio" ? "Voice message" : "Video";
+    if (attachment.status === "pending") {
+      return appendReference(originalBody, `[${label} pending: ${name}]`);
+    }
     return appendReference(originalBody, `[${label} unavailable: ${name} (${attachment.status})]`);
   }
   if (attachment.kind === "file") {

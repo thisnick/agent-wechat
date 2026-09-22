@@ -7,8 +7,10 @@ import { resolveWeChatAccount } from "./types.js";
 import {
   applyCatchupAttachmentPolicy,
   applyLiveAttachment,
+  attachmentFallbackFilename,
   attachmentKindForMessageType,
   attachmentKindForResult,
+  attachmentSourceBody,
   buildMediaSegments,
   mediaMime,
   type WeChatAttachment,
@@ -136,18 +138,19 @@ async function retrieveAttachment(
   const baseType = msg.type & 0x7fffffff;
   const expectedKind = attachmentKindForMessageType(baseType);
   if (!expectedKind) return undefined;
+  const fallbackFilename = attachmentFallbackFilename(expectedKind, msg.localId, msg.content);
   try {
     const result = await pollMedia(client, chatId, msg.localId, log, maxAttempts);
     if (!result) {
-      return { kind: expectedKind, status: "unavailable", filename: msg.content || `message-${msg.localId}` };
+      return { kind: expectedKind, status: "unavailable", filename: fallbackFilename };
     }
     if (result.type === "unsupported") {
       // Type 49 also represents links/cards; unsupported means it was not a file.
       if (baseType === 49) return undefined;
-      return { kind: expectedKind, status: "unsupported", filename: msg.content || `message-${msg.localId}` };
+      return { kind: expectedKind, status: "unsupported", filename: fallbackFilename };
     }
     const kind = attachmentKindForResult(result, expectedKind);
-    const filename = result.filename || msg.content || `message-${msg.localId}`;
+    const filename = result.filename || fallbackFilename;
     if (!result.data) {
       return { kind, status: result.type === "pending" ? "pending" : "unavailable", filename };
     }
@@ -171,7 +174,7 @@ async function retrieveAttachment(
     return {
       kind: expectedKind,
       status,
-      filename: msg.content || `message-${msg.localId}`,
+      filename: fallbackFilename,
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -381,14 +384,15 @@ async function prepareMessage(
   }
 
   const baseType = msg.type & 0x7fffffff;
+  const messageAttachmentKind = attachmentKindForMessageType(baseType);
   let attachment: WeChatAttachment | undefined;
-  if (attachmentKindForMessageType(baseType)) {
+  if (messageAttachmentKind) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
     attachment = await retrieveAttachment(client, chatId, msg, liveAccount, log);
   }
 
   const timestamp = new Date(msg.timestamp).getTime();
-  let sourceBody = msg.content || "";
+  let sourceBody = attachmentSourceBody(msg.content || "", messageAttachmentKind);
 
   // Append reply context for quote/reply messages
   if (msg.reply) {
