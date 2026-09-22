@@ -1,5 +1,17 @@
 # @agent-wechat/wechat
 
+## 0.13.0
+
+### Minor Changes
+
+- [#187](https://github.com/thisnick/agent-wechat/pull/187) [`93cdb04`](https://github.com/thisnick/agent-wechat/commit/93cdb0482629b90f48ade6aa7dc111586f8117c8) Thanks [@thisnick](https://github.com/thisnick)! - Return the requested image quality without silently substituting a thumbnail. The CLI requests full resolution by default; use --thumbnail for the cached preview. HTTP clients that omit quality retain the legacy thumbnail-first behavior.
+
+  Validate cached file attachments against their message's size and content hash before returning them, and reject titles containing filesystem paths.
+
+- [#187](https://github.com/thisnick/agent-wechat/pull/187) [`641367c`](https://github.com/thisnick/agent-wechat/commit/641367c3e586ea7529d7d9d23f3698a673bcfdef) Thanks [@thisnick](https://github.com/thisnick)! - Request missing files and full images through WeChat's native queue from the media endpoint on supported AMD64 and ARM64 builds, preserving sender identity for groups, self-sent messages, and File Transfer. Reuse a process-scoped helper, suppress duplicate submissions, and return data only after cache validation. Preserve legacy image selection for clients that omit quality; OpenClaw requests full images explicitly. Voice and video retain cached retrieval without native triggering.
+
+- [#187](https://github.com/thisnick/agent-wechat/pull/187) [`dbf508d`](https://github.com/thisnick/agent-wechat/commit/dbf508de6426be2635722aa464e661a3a921b96e) Thanks [@thisnick](https://github.com/thisnick)! - Persist inbound WeChat attachments in OpenClaw-managed local storage with a configurable per-file size limit. Include every file path in agent-visible context, retry unavailable catch-up attachments, retain only the latest image in the single visual-media slot, paginate chat/message polling, and preserve group catch-up cursors across gateway restarts.
+
 ## 0.12.2
 
 ### Patch Changes
