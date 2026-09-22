@@ -22,6 +22,30 @@ import tempfile
 
 MIN_RATIO = 0.6
 
+
+def validate_image(data):
+    """Reject incomplete cache writes before decoding with the runtime codec."""
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        complete = data.endswith(b'\x00\x00\x00\x00IEND\xaeB`\x82')
+    elif data.startswith(b'\xff\xd8'):
+        complete = data.endswith(b'\xff\xd9')
+    elif data.startswith((b'GIF87a', b'GIF89a')):
+        complete = data.endswith(b';')
+    elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        complete = len(data) >= 12 and struct.unpack('<I', data[4:8])[0] + 8 == len(data)
+    else:
+        complete = False
+    if not complete:
+        raise ValueError('Incomplete image')
+    result = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-xerror',
+         '-err_detect', 'explode', '-i', 'pipe:0', '-f', 'null', '-'],
+        input=data, capture_output=True, timeout=10,
+    )
+    if result.returncode or result.stderr:
+        raise ValueError('Image validation failed')
+    return b'ok', 'validation'
+
 # ============================================
 # WXGF → Image
 # ============================================
@@ -219,7 +243,9 @@ def main():
         sys.exit(1)
 
     try:
-        if mode == "wxgf2img":
+        if mode == "validate-image":
+            result, fmt = validate_image(data)
+        elif mode == "wxgf2img":
             result, fmt = wxgf2img(data)
         elif mode == "silk2mp3":
             result, fmt = silk2mp3(data)

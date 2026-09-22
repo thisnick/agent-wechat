@@ -97,7 +97,7 @@ async function pollMedia(
 ): Promise<MediaResult | null> {
   let lastResult: MediaResult | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = await client.getMedia(chatId, localId);
+    const result = await client.getMedia(chatId, localId, "full");
     lastResult = result;
     if (result.type === "unsupported") {
       return result;

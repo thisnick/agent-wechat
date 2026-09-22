@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - 'docker/tools/**.py'
+      - 'docker/tools/media-download.js'
       - 'tests/test_*.py'
+      - 'tests/media-download.test.cjs'
       - '.github/workflows/python-tools.yml'
 
 jobs:
@@ -17,3 +19,7 @@ jobs:
           python-version: '3.12'
       # SQLCipher 4 integration is additionally exercised in research containers.
       - run: python3 -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tests/media-download.test.cjs

@@ -9,3 +9,4 @@ pub mod wechat_db;
 pub mod wechat_keys;
 pub mod wechat_messages;
 pub mod wechat_media;
+pub mod media_download;
