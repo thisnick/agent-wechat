@@ -12,7 +12,7 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::get_message_media;
+use crate::tools::wechat_media::{get_message_media, ImageQuality};
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
 
@@ -79,7 +79,16 @@ pub async fn list_messages(
     ))
 }
 
-pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+#[derive(Deserialize, Default)]
+pub struct MediaParams {
+    #[serde(default)]
+    quality: ImageQuality,
+}
+
+pub async fn get_media(
+    Path((chat_id, local_id)): Path<(String, i64)>,
+    Query(params): Query<MediaParams>,
+) -> Json<MediaResult> {
     let session = match get_session("default") {
         Some(s) => s,
         None => {
@@ -131,13 +140,26 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
-    Json(get_message_media(
-        &logged_in_user,
-        &keys,
-        &chat_id,
-        local_id,
-        image_keys,
-    ))
+    // Database reads, image conversion and large-file hashing are blocking work.
+    let result = tokio::task::spawn_blocking(move || {
+        get_message_media(
+            &logged_in_user,
+            &keys,
+            &chat_id,
+            local_id,
+            image_keys,
+            params.quality,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| MediaResult {
+        media_type: "pending".into(),
+        data: None,
+        url: None,
+        format: String::new(),
+        filename: String::new(),
+    });
+    Json(result)
 }
 
 #[derive(Deserialize)]

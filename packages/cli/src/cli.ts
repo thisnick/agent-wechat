@@ -324,10 +324,11 @@ messagesCmd
 
 messagesCmd
   .command("media <chatId> <localId>")
-  .description("Save media attachment (image thumbnail, emoji, or voice)")
+  .description("Save a media attachment (full-resolution image, file, or voice)")
+  .option("--thumbnail", "Retrieve an image thumbnail instead of full resolution")
   .option("-o, --output <path>", "Output file path")
   .action(async (chatId: string, localIdStr: string, opts) => {
-    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output);
+    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output, opts.thumbnail);
   });
 
 messagesCmd
@@ -685,8 +686,8 @@ async function cmdMessages(client: WeChatClient, chatId: string, limit: number =
   console.log(`\n${messages.length} message(s) shown.`);
 }
 
-async function cmdMedia(client: WeChatClient, chatId: string, localId: number, outputPath?: string) {
-  const result = await client.getMedia(chatId, localId);
+async function cmdMedia(client: WeChatClient, chatId: string, localId: number, outputPath?: string, thumbnail = false) {
+  const result = await client.getMedia(chatId, localId, thumbnail ? "thumbnail" : "full");
 
   if (result.type === "unsupported") {
     console.error("No media found for this message (unsupported type or not found).");
@@ -705,7 +706,7 @@ async function cmdMedia(client: WeChatClient, chatId: string, localId: number, o
     fs.writeFileSync(outFile, buffer);
     console.log(`Saved ${result.type} to ${outFile} (${buffer.length} bytes)`);
   } else if (result.type === "image") {
-    console.error("Image thumbnail not yet cached by WeChat. Try opening the chat in the app first.");
+    console.error(`Requested image ${thumbnail ? "thumbnail" : "full resolution"} is not yet available.`);
     process.exit(1);
   } else if (result.type === "video") {
     console.error("Video not yet downloaded by WeChat. Try playing the video in the app first.");

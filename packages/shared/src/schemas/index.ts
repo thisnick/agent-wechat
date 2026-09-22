@@ -200,10 +200,11 @@ export const sendResultSchema = z.object({
 export const getMediaParamsSchema = z.object({
   chatId: z.string().min(1),
   localId: z.number().int(),
+  quality: z.enum(["full", "thumbnail"]).optional(),
 });
 
 export const mediaResultSchema = z.object({
-  type: z.enum(["image", "emoji", "voice", "video", "unsupported"]),
+  type: z.enum(["image", "emoji", "voice", "video", "file", "pending", "unsupported"]),
   data: z.string().optional(),
   url: z.string().optional(),
   format: z.string(),
