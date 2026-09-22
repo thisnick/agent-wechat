@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.14.0
+
+### Minor Changes
+
+- [#190](https://github.com/thisnick/agent-wechat/pull/190) [`1f3c5eb`](https://github.com/thisnick/agent-wechat/commit/1f3c5eb549d2b18c25f4916f1bf939c05a22245d) Thanks [@thisnick](https://github.com/thisnick)! - Trigger missing video downloads through WeChat's native queue, return only complete message-matching MP4 data for full-quality requests, keep raw video metadata out of OpenClaw pending messages, and allow base64-wrapped uploads up to the explicit 128 MiB media limit.
+
 ## 0.13.0
 
 ### Minor Changes
