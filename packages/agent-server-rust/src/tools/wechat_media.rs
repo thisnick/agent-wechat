@@ -7,6 +7,21 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageQuality {
+    #[default]
+    Full,
+    Thumbnail,
+}
+
+fn image_suffixes(quality: ImageQuality) -> &'static [&'static str] {
+    match quality {
+        ImageQuality::Full => &["_h"],
+        ImageQuality::Thumbnail => &["_t"],
+    }
+}
+
 /// WeChat .dat file magic bytes: 07 08 56 32 08 07
 const DAT_MAGIC: [u8; 6] = [0x07, 0x08, 0x56, 0x32, 0x08, 0x07];
 
@@ -367,6 +382,7 @@ fn find_dat_via_hardlink(
     keys: &HashMap<String, String>,
     _chat_id: &str,
     content: &str,
+    quality: ImageQuality,
 ) -> Option<String> {
     let hardlink_key = match keys.get("hardlink.db") {
         Some(k) => k,
@@ -400,6 +416,14 @@ fn find_dat_via_hardlink(
         }
     };
     let file_name = row.get("file_name")?.as_str()?;
+    let stem = file_name.strip_suffix(".dat")?;
+    let stem = stem.strip_suffix("_h")
+        .or_else(|| stem.strip_suffix("_t"))
+        .unwrap_or(stem);
+    if stem.len() != 32 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let file_name = format!("{stem}{}.dat", image_suffixes(quality)[0]);
     let dir1 = row.get("dir1")?.as_i64()?;
     let dir2 = row.get("dir2")?.as_i64()?;
 
@@ -426,7 +450,7 @@ fn find_dat_via_hardlink(
             .join(chat_dir)
             .join(date_dir)
             .join("Img")
-            .join(file_name);
+            .join(&file_name);
         if dat_path.exists() {
             return Some(dat_path.to_string_lossy().to_string());
         }
@@ -482,6 +506,7 @@ fn find_dat_via_resource_db(
     chat_id: &str,
     local_id: i64,
     create_time: i64,
+    quality: ImageQuality,
 ) -> Option<String> {
     let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id)?;
 
@@ -491,8 +516,8 @@ fn find_dat_via_resource_db(
     let year_month = dt.format("%Y-%m").to_string();
 
     for base in &account_base_paths(account_dir) {
-        // Try mid-res .dat first, then _t.dat thumbnail
-        for suffix in &["", "_t"] {
+        // Never satisfy a full-resolution request with a smaller variant.
+        for suffix in image_suffixes(quality) {
             let dat_path = Path::new(base)
                 .join("msg/attach")
                 .join(&chat_hash)
@@ -872,6 +897,10 @@ fn get_file_attachment(
 ) -> MediaResult {
     let filename = extract_xml_tag(content, "title").unwrap_or_else(|| format!("file_{local_id}"));
     let ext = extract_xml_tag(content, "fileext").unwrap_or_default();
+    // The title comes from another client, not a trusted filesystem path.
+    if !safe_attachment_name(&filename) {
+        return unsupported();
+    }
 
     // Files are stored at <account>/msg/file/YYYY-MM/<filename>
     let dt = chrono::DateTime::from_timestamp(create_time, 0);
@@ -884,6 +913,9 @@ fn get_file_attachment(
             .join(&filename);
         if file_path.exists() {
             if let Ok(data) = fs::read(&file_path) {
+                if !file_matches_message(&data, content) {
+                    continue;
+                }
                 return MediaResult {
                     media_type: "file".into(),
                     data: Some(base64::Engine::encode(
@@ -902,6 +934,30 @@ fn get_file_attachment(
     pending()
 }
 
+fn safe_attachment_name(filename: &str) -> bool {
+    !filename.is_empty()
+        && filename != "."
+        && filename != ".."
+        && !filename.contains(['/', '\\', '\0'])
+}
+
+fn file_matches_message(data: &[u8], content: &str) -> bool {
+    let Some(expected_size) = extract_xml_tag(content, "totallen")
+        .and_then(|n| n.parse::<u64>().ok()) else {
+        return false;
+    };
+    if data.len() as u64 != expected_size {
+        return false;
+    }
+    // Equal filenames and lengths can still belong to different messages.
+    let Some(expected_md5) = extract_xml_tag(content, "md5") else {
+        return false;
+    };
+    expected_md5.len() == 32
+        && expected_md5.bytes().all(|b| b.is_ascii_hexdigit())
+        && format!("{:x}", Md5::digest(data)).eq_ignore_ascii_case(&expected_md5)
+}
+
 // ── Public entry point ───────────────────────────────────────────────────────
 
 /// Get media attachment for a message.
@@ -911,6 +967,7 @@ pub fn get_message_media(
     chat_id: &str,
     local_id: i64,
     image_keys_raw: Option<(String, Option<u8>)>,
+    quality: ImageQuality,
 ) -> MediaResult {
     let (local_type, create_time, content) =
         match lookup_message_raw(account_dir, keys, chat_id, local_id) {
@@ -939,17 +996,15 @@ pub fn get_message_media(
                 chat_id, local_id, create_time, content.len()
             );
 
-            // Try cached thumbnail first
-            if let Some(thumb) =
-                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
-            {
-                tracing::info!("[media] found thumbnail for local_id={}", local_id);
-                return thumb;
+            if quality == ImageQuality::Thumbnail {
+                if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time)
+                {
+                    return thumb;
+                }
             }
-            tracing::info!("[media] no thumbnail for local_id={}", local_id);
 
 
-            // Try .dat decryption if we have image keys
+            // Read .dat content if image credentials are available.
             if let Some((aes_hex, xor_byte)) = image_keys_raw {
                 let image_keys = ImageKeys {
                     aes_key_hex: aes_hex,
@@ -958,14 +1013,16 @@ pub fn get_message_media(
 
                 // Primary: look up filename from message_resource.db
                 if let Some(dat_path) = find_dat_via_resource_db(
-                    account_dir, keys, chat_id, local_id, create_time,
+                    account_dir, keys, chat_id, local_id, create_time, quality,
                 ) {
                     tracing::info!("[media] found dat via resource-db: {}", dat_path);
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
 
                 // Fallback: try hardlink.db (older images may not be in resource db)
-                if let Some(dat_path) = find_dat_via_hardlink(account_dir, keys, chat_id, &content) {
+                if let Some(dat_path) = find_dat_via_hardlink(
+                    account_dir, keys, chat_id, &content, quality,
+                ) {
                     tracing::info!("[media] found dat via hardlink: {}", dat_path);
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
@@ -1007,6 +1064,41 @@ pub fn get_message_media(
                 return thumb;
             }
             unsupported()
+        }
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    #[test]
+    fn full_resolution_never_selects_a_thumbnail_or_mid_size() {
+        assert_eq!(image_suffixes(ImageQuality::Full), &["_h"]);
+        assert_eq!(image_suffixes(ImageQuality::Thumbnail), &["_t"]);
+        assert_eq!(ImageQuality::default(), ImageQuality::Full);
+    }
+
+    #[test]
+    fn quality_rejects_unknown_values() {
+        assert_eq!(serde_json::from_str::<ImageQuality>("\"thumbnail\"").unwrap(), ImageQuality::Thumbnail);
+        assert!(serde_json::from_str::<ImageQuality>("\"anything\"").is_err());
+    }
+
+    #[test]
+    fn incomplete_or_wrong_file_is_not_returned() {
+        let content = "<totallen>3</totallen><md5>900150983cd24fb0d6963f7d28e17f72</md5>";
+        assert!(file_matches_message(b"abc", content));
+        assert!(!file_matches_message(b"ab", content));
+        assert!(!file_matches_message(b"xyz", content));
+        assert!(!file_matches_message(b"abc", "<totallen>3</totallen>"));
+    }
+
+    #[test]
+    fn attachment_title_is_a_single_filename() {
+        assert!(safe_attachment_name("test image.png"));
+        for name in ["", ".", "..", "../file", "/etc/passwd", "folder\\file", "a\0b"] {
+            assert!(!safe_attachment_name(name));
         }
     }
 }
