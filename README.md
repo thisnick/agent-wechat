@@ -98,9 +98,7 @@ ordinary attachment instead.
 API clients can create a job with authenticated `POST /api/messages/voice`
 (multipart `chatId` and `audio`, plus an `Idempotency-Key` header), then poll
 `GET /api/messages/voice/{jobId}` or request cancellation with
-`POST /api/messages/voice/{jobId}/cancel`. See the
-[voice-note integration notes](https://github.com/thisnick/agent-wechat-docs/blob/main/VOICE-SEND-INTEGRATION.md)
-for behavior and validation details.
+`POST /api/messages/voice/{jobId}/cancel`.
 
 In OpenClaw, outbound audio with `asVoice: true` becomes a WeChat voice note;
 audio without voice intent remains a file attachment. An incoming voice message
