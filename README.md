@@ -15,7 +15,7 @@ A programmable WeChat interface. Controls a WeChat client running in a Docker co
 ## What It Does
 
 - **Read** chats, messages, and media (images, voice, files) via REST API
-- **Send** text messages, images, and files
+- **Send** text messages, images, files, and voice notes
 - **Login** via QR code displayed in your terminal
 - **Monitor** for new messages in real-time
 
@@ -44,6 +44,9 @@ wx chats list
 # Send a message
 wx messages send <chatId> --text "Hello"
 
+# Record audio as a WeChat voice note
+wx messages send <chatId> --voice ./reply.mp3
+
 # Read messages
 wx messages list <chatId>
 
@@ -60,12 +63,49 @@ wx down
 | `wx logs` | Stream container logs |
 | `wx status` | Show server and login status |
 | `wx auth login` | Login flow (shows QR code) |
+| `wx auth status` | Show login status |
+| `wx auth logout` | Log out of WeChat |
 | `wx chats list` | List chats |
+| `wx chats get <id>` | Show one chat |
+| `wx chats open <id>` | Select a chat in WeChat |
 | `wx find <name>` | Find chat by name |
+| `wx contacts list` / `wx contacts find <name>` | List or find contacts |
 | `wx messages list <id>` | List messages in a chat |
 | `wx messages send <id> --text <msg>` | Send text message |
 | `wx messages send <id> --image <file>` | Send image |
-| `wx messages media <id> <localId>` | Download media attachment |
+| `wx messages send <id> --file <file>` | Send a file attachment |
+| `wx messages send <id> --voice <audio>` | Send audio as one or more voice notes and wait for verification |
+| `wx messages send <id> --voice <audio> --detach` | Start a voice job and return its ID immediately |
+| `wx messages voice status <jobId>` | Check voice-job progress and sent message IDs |
+| `wx messages voice cancel <jobId>` | Request cancellation of a voice job |
+| `wx messages media <id> <localId> [-o <path>] [--thumbnail]` | Save a message attachment |
+
+Run `wx --help` or `wx <command> --help` for all commands and options.
+
+### Voice notes
+
+`--voice` uses WeChat's recorder, not a file attachment. It must be sent on its
+own, without `--text`, `--image`, or `--file`. Audio longer than 50 seconds is
+split into sequential notes; the CLI waits for each note to be verified unless
+you use `--detach`.
+
+A voice send is not atomic: earlier notes remain sent if a later note fails.
+Check `wx messages voice status <jobId>` before retrying, and do not resend the
+whole recording after an uncertain result. The current limits are 128 MiB per
+upload and ten minutes of decoded audio. Use `--file` to send the audio as an
+ordinary attachment instead.
+
+API clients can create a job with authenticated `POST /api/messages/voice`
+(multipart `chatId` and `audio`, plus an `Idempotency-Key` header), then poll
+`GET /api/messages/voice/{jobId}` or request cancellation with
+`POST /api/messages/voice/{jobId}/cancel`. See the
+[voice-note integration notes](https://github.com/thisnick/agent-wechat-docs/blob/main/VOICE-SEND-INTEGRATION.md)
+for behavior and validation details.
+
+In OpenClaw, outbound audio with `asVoice: true` becomes a WeChat voice note;
+audio without voice intent remains a file attachment. An incoming voice message
+does not force a spoken reply. Automatic speech replies depend on OpenClaw's
+optional `messages.tts.auto` setting.
 
 ## Architecture
 
