@@ -337,11 +337,22 @@ messagesCmd
   .option("--text <text>", "Text message to send")
   .option("--image <path>", "Image file to send")
   .option("--file <path>", "File to send")
-  .action(async (chatId: string, opts: { text?: string; image?: string; file?: string }) => {
-    if (!opts.text && !opts.image && !opts.file) {
-      console.error("Must provide --text, --image, or --file");
+  .option("--voice <path>", "Record audio as one or more voice notes")
+  .option("--detach", "Return after the voice job is queued")
+  .action(async (chatId: string, opts: { text?: string; image?: string; file?: string; voice?: string; detach?: boolean }) => {
+    if (!opts.text && !opts.image && !opts.file && !opts.voice) {
+      console.error("Must provide --text, --image, --file, or --voice");
       process.exit(1);
     }
+    if (opts.voice) {
+      if (opts.text || opts.image || opts.file) throw new Error("--voice must be sent on its own");
+      const audio = fs.readFileSync(opts.voice);
+      const job = await getClient().createVoiceJob(chatId, audio, randomBytes(16).toString("hex"));
+      console.log(`Voice job: ${job.jobId}`);
+      if (!opts.detach) await waitVoiceJob(getClient(), job.jobId);
+      return;
+    }
+    if (opts.detach) throw new Error("--detach requires --voice");
 
     let image: { data: string; mimeType: string } | undefined;
     if (opts.image) {
@@ -368,6 +379,36 @@ messagesCmd
 
     await cmdSend(getClient(), chatId, opts.text, image, file);
   });
+
+const voiceCmd = messagesCmd.command("voice").description("Inspect or cancel voice jobs");
+voiceCmd.command("status <jobId>").action(async (jobId: string) => {
+  console.log(JSON.stringify(await getClient().getVoiceJob(jobId), null, 2));
+});
+voiceCmd.command("cancel <jobId>").action(async (jobId: string) => {
+  const job = await getClient().cancelVoiceJob(jobId);
+  console.log(`Cancellation requested for ${job.jobId}`);
+});
+
+async function waitVoiceJob(client: WeChatClient, jobId: string): Promise<void> {
+  let lastProgress = "";
+  for (;;) {
+    const job = await client.getVoiceJob(jobId);
+    const verified = job.chunks.filter((chunk) => chunk.status === "verified").length;
+    const progress = `${job.status}: ${verified}/${job.chunks.length} notes verified`;
+    if (progress !== lastProgress) {
+      console.log(progress);
+      lastProgress = progress;
+    }
+    if (job.status === "completed") {
+      console.log(`Message IDs: ${job.chunks.map((chunk) => chunk.messageId).join(", ")}`);
+      return;
+    }
+    if (["failed", "cancelled", "needs_review"].includes(job.status)) {
+      throw new Error(`${job.status}: ${job.error ?? "No further details"}. Job ${jobId}; do not resend the whole recording.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
 
 // ============================================
 // Update Command

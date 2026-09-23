@@ -12,6 +12,7 @@ import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
+import { sendWeChatMedia } from "./outbound-media.js";
 
 async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
@@ -19,53 +20,6 @@ async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<s
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   const result = await client.sendMessage({ chatId: to, text });
   if (!result.success) throw new Error(result.error ?? "Send failed");
-  return `agent-wechat:${to}:${Date.now()}`;
-}
-
-async function sendWeChatMedia(
-  cfg: unknown,
-  to: string,
-  text: string,
-  mediaUrl: string | undefined,
-): Promise<string> {
-  const account = resolveWeChatAccount(cfg as Record<string, unknown>);
-  if (!account?.serverUrl) throw new Error("No serverUrl configured");
-  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
-  if (!mediaUrl) {
-    const result = await client.sendMessage({ chatId: to, text: text || undefined });
-    if (!result.success) throw new Error(result.error ?? "Send failed");
-    return `agent-wechat:${to}:${Date.now()}`;
-  }
-
-  const fsmod = await import("fs/promises");
-  const pathmod = await import("path");
-  let base64: string;
-  let mimeType: string;
-  let filename: string;
-  if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-    const res = await fetch(mediaUrl);
-    const buffer = await res.arrayBuffer();
-    base64 = Buffer.from(buffer).toString("base64");
-    mimeType = res.headers.get("content-type") ?? "application/octet-stream";
-    const urlPath = new URL(mediaUrl).pathname;
-    filename = pathmod.basename(urlPath) || "file";
-  } else {
-    const buf = await fsmod.readFile(mediaUrl);
-    base64 = buf.toString("base64");
-    filename = pathmod.basename(mediaUrl);
-    const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
-    const extMime: Record<string, string> = {
-      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-      gif: "image/gif", webp: "image/webp",
-    };
-    mimeType = extMime[ext] ?? "application/octet-stream";
-  }
-
-  const isImage = mimeType.startsWith("image/");
-  const result = isImage
-    ? await client.sendMessage({ chatId: to, text: text || undefined, image: { data: base64, mimeType } })
-    : await client.sendMessage({ chatId: to, text: text || undefined, file: { data: base64, filename } });
-  if (!result.success) throw new Error(result.error ?? "Send media failed");
   return `agent-wechat:${to}:${Date.now()}`;
 }
 
@@ -81,9 +35,9 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
       channel: "agent-wechat",
       messageId: await sendWeChatText(cfg, to, text),
     }),
-    sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
+    sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
       channel: "agent-wechat",
-      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
+      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
     }),
   },
 });
@@ -108,6 +62,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     threads: false,
     media: true,
     reply: true,
+    tts: { voice: { synthesisTarget: "voice-note", transcodesAudio: true } },
   },
 
   reload: { configPrefixes: ["channels.agent-wechat"] },
@@ -244,9 +199,9 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       channel: "agent-wechat" as const,
       messageId: await sendWeChatText(cfg, to, text),
     }),
-    sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
+    sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
       channel: "agent-wechat" as const,
-      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
+      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
     }),
   },
 

@@ -7,6 +7,7 @@ export {
   type WeChatClientOptions,
   type StatusResponse,
   type AuthStatus,
+  type VoiceJob,
 } from "./client.js";
 
 // Export schemas (but not the inferred types which duplicate types/)
