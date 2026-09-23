@@ -3,7 +3,7 @@ title: REST API
 description: API endpoint reference for agent-wechat.
 ---
 
-The agent-wechat server exposes a REST API on port `6174`. All requests require a `Bearer` token in the `Authorization` header.
+The agent-wechat server exposes a REST API on port `6174`. API requests require a `Bearer` token in the `Authorization` header. The `/health` probe does not require authentication.
 
 ## Authentication
 
@@ -27,14 +27,17 @@ Authorization: Bearer <token>
 |--------|------|-------------|
 | `GET` | `/api/messages/:chatId` | List messages in a chat |
 | `POST` | `/api/messages/send` | Send a message (text, image, or file) |
-| `GET` | `/api/messages/:chatId/media/:localId` | Download a media attachment |
+| `GET` | `/api/messages/:chatId/media/:localId` | Retrieve media; may return `pending` while the server requests a local copy |
+| `POST` | `/api/messages/voice` | Start a voice-note job (multipart audio; requires `Idempotency-Key`) |
+| `GET` | `/api/messages/voice/:jobId` | Check voice-job status |
+| `POST` | `/api/messages/voice/:jobId/cancel` | Request voice-job cancellation |
 
 ### Auth
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/auth/status` | Check login status |
-| `POST` | `/api/auth/logout` | Log out of WeChat |
+| `GET` | `/api/status/auth` | Check login status |
+| `POST` | `/api/status/logout` | Log out of WeChat |
 | `WS` | `/api/ws/login` | WebSocket for login flow (QR code events) |
 
 ### Contacts
@@ -57,11 +60,11 @@ Authorization: Bearer <token>
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/screenshot` | Take a screenshot |
-| `GET` | `/api/a11y` | Dump the accessibility tree |
+| `GET` | `/api/debug/screenshot` | Take a screenshot |
+| `GET` | `/api/debug/a11y` | Dump the accessibility tree |
 
 ### VNC
 
 | Path | Description |
 |------|-------------|
-| `/vnc/` | Browser-based VNC viewer (noVNC) |
+| `/vnc/` | Read-only browser-based VNC viewer (noVNC) |

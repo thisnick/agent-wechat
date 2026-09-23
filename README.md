@@ -17,7 +17,7 @@ A programmable WeChat interface. Controls a WeChat client running in a Docker co
 - **Read** chats, messages, and media (images, voice, files) via REST API
 - **Send** text messages, images, files, and voice notes
 - **Login** via QR code displayed in your terminal
-- **Monitor** for new messages in real-time
+- **Monitor** for new messages through client polling
 
 ## Requirements
 
@@ -100,7 +100,7 @@ Run `wx --help` or `wx <command> --help` for all commands and options.
 ```
 
 - **UI automation**: Login, open chats, send messages — all via deterministic FSM (no LLM needed)
-- **API**: REST endpoints for all operations, WebSocket for login flow and events
+- **API**: REST endpoints for supported operations and a WebSocket login flow
 
 ## Docker Setup
 
@@ -153,7 +153,7 @@ pnpm build:image:arm64       # Build Docker image (Apple Silicon)
 pnpm build:image:amd64       # Build Docker image (Intel)
 ```
 
-See [CLAUDE.md](./CLAUDE.md) for full technical documentation.
+See [AGENTS.md](./AGENTS.md) for contributor guidance and implementation pointers.
 
 ## Ports
 
