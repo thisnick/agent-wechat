@@ -41,6 +41,7 @@ async fn main() {
     // Initialize database
     tracing::info!("Initializing database...");
     db::init_db().expect("Failed to initialize database");
+    router::recover_interrupted_jobs();
 
     // Initialize sessions
     tracing::info!("Initializing sessions...");

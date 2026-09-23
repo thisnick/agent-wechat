@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for attempt in $(seq 1 15); do
+  if pactl info >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+pactl info >/dev/null
+
+if ! pactl list short sinks | awk '{print $2}' | grep -qx agent_voice_output; then
+  pactl load-module module-null-sink sink_name=agent_voice_output rate=48000 channels=1 >/dev/null
+fi
+if ! pactl list short sinks | awk '{print $2}' | grep -qx agent_voice_feed; then
+  pactl load-module module-null-sink sink_name=agent_voice_feed rate=48000 channels=1 >/dev/null
+fi
+if ! pactl list short sources | awk '{print $2}' | grep -qx agent_voice_mic; then
+  pactl load-module module-remap-source source_name=agent_voice_mic master=agent_voice_feed.monitor channels=1 >/dev/null
+fi
+
+pactl set-default-sink agent_voice_output
+pactl set-default-source agent_voice_mic
+pactl info | grep -q 'Default Source: agent_voice_mic'

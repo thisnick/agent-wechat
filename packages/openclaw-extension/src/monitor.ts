@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { WeChatClient } from "@agent-wechat/shared";
 import type { Chat, Message, MediaResult, AuthStatus } from "@agent-wechat/shared";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
@@ -22,6 +23,7 @@ import {
 } from "./attachment-store.js";
 import { MonitorStateStore } from "./monitor-state.js";
 import { listAllChats, listMessageWindow } from "./polling.js";
+import { sendWeChatMedia } from "./outbound-media.js";
 import {
   normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
@@ -34,6 +36,7 @@ import {
 // History context markers (match openclaw's built-in markers)
 const HISTORY_CONTEXT_MARKER = "[Chat messages since your last reply - for context]";
 const CURRENT_MESSAGE_MARKER = "[Current message - respond to this]";
+const voiceTranscriptCache = new Map<string, string>();
 
 export interface WeChatMonitorOptions {
   account: ResolvedWeChatAccount;
@@ -544,6 +547,38 @@ async function dispatchSegment(
   }
 
   try {
+    // Catch-up history keeps its audio file path in text. Resolve speech through
+    // OpenClaw's configured media understanding runtime after mention gating.
+    for (const item of segment) {
+      const attachment = item.attachment;
+      if (item.mediaPath || attachment?.kind !== "audio" || attachment.status !== "ready" || !attachment.path) continue;
+      const cacheKey = `${liveAccount.accountId}:${chatId}:${item.msg.localId}:${attachment.path}`;
+      let transcript = voiceTranscriptCache.get(cacheKey);
+      if (!transcript) {
+        try {
+          const result = await core.mediaUnderstanding.transcribeAudioFile({
+            filePath: attachment.path,
+            cfg,
+            mime: attachment.mime,
+          });
+          transcript = result.text?.trim();
+          if (transcript) {
+            if (voiceTranscriptCache.size >= 500) voiceTranscriptCache.clear();
+            voiceTranscriptCache.set(cacheKey, transcript);
+          }
+        } catch (error) {
+          log?.error?.(`[wechat:${liveAccount.accountId}] Voice transcription failed for ${item.msg.localId}: ${String(error)}`);
+        }
+      }
+      if (transcript) {
+        item.rawBody += `\n[Voice transcript: ${transcript.slice(0, 10000)}]`;
+        item.commandBody = normalizeWeChatCommandBody(item.rawBody, {
+          isGroup: item.isGroup,
+          wasMentioned: item.isMentioned,
+        });
+      }
+    }
+
     // Resolve routing using the last (triggering) message
     const route = core.channel.routing.resolveAgentRoute({
       cfg,
@@ -583,7 +618,7 @@ async function dispatchSegment(
         timestamp,
         previousTimestamp,
         envelope: envelopeOptions,
-        body: isGroup ? `${senderName}: ${rawBody}` : rawBody,
+        body: isGroup ? `${senderName}: ${lastMsg.rawBody}` : lastMsg.rawBody,
       });
     } else {
       // Multi-message batch: earlier messages become history context
@@ -608,7 +643,7 @@ async function dispatchSegment(
         timestamp,
         previousTimestamp,
         envelope: envelopeOptions,
-        body: isGroup ? `${senderName}: ${rawBody}` : rawBody,
+        body: isGroup ? `${senderName}: ${lastMsg.rawBody}` : lastMsg.rawBody,
       });
 
       // Combine with history context markers
@@ -636,8 +671,8 @@ async function dispatchSegment(
     // Build inbound context
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
-      BodyForAgent: rawBody,
-      RawBody: rawBody,
+      BodyForAgent: lastMsg.rawBody,
+      RawBody: lastMsg.rawBody,
       CommandBody: commandBody,
       InboundHistory: inboundHistory,
       From: isGroup ? `wechat:group:${chatId}` : `wechat:${senderId}`,
@@ -684,12 +719,14 @@ async function dispatchSegment(
     });
 
     let replyFailed = false;
+    let deliverySequence = 0;
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
         ...prefixOptions,
         deliver: async (payload: any) => {
+          const deliveryIndex = deliverySequence++;
           const mediaList: string[] = payload.mediaUrls?.length
             ? payload.mediaUrls
             : payload.mediaUrl
@@ -707,49 +744,19 @@ async function dispatchSegment(
           );
 
           if (mediaList.length > 0) {
-            for (const mediaUrl of mediaList) {
-              try {
-                const fsmod = await import("fs/promises");
-                const pathmod = await import("path");
-
-                let base64: string;
-                let mimeType: string;
-                let filename: string;
-                if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-                  const res = await fetch(mediaUrl);
-                  const buffer = await res.arrayBuffer();
-                  base64 = Buffer.from(buffer).toString("base64");
-                  mimeType = res.headers.get("content-type") ?? "application/octet-stream";
-                  const urlPath = new URL(mediaUrl).pathname;
-                  filename = pathmod.basename(urlPath) || "file";
-                } else {
-                  const buf = await fsmod.readFile(mediaUrl);
-                  base64 = buf.toString("base64");
-                  filename = pathmod.basename(mediaUrl);
-                  const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
-                  const extMime: Record<string, string> = {
-                    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-                    gif: "image/gif", webp: "image/webp",
-                  };
-                  mimeType = extMime[ext] ?? "application/octet-stream";
-                }
-
-                const isImage = mimeType.startsWith("image/");
-                if (isImage) {
-                  await client.sendMessage({ chatId, image: { data: base64, mimeType } });
-                } else {
-                  await client.sendMessage({ chatId, file: { data: base64, filename } });
-                }
-              } catch (err) {
-                log?.error?.(`[wechat:${liveAccount.accountId}] Failed to send media: ${err}`);
-              }
+            for (let index = 0; index < mediaList.length; index++) {
+              const retryKey = createHash("sha256")
+                .update(`${liveAccount.accountId}\0${chatId}\0${msg.localId}\0${deliveryIndex}\0${index}`)
+                .digest("hex");
+              await sendWeChatMedia(cfg, chatId, "", mediaList[index], payload.audioAsVoice === true, retryKey);
             }
-            // Send text caption separately if present
             if (text) {
-              await client.sendMessage({ chatId, text });
+              const result = await client.sendMessage({ chatId, text });
+              if (!result.success) throw new Error(result.error ?? "Text send failed");
             }
           } else if (text) {
-            await client.sendMessage({ chatId, text });
+            const result = await client.sendMessage({ chatId, text });
+            if (!result.success) throw new Error(result.error ?? "Text send failed");
           }
         },
         onError: (err: unknown, info: any) => {

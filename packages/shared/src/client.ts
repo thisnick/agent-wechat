@@ -23,6 +23,21 @@ export type AuthStatus = {
   loggedInUser?: string;
 };
 
+export type VoiceJob = {
+  jobId: string;
+  chatId: string;
+  status: "queued" | "preparing" | "prepared" | "sending" | "completed" | "cancelled" | "failed" | "needs_review";
+  sourceDurationSeconds: number | null;
+  chunks: Array<{
+    index: number;
+    status: string;
+    sourceDurationSeconds: number;
+    playbackDurationSeconds: number;
+    messageId: number | null;
+  }>;
+  error: string | null;
+};
+
 export interface WeChatClientOptions {
   baseUrl: string;
   token?: string;
@@ -191,6 +206,25 @@ export class WeChatClient {
 
   async sendMessage(params: SendParams): Promise<SendResult> {
     return this.post("/api/messages/send", params);
+  }
+
+  async createVoiceJob(chatId: string, audio: Uint8Array, idempotencyKey: string): Promise<VoiceJob> {
+    const form = new FormData();
+    form.set("chatId", chatId);
+    form.set("audio", new Blob([new Uint8Array(audio)]), "voice-audio");
+    const headers: Record<string, string> = { ...this.headers, "Idempotency-Key": idempotencyKey };
+    delete headers["Content-Type"];
+    const res = await fetch(`${this.base}/api/messages/voice`, { method: "POST", headers, body: form });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+    return res.json() as Promise<VoiceJob>;
+  }
+
+  async getVoiceJob(jobId: string): Promise<VoiceJob> {
+    return this.get(`/api/messages/voice/${encodeURIComponent(jobId)}`);
+  }
+
+  async cancelVoiceJob(jobId: string): Promise<VoiceJob> {
+    return this.post(`/api/messages/voice/${encodeURIComponent(jobId)}/cancel`);
   }
 
   // ---- Debug ----

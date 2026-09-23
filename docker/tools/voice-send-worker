@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""Prepare and send voice notes for the Rust voice job API."""
+
+import base64
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+import wave
+
+RATE = 48_000
+MAX_SAMPLES = 50 * RATE
+MIN_SAMPLES = 2 * RATE
+EDGE_SAMPLES = RATE // 4
+API = "http://127.0.0.1:6174"
+
+
+def save(path, value):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def command(*args, timeout=30, input_data=None):
+    result = subprocess.run(args, input=input_data, capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise RuntimeError(f"{args[0]} failed: {result.stderr.decode(errors='replace')[-400:]}")
+    return result.stdout
+
+
+def pulse(*args):
+    return command("runuser", "-u", "wechat", "--", "env", "HOME=/home/wechat", "pactl", *args).decode()
+
+
+def read_pcm(path):
+    with wave.open(str(path), "rb") as audio:
+        if (audio.getnchannels(), audio.getframerate(), audio.getsampwidth()) != (1, RATE, 2):
+            raise RuntimeError("Prepared audio must be mono 48 kHz s16 PCM")
+        return audio.readframes(audio.getnframes())
+
+
+def write_pcm(path, samples):
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(RATE)
+        audio.writeframes(samples)
+    path.chmod(0o644)
+
+
+def bounds(total):
+    if total <= 0:
+        raise RuntimeError("No decoded audio samples")
+    parts = [(start, min(start + MAX_SAMPLES, total)) for start in range(0, total, MAX_SAMPLES)]
+    if len(parts) > 1 and parts[-1][1] - parts[-1][0] < MIN_SAMPLES:
+        deficit = MIN_SAMPLES - (parts[-1][1] - parts[-1][0])
+        previous_start, previous_end = parts[-2]
+        parts[-2] = (previous_start, previous_end - deficit)
+        parts[-1] = (previous_end - deficit, total)
+    return parts
+
+
+def prepare(directory):
+    status_path = directory / "status.json"
+    status = json.loads(status_path.read_text())
+    status["status"] = "preparing"
+    save(status_path, status)
+    source = directory / "source.wav"
+    command("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(directory / "input"), "-vn", "-ac", "1", "-ar", str(RATE),
+            "-c:a", "pcm_s16le", str(source), timeout=300)
+    original = read_pcm(source)
+    count = len(original) // 2
+    if count > 10 * 60 * RATE:
+        raise RuntimeError("Voice source exceeds the ten-minute decoded duration limit")
+    silence = bytes(EDGE_SAMPLES * 2)
+    chunks = []
+    for index, (start, end) in enumerate(bounds(count)):
+        section = original[start * 2:end * 2]
+        tail_padding = max(0, MIN_SAMPLES - (end - start))
+        path = directory / f"chunk-{index + 1:03d}.wav"
+        write_pcm(path, silence + section + bytes(tail_padding * 2) + silence)
+        chunks.append({"index": index, "status": "prepared", "sourceStartSample": start,
+                       "sourceEndSample": end, "sourceDurationSeconds": (end - start) / RATE,
+                       "playbackDurationSeconds": (end - start + tail_padding + 2 * EDGE_SAMPLES) / RATE,
+                       "path": path.name, "messageId": None})
+    reconstructed = b"".join(read_pcm(directory / part["path"])[EDGE_SAMPLES * 2:
+                             (EDGE_SAMPLES + part["sourceEndSample"] - part["sourceStartSample"]) * 2]
+                             for part in chunks)
+    if reconstructed != original:
+        raise RuntimeError("Prepared audio failed source reconstruction")
+    check_cancel(directory)
+    status["sourceDurationSeconds"] = count / RATE
+    status["chunks"] = chunks
+    status["status"] = "prepared"
+    save(status_path, status)
+
+
+def api(path):
+    token = Path("/data/auth-token").read_text().strip()
+    request = urllib.request.Request(API + path, headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(request, timeout=25) as response:
+        return json.load(response)
+
+
+def messages(chat_id):
+    return api("/api/messages/" + urllib.parse.quote(chat_id, safe="") + "?limit=50")
+
+
+def walk(node):
+    yield node
+    for child in node.get("children", []):
+        yield from walk(child)
+
+
+def tree():
+    return json.loads(command("a11y-dump", "--format", "json").decode())
+
+
+def named(root, role, name):
+    return [node for node in walk(root) if node.get("role") == role
+            and node.get("name") == name and node.get("bounds")]
+
+
+def destination_ok(root, display_name):
+    selected = [node for node in walk(root) if node.get("role") == "list-item"
+                and node.get("name", "").startswith(display_name)
+                and "SELECTED" in node.get("states", [])]
+    return bool(selected and named(root, "label", display_name))
+
+
+def control(root, name):
+    matches = named(root, "push-button", name)
+    if len(matches) != 1:
+        raise RuntimeError(f"{name} control is missing or ambiguous")
+    return matches[0]
+
+
+def click(node):
+    b = node["bounds"]
+    x = int(b["x"] + b["width"] / 2)
+    y = int(b["y"] + b["height"] / 2)
+    command("xdotool", "mousemove", str(x), str(y), "click", "1")
+
+
+def check_cancel(directory):
+    if (directory / "cancel").exists():
+        raise InterruptedError("Voice job cancelled")
+    expected_parent = os.environ.get("AGENT_SERVER_PID")
+    if expected_parent and os.getppid() != int(expected_parent):
+        raise RuntimeError("Server restarted during voice job")
+
+
+def capture_ready():
+    source = None
+    for line in pulse("list", "sources", "short").splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2 and fields[1] == "agent_voice_mic":
+            source = int(fields[0])
+    if source is None:
+        raise RuntimeError("Virtual microphone is unavailable")
+    streams = []
+    for block in pulse("list", "source-outputs").split("Source Output #")[1:]:
+        number = re.match(r"(\d+)", block)
+        current = re.search(r"(?m)^\s*Source: (\d+)\s*$", block)
+        if number and current and 'application.process.binary = "wechat"' in block:
+            streams.append((number.group(1), int(current.group(1))))
+    if len(streams) > 1:
+        raise RuntimeError("WeChat capture stream is ambiguous")
+    if not streams:
+        return False
+    stream, current = streams[0]
+    if current != source:
+        pulse("move-source-output", stream, "agent_voice_mic")
+        return False
+    return True
+
+
+def cancel_recorder():
+    click(control(tree(), "Cancel"))
+
+
+def verify_voice(directory, status, part, prior_ids, display_name):
+    chat_id = status["chatId"]
+    deadline = time.monotonic() + 30
+    matched = None
+    while time.monotonic() < deadline:
+        fresh = [item for item in messages(chat_id) if item["localId"] not in prior_ids]
+        if len(fresh) > 1:
+            raise RuntimeError("More than one new message appeared after voice Send")
+        if len(fresh) == 1 and fresh[0].get("type") == 34 and fresh[0].get("isSelf"):
+            matched = fresh[0]
+            break
+        time.sleep(0.5)
+    if matched is None:
+        raise RuntimeError("Voice Send outcome is unknown after 30 seconds")
+    part["messageId"] = matched["localId"]
+    media = api("/api/messages/" + urllib.parse.quote(chat_id, safe="") +
+                "/media/" + str(matched["localId"]))
+    if not media.get("data"):
+        raise RuntimeError("Sent voice bytes are not available")
+    decoded = command("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                      "-i", "pipe:0", "-ac", "1", "-ar", str(RATE), "-f", "s16le", "pipe:1",
+                      input_data=base64.b64decode(media["data"]), timeout=30)
+    duration = len(decoded) / (2 * RATE)
+    part["decodedDurationSeconds"] = duration
+    if abs(duration - part["playbackDurationSeconds"]) > 1:
+        raise RuntimeError("Retrieved voice duration differs from playback")
+    root = tree()
+    if not destination_ok(root, display_name):
+        raise RuntimeError("Destination changed after voice Send")
+    expected = f'Audio{round(duration)}"sec'
+    if not any(node.get("name", "").startswith(expected) for node in walk(root)
+               if node.get("role") == "list-item"):
+        raise RuntimeError("Voice bubble was not visible after Send")
+    part["status"] = "verified"
+    save(directory / "status.json", status)
+
+
+def send(directory):
+    status_path = directory / "status.json"
+    status = json.loads(status_path.read_text())
+    chat_id = status["chatId"]
+    chat = api("/api/chats/" + urllib.parse.quote(chat_id, safe=""))
+    if not chat:
+        raise RuntimeError("Destination chat was not found")
+    display_name = "File Transfer" if chat_id == "filehelper" else chat["name"]
+    first_pid = command("pgrep", "-o", "-f", "/usr/bin/wechat").strip()
+    if not first_pid:
+        raise RuntimeError("WeChat is not running")
+    status["status"] = "sending"
+    save(status_path, status)
+    for part in status["chunks"]:
+        check_cancel(directory)
+        if command("pgrep", "-o", "-f", "/usr/bin/wechat").strip() != first_pid:
+            raise RuntimeError("WeChat restarted during voice job")
+        root = tree()
+        if not destination_ok(root, display_name):
+            raise RuntimeError("Destination is not selected")
+        check_cancel(directory)
+        before = {item["localId"] for item in messages(chat_id)}
+        started = time.monotonic()
+        click(control(root, "Send Voice"))
+        try:
+            while time.monotonic() - started < 5:
+                if destination_ok(tree(), display_name) and control(tree(), "Cancel") and capture_ready():
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("Recorder UI and capture stream did not appear in five seconds")
+            part["status"] = "recording"
+            save(status_path, status)
+            player = subprocess.Popen(["runuser", "-u", "wechat", "--", "env", "HOME=/home/wechat",
+                                       "paplay", "--device=agent_voice_feed", str(directory / part["path"])],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                      start_new_session=True)
+            try:
+                while player.poll() is None:
+                    check_cancel(directory)
+                    if time.monotonic() - started >= 55:
+                        raise TimeoutError("Recording reached the 55-second deadline")
+                    time.sleep(0.1)
+                if player.returncode:
+                    raise RuntimeError("Audio playback failed")
+            finally:
+                if player.poll() is None:
+                    try:
+                        os.killpg(player.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        player.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(player.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        player.wait(timeout=2)
+            if time.monotonic() - started >= 55:
+                raise TimeoutError("Recording reached the 55-second deadline")
+            check_cancel(directory)
+            root = tree()
+            if not destination_ok(root, display_name):
+                raise RuntimeError("Destination changed while recording")
+            if time.monotonic() - started >= 55:
+                raise TimeoutError("Recording reached the 55-second deadline during control refresh")
+            if command("pgrep", "-o", "-f", "/usr/bin/wechat").strip() != first_pid:
+                raise RuntimeError("WeChat restarted during recording")
+            check_cancel(directory)
+            click(control(root, "Send voice message"))
+            part["status"] = "send_clicked"
+            part["recordingElapsedSeconds"] = time.monotonic() - started
+            save(status_path, status)
+        except Exception:
+            if part["status"] != "send_clicked":
+                try:
+                    cancel_recorder()
+                    part["status"] = "cancelled" if (directory / "cancel").exists() else "failed"
+                    if {item["localId"] for item in messages(chat_id)} != before:
+                        part["status"] = "unknown"
+                except Exception:
+                    part["status"] = "unknown"
+                save(status_path, status)
+            raise
+        try:
+            verify_voice(directory, status, part, before, display_name)
+        except Exception:
+            part["status"] = "unknown"
+            save(status_path, status)
+            raise
+    status["status"] = "completed"
+    save(status_path, status)
+
+
+def main():
+    mode = sys.argv[1]
+    directory = Path(sys.argv[2]).resolve()
+    if mode == "prepare":
+        prepare(directory)
+    elif mode == "send":
+        send(directory)
+    else:
+        raise RuntimeError("Expected prepare or send mode")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        directory = Path(sys.argv[2]).resolve()
+        status_path = directory / "status.json"
+        if status_path.exists():
+            status = json.loads(status_path.read_text())
+            status["status"] = "cancelled" if isinstance(exc, InterruptedError) else "needs_review" if any(
+                part["status"] in ("send_clicked", "unknown", "verified") for part in status.get("chunks", [])
+            ) else "failed"
+            status["error"] = str(exc)
+            save(status_path, status)
+        print(f"voice job stopped: {exc}", file=sys.stderr)
+        raise SystemExit(1)

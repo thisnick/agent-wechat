@@ -7,6 +7,9 @@ mod messages;
 mod sessions;
 mod status;
 mod vnc;
+mod voice;
+
+pub use voice::recover_interrupted_jobs;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -55,6 +58,9 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        .route("/api/messages/voice", post(voice::create_job))
+        .route("/api/messages/voice/{job_id}", get(voice::get_job))
+        .route("/api/messages/voice/{job_id}/cancel", post(voice::cancel_job))
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))

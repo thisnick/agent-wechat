@@ -15,6 +15,22 @@ use tokio_util::sync::CancellationToken;
 /// Only one plan can run at a time — they all drive the GUI.
 static PLAN_LOCK: Mutex<()> = Mutex::const_new(());
 
+pub struct GuiGuard {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for GuiGuard {
+    fn drop(&mut self) {
+        crate::sessions::health_monitor::resume_monitoring();
+    }
+}
+
+pub async fn acquire_gui_guard() -> GuiGuard {
+    let lock = PLAN_LOCK.lock().await;
+    crate::sessions::health_monitor::pause_monitoring();
+    GuiGuard { _lock: lock }
+}
+
 pub struct ExecutionResult {
     pub success: bool,
     pub error: Option<String>,
@@ -47,17 +63,7 @@ where
     PS: Send,
     PA: Send,
 {
-    let _plan_guard = PLAN_LOCK.lock().await;
-
-    // Pause health monitoring while an execution loop is active
-    crate::sessions::health_monitor::pause_monitoring();
-    struct ResumeOnDrop;
-    impl Drop for ResumeOnDrop {
-        fn drop(&mut self) {
-            crate::sessions::health_monitor::resume_monitoring();
-        }
-    }
-    let _health_guard = ResumeOnDrop;
+    let _gui_guard = acquire_gui_guard().await;
 
     let mut plan_state = plan.initial_plan_state();
     let session_id = context.session_id.clone();
