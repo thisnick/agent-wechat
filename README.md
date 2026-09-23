@@ -82,29 +82,6 @@ wx down
 
 Run `wx --help` or `wx <command> --help` for all commands and options.
 
-### Voice notes
-
-`--voice` uses WeChat's recorder, not a file attachment. It must be sent on its
-own, without `--text`, `--image`, or `--file`. Audio longer than 50 seconds is
-split into sequential notes; the CLI waits for each note to be verified unless
-you use `--detach`.
-
-A voice send is not atomic: earlier notes remain sent if a later note fails.
-Check `wx messages voice status <jobId>` before retrying, and do not resend the
-whole recording after an uncertain result. The current limits are 128 MiB per
-upload and ten minutes of decoded audio. Use `--file` to send the audio as an
-ordinary attachment instead.
-
-API clients can create a job with authenticated `POST /api/messages/voice`
-(multipart `chatId` and `audio`, plus an `Idempotency-Key` header), then poll
-`GET /api/messages/voice/{jobId}` or request cancellation with
-`POST /api/messages/voice/{jobId}/cancel`.
-
-In OpenClaw, outbound audio with `asVoice: true` becomes a WeChat voice note;
-audio without voice intent remains a file attachment. An incoming voice message
-does not force a spoken reply. Automatic speech replies depend on OpenClaw's
-optional `messages.tts.auto` setting.
-
 ## Architecture
 
 ```
