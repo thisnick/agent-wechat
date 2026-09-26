@@ -28,6 +28,14 @@ fn image_suffixes(quality: ImageQuality) -> &'static [&'static str] {
     }
 }
 
+fn non_image_quality(quality: ImageQuality) -> ImageQuality {
+    match quality {
+        ImageQuality::Best => ImageQuality::Legacy,
+        ImageQuality::Standard => ImageQuality::Full,
+        other => other,
+    }
+}
+
 /// WeChat .dat file magic bytes: 07 08 56 32 08 07
 const DAT_MAGIC: [u8; 6] = [0x07, 0x08, 0x56, 0x32, 0x08, 0x07];
 
@@ -1206,11 +1214,7 @@ pub fn get_message_media(
 
     let base = (local_type & 0xFFFFFFFF) as i32;
     let sub = (local_type >> 32) as i32;
-    let non_image_quality = if matches!(quality, ImageQuality::Best | ImageQuality::Standard) {
-        ImageQuality::Full
-    } else {
-        quality
-    };
+    let non_image_quality = non_image_quality(quality);
 
     match base {
         49 if sub == 6 => {
@@ -1296,6 +1300,13 @@ mod quality_tests {
         assert_eq!(image_suffixes(ImageQuality::Thumbnail), &["_t"]);
         assert_eq!(image_suffixes(ImageQuality::Best), &["_h", "", "_t"]);
         assert_eq!(ImageQuality::default(), ImageQuality::Best);
+    }
+
+    #[test]
+    fn best_default_preserves_non_image_cache_behavior() {
+        assert_eq!(non_image_quality(ImageQuality::Best), ImageQuality::Legacy);
+        assert_eq!(non_image_quality(ImageQuality::Standard), ImageQuality::Full);
+        assert_eq!(non_image_quality(ImageQuality::Full), ImageQuality::Full);
     }
 
     #[test]
