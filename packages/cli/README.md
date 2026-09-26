@@ -90,6 +90,12 @@ Send options:
 
 Media options:
 - `--output <path>` — save to a specific file path
+- `--full` — require an original-resolution image
+- `--thumbnail` — save the cached preview
+- `--best` — explicitly choose the default best-available image behavior
+
+Media retrieval does not open a chat. Use `wx chats open <chatId>` separately
+if WeChat needs to cache a regular photo's standard-size copy.
 
 ### Sessions
 

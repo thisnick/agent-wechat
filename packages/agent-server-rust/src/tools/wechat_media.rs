@@ -10,11 +10,11 @@ use std::process::Command;
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageQuality {
-    #[default]
     Legacy,
     Full,
     Standard,
     Thumbnail,
+    #[default]
     Best,
 }
 
@@ -1295,7 +1295,7 @@ mod quality_tests {
         assert_eq!(image_suffixes(ImageQuality::Standard), &[""]);
         assert_eq!(image_suffixes(ImageQuality::Thumbnail), &["_t"]);
         assert_eq!(image_suffixes(ImageQuality::Best), &["_h", "", "_t"]);
-        assert_eq!(ImageQuality::default(), ImageQuality::Legacy);
+        assert_eq!(ImageQuality::default(), ImageQuality::Best);
     }
 
     #[test]

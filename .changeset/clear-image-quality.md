@@ -5,4 +5,4 @@
 "@agent-wechat/agent-server": patch
 ---
 
-Accept valid phone images with recoverable metadata warnings and add a best-available image retrieval mode. OpenClaw uses this mode for inbound images and labels thumbnail fallbacks; the CLI exposes it as `wx messages media --best` while retaining strict full-resolution behavior by default.
+Accept valid phone images with recoverable metadata warnings and use best-available image retrieval by default in the HTTP API, CLI, and OpenClaw. The reported quality distinguishes original, standard, and thumbnail copies; callers can request strict full resolution with `quality=full` or `wx messages media --full`.

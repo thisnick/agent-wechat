@@ -41,7 +41,8 @@ Its `quality` response field is `full`, `standard`, or `thumbnail`. A regular
 phone send may advertise only a standard image; opening its chat can make
 WeChat cache that copy. The media endpoint does not open chats itself. Without
 the standard copy, `best` returns a thumbnail and strict `standard` has no
-image data yet. Omitting `quality` retains the legacy behavior for older clients.
+image data yet. Omitting `quality` now uses `best`; pass `quality=full` to
+require the original-resolution copy.
 
 ### Auth
 
