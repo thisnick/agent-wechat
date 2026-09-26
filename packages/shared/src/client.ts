@@ -197,7 +197,7 @@ export class WeChatClient {
   async getMedia(
     chatId: string,
     localId: number,
-    quality?: "full" | "thumbnail",
+    quality?: "full" | "standard" | "thumbnail" | "best",
   ): Promise<MediaResult> {
     return this.get(
       `/api/messages/${encodeURIComponent(chatId)}/media/${localId}${qs({ quality })}`,

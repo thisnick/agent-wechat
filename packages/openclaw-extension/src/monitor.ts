@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { WeChatClient } from "@agent-wechat/shared";
-import type { Chat, Message, MediaResult, AuthStatus } from "@agent-wechat/shared";
+import type { Chat, Message, AuthStatus } from "@agent-wechat/shared";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
@@ -14,6 +14,7 @@ import {
   attachmentSourceBody,
   buildMediaSegments,
   mediaMime,
+  mediaRequestQuality,
   type WeChatAttachment,
 } from "./media-delivery.js";
 import {
@@ -24,6 +25,7 @@ import {
 import { MonitorStateStore } from "./monitor-state.js";
 import { listAllChats, listMessageWindow } from "./polling.js";
 import { sendWeChatMedia } from "./outbound-media.js";
+import { pollMedia } from "./media-poll.js";
 import {
   normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
@@ -89,35 +91,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/**
- * Poll for media data, retrying until data is available or max attempts reached.
- */
-async function pollMedia(
-  client: WeChatClient,
-  chatId: string,
-  localId: number,
-  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
-  maxAttempts = 15,
-  intervalMs = 1000,
-): Promise<MediaResult | null> {
-  let lastResult: MediaResult | null = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = await client.getMedia(chatId, localId, "full");
-    lastResult = result;
-    if (result.type === "unsupported") {
-      return result;
-    }
-    if (result.data) {
-      return result;
-    }
-    if (attempt < maxAttempts) {
-      log?.info?.(`[media] Attempt ${attempt}/${maxAttempts} for ${chatId}:${localId} returned no data, retrying...`);
-      await new Promise(r => setTimeout(r, intervalMs));
-    }
-  }
-  return lastResult;
-}
-
 function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
   try {
     const core = getWeChatRuntime();
@@ -143,7 +116,7 @@ async function retrieveAttachment(
   if (!expectedKind) return undefined;
   const fallbackFilename = attachmentFallbackFilename(expectedKind, msg.localId, msg.content);
   try {
-    const result = await pollMedia(client, chatId, msg.localId, log, maxAttempts);
+    const result = await pollMedia(client, chatId, msg.localId, mediaRequestQuality(baseType), log, maxAttempts);
     if (!result) {
       return { kind: expectedKind, status: "unavailable", filename: fallbackFilename };
     }
@@ -166,9 +139,9 @@ async function retrieveAttachment(
       saveMediaBuffer: getWeChatRuntime().channel.media.saveMediaBuffer,
     });
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] Saved ${kind} attachment for msg ${msg.localId} (${saved.size} bytes)`,
+      `[wechat:${liveAccount.accountId}] Saved ${kind} attachment for msg ${msg.localId} (${saved.size} bytes${result.quality ? `, ${result.quality} quality` : ""})`,
     );
-    return { kind, status: "ready", filename: saved.filename, mime, path: saved.path };
+    return { kind, status: "ready", filename: saved.filename, mime, path: saved.path, quality: result.quality };
   } catch (error) {
     const status = error instanceof AttachmentTooLargeError ? "too_large" : "error";
     log?.error?.(

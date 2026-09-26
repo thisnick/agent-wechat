@@ -52,6 +52,13 @@ Send options:
 
 Media options:
 - `--output <path>` — save to a specific file path
+- `--best` — save the best available image (the default)
+- `--full` — require the original-resolution image
+- `--thumbnail` — save the cached image preview
+
+The media command does not open a chat. For a regular phone photo, run
+`wx chats open <chatId>` first if you want WeChat to cache the standard-size
+copy; otherwise the default media command may save only the thumbnail.
 
 ## Debug
 

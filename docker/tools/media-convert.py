@@ -42,7 +42,9 @@ def validate_image(data):
          '-err_detect', 'explode', '-i', 'pipe:0', '-f', 'null', '-'],
         input=data, capture_output=True, timeout=10,
     )
-    if result.returncode or result.stderr:
+    # FFmpeg can report recoverable EXIF/APP metadata warnings while decoding
+    # every pixel successfully. -xerror already makes decode failures fatal.
+    if result.returncode:
         raise ValueError('Image validation failed')
     return b'ok', 'validation'
 

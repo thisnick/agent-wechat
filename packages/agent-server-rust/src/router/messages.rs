@@ -12,7 +12,7 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::{get_message_media, download_metadata, pending, ImageQuality};
+use crate::tools::wechat_media::{best_image_target, get_message_media, download_metadata, pending, ImageQuality};
 use crate::tools::media_download::{ensure_queued, current_process};
 use crate::tools::wechat_messages;
 use crate::sessions::manager::get_session;
@@ -86,6 +86,43 @@ pub struct MediaParams {
     quality: ImageQuality,
 }
 
+fn image_quality_rank(quality: Option<&str>) -> u8 {
+    match quality {
+        Some("full") => 3,
+        Some("standard") => 2,
+        Some("thumbnail") => 1,
+        _ => 0,
+    }
+}
+
+fn needs_native_transfer(quality: ImageQuality, local_type: i64, advertised: &str) -> bool {
+    local_type != 3
+        || (quality != ImageQuality::Standard
+            && (quality != ImageQuality::Best || advertised == "full"))
+}
+
+#[cfg(test)]
+mod image_quality_tests {
+    use super::{image_quality_rank, needs_native_transfer};
+    use crate::tools::wechat_media::ImageQuality;
+
+    #[test]
+    fn best_available_quality_orders_full_standard_thumbnail() {
+        assert!(image_quality_rank(Some("full")) > image_quality_rank(Some("standard")));
+        assert!(image_quality_rank(Some("standard")) > image_quality_rank(Some("thumbnail")));
+        assert_eq!(image_quality_rank(None), 0);
+    }
+
+    #[test]
+    fn standard_images_use_cache_not_full_image_transfer() {
+        assert!(!needs_native_transfer(ImageQuality::Best, 3, "standard"));
+        assert!(!needs_native_transfer(ImageQuality::Best, 3, "thumbnail"));
+        assert!(!needs_native_transfer(ImageQuality::Standard, 3, "full"));
+        assert!(needs_native_transfer(ImageQuality::Best, 3, "full"));
+        assert!(needs_native_transfer(ImageQuality::Best, 43, "standard"));
+    }
+}
+
 pub async fn get_media(
     Path((chat_id, local_id)): Path<(String, i64)>,
     Query(params): Query<MediaParams>,
@@ -99,6 +136,7 @@ pub async fn get_media(
                 url: None,
                 format: String::new(),
                 filename: String::new(),
+                quality: None,
             })
         }
     };
@@ -111,6 +149,7 @@ pub async fn get_media(
                 url: None,
                 format: String::new(),
                 filename: String::new(),
+                quality: None,
             })
         }
     };
@@ -163,8 +202,15 @@ pub async fn get_media(
         url: None,
         format: String::new(),
         filename: String::new(),
+        quality: None,
     });
-    if result.data.is_some() || result.media_type == "unsupported" { return Json(result); }
+    if result.media_type == "unsupported"
+        || (result.data.is_some()
+            && (params.quality != ImageQuality::Best || result.media_type != "image"
+                || result.quality.as_deref() == Some("full")))
+    {
+        return Json(result);
+    }
     let metadata_account = account.clone();
     let metadata_keys = request_keys.clone();
     let metadata_chat = request_chat.clone();
@@ -172,8 +218,32 @@ pub async fn get_media(
         download_metadata(&metadata_account, &metadata_keys, &metadata_chat, local_id)
     ).await.ok().flatten();
     let Some(metadata) = metadata else { return Json(result); };
-    let Some((_, identity)) = current_process(&account) else { return Json(pending()); };
-    if !ensure_queued(account.clone(), metadata).await { return Json(pending()); }
+    let advertised = best_image_target(metadata["content"].as_str().unwrap_or(""));
+    let target_rank = if params.quality == ImageQuality::Best && metadata["local_type"] == 3 {
+        image_quality_rank(Some(advertised))
+    } else {
+        0
+    };
+    if target_rank > 0 && result.data.is_some()
+        && image_quality_rank(result.quality.as_deref()) >= target_rank
+    {
+        return Json(result);
+    }
+    if !needs_native_transfer(params.quality, metadata["local_type"].as_i64().unwrap_or_default(), advertised) {
+        // This build's native resource-3 request fetches originals, not the
+        // standard copy. Chat entry can fetch standard, but media GET must not
+        // select chats; return the best variant already in WeChat's cache.
+        return Json(result);
+    }
+    let Some((_, identity)) = current_process(&account) else { return Json(result); };
+    if !ensure_queued(account.clone(), metadata).await {
+        return if current_process(&account).map(|(_, key)| key).as_ref() == Some(&identity) {
+            Json(result)
+        } else {
+            Json(pending())
+        };
+    }
+    let mut best_so_far = result;
     // A bounded HTTP wait; further GETs reuse the native submission for five minutes.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     while tokio::time::Instant::now() < deadline {
@@ -185,10 +255,17 @@ pub async fn get_media(
             .await.unwrap_or_else(|_| pending());
         if found.data.is_some() {
             if current_process(&account).map(|(_, key)| key).as_ref() != Some(&identity) { return Json(pending()); }
-            return Json(found);
+            if target_rank == 0 || image_quality_rank(found.quality.as_deref()) >= target_rank {
+                return Json(found);
+            }
+            if best_so_far.data.is_none()
+                || image_quality_rank(found.quality.as_deref()) > image_quality_rank(best_so_far.quality.as_deref())
+            {
+                best_so_far = found;
+            }
         }
     }
-    Json(pending())
+    Json(best_so_far)
 }
 
 #[derive(Deserialize)]

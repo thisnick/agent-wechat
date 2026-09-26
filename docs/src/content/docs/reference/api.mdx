@@ -32,6 +32,18 @@ Authorization: Bearer <token>
 | `GET` | `/api/messages/voice/:jobId` | Check voice-job status |
 | `POST` | `/api/messages/voice/:jobId/cancel` | Request voice-job cancellation |
 
+For image media, `?quality=full` requires the original-resolution copy,
+`?quality=standard` requires the mid-size copy, and `?quality=thumbnail`
+requests the preview. `?quality=best` returns the best valid local copy.
+When the message advertises an Original image, it requests the native full-size
+transfer and waits up to 20 seconds before returning the best cached fallback.
+Its `quality` response field is `full`, `standard`, or `thumbnail`. A regular
+phone send may advertise only a standard image; opening its chat can make
+WeChat cache that copy. The media endpoint does not open chats itself. Without
+the standard copy, `best` returns a thumbnail and strict `standard` has no
+image data yet. Omitting `quality` now uses `best`; pass `quality=full` to
+require the original-resolution copy.
+
 ### Auth
 
 | Method | Path | Description |

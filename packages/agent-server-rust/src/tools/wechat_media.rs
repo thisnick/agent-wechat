@@ -10,17 +10,29 @@ use std::process::Command;
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageQuality {
-    #[default]
     Legacy,
     Full,
+    Standard,
     Thumbnail,
+    #[default]
+    Best,
 }
 
 fn image_suffixes(quality: ImageQuality) -> &'static [&'static str] {
     match quality {
         ImageQuality::Legacy => &["", "_t", "_h"],
         ImageQuality::Full => &["_h"],
+        ImageQuality::Standard => &[""],
         ImageQuality::Thumbnail => &["_t"],
+        ImageQuality::Best => &["_h", "", "_t"],
+    }
+}
+
+fn non_image_quality(quality: ImageQuality) -> ImageQuality {
+    match quality {
+        ImageQuality::Best => ImageQuality::Legacy,
+        ImageQuality::Standard => ImageQuality::Full,
+        other => other,
     }
 }
 
@@ -39,6 +51,7 @@ fn unsupported() -> MediaResult {
         url: None,
         format: String::new(),
         filename: String::new(),
+        quality: None,
     }
 }
 
@@ -49,6 +62,7 @@ pub(crate) fn pending() -> MediaResult {
         url: None,
         format: String::new(),
         filename: String::new(),
+        quality: None,
     }
 }
 
@@ -208,6 +222,20 @@ fn video_attr(xml: &str, attr: &str) -> Option<String> {
     (!val.is_empty()).then_some(val)
 }
 
+/// Highest image variant advertised by the sender. A regular phone send may
+/// offer a mid-size image but no original, so waiting for _h.dat cannot help.
+pub(crate) fn best_image_target(content: &str) -> &'static str {
+    if video_attr(content, "cdnbigimgurl").is_some()
+        || video_attr(content, "hdlength").and_then(|value| value.parse::<u64>().ok()).unwrap_or(0) > 0
+    {
+        "full"
+    } else if video_attr(content, "cdnmidimgurl").is_some() {
+        "standard"
+    } else {
+        "thumbnail"
+    }
+}
+
 // ── Image thumbnail from filesystem cache ────────────────────────────────────
 
 fn get_image_thumbnail(
@@ -231,16 +259,19 @@ fn get_image_thumbnail(
             .join(&thumb_name);
         if thumb_path.exists() {
             if let Ok(data) = fs::read(&thumb_path) {
-                return Some(MediaResult {
-                    media_type: "image".into(),
-                    data: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data,
-                    )),
-                    url: None,
-                    format: "jpeg".into(),
-                    filename: format!("msg_{local_id}.jpg"),
-                });
+                if convert_media("validate-image", &data).is_some() {
+                    return Some(MediaResult {
+                        media_type: "image".into(),
+                        data: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &data,
+                        )),
+                        url: None,
+                        format: "jpeg".into(),
+                        filename: format!("msg_{local_id}.jpg"),
+                        quality: None,
+                    });
+                }
             }
         }
 
@@ -257,16 +288,19 @@ fn get_image_thumbnail(
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with(&prefix) {
                     if let Ok(data) = fs::read(entry.path()) {
-                        return Some(MediaResult {
-                            media_type: "image".into(),
-                            data: Some(base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                &data,
-                            )),
-                            url: None,
-                            format: "jpeg".into(),
-                            filename: format!("msg_{local_id}.jpg"),
-                        });
+                        if convert_media("validate-image", &data).is_some() {
+                            return Some(MediaResult {
+                                media_type: "image".into(),
+                                data: Some(base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    &data,
+                                )),
+                                url: None,
+                                format: "jpeg".into(),
+                                filename: format!("msg_{local_id}.jpg"),
+                                quality: None,
+                            });
+                        }
                     }
                 }
             }
@@ -713,6 +747,7 @@ fn get_video_data(
                     url: None,
                     format: "mp4".into(),
                     filename: format!("msg_{local_id}.mp4"),
+                    quality: None,
                 };
             }
         }
@@ -735,6 +770,7 @@ fn get_video_data(
                         url: None,
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}_cover.jpg"),
+                        quality: None,
                     };
                 }
             }
@@ -753,6 +789,7 @@ fn get_video_data(
                         url: None,
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}_thumb.jpg"),
+                        quality: None,
                     };
                 }
             }
@@ -803,6 +840,7 @@ fn decrypt_and_return(
                 url: None,
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
+                quality: None,
             }
         }
     };
@@ -816,6 +854,7 @@ fn decrypt_and_return(
                 url: None,
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
+                quality: None,
             }
         }
     };
@@ -829,6 +868,7 @@ fn decrypt_and_return(
                 url: None,
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
+                quality: None,
             }
         }
     };
@@ -853,6 +893,7 @@ fn decrypt_and_return(
                 url: None,
                 format: cfmt,
                 filename: format!("msg_{local_id}.{cext}"),
+                quality: None,
             };
         }
         return pending();
@@ -869,6 +910,7 @@ fn decrypt_and_return(
         url: None,
         format: format.into(),
         filename: format!("msg_{local_id}.{ext}"),
+        quality: None,
     }
 }
 
@@ -904,6 +946,7 @@ fn get_emoji_media(
                         url: Some(url.to_string()),
                         format: "gif".into(),
                         filename: format!("emoji_{md5_val}.gif"),
+                        quality: None,
                     };
                 }
             }
@@ -919,6 +962,7 @@ fn get_emoji_media(
                 url: Some(url),
                 format: "gif".into(),
                 filename: format!("emoji_{md5_val}.gif"),
+                quality: None,
             };
         }
     }
@@ -929,6 +973,7 @@ fn get_emoji_media(
         url: None,
         format: "unknown".into(),
         filename: format!("emoji_{md5_val}"),
+        quality: None,
     }
 }
 
@@ -997,6 +1042,7 @@ fn get_voice_data(
                 url: None,
                 format: "mp3".into(),
                 filename: format!("msg_{local_id}.mp3"),
+                quality: None,
             };
         }
 
@@ -1010,6 +1056,7 @@ fn get_voice_data(
             url: None,
             format: "silk".into(),
             filename: format!("msg_{local_id}.silk"),
+            quality: None,
         };
     }
 
@@ -1054,6 +1101,7 @@ fn get_file_attachment(
                     url: None,
                     format: ext,
                     filename,
+                    quality: None,
                 };
             }
         }
@@ -1089,6 +1137,60 @@ fn file_matches_message(data: &[u8], content: &str) -> bool {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
+fn get_image_for_quality(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+    create_time: i64,
+    content: &str,
+    image_keys_raw: Option<&(String, Option<u8>)>,
+    quality: ImageQuality,
+) -> MediaResult {
+    if matches!(quality, ImageQuality::Legacy | ImageQuality::Thumbnail) {
+        if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
+            return thumb;
+        }
+    }
+
+    if let Some((aes_hex, xor_byte)) = image_keys_raw {
+        let image_keys = ImageKeys {
+            aes_key_hex: aes_hex.clone(),
+            xor_byte: *xor_byte,
+        };
+
+        if let Some(dat_path) = find_dat_via_resource_db(
+            account_dir, keys, chat_id, local_id, create_time, quality,
+        ) {
+            tracing::info!("[media] found dat via resource-db: {}", dat_path);
+            return decrypt_and_return(&dat_path, &image_keys, local_id);
+        }
+
+        if let Some(dat_path) = find_dat_via_hardlink(
+            account_dir, keys, chat_id, content, quality,
+        ) {
+            tracing::info!("[media] found dat via hardlink: {}", dat_path);
+            return decrypt_and_return(&dat_path, &image_keys, local_id);
+        }
+
+        tracing::warn!(
+            "[media] no dat found for local_id={}, md5={}",
+            local_id, xml_attr(content, "md5").unwrap_or_default()
+        );
+    } else {
+        tracing::warn!("[media] no image keys available for local_id={}", local_id);
+    }
+
+    MediaResult {
+        media_type: "image".into(),
+        data: None,
+        url: None,
+        format: "jpeg".into(),
+        filename: format!("msg_{local_id}.jpg"),
+        quality: None,
+    }
+}
+
 /// Get media attachment for a message.
 pub fn get_message_media(
     account_dir: &str,
@@ -1112,6 +1214,7 @@ pub fn get_message_media(
 
     let base = (local_type & 0xFFFFFFFF) as i32;
     let sub = (local_type >> 32) as i32;
+    let non_image_quality = non_image_quality(quality);
 
     match base {
         49 if sub == 6 => {
@@ -1119,63 +1222,38 @@ pub fn get_message_media(
             return get_file_attachment(account_dir, &content, create_time, local_id);
         }
         3 => {
-            // Image
             tracing::info!(
                 "[media] image msg chat_id={}, local_id={}, create_time={}, content_len={}",
                 chat_id, local_id, create_time, content.len()
             );
-
-            if quality != ImageQuality::Full {
-                if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time)
-                {
-                    return thumb;
+            if quality == ImageQuality::Best {
+                // Test each cache variant independently: an incomplete _h.dat
+                // must not hide an intact standard image or thumbnail.
+                for (variant, label) in [
+                    (ImageQuality::Full, "full"),
+                    (ImageQuality::Standard, "standard"),
+                    (ImageQuality::Thumbnail, "thumbnail"),
+                ] {
+                    let mut found = get_image_for_quality(
+                        account_dir, keys, chat_id, local_id, create_time, &content,
+                        image_keys_raw.as_ref(), variant,
+                    );
+                    if found.data.is_some() {
+                        found.quality = Some(label.into());
+                        return found;
+                    }
                 }
-            }
-
-
-            // Read .dat content if image credentials are available.
-            if let Some((aes_hex, xor_byte)) = image_keys_raw {
-                let image_keys = ImageKeys {
-                    aes_key_hex: aes_hex,
-                    xor_byte,
-                };
-
-                // Primary: look up filename from message_resource.db
-                if let Some(dat_path) = find_dat_via_resource_db(
-                    account_dir, keys, chat_id, local_id, create_time, quality,
-                ) {
-                    tracing::info!("[media] found dat via resource-db: {}", dat_path);
-                    return decrypt_and_return(&dat_path, &image_keys, local_id);
-                }
-
-                // Fallback: try hardlink.db (older images may not be in resource db)
-                if let Some(dat_path) = find_dat_via_hardlink(
-                    account_dir, keys, chat_id, &content, quality,
-                ) {
-                    tracing::info!("[media] found dat via hardlink: {}", dat_path);
-                    return decrypt_and_return(&dat_path, &image_keys, local_id);
-                }
-
-                tracing::warn!(
-                    "[media] no dat found for local_id={}, md5={}",
-                    local_id, xml_attr(&content, "md5").unwrap_or_default()
-                );
+                pending()
             } else {
-                tracing::warn!("[media] no image keys available for local_id={}", local_id);
-            }
-
-            // Image exists but can't be retrieved
-            MediaResult {
-                media_type: "image".into(),
-                data: None,
-                url: None,
-                format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
+                get_image_for_quality(
+                    account_dir, keys, chat_id, local_id, create_time, &content,
+                    image_keys_raw.as_ref(), quality,
+                )
             }
         }
         43 => {
             // Video
-            get_video_data(account_dir, keys, chat_id, local_id, create_time, &content, quality)
+            get_video_data(account_dir, keys, chat_id, local_id, create_time, &content, non_image_quality)
         }
         34 => {
             // Voice
@@ -1218,13 +1296,32 @@ mod quality_tests {
     #[test]
     fn full_resolution_never_selects_a_thumbnail_or_mid_size() {
         assert_eq!(image_suffixes(ImageQuality::Full), &["_h"]);
+        assert_eq!(image_suffixes(ImageQuality::Standard), &[""]);
         assert_eq!(image_suffixes(ImageQuality::Thumbnail), &["_t"]);
-        assert_eq!(ImageQuality::default(), ImageQuality::Legacy);
+        assert_eq!(image_suffixes(ImageQuality::Best), &["_h", "", "_t"]);
+        assert_eq!(ImageQuality::default(), ImageQuality::Best);
+    }
+
+    #[test]
+    fn best_default_preserves_non_image_cache_behavior() {
+        assert_eq!(non_image_quality(ImageQuality::Best), ImageQuality::Legacy);
+        assert_eq!(non_image_quality(ImageQuality::Standard), ImageQuality::Full);
+        assert_eq!(non_image_quality(ImageQuality::Full), ImageQuality::Full);
+    }
+
+    #[test]
+    fn advertised_image_variants_determine_best_target() {
+        assert_eq!(best_image_target("<img cdnmidimgurl=\"mid\" />"), "standard");
+        assert_eq!(best_image_target("<img cdnmidimgurl=\"mid\" cdnbigimgurl=\"big\" />"), "full");
+        assert_eq!(best_image_target("<img cdnmidimgurl=\"mid\" hdlength=\"123\" />"), "full");
+        assert_eq!(best_image_target("<img cdnbigimgurl=\"\" cdnthumburl=\"thumb\" />"), "thumbnail");
     }
 
     #[test]
     fn quality_rejects_unknown_values() {
         assert_eq!(serde_json::from_str::<ImageQuality>("\"thumbnail\"").unwrap(), ImageQuality::Thumbnail);
+        assert_eq!(serde_json::from_str::<ImageQuality>("\"standard\"").unwrap(), ImageQuality::Standard);
+        assert_eq!(serde_json::from_str::<ImageQuality>("\"best\"").unwrap(), ImageQuality::Best);
         assert!(serde_json::from_str::<ImageQuality>("\"anything\"").is_err());
     }
 
