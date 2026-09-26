@@ -40,6 +40,8 @@ Chat, message, and media readers are under `packages/agent-server-rust/src/tools
 
 `GET /api/messages/{chat_id}/media/{local_id}` first checks locally available media. When native transfer metadata is available, the server can queue a transfer through `src/tools/media_download.rs`, wait up to 20 seconds for local bytes, and otherwise return `pending`. The transfer is server-owned; an HTTP disconnect does not cancel its submission. Callers should retry a pending result with a bounded policy. Never present raw message XML as a successfully retrieved attachment.
 
+For image media, `quality=best` requests a native transfer only when the message advertises an Original. It returns the best cached variant and labels it in the `quality` field. The media endpoint never selects a chat: on the tested AMD64 build, the native full-image request does not fetch the standard-size variant. Opening a chat separately may cause WeChat to cache standard images in the visible history.
+
 The current upload limit is defined in `src/router/mod.rs` (`MAX_UPLOAD_BYTES`, 128 MiB); HTTP body size includes base64 expansion. If changing limits, update the server, clients, error reporting, and boundary tests together.
 
 ### Outgoing voice notes

@@ -78,7 +78,7 @@ wx down
 | `wx messages send <id> --voice <audio> --detach` | Start a voice job and return its ID immediately |
 | `wx messages voice status <jobId>` | Check voice-job progress and sent message IDs |
 | `wx messages voice cancel <jobId>` | Request cancellation of a voice job |
-| `wx messages media <id> <localId> [-o <path>] [--thumbnail]` | Save a message attachment |
+| `wx messages media <id> <localId> [-o <path>] [--best\|--thumbnail]` | Save an attachment; `--best` accepts a smaller image when the original is unavailable |
 
 Run `wx --help` or `wx <command> --help` for all commands and options.
 

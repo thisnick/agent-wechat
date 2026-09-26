@@ -9,6 +9,7 @@ export type WeChatAttachment = {
   filename: string;
   mime?: string;
   path?: string;
+  quality?: "full" | "standard" | "thumbnail";
   error?: string;
 };
 
@@ -46,6 +47,10 @@ export function attachmentKindForMessageType(baseType: number): AttachmentKind |
   if (baseType === 43) return "video";
   if (baseType === 49) return "file";
   return undefined;
+}
+
+export function mediaRequestQuality(baseType: number): "best" | "full" {
+  return baseType === 3 ? "best" : "full";
 }
 
 export function attachmentKindForResult(
@@ -122,8 +127,11 @@ export function renderAttachmentBody(
       return appendReference(originalBody || "<media:video>", `[Video file: ${attachment.path}]`);
     }
   }
-  if (!originalBody) return attachment.kind === "image" ? "<media:image>" : originalBody;
-  return originalBody;
+  const body = originalBody || (attachment.kind === "image" ? "<media:image>" : originalBody);
+  if (attachment.kind === "image" && attachment.quality === "thumbnail") {
+    return appendReference(body, "[Image preview only: thumbnail quality]");
+  }
+  return body;
 }
 
 export function applyLiveAttachment<T extends MessageWithAttachment>(

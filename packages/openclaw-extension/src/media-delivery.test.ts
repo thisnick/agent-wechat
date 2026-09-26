@@ -5,6 +5,7 @@ import {
   attachmentFallbackFilename,
   attachmentSourceBody,
   buildMediaSegments,
+  mediaRequestQuality,
   renderAttachmentBody,
   type MessageWithAttachment,
   type WeChatAttachment,
@@ -78,4 +79,20 @@ test("pending videos never expose raw message XML", () => {
   assert.equal(filename, "message-60.mp4");
   assert.equal(body, "[Video pending: message-60.mp4]");
   assert.doesNotMatch(body, /videomsg|cdnvideourl|private/);
+});
+
+test("images request best available quality while other media stays strict", () => {
+  assert.equal(mediaRequestQuality(3), "best");
+  assert.equal(mediaRequestQuality(34), "full");
+  assert.equal(mediaRequestQuality(43), "full");
+  assert.equal(mediaRequestQuality(49), "full");
+});
+
+test("a delivered thumbnail is labeled as a preview for the model", () => {
+  const preview: WeChatAttachment = {
+    ...ready("image", "photo.jpg", "/managed/photo.jpg"),
+    quality: "thumbnail",
+  };
+  assert.equal(renderAttachmentBody("", preview), "<media:image>\n[Image preview only: thumbnail quality]");
+  assert.equal(renderAttachmentBody("", { ...preview, quality: "standard" }), "<media:image>");
 });

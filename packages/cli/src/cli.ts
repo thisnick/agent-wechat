@@ -326,9 +326,15 @@ messagesCmd
   .command("media <chatId> <localId>")
   .description("Save a media attachment (full-resolution image, file, or voice)")
   .option("--thumbnail", "Retrieve an image thumbnail instead of full resolution")
+  .option("--best", "Retrieve the best available image; fall back if full resolution was not sent")
   .option("-o, --output <path>", "Output file path")
   .action(async (chatId: string, localIdStr: string, opts) => {
-    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output, opts.thumbnail);
+    if (opts.thumbnail && opts.best) {
+      console.error("Choose either --thumbnail or --best.");
+      process.exit(1);
+    }
+    const quality = opts.thumbnail ? "thumbnail" : opts.best ? "best" : "full";
+    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output, quality);
   });
 
 messagesCmd
@@ -727,8 +733,11 @@ async function cmdMessages(client: WeChatClient, chatId: string, limit: number =
   console.log(`\n${messages.length} message(s) shown.`);
 }
 
-async function cmdMedia(client: WeChatClient, chatId: string, localId: number, outputPath?: string, thumbnail = false) {
-  const result = await client.getMedia(chatId, localId, thumbnail ? "thumbnail" : "full");
+async function cmdMedia(
+  client: WeChatClient, chatId: string, localId: number, outputPath?: string,
+  quality: "full" | "thumbnail" | "best" = "full",
+) {
+  const result = await client.getMedia(chatId, localId, quality);
 
   if (result.type === "unsupported") {
     console.error("No media found for this message (unsupported type or not found).");
@@ -745,9 +754,10 @@ async function cmdMedia(client: WeChatClient, chatId: string, localId: number, o
     // Decode base64
     const buffer = Buffer.from(result.data, "base64");
     fs.writeFileSync(outFile, buffer);
-    console.log(`Saved ${result.type} to ${outFile} (${buffer.length} bytes)`);
+    const variant = result.type === "image" && result.quality ? ` (${result.quality})` : "";
+    console.log(`Saved ${result.type}${variant} to ${outFile} (${buffer.length} bytes)`);
   } else if (result.type === "image") {
-    console.error(`Requested image ${thumbnail ? "thumbnail" : "full resolution"} is not yet available.`);
+    console.error(`Requested image ${quality} is not yet available.${quality === "full" ? " Regular phone sends may have no Original copy; try --best." : ""}`);
     process.exit(1);
   } else if (result.type === "video") {
     console.error("Video not yet downloaded by WeChat. Try playing the video in the app first.");
