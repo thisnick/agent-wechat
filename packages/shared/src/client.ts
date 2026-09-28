@@ -43,6 +43,8 @@ export interface WeChatClientOptions {
   token?: string;
   sessionId?: string;
   headers?: Record<string, string>;
+  /** Cancel HTTP requests owned by this client (not server-side jobs). */
+  signal?: AbortSignal;
 }
 
 function normalizeUrl(base: string): string {
@@ -65,11 +67,13 @@ function qs(params: Record<string, unknown>): string {
 }
 
 export class WeChatClient {
+  readonly signal?: AbortSignal;
   private base: string;
   private headers: Record<string, string>;
 
   constructor(options: WeChatClientOptions) {
     this.base = normalizeUrl(options.baseUrl);
+    this.signal = options.signal;
     this.headers = { "Content-Type": "application/json" };
     if (options.token) this.headers.Authorization = `Bearer ${options.token}`;
     if (options.sessionId)
@@ -87,6 +91,7 @@ export class WeChatClient {
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
       headers: this.headers,
+      signal: this.signal,
     });
     if (!res.ok)
       throw new Error(
@@ -99,6 +104,7 @@ export class WeChatClient {
     const res = await fetch(`${this.base}${path}`, {
       method: "POST",
       headers: this.headers,
+      signal: this.signal,
       body: body != null ? JSON.stringify(body) : undefined,
     });
     if (!res.ok)
@@ -112,6 +118,7 @@ export class WeChatClient {
     const res = await fetch(`${this.base}${path}`, {
       method: "DELETE",
       headers: this.headers,
+      signal: this.signal,
     });
     if (!res.ok)
       throw new Error(
@@ -214,7 +221,7 @@ export class WeChatClient {
     form.set("audio", new Blob([new Uint8Array(audio)]), "voice-audio");
     const headers: Record<string, string> = { ...this.headers, "Idempotency-Key": idempotencyKey };
     delete headers["Content-Type"];
-    const res = await fetch(`${this.base}/api/messages/voice`, { method: "POST", headers, body: form });
+    const res = await fetch(`${this.base}/api/messages/voice`, { method: "POST", headers, body: form, signal: this.signal });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
     return res.json() as Promise<VoiceJob>;
   }

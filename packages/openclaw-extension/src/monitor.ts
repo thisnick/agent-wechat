@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { WeChatClient } from "@agent-wechat/shared";
 import type { Chat, Message, AuthStatus } from "@agent-wechat/shared";
@@ -22,6 +23,7 @@ import {
   attachmentPathExists,
   saveManagedAttachment,
 } from "./attachment-store.js";
+import { createChatScheduler, createSerialQueue } from "./chat-scheduler.js";
 import { MonitorStateStore } from "./monitor-state.js";
 import { listAllChats, listMessageWindow } from "./polling.js";
 import { sendWeChatMedia } from "./outbound-media.js";
@@ -81,14 +83,12 @@ function isOfficialAccount(chatId: string): boolean {
   return chatId.startsWith("gh_");
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  try {
+    await delay(ms, undefined, { signal });
+  } catch (error) {
+    if (!signal?.aborted) throw error;
+  }
 }
 
 function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
@@ -109,7 +109,7 @@ async function retrieveAttachment(
   msg: Message,
   liveAccount: ResolvedWeChatAccount,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
-  maxAttempts = 15,
+  maxAttempts = 3,
 ): Promise<WeChatAttachment | undefined> {
   const baseType = msg.type & 0x7fffffff;
   const expectedKind = attachmentKindForMessageType(baseType);
@@ -143,6 +143,7 @@ async function retrieveAttachment(
     );
     return { kind, status: "ready", filename: saved.filename, mime, path: saved.path, quality: result.quality };
   } catch (error) {
+    client.signal?.throwIfAborted();
     const status = error instanceof AttachmentTooLargeError ? "too_large" : "error";
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Attachment retrieval failed for msg ${msg.localId} (${status})`,
@@ -160,7 +161,7 @@ export async function startWeChatMonitor(
   opts: WeChatMonitorOptions,
 ): Promise<void> {
   const { account, abortSignal, setStatus, log } = opts;
-  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
+  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token, signal: abortSignal });
   const runtimeStateDir = getWeChatRuntime().state.resolveStateDir(process.env);
   const stateStore = new MonitorStateStore<ProcessedMessage>(runtimeStateDir, account.accountId);
   let savedState: Awaited<ReturnType<typeof stateStore.load>>;
@@ -173,13 +174,18 @@ export async function startWeChatMonitor(
   const lastSeenId = new Map<string, number>(Object.entries(savedState.lastSeen));
   const groupHistory = new Map<string, ProcessedMessage[]>(Object.entries(savedState.groupHistory));
   const GROUP_HISTORY_LIMIT = 50;
-  const persistState = async () => {
+  const stateWrites = createSerialQueue();
+  const scheduler = createChatScheduler({
+    signal: abortSignal,
+    onError: (error, chatId) => log?.error?.(`[wechat:${account.accountId}] Chat ${chatId} failed: ${String(error)}`),
+  });
+  const persistState = () => stateWrites.run(async () => {
     try {
       await stateStore.save(lastSeenId, groupHistory);
     } catch (error) {
       log?.error?.(`[wechat:${account.accountId}] Failed to persist monitor state: ${String(error)}`);
     }
-  };
+  });
   let lastAuthCheck = 0;
   let prevStatus: AuthStatus["status"] | undefined = undefined;
 
@@ -253,6 +259,11 @@ export async function startWeChatMonitor(
         }
       }
 
+      if (prevStatus !== "logged_in") {
+        await sleep(account.pollIntervalMs, abortSignal);
+        continue;
+      }
+
       // ---- Message polling ----
       let chats: Chat[];
       try {
@@ -278,7 +289,8 @@ export async function startWeChatMonitor(
       if (unreadChats.length > 0) {
         for (const chat of unreadChats) {
           if (abortSignal.aborted) break;
-          await processUnreadChat(
+          const chatId = chat.username ?? chat.id;
+          scheduler.schedule(chatId, () => processUnreadChat(
             client,
             chat,
             lastSeenId,
@@ -289,7 +301,7 @@ export async function startWeChatMonitor(
             groupHistory,
             GROUP_HISTORY_LIMIT,
             persistState,
-          );
+          ));
         }
       }
 
@@ -297,7 +309,7 @@ export async function startWeChatMonitor(
       for (const chat of chats) {
         if (abortSignal.aborted) break;
         const chatId = chat.username ?? chat.id;
-        if (isOfficialAccount(chatId)) continue; // skip official accounts
+        if (isOfficialAccount(chatId) || scheduler.has(chatId)) continue; // skip busy/official accounts
         const prevSeen = lastSeenId.get(chatId);
         if (prevSeen === undefined) continue; // not tracked yet
         if (unreadChats.some((c) => (c.username ?? c.id) === chatId)) continue; // already processed
@@ -306,7 +318,7 @@ export async function startWeChatMonitor(
         log?.info?.(
           `[wechat:${account.accountId}] Catch-up: ${chatId} lastMsgLocalId=${chat.lastMsgLocalId} > lastSeenId=${prevSeen}`,
         );
-        await processUnreadChat(client, chat, lastSeenId, account, cfg, log, true, groupHistory, GROUP_HISTORY_LIMIT, persistState);
+        scheduler.schedule(chatId, () => processUnreadChat(client, chat, lastSeenId, account, cfg, log, true, groupHistory, GROUP_HISTORY_LIMIT, persistState));
       }
     } catch (err) {
       log?.error?.(
@@ -316,6 +328,9 @@ export async function startWeChatMonitor(
 
     await sleep(account.pollIntervalMs, abortSignal);
   }
+
+  await scheduler.drain();
+  await stateWrites.drain();
 
   setStatus({
     accountId: account.accountId,
@@ -454,6 +469,7 @@ async function dispatchSegment(
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
   remainingSegments?: number,
 ): Promise<"delivered" | "ignored" | "failed"> {
+  client.signal?.throwIfAborted();
   const core = getWeChatRuntime();
   const lastMsg = segment[segment.length - 1];
   const { isGroup, senderId, senderName, timestamp, rawBody, commandBody, msg } = lastMsg;
@@ -671,6 +687,7 @@ async function dispatchSegment(
       } : {}),
     });
 
+    client.signal?.throwIfAborted();
     // Record session
     await core.channel.session.recordInboundSession({
       storePath,
@@ -693,6 +710,7 @@ async function dispatchSegment(
 
     let replyFailed = false;
     let deliverySequence = 0;
+    client.signal?.throwIfAborted();
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
@@ -795,6 +813,7 @@ async function processUnreadChat(
   groupHistoryLimit?: number,
   persistState?: () => Promise<void>,
 ): Promise<void> {
+  client.signal?.throwIfAborted();
   const core = getWeChatRuntime();
   // Re-resolve account from hot-reloaded config so policy changes take effect
   const liveAccount =
@@ -893,7 +912,9 @@ async function processUnreadChat(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}`,
     );
+    client.signal?.throwIfAborted();
     const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, policy, log);
+    client.signal?.throwIfAborted();
     if (pm) {
       processed.push(pm);
     }
@@ -937,6 +958,7 @@ async function processUnreadChat(
         // before assembling catch-up, then retain every file path and select only
         // the latest image for OpenClaw's single media slot.
         processed.splice(0, processed.length, ...await refreshAttachments(processed, client, chatId, liveAccount, log));
+        client.signal?.throwIfAborted();
         processed.splice(0, processed.length, ...applyCatchupAttachmentPolicy(processed));
       }
     } else {
@@ -987,6 +1009,8 @@ async function processUnreadChat(
     }
   }
 
+  // Checkpoint fully handled batches even if shutdown began during delivery.
+  // Cancelled preparation/dispatch exits above without advancing this cursor.
   // Update lastSeenId (track all messages including self-sent/filtered)
   const maxId = Math.max(...newMessages.map((m) => m.localId));
   lastSeenId.set(chatId, maxId);
