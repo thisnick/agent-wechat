@@ -192,3 +192,7 @@ OpenClaw Gateway
 ```
 
 The monitor polls for chats with unread messages, fetches new messages, resolves routing/session via OpenClaw's runtime, and dispatches replies back through the agent-wechat API.
+
+The monitor processes at most two direct chats and two group chats concurrently, with one active batch per chat. Slow group media retrieval therefore does not hold up the polling loop or consume the direct-chat slots. The server still serializes UI operations through its existing GUI guard.
+
+Media preparation and later attachment refresh share a budget of three HTTP requests per message, including image-quality compatibility requests. This budget is retained for the latest 1,000 media messages per monitor client and resets on restart. A pending or unavailable attachment remains explicitly labeled; it is not represented as a successful download. Shutdown cancels monitor HTTP waits and retry delays, then drains active work and state writes. Cancelling an HTTP wait does not cancel a transfer already queued by the server.
