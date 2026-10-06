@@ -1,4 +1,5 @@
 use super::Plan;
+use super::composer::find_edit_and_send_button;
 use crate::ia::actions;
 use crate::ia::selectors::{query_selector, query_selector_all};
 use crate::ia::types::*;
@@ -24,36 +25,78 @@ pub enum ChatOpenPhase {
 }
 
 fn find_edit_area(a11y: &A11yNode) -> Option<&A11yNode> {
-    find_edit_near_send(a11y)
+    find_edit_and_send_button(a11y).map(|(edit, _)| edit)
 }
 
-fn find_edit_near_send(node: &A11yNode) -> Option<&A11yNode> {
-    if let Some(children) = &node.children {
-        let has_send = children.iter().any(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
-        let edit_node = children.iter().find(|c| {
-            c.role == "text"
-                && c.states
-                    .as_ref()
-                    .map(|s| s.iter().any(|st| st == "EDITABLE"))
-                    .unwrap_or(false)
-        });
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
 
-        if has_send {
-            if let Some(edit) = edit_node {
-                return Some(edit);
-            }
+    fn editor(y: f64) -> Value {
+        json!({"role":"text","name":"","states":["EDITABLE"],
+            "bounds":{"x":321.0,"y":y,"width":942.0,"height":79.0}})
+    }
+
+    fn send(name: &str) -> Value {
+        json!({"role":"push-button","name":name,"states":["DISABLED"],
+            "bounds":{"x":1204.0,"y":735.0,"width":55.0,"height":24.0}})
+    }
+
+    fn group(children: Vec<Value>) -> Value {
+        json!({"role":"filler","name":"","children":children})
+    }
+
+    fn identified() -> IdentifiedStates {
+        IdentifiedStates {
+            main_window: Some(IdentifiedState {
+                state_id: "chat_open".into(), fsm: "main_window".into(), frame: None,
+            }),
+            popup: None, contact_card: None, settings: None,
         }
+    }
 
-        // Recurse
-        for child in children {
-            if let Some(result) = find_edit_near_send(child) {
-                return Some(result);
+    #[tokio::test]
+    async fn focusing_supports_both_send_labels_and_layouts() {
+        for name in ["Send", "Send(S)"] {
+            for nested in [false, true] {
+                let composer = if nested {
+                    group(vec![group(vec![editor(646.0)]),
+                        group(vec![group(vec![send("Send Voice"), send(name)])])])
+                } else {
+                    group(vec![editor(646.0), send(name)])
+                };
+                let tree: A11yNode = serde_json::from_value(group(vec![editor(46.0), composer])).unwrap();
+                let mut phase = ChatOpenPlanState { phase: ChatOpenPhase::Focusing, result: None };
+                let action = ChatOpenPlan.select_action(
+                    &AppState::default(),
+                    &ChatOpenParams { chat_id: "filehelper".into(), clear_unreads: true },
+                    &identified(), &mut phase, &tree, "default",
+                ).await.unwrap();
+                assert!(matches!(action.action, Action::ClickCoords { x: 792.0, y: 686.0 }),
+                    "wrong focus target for {name}, nested={nested}");
+                assert!(matches!(phase.phase, ChatOpenPhase::ClickingAudio));
             }
         }
     }
-    None
+
+    #[tokio::test]
+    async fn focusing_does_not_click_search_or_send_voice() {
+        for value in [
+            group(vec![group(vec![editor(46.0)]), group(vec![send("Send")])]),
+            group(vec![editor(646.0), send("Send Voice")]),
+        ] {
+            let tree: A11yNode = serde_json::from_value(value).unwrap();
+            let mut phase = ChatOpenPlanState { phase: ChatOpenPhase::Focusing, result: None };
+            let action = ChatOpenPlan.select_action(
+                &AppState::default(),
+                &ChatOpenParams { chat_id: "filehelper".into(), clear_unreads: true },
+                &identified(), &mut phase, &tree, "default",
+            ).await;
+            assert!(action.is_none());
+            assert!(matches!(phase.phase, ChatOpenPhase::Focusing));
+        }
+    }
 }
 
 #[async_trait::async_trait]

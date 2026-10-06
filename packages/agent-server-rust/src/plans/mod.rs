@@ -1,5 +1,6 @@
 pub mod auth_status;
 pub mod chat_open;
+mod composer;
 pub mod login;
 pub mod logout;
 pub mod send_message;
