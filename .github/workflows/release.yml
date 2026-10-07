@@ -28,17 +28,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
-      # npm >= 11.5 required for OIDC trusted publishing. Use Corepack to
-      # activate it, because the bundled npm 10.9.7 in the Node 22.22.2 runner
-      # image is broken at the arborist rebuild step (MODULE_NOT_FOUND:
-      # 'promise-retry') and cannot install anything — including itself.
-      - name: Activate npm 11.12.1 via Corepack
+      # No setup-node registry auth placeholder: publishing uses GitHub OIDC.
+      - name: Install verified standalone npm 11.12.1
+        run: bash scripts/install-ci-npm.sh
+
+      - name: Check npm and release verification
         run: |
-          corepack enable npm
-          corepack prepare npm@11.12.1 --activate
-          echo "Active npm: $(npm --version)"
+          test "$(npm --version)" = "11.12.1"
+          node --test scripts/verify-npm-release.test.mjs
 
       - run: pnpm install --frozen-lockfile
 
@@ -59,11 +57,15 @@ jobs:
         id: publish
         if: steps.changesets.outputs.hasChangesets == 'false'
         run: |
-          OUTPUT=$(pnpm changeset publish 2>&1) || true
+          if ! OUTPUT=$(pnpm changeset publish 2>&1); then
+            echo "$OUTPUT"
+            exit 1
+          fi
           echo "$OUTPUT"
           if echo "$OUTPUT" | grep -q "New tag:"; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
             PACKAGES=$(echo "$OUTPUT" | grep "New tag:" | sed 's/.*New tag: *//' | jq -Rc 'split("@") | {name: (.[:-1] | join("@")), version: .[-1]}' | jq -sc '.')
+            node scripts/verify-npm-release.mjs "$PACKAGES"
+            echo "published=true" >> "$GITHUB_OUTPUT"
             echo "publishedPackages=$PACKAGES" >> "$GITHUB_OUTPUT"
           else
             echo "published=false" >> "$GITHUB_OUTPUT"

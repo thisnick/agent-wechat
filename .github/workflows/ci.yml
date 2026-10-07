@@ -11,6 +11,9 @@ on:
       - 'turbo.json'
       - 'tsconfig.json'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/install-ci-npm.sh'
+      - 'scripts/verify-npm-release*.mjs'
 
 jobs:
   changes:
@@ -19,12 +22,17 @@ jobs:
       ts: ${{ steps.filter.outputs.ts }}
       rust: ${{ steps.filter.outputs.rust }}
       docs: ${{ steps.filter.outputs.docs }}
+      release: ${{ steps.filter.outputs.release }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
+            release:
+              - '.github/workflows/release.yml'
+              - 'scripts/install-ci-npm.sh'
+              - 'scripts/verify-npm-release*.mjs'
             ts:
               - 'packages/cli/**'
               - 'packages/shared/**'
@@ -44,6 +52,22 @@ jobs:
               - 'docs/**'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+
+  release-tools:
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bash -n scripts/install-ci-npm.sh
+      - run: bash scripts/install-ci-npm.sh
+      - run: |
+          test "$(npm --version)" = "11.12.1"
+          node --test scripts/verify-npm-release.test.mjs
 
   ts:
     needs: changes
