@@ -1,5 +1,13 @@
 # @agent-wechat/agent-server
 
+## 0.15.2
+
+### Patch Changes
+
+- [#199](https://github.com/thisnick/agent-wechat/pull/199) [`b5ee9ac`](https://github.com/thisnick/agent-wechat/commit/b5ee9ac123d6fb2a3de6e3e54a2a7a5b233ba81d) Thanks [@thisnick](https://github.com/thisnick)! - Use the shared composer selector when opening chats, supporting both Send and Send(S) and separately nested editor controls. This fixes opening chats with unread clearing failing with “No action selected” on the newer WeChat layout.
+
+- [#199](https://github.com/thisnick/agent-wechat/pull/199) [`b5ee9ac`](https://github.com/thisnick/agent-wechat/commit/b5ee9ac123d6fb2a3de6e3e54a2a7a5b233ba81d) Thanks [@thisnick](https://github.com/thisnick)! - Report explicitly expired, uncached media without retrying native downloads. Preserve cached attachments and show expiry in matching CLI and OpenClaw attachment feedback.
+
 ## 0.15.1
 
 ### Patch Changes
