@@ -1,6 +1,7 @@
 import { Command, Option } from "commander";
 import { WeChatClient, type WeChatClientOptions } from "@agent-wechat/shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
+import { expiredMediaMessage } from "./lib/media-status.js";
 import { spawn, execSync } from "child_process";
 import { randomBytes } from "crypto";
 import fs from "fs";
@@ -740,6 +741,11 @@ async function cmdMedia(
 ) {
   const result = await client.getMedia(chatId, localId, quality);
 
+  const expired = expiredMediaMessage(result);
+  if (expired) {
+    console.error(expired);
+    process.exit(1);
+  }
   if (result.type === "unsupported") {
     console.error("No media found for this message (unsupported type or not found).");
     process.exit(1);

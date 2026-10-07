@@ -23,7 +23,7 @@ export async function pollMedia(
     let result: MediaResult;
     if (legacyImageServer) {
       const full = await client.getMedia(chatId, localId, "full");
-      if (full.data || full.type === "unsupported") return full;
+      if (full.data || full.type === "unsupported" || full.type === "expired") return full;
       const preview = await client.getMedia(chatId, localId, "thumbnail");
       result = preview.data ? { ...preview, quality: "thumbnail" } : full;
     } else {
@@ -38,7 +38,7 @@ export async function pollMedia(
       }
     }
     lastResult = result;
-    if (result.type === "unsupported" || result.data) return result;
+    if (result.type === "unsupported" || result.type === "expired" || result.data) return result;
     if (attempt < maxAttempts) {
       log?.info?.(`[media] Attempt ${attempt}/${maxAttempts} for ${chatId}:${localId} returned no data, retrying...`);
       await new Promise(resolve => setTimeout(resolve, intervalMs));

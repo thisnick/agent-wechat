@@ -1,7 +1,7 @@
 import type { MediaResult } from "@agent-wechat/shared";
 
 export type AttachmentKind = "image" | "file" | "audio" | "video";
-export type AttachmentStatus = "ready" | "pending" | "unavailable" | "unsupported" | "too_large" | "error";
+export type AttachmentStatus = "ready" | "pending" | "expired" | "unavailable" | "unsupported" | "too_large" | "error";
 
 export type WeChatAttachment = {
   kind: AttachmentKind;
@@ -11,6 +11,7 @@ export type WeChatAttachment = {
   path?: string;
   quality?: "full" | "standard" | "thumbnail";
   error?: string;
+  expiresAt?: number;
 };
 
 export type MessageWithAttachment = {
@@ -112,6 +113,9 @@ export function renderAttachmentBody(
         attachment.kind === "audio" ? "Voice message" : "Video";
     if (attachment.status === "pending") {
       return appendReference(originalBody, `[${label} pending: ${name}]`);
+    }
+    if (attachment.status === "expired") {
+      return appendReference(originalBody, `[${label} expired: ${name}; no cached copy available. Ask the sender to resend.]`);
     }
     return appendReference(originalBody, `[${label} unavailable: ${name} (${attachment.status})]`);
   }

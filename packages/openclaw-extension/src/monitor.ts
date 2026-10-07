@@ -120,6 +120,10 @@ async function retrieveAttachment(
     if (!result) {
       return { kind: expectedKind, status: "unavailable", filename: fallbackFilename };
     }
+    if (result.type === "expired") {
+      return { kind: expectedKind, status: "expired", filename: result.filename || fallbackFilename,
+        expiresAt: result.expiresAt };
+    }
     if (result.type === "unsupported") {
       // Type 49 also represents links/cards; unsupported means it was not a file.
       if (baseType === 49) return undefined;
@@ -406,6 +410,8 @@ async function refreshAttachment(
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
 ): Promise<ProcessedMessage> {
   if (!message.attachment) return message;
+  // A bounded catch-up retry cannot recover a confirmed expired CDN copy.
+  if (message.attachment.status === "expired") return message;
   if (message.attachment.status === "ready" && await attachmentPathExists(message.attachment.path)) {
     return message;
   }

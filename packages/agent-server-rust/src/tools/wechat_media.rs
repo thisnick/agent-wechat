@@ -52,6 +52,7 @@ fn unsupported() -> MediaResult {
         format: String::new(),
         filename: String::new(),
         quality: None,
+        ..Default::default()
     }
 }
 
@@ -63,6 +64,7 @@ pub(crate) fn pending() -> MediaResult {
         format: String::new(),
         filename: String::new(),
         quality: None,
+        ..Default::default()
     }
 }
 
@@ -270,6 +272,7 @@ fn get_image_thumbnail(
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}.jpg"),
                         quality: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -299,6 +302,7 @@ fn get_image_thumbnail(
                                 format: "jpeg".into(),
                                 filename: format!("msg_{local_id}.jpg"),
                                 quality: None,
+                                ..Default::default()
                             });
                         }
                     }
@@ -748,6 +752,7 @@ fn get_video_data(
                     format: "mp4".into(),
                     filename: format!("msg_{local_id}.mp4"),
                     quality: None,
+                    ..Default::default()
                 };
             }
         }
@@ -771,6 +776,7 @@ fn get_video_data(
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}_cover.jpg"),
                         quality: None,
+                        ..Default::default()
                     };
                 }
             }
@@ -790,6 +796,7 @@ fn get_video_data(
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}_thumb.jpg"),
                         quality: None,
+                        ..Default::default()
                     };
                 }
             }
@@ -841,6 +848,7 @@ fn decrypt_and_return(
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
                 quality: None,
+                ..Default::default()
             }
         }
     };
@@ -855,6 +863,7 @@ fn decrypt_and_return(
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
                 quality: None,
+                ..Default::default()
             }
         }
     };
@@ -869,6 +878,7 @@ fn decrypt_and_return(
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
                 quality: None,
+                ..Default::default()
             }
         }
     };
@@ -894,6 +904,7 @@ fn decrypt_and_return(
                 format: cfmt,
                 filename: format!("msg_{local_id}.{cext}"),
                 quality: None,
+                ..Default::default()
             };
         }
         return pending();
@@ -911,6 +922,7 @@ fn decrypt_and_return(
         format: format.into(),
         filename: format!("msg_{local_id}.{ext}"),
         quality: None,
+        ..Default::default()
     }
 }
 
@@ -947,6 +959,7 @@ fn get_emoji_media(
                         format: "gif".into(),
                         filename: format!("emoji_{md5_val}.gif"),
                         quality: None,
+                        ..Default::default()
                     };
                 }
             }
@@ -963,6 +976,7 @@ fn get_emoji_media(
                 format: "gif".into(),
                 filename: format!("emoji_{md5_val}.gif"),
                 quality: None,
+                ..Default::default()
             };
         }
     }
@@ -974,6 +988,7 @@ fn get_emoji_media(
         format: "unknown".into(),
         filename: format!("emoji_{md5_val}"),
         quality: None,
+        ..Default::default()
     }
 }
 
@@ -1043,6 +1058,7 @@ fn get_voice_data(
                 format: "mp3".into(),
                 filename: format!("msg_{local_id}.mp3"),
                 quality: None,
+                ..Default::default()
             };
         }
 
@@ -1057,6 +1073,7 @@ fn get_voice_data(
             format: "silk".into(),
             filename: format!("msg_{local_id}.silk"),
             quality: None,
+            ..Default::default()
         };
     }
 
@@ -1102,6 +1119,7 @@ fn get_file_attachment(
                     format: ext,
                     filename,
                     quality: None,
+                    ..Default::default()
                 };
             }
         }
@@ -1188,6 +1206,7 @@ fn get_image_for_quality(
         format: "jpeg".into(),
         filename: format!("msg_{local_id}.jpg"),
         quality: None,
+        ..Default::default()
     }
 }
 

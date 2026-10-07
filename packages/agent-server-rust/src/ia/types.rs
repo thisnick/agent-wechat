@@ -545,7 +545,7 @@ pub struct SendResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct MediaResult {
@@ -563,6 +563,16 @@ pub struct MediaResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub quality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+    // Explicit message expiry, in Unix seconds (not an age-based estimate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub expires_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub retryable: Option<bool>,
 }
 
 // ============================================

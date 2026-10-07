@@ -70,6 +70,13 @@ test("unavailable attachments expose status without a fake path", () => {
   assert.doesNotMatch(body, /Local file/);
 });
 
+test("expired files are visible to the model without suggesting more polling", () => {
+  const body = renderAttachmentBody("report.pdf", { kind: "file", filename: "report.pdf", status: "expired" });
+  assert.match(body, /File expired: report\.pdf/);
+  assert.match(body, /Ask the sender to resend/);
+  assert.doesNotMatch(body, /pending|Local file/);
+});
+
 test("pending videos never expose raw message XML", () => {
   const raw = '<msg><videomsg cdnvideourl="private" /></msg>';
   const source = attachmentSourceBody(raw, "video");
