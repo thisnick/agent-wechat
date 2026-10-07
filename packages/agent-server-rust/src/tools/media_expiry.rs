@@ -26,7 +26,7 @@ pub fn expiry_timestamp(content: &str, created_at: i64) -> Option<i64> {
         || field.children().any(|node| node.is_element()) {
         return None;
     }
-    let text: String = field.children().filter_map(|node| node.text()).collect();
+    let text: String = field.children().filter(|node| node.is_text()).filter_map(|node| node.text()).collect();
     let value = text.trim();
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -77,6 +77,8 @@ mod tests {
             "<msg><extcommoninfo><media_expire_at>1700000200</media_expire_at><media_expire_at>1700000300</media_expire_at></extcommoninfo></msg>".into(),
             format!("<msg><extcommoninfo/><extcommoninfo><media_expire_at>1700000200</media_expire_at></extcommoninfo></msg>"),
             xml("<value>1700000200</value>"),
+            xml("170000<!--0200-->"),
+            "<msg xmlns='untrusted'><extcommoninfo><media_expire_at>1700000200</media_expire_at></extcommoninfo></msg>".into(),
             "<!DOCTYPE msg [<!ENTITY exp '1700000200'>]><msg><extcommoninfo><media_expire_at>&exp;</media_expire_at></extcommoninfo></msg>".into(),
         ] {
             assert_eq!(expiry_timestamp(&content, 1_700_000_100), None);
