@@ -78,9 +78,11 @@ wx down
 | `wx messages send <id> --voice <audio> --detach` | Start a voice job and return its ID immediately |
 | `wx messages voice status <jobId>` | Check voice-job progress and sent message IDs |
 | `wx messages voice cancel <jobId>` | Request cancellation of a voice job |
-| `wx messages media <id> <localId> [-o <path>] [--full\|--thumbnail]` | Save an attachment; images use the best available copy by default |
+| `wx messages media <id> <localId> [-o <path>] [--full\|--thumbnail]` | Save an attachment, including supported stickers with animation preserved; images use the best available copy by default |
 
 Run `wx --help` or `wx <command> --help` for all commands and options.
+
+Supported type-47 stickers use the same media command: the server retrieves and validates the original CDN bytes, preserves animation, and keeps its own persistent cache. This does not open a chat, modify WeChat's cache, or enable automatic OpenClaw sticker ingestion. Encrypted-only or unverified sticker sources return an unavailable result.
 
 ## Architecture
 

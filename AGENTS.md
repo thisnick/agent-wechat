@@ -42,6 +42,8 @@ Chat, message, and media readers are under `packages/agent-server-rust/src/tools
 
 For image media, omitted `quality` defaults to `best`. It requests a native transfer only when the message advertises an Original, then returns the best cached variant and labels it in the `quality` field. Explicit `quality=full` is strict. The media endpoint never selects a chat: on the tested AMD64 build, the native full-image request does not fetch the standard-size variant. Opening a chat separately may cause WeChat to cache standard images in the visible history.
 
+Type-47 sticker retrieval uses `src/tools/sticker_media.rs`, not the native transfer queue. The existing media endpoint returns validated original bytes as `type: "emoji"`; GIF animation is preserved. Downloads accept only verified CDN sources, public pinned DNS answers, and no redirects. Signed URLs and encryption keys are not exposed or logged. The server-owned cache lives beside `AGENT_DB_PATH` under `media-cache/stickers`, is account-scoped, and retains up to 512 MiB per account. Sticker payloads are limited to 16 MiB, with separate decoding limits. Cached bytes precede explicit expiry checks; CDN 403/404 alone is not evidence of expiry. Terminal failures carry a reason and `retryable: false`; transient errors are bounded pending results. This does not enable automatic OpenClaw type-47 attachment handling.
+
 The current upload limit is defined in `src/router/mod.rs` (`MAX_UPLOAD_BYTES`, 128 MiB); HTTP body size includes base64 expansion. If changing limits, update the server, clients, error reporting, and boundary tests together.
 
 ### Outgoing voice notes

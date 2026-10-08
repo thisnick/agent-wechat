@@ -23,7 +23,7 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 refinery = { version = "0.8", features = ["rusqlite"] }
 
 # Image processing + QR
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "jpeg", "webp"] }
 rqrr = "0.8"
 qrcode = "0.14"
 
@@ -42,6 +42,7 @@ chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 regex = "1"
 roxmltree = "0.21"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 futures = "0.3"
 tokio-stream = "0.1"
 
