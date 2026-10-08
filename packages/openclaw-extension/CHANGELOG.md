@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.15.5
+
+### Patch Changes
+
+- [#206](https://github.com/thisnick/agent-wechat/pull/206) [`666deea`](https://github.com/thisnick/agent-wechat/commit/666deea513e22551b0fbf04b8a360c430892db9d) Thanks [@thisnick](https://github.com/thisnick)! - Allow releases to proceed after successful npm publication without waiting for registry propagation, and resume binary and Docker publication when npm packages already exist but the GitHub release is missing.
+
 ## 0.15.4
 
 ### Patch Changes
