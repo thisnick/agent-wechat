@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.15.3
+
+### Patch Changes
+
+- [#202](https://github.com/thisnick/agent-wechat/pull/202) [`e321b5b`](https://github.com/thisnick/agent-wechat/commit/e321b5b9b3557e41e5b6b84a5a41f8dead0ee68b) Thanks [@thisnick](https://github.com/thisnick)! - Retrieve supported WeChat type-47 stickers through the existing media endpoint, preserving GIF animation. Download and validate original CDN bytes into a bounded, account-scoped server cache without opening chats or writing to WeChat's cache. Existing CLI media commands can save the returned sticker files; automatic OpenClaw sticker ingestion is unchanged.
+
 ## 0.15.2
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # @agent-wechat/agent-server
 
+## 0.15.3
+
+### Patch Changes
+
+- [#159](https://github.com/thisnick/agent-wechat/pull/159) [`09b959e`](https://github.com/thisnick/agent-wechat/commit/09b959ed5e8bd4766f0714f193918736f46369be) Thanks [@kyan-du](https://github.com/kyan-du)! - Render the text and media descriptions inside Combine and Forward messages
+  (type 49, subtype 19), including nested chat histories. Parse XML entities and
+  CDATA correctly, retain sender attribution, and label bounded truncation or
+  unavailable nested records. Forwarded media is described, not downloaded.
+
 ## 0.15.2
 
 ### Patch Changes
