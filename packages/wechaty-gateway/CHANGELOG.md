@@ -1,5 +1,14 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.15.4
+
+### Patch Changes
+
+- [#204](https://github.com/thisnick/agent-wechat/pull/204) [`40d6dde`](https://github.com/thisnick/agent-wechat/commit/40d6dde0c8ac90e6e5fca4b6db8a2f73020215af) Thanks [@thisnick](https://github.com/thisnick)! - Fix GitHub OIDC release publishing by ensuring pnpm uses the pinned, OIDC-capable npm instead of Node's bundled npm. Add a publishing-subprocess dry-run check so an incorrect npm version fails before publication.
+
+- Updated dependencies [[`40d6dde`](https://github.com/thisnick/agent-wechat/commit/40d6dde0c8ac90e6e5fca4b6db8a2f73020215af)]:
+  - @agent-wechat/wechaty-puppet@0.15.4
+
 ## 0.15.3
 
 ### Patch Changes
