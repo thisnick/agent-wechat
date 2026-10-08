@@ -33,10 +33,10 @@ jobs:
       - name: Install verified standalone npm 11.12.1
         run: bash scripts/install-ci-npm.sh
 
-      - name: Check npm and release verification
+      - name: Check npm publisher and release recovery
         run: |
           test "$(npm --version)" = "11.12.1"
-          node --test scripts/verify-npm-release.test.mjs scripts/verify-ci-publisher.test.mjs
+          node --test scripts/verify-ci-publisher.test.mjs scripts/pending-release-packages.test.mjs
           node scripts/verify-ci-publisher.mjs
 
       - run: pnpm install --frozen-lockfile
@@ -65,7 +65,12 @@ jobs:
           echo "$OUTPUT"
           if echo "$OUTPUT" | grep -q "New tag:"; then
             PACKAGES=$(echo "$OUTPUT" | grep "New tag:" | sed 's/.*New tag: *//' | jq -Rc 'split("@") | {name: (.[:-1] | join("@")), version: .[-1]}' | jq -sc '.')
-            node scripts/verify-npm-release.mjs "$PACKAGES"
+          else
+            # A previous attempt may have published npm packages before failing
+            # to start the binary/Docker jobs. Resume if its release is missing.
+            PACKAGES=$(node scripts/pending-release-packages.mjs)
+          fi
+          if [ "$(echo "$PACKAGES" | jq 'length')" -gt 0 ]; then
             echo "published=true" >> "$GITHUB_OUTPUT"
             echo "publishedPackages=$PACKAGES" >> "$GITHUB_OUTPUT"
           else
@@ -74,6 +79,7 @@ jobs:
           fi
         env:
           NPM_CONFIG_PROVENANCE: true
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-binary:
     name: Binary (${{ matrix.arch }})

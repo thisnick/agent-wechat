@@ -13,7 +13,7 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
       - 'scripts/install-ci-npm.sh'
-      - 'scripts/verify-npm-release*.mjs'
+      - 'scripts/pending-release-packages*.mjs'
       - 'scripts/verify-ci-publisher*.mjs'
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
             release:
               - '.github/workflows/release.yml'
               - 'scripts/install-ci-npm.sh'
-              - 'scripts/verify-npm-release*.mjs'
+              - 'scripts/pending-release-packages*.mjs'
               - 'scripts/verify-ci-publisher*.mjs'
             ts:
               - 'packages/cli/**'
@@ -70,7 +70,7 @@ jobs:
       - run: bash scripts/install-ci-npm.sh
       - run: |
           test "$(npm --version)" = "11.12.1"
-          node --test scripts/verify-npm-release.test.mjs scripts/verify-ci-publisher.test.mjs
+          node --test scripts/verify-ci-publisher.test.mjs scripts/pending-release-packages.test.mjs
           node scripts/verify-ci-publisher.mjs
 
   ts:
