@@ -36,7 +36,8 @@ jobs:
       - name: Check npm and release verification
         run: |
           test "$(npm --version)" = "11.12.1"
-          node --test scripts/verify-npm-release.test.mjs
+          node --test scripts/verify-npm-release.test.mjs scripts/verify-ci-publisher.test.mjs
+          node scripts/verify-ci-publisher.mjs
 
       - run: pnpm install --frozen-lockfile
 

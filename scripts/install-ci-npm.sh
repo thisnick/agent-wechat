@@ -20,4 +20,7 @@ ln -s "$ci_npm_dir/package/bin/npm-cli.js" "$ci_npm_dir/bin/npm"
 ln -s "$ci_npm_dir/package/bin/npx-cli.js" "$ci_npm_dir/bin/npx"
 test "$("$ci_npm_dir/bin/npm" --version)" = "$ci_npm_version"
 printf '%s\n' "$ci_npm_dir/bin" >> "${GITHUB_PATH:?GITHUB_PATH must be set}"
+# Changesets delegates publication to pnpm. pnpm prepends Node's directory to
+# PATH, which otherwise selects setup-node's bundled npm 10 instead of this npm.
+printf 'npm_config_npm_path=%s\n' "$ci_npm_dir/bin/npm" >> "${GITHUB_ENV:?GITHUB_ENV must be set}"
 echo "Verified standalone npm ${ci_npm_version}"
