@@ -1,5 +1,7 @@
 # @agent-wechat/cli
 
+## 0.15.6
+
 ## 0.15.5
 
 ### Patch Changes

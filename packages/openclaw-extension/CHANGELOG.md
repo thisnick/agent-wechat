@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.15.6
+
+### Patch Changes
+
+- [#208](https://github.com/thisnick/agent-wechat/pull/208) [`82a1cd9`](https://github.com/thisnick/agent-wechat/commit/82a1cd9d6f7690a976ae5531d6dab31600d5731f) Thanks [@thisnick](https://github.com/thisnick)! - Load on OpenClaw 2026.10.2, which removed the `channel-message`, `channel-reply-pipeline`, `config-runtime` and `command-auth` SDK subpaths. Outbound and reply-pipeline helpers now come from `channel-outbound`, group-policy helpers from `runtime-group-policy`, and sender command authorization is resolved in the plugin with the same rules as before. Still works on 2026.9.x.
+
 ## 0.15.5
 
 ### Patch Changes
