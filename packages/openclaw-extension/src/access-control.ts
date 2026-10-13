@@ -3,6 +3,12 @@ import {
   buildChannelKeyCandidates,
   resolveChannelEntryMatchWithFallback,
 } from "openclaw/plugin-sdk/channel-targets";
+import type {
+  ChannelIngressRouteDescriptor,
+  ResolveStableChannelMessageIngressParams,
+  ResolvedChannelMessageIngress,
+  StableChannelIngressIdentityParams,
+} from "openclaw/plugin-sdk/channel-ingress-runtime";
 import {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
@@ -11,33 +17,36 @@ import type { ResolvedWeChatAccount, WeChatDmPolicy, WeChatGroupPolicy } from ".
 
 type WeChatGroupEntry = NonNullable<ResolvedWeChatAccount["groups"]>[string];
 
-type CommandAuthorizationDeps = {
-  shouldComputeCommandAuthorized: (rawBody: string, cfg: OpenClawConfig) => boolean;
-  resolveCommandAuthorizedFromAuthorizers: (params: {
-    useAccessGroups: boolean;
-    authorizers: Array<{ configured: boolean; allowed: boolean }>;
-  }) => boolean;
-  readAllowFromStore: () => Promise<string[]>;
-};
-
+/**
+ * WeChat-specific facts that feed OpenClaw's channel ingress resolver. Lists are the
+ * configured entries (normalized ids, `*`, `accessGroup:<name>`); core derives the
+ * effective allowlists, command owners and access-group membership from them.
+ */
 export type WeChatPolicyContext = {
   dmPolicy: WeChatDmPolicy;
   groupPolicy: WeChatGroupPolicy;
   requireMention: boolean;
   groupEnabled: boolean;
-  effectiveAllowFrom: string[];
-  effectiveGroupAllowFrom: string[];
+  allowFrom: string[];
+  groupAllowFrom: string[];
+  /** Per-group `allowFrom` from `groups.<id>` or `groups["*"]`; replaces groupAllowFrom for that group. */
+  groupSenderAllowFrom?: string[];
+  /**
+   * `dmPolicy: "open"` without `"*"` in `allowFrom`. The plugin has always documented open as
+   * "anyone can DM", but OpenClaw core admits nobody unless the wildcard is listed, so the
+   * wildcard is added and the monitor warns once.
+   */
+  impliedOpenDmWildcard?: boolean;
+  /** Whether an empty groupAllowFrom falls back to allowFrom (core default for WeChat: yes). */
+  groupAllowFromFallbackToAllowFrom: boolean;
+  /** Command owners when they differ from the effective DM allowlist. */
+  commandOwnerAllowFrom?: string[];
 };
 
-export type WeChatAccessDecision =
-  | { allowed: true; reason: string }
-  | { allowed: false; reason: string };
-
-export type WeChatMentionGateResult = {
-  effectiveWasMentioned: boolean;
-  shouldSkip: boolean;
-  shouldBypassMention: boolean;
-};
+/** Same signature as the runtime's `channel.inbound.ingress.resolveStable` and the SDK helper. */
+export type WeChatIngressResolver = (
+  params: ResolveStableChannelMessageIngressParams,
+) => Promise<ResolvedChannelMessageIngress>;
 
 const INVISIBLE_TEXT_RE = /[\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g;
 const WECHAT_MENTION_START_RE = /^[@＠]/u;
@@ -138,20 +147,6 @@ export function normalizeWeChatCommandBody(
   return trimmed;
 }
 
-export function isWeChatSenderAllowed(
-  senderId: string | undefined,
-  allowFrom: string[],
-): boolean {
-  if (allowFrom.includes("*")) {
-    return true;
-  }
-  const normalizedSender = senderId ? normalizeWeChatId(senderId) : "";
-  if (!normalizedSender) {
-    return false;
-  }
-  return allowFrom.includes(normalizedSender);
-}
-
 function resolveGroupEntry(params: {
   account: ResolvedWeChatAccount;
   chatId: string;
@@ -178,17 +173,7 @@ export function resolveWeChatPolicyContext(params: {
   account: ResolvedWeChatAccount;
   cfg: OpenClawConfig;
   chatId: string;
-  storeAllowFrom?: string[];
 }): WeChatPolicyContext {
-  const dmPolicy = normalizeDmPolicy(params.account.dmPolicy);
-  const configuredAllowFrom = normalizeWeChatAllowFrom(params.account.allowFrom);
-  const configuredGroupAllowFrom = normalizeWeChatAllowFrom(params.account.groupAllowFrom);
-  const normalizedStoreAllowFrom =
-    dmPolicy === "allowlist" ? [] : normalizeWeChatAllowFrom(params.storeAllowFrom);
-  const effectiveAllowFrom = unique([...configuredAllowFrom, ...normalizedStoreAllowFrom]);
-  const groupBase = configuredGroupAllowFrom.length > 0 ? configuredGroupAllowFrom : configuredAllowFrom;
-  const effectiveGroupAllowFrom = unique([...groupBase, ...normalizedStoreAllowFrom]);
-
   const { groupEntry, wildcardEntry } = resolveGroupEntry({
     account: params.account,
     chatId: params.chatId,
@@ -214,118 +199,110 @@ export function resolveWeChatPolicyContext(params: {
       ),
     ) ?? fallbackGroupPolicy;
 
-  const groupAllowOverride = normalizeWeChatAllowFrom(
+  const groupSenderAllowFrom = normalizeWeChatAllowFrom(
     firstDefined(groupEntry?.allowFrom, wildcardEntry?.allowFrom),
   );
-  const groupAllowFrom =
-    groupAllowOverride.length > 0
-      ? unique([...groupAllowOverride, ...normalizedStoreAllowFrom])
-      : effectiveGroupAllowFrom;
+
+  const dmPolicy = normalizeDmPolicy(params.account.dmPolicy);
+  const allowFrom = normalizeWeChatAllowFrom(params.account.allowFrom);
+  const groupAllowFrom = normalizeWeChatAllowFrom(params.account.groupAllowFrom);
+  const impliedOpenDmWildcard = dmPolicy === "open" && !allowFrom.includes("*");
+  // The implied wildcard only opens DMs. Group senders and command owners keep using the
+  // configured list, so the group fallback is applied here instead of by core.
+  const scoped = impliedOpenDmWildcard
+    ? {
+        allowFrom: ["*", ...allowFrom],
+        impliedOpenDmWildcard,
+        groupAllowFrom: groupAllowFrom.length > 0 ? groupAllowFrom : allowFrom,
+        groupAllowFromFallbackToAllowFrom: false,
+        commandOwnerAllowFrom: allowFrom,
+      }
+    : { allowFrom, groupAllowFrom, groupAllowFromFallbackToAllowFrom: true };
 
   return {
     dmPolicy,
     groupPolicy,
     requireMention,
     groupEnabled,
-    effectiveAllowFrom,
-    effectiveGroupAllowFrom: groupAllowFrom,
+    ...scoped,
+    ...(groupSenderAllowFrom.length > 0 ? { groupSenderAllowFrom } : {}),
   };
 }
 
-export function resolveWeChatInboundAccessDecision(params: {
-  isGroup: boolean;
-  senderId: string | undefined;
-  policy: WeChatPolicyContext;
-}): WeChatAccessDecision {
-  if (params.isGroup) {
-    if (!params.policy.groupEnabled) {
-      return { allowed: false, reason: "group-config-disabled" };
-    }
-    if (params.policy.groupPolicy === "disabled") {
-      return { allowed: false, reason: "groupPolicy=disabled" };
-    }
-    if (params.policy.groupPolicy === "allowlist") {
-      if (params.policy.effectiveGroupAllowFrom.length === 0) {
-        return { allowed: false, reason: "groupPolicy=allowlist (empty allowlist)" };
-      }
-      if (!isWeChatSenderAllowed(params.senderId, params.policy.effectiveGroupAllowFrom)) {
-        return { allowed: false, reason: "groupPolicy=allowlist (sender not allowlisted)" };
-      }
-    }
-    return { allowed: true, reason: `groupPolicy=${params.policy.groupPolicy}` };
-  }
+/** WeChat ids (`wxid_…`, `…@chatroom`) are stable and come from the logged-in client's database. */
+export const WECHAT_INGRESS_IDENTITY: StableChannelIngressIdentityParams = {
+  key: "wechat-id",
+  entryIdPrefix: "wechat",
+  sensitivity: "pii",
+  normalize: (value) => normalizeWeChatId(value) || null,
+};
 
-  if (params.policy.dmPolicy === "disabled") {
-    return { allowed: false, reason: "dmPolicy=disabled" };
-  }
-  if (params.policy.dmPolicy === "allowlist") {
-    if (params.policy.effectiveAllowFrom.length === 0) {
-      return { allowed: false, reason: "dmPolicy=allowlist (empty allowlist)" };
-    }
-    if (!isWeChatSenderAllowed(params.senderId, params.policy.effectiveAllowFrom)) {
-      return { allowed: false, reason: "dmPolicy=allowlist (sender not allowlisted)" };
-    }
-  }
-  return { allowed: true, reason: `dmPolicy=${params.policy.dmPolicy}` };
-}
-
-export async function resolveWeChatCommandAuthorization(params: {
+/**
+ * Resolve one inbound WeChat message through OpenClaw's channel ingress policy: DM and
+ * group sender gates, the per-group route (enabled / sender override), and optionally the
+ * control-command and mention gates. WeChat has no pairing flow, so events never pair.
+ */
+export function resolveWeChatIngress(params: {
+  resolve: WeChatIngressResolver;
   cfg: OpenClawConfig;
-  rawBody: string;
+  accountId: string;
+  policy: WeChatPolicyContext;
   isGroup: boolean;
+  chatId: string;
   senderId: string | undefined;
-  dmPolicy: WeChatDmPolicy;
-  allowFromForCommands: string[];
-  deps: CommandAuthorizationDeps;
-}): Promise<boolean | undefined> {
-  // Mirrors the sender-authorization helper the SDK retired in 2026.10 (command-auth), as
-  // WeChat used it: no access groups, and groups fall back to the DM allowlist.
-  if (!params.deps.shouldComputeCommandAuthorized(params.rawBody, params.cfg)) {
-    return undefined;
+  readStoreAllowFrom?: () => Promise<readonly string[]>;
+  /** Run the command gate for this message. */
+  command?: { allowTextCommands: boolean; hasControlCommand: boolean };
+  /** Run the mention gate (groups only) with this mention fact. */
+  mention?: { wasMentioned: boolean; allowTextCommands: boolean };
+}): Promise<ResolvedChannelMessageIngress> {
+  const { policy, isGroup } = params;
+  const routes: ChannelIngressRouteDescriptor[] = [];
+  if (isGroup && !policy.groupEnabled) {
+    routes.push({
+      id: "wechat-group",
+      kind: "route",
+      configured: true,
+      matched: true,
+      enabled: true,
+      allowed: false,
+      blockReason: "group_disabled",
+    });
   }
-  const normalizedSenderId = normalizeWeChatId(params.senderId ?? "");
-  const usesStore = !params.isGroup && params.dmPolicy !== "allowlist" && params.dmPolicy !== "open";
-  const storeAllowFrom = usesStore
-    ? normalizeWeChatAllowFrom(await params.deps.readAllowFromStore().catch(() => []))
-    : [];
-  const configuredAllowFrom = normalizeWeChatAllowFrom(params.allowFromForCommands);
-  const effectiveAllowFrom = unique([...configuredAllowFrom, ...storeAllowFrom]);
-  const effectiveGroupAllowFrom = configuredAllowFrom;
-  return params.deps.resolveCommandAuthorizedFromAuthorizers({
-    useAccessGroups: true,
-    authorizers: [
-      {
-        configured: effectiveAllowFrom.length > 0,
-        allowed: isWeChatSenderAllowed(normalizedSenderId, effectiveAllowFrom),
-      },
-      {
-        configured: effectiveGroupAllowFrom.length > 0,
-        allowed: isWeChatSenderAllowed(normalizedSenderId, effectiveGroupAllowFrom),
-      },
-    ],
+  // A per-group allowFrom is that group's sender allowlist, for messages and commands alike.
+  const groupAllowFrom = (isGroup && policy.groupSenderAllowFrom) || policy.groupAllowFrom;
+  const mention = isGroup ? params.mention : undefined;
+  const readStoreAllowFrom = params.readStoreAllowFrom;
+  return params.resolve({
+    channelId: "agent-wechat",
+    accountId: params.accountId,
+    identity: WECHAT_INGRESS_IDENTITY,
+    cfg: params.cfg as ResolveStableChannelMessageIngressParams["cfg"],
+    subject: { stableId: normalizeWeChatId(params.senderId ?? "") || null },
+    conversation: { kind: isGroup ? "group" : "direct", id: params.chatId },
+    event: { kind: "message", authMode: "inbound", mayPair: false },
+    dmPolicy: policy.dmPolicy,
+    groupPolicy: policy.groupPolicy,
+    policy: {
+      groupAllowFromFallbackToAllowFrom: policy.groupAllowFromFallbackToAllowFrom,
+      ...(mention
+        ? { activation: { requireMention: policy.requireMention, allowTextCommands: mention.allowTextCommands } }
+        : {}),
+    },
+    allowFrom: policy.allowFrom,
+    groupAllowFrom,
+    ...(routes.length > 0 ? { route: routes } : {}),
+    ...(readStoreAllowFrom ? { readStoreAllowFrom: async () => readStoreAllowFrom() } : {}),
+    ...(mention ? { mentionFacts: { canDetectMention: true, wasMentioned: mention.wasMentioned } } : {}),
+    command: params.command
+      ? {
+          ...params.command,
+          // Group commands are authorized by the group's sender allowlist only, as before.
+          groupOwnerAllowFrom: "none",
+          ...(policy.commandOwnerAllowFrom && !isGroup
+            ? { commandOwnerAllowFrom: policy.commandOwnerAllowFrom, commandGroupAllowFromFallbackToAllowFrom: false }
+            : {}),
+        }
+      : false,
   });
-}
-
-export function resolveWeChatMentionGate(params: {
-  isGroup: boolean;
-  requireMention: boolean;
-  canDetectMention: boolean;
-  wasMentioned: boolean;
-  implicitMention?: boolean;
-  allowTextCommands: boolean;
-  hasControlCommand: boolean;
-  commandAuthorized: boolean;
-}): WeChatMentionGateResult {
-  const implicitMention = params.implicitMention === true;
-  const baseWasMentioned = params.wasMentioned || implicitMention;
-  const shouldBypassMention =
-    params.isGroup &&
-    params.requireMention &&
-    !baseWasMentioned &&
-    params.allowTextCommands &&
-    params.hasControlCommand &&
-    params.commandAuthorized;
-  const effectiveWasMentioned = baseWasMentioned || shouldBypassMention;
-  const shouldSkip = params.requireMention && params.canDetectMention && !effectiveWasMentioned;
-  return { effectiveWasMentioned, shouldSkip, shouldBypassMention };
 }

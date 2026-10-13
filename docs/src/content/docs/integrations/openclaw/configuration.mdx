@@ -15,6 +15,7 @@ All configuration lives under `channels.wechat` in OpenClaw's config file (`~/.o
       "serverUrl": "http://localhost:6174",
       "token": "your-auth-token",
       "dmPolicy": "open",
+      "allowFrom": ["*"],
       "groupPolicy": "allowlist",
       "groupAllowFrom": ["wxid_trusted_user"],
       "groups": {
@@ -40,24 +41,36 @@ All configuration lives under `channels.wechat` in OpenClaw's config file (`~/.o
 | `serverUrl` | string | — | agent-wechat REST API URL |
 | `token` | string | — | Auth token (auto-read from `~/.config/agent-wechat/token` for local setups) |
 | `dmPolicy` | `"open"` \| `"allowlist"` \| `"disabled"` | `"disabled"` | Who can DM the bot |
-| `allowFrom` | string[] | `[]` | wxid allowlist for DMs (when policy is `allowlist`) |
+| `allowFrom` | string[] | `[]` | DM senders and command owners (see [Allowlist entries](#allowlist-entries)) |
 | `groupPolicy` | `"open"` \| `"allowlist"` \| `"disabled"` | `"disabled"` | Group message policy |
-| `groupAllowFrom` | string[] | `[]` | Global allowlist of group sender IDs |
+| `groupAllowFrom` | string[] | `[]` | Group senders; falls back to `allowFrom` when empty |
 | `groups` | object | `{}` | Per-group overrides (see below) |
 | `pollIntervalMs` | integer | `1000` | Message polling interval (ms) |
 | `authPollIntervalMs` | integer | `30000` | Auth status check interval (ms) |
 
 ## DM policies
 
-- **`open`** — anyone can DM the bot
-- **`allowlist`** — only wxids in `allowFrom` can DM the bot
+- **`open`** — anyone can DM the bot. Set `allowFrom: ["*"]` to say so explicitly; without the wildcard the plugin adds it and logs a reminder
+- **`allowlist`** — only senders in `allowFrom` can DM the bot
 - **`disabled`** — the bot ignores all DMs
 
 ## Group policies
 
 - **`open`** — the bot responds in all group chats
-- **`allowlist`** — the bot only responds to senders in `groupAllowFrom`
+- **`allowlist`** — the bot only responds to senders in `groupAllowFrom` (or `allowFrom` when `groupAllowFrom` is empty)
 - **`disabled`** — the bot ignores all group messages
+
+## Allowlist entries
+
+`allowFrom`, `groupAllowFrom` and per-group `allowFrom` accept:
+
+- a WeChat ID such as `wxid_abc123` (a `wechat:` prefix is ignored)
+- `"*"` for everyone
+- `accessGroup:<name>` to reuse a group of senders defined under OpenClaw's top-level `accessGroups`
+
+Control commands such as `/status` are authorized from the same lists: in DMs by `allowFrom`, in groups by the group's sender allowlist. In groups that require an @mention, an authorized command does not need the mention.
+
+Access is decided by OpenClaw's channel ingress policy. The pairing store is not used, because WeChat has no pairing flow.
 
 ## Per-group overrides
 
@@ -81,7 +94,7 @@ You can override settings for specific groups:
 | `enabled` | boolean | Enable/disable the bot in this group |
 | `requireMention` | boolean | Whether the bot must be @mentioned to respond |
 | `groupPolicy` | string | Override the global group policy for this group |
-| `allowFrom` | string[] | Group-specific sender allowlist |
+| `allowFrom` | string[] | Sender allowlist for this group; replaces `groupAllowFrom` here, for messages and commands |
 
 ## Token handling
 

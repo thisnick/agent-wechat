@@ -26,14 +26,33 @@ import { MonitorStateStore } from "./monitor-state.js";
 import { listAllChats, listMessageWindow } from "./polling.js";
 import { sendWeChatMedia } from "./outbound-media.js";
 import { pollMedia } from "./media-poll.js";
+import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import {
   normalizeWeChatCommandBody,
-  resolveWeChatCommandAuthorization,
-  resolveWeChatInboundAccessDecision,
-  resolveWeChatMentionGate,
+  resolveWeChatIngress,
   resolveWeChatPolicyContext,
+  type WeChatIngressResolver,
   type WeChatPolicyContext,
 } from "./access-control.js";
+
+const warnedOpenDmWildcard = new Set<string>();
+
+/** Decides whether one sender's message may enter processing (sender and group route gates). */
+type WeChatSenderAdmission = (params: {
+  isGroup: boolean;
+  senderId: string;
+}) => Promise<{ allowed: boolean; reason: string }>;
+
+/**
+ * Prefer the runtime-bound resolver (OpenClaw 2026.10+); older hosts only have the SDK
+ * helper, which applies the same policy.
+ */
+function getIngressResolver(core: ReturnType<typeof getWeChatRuntime>): WeChatIngressResolver {
+  const runtimeResolve = (core.channel as any).inbound?.ingress?.resolveStable as
+    | WeChatIngressResolver
+    | undefined;
+  return runtimeResolve ?? resolveStableChannelMessageIngress;
+}
 
 // History context markers (match openclaw's built-in markers)
 const HISTORY_CONTEXT_MARKER = "[Chat messages since your last reply - for context]";
@@ -337,7 +356,7 @@ async function prepareMessage(
   chatId: string,
   chat: Chat,
   liveAccount: ResolvedWeChatAccount,
-  policy: WeChatPolicyContext,
+  admitSender: WeChatSenderAdmission,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
 ): Promise<ProcessedMessage | null> {
   // Skip self-sent messages
@@ -351,11 +370,7 @@ async function prepareMessage(
   const senderName = msg.senderName ?? msg.sender ?? chat.name;
   const wasMentioned = isGroup && (msg.isMentioned === true);
 
-  const access = resolveWeChatInboundAccessDecision({
-    isGroup,
-    senderId,
-    policy,
-  });
+  const access = await admitSender({ isGroup, senderId });
   if (!access.allowed) {
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Blocked by policy (${access.reason}) from ${senderId}`,
@@ -487,43 +502,40 @@ async function dispatchSegment(
 
   const hasControlCommand =
     allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg);
-  const commandAuthorized = await resolveWeChatCommandAuthorization({
+  const wasMentioned = segment.some((pm) => pm.isMentioned);
+  const ingress = await resolveWeChatIngress({
+    resolve: getIngressResolver(core),
     cfg,
-    rawBody: commandBody,
+    accountId: liveAccount.accountId,
+    policy,
     isGroup,
+    chatId,
     senderId,
-    dmPolicy: policy.dmPolicy,
-    allowFromForCommands: isGroup ? policy.effectiveGroupAllowFrom : policy.effectiveAllowFrom,
-    deps: {
-      shouldComputeCommandAuthorized: (raw, loadedCfg) =>
-        core.channel.commands.shouldComputeCommandAuthorized(raw, loadedCfg),
-      resolveCommandAuthorizedFromAuthorizers: (params) =>
-        core.channel.commands.resolveCommandAuthorizedFromAuthorizers(params),
-      readAllowFromStore: async () => storeAllowFrom,
-    },
+    readStoreAllowFrom: async () => storeAllowFrom,
+    command: { allowTextCommands, hasControlCommand },
+    mention: { wasMentioned, allowTextCommands },
   });
-  if (isGroup && allowTextCommands && hasControlCommand && commandAuthorized !== true) {
+  if (ingress.ingress.admission === "skip") {
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] Dropping unauthorized group control command from ${senderId} in ${chatId}`,
+      `[wechat:${liveAccount.accountId}] Skipping group segment (${ingress.ingress.reasonCode}) in ${chatId}`,
     );
     return "ignored";
   }
-
-  const mentionGate = resolveWeChatMentionGate({
-    isGroup,
-    requireMention: policy.requireMention,
-    canDetectMention: true,
-    wasMentioned: segment.some((pm) => pm.isMentioned),
-    allowTextCommands,
-    hasControlCommand,
-    commandAuthorized: commandAuthorized === true,
-  });
-  if (isGroup && mentionGate.shouldSkip) {
+  // In DMs an unauthorized control command still reaches the agent as text (CommandAuthorized
+  // false), as before; only groups drop it.
+  const dmUnauthorizedCommand =
+    !isGroup && ingress.ingress.reasonCode === "control_command_unauthorized";
+  if (ingress.ingress.admission !== "dispatch" && !dmUnauthorizedCommand) {
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] Skipping group segment (mention required) in ${chatId}`,
+      `[wechat:${liveAccount.accountId}] Dropping segment (${ingress.ingress.reasonCode}) from ${senderId} in ${chatId}`,
     );
     return "ignored";
   }
+  // Only report command authorization for command-like bodies, as before.
+  const commandAuthorized = core.channel.commands.shouldComputeCommandAuthorized(commandBody, cfg)
+    ? ingress.commandAccess.authorized
+    : undefined;
+  const effectiveWasMentioned = ingress.activationAccess.effectiveWasMentioned ?? wasMentioned;
 
   try {
     // Catch-up history keeps its audio file path in text. Resolve speech through
@@ -665,7 +677,7 @@ async function dispatchSegment(
       Provider: "agent-wechat",
       Surface: "agent-wechat",
       MessageSid: `wechat:${chatId}:${msg.localId}`,
-      WasMentioned: isGroup ? mentionGate.effectiveWasMentioned : undefined,
+      WasMentioned: isGroup ? effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       OriginatingChannel: "agent-wechat",
       OriginatingTo: `wechat:${chatId}`,
@@ -814,8 +826,31 @@ async function processUnreadChat(
     account: liveAccount,
     cfg: cfg as any,
     chatId,
-    storeAllowFrom,
   });
+  if (policy.impliedOpenDmWildcard && !warnedOpenDmWildcard.has(liveAccount.accountId)) {
+    warnedOpenDmWildcard.add(liveAccount.accountId);
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] dmPolicy is "open" but allowFrom has no "*"; treating it as ["*"]. ` +
+        `Add "*" to channels.agent-wechat.allowFrom to make this explicit.`,
+    );
+  }
+  const resolveIngress = getIngressResolver(core);
+  const admitSender: WeChatSenderAdmission = async ({ isGroup, senderId }) => {
+    const result = await resolveWeChatIngress({
+      resolve: resolveIngress,
+      cfg,
+      accountId: liveAccount.accountId,
+      policy,
+      isGroup,
+      chatId,
+      senderId,
+      readStoreAllowFrom: async () => storeAllowFrom,
+    });
+    return {
+      allowed: result.ingress.admission === "dispatch",
+      reason: result.ingress.reasonCode,
+    };
+  };
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg,
     surface: "agent-wechat",
@@ -899,7 +934,7 @@ async function processUnreadChat(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}`,
     );
-    const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, policy, log);
+    const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, admitSender, log);
     if (pm) {
       processed.push(pm);
     }

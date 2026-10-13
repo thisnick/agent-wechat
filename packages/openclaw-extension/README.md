@@ -87,6 +87,7 @@ Or edit `~/.openclaw/openclaw.json` directly:
       "enabled": true,
       "serverUrl": "http://localhost:6174",
       "dmPolicy": "open",
+      "allowFrom": ["*"],
       "groupPolicy": "open"
     }
   }
@@ -147,12 +148,17 @@ All config lives under `channels.agent-wechat` in OpenClaw's config file:
 | `serverUrl` | string | — | agent-wechat REST API URL |
 | `token` | string | — | Auth token (auto-read from `~/.config/agent-wechat/token` for local setups) |
 | `dmPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | Who can DM the bot |
-| `allowFrom` | string[] | `[]` | wxid allowlist for DMs (when policy is `allowlist`) |
+| `allowFrom` | string[] | `[]` | DM senders and command owners: `wxid_...`, `"*"` for everyone, or `accessGroup:<name>`. With `dmPolicy: "open"`, use `["*"]` |
 | `groupPolicy` | `"open" \| "allowlist" \| "disabled"` | `"disabled"` | Group message policy |
-| `groupAllowFrom` | string[] | `[]` | Global allowlist of group sender IDs (`wxid_...`) |
+| `groupAllowFrom` | string[] | `[]` | Group senders who pass `allowlist` and may run commands in groups; falls back to `allowFrom` when empty |
 | `groups` | object | `{}` | Per-group overrides (e.g. `{ "id@chatroom": { "requireMention": false, "enabled": true, "groupPolicy": "allowlist", "allowFrom": ["wxid_..."] } }`) |
 | `pollIntervalMs` | integer | `1000` | Message polling interval |
 | `authPollIntervalMs` | integer | `30000` | Auth status check interval |
+
+Access decisions (DM and group senders, per-group overrides, control commands, @mention
+gating) are made by OpenClaw's channel ingress policy, so `accessGroup:<name>` entries from
+the top-level `accessGroups` config work in every allowlist. The pairing store is not
+used: WeChat has no pairing flow.
 
 ## Development
 
