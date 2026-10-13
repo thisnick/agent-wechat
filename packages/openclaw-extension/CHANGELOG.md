@@ -1,5 +1,14 @@
 # @agent-wechat/wechat
 
+## 0.16.0
+
+### Minor Changes
+
+- [#211](https://github.com/thisnick/agent-wechat/pull/211) [`e743310`](https://github.com/thisnick/agent-wechat/commit/e743310cd08df14d6595ac1b3481f65a2194c118) Thanks [@thisnick](https://github.com/thisnick)! - Decide WeChat access with OpenClaw's channel ingress policy instead of a local copy of it. DM and group sender gates, per-group overrides, control-command authorization and @mention gating now come from core, so `accessGroup:<name>` entries work in `allowFrom`, `groupAllowFrom` and per-group `allowFrom`. Existing configs keep their behavior, with two exceptions:
+
+  - The pairing store no longer admits group senders or authorizes commands. WeChat has no pairing flow, so the store is normally empty.
+  - `dmPolicy: "open"` without `"*"` in `allowFrom` still admits everyone, but now logs a reminder to add `"*"`.
+
 ## 0.15.6
 
 ### Patch Changes

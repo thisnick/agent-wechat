@@ -1,5 +1,7 @@
 # @agent-wechat/agent-server
 
+## 0.16.0
+
 ## 0.15.6
 
 ## 0.15.5
