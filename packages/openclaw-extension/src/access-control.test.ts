@@ -250,3 +250,38 @@ test("resolveWeChatCommandAuthorization computes only for command-like bodies", 
   });
   assert.equal(skipped, undefined);
 });
+
+test("resolveWeChatCommandAuthorization rejects unlisted senders and uses the store only for disabled DMs", async () => {
+  const cfg: OpenClawConfig = { commands: { useAccessGroups: true } } as OpenClawConfig;
+  let storeReads = 0;
+  const deps = {
+    shouldComputeCommandAuthorized: () => true,
+    resolveCommandAuthorizedFromAuthorizers: (params: {
+      useAccessGroups: boolean;
+      authorizers: Array<{ configured: boolean; allowed: boolean }>;
+    }) => params.authorizers.some((entry) => entry.configured && entry.allowed),
+    readAllowFromStore: async () => {
+      storeReads += 1;
+      return ["wechat:wxid_paired"];
+    },
+  };
+  const run = (senderId: string, dmPolicy: "open" | "allowlist" | "disabled", isGroup = false) =>
+    resolveWeChatCommandAuthorization({
+      cfg,
+      rawBody: "/status",
+      isGroup,
+      senderId,
+      dmPolicy,
+      allowFromForCommands: ["wxid_owner"],
+      deps,
+    });
+
+  assert.equal(await run("wxid_stranger", "open"), false);
+  assert.equal(await run("wxid_owner", "open", true), true);
+  assert.equal(await run("wxid_stranger", "open", true), false);
+  assert.equal(await run("wxid_paired", "allowlist"), false);
+  assert.equal(storeReads, 0);
+  assert.equal(await run("wxid_paired", "disabled"), true);
+  assert.equal(await run("wxid_paired", "disabled", true), false);
+  assert.equal(storeReads, 1);
+});

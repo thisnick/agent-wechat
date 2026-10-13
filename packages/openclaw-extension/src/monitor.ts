@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { WeChatClient } from "@agent-wechat/shared";
 import type { Chat, Message, AuthStatus } from "@agent-wechat/shared";
-import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
@@ -690,7 +690,7 @@ async function dispatchSegment(
     });
 
     // Dispatch reply
-    const { onModelSelected, ...prefixOptions } = createChannelReplyPipeline({
+    const { onModelSelected, ...prefixOptions } = createChannelMessageReplyPipeline({
       cfg,
       agentId: route.agentId,
       channel: "agent-wechat",

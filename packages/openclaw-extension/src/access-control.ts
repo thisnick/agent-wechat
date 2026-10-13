@@ -6,8 +6,7 @@ import {
 import {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
-} from "openclaw/plugin-sdk/config-runtime";
-import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk/command-auth";
+} from "openclaw/plugin-sdk/runtime-group-policy";
 import type { ResolvedWeChatAccount, WeChatDmPolicy, WeChatGroupPolicy } from "./types.js";
 
 type WeChatGroupEntry = NonNullable<ResolvedWeChatAccount["groups"]>[string];
@@ -279,21 +278,32 @@ export async function resolveWeChatCommandAuthorization(params: {
   allowFromForCommands: string[];
   deps: CommandAuthorizationDeps;
 }): Promise<boolean | undefined> {
+  // Mirrors the sender-authorization helper the SDK retired in 2026.10 (command-auth), as
+  // WeChat used it: no access groups, and groups fall back to the DM allowlist.
+  if (!params.deps.shouldComputeCommandAuthorized(params.rawBody, params.cfg)) {
+    return undefined;
+  }
   const normalizedSenderId = normalizeWeChatId(params.senderId ?? "");
-  const { commandAuthorized } = await resolveSenderCommandAuthorization({
-    cfg: params.cfg,
-    rawBody: params.rawBody,
-    isGroup: params.isGroup,
-    dmPolicy: params.dmPolicy,
-    configuredAllowFrom: params.allowFromForCommands,
-    senderId: normalizedSenderId,
-    isSenderAllowed: (senderId, allowFrom) =>
-      isWeChatSenderAllowed(senderId, normalizeWeChatAllowFrom(allowFrom)),
-    readAllowFromStore: async () => normalizeWeChatAllowFrom(await params.deps.readAllowFromStore()),
-    shouldComputeCommandAuthorized: params.deps.shouldComputeCommandAuthorized,
-    resolveCommandAuthorizedFromAuthorizers: params.deps.resolveCommandAuthorizedFromAuthorizers,
+  const usesStore = !params.isGroup && params.dmPolicy !== "allowlist" && params.dmPolicy !== "open";
+  const storeAllowFrom = usesStore
+    ? normalizeWeChatAllowFrom(await params.deps.readAllowFromStore().catch(() => []))
+    : [];
+  const configuredAllowFrom = normalizeWeChatAllowFrom(params.allowFromForCommands);
+  const effectiveAllowFrom = unique([...configuredAllowFrom, ...storeAllowFrom]);
+  const effectiveGroupAllowFrom = configuredAllowFrom;
+  return params.deps.resolveCommandAuthorizedFromAuthorizers({
+    useAccessGroups: true,
+    authorizers: [
+      {
+        configured: effectiveAllowFrom.length > 0,
+        allowed: isWeChatSenderAllowed(normalizedSenderId, effectiveAllowFrom),
+      },
+      {
+        configured: effectiveGroupAllowFrom.length > 0,
+        allowed: isWeChatSenderAllowed(normalizedSenderId, effectiveGroupAllowFrom),
+      },
+    ],
   });
-  return commandAuthorized;
 }
 
 export function resolveWeChatMentionGate(params: {
