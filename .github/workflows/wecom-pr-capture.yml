@@ -1,0 +1,30 @@
+name: WeCom PR event capture
+on:
+  pull_request:
+    types: [opened]
+permissions: {}
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Record event metadata without checking out PR code
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as f:
+              event = json.load(f)
+          record = {'event': 'pull_request', 'action': event['action'],
+                    'repository': event['repository']['full_name'],
+                    'number': event['number'], 'id': event['pull_request']['id']}
+          with open('event.json', 'w', encoding='utf-8') as f:
+              json.dump(record, f)
+          PY
+      - name: Upload event metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wecom-pr-event
+          path: event.json
+          retention-days: 3
+          if-no-files-found: error

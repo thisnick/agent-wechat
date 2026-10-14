@@ -1,0 +1,362 @@
+name: WeCom event notifications
+on:
+  workflow_run:
+    workflows: ["CI", "Deploy docs to GitHub Pages", "Docker Rebuild", "Release", "WeCom PR event capture"]
+    types: [completed]
+  release:
+    types: [published, released]
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+  pull-requests: read
+concurrency:
+  group: wecom-event-${{ github.event.release.id || github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+jobs:
+  notify:
+    if: github.repository_owner == 'foshanfm' && (github.event_name != 'workflow_run' || (github.event.workflow_run.name != 'WeCom event notifications' && (github.event.workflow_run.name != 'WeCom PR event capture' || github.event.workflow_run.conclusion == 'success')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Notify new PR or stable release
+        shell: bash
+        env:
+          GH_REPO_TOKEN: ${{ github.token }}
+          WECOM_WEBHOOK: ${{ secrets.LIMEN_GITHUB_NOTIFY_WEBHOOK }}
+          PERSONAL_EVENTS_STARTED_AT: "2026-10-14T10:39:11.024534+00:00"
+        run: |
+          python3 - <<'PY'
+          """Trusted event consumer. The deployed workflow embeds this source without checkout."""
+          import base64
+          import io
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+          from datetime import datetime, timedelta, timezone
+
+
+          API = "https://api.github.com"
+
+          class MonitorError(Exception):
+              pass
+
+          class ApiError(MonitorError):
+              def __init__(self, status, path):
+                  self.status = status
+                  super().__init__(f"GitHub HTTP {status}: {path.split('?')[0]}")
+
+          def utcnow():
+              return datetime.now(timezone.utc).replace(microsecond=0)
+
+          def stamp(value):
+              return value.isoformat().replace("+00:00", "Z")
+
+          def parse(value):
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              # Avoid forwarding tokens or the webhook key to another host.
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          OPENER = urllib.request.build_opener(NoRedirect())
+
+          class GitHub:
+              def __init__(self, token):
+                  self.token = token
+
+              def request(self, method, path, payload=None):
+                  data = None if payload is None else json.dumps(payload).encode("utf-8")
+                  headers = {
+                      "Authorization": f"Bearer {self.token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "all-repositories-pr-monitor",
+                      "Content-Type": "application/json",
+                  }
+                  # Only GETs are retried automatically; ambiguous writes must fail closed.
+                  attempts = 3 if method == "GET" else 1
+                  for attempt in range(attempts):
+                      try:
+                          req = urllib.request.Request(API + path, data, headers, method=method)
+                          with OPENER.open(req, timeout=30) as response:
+                              return json.load(response)
+                      except urllib.error.HTTPError as exc:
+                          if exc.code in (429, 500, 502, 503, 504) and attempt + 1 < attempts:
+                              time.sleep(2 ** (attempt + 1))
+                              continue
+                          raise ApiError(exc.code, path) from None
+                      except (urllib.error.URLError, TimeoutError):
+                          if attempt + 1 < attempts:
+                              time.sleep(2 ** (attempt + 1))
+                              continue
+                          raise MonitorError("GitHub 网络请求失败；未输出请求令牌。") from None
+
+              def pages(self, path, params=None):
+                  query = dict(params or {})
+                  query["per_page"] = 100
+                  page = 1
+                  while True:
+                      query["page"] = page
+                      items = self.request("GET", path + "?" + urllib.parse.urlencode(query))
+                      if not isinstance(items, list):
+                          raise MonitorError("GitHub 分页结果格式异常。")
+                      yield items
+                      if len(items) < 100:
+                          break
+                      page += 1
+
+          def release_message(repository, release):
+              url = (f"https://github.com/{repository}/releases/tag/"
+                     + urllib.parse.quote(release['tag_name'], safe=""))
+              if len(url.encode('utf-8')) > 600:
+                  url = f'https://github.com/{repository}/releases'
+              return (
+                  f"项目发布新版本\n\n项目：{plain(repository, 150)}\n"
+                  f"版本：{plain(release['tag_name'], 100)}\n"
+                  f"名称：{plain(release.get('name') or release['tag_name'], 100)}\n"
+                  f"发布人：{plain((release.get('author') or {}).get('login', '已删除账号'), 50)}\n"
+                  f"查看链接：{url}"
+              )
+
+          def plain(value, limit):
+              value = " ".join(str(value).split())
+              return value if len(value) <= limit else value[:limit - 1] + "…"
+
+          def batches(repository, pulls):
+              header = "项目有新 PR\n\n"
+              group, content = [], header
+              for pull in pulls:
+                  entry = (
+                      f"项目：{plain(repository, 150)}\n"
+                      f"PR：#{pull['number']} {plain(pull['title'], 100)}\n"
+                      f"提交人：{plain((pull.get('user') or {}).get('login', '已删除账号'), 50)}\n"
+                      f"查看链接：https://github.com/{repository}/pull/{int(pull['number'])}"
+                  )
+                  if len((header + entry).encode("utf-8")) > 1900:
+                      raise MonitorError("通知超过消息长度上限。")
+                  candidate = content + ("\n\n" if group else "") + entry
+                  if len(candidate.encode("utf-8")) > 1900:
+                      yield group, content
+                      group, content = [], header
+                  content += ("\n\n" if group else "") + entry
+                  group.append(pull)
+              if group:
+                  yield group, content
+
+          class WeCom:
+              def __init__(self, webhook):
+                  url = urllib.parse.urlsplit(webhook)
+                  if (url.scheme != "https" or url.netloc != "qyapi.weixin.qq.com"
+                          or url.path != "/cgi-bin/webhook/send" or url.fragment
+                          or not urllib.parse.parse_qs(url.query).get("key")):
+                      raise MonitorError("WECOM_WEBHOOK 必须是企业微信官方机器人 HTTPS 地址。")
+                  self.webhook, self.last_send = webhook, None
+
+              def send(self, content):
+                  if self.last_send is not None:
+                      time.sleep(max(0, 3.2 - (time.monotonic() - self.last_send)))
+                  payload = json.dumps({"msgtype": "text", "text": {"content": content}},
+                                       ensure_ascii=False).encode("utf-8")
+                  req = urllib.request.Request(self.webhook, payload, {"Content-Type": "application/json"})
+                  self.last_send = time.monotonic()
+                  for attempt in range(3):
+                      try:
+                          with OPENER.open(req, timeout=30) as response:
+                              result = json.load(response)
+                      except (urllib.error.URLError, TimeoutError, ValueError):
+                          raise MonitorError("企业微信请求失败，未记为已通知；未输出 Webhook。") from None
+                      if result.get('errcode') == 45009 and attempt < 2:
+                          # A shared group robot may receive simultaneous events from many
+                          # repositories. Only an explicit rate rejection is safe to retry.
+                          time.sleep(60)
+                          continue
+                      break
+                  if result.get("errcode") != 0:
+                      code = result.get("errcode")
+                      code = code if isinstance(code, int) else "invalid-response"
+                      raise MonitorError(f"企业微信拒绝消息，错误码 {code}；未记为已通知。")
+
+          OWNER = 'foshanfm'
+          CAPTURE_PATH = '.github/workflows/wecom-pr-capture.yml'
+          CAPTURE_NAME = 'WeCom PR event capture'
+
+
+          def artifact_record(client, repository, run_id):
+              run = client.request('GET', f'/repos/{repository}/actions/runs/{int(run_id)}')
+              if (run.get('event') != 'pull_request' or run.get('name') != CAPTURE_NAME
+                      or run.get('path', '').split('@')[0] != CAPTURE_PATH
+                      or run.get('conclusion') != 'success'):
+                  raise MonitorError('不是受支持的新 PR 捕获运行。')
+              artifacts = client.request('GET', f'/repos/{repository}/actions/runs/{int(run_id)}/artifacts')
+              matches = [a for a in artifacts['artifacts'] if a['name'] == 'wecom-pr-event' and not a['expired']]
+              if len(matches) != 1 or matches[0]['size_in_bytes'] > 20000:
+                  raise MonitorError('PR 事件元数据缺失或超出大小限制。')
+              artifact_id = int(matches[0]['id'])
+              req = urllib.request.Request(
+                  f'{API}/repos/{repository}/actions/artifacts/{artifact_id}/zip',
+                  headers={'Authorization': f'Bearer {client.token}', 'User-Agent': 'wecom-events'})
+              try:
+                  with OPENER.open(req, timeout=30) as response:
+                      raw = response.read(20001)
+              except urllib.error.HTTPError as error:
+                  if error.code != 302:
+                      raise MonitorError('无法下载 PR 事件元数据。') from None
+                  location = error.headers.get('Location', '')
+                  if urllib.parse.urlsplit(location).scheme != 'https':
+                      raise MonitorError('事件元数据下载地址异常。')
+                  # The signed artifact URL is fetched WITHOUT the repository token.
+                  with urllib.request.urlopen(location, timeout=30) as response:
+                      raw = response.read(20001)
+              if len(raw) > 20000:
+                  raise MonitorError('PR 事件压缩包超过大小限制。')
+              with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                  if archive.namelist() != ['event.json'] or archive.getinfo('event.json').file_size > 4096:
+                      raise MonitorError('PR 元数据压缩包结构异常。')
+                  # Never extract files or execute artifact contents.
+                  record = json.loads(archive.read('event.json'))
+              return run, record
+
+
+          def notification(client, repository, event_name, event, record_loader=artifact_record):
+              if repository.split('/')[0].lower() != OWNER:
+                  raise MonitorError('此事件工作流只允许 foshanfm 的个人仓库。')
+              if event_name == 'workflow_dispatch':
+                  return None
+              if event_name == 'workflow_run':
+                  run, record = record_loader(client, repository, event['workflow_run']['id'])
+                  if (record.get('event') != 'pull_request' or record.get('action') != 'opened'
+                          or record.get('repository', '').lower() != repository.lower()):
+                      raise MonitorError('PR 事件来源不匹配。')
+                  number = int(record['number'])
+                  pull = client.request('GET', f'/repos/{repository}/pulls/{number}')
+                  if (pull['id'] != int(record['id'])
+                          or pull['base']['repo']['full_name'].lower() != repository.lower()):
+                      raise MonitorError('PR 元数据与 GitHub 记录不匹配。')
+                  elapsed = parse(run['created_at']) - parse(pull['created_at'])
+                  if not -timedelta(minutes=1) <= elapsed <= timedelta(minutes=10):
+                      raise MonitorError('PR 创建时间与触发运行不匹配，拒绝历史 PR 重放。')
+                  message = next(batches(repository, [pull]))[1]
+                  return 'pr', pull['id'], message
+              if event_name == 'release':
+                  if event.get('action') not in ('published', 'released'):
+                      return None
+                  release = client.request('GET', f"/repos/{repository}/releases/{int(event['release']['id'])}")
+                  if release.get('draft') or release.get('prerelease') or not release.get('published_at'):
+                      return None
+                  return 'release', release['id'], release_message(repository, release)
+              raise MonitorError('不支持的通知事件。')
+
+
+          class Receipts:
+              def __init__(self, client, repository):
+                  self.client = client
+                  self.prefix = '/repos/' + repository
+                  self.branch = 'wecom-notification-state'
+
+              def ensure_branch(self):
+                  path = self.prefix + '/git/ref/heads/' + self.branch
+                  try:
+                      self.client.request('GET', path)
+                      return
+                  except ApiError as error:
+                      if error.status != 404:
+                          raise
+                  repo = self.client.request('GET', self.prefix)
+                  branch = urllib.parse.quote(repo['default_branch'], safe='')
+                  ref = self.client.request('GET', self.prefix + '/git/ref/heads/' + branch)
+                  try:
+                      self.client.request('POST', self.prefix + '/git/refs', {
+                          'ref': 'refs/heads/' + self.branch, 'sha': ref['object']['sha']})
+                  except ApiError as error:
+                      if error.status != 422:
+                          raise
+                      self.client.request('GET', path)  # Another notification created it.
+
+              def path(self, kind, identifier):
+                  if kind not in ('pr', 'release'):
+                      raise MonitorError('通知回执类型错误。')
+                  return f'{self.prefix}/contents/notifications/{kind}-{int(identifier)}.json'
+
+              def exists(self, kind, identifier):
+                  try:
+                      self.client.request('GET', self.path(kind, identifier) + '?ref=' + self.branch)
+                      return True
+                  except ApiError as error:
+                      if error.status != 404:
+                          raise
+                      return False
+
+              def save(self, kind, identifier):
+                  payload = {'kind': kind, 'id': int(identifier), 'sent_at': stamp(utcnow())}
+                  body = {'message': 'Record delivered WeCom notification [skip ci]', 'branch': self.branch,
+                          'content': base64.b64encode(json.dumps(payload).encode()).decode()}
+                  for attempt in range(4):
+                      try:
+                          self.client.request('PUT', self.path(kind, identifier), body)
+                          return
+                      except ApiError as error:
+                          if error.status not in (409, 422) or attempt == 3:
+                              raise
+                          if self.exists(kind, identifier):
+                              return
+                          time.sleep(2 ** attempt)
+
+
+          def deliver(client, sender, repository, event_name, event, receipt_store=None, record_loader=artifact_record):
+              if (event_name == 'workflow_run'
+                      and event.get('workflow_run', {}).get('name', CAPTURE_NAME) != CAPTURE_NAME):
+                  # Releases created by another workflow's GITHUB_TOKEN do not generate
+                  # another release workflow. Reconcile on CI completion instead of polling.
+                  if repository.split('/')[0].lower() != OWNER:
+                      raise MonitorError('此事件工作流只允许个人仓库。')
+                  cutoff = parse(os.environ['PERSONAL_EVENTS_STARTED_AT'])
+                  delivered = False
+                  for page in client.pages(f'/repos/{repository}/releases'):
+                      for release in page:
+                          if (release.get('draft') or release.get('prerelease')
+                                  or not release.get('published_at') or parse(release['published_at']) < cutoff):
+                              continue
+                          delivered = deliver(client, sender, repository, 'release',
+                                              {'action': 'published', 'release': {'id': release['id']}},
+                                              receipt_store, record_loader) or delivered
+                  return delivered
+              result = notification(client, repository, event_name, event, record_loader)
+              if result is None:
+                  print('事件配置检查完成；未发送消息。' if event_name == 'workflow_dispatch' else '非正式发布，保持安静。')
+                  return False
+              kind, identifier, message = result
+              receipts = receipt_store or Receipts(client, repository)
+              receipts.ensure_branch()
+              if receipts.exists(kind, identifier):
+                  print('该事件已通知，跳过重复发送。')
+                  return False
+              sender.send(message)
+              receipts.save(kind, identifier)
+              print('已发送一条企业微信事件通知。')
+              return True
+
+
+          def main():
+              with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as file:
+                  event = json.load(file)
+              sender = WeCom(os.environ.get('WECOM_WEBHOOK', '').strip())
+              client = GitHub(os.environ['GH_REPO_TOKEN'])
+              deliver(client, sender, os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_EVENT_NAME'], event)
+
+
+          if __name__ == '__main__':
+              try:
+                  main()
+              except MonitorError as error:
+                  print(str(error), file=__import__('sys').stderr)
+                  raise SystemExit(1)
+              except Exception as error:
+                  print('事件通知失败：' + type(error).__name__ + '；请求细节已隐藏。', file=__import__('sys').stderr)
+                  raise SystemExit(1)
+          PY
