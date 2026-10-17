@@ -138,12 +138,29 @@ services:
       - ~/.config/agent-wechat/token:/data/auth-token:ro
     environment:
       - PROXY=${PROXY:-}    # optional: user:pass@host:port
+      - AGENT_WECHAT_HEALTH_UI_SCAN_INTERVAL_SECS=30  # optional: any positive integer
+      - AGENT_WECHAT_HEALTH_UNRESPONSIVE_TIMEOUT_SECS=60  # optional: any positive integer
     restart: unless-stopped
 
 volumes:
   agent-wechat-data:
   agent-wechat-home:
 ```
+
+## Health Monitoring
+
+The container checks whether the WeChat process exists once per second, so a
+crash is detected and recovered quickly. The more expensive UI health
+observation — full AT-SPI tree traversal, screenshot capture, and state
+identification — runs every 30 seconds by default.
+
+For local or resource-constrained deployments, set
+`AGENT_WECHAT_HEALTH_UI_SCAN_INTERVAL_SECS` to any positive integer. Lower
+values detect an unresponsive UI sooner; higher values reduce CPU usage.
+`AGENT_WECHAT_HEALTH_UNRESPONSIVE_TIMEOUT_SECS` independently controls how long
+an unresponsive UI is tolerated before WeChat is restarted (60 seconds by
+default). If the scan interval exceeds this timeout, one failed scan will
+trigger recovery.
 
 ## Development
 
