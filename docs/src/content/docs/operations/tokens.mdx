@@ -9,7 +9,7 @@ agent-wechat uses a simple token-based authentication to secure the REST API.
 
 | Location | Description |
 |----------|-------------|
-| `~/.config/agent-wechat/token` | File on your host machine. Auto-generated on first `wx up`. |
+| `~/.config/agent-wechat/token` | File on your host machine. Auto-generated on first `wx-legacy up`. |
 | `/data/auth-token` | Inside the container (read-only mount of the host file) |
 | `AGENT_WECHAT_TOKEN` env var | Overrides the file-based token |
 
@@ -42,7 +42,7 @@ chmod 600 ~/.config/agent-wechat/token
 Using the CLI:
 
 ```bash
-wx auth token --regenerate
+wx-legacy auth token --regenerate
 ```
 
 Or manually:
@@ -54,7 +54,7 @@ openssl rand -hex 32 > ~/.config/agent-wechat/token
 Then restart the container so it picks up the new token:
 
 ```bash
-wx down && wx up
+wx-legacy down && wx-legacy up
 # or
 docker compose restart agent-wechat
 ```

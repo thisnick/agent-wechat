@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-process foundation check: synthetic files, no WeChat/production access."""
+"""Cross-process native daemon check: synthetic files, no WeChat/production access."""
 import hashlib
 import json
 import os
@@ -30,7 +30,7 @@ def tree(root):
 with tempfile.TemporaryDirectory(prefix="wx-native-smoke-") as directory:
     root = Path(directory)
     version = run("version")
-    assert version["backend"] == "native" and not version["nativeLogin"]
+    assert version["backend"] == "native" and version["nativeLogin"]
     config_file = root / "server.toml"
     config_file.write_text('schemaVersion=1\ndataDir="data"\nlisten="127.0.0.1:0"\n')
     args = ("--server-config", config_file)
@@ -83,7 +83,21 @@ with tempfile.TemporaryDirectory(prefix="wx-native-smoke-") as directory:
                 if endpoint == "accounts":
                     assert {a["id"] for a in value["items"]} == {"direct", "copied"}
                 else:
-                    assert not value["version"]["officialDatabaseWrites"]
+                    assert value["version"]["officialDatabaseWrites"]
+                    assert value["pid"] == process.pid and value["dataDir"] == str(root / "data")
+                    assert value["ownershipGeneration"]
+            remote = ("--url", base, "--token-file", root / "data/api-token")
+            assert run(*remote, "status")["pid"] == process.pid
+            assert run(*remote, "accounts", "list")["items"]
+            grant = run(*remote, "tokens", "create", "smoke-read", "--accounts", "copied", "--scopes", "read")
+            scoped = root / ("scoped-token-" + str(process.pid))
+            scoped.write_text(grant["token"])
+            scoped.chmod(0o600)
+            restricted = run("--url", base, "--token-file", scoped, "accounts", "list")
+            assert [a["id"] for a in restricted["items"]] == ["copied"]
+            run("--url", base, "--token-file", scoped, "--account", "direct", "threads", success=False)
+            run(*remote, "tokens", "revoke", grant["grant"]["id"])
+            run("--url", base, "--token-file", scoped, "status", success=False)
             run(*args, "store", "list", success=False)
         finally:
             process.send_signal(signal.SIGTERM)

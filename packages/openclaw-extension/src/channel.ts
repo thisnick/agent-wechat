@@ -13,10 +13,15 @@ import { loginStart, loginWait, loginTerminal } from "./login.js";
 import { createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
 import { sendWeChatMedia } from "./outbound-media.js";
+import { nativeConfigSchema } from "./native-config.js";
+import { ensureNativeHost } from "./native-host.js";
+import { startNativeMonitor } from "./native-monitor.js";
+import { nativeLoginStart, nativeLoginWait, sendNativeText, createNativeLoginTool } from "./native-login.js";
 
 async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
+  if (account.backend === "native") return sendNativeText(account, to, text);
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   const result = await client.sendMessage({ chatId: to, text });
   if (!result.success) throw new Error(result.error ?? "Send failed");
@@ -46,7 +51,7 @@ const meta: ChannelPlugin["meta"] = {
   id: "agent-wechat",
   label: "WeChat",
   selectionLabel: "WeChat (微信)",
-  blurb: "WeChat messaging via agent-wechat container.",
+  blurb: "WeChat messaging through a native daemon or explicit legacy container backend.",
   docsPath: "wechat",
   order: 80,
 };
@@ -72,6 +77,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       type: "object",
       additionalProperties: false,
       properties: {
+        backend: { type: "string", enum: ["legacy", "native"] },
+        native: nativeConfigSchema,
         enabled: { type: "boolean" },
         serverUrl: { type: "string" },
         token: { type: "string" },
@@ -213,7 +220,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       ctx.log?.info?.(
         `[wechat:${ctx.accountId}] Starting monitor (polling ${ctx.account.serverUrl})`,
       );
-      return startWeChatMonitor({
+      return (ctx.account.backend === "native" ? startNativeMonitor : startWeChatMonitor)({
         account: ctx.account,
         abortSignal: ctx.abortSignal,
         runtime: ctx.runtime,
@@ -232,6 +239,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       if (!account?.serverUrl) {
         return { message: "No serverUrl configured. Run: openclaw channels setup agent-wechat" };
       }
+      if (account.backend === "native") return nativeLoginStart(account, { force, timeoutMs });
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
 
       try {
@@ -251,6 +259,11 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         accountId ?? undefined,
       );
       if (!account?.serverUrl) return { cleared: false };
+      if (account.backend === "native") {
+        const { client } = await ensureNativeHost(account.native!);
+        await client.logoutLocal(account.native!.accountId);
+        return { cleared: false, loggedOut: true };
+      }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
       try {
         const result = await client.logout();
@@ -261,6 +274,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     },
 
     loginWithQrWait: async ({ accountId, timeoutMs }) => {
+      const account = resolveWeChatAccount(getWeChatRuntime().config.current() as Record<string, unknown>, accountId ?? undefined);
+      if (account?.backend === "native") return nativeLoginWait(account.accountId, timeoutMs);
       const result = await loginWait(accountId ?? DEFAULT_ACCOUNT_ID, { timeoutMs });
       return result;
     },
@@ -279,6 +294,12 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         );
       }
 
+      if (account.backend === "native") {
+        const result = await nativeLoginStart(account);
+        runtime.log(result.message);
+        if (result.qrDataUrl) runtime.log(result.qrDataUrl);
+        return;
+      }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
 
       // Check if already logged in
@@ -359,6 +380,9 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       const configured = Boolean(account?.serverUrl?.trim());
       return {
         accountId: account?.accountId ?? "default",
+        backend: account?.backend ?? "legacy",
+        handoffUnconfirmed: (runtime as any)?.handoffUnconfirmed,
+        needsReview: (runtime as any)?.needsReview,
         enabled: account?.enabled ?? false,
         configured,
         running: runtime?.running ?? false,
@@ -372,7 +396,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   agentTools: (({ cfg }: { cfg?: any }) => {
     const account = resolveWeChatAccount(cfg as Record<string, unknown>);
     if (!account?.serverUrl) return [];
-    return [createWeChatLoginTool(account)];
+    return [account.backend === "native" ? createNativeLoginTool(account) : createWeChatLoginTool(account)];
   }) as any,
 
   // ---- Directory adapter ----
@@ -380,6 +404,13 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     self: async ({ cfg }) => {
       const account = resolveWeChatAccount(cfg as Record<string, unknown>);
       if (!account?.serverUrl) return null;
+      if (account.backend === "native") {
+        try {
+          const { client } = await ensureNativeHost(account.native!);
+          const status = await client.account(account.native!.accountId);
+          return typeof status.username === "string" ? { kind: "user" as const, id: status.username } : null;
+        } catch { return null; }
+      }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
       try {
         const auth = await client.authStatus();
@@ -392,6 +423,12 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     listPeers: async ({ cfg, query, limit }) => {
       const account = resolveWeChatAccount(cfg as Record<string, unknown>);
       if (!account?.serverUrl) return [];
+      if (account.backend === "native") {
+        const { client } = await ensureNativeHost(account.native!);
+        const page = await client.contacts(account.native!.accountId);
+        return page.items.filter(item => typeof item.id === "string" && (!query || String(item.displayName ?? item.id).includes(query))).slice(0, limit ?? 50)
+          .map(item => ({ kind: "user" as const, id: String(item.id), name: String(item.displayName ?? item.id) }));
+      }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
       try {
         const chats = query
@@ -411,6 +448,12 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     listGroups: async ({ cfg, query, limit }) => {
       const account = resolveWeChatAccount(cfg as Record<string, unknown>);
       if (!account?.serverUrl) return [];
+      if (account.backend === "native") {
+        const { client } = await ensureNativeHost(account.native!);
+        const page = await client.groups(account.native!.accountId);
+        return page.items.filter(item => typeof item.id === "string" && (!query || String(item.displayName ?? item.id).includes(query))).slice(0, limit ?? 50)
+          .map(item => ({ kind: "group" as const, id: String(item.id), name: String(item.displayName ?? item.id) }));
+      }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
       try {
         const chats = query
@@ -435,6 +478,12 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       const account = resolveWeChatAccount(cfg as Record<string, unknown>);
       if (!account?.serverUrl) {
         return { ok: false, reason: "wechat-not-configured" };
+      }
+      if (account.backend === "native") {
+        try { const { client } = await ensureNativeHost(account.native!); const status = await client.account(account.native!.accountId);
+          const ready = status.authenticated === true && status.connection === "online";
+          return { ok: ready, reason: ready ? "ok" : "wechat-not-logged-in" };
+        } catch { return { ok: false, reason: "wechat-native-unreachable" }; }
       }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
       try {

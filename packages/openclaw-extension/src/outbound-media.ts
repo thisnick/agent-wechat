@@ -49,6 +49,7 @@ export async function sendWeChatMedia(
 ): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
+  if (account.backend === "native") throw new Error("Native media sending is not implemented in this integration; no legacy fallback is used");
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   if (!mediaUrl) {
     if (audioAsVoice) throw new Error("Voice sending requires an audio attachment");

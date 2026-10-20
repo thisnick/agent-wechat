@@ -1,0 +1,27 @@
+{
+  "source": "Fresh .26 embedded default config, independently extracted as public data in network-disabled fresh reference",
+  "profiles": [
+    {
+      "version": 5,
+      "curveNid": 415,
+      "ecdsaPEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvDq9RQg9ho32ctJGZ1+KtEFksBSF\nEECOCnuhqRPPXQtmvUrUtVvfIdFommkrg/Iyd8vYMdDdtO8GkeoCkJ6FBA==\n-----END PUBLIC KEY-----\n",
+      "jwk": {
+        "kty": "EC",
+        "x": "vDq9RQg9ho32ctJGZ1-KtEFksBSFEECOCnuhqRPPXQs",
+        "y": "Zr1K1LVb3yHRaJppK4PyMnfL2DHQ3bTvBpHqApCehQQ",
+        "crv": "P-256"
+      }
+    },
+    {
+      "version": 1000,
+      "curveNid": 415,
+      "ecdsaPEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvNO5sjEzAoQpX1WVHmJEM7sNn4d5\nGRix7PLXtaU+wrQ5LgCEwxu6s7hcEUHMMTc9Tc2I+1cuJMaLgST3Q3yKXg==\n-----END PUBLIC KEY-----\n",
+      "jwk": {
+        "kty": "EC",
+        "x": "vNO5sjEzAoQpX1WVHmJEM7sNn4d5GRix7PLXtaU-wrQ",
+        "y": "OS4AhMMburO4XBFBzDE3PU3NiPtXLiTGi4Ek90N8il4",
+        "crv": "P-256"
+      }
+    }
+  ]
+}

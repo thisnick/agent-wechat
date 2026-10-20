@@ -1,0 +1,70 @@
+name: Native distribution validation
+on:
+  pull_request:
+    paths:
+      - 'packages/native-client-rust/**'
+      - 'packages/cli/**'
+      - 'packages/shared/**'
+      - 'packages/openclaw-extension/**'
+      - 'scripts/native-*'
+      - 'deploy/native/**'
+      - '.github/workflows/native-*'
+      - '.github/workflows/release.yml'
+      - 'package.json'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/native-client-rust/**'
+      - 'packages/cli/**'
+      - 'packages/shared/**'
+      - 'packages/openclaw-extension/**'
+      - 'scripts/native-*'
+      - 'deploy/native/**'
+      - '.github/workflows/native-*'
+      - '.github/workflows/release.yml'
+      - 'package.json'
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/cli... build
+      - run: pnpm --filter @agent-wechat/cli test
+      - run: pnpm --filter @agent-wechat/shared test
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - run: pnpm --filter @agent-wechat/agent-wechat typecheck
+      - run: pnpm --filter @agent-wechat/agent-wechat test
+      - run: node --test scripts/pending-release-packages.test.mjs
+      - run: bash scripts/native-build-release.sh
+      - run: node scripts/native-package-smoke.mjs artifacts/native
+      - name: Validate real managed/external OpenClaw hosting without account credentials
+        run: |
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          node --experimental-strip-types scripts/native-openclaw-smoke.mjs "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
+      - name: Build standalone image without publishing or starting a service
+        run: docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:ci .
+      - name: Check image identity without touching account data
+        run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
+      - run: python3 scripts/native-container-smoke.py agent-wechat-native:ci
+      - name: Validate deployment examples without applying them
+        run: |
+          mkdir -p deploy/native/secrets
+          printf 'validation-placeholder-not-a-real-secret\n' > deploy/native/secrets/api-token
+          docker compose -f deploy/native/compose.yaml config --quiet
+          systemd-analyze --user verify deploy/native/agent-wechat-native.service
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x64-gnu-validation
+          path: artifacts/native/*
+          if-no-files-found: error

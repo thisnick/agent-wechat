@@ -8,9 +8,24 @@ export type WeChatGroupConfig = {
   allowFrom?: string[];
 };
 
+export type WeChatNativeConfig = {
+  mode: "managed" | "external";
+  accountId: string;
+  endpoint?: string;
+  executable?: string;
+  serverConfig?: string;
+  dataDir?: string;
+  listen?: string;
+  tokenFile: string;
+  consumerStateDir: string;
+  readPolicy?: "never" | "on_model_dispatch";
+};
+
 export type WeChatConfig = {
+  backend?: "legacy" | "native";
+  native?: WeChatNativeConfig;
   enabled?: boolean;
-  serverUrl: string;
+  serverUrl?: string;
   token?: string;
   dmPolicy?: WeChatDmPolicy;
   allowFrom?: string[];
@@ -24,6 +39,8 @@ export type WeChatConfig = {
 };
 
 export type ResolvedWeChatAccount = {
+  backend?: "legacy" | "native";
+  native?: WeChatNativeConfig;
   accountId: string;
   enabled: boolean;
   serverUrl: string;
@@ -62,24 +79,32 @@ export function resolveWeChatAccount(
 ): ResolvedWeChatAccount | null {
   const wechat = (cfg as { channels?: { "agent-wechat"?: WeChatConfig } })
     .channels?.["agent-wechat"];
-  if (!wechat?.serverUrl) return null;
+  const plugin = (cfg as any)?.plugins?.entries?.["agent-wechat"]?.config as Partial<WeChatConfig> | undefined;
+  const backend = wechat?.backend ?? plugin?.backend ?? "legacy";
+  const native = wechat?.native ?? plugin?.native;
+  const serverUrl = backend === "native"
+    ? native?.mode === "external" ? native.endpoint ?? "" : `http://${native?.listen ?? "127.0.0.1:6174"}`
+    : wechat?.serverUrl;
+  if (!serverUrl || (backend === "native" && !native)) return null;
 
   return {
+    backend,
+    native,
     accountId: accountId ?? DEFAULT_ACCOUNT_ID,
-    enabled: wechat.enabled !== false,
-    serverUrl: wechat.serverUrl,
-    token: wechat.token,
-    dmPolicy: normalizeDmPolicy(wechat.dmPolicy),
-    allowFrom: wechat.allowFrom ?? [],
-    groupPolicy: normalizeGroupPolicy(wechat.groupPolicy),
-    groupAllowFrom: wechat.groupAllowFrom ?? [],
-    groups: wechat.groups ?? {},
-    pollIntervalMs: wechat.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    enabled: wechat?.enabled !== false,
+    serverUrl,
+    token: wechat?.token,
+    dmPolicy: normalizeDmPolicy(wechat?.dmPolicy),
+    allowFrom: wechat?.allowFrom ?? [],
+    groupPolicy: normalizeGroupPolicy(wechat?.groupPolicy),
+    groupAllowFrom: wechat?.groupAllowFrom ?? [],
+    groups: wechat?.groups ?? {},
+    pollIntervalMs: wechat?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     authPollIntervalMs:
-      wechat.authPollIntervalMs ?? DEFAULT_AUTH_POLL_INTERVAL_MS,
-    mediaMaxMb: Number.isInteger(wechat.mediaMaxMb) && (wechat.mediaMaxMb ?? 0) > 0 &&
-        (wechat.mediaMaxMb ?? 0) <= 1024
-      ? wechat.mediaMaxMb!
+      wechat?.authPollIntervalMs ?? DEFAULT_AUTH_POLL_INTERVAL_MS,
+    mediaMaxMb: Number.isInteger(wechat?.mediaMaxMb) && (wechat?.mediaMaxMb ?? 0) > 0 &&
+        (wechat?.mediaMaxMb ?? 0) <= 1024
+      ? wechat?.mediaMaxMb!
       : DEFAULT_MEDIA_MAX_MB,
   };
 }

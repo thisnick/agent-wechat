@@ -1,0 +1,6 @@
+# Copy to ~/.config/agent-wechat/server/config.toml only during explicit setup.
+# Omitted dataDir uses XDG_DATA_HOME/agent-wechat or ~/.local/share/agent-wechat.
+# Relative references resolve against this file's directory.
+schemaVersion = 1
+listen = "127.0.0.1:6174"
+tokenFile = "api-token"

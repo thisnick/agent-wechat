@@ -1,7 +1,10 @@
 //! Official-format profiles remain opaque here; only our sidecar schema is migrated.
 pub mod copy;
+mod operations;
+pub mod vault;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+pub use operations::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -143,7 +146,7 @@ impl Store {
         let mut db = Connection::open(&db_path)?;
         db.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !matches!(version, 0 | 1) {
+        if !(0..=2).contains(&version) {
             bail!("unsupported registry schema version");
         }
         if version == 0 {
@@ -159,12 +162,15 @@ impl Store {
                 bail!("unrecognized registry schema; existing data preserved");
             }
             let tx = db.transaction()?;
-            tx.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE accounts(id TEXT PRIMARY KEY,storage_mode TEXT NOT NULL,profile_path TEXT NOT NULL UNIQUE,schema_compatibility TEXT NOT NULL); PRAGMA user_version=1;")?;
+            tx.execute_batch(include_str!("../migrations/registry/V001__registry.sql"))?;
             tx.execute(
                 "INSERT INTO metadata VALUES('server_id',?1)",
                 [uuid::Uuid::new_v4().to_string()],
             )?;
             tx.commit()?;
+        }
+        if version < 2 {
+            operations::migrate(&mut db)?;
         }
         let server_id = db.query_row(
             "SELECT value FROM metadata WHERE key='server_id'",

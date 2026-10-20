@@ -21,6 +21,7 @@ async function fixture(t, manifests = packages) {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'package.json'), JSON.stringify(pkg));
   }
+  await mkdir(join(cwd, 'packages', 'native-client-rust'));
   return cwd;
 }
 
@@ -37,7 +38,7 @@ test('already published npm packages still start artifact jobs when their releas
 test('ordinary pushes do not rebuild an existing release', async t => {
   const cwd = await fixture(t);
   assert.deepEqual(await pendingReleasePackages({ cwd, env,
-    fetchImpl: async () => ({ status: 200 }) }), []);
+    fetchImpl: async () => ({ status: 200, json: async () => ({ assets: ['agent-server-0.15.4-linux-amd64', 'agent-server-0.15.4-linux-arm64', 'docker-tools-0.15.4.tar.gz'].map(name => ({ name })) }) }) }), []);
 });
 
 test('GitHub authentication and network errors do not trigger a release', async t => {
@@ -57,4 +58,11 @@ test('invalid package versions fail before looking up the release', async t => {
     await assert.rejects(pendingReleasePackages({ cwd, env,
       fetchImpl: () => { throw new Error('must not fetch'); } }), /shared version/);
   }
+});
+
+test('prepared native release does not hide unfinished legacy artifact jobs', async t => {
+  const cwd = await fixture(t);
+  const result = await pendingReleasePackages({ cwd, env, fetchImpl: async () => ({ status: 200,
+    json: async () => ({ assets: [{ name: 'wx-v0.15.4-linux-x64-gnu' }, { name: 'wx-v0.15.4-checksums.json' }] }) }) });
+  assert.deepEqual(result, packages);
 });

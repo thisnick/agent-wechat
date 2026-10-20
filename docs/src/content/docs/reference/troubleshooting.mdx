@@ -20,10 +20,10 @@ description: Common issues and how to fix them.
    - **Increase disk space** on the host
    - **Wipe WeChat data** and start fresh (you'll need to re-scan the QR code):
      ```bash
-     wx down
+     wx-legacy down
      docker volume rm agent-wechat-home
-     wx up
-     wx auth login
+     wx-legacy up
+     wx-legacy auth login
      ```
 
 **Prevention**: Monitor disk usage and provision enough storage. 10 GB is a minimum; active accounts may need 20 GB+.
@@ -40,7 +40,7 @@ description: Common issues and how to fix them.
 2. If there's an unexpected dialog, you may need to dismiss it manually via VNC
 3. Restart the container:
    ```bash
-   wx down && wx up
+   wx-legacy down && wx-legacy up
    ```
 
 ## Not receiving new messages
@@ -56,27 +56,27 @@ description: Common issues and how to fix them.
 
 1. Check login status:
    ```bash
-   wx auth status
+   wx-legacy auth status
    ```
 
 2. Check the VNC viewer to see the UI state
 
 3. Restart the container:
    ```bash
-   wx down && wx up
+   wx-legacy down && wx-legacy up
    ```
 
 4. If restarting doesn't help, wipe WeChat data and re-login:
    ```bash
-   wx down
+   wx-legacy down
    docker volume rm agent-wechat-home
-   wx up
-   wx auth login
+   wx-legacy up
+   wx-legacy auth login
    ```
 
 ## Container won't start
 
-**Symptom**: `wx up` or `docker compose up` fails.
+**Symptom**: `wx-legacy up` or `docker compose up` fails.
 
 **Cause**: Usually missing capabilities or Docker configuration issues.
 
@@ -97,8 +97,8 @@ description: Common issues and how to fix them.
 
 - Make sure you're using WeChat's built-in scanner (tap **+** > **Scan**), not a generic QR scanner
 - The QR code must be displayed on a **separate screen** from the phone running WeChat — WeChat's scanner uses the camera only, it cannot scan from the phone's gallery
-- QR codes expire after a few minutes. If it doesn't work, run `wx auth login` again to get a fresh one
-- Try `wx auth login --new` to force a new account login instead of reusing an existing session
+- QR codes expire after a few minutes. If it doesn't work, run `wx-legacy auth login` again to get a fresh one
+- Try `wx-legacy auth login --new` to force a new account login instead of reusing an existing session
 
 ## WeChat session disconnects
 
@@ -111,4 +111,4 @@ description: Common issues and how to fix them.
 
 **Fix**:
 
-Run `wx auth login` — if the disconnection was brief, you may not need a new QR scan. If a QR code appears, scan it again.
+Run `wx-legacy auth login` — if the disconnection was brief, you may not need a new QR scan. If a QR code appears, scan it again.

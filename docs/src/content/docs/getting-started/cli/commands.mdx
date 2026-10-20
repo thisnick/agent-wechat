@@ -1,26 +1,30 @@
 ---
 title: CLI Commands
-description: Full reference for the wx command-line tool.
+description: Full reference for the wx-legacy command-line tool.
 ---
+
+:::note[Container backend]
+This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
+:::
 
 ## Container
 
 | Command | Description |
 |---------|-------------|
-| `wx up [--proxy user:pass@host:port]` | Start the agent-wechat container (auto-pulls image) |
-| `wx down` | Stop and remove the container |
-| `wx logs` | Tail container logs |
-| `wx status` | Show container up/down status and login status |
+| `wx-legacy up [--proxy user:pass@host:port]` | Start the agent-wechat container (auto-pulls image) |
+| `wx-legacy down` | Stop and remove the container |
+| `wx-legacy logs` | Tail container logs |
+| `wx-legacy status` | Show container up/down status and login status |
 
 ## Auth
 
 | Command | Description |
 |---------|-------------|
-| `wx auth login` | Log in to WeChat (shows QR code in terminal) |
-| `wx auth logout` | Log out of WeChat |
-| `wx auth status` | Check login status |
-| `wx auth token` | Show current auth token |
-| `wx auth token --regenerate` | Generate a new auth token |
+| `wx-legacy auth login` | Log in to WeChat (shows QR code in terminal) |
+| `wx-legacy auth logout` | Log out of WeChat |
+| `wx-legacy auth status` | Check login status |
+| `wx-legacy auth token` | Show current auth token |
+| `wx-legacy auth token --regenerate` | Generate a new auth token |
 
 Login options:
 - `--timeout <seconds>` — login timeout (default: 300)
@@ -30,10 +34,10 @@ Login options:
 
 | Command | Description |
 |---------|-------------|
-| `wx chats list` | List chats from WeChat |
-| `wx chats get <chatId>` | Get details for a specific chat |
-| `wx chats find <name>` | Search chats by display name |
-| `wx chats open <chatId>` | Open a chat in the WeChat UI |
+| `wx-legacy chats list` | List chats from WeChat |
+| `wx-legacy chats get <chatId>` | Get details for a specific chat |
+| `wx-legacy chats find <name>` | Search chats by display name |
+| `wx-legacy chats open <chatId>` | Open a chat in the WeChat UI |
 
 Options: `--limit <n>`, `--offset <n>`, `--json`
 
@@ -41,9 +45,9 @@ Options: `--limit <n>`, `--offset <n>`, `--json`
 
 | Command | Description |
 |---------|-------------|
-| `wx messages list <chatId>` | List messages in a chat |
-| `wx messages send <chatId>` | Send a message |
-| `wx messages media <chatId> <localId>` | Download a media attachment |
+| `wx-legacy messages list <chatId>` | List messages in a chat |
+| `wx-legacy messages send <chatId>` | Send a message |
+| `wx-legacy messages media <chatId> <localId>` | Download a media attachment |
 
 Send options:
 - `--text "message"` — send text
@@ -57,12 +61,12 @@ Media options:
 - `--thumbnail` — save the cached image preview
 
 The media command does not open a chat. For a regular phone photo, run
-`wx chats open <chatId>` first if you want WeChat to cache the standard-size
+`wx-legacy chats open <chatId>` first if you want WeChat to cache the standard-size
 copy; otherwise the default media command may save only the thumbnail.
 
 ## Debug
 
 | Command | Description |
 |---------|-------------|
-| `wx screenshot [file]` | Save a screenshot (default: `screenshot.png`) |
-| `wx a11y` | Dump the accessibility tree (`--format json\|aria`) |
+| `wx-legacy screenshot [file]` | Save a screenshot (default: `screenshot.png`) |
+| `wx-legacy a11y` | Dump the accessibility tree (`--format json\|aria`) |

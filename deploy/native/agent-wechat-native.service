@@ -1,0 +1,26 @@
+# Example user unit. Copy/edit/enable only during explicitly approved deployment.
+[Unit]
+Description=Agent WeChat native daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Use an explicitly provisioned native executable, not an npm lifecycle script.
+ExecStart=%h/.local/bin/wx serve --server-config %h/.config/agent-wechat/server/config.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/agent-wechat
+# Direct external profiles and nondefault dataDir require explicit extra
+# ReadWritePaths entries and compatible ownership. Never share an active writer.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

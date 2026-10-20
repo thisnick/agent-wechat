@@ -15,3 +15,6 @@ tempfile.workspace = true
 libc.workspace = true
 fs2.workspace = true
 filetime.workspace = true
+openssl.workspace = true
+zeroize.workspace = true
+chrono.workspace = true

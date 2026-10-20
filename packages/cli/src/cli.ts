@@ -76,7 +76,7 @@ function getImageTag(): string {
 const program = new Command();
 
 program
-  .name("wx")
+  .name("wx-legacy")
   .description("WeChat automation CLI")
   .version(VERSION)
   .option("-s, --session <name>", "Use specified session", "default");
@@ -231,7 +231,7 @@ authCmd
       const token = randomBytes(32).toString("hex");
       fs.writeFileSync(TOKEN_PATH, token + "\n", { mode: 0o600 });
       console.log(`New token: ${token}`);
-      console.log(`Restart the container for it to take effect: pnpm cli down && pnpm cli up`);
+      console.log(`Restart the container for it to take effect: wx-legacy down && wx-legacy up`);
     } else {
       const token = ensureToken();
       console.log(token);
@@ -795,7 +795,7 @@ async function cmdChatOpen(client: WeChatClient, chatId: string, clearUnreads?: 
   if (result.ok) {
     console.log(`Chat opened: ${result.username} (index ${result.index})`);
   } else if (result.error === "NOT_LOGGED_IN") {
-    console.error("Not logged in. Run: pnpm cli auth login");
+    console.error("Not logged in. Run: wx-legacy auth login");
     process.exit(1);
   } else {
     console.error(`Failed: ${result.error}`);
@@ -866,7 +866,7 @@ async function cmdSend(client: WeChatClient, chatId: string, text?: string, imag
       console.log(`Message ID: ${result.messageId}`);
     }
   } else if (result.error === "NOT_LOGGED_IN") {
-    console.error("Not logged in. Run: pnpm cli auth login");
+    console.error("Not logged in. Run: wx-legacy auth login");
     process.exit(1);
   } else {
     console.error(`Failed to send message: ${result.error || "Unknown error"}`);
@@ -930,7 +930,7 @@ async function cmdSessionCreate(client: WeChatClient, name: string) {
   console.log(`  User: ${session.linuxUser}`);
   console.log(`  Display: ${session.display}`);
   console.log(`  VNC Port: ${session.vncPort}`);
-  console.log(`\nStart the session with: pnpm cli session start ${session.name}`);
+  console.log(`\nStart the session with: wx-legacy session start ${session.name}`);
 }
 
 async function cmdSessionStart(client: WeChatClient, idOrName: string) {
@@ -943,7 +943,7 @@ async function cmdSessionStart(client: WeChatClient, idOrName: string) {
   if (session.dbusAddress) {
     console.log(`  D-Bus: ${session.dbusAddress}`);
   }
-  console.log(`\nLogin with: pnpm cli --session ${session.name} login`);
+  console.log(`\nLogin with: wx-legacy --session ${session.name} login`);
 }
 
 async function cmdSessionStop(client: WeChatClient, idOrName: string) {

@@ -44,3 +44,6 @@ export {
   // Agent config schema
   agentConfigSchema,
 } from "./schemas/index.js";
+
+// Native v1 transport is explicit; the legacy /api client remains separate.
+export * from "./native-client.js";

@@ -1,0 +1,28 @@
+[package]
+name = "wechat-profile"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { workspace = true, features = ["limits", "hooks"] }
+sha2.workspace = true
+tempfile.workspace = true
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+hex = "0.4"
+md-5 = "0.10"
+pbkdf2 = "0.12"
+hmac = "0.12"
+zstd = "0.13"
+aes = "0.8"
+cipher = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+quick-xml = "0.38"
+libc.workspace = true
+
+openssl.workspace = true
+crc32fast = "1"

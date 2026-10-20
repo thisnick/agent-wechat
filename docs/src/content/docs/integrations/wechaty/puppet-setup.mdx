@@ -82,7 +82,7 @@ import { PuppetService } from 'wechaty-puppet-service'
 
 const bot = WechatyBuilder.build({
   puppet: new PuppetService({
-    endpoint: 'your-instance.agent-wx.app:8443',  // provided by managed hosting
+    endpoint: 'your-instance.agent-wx-legacy.app:8443',  // provided by managed hosting
     token: 'your-token',
     tls: {
       caCert: fs.readFileSync('/etc/ssl/cert.pem'),  // system CA certs

@@ -3,6 +3,10 @@ title: What is agent-wechat?
 description: A programmable WeChat interface for AI agents and automation.
 ---
 
+:::note[Container backend]
+This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
+:::
+
 **agent-wechat** is a programmable WeChat interface. It runs the WeChat desktop application inside a Docker container and exposes a REST + WebSocket API for controlling it — send and receive messages, list chats, download media, and more.
 
 ## What you can do
@@ -18,7 +22,7 @@ There are several ways to interact with agent-wechat:
 
 | Method | Best for |
 |--------|----------|
-| [CLI (`wx` command)](/getting-started/cli/installation) | Quick local use, scripting, debugging |
+| [CLI (`wx-legacy` command)](/getting-started/cli/installation) | Quick local use, scripting, debugging |
 | [OpenClaw plugin](/integrations/openclaw/setup) | Adding WeChat as a channel in [OpenClaw](https://openclaw.ai) |
 | [Wechaty puppet](/integrations/wechaty/puppet-setup) | Using existing Wechaty bots with WeChat |
 | [REST API directly](/reference/api) | Custom integrations |

@@ -1,4 +1,4 @@
-name: Native client foundation
+name: Native client
 
 on:
   pull_request:

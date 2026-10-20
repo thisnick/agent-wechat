@@ -1,0 +1,24 @@
+{
+  "source_artifact_sha256": "2749535f299ba67feb8ef80cab898bb0531fa8f376b16f8a72db706811c84132",
+  "source_evidence_id": "STANDALONE-BUSINESS-PUBLIC-DEFAULTS-20261019-01",
+  "profiles": [
+    {
+      "certVersion": 10014,
+      "curveNid": 415,
+      "ecdhPointHex": "0485140cd4892095aecbf79e71cef6348a92eb9b3bbc697e38ab11bd1187cca8e749623dc33c94e0d5166c6de42018258edaf6128ec08a9548927e60c29ed46116",
+      "ecdsaPEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAECh6rXlsE2tI0kPePrkGdqfax3fM4\neqr7vmerVCTDizLW9FVby/9Uz3wxV5IQXjBT9JnLSNrhwPG/CbufQGwMvQ==\n-----END PUBLIC KEY-----\n"
+    },
+    {
+      "certVersion": 50005,
+      "curveNid": 415,
+      "ecdhPointHex": "0476a400ef255ef6729aa837be190b3d30832deb78e4fad786c2e94ecc6b0e8ca69f8f585726c6422bb953067edbf2e907918716ba55175d4e2c167c41aa709558",
+      "ecdsaPEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKayuW6LOC4vQ74qVRu25yeDLP6v2\nSqBIIdoY7iFk2k89NLjCAST9imZBpPUgHGeyDVWBvgIRHDoVW3zAfAWTKA==\n-----END PUBLIC KEY-----\n"
+    },
+    {
+      "certVersion": 10001,
+      "curveNid": 415,
+      "ecdhPointHex": "0493b4723be07a56d81e6f1994a55597ade831b78c60b8c8a9a5ad656bc10534a6ecfcd6b2504ccbc9682dc9c6f5d213bc3cc3e98a5d759747d4f9c7c46f0aa6fa",
+      "ecdsaPEM": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAECBoAWf0/8eRD/CJyb1StJrHOyW2W\n6gvciHuM6NfO6qhK42JN6RFlnpKYmP2NPXnww/NUTZL3NPkqYTHvCP0Jkg==\n-----END PUBLIC KEY-----\n"
+    }
+  ]
+}

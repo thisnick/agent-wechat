@@ -43,3 +43,9 @@ screenshot.png
 
 # Downloaded WeChat data files
 wechat_files/
+
+# Generated native release metadata/cache; exact manifest is embedded during packaging.
+artifacts/native/
+packages/cli/native-release.json
+packages/cli/native/
+deploy/native/secrets/

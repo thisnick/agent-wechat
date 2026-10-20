@@ -49,6 +49,7 @@ struct FileConfig {
     data_dir: Option<PathBuf>,
     token_file: Option<PathBuf>,
     listen: Option<SocketAddr>,
+    storage_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +61,7 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub token_file: PathBuf,
     pub token_explicit: bool,
+    pub storage_key_file: Option<PathBuf>,
     pub listen: SocketAddr,
 }
 
@@ -137,6 +139,11 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         (_, Some(p)) => absolute(p, base)?,
         _ => data_dir.join("api-token"),
     };
+    let storage_key_file = file
+        .storage_key_file
+        .as_ref()
+        .map(|p| absolute(p, base))
+        .transpose()?;
     let listen = flags
         .listen
         .or(file.listen)
@@ -151,6 +158,7 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         data_dir,
         token_file,
         token_explicit,
+        storage_key_file,
         listen,
     })
 }
@@ -240,4 +248,53 @@ mod tests {
         )
         .is_err());
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClientConfig {
+    pub schema_version: u32,
+    pub endpoint: String,
+    pub token_file: PathBuf,
+    pub account: Option<String>,
+}
+pub fn resolve_client(
+    selected: Option<&Path>,
+    env: &Environment,
+    cwd: &Path,
+    server: &ServerConfig,
+) -> Result<ClientConfig> {
+    let path = match selected {
+        Some(p) => absolute(p, cwd)?,
+        None => env
+            .config_home
+            .as_ref()
+            .filter(|p| p.is_absolute())
+            .cloned()
+            .or_else(|| env.home.as_ref().map(|p| p.join(".config")))
+            .context("client configuration location unavailable")?
+            .join("agent-wechat/client.toml"),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && selected.is_none() => {
+            return Ok(ClientConfig {
+                schema_version: 1,
+                endpoint: format!("http://{}", server.listen),
+                token_file: server.token_file.clone(),
+                account: None,
+            })
+        }
+        Err(e) => return Err(e).context("cannot read selected client configuration"),
+    };
+    if text.len() > 64 * 1024 {
+        bail!("client configuration is too large");
+    }
+    let mut config: ClientConfig =
+        toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid client configuration"))?;
+    if config.schema_version != 1 {
+        bail!("unsupported client configuration schemaVersion");
+    }
+    config.token_file = absolute(&config.token_file, path.parent().unwrap())?;
+    Ok(config)
 }

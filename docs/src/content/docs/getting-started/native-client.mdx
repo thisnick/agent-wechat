@@ -1,0 +1,56 @@
+---
+title: Native Client (experimental)
+description: Standalone Rust daemon, official-format profiles and native client compatibility.
+---
+
+The native `wx` executable runs without an official WeChat binary, desktop or Docker container. It speaks the native protocol, exposes an authenticated `/v1` API and keeps official-format profiles plus private daemon sidecars. The retained container CLI is `wx-legacy`; its commands and API are separate.
+
+The enabled release target is Linux x64 with glibc 2.36 or newer. Node.js 24.16+ is required by the npm launcher; the Rust executable can run independently after provisioning. A matching release asset and npm-bundled checksum manifest must exist before distribution.
+
+```bash
+npm install -g @agent-wechat/cli@VERSION
+wx --json version
+wx config show
+wx serve
+```
+
+`serve` runs in the foreground and creates private implicit API/storage keys. It does not automatically open a QR. Other CLI invocations connect to that daemon:
+
+```bash
+wx accounts create test
+wx --account test auth login --qr-output /absolute/new-login.png
+wx --account test threads
+```
+
+An empty account slot can authenticate and stage sync commands, but does not yet initialize the official database set. Local history queries require a compatible initialized profile and authorized keys. Import/export are same-format copies; direct binding also remains available. The official client and daemon must take turns owning the profile.
+
+## Configuration
+
+Server settings: `~/.config/agent-wechat/server/config.toml`, with XDG support:
+
+```toml
+schemaVersion = 1
+listen = "127.0.0.1:6174"
+dataDir = "/private/agent-wechat"
+```
+
+Data defaults to `~/.local/share/agent-wechat`. Client selections are separate, in `~/.config/agent-wechat/client.toml`:
+
+```toml
+schemaVersion = 1
+endpoint = "http://127.0.0.1:6174"
+tokenFile = "/private/agent-wechat/api-token"
+account = "test"
+```
+
+Credentials, tokens and database keys are separate secrets. Do not put token values in URLs. The daemon listens on loopback; remote clients need a protected TLS endpoint or tunnel.
+
+## Compatibility and validation
+
+Native Rust active-session renewal, heartbeat/sync and assembled daemon reads were validated using an isolated test account and copied stopped profiles. Official-format SQLCipher reads, cached media and narrow incoming direct-text/exact-read projection have tests and encrypted-clone validation. Other schemas refuse writes.
+
+Group/media official-file projection, fresh official database initialization, complete send projection and server-side logout are still compatibility gates. Media protocol helpers exist as libraries with offline tests; general daemon media jobs are not enabled. Notifications currently use verified heartbeat-driven sync, rather than claiming unsolicited native push association. A pending sync projection means official files have not fully caught up.
+
+OpenClaw native mode requires a separately provisioned native executable. Only live, committed incoming text enters its model-dispatch path. Released OpenClaw hosts inspected do not expose the prepared-model callback required for read receipts, so those hosts retain unread state with an explicit unconfirmed handoff. Native media forwarding is not enabled.
+
+The [complete native guide](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/README.md) covers profile ownership, keys, login operations, read-state conflicts, durable sends, event custody and tests. [Build/release and deployment templates](https://github.com/thisnick/agent-wechat/tree/main/deploy/native) include a user service and an image without the official client. Their preparation does not deploy them.

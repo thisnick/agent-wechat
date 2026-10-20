@@ -8,7 +8,7 @@ description: How to restart the container and recover from common issues.
 ### Via the CLI
 
 ```bash
-wx down && wx up
+wx-legacy down && wx-legacy up
 ```
 
 ### Via Docker Compose
@@ -27,7 +27,7 @@ docker compose up -d
 ## What happens on restart
 
 - The WeChat session usually persists across restarts. Scan the QR code in WeChat if prompted.
-- If the session does expire, the API will report a logged-out status. Run `wx auth login` or ask your OpenClaw bot to log in again.
+- If the session does expire, the API will report a logged-out status. Run `wx-legacy auth login` or ask your OpenClaw bot to log in again.
 - The agent database (`/data/agent.db`) persists across restarts.
 - All WeChat data (messages, contacts, media) persists in the `agent-wechat-home` volume.
 
@@ -45,14 +45,14 @@ If restarting doesn't fix the issue, you can wipe the WeChat data and start from
 
 ```bash
 # Stop the container
-wx down
+wx-legacy down
 # or: docker compose down
 
 # Remove the WeChat home volume
 docker volume rm agent-wechat-home
 
 # Start fresh
-wx up
+wx-legacy up
 # or: docker compose up -d
 ```
 
@@ -65,9 +65,9 @@ This deletes all WeChat data inside the container including the login session, c
 To completely reset both agent data and WeChat data:
 
 ```bash
-wx down
+wx-legacy down
 docker volume rm agent-wechat-data agent-wechat-home
-wx up
+wx-legacy up
 ```
 
 This removes:

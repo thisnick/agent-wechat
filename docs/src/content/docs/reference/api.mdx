@@ -3,6 +3,10 @@ title: REST API
 description: API endpoint reference for agent-wechat.
 ---
 
+:::note[Container backend]
+This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
+:::
+
 The agent-wechat server exposes a REST API on port `6174`. API requests require a `Bearer` token in the `Authorization` header. The `/health` probe does not require authentication.
 
 ## Authentication

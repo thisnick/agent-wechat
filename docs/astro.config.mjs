@@ -29,7 +29,8 @@ export default defineConfig({
           label: 'Getting Started',
           items: [
             { label: 'What is agent-wechat?', slug: 'getting-started/overview' },
-            { label: 'Quick Start', slug: 'getting-started/quickstart' },
+            { label: 'Native Client (experimental)', slug: 'getting-started/native-client' },
+            { label: 'Container Quick Start', slug: 'getting-started/quickstart' },
           ],
         },
         {
@@ -41,13 +42,13 @@ export default defineConfig({
         {
           label: 'Container Setup',
           items: [
-            { label: 'Using the CLI (wx up)', slug: 'getting-started/container-setup/cli' },
+            { label: 'Using the CLI (wx-legacy up)', slug: 'getting-started/container-setup/cli' },
             { label: 'Docker Compose', slug: 'getting-started/container-setup/docker-compose' },
             { label: 'Building from Source', slug: 'getting-started/container-setup/building-locally' },
           ],
         },
         {
-          label: 'CLI Reference',
+          label: 'Container CLI Reference',
           items: [
             { label: 'Installation', slug: 'getting-started/cli/installation' },
             { label: 'Commands', slug: 'getting-started/cli/commands' },

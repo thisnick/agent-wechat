@@ -3,6 +3,10 @@ title: Architecture
 description: How agent-wechat works under the hood.
 ---
 
+:::note[Container backend]
+This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
+:::
+
 ## Overview
 
 agent-wechat runs the official WeChat desktop client inside a Docker container and controls it via UI automation. A Rust server (Axum) sits alongside WeChat in the container and exposes a REST + WebSocket API.

@@ -1,0 +1,15 @@
+The AES-GCM known-answer fixture in src/mmtls.rs is reproduced from
+code/outer.py in Citizen Lab's wechat-security-report repository:
+https://github.com/citizenlab/wechat-security-report
+
+Copyright (c) 2025 Mona Wang
+Used under the MIT License; see fixtures/LICENSE-CITIZENLAB.
+
+The public MMTLS verification pins and business ECDH/signature pins are public
+protocol constants from the Linux 4.1.13.26 default configuration. They are not
+account credentials. Reference artifact SHA-256:
+2749535f299ba67feb8ef80cab898bb0531fa8f376b16f8a72db706811c84132
+
+Other test vectors contain synthetic inputs, RFC 5869 test-case 1 data, or
+independently generated Python cryptography/zlib ciphertext. No private capture,
+account identity, token, device state, message, or runtime executable is shipped.

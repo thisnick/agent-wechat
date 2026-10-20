@@ -3,15 +3,23 @@
   "version": "0.16.0",
   "type": "module",
   "bin": {
-    "wx": "./dist/cli.js"
+    "wx": "./scripts/native-launcher.mjs",
+    "wx-legacy": "./dist/cli.js",
+    "wx-native-install": "./scripts/native-install.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts",
+    "native-release.json",
+    "LEGACY.md"
   ],
   "scripts": {
     "build": "node build.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/lib/*.test.mjs"
+    "test": "node --test --experimental-strip-types src/lib/*.test.mjs test/*.test.mjs",
+    "postinstall": "node scripts/native-install.mjs --postinstall",
+    "prepack": "node scripts/native-check-package.mjs",
+    "prepublishOnly": "node scripts/native-check-package.mjs --publication"
   },
   "dependencies": {
     "qrcode-terminal": "^0.12.0"
@@ -32,5 +40,8 @@
     "type": "git",
     "url": "git+https://github.com/thisnick/agent-wechat.git",
     "directory": "packages/cli"
+  },
+  "engines": {
+    "node": ">=24.16"
   }
 }

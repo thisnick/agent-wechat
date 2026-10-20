@@ -29,6 +29,11 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      # Version commits must synchronize the standalone Rust workspace lockfile.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+
       # No setup-node registry auth placeholder: publishing uses GitHub OIDC.
       - name: Install verified standalone npm 11.12.1
         run: bash scripts/install-ci-npm.sh
@@ -52,6 +57,12 @@ jobs:
           commit: "Version Packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Native assets must be prepared from this exact commit first. This gate
+      # fails closed until the operator approves the native-release workflow.
+      - name: Verify native assets and embed npm checksum manifest
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: node scripts/native-prepare-package.mjs --if-unpublished
 
       # Publish separately so npm can use OIDC (no NODE_AUTH_TOKEN needed)
       - name: Publish to npm

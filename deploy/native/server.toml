@@ -1,0 +1,4 @@
+schemaVersion = 1
+listen = "127.0.0.1:6174"
+dataDir = "/var/lib/agent-wechat"
+tokenFile = "/run/secrets/wechat-api-token"

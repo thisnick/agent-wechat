@@ -26,10 +26,10 @@ Check the container health:
 docker ps | grep agent-wechat
 
 # Server and login status
-wx status
+wx-legacy status
 
 # Container logs
-wx logs
+wx-legacy logs
 # or
 docker compose logs -f agent-wechat
 ```
@@ -58,9 +58,9 @@ docker compose up -d
 Or with the CLI:
 
 ```bash
-wx down
+wx-legacy down
 docker pull ghcr.io/thisnick/agent-wechat:latest
-wx up
+wx-legacy up
 ```
 
 After updating, the WeChat session usually persists. Scan the QR code in WeChat if prompted.

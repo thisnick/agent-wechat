@@ -1,0 +1,38 @@
+# Linux-only example. Build/create/start are separate operator actions.
+services:
+  agent-wechat-native:
+    image: agent-wechat-native:local
+    build:
+      context: ../..
+      dockerfile: deploy/native/Dockerfile
+    platform: linux/amd64
+    # Initial native daemon accepts loopback only. Other local clients/tunnel can
+    # reach host 127.0.0.1:6174; no unauthenticated bridge/public port is enabled.
+    network_mode: host
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    volumes:
+      - native-data:/var/lib/agent-wechat
+      - native-scratch:/var/cache/agent-wechat
+      - ./server.toml:/etc/agent-wechat/server/config.toml:ro
+      # An existing official profile requires an explicit additional bind mount,
+      # stopped-source handoff and registration; no profile is discovered here.
+    secrets:
+      - source: native-api-token
+        target: wechat-api-token
+    stop_grace_period: 30s
+    restart: "no"
+
+volumes:
+  native-data:
+  # Disk-backed temporary snapshots. Provision capacity/quota for expected
+  # concurrent accounts; application snapshot bounds are 8GiB total/2GiB per DB.
+  native-scratch:
+
+secrets:
+  native-api-token:
+    file: ./secrets/api-token

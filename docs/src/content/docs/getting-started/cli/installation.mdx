@@ -1,27 +1,31 @@
 ---
 title: CLI Installation
-description: Install the wx command-line tool.
+description: Install the wx-legacy command-line tool.
 ---
 
-The `wx` CLI lets you manage the agent-wechat container and interact with WeChat from your terminal.
+:::note[Container backend]
+This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
+:::
+
+The `wx-legacy` CLI lets you manage the agent-wechat container and interact with WeChat from your terminal.
 
 ## Install
 
 ```bash
-npm install -g @agent-wechat/cli
+AGENT_WECHAT_SKIP_NATIVE_INSTALL=1 npm install -g @agent-wechat/cli
 ```
 
-This installs the `wx` command globally.
+This installs the `wx-legacy` command globally.
 
 ## Prerequisites
 
-- **Node.js >= 22**
+- **Node.js >= 24.16**
 - **Docker** installed and running
 
 ## Verify installation
 
 ```bash
-wx --version
+wx-legacy --version
 ```
 
 ## Configuration
@@ -32,7 +36,7 @@ The CLI reads configuration from:
 |--------|-------------|
 | `AGENT_WECHAT_URL` | Server URL (default: `http://localhost:6174`) |
 | `AGENT_WECHAT_TOKEN` | Auth token (overrides token file) |
-| `~/.config/agent-wechat/token` | Auto-generated auth token (created on first `wx up`) |
+| `~/.config/agent-wechat/token` | Auto-generated auth token (created on first `wx-legacy up`) |
 
 The auth token is generated automatically on first run and shared with the container via a read-only volume mount.
 

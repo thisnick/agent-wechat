@@ -1,3 +1,63 @@
+# Native and legacy WeChat backends
+
+The plugin keeps the existing container backend as its default. Native mode is an explicit opt-in and uses an independently provisioned native `wx` or an existing authenticated native daemon. Plugin installation/startup never downloads, installs or repairs a binary. Capabilities are channel-global: mixed native/legacy accounts under one registered channel are unsupported in this increment, and changing backend requires a Gateway/plugin reload. Native registration advertises media unavailable. The native daemon and API capabilities are under active validation; do not infer media or profile compatibility from a configured route.
+
+## Native external mode
+
+Configure plugin defaults under `plugins.entries.agent-wechat.config` (or the same `backend`/`native` keys in the channel configuration):
+
+```json
+{
+  "backend": "native",
+  "native": {
+    "mode": "external",
+    "accountId": "example",
+    "endpoint": "http://127.0.0.1:6174",
+    "tokenFile": "/private/native-api-token",
+    "consumerStateDir": "/private/openclaw-native-consumer",
+    "readPolicy": "on_model_dispatch"
+  }
+}
+```
+
+The external service remains independently owned. Plugin stop closes its stream and never stops/logs out the daemon or cancels its sends. Remote endpoints require verified HTTPS or an encrypted tunnel terminating at loopback. Token files must be private regular files (0600), contain at least 32 bytes, and are references rather than inline credentials. The API token needs read/send/login for the selected account, plus read-state only when automatic local read projection is enabled; do not grant admin solely to run the plugin. Normal sender/DM/group/mention policy remains in `channels.agent-wechat`; defaults remain closed.
+
+## Native managed mode
+
+```json
+{
+  "backend": "native",
+  "native": {
+    "mode": "managed",
+    "accountId": "example",
+    "executable": "/opt/agent-wechat/bin/wx",
+    "listen": "127.0.0.1:6174",
+    "dataDir": "/private/native-store",
+    "tokenFile": "/private/native-api-token",
+    "consumerStateDir": "/private/openclaw-native-consumer",
+    "readPolicy": "never"
+  }
+}
+```
+
+Provision the native executable and account registration separately. Omitting `executable` resolves `wx` once from absolute trusted PATH entries. The plugin supports the package's tested npm launcher layout by selecting its already installed checksum-verified ELF payload directly. It never invokes an installer or shell. Unknown wrappers/old container CLIs are rejected. Managed startup refuses an occupied port and requires authenticated readiness matching the owned child PID, store path, server identity and process generation; it never adopts or terminates another process. Stop sends a graceful termination to its own child with bounded escalation. An unexpected child/stream failure is reported; automatic process crash restart is not implemented in this increment.
+
+Keep `dataDir` and `consumerStateDir` on separate explicit persistent mounts. The daemon owns official-format profile/sidecar data; the consumer directory holds private intake/deduplication/model-handoff/read receipts bound to server and account identities. Executable upgrades do not remove either. One configured OpenClaw account maps to one selected native daemon account in this increment, while the daemon itself supports independent account slots.
+
+## Native messaging lifecycle and validation limits
+
+The adapter consumes account-scoped SSE using bearer headers and decimal-string journal cursors. It persists custody before acknowledging a cursor; acknowledgement is independent of unread state. Only an explicitly live, incoming, committed type-1 text resource can enter the model. Catch-up/import/raw pending sync batches, unknown origin, outgoing messages and unsupported media do not become automatic model inputs. Group admission uses structured exact self-mention facts; unknown metadata or displayed `@names` never satisfy a mention gate. Contacts and groups use their separate catalogs.
+
+The prepared-run callback synchronously writes a bounded durable receipt for the exact selected new message IDs before a separate retryable read projection. Read CAS retries preserve the same sparse IDs and never widen to the largest ID or clear concurrent arrivals. `readPolicy: "never"` disables automatic reads. Crashes during an unconfirmed dispatch retain `needs_review`; the plugin does not automatically duplicate model turns or uncertain outgoing sends.
+
+**Released SDK limitation:** inspected OpenClaw2026.10.2 and2026.10.5 do not expose `onPreparedAgentRunStart`. The older `onAgentRunStart` can also report direct tool execution and early lifecycle phases, so it is not used as a substitute. On those hosts native text dispatch can run, but automatic read projection remains disabled and status reports `handoffUnconfirmed`. The prepared callback and failure/CAS behavior are validated in a model-runtime harness, not a live hosted model. A compatible released SDK and real model handoff remain rollout gates.
+
+Native text sends retain server-side intent/idempotency and returned send IDs. Native media/voice send and inbound attachment forwarding are not implemented in this adapter; they fail explicitly with no legacy fallback. Native QR login uses a durable daemon operation and authenticated PNG retrieval. The channel logout hook and native login tool perform persistent local logout fencing; they preserve credential files and do not claim server-side revocation. Explicit disconnect instead retains reusable trust. The legacy login transport is not used for a native account.
+
+See [native deployment examples](../../deploy/native/README.md) and [native CLI installation](../cli/README.md). The following guide describes the legacy container backend.
+
+---
+
 # @agent-wechat/agent-wechat
 
 OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [agent-wechat](https://github.com/thisnick/agent-wechat).
@@ -24,7 +84,7 @@ If you need to run the server yourself:
 
 ```bash
 npm install -g @agent-wechat/cli
-wx up
+wx-legacy up
 ```
 
 **Option B: Docker Compose** (production / networked)

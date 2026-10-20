@@ -9,8 +9,10 @@ export async function pendingReleasePackages({
 } = {}) {
   const packagesDir = join(cwd, 'packages');
   const entries = await readdir(packagesDir, { withFileTypes: true });
-  const manifests = await Promise.all(entries.filter(entry => entry.isDirectory()).map(async entry =>
-    JSON.parse(await readFile(join(packagesDir, entry.name, 'package.json'), 'utf8'))));
+  const manifests = (await Promise.all(entries.filter(entry => entry.isDirectory()).map(async entry => {
+    try { return JSON.parse(await readFile(join(packagesDir, entry.name, 'package.json'), 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  }))).filter(Boolean);
   const packages = manifests.filter(pkg => !pkg.private).map(({ name, version }) => ({ name, version }));
   if (!packages.length || packages.some(pkg => !/^@agent-wechat\/[a-z0-9-]+$/.test(pkg.name)
     || !/^\d+\.\d+\.\d+$/.test(pkg.version) || pkg.version !== packages[0].version)) {
@@ -25,7 +27,18 @@ export async function pendingReleasePackages({
     { headers: { Accept: 'application/vnd.github+json',
       ...(env.GH_TOKEN ? { Authorization: `Bearer ${env.GH_TOKEN}` } : {}) },
     signal: AbortSignal.timeout(10000) });
-  if (response.status === 200) return [];
+  if (response.status === 200) {
+    const release = await response.json();
+    if (!Array.isArray(release.assets)) throw new Error('Unable to inspect release recovery assets');
+    const names = new Set(release.assets.map(asset => asset.name));
+    const version = packages[0].version;
+    // A native release is prepared before npm publication. Its existence alone
+    // cannot prove the subsequent legacy binary/tools jobs finished.
+    const required = [`agent-server-${version}-linux-amd64`, `agent-server-${version}-linux-arm64`, `docker-tools-${version}.tar.gz`];
+    if (required.every(name => names.has(name))) return [];
+    console.error(`Resuming incomplete release v${version} after npm publication`);
+    return packages;
+  }
   if (response.status !== 404) {
     throw new Error(`Unable to check the pending GitHub release (HTTP ${response.status})`);
   }

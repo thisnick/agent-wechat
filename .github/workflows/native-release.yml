@@ -1,0 +1,57 @@
+name: Prepare native release assets
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact @agent-wechat/cli version already committed on main
+        required: true
+        type: string
+      confirm_publish:
+        description: Publish tested native release assets (does not deploy or publish npm)
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency: native-release-${{ inputs.version }}
+jobs:
+  prepare:
+    if: inputs.confirm_publish && github.ref == 'refs/heads/main'
+    environment: native-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+      - name: Validate requested release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node --input-type=module -e 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("packages/cli/package.json")); if(p.version!==process.env.RELEASE_VERSION)throw Error("Version differs from committed CLI package");'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/cli... build
+      - run: pnpm --filter @agent-wechat/cli test
+      - run: bash scripts/native-build-release.sh
+      - run: node scripts/native-package-smoke.mjs artifacts/native
+      - uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: artifacts/native/*
+      - name: Publish new assets without replacing existing release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          TAG="v$RELEASE_VERSION"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "Validated native Linux x64 GNU assets. npm publication and deployment are separate steps."
+          fi
+          gh release upload "$TAG" artifacts/native/*
