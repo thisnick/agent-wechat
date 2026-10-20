@@ -75,7 +75,7 @@ importers:
         specifier: ^0.25.0
         version: 0.25.12
       openclaw:
-        specifier: ^2026.10.2
+        specifier: 2026.10.2
         version: 2026.10.2(@aws-sdk/credential-provider-node@3.972.42)(@smithy/signature-v4@5.4.3)(undici@8.10.0)
       typescript:
         specifier: ^5.4.5
@@ -88,7 +88,7 @@ importers:
         version: 3.25.76
     devDependencies:
       typescript:
-        specifier: ^5.4.5
+        specifier: ^5.9.3
         version: 5.9.3
 
   packages/wechaty-gateway:

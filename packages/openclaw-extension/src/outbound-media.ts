@@ -1,8 +1,12 @@
+import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { WeChatClient, type VoiceJob } from "@agent-wechat/shared";
 import { resolveWeChatAccount } from "./types.ts";
+import { ensureNativeHost } from "./native-host.ts";
+import { sendNativeAttachment } from "./native-media.ts";
+import { submitNativeText } from "./native-send.ts";
 
 const EXT_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
@@ -49,7 +53,13 @@ export async function sendWeChatMedia(
 ): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
-  if (account.backend === "native") throw new Error("Native media sending is not implemented in this integration; no legacy fallback is used");
+  if (account.backend === "native") {
+    const { client } = await ensureNativeHost(account.native!); const key = idempotencyKey ?? randomUUID();
+    if (!mediaUrl) { if (audioAsVoice) throw new Error("Voice sending requires an audio attachment"); const send = await submitNativeText(client, account.native!.accountId, to, text, key); return `agent-wechat-native:${account.native!.accountId}:${send.id}`; }
+    const result = await sendNativeAttachment(client, account, to, mediaUrl, audioAsVoice, key);
+    if (text) await submitNativeText(client, account.native!.accountId, to, text, createHash("sha256").update(`${key}\0caption`).digest("hex"));
+    return result;
+  }
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   if (!mediaUrl) {
     if (audioAsVoice) throw new Error("Voice sending requires an audio attachment");

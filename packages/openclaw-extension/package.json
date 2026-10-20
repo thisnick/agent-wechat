@@ -15,7 +15,7 @@
     "@agent-wechat/shared": "workspace:*",
     "@types/node": "^22",
     "esbuild": "^0.25.0",
-    "openclaw": "^2026.10.2",
+    "openclaw": "2026.10.2",
     "typescript": "^5.4.5"
   },
   "openclaw": {
@@ -172,6 +172,21 @@
                     "never",
                     "on_model_dispatch"
                   ]
+                },
+                "gatewayFacade": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "enabled"
+                  ],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "prefix": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }

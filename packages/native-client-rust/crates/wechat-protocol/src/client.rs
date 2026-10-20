@@ -1,3 +1,8 @@
+#[path = "group_inventory.rs"]
+mod group_inventory;
+pub use group_inventory::*;
+#[path = "logout.rs"]
+mod logout;
 pub use crate::wire::{
     AddMessage, AvatarBytes, ContactLookup, ContactRecord, Heartbeat, InitContactPage, RoomMember,
     RoomRoster, SyncBatch, SyncCommand, TextSendResult, VoiceChunk,
@@ -9,6 +14,7 @@ use crate::{
     protobuf as p, wire,
 };
 use anyhow::{bail, ensure, Result};
+pub use logout::*;
 use openssl::{nid::Nid, pkey::PKey, rsa::Rsa};
 use serde::{Deserialize, Serialize};
 use std::{fmt, time::Duration};
@@ -57,6 +63,35 @@ impl DeviceProfile {
         Ok(())
     }
 }
+/// Raw accepted auth sections, retained only inside the encrypted account state.
+/// The update mask describes native application gates; presence alone does not
+/// mean an optional section changed active account credentials.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthSnapshot {
+    pub update_mask: u32,
+    pub response: Vec<u8>,
+    pub auth: Vec<u8>,
+    pub account: Vec<u8>,
+    pub network: Vec<u8>,
+    pub ax_auth: Vec<u8>,
+}
+impl fmt::Debug for AuthSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthSnapshot")
+            .field("sections", &"[redacted]")
+            .finish()
+    }
+}
+impl Drop for AuthSnapshot {
+    fn drop(&mut self) {
+        self.response.zeroize();
+        self.auth.zeroize();
+        self.account.zeroize();
+        self.network.zeroize();
+        self.ax_auth.zeroize();
+    }
+}
 /// Accepted credentials. Serialize only into the service's encrypted state vault.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +106,12 @@ pub struct AccountState {
     pub response_key: Vec<u8>,
     pub auto_auth_key: Vec<u8>,
     pub key_info: Vec<u8>,
+    /// Native AuthSect field 9 SKBuffer. This is the official profile password,
+    /// distinct from transport keys, and is never part of an HTTP response.
+    #[serde(default)]
+    pub database_password: Vec<u8>,
+    #[serde(default)]
+    pub auth_snapshot: AuthSnapshot,
     pub long_host: String,
     pub short_host: String,
 }
@@ -90,6 +131,7 @@ impl Drop for AccountState {
         self.response_key.zeroize();
         self.auto_auth_key.zeroize();
         self.key_info.zeroize();
+        self.database_password.zeroize();
     }
 }
 impl AccountState {
@@ -111,7 +153,17 @@ impl AccountState {
                 && ((self.request_key.is_empty() && self.response_key.is_empty())
                     || (self.request_key.len() == 24 && self.response_key.len() == 24))
                 && self.auto_auth_key.len() <= 1024 * 1024
-                && self.key_info.len() <= 1024 * 1024,
+                && self.key_info.len() <= 1024 * 1024
+                && (self.database_password.is_empty() || self.database_password.len() == 32)
+                && [
+                    &self.auth_snapshot.response,
+                    &self.auth_snapshot.auth,
+                    &self.auth_snapshot.account,
+                    &self.auth_snapshot.network,
+                    &self.auth_snapshot.ax_auth
+                ]
+                .iter()
+                .all(|v| v.len() <= 1024 * 1024),
             "Invalid native account keys"
         );
         Ok(())
@@ -195,37 +247,53 @@ impl AccountState {
             section_username.is_none_or(|s| s == own_username),
             "Baseline account identity mismatch"
         );
-        let state = Self {
-            schema: 1,
-            device: DeviceProfile {
-                device_id: decode("deviceId", true)?,
-                device_type: string("deviceType")?,
-                client_version: i32::try_from(
-                    object
-                        .get("clientVersion")
-                        .and_then(|v| v.as_i64())
-                        .ok_or_else(|| anyhow::anyhow!("Invalid baseline client version"))?,
-                )?,
-            },
-            uin,
-            own_username,
-            cookie: decode("cookie", false)?,
-            session_key: decode("sessionKey", true)?,
-            request_key: decode("field23", false)?,
-            response_key: decode("field24", false)?,
-            auto_auth_key: decode("autoAuthKey", false)?,
-            key_info: decode("keyInfo", false)?,
-            long_host: object
-                .get("longHost")
-                .and_then(|v| v.as_str())
-                .unwrap_or("long.weixin.qq.com")
-                .to_string(),
-            short_host: object
-                .get("shortHost")
-                .and_then(|v| v.as_str())
-                .unwrap_or("short.weixin.qq.com")
-                .to_string(),
-        };
+        let state =
+            Self {
+                schema: 1,
+                device: DeviceProfile {
+                    device_id: decode("deviceId", true)?,
+                    device_type: string("deviceType")?,
+                    client_version: i32::try_from(
+                        object
+                            .get("clientVersion")
+                            .and_then(|v| v.as_i64())
+                            .ok_or_else(|| anyhow::anyhow!("Invalid baseline client version"))?,
+                    )?,
+                },
+                uin,
+                own_username,
+                cookie: decode("cookie", false)?,
+                session_key: decode("sessionKey", true)?,
+                request_key: decode("field23", false)?,
+                response_key: decode("field24", false)?,
+                auto_auth_key: decode("autoAuthKey", false)?,
+                key_info: decode("keyInfo", false)?,
+                database_password: decode("databasePassword", false)?,
+                auth_snapshot: AuthSnapshot {
+                    update_mask: match object.get("authSections") {
+                        Some(serde_json::Value::String(value)) => value.parse()?,
+                        Some(value) => u32::try_from(value.as_u64().ok_or_else(|| {
+                            anyhow::anyhow!("Invalid baseline auth section mask")
+                        })?)?,
+                        None => 0,
+                    },
+                    response: decode("authResponse", false)?,
+                    auth: decode("authSect", false)?,
+                    account,
+                    network: decode("networkSect", false)?,
+                    ax_auth: decode("axAuthSect", false)?,
+                },
+                long_host: object
+                    .get("longHost")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("long.weixin.qq.com")
+                    .to_string(),
+                short_host: object
+                    .get("shortHost")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("short.weixin.qq.com")
+                    .to_string(),
+            };
         state.validate()?;
         Ok(state)
     }
@@ -904,9 +972,27 @@ fn reduce_auth(
         response_key: vec![],
         auto_auth_key: vec![],
         key_info: vec![],
+        database_password: vec![],
+        auth_snapshot: AuthSnapshot::default(),
         long_host: "long.weixin.qq.com".into(),
         short_host: "short.weixin.qq.com".into(),
     });
+    ensure!(
+        plain.len() <= 1024 * 1024,
+        "Auth response snapshot too large"
+    );
+    state.auth_snapshot.update_mask = mask;
+    state.auth_snapshot.response = plain.to_vec();
+    for (number, target) in [
+        (3, &mut state.auth_snapshot.auth),
+        (4, &mut state.auth_snapshot.account),
+        (5, &mut state.auth_snapshot.network),
+        (6, &mut state.auth_snapshot.ax_auth),
+    ] {
+        if let Some(section) = p::optional_data(&f, number)? {
+            *target = section.to_vec();
+        }
+    }
     if let Some(account) = p::optional_data(&f, 4)? {
         let a = p::decode(account)?;
         if let Some(name) = p::optional_data(&a, 1)? {
@@ -935,6 +1021,15 @@ fn reduce_auth(
             .map(p::unbuffer)
             .transpose()?
             .unwrap_or_default();
+        if let Some(password) = p::optional_data(&a, 9)? {
+            let password = p::unbuffer(password)?;
+            ensure!(
+                password.is_empty() || password.len() == 32,
+                "Invalid native database password"
+            );
+            state.database_password.zeroize();
+            state.database_password = password;
+        }
         state.key_info = p::optional_data(&a, 10)?
             .map(p::unbuffer)
             .transpose()?
@@ -969,6 +1064,8 @@ mod tests {
             response_key: vec![8; 24],
             auto_auth_key: vec![],
             key_info: vec![],
+            database_password: vec![],
+            auth_snapshot: AuthSnapshot::default(),
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
         }
@@ -988,6 +1085,76 @@ mod tests {
         let restored: AccountState = serde_json::from_slice(&json).unwrap();
         restored.validate().unwrap();
         assert_eq!(restored.uin, s.uin);
+    }
+    #[test]
+    fn database_password_follows_auth_update_gate_and_optional_presence() {
+        let mut old = state();
+        old.database_password = vec![11; 32];
+        let inner = Ecdh::generate(Nid::SECP224R1).unwrap();
+        let response = |mask, password: Option<&[u8]>| {
+            let mut fields = vec![
+                p::uint(1, old.uin as u64),
+                p::bytes(3, &p::buffer(&[1; 16])),
+                p::uint(19, 0),
+            ];
+            if let Some(bytes) = password {
+                fields.push(p::bytes(9, &p::buffer(bytes)));
+            }
+            p::message(&[
+                p::bytes(1, &p::uint(1, 0)),
+                p::uint(2, mask),
+                p::bytes(3, &p::message(&fields).unwrap()),
+                p::bytes(6, b"synthetic-ax"),
+            ])
+            .unwrap()
+        };
+        let gated_off = response(0, Some(&[22; 32]));
+        let unchanged = reduce_auth(&gated_off, Some(&old), &inner, &old.device, &[]).unwrap();
+        assert_eq!(unchanged.database_password, old.database_password);
+        assert_eq!(unchanged.auth_snapshot.update_mask, 0);
+        assert_eq!(unchanged.auth_snapshot.response, gated_off);
+        assert_eq!(unchanged.auth_snapshot.ax_auth, b"synthetic-ax");
+        let accepted = reduce_auth(
+            &response(1, Some(&[22; 32])),
+            Some(&old),
+            &inner,
+            &old.device,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(accepted.database_password, vec![22; 32]);
+        let absent = reduce_auth(
+            &response(1, None),
+            Some(&accepted),
+            &inner,
+            &old.device,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(absent.database_password, accepted.database_password);
+        let empty = reduce_auth(
+            &response(1, Some(&[])),
+            Some(&absent),
+            &inner,
+            &old.device,
+            &[],
+        )
+        .unwrap();
+        assert!(empty.database_password.is_empty());
+        assert!(reduce_auth(
+            &response(1, Some(&[22; 31])),
+            Some(&old),
+            &inner,
+            &old.device,
+            &[]
+        )
+        .is_err());
+        let mut legacy = serde_json::to_value(&old).unwrap();
+        legacy.as_object_mut().unwrap().remove("database_password");
+        legacy.as_object_mut().unwrap().remove("auth_snapshot");
+        let restored: AccountState = serde_json::from_value(legacy).unwrap();
+        restored.validate().unwrap();
+        assert!(restored.database_password.is_empty());
     }
     #[test]
     fn refresh_identity_and_clear_tokens() {

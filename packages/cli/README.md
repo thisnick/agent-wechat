@@ -63,6 +63,10 @@ pnpm native:build
 pnpm native:test
 pnpm native:release:build
 node scripts/native-package-smoke.mjs artifacts/native
+# Substitute the exact artifact version emitted by the build:
+python3 scripts/native-cli-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 scripts/native-cli-fixture-test.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 scripts/native-export-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
 ```
 
 Source-workspace postinstall defers release installation; run the Rust binary from its target directory or use an explicit trusted executable override. The local release builder tests the Rust workspace, verifies executable identity and creates versioned assets; it does not publish, deploy or log an account in. The package smoke test packs/unpacks an actual npm tarball and installs from local artifacts into a temporary directory.

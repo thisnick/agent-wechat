@@ -101,7 +101,7 @@ fn relative(root: &Path, p: &Path) -> Result<String> {
         .map(|v| v.replace('\\', "/"))
         .ok_or(ProfileError::UnsupportedFile)
 }
-fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize, max: usize) -> Result<()> {
+pub(crate) fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize, max: usize) -> Result<()> {
     if depth > 16 {
         return Err(ProfileError::ResourceLimit);
     }

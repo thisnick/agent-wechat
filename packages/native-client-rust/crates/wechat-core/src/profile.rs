@@ -158,10 +158,7 @@ impl Core {
         cursor: Option<String>,
     ) -> Result<Value> {
         let reader = self.profile_reader(account)?;
-        let own = self
-            .account_state(account)
-            .ok()
-            .map(|s| s.own_username.clone());
+        let own = self.profile_username(account)?;
         let page = reader.messages(&MessageQuery {
             chat: Some(thread.into()),
             own_username: own.clone(),
@@ -180,10 +177,7 @@ impl Core {
     }
     pub fn message(&self, account: &str, id: &str) -> Result<Value> {
         let reader = self.profile_reader(account)?;
-        let own = self
-            .account_state(account)
-            .ok()
-            .map(|s| s.own_username.clone());
+        let own = self.profile_username(account)?;
         normalized_message(
             account,
             reader.message(&source_message_id(id)?, own.as_deref())?,
@@ -206,7 +200,7 @@ impl Core {
     }
 }
 
-fn normalized_message(
+pub(crate) fn normalized_message(
     account: &str,
     msg: wechat_profile::Message,
     own: Option<&str>,

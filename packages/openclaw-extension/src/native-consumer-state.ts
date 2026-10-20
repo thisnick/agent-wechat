@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { NativeMessage } from "@agent-wechat/shared";
+export type NativeDispatchManifest = Readonly<{
+  schemaVersion: 1; runId: string; accountId: string; messageIds: readonly string[]; messageSid: string;
+  threadId: string; sessionKey: string; agentId: string; channelAccountId: string; inputBodySha256: string;
+}>;
 export type NativeCustodyItem = {
   message: NativeMessage;
   origin: string;
@@ -10,6 +14,7 @@ export type NativeCustodyItem = {
   manifestHash?: string;
   readPending?: boolean;
   handoffUnconfirmed?: boolean;
+  dispatchManifest?: NativeDispatchManifest;
 };
 type State = { schemaVersion: 1; serverId: string; accountId: string; cursor: string; items: Record<string, NativeCustodyItem> };
 export class NativeConsumerState {
@@ -77,15 +82,16 @@ export class NativeConsumerState {
     const exact = [...new Set(messageIds)];
     const items = exact.map(id => { const item = this.value.items[id]; if (!item || item.state !== "dispatching") throw new Error("Prepared input manifest is not in dispatch custody"); return item; });
     if (new Set(items.map(item => item.message.threadId)).size !== 1) throw new Error("Prepared input manifest crosses threads");
-    const manifestHash = createHash("sha256").update(JSON.stringify({ accountId: this.value.accountId, messageIds: exact })).digest("hex");
+    const manifestHash = createHash("sha256").update(JSON.stringify({ accountId: this.value.accountId, messageIds: exact,
+      dispatchManifests: items.map(item => item.dispatchManifest ?? null) })).digest("hex");
     return (...args: any[]) => {
-      const runId = args[0];
+      const runId = typeof args[0] === "string" ? args[0] : args[0]?.runId;
       if (typeof runId !== "string" || !runId || runId.length > 256) throw new Error("Prepared run callback has no valid runId");
       this.mutate(() => {
       for (const id of exact) {
         const item = this.value.items[id];
         if (item.runId && item.runId !== runId) throw new Error("Native prepared manifest was assigned to another run; operator review required");
-        Object.assign(item, { state: "handed_off", runId, manifestHash, readPending: readPolicy === "on_model_dispatch" });
+        Object.assign(item, { state: "handed_off", runId, manifestHash, readPending: readPolicy === "on_model_dispatch", handoffUnconfirmed: false });
       }
       });
       return previous?.(...args);

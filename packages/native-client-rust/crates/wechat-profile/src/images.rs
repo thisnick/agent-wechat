@@ -8,7 +8,7 @@ use quick_xml::{events::Event, Reader};
 use rusqlite::OptionalExtension;
 use sha2::Sha256;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Cursor, Read},
     path::{Component, Path},
@@ -53,7 +53,7 @@ fn stem(s: &str) -> Option<String> {
         None
     }
 }
-fn image_md5(xml: &str) -> Result<Option<String>> {
+pub(crate) fn image_md5(xml: &str) -> Result<Option<String>> {
     if xml.len() > 16 * 1024 * 1024 {
         return Err(ProfileError::ResourceLimit);
     }
@@ -92,15 +92,94 @@ fn image_md5(xml: &str) -> Result<Option<String>> {
     }
     Ok(value)
 }
+struct ImageResources {
+    base: String,
+    peer_directory: String,
+    details: BTreeMap<String, u64>,
+}
 impl ProfileReader {
-    /// Resolve one exact local message through its advertised original hash and
-    /// hardlink namespace. Ambiguous groups are rejected. `_h` is never assumed to
-    /// mean Original. Standard/Thumbnail requests remain unsupported until their
-    /// exact variant-role binding is verified for this adapter.
-    pub fn cached_image(&self, id: &SourceMessageId, quality: ImageQuality) -> Result<CachedImage> {
-        if matches!(quality, ImageQuality::Standard | ImageQuality::Thumbnail) {
-            return Err(ProfileError::ImageQualityUnavailable);
+    fn image_resources(
+        &self,
+        id: &SourceMessageId,
+        local: i64,
+        row: &crate::RawFields,
+    ) -> Result<Option<ImageResources>> {
+        let databases = self
+            .snapshot
+            .inventory
+            .iter()
+            .filter(|d| d.relative_path.rsplit('/').next() == Some("message_resource.db"))
+            .collect::<Vec<_>>();
+        if databases.is_empty() {
+            return Ok(None);
         }
+        if databases.len() != 1 {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        let message = self.message(id, None)?;
+        let peer = message.peer.ok_or(ProfileError::InvalidMetadata)?;
+        let time = crate::reader::num(row, "create_time").ok_or(ProfileError::InvalidMetadata)?;
+        let server = crate::reader::num(row, "server_id").ok_or(ProfileError::InvalidMetadata)?;
+        let c = self.snapshot.open(&databases[0].relative_path)?;
+        let rows=c.prepare("SELECT r.message_id,r.packed_info FROM MessageResourceInfo r JOIN ChatName2Id n ON n.rowid=r.chat_id WHERE n.user_name=?1 AND r.message_local_id=?2 AND r.message_create_time=?3 AND r.message_svr_id=?4 LIMIT 2")?.query_map(rusqlite::params![peer,local,time,server],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if rows.len() != 1 {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        let (resource, packed) = &rows[0];
+        let mut bases = BTreeSet::new();
+        for (field, wire, inner) in crate::reader::protobuf_fields(packed)? {
+            if field == 2 && wire == 2 {
+                for (f, w, b) in crate::reader::protobuf_fields(inner)? {
+                    if f == 1 && w == 2 {
+                        let base =
+                            std::str::from_utf8(b).map_err(|_| ProfileError::InvalidMetadata)?;
+                        if !crate::media::digest_hex(base, 32) {
+                            return Err(ProfileError::InvalidMetadata);
+                        }
+                        bases.insert(base.to_ascii_lowercase());
+                    }
+                }
+            }
+        }
+        if bases.len() != 1 {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        let mut details = BTreeMap::new();
+        for row in c
+            .prepare("SELECT type,size,status FROM MessageResourceDetail WHERE message_id=?1")?
+            .query_map([resource], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+        {
+            let (kind, size, status) = row?;
+            let suffix = match kind {
+                65537 => "_h",
+                131073 => "",
+                262145 => "_t",
+                _ => continue,
+            };
+            if status == 1 && size > 0 && details.insert(suffix.to_owned(), size as u64).is_some() {
+                return Err(ProfileError::InvalidMetadata);
+            }
+        }
+        Ok(Some(ImageResources {
+            base: bases.pop_first().ok_or(ProfileError::InvalidMetadata)?,
+            peer_directory: format!("{:x}", Md5::digest(peer.as_bytes())),
+            details,
+        }))
+    }
+    /// Resolve one exact local message through its advertised original hash and
+    /// hardlink namespace. Ambiguous groups are rejected. Standard/Thumbnail
+    /// require the exact resource basename/type/status/encoded-size join. A suffix
+    /// alone is not a quality proof; Original also requires the XML content MD5.
+    pub fn cached_image(&self, id: &SourceMessageId, quality: ImageQuality) -> Result<CachedImage> {
         if !crate::schema::message_table(&id.table) {
             return Err(ProfileError::InvalidQuery);
         }
@@ -134,6 +213,11 @@ impl ProfileReader {
                 .ok_or(ProfileError::InvalidMetadata)?,
         )?
         .ok_or(ProfileError::NotCached)?;
+        let resource = self.image_resources(id, local, &row)?;
+        if matches!(quality, ImageQuality::Standard | ImageQuality::Thumbnail) && resource.is_none()
+        {
+            return Err(ProfileError::ImageQualityUnavailable);
+        }
         let hard = self
             .snapshot
             .inventory
@@ -144,9 +228,24 @@ impl ProfileReader {
             return Err(ProfileError::NotCached);
         }
         let c = self.snapshot.open(&hard[0].relative_path)?;
-        let mut s=c.prepare("SELECT a.username,b.username,h.file_name FROM image_hardlink_info_v4 h JOIN dir2id a ON a.rowid=h.dir1 JOIN dir2id b ON b.rowid=h.dir2 WHERE lower(h.md5)=?1 LIMIT 201")?;
+        let query = if resource.is_some() {
+            "SELECT a.username,b.username,h.file_name FROM image_hardlink_info_v4 h JOIN dir2id a ON a.rowid=h.dir1 JOIN dir2id b ON b.rowid=h.dir2 WHERE a.username=?1 AND h.file_name IN(?2,?3,?4) LIMIT 201"
+        } else {
+            "SELECT a.username,b.username,h.file_name FROM image_hardlink_info_v4 h JOIN dir2id a ON a.rowid=h.dir1 JOIN dir2id b ON b.rowid=h.dir2 WHERE lower(h.md5)=?1 LIMIT 201"
+        };
+        let mut s = c.prepare(query)?;
+        let args = if let Some(r) = &resource {
+            vec![
+                r.peer_directory.clone(),
+                format!("{}.dat", r.base),
+                format!("{}_h.dat", r.base),
+                format!("{}_t.dat", r.base),
+            ]
+        } else {
+            vec![hash.clone()]
+        };
         let rows = s
-            .query_map([&hash], |r| {
+            .query_map(rusqlite::params_from_iter(args), |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -225,7 +324,31 @@ impl ProfileReader {
             let (plain, _) = self.decode_dat(&data)?;
             let (mime, width, height) = validate_image(&plain)?;
             let original = format!("{:x}", Md5::digest(&plain)) == hash;
-            if quality == ImageQuality::Original && !original {
+            let role = if resource.as_ref().is_some_and(|r| {
+                r.base == base && r.details.get(suffix).copied() == Some(data.len() as u64)
+            }) {
+                match suffix {
+                    "" => VerifiedImageQuality::Standard,
+                    "_t" => VerifiedImageQuality::Thumbnail,
+                    _ => VerifiedImageQuality::Unknown,
+                }
+            } else {
+                VerifiedImageQuality::Unknown
+            };
+            // Equal bytes can legitimately occupy multiple advertised roles. Honor
+            // an explicit resource-bound role before comparing original content.
+            let verified = match quality {
+                ImageQuality::Standard if role == VerifiedImageQuality::Standard => role,
+                ImageQuality::Thumbnail if role == VerifiedImageQuality::Thumbnail => role,
+                _ if original => VerifiedImageQuality::Original,
+                _ => role,
+            };
+            if match quality {
+                ImageQuality::Original => !original,
+                ImageQuality::Standard => verified != VerifiedImageQuality::Standard,
+                ImageQuality::Thumbnail => verified != VerifiedImageQuality::Thumbnail,
+                ImageQuality::Best => false,
+            } {
                 continue;
             }
             variants.push(CachedImage {
@@ -236,11 +359,7 @@ impl ProfileReader {
                     source_database: id.database.clone(),
                     source_table: id.table.clone(),
                 },
-                quality: if original {
-                    VerifiedImageQuality::Original
-                } else {
-                    VerifiedImageQuality::Unknown
-                },
+                quality: verified,
                 width,
                 height,
                 cache_variant: if suffix.is_empty() {

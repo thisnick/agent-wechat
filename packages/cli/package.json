@@ -11,7 +11,8 @@
     "dist",
     "scripts",
     "native-release.json",
-    "LEGACY.md"
+    "LEGACY.md",
+    "THIRD_PARTY_NOTICES.txt"
   ],
   "scripts": {
     "build": "node build.js",

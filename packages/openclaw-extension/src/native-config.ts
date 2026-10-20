@@ -8,6 +8,7 @@ export const nativeConfigSchema = {
     serverConfig: { type: "string" }, dataDir: { type: "string" }, listen: { type: "string" },
     tokenFile: { type: "string" }, consumerStateDir: { type: "string" },
     readPolicy: { type: "string", enum: ["never", "on_model_dispatch"] },
+    gatewayFacade: { type: "object", additionalProperties: false, required: ["enabled"], properties: { enabled: { type: "boolean" }, prefix: { type: "string" } } },
   },
 };
 export const nativePluginConfigSchema = {

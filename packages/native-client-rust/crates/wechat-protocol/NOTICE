@@ -13,3 +13,12 @@ account credentials. Reference artifact SHA-256:
 Other test vectors contain synthetic inputs, RFC 5869 test-case 1 data, or
 independently generated Python cryptography/zlib ciphertext. No private capture,
 account identity, token, device state, message, or runtime executable is shipped.
+
+The portable SILK SDK sources under vendor/silk are from kn007/silk-v3-decoder,
+pinned commit 507be6bca8ce1fb977a061481f1d79e8c610e309:
+https://github.com/kn007/silk-v3-decoder
+
+The wrapper project is MIT licensed; the SILK SDK sources retain their Skype
+BSD-style notices. Full license text and an allowlist of SHA-256 source hashes
+are in vendor/silk/LICENSE-MIT, LICENSE-SDK and SOURCE.json. Only portable C and
+headers are included. No codec binary from the official client is loaded.

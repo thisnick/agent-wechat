@@ -1,21 +1,23 @@
 # Agent guide for agent-wechat
 
-This repository provides a programmable interface to a WeChat Linux client running in a Docker container. The Rust server controls the client UI and reads its local data; host clients use its authenticated HTTP API. Check the implementation before describing a behavior as supported. In particular, a registered route is not proof that it delivers useful events.
+This repository provides a programmable interface to WeChat. The existing container backend controls the official Linux client's UI and reads its local data. The experimental native backend implements protocol communication and official-format local storage independently. Check the implementation before describing a behavior as supported. In particular, a registered route is not proof that it delivers useful events.
 
 ## Repository map
 
 | Path | Responsibility |
 | --- | --- |
 | `packages/agent-server-rust/` | Axum server, UI plans, sessions, local data readers, media jobs |
+| `packages/native-client-rust/` | Standalone native protocol, profile, sidecar store, HTTP daemon and Rust `wx` CLI |
 | `packages/shared/` | TypeScript client and types generated from Rust |
-| `packages/cli/` | `wx` command-line client and container management |
+| `packages/cli/` | Native `wx` launcher, verified executable installer and legacy container CLI |
 | `packages/openclaw-extension/` | OpenClaw channel, inbound polling and media, outbound messages |
 | `packages/wechaty-puppet/` | Wechaty adapter |
 | `packages/wechaty-gateway/` | Wechaty gateway |
 | `docker/` | Image, entrypoint, and container-side tools |
+| `deploy/native/` | Standalone native image and service examples |
 | `docs/` | Public documentation site |
 
-The active HTTP routes are assembled in `packages/agent-server-rust/src/router/mod.rs`. Request/response types live in `packages/agent-server-rust/src/ia/types.rs` and `packages/shared/src/`; keep them in sync with `pnpm generate-types` when changing Rust-exported types. The README is a concise user guide, not an exhaustive API specification.
+Container-backend HTTP routes are assembled in `packages/agent-server-rust/src/router/mod.rs`. Request/response types live in `packages/agent-server-rust/src/ia/types.rs` and `packages/shared/src/`; keep them in sync with `pnpm generate-types` when changing Rust-exported types. Native routes and contracts live in `packages/native-client-rust/crates/wechat-api/`; regenerate their SDK types with `bash scripts/native-generate-types.sh`. The README is a concise user guide, not an exhaustive API specification.
 
 ## Working rules
 
@@ -27,6 +29,10 @@ The active HTTP routes are assembled in `packages/agent-server-rust/src/router/m
 - Add a changeset for user-facing behavior or package changes. Documentation-only edits do not need one.
 
 ## Runtime boundaries
+
+### Standalone native backend
+
+Read `packages/native-client-rust/FEATURES.md` before claiming native compatibility. Native tests and live server acceptance do not establish official-client rendering or recipient playback. Keep account/profile identity admission, per-account mutation guards, accepted credential generations, logout fences and durable projection journals intact. Retain unknown sync commands rather than advancing the official projected cursor past them. Local repair uses already owned bytes and receipts; it must never resend or start a transfer. Profile handoff requires exclusive ownership and complete projection checks, or an explicit incomplete-copy request with reported gaps. Preserve unknown official files and never delete FTS databases as a general repair.
 
 ### UI plans and concurrency
 
@@ -65,6 +71,8 @@ pnpm typecheck
 pnpm --filter @agent-wechat/agent-wechat test
 pnpm --filter @agent-wechat/wechaty-puppet test
 cargo test --manifest-path packages/agent-server-rust/Cargo.toml
+cargo test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml
+bash scripts/native-generate-types.sh --check
 ```
 
 Use `pnpm generate-types` after changing exported Rust types. Build images with `pnpm build:image:amd64` or `pnpm build:image:arm64`; `pnpm dev:deploy` updates a running development container, so identify the target before using it. For end-to-end changes, test the built image and CLI against an isolated container in addition to unit tests. The public CLI entry point is `wx`; `pnpm cli` runs the local build.

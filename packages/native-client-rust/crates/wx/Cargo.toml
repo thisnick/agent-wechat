@@ -21,9 +21,12 @@ wechat-api = { path = "../wechat-api" }
 
 wechat-core = { path = "../wechat-core" }
 wechat-profile = { path = "../wechat-profile" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 futures-util = "0.3"
 base64.workspace = true
 uuid.workspace = true
 libc.workspace = true
 tempfile.workspace = true
+sha2.workspace = true
+toml = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }

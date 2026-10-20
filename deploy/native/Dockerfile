@@ -10,7 +10,7 @@ RUN cargo test --workspace --locked \
 
 FROM --platform=linux/amd64 debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && apt-get install -y --no-install-recommends ca-certificates tini ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 agent-wechat \
     && useradd --uid 10001 --gid 10001 --home-dir /var/lib/agent-wechat --no-create-home --shell /usr/sbin/nologin agent-wechat \
@@ -20,6 +20,8 @@ RUN apt-get update \
 COPY --from=builder /build/target/x86_64-unknown-linux-gnu/release/wx /usr/local/bin/wx
 COPY --from=builder /build/crates/wechat-protocol/NOTICE /usr/share/doc/agent-wechat-native/NOTICE
 COPY --from=builder /build/crates/wechat-protocol/fixtures/LICENSE-CITIZENLAB /usr/share/doc/agent-wechat-native/LICENSE-CITIZENLAB
+COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-MIT /usr/share/doc/agent-wechat-native/LICENSE-SILK-MIT
+COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-SDK /usr/share/doc/agent-wechat-native/LICENSE-SILK-SDK
 USER 10001:10001
 ENV HOME=/var/lib/agent-wechat
 ENV TMPDIR=/var/cache/agent-wechat

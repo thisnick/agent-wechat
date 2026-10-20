@@ -19,6 +19,7 @@ export type WeChatNativeConfig = {
   tokenFile: string;
   consumerStateDir: string;
   readPolicy?: "never" | "on_model_dispatch";
+  gatewayFacade?: { enabled: boolean; prefix?: string };
 };
 
 export type WeChatConfig = {

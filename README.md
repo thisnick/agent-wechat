@@ -33,7 +33,7 @@ wx --account test threads
 wx --account test messages list filehelper
 ```
 
-An empty account slot can authenticate and stage native sync. Reading and projecting official history currently requires an initialized compatible official profile and its authorized keys; creating the full official database set from scratch remains a compatibility gate. Group/media projection is also incomplete. The commands above are not a claim of a complete drop-in replacement.
+An approved native login now creates a fresh official-format profile with seven encrypted databases and saved-login storage; an existing official profile is optional. Native history, text/media sends, contact/group lookup, rosters, avatars and downloads use that profile. Unsupported sync controls remain staged. Supported image/voice/file/video caches and resource joins pass local repair checks; FTS/index maintenance and stock-client takeover remain under validation. See the [capability checklist](packages/native-client-rust/FEATURES.md) for the tested scope.
 
 Server configuration defaults to `~/.config/agent-wechat/server/config.toml`; data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. Existing stopped profiles can be attached directly or copied through import/export. Daemon state stays in sidecars.
 

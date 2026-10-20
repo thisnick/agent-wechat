@@ -50,6 +50,7 @@ struct FileConfig {
     token_file: Option<PathBuf>,
     listen: Option<SocketAddr>,
     storage_key_file: Option<PathBuf>,
+    profile_format_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +63,7 @@ pub struct ServerConfig {
     pub token_file: PathBuf,
     pub token_explicit: bool,
     pub storage_key_file: Option<PathBuf>,
+    pub profile_format_key_file: Option<PathBuf>,
     pub listen: SocketAddr,
 }
 
@@ -144,6 +146,11 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         .as_ref()
         .map(|p| absolute(p, base))
         .transpose()?;
+    let profile_format_key_file = file
+        .profile_format_key_file
+        .as_ref()
+        .map(|p| absolute(p, base))
+        .transpose()?;
     let listen = flags
         .listen
         .or(file.listen)
@@ -159,6 +166,7 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         token_file,
         token_explicit,
         storage_key_file,
+        profile_format_key_file,
         listen,
     })
 }

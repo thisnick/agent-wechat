@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl } from '../src/native-client.ts';
+import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES } from '../src/native-client.ts';
 const options = { baseUrl: 'http://127.0.0.1:6174', token: 'fixture-secret' };
 test('native transport rejects plaintext remote URLs and embedded credentials', () => {
   for (const url of ['http://example.net', 'https://user:secret@example.net', 'https://example.net?token=x', 'file:///tmp/store']) assert.throws(() => validateNativeBaseUrl(url));
@@ -72,4 +72,46 @@ test('native HTTPS refuses Node global certificate-verification bypass', () => {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try { assert.throws(() => new NativeWeChatClient({ ...options, baseUrl: 'https://daemon.example.net' }), /verification disabled/); }
   finally { if (previous === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED; else process.env.NODE_TLS_REJECT_UNAUTHORIZED = previous; }
+});
+test('logout and explicit local forgetting preserve distinct durable request identities', async () => {
+  const requests=[];const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{requests.push({url:String(url),init});return Response.json({id:'operation_fixture',state:'queued'});}});
+  await client.logout('a','logout-key');await client.forgetCredentials('a','forget-key',true);
+  assert.match(requests[0].url,/\/logout$/);assert.equal(requests[0].init.headers.get('Idempotency-Key'),'logout-key');
+  assert.match(requests[1].url,/\/forget-credentials$/);assert.deepEqual(JSON.parse(requests[1].init.body),{confirm:true});
+  assert.throws(()=>client.forgetCredentials('a','forget-key',false));
+});
+test('media source upload uses multipart bytes without a caller path or JSON content type', async () => {
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{assert.match(String(url),/\/uploads$/);assert.equal(init.headers.get('content-type'),null);assert.ok(init.body instanceof FormData);assert.equal(init.body.get('file').name,'fixture.bin');assert.deepEqual(new Uint8Array(await init.body.get('file').arrayBuffer()),new Uint8Array([1,2,3]));return Response.json({id:'upload_fixture'});}});
+  assert.equal((await client.upload('a',new Uint8Array([1,2,3]),'fixture.bin')).id,'upload_fixture');
+  await assert.rejects(client.upload('a',new Uint8Array([1]),'../fixture.bin'));
+});
+test('cached media range reads preserve bytes/status and reject oversized bodies', async () => {
+  const client=new NativeWeChatClient({...options,fetch:async(_url,init)=>{assert.equal(init.headers.get('Range'),'bytes=1-2');return new Response(new Uint8Array([2,3]),{status:206,headers:{'content-type':'application/octet-stream','content-length':'2','content-range':'bytes 1-2/3','etag':'fixture'}});}});
+  const content=await client.mediaContent('a','asset_fixture',{range:'bytes=1-2',maxBytes:2});assert.equal(content.status,206);assert.equal(content.contentRange,'bytes 1-2/3');assert.deepEqual(content.bytes,new Uint8Array([2,3]));
+  await assert.rejects(client.mediaContent('a','asset_fixture',{range:'bytes=1-2',maxBytes:1}),/bound/);
+});
+
+test('native resource pagination retains tombstones and binds continuation query without losing IDs', async () => {
+  const tombstone={id:'deleted-message',deleted:true,version:'2'};let requested;
+  const client=new NativeWeChatClient({...options,fetch:async url=>{requested=new URL(url);return Response.json({items:[tombstone],nextCursor:null,coverage:{},sourceGeneration:'g'});}});
+  const page=await client.messages('a','t',{cursor:'cursor+/=',limit:17});assert.ok(isNativeTombstone(page.items[0]));assert.equal(requested.searchParams.get('cursor'),'cursor+/=');assert.equal(requested.searchParams.get('limit'),'17');assert.equal(page.items[0].id,'deleted-message');
+  await assert.rejects(async()=>client.contacts('a',{limit:201}));assert.equal(isNativeTombstone({id:'x',deleted:false,version:'1'}),false);
+});
+test('explicit human read-through stays distinct from exact model input IDs', async () => {
+ const client=new NativeWeChatClient({...options,fetch:async(_url,init)=>{assert.deepEqual(JSON.parse(init.body),{throughMessageId:'m_boundary',expectedVersion:'7'});return Response.json({version:'8'});}});await client.markReadThrough('a','t','m_boundary','7');
+});
+test('media upload native limit is generated from the daemon contract and refuses before transport', async () => {
+ let calls=0;const client=new NativeWeChatClient({...options,fetch:async()=>{calls++;throw Error('unexpected transport');}});assert.equal(NATIVE_MAX_SOURCE_BYTES,25*1024*1024-17);await assert.rejects(client.upload('a',new Uint8Array(NATIVE_MAX_SOURCE_BYTES+1),'fixture.bin'));assert.equal(calls,0);
+});
+
+test('local media writeback repair is bounded and does not submit a send or transfer', async () => {
+  let calls = 0;
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    calls++;
+    assert.equal(String(url), 'http://127.0.0.1:6174/v1/accounts/a/media-writeback/repair');
+    assert.equal(init.method, 'POST'); assert.deepEqual(JSON.parse(init.body), { limit: 25 });
+    return Response.json({ id: 'repair', accountId: 'a', kind: 'media-writeback', state: 'queued', result: {} });
+  } });
+  for (const limit of [0,101,1.5,NaN]) assert.throws(() => client.repairMediaWriteback('a', limit), /limit/);
+  assert.equal(calls,0); assert.equal((await client.repairMediaWriteback('a')).id,'repair'); assert.equal(calls,1);
 });

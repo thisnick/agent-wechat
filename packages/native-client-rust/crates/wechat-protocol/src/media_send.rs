@@ -99,6 +99,103 @@ pub fn file_xml(sender: &str, upload: &UploadedMedia) -> Result<String> {
         tag("fromusername", sender)
     ))
 }
+/// Reconstruct local metadata from accepted uploaded tuples. These are local
+/// cache records, not a claim that a server returned this exact XML spelling.
+fn local_element(name: &str, attributes: Vec<(&str, String)>) -> String {
+    let attributes = attributes
+        .into_iter()
+        .map(|(key, value)| format!(" {key}=\"{}\"", escape(&value)))
+        .collect::<String>();
+    format!("<msg><{name}{attributes}/></msg>")
+}
+pub fn local_image_xml(image: &UploadedImage) -> Result<String> {
+    descriptor(&image.original, MediaQuality::Original)?;
+    descriptor(&image.standard, MediaQuality::Standard)?;
+    descriptor(&image.thumbnail, MediaQuality::Thumbnail)?;
+    ensure!(
+        image.original.descriptor.aes_key == image.standard.descriptor.aes_key,
+        "Image variants require one main key"
+    );
+    Ok(local_element(
+        "img",
+        vec![
+            ("aeskey", hex::encode(&image.original.descriptor.aes_key)),
+            ("encryver", "1".into()),
+            ("cdnbigimgurl", image.original.descriptor.file_id.clone()),
+            ("cdnmidimgurl", image.standard.descriptor.file_id.clone()),
+            ("cdnthumburl", image.thumbnail.descriptor.file_id.clone()),
+            (
+                "cdnthumbaeskey",
+                hex::encode(&image.thumbnail.descriptor.aes_key),
+            ),
+            ("md5", hex32(&image.original.md5)?),
+            ("hdlength", image.original.plaintext_bytes.to_string()),
+            ("length", image.standard.plaintext_bytes.to_string()),
+            (
+                "cdnthumblength",
+                image.thumbnail.plaintext_bytes.to_string(),
+            ),
+            (
+                "cdnthumbwidth",
+                image.thumbnail.width.unwrap_or(0).to_string(),
+            ),
+            (
+                "cdnthumbheight",
+                image.thumbnail.height.unwrap_or(0).to_string(),
+            ),
+        ],
+    ))
+}
+pub fn local_video_xml(video: &UploadedVideo, seconds: u32) -> Result<String> {
+    descriptor(&video.video, MediaQuality::Video)?;
+    descriptor(&video.thumbnail, MediaQuality::Thumbnail)?;
+    ensure!(seconds > 0, "Invalid video duration");
+    Ok(local_element(
+        "videomsg",
+        vec![
+            ("aeskey", hex::encode(&video.video.descriptor.aes_key)),
+            ("cdnvideourl", video.video.descriptor.file_id.clone()),
+            ("length", video.video.plaintext_bytes.to_string()),
+            ("md5", hex32(&video.video.md5)?),
+            ("playlength", seconds.to_string()),
+            ("cdnthumburl", video.thumbnail.descriptor.file_id.clone()),
+            (
+                "cdnthumbaeskey",
+                hex::encode(&video.thumbnail.descriptor.aes_key),
+            ),
+            (
+                "cdnthumblength",
+                video.thumbnail.plaintext_bytes.to_string(),
+            ),
+            (
+                "cdnthumbwidth",
+                video.thumbnail.width.unwrap_or(0).to_string(),
+            ),
+            (
+                "cdnthumbheight",
+                video.thumbnail.height.unwrap_or(0).to_string(),
+            ),
+        ],
+    ))
+}
+pub fn local_voice_xml(encoded_bytes: usize, duration_ms: u32) -> Result<String> {
+    ensure!(
+        encoded_bytes > 0 && encoded_bytes <= 48000 && (1..=10000).contains(&duration_ms),
+        "Invalid short voice metadata"
+    );
+    Ok(local_element(
+        "voicemsg",
+        vec![
+            ("voiceformat", "4".into()),
+            ("length", encoded_bytes.to_string()),
+            ("voicelength", duration_ms.to_string()),
+            ("endflag", "1".into()),
+        ],
+    ))
+}
+pub fn local_file_xml(sender: &str, upload: &UploadedMedia) -> Result<String> {
+    Ok(format!("<msg>{}</msg>", file_xml(sender, upload)?))
+}
 pub fn file_send_request(
     state: &AccountState,
     destination: &str,
@@ -300,6 +397,7 @@ pub enum SendStatus {
     NeedsReview,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaSendResult {
     pub status: SendStatus,
     pub service_code: i32,
@@ -471,6 +569,8 @@ mod tests {
             response_key: vec![],
             auto_auth_key: vec![],
             key_info: vec![],
+            database_password: vec![],
+            auth_snapshot: Default::default(),
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
         };

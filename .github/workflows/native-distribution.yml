@@ -45,9 +45,17 @@ jobs:
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - run: pnpm --filter @agent-wechat/agent-wechat typecheck
       - run: pnpm --filter @agent-wechat/agent-wechat test
+      - run: node scripts/native-gateway-smoke.mjs
+      - run: node scripts/native-model-smoke.mjs
       - run: node --test scripts/pending-release-packages.test.mjs scripts/native-release-preflight.test.mjs
       - run: bash scripts/native-build-release.sh
       - run: node scripts/native-package-smoke.mjs artifacts/native
+      - name: Validate actual CLI lifecycle and account selection without a native login
+        run: |
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          python3 scripts/native-cli-smoke.py "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
+          python3 scripts/native-cli-fixture-test.py "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
+          python3 scripts/native-export-smoke.py "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
       - name: Validate real managed/external OpenClaw hosting without account credentials
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")

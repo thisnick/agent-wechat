@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
-import { NativeApiError, type NativeEvent, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
+import { isNativeTombstone, NativeApiError, type NativeEvent, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { normalizeWeChatCommandBody, resolveWeChatIngress, resolveWeChatPolicyContext } from "./access-control.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { NativeConsumerState } from "./native-consumer-state.ts";
+import { nativeDispatchManifest, trackNativePreparedText } from "./native-prepared-boundary.ts";
 import { submitNativeText } from "./native-send.ts";
+import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
 import { getWeChatRuntime } from "./runtime.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
 import type { WeChatMonitorOptions } from "./monitor.js";
@@ -20,7 +22,7 @@ export async function projectNativeRead(client: NativeWeChatClient, accountId: s
       const seen = new Set<string>();
       for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
         const page = await client.threads(accountId, cursor);
-        thread = page.items.find(value => value.id === item.message.threadId);
+        thread = page.items.find((value): value is import("@agent-wechat/shared").NativeThread => !isNativeTombstone(value) && value.id === item.message.threadId);
         if (thread || !page.nextCursor) break;
         if (seen.has(page.nextCursor)) throw new Error("Native thread pagination did not advance");
         seen.add(page.nextCursor); cursor = page.nextCursor;
@@ -40,18 +42,19 @@ export async function dispatchNativeMessage(params: {
   client: NativeWeChatClient; state: NativeConsumerState; account: ResolvedWeChatAccount;
   message: NativeMessage; cfg: any; core: any;
   createPipeline?: typeof createChannelMessageReplyPipeline;
-}): Promise<"ignored" | "completed" | "needs_review"> {
+  prepareAttachment?: typeof prepareNativeAttachment;
+}): Promise<"ignored" | "completed" | "needs_review" | "pending"> {
   const { client, state, account, message, cfg, core } = params;
   const custody = state.get(message.id);
   if (!custody || custody.state !== "received") return "needs_review";
-  if (custody.origin !== "live" || message.direction !== "incoming" || message.type !== 1 || !message.body || !message.senderId) {
+  if (custody.origin !== "live" || message.direction !== "incoming" || ![1,3,34,43,47,49].includes(message.type) || (message.type === 1 && !message.body) || !message.senderId) {
     state.update(message.id, { state: "ignored" }); return "ignored";
   }
   const isGroup = message.threadId.endsWith("@chatroom");
   const wasMentioned = nativeWasMentioned(message);
   const policy = resolveWeChatPolicyContext({ account, cfg, chatId: message.threadId });
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({ cfg, surface: "agent-wechat" });
-  const commandBody = normalizeWeChatCommandBody(message.body, { isGroup, wasMentioned });
+  const commandBody = normalizeWeChatCommandBody(message.type === 1 ? message.body ?? "" : "", { isGroup, wasMentioned });
   const ingress = await resolveWeChatIngress({
     resolve: core.channel.inbound?.ingress?.resolveStable ?? resolveStableChannelMessageIngress,
     cfg, accountId: account.accountId, policy, isGroup, chatId: message.threadId, senderId: message.senderId,
@@ -63,39 +66,56 @@ export async function dispatchNativeMessage(params: {
   if (ingress.ingress.admission !== "dispatch" && !unauthorizedDirectCommand) {
     state.update(message.id, { state: "ignored" }); return "ignored";
   }
+  let preparedMedia;
+  try { preparedMedia = await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message, core }); }
+  catch { state.update(message.id, { state: "needs_review" }); return "needs_review"; }
+  if (preparedMedia.pending) return "pending";
+  let inputBody = preparedMedia.body;
+  if (preparedMedia.attachment?.kind === "audio" && preparedMedia.attachment.status === "ready" && preparedMedia.attachment.path) {
+    try { const transcript = await core.mediaUnderstanding.transcribeAudioFile({ filePath: preparedMedia.attachment.path, cfg, mime: preparedMedia.attachment.mime }); if (transcript.text?.trim()) inputBody += `\n[Voice transcript: ${transcript.text.trim().slice(0, 10000)}]`; }
+    catch { /* The verified audio path and explicit status remain available. */ }
+  }
   const route = core.channel.routing.resolveAgentRoute({ cfg, channel: "agent-wechat", accountId: account.accountId,
     peer: { kind: isGroup ? "group" : "direct", id: isGroup ? message.threadId : message.senderId } });
   const storePath = core.channel.session.resolveStorePath(cfg.session?.store, { agentId: route.agentId });
   const body = core.channel.reply.formatAgentEnvelope({ channel: "WeChat", from: message.senderId,
-    timestamp: message.createdAt ? Date.parse(message.createdAt) : undefined, envelope: core.channel.reply.resolveEnvelopeFormatOptions(cfg), body: message.body });
-  const ctx = core.channel.reply.finalizeInboundContext({ Body: body, BodyForAgent: message.body, RawBody: message.body,
+    timestamp: message.createdAt ? Date.parse(message.createdAt) : undefined, envelope: core.channel.reply.resolveEnvelopeFormatOptions(cfg), body: inputBody });
+  const ctx = core.channel.reply.finalizeInboundContext({ Body: body, BodyForAgent: inputBody, RawBody: inputBody,
     CommandBody: commandBody, From: isGroup ? `wechat:group:${message.threadId}` : `wechat:${message.senderId}`,
     To: `wechat:${message.threadId}`, SessionKey: route.sessionKey, AccountId: account.accountId,
     ChatType: isGroup ? "group" : "direct", SenderId: message.senderId, Provider: "agent-wechat", Surface: "agent-wechat",
     MessageSid: `wechat-native:${account.native!.accountId}:${message.id}`, WasMentioned: isGroup ? wasMentioned : undefined,
     CommandAuthorized: core.channel.commands.shouldComputeCommandAuthorized(commandBody, cfg) ? ingress.commandAccess.authorized : undefined,
-    OriginatingChannel: "agent-wechat", OriginatingTo: `wechat:${message.threadId}` });
+    OriginatingChannel: "agent-wechat", OriginatingTo: `wechat:${message.threadId}`,
+    ...(preparedMedia.mediaPath ? { MediaPath: preparedMedia.mediaPath, MediaUrl: preparedMedia.mediaPath, MediaType: preparedMedia.mediaMime } : {}),
+  });
   await core.channel.session.recordInboundSession({ storePath, sessionKey: route.sessionKey, ctx });
   const pipeline = (params.createPipeline ?? createChannelMessageReplyPipeline)({ cfg, agentId: route.agentId, channel: "agent-wechat", accountId: account.accountId });
   const { onModelSelected, ...prefixOptions } = pipeline;
   // Persist before making a model-side effect. A crash in this window is uncertain,
   // and reopening holds this item for review rather than duplicating a model turn.
-  state.update(message.id, { state: "dispatching" });
-  const callback = state.preparedCallback([message.id], account.native?.readPolicy ?? "on_model_dispatch");
+  const dispatchManifest = nativeDispatchManifest({ message, inputBody, sessionKey: route.sessionKey,
+    agentId: route.agentId, channelAccountId: account.accountId });
+  state.update(message.id, { state: "dispatching", dispatchManifest });
+  const callback = message.type === 1 || preparedMedia.attachment?.status === "ready"
+    ? state.preparedCallback([message.id], account.native?.readPolicy ?? "on_model_dispatch") : undefined;
+  if (message.type === 1 && callback) trackNativePreparedText(dispatchManifest, callback);
   let failed = false; let delivery = 0;
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg,
       dispatcherOptions: { ...prefixOptions,
         deliver: async (payload: any) => {
-          if (payload.mediaUrl || payload.mediaUrls?.length || payload.audioAsVoice) throw new Error("Native OpenClaw media delivery is not implemented; no legacy fallback is used");
-          if (!payload.text) return;
-          const key = createHash("sha256").update(`${account.native!.accountId}\0${message.id}\0${delivery++}`).digest("hex");
-          await submitNativeText(client, account.native!.accountId, message.threadId, payload.text, key);
+          const urls: string[] = payload.mediaUrls?.length ? payload.mediaUrls : payload.mediaUrl ? [payload.mediaUrl] : [];
+          if (urls.length > 16) throw new Error("Native reply media count exceeds its bound");
+          if (payload.audioAsVoice && !urls.length) throw new Error("Native voice reply requires an audio attachment");
+          for (const url of urls) { const key = createHash("sha256").update(`${account.native!.accountId}\0${message.id}\0${delivery++}`).digest("hex"); await sendNativeAttachment(client, account, message.threadId, url, payload.audioAsVoice === true, key); }
+          if (payload.text) { const key = createHash("sha256").update(`${account.native!.accountId}\0${message.id}\0${delivery++}`).digest("hex"); await submitNativeText(client, account.native!.accountId, message.threadId, payload.text, key); }
         }, onError: () => { failed = true; } },
       // This hook is intentionally separate from onModelSelected and old
       // onAgentRunStart (which can also report direct-tool execution). Released
-      // hosts lacking this prepared hook leave read state unchanged.
-      replyOptions: { onModelSelected, onPreparedAgentRunStart: callback },
+      // hosts without it need the separately verified text input/model-call
+      // bridge; unsupported or ambiguous handoffs leave read state unchanged.
+      replyOptions: { runId: dispatchManifest.runId, onModelSelected, onPreparedAgentRunStart: callback },
     });
     const prepared = Boolean(state.get(message.id)?.runId);
     state.update(message.id, { state: failed ? "needs_review" : "completed", handoffUnconfirmed: !prepared });

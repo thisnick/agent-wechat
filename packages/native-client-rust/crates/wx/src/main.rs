@@ -9,6 +9,15 @@ use std::{
     time::Duration,
 };
 use wechat_core::Core;
+mod client_actions;
+mod daemon;
+mod events;
+mod login;
+mod outcome;
+mod profile_cli;
+mod profile_export;
+mod settings;
+use outcome::{failure, set_exit};
 
 #[derive(Parser)]
 #[command(
@@ -27,10 +36,19 @@ struct Cli {
     token_file: Option<PathBuf>,
     #[arg(long, global = true)]
     listen: Option<SocketAddr>,
-    #[arg(long, global = true)]
+    #[arg(long = "config", alias = "client-config", global = true)]
     client_config: Option<PathBuf>,
-    #[arg(long, global = true)]
+    #[arg(
+        long = "server",
+        alias = "url",
+        conflicts_with = "server_name",
+        global = true
+    )]
     url: Option<String>,
+    #[arg(long, global = true)]
+    server_name: Option<String>,
+    #[arg(long, global = true)]
+    local_profile: Option<String>,
     #[arg(long, global = true)]
     account: Option<String>,
     #[command(subcommand)]
@@ -39,12 +57,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Version,
+    Licenses,
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
     Serve,
+    Daemon {
+        #[command(subcommand)]
+        command: daemon::DaemonCommand,
+    },
+    Profile {
+        #[command(subcommand)]
+        command: profile_cli::ProfileCommand,
+    },
     Status,
     LookupContacts {
         #[arg(required = true)]
@@ -59,6 +86,28 @@ enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
+    Account {
+        #[command(subcommand)]
+        command: AccountAction,
+    },
+    Sync {
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
+    Chats {
+        #[command(subcommand)]
+        command: ChatCommand,
+    },
+    Jobs {
+        #[command(subcommand)]
+        command: JobsAction,
+    },
+    Operations {
+        #[command(subcommand)]
+        command: ResourceAction,
+    },
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
@@ -70,12 +119,16 @@ enum Command {
         limit: Option<usize>,
     },
     Contacts {
+        #[command(subcommand)]
+        command: Option<CatalogCommand>,
         #[arg(long)]
         search: Option<String>,
         #[arg(long)]
         cursor: Option<String>,
     },
     Groups {
+        #[command(subcommand)]
+        command: Option<CatalogCommand>,
         #[arg(long)]
         search: Option<String>,
         #[arg(long)]
@@ -86,11 +139,14 @@ enum Command {
         command: MessageCommand,
     },
     Events {
+        #[command(subcommand)]
+        command: Option<EventCommand>,
         #[arg(long, default_value = "0")]
         after: String,
         #[arg(long)]
         watch: bool,
     },
+    #[command(alias = "access-tokens")]
     Tokens {
         #[command(subcommand)]
         command: TokenCommand,
@@ -105,25 +161,203 @@ enum Command {
 enum ConfigCommand {
     Show,
     Client,
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+}
+#[derive(Subcommand)]
+enum ServerCommand {
+    Add {
+        name: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        token_file: PathBuf,
+    },
+    List,
+    Use {
+        name: String,
+    },
 }
 #[derive(Subcommand)]
 enum AccountCommand {
     List,
-    Create { id: String },
-    Get,
+    Create {
+        id: Option<String>,
+        #[arg(long)]
+        alias: Option<String>,
+    },
+    Get {
+        id: Option<String>,
+    },
+    Default {
+        id: String,
+    },
+    Alias {
+        id: String,
+        alias: String,
+    },
+}
+#[derive(Subcommand)]
+enum AccountAction {
+    Status,
+    Capabilities,
+    Connect {
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
+    Disconnect,
+}
+#[derive(Subcommand)]
+enum JobsAction {
+    #[command(flatten)]
+    Resource(ResourceAction),
+    RepairWriteback {
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
+}
+#[derive(Subcommand)]
+enum ResourceAction {
+    #[command(alias = "status")]
+    Get {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Retry {
+        id: String,
+    },
+}
+#[derive(Subcommand)]
+enum CatalogCommand {
+    Avatar {
+        id: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+    },
+    List {
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    Get {
+        id: String,
+    },
+    Find {
+        query: String,
+    },
+    Refresh {
+        id: String,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
+    Members {
+        id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    Sync {
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
+}
+#[derive(Subcommand)]
+enum ChatCommand {
+    List {
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    Get {
+        id: String,
+    },
+    Find {
+        query: String,
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    Read {
+        id: String,
+        #[arg(long)]
+        through: Option<String>,
+        #[arg(long, conflicts_with = "through")]
+        message_id: Vec<String>,
+        #[arg(long)]
+        expected_version: String,
+    },
+    Open {
+        id: String,
+    },
+}
+#[derive(Subcommand)]
+enum EventCommand {
+    Watch {
+        #[arg(long, default_value = "0")]
+        after: String,
+        #[arg(long)]
+        cursor_file: Option<PathBuf>,
+    },
+    List {
+        #[arg(long, default_value = "0")]
+        after: String,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    Ack {
+        #[arg(long)]
+        consumer: String,
+        #[arg(long)]
+        through: String,
+    },
 }
 #[derive(Subcommand)]
 enum AuthCommand {
+    Status,
+    Attempts {
+        #[command(subcommand)]
+        command: ResourceAction,
+    },
     Login {
         #[arg(long)]
+        idempotency_key: Option<String>,
+        #[arg(long,value_parser=["auto","saved-device","qr"],default_value="auto")]
+        strategy: String,
+        #[arg(long,value_parser=["auto","manual"],default_value="auto")]
+        qr_refresh: String,
+        #[arg(long,default_value_t=3,value_parser=clap::value_parser!(u8).range(0..=3))]
+        max_refreshes: u8,
+        #[arg(long, alias = "qr")]
         force_qr: bool,
-        #[arg(long)]
+        #[arg(long, alias = "saved-only", conflicts_with = "force_qr")]
         no_qr: bool,
-        #[arg(long, default_value_t = 300)]
+        #[arg(long, alias = "wait", default_value_t = 300)]
         timeout: u64,
         #[arg(long)]
         detach: bool,
-        #[arg(long)]
+        #[arg(long, alias = "qr-out")]
         qr_output: Option<PathBuf>,
     },
     Operation {
@@ -135,13 +369,55 @@ enum AuthCommand {
     Qr {
         id: String,
         #[arg(long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
     },
     Disconnect,
     LogoutLocal,
+    Logout {
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+    },
+    Forget {
+        #[arg(long, required = true)]
+        yes: bool,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
 }
 #[derive(Subcommand)]
 enum MessageCommand {
+    Watch {
+        #[arg(long, default_value = "0")]
+        after: String,
+        #[arg(long)]
+        cursor_file: Option<PathBuf>,
+    },
+    Media {
+        thread: String,
+        id: String,
+        #[arg(long,default_value="best",value_parser=["best","thumbnail","standard","original","full","normal","encoded"])]
+        quality: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        cached_only: bool,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 20, conflicts_with = "detach")]
+        wait: u64,
+    },
+    Sends {
+        #[command(subcommand)]
+        command: SendAction,
+    },
+    Voice {
+        #[command(subcommand)]
+        command: ResourceAction,
+    },
     List {
         thread: String,
         #[arg(long)]
@@ -150,14 +426,27 @@ enum MessageCommand {
         limit: Option<usize>,
     },
     Get {
-        id: String,
+        thread_or_id: String,
+        id: Option<String>,
     },
     Send {
         thread: String,
-        #[arg(long)]
-        text: String,
+        #[arg(long, group = "payload")]
+        text: Option<String>,
+        #[arg(long, group = "payload")]
+        image: Option<PathBuf>,
+        #[arg(long, group = "payload")]
+        file: Option<PathBuf>,
+        #[arg(long, group = "payload")]
+        video: Option<PathBuf>,
+        #[arg(long, group = "payload")]
+        voice: Option<PathBuf>,
         #[arg(long)]
         idempotency_key: Option<String>,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
     },
     SendStatus {
         id: String,
@@ -170,6 +459,19 @@ enum MessageCommand {
         expected_version: String,
     },
     Sync,
+}
+#[derive(Subcommand)]
+enum SendAction {
+    Get {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Lookup {
+        #[arg(long)]
+        idempotency_key: String,
+    },
 }
 #[derive(Subcommand)]
 enum TokenCommand {
@@ -241,11 +543,21 @@ enum StoreCommand {
         #[arg(long, required = true)]
         official_client_stopped: bool,
     },
+    BindIdentity {
+        #[arg(long)]
+        mmkv_store: PathBuf,
+        #[arg(long)]
+        format_key_file: PathBuf,
+        #[arg(long, required = true)]
+        official_client_stopped: bool,
+    },
     Schema,
     RecoverProjection,
 }
 fn output(value: &impl serde::Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
+    let value = serde_json::to_value(value)?;
+    outcome::record(&value);
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 fn private_input(path: &Path, max: u64) -> Result<Vec<u8>> {
@@ -289,19 +601,39 @@ fn private_output(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    let json = cli.json;
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let json = arguments.iter().any(|s| s == "--json");
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.exit_code() == 0 {
+                let _ = error.print();
+                return;
+            }
+            if json {
+                eprintln!(
+                    "{}",
+                    json!({"error":{"code":"invalid_arguments","message":error.to_string(),"retryable":false}})
+                );
+            } else {
+                let _ = error.print();
+            }
+            std::process::exit(2);
+        }
+    };
     if let Err(error) = run(cli).await {
+        let (exit, code) = outcome::classify(&error);
         if json {
             eprintln!(
                 "{}",
-                json!({"error":{"code":"operation_failed","message":error.to_string()}})
+                json!({"error":{"code":code,"message":error.to_string(),"retryable":exit==3}})
             );
         } else {
             eprintln!("{error:#}");
         }
-        std::process::exit(1);
+        std::process::exit(exit);
     }
+    std::process::exit(outcome::exit());
 }
 async fn shutdown(core: Arc<Core>) {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -317,6 +649,9 @@ struct Remote {
 }
 impl Remote {
     fn new(config: wechat_config::ClientConfig) -> Result<Self> {
+        Self::with_token(config, None)
+    }
+    fn with_token(config: wechat_config::ClientConfig, token: Option<String>) -> Result<Self> {
         let base = reqwest::Url::parse(&format!("{}/", config.endpoint.trim_end_matches('/')))?;
         if !base.username().is_empty()
             || base.password().is_some()
@@ -341,7 +676,26 @@ impl Remote {
                 .timeout(Duration::from_secs(65))
                 .build()?,
             base,
-            token: wechat_api::read_token(&config.token_file)?,
+            token: match token {
+                Some(value) => {
+                    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
+                    {
+                        return Err(failure(
+                            4,
+                            "invalid_api_token",
+                            "API bearer token is invalid",
+                        ));
+                    }
+                    value
+                }
+                None => wechat_api::read_token(&config.token_file).map_err(|_| {
+                    failure(
+                        4,
+                        "invalid_api_token",
+                        "API bearer token file is missing or invalid",
+                    )
+                })?,
+            },
             account: config.account,
         })
     }
@@ -378,10 +732,28 @@ impl Remote {
         if !response.status().is_success() {
             let code = response.status();
             let error: Value = response.json().await.unwrap_or(Value::Null);
-            bail!(
-                "daemon request failed ({code}): {}",
-                error["error"]["code"].as_str().unwrap_or("request_failed")
-            );
+            let error_code = error["error"]["code"].as_str().unwrap_or("request_failed");
+            let exit = if code.as_u16() == 401 || code.as_u16() == 403 {
+                4
+            } else if matches!(
+                error_code,
+                "auth_required"
+                    | "needs_login"
+                    | "not_authenticated"
+                    | "saved_device_unavailable"
+                    | "upstream_unavailable"
+            ) {
+                5
+            } else if code.is_client_error() {
+                9
+            } else {
+                3
+            };
+            return Err(failure(
+                exit,
+                error_code,
+                &format!("daemon request failed ({code}): {error_code}"),
+            ));
         }
         Ok(response)
     }
@@ -393,10 +765,7 @@ impl Remote {
         key: Option<&str>,
     ) -> Result<Value> {
         let response = self.response(method, path, body, key).await?;
-        let bytes = response.bytes().await?;
-        if bytes.len() > 32 * 1024 * 1024 {
-            bail!("response exceeds limit");
-        }
+        let bytes = bounded_bytes(response, 32 * 1024 * 1024).await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
     async fn get(&self, path: &str) -> Result<Value> {
@@ -405,6 +774,27 @@ impl Remote {
     async fn post(&self, path: &str, body: Value) -> Result<Value> {
         self.request(reqwest::Method::POST, path, Some(body), None)
             .await
+    }
+    async fn upload(&self, bytes: &[u8], name: &str) -> Result<Value> {
+        let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+            .file_name(name.to_string())
+            .mime_str("application/octet-stream")?;
+        let response = self
+            .http
+            .post(self.base.join(&self.path("uploads")?)?)
+            .bearer_auth(&self.token)
+            .multipart(reqwest::multipart::Form::new().part("file", part))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let value: Value = response.json().await.unwrap_or(Value::Null);
+            bail!(
+                "upload failed({status}): {}",
+                value["error"]["code"].as_str().unwrap_or("request_failed")
+            );
+        }
+        Ok(response.json().await?)
     }
 }
 fn encode(s: &str) -> String {
@@ -432,11 +822,137 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
+    if matches!(cli.command, Command::Licenses) {
+        return output(
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+        );
+    }
     if matches!(cli.command, Command::Version) {
         return output(&wechat_api::version());
     }
     let env = wechat_config::Environment::capture();
     let cwd = std::env::current_dir()?;
+    if matches!(
+        &cli.command,
+        Command::Serve
+            | Command::Daemon { .. }
+            | Command::Store { .. }
+            | Command::Config {
+                command: ConfigCommand::Show
+            }
+    ) {
+        let config = wechat_config::resolve(
+            &wechat_config::Overrides {
+                server_config: cli.server_config.clone(),
+                data_dir: cli.data_dir.clone(),
+                token_file: cli.token_file.clone(),
+                listen: cli.listen,
+            },
+            &env,
+            &cwd,
+        )?;
+        return match cli.command {
+            Command::Serve => serve(config).await,
+            Command::Daemon { command } => daemon::run(config, command).await,
+            Command::Store { command } => offline(config, cli.account.unwrap_or_default(), command),
+            Command::Config {
+                command: ConfigCommand::Show,
+            } => output(&config),
+            _ => unreachable!(),
+        };
+    }
+    let create_settings = matches!(
+        &cli.command,
+        Command::Profile {
+            command: profile_cli::ProfileCommand::Add { .. }
+        } | Command::Config {
+            command: ConfigCommand::Server {
+                command: ServerCommand::Add { .. }
+            }
+        }
+    );
+    let mut settings =
+        settings::File::load(cli.client_config.as_deref(), &env, &cwd, create_settings)?;
+    if let Command::Config {
+        command: ConfigCommand::Server { command },
+    } = cli.command
+    {
+        match command {
+            ServerCommand::Add {
+                name,
+                url,
+                token_file,
+            } => {
+                settings::valid_name(&name)?;
+                if settings.settings.servers.contains_key(&name) {
+                    bail!("saved server already exists");
+                }
+                let endpoint = reqwest::Url::parse(&url)?;
+                if !matches!(endpoint.scheme(), "http" | "https")
+                    || endpoint.username() != ""
+                    || endpoint.password().is_some()
+                    || endpoint.query().is_some()
+                    || endpoint.fragment().is_some()
+                {
+                    bail!("invalid server URL");
+                }
+                let token_file = if token_file.is_absolute() {
+                    token_file
+                } else {
+                    cwd.join(token_file)
+                };
+                settings.settings.servers.insert(
+                    name.clone(),
+                    settings::Server {
+                        url,
+                        token_file,
+                        default_account_id: None,
+                        local_profile: None,
+                    },
+                );
+                settings.save()?;
+                return output(&json!({"server":name,"state":"registered"}));
+            }
+            ServerCommand::Use { name } => {
+                if !settings.settings.servers.contains_key(&name) {
+                    bail!("saved server not found");
+                }
+                settings.settings.active_server = Some(name.clone());
+                settings.save()?;
+                return output(&json!({"server":name}));
+            }
+            ServerCommand::List => {
+                return output(
+                    &json!({"items":settings.settings.servers,"activeServer":settings.settings.active_server}),
+                )
+            }
+        }
+    }
+    if let Command::Profile { command } = cli.command {
+        let env_url = std::env::var("AGENT_WECHAT_URL").ok();
+        let env_name = std::env::var("AGENT_WECHAT_SERVER").ok();
+        let url = cli.url.as_deref().or_else(|| {
+            if cli.server_name.is_none() {
+                env_url.as_deref()
+            } else {
+                None
+            }
+        });
+        let name = cli.server_name.as_deref().or_else(|| {
+            if url.is_none() {
+                env_name.as_deref()
+            } else {
+                None
+            }
+        });
+        let server = settings.server_name(name, url)?;
+        return profile_cli::run(
+            settings,
+            cli.local_profile.as_deref(),
+            server.as_deref(),
+            command,
+        );
+    }
     let config = wechat_config::resolve(
         &wechat_config::Overrides {
             server_config: cli.server_config.clone(),
@@ -447,39 +963,13 @@ async fn run(cli: Cli) -> Result<()> {
         &env,
         &cwd,
     )?;
-    if matches!(
-        cli.command,
-        Command::Config {
-            command: ConfigCommand::Show
-        }
-    ) {
-        return output(&config);
-    }
-    if matches!(cli.command, Command::Serve) {
-        let store = Arc::new(wechat_store::Store::open(&config.data_dir)?);
-        let token = wechat_api::provision_token(&config.token_file, !config.token_explicit)?;
-        let core = Core::new(store.clone(), config.storage_key_file.as_deref())?;
-        let listener = tokio::net::TcpListener::bind(config.listen).await?;
-        core.start_workers()?;
-        eprintln!(
-            "{}",
-            json!({"state":"ready","listen":listener.local_addr()?.to_string(),"serverId":store.server_id,"nativeLogin":true})
-        );
-        axum::serve(listener, wechat_api::router(core.clone(), &token))
-            .with_graceful_shutdown(shutdown(core))
-            .await?;
-        return Ok(());
-    }
-    if let Command::Store { command } = cli.command {
-        return offline(config, cli.account.unwrap_or_default(), command);
-    }
-    let mut client =
-        wechat_config::resolve_client(cli.client_config.as_deref(), &env, &cwd, &config)?;
+    let (mut client, selected_server) =
+        settings.client(cli.server_name.as_deref(), cli.url.as_deref(), &config)?;
     if let Some(url) = cli.url {
         client.endpoint = url;
     }
-    if let Some(path) = cli.token_file {
-        client.token_file = path;
+    if let Some(path) = &cli.token_file {
+        client.token_file = path.clone();
     }
     if let Some(account) = cli.account {
         client.account = Some(account);
@@ -492,7 +982,62 @@ async fn run(cli: Cli) -> Result<()> {
     ) {
         return output(&client);
     }
-    let r = Remote::new(client)?;
+    let env_token = if cli.token_file.is_none() {
+        std::env::var("AGENT_WECHAT_TOKEN").ok()
+    } else {
+        None
+    };
+    let mut r = Remote::with_token(client, env_token)?;
+    let requires_account = !matches!(
+        &cli.command,
+        Command::Status
+            | Command::Accounts {
+                command: AccountCommand::List
+                    | AccountCommand::Create { .. }
+                    | AccountCommand::Default { .. }
+                    | AccountCommand::Alias { .. }
+                    | AccountCommand::Get { id: Some(_) }
+            }
+            | Command::Tokens { .. }
+            | Command::Config { .. }
+    );
+    if requires_account {
+        let catalog = r.get("v1/accounts").await?;
+        let items = catalog["items"]
+            .as_array()
+            .context("invalid account catalog")?;
+        let selected = if let Some(selected) = r.account.as_ref() {
+            let matching = items
+                .iter()
+                .filter(|a| {
+                    a["id"].as_str() == Some(selected)
+                        || a["alias"].as_str() == Some(selected)
+                        || a["aliases"]
+                            .as_array()
+                            .is_some_and(|v| v.iter().any(|v| v.as_str() == Some(selected)))
+                })
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                bail!("account_not_found: selected account or alias is unavailable");
+            }
+            matching[0]["id"]
+                .as_str()
+                .context("invalid account identity")?
+                .to_string()
+        } else {
+            if items.is_empty() {
+                bail!("account_not_configured: create an account slot first");
+            }
+            if items.len() != 1 {
+                bail!("account_ambiguous: select --account or configure an endpoint default");
+            }
+            items[0]["id"]
+                .as_str()
+                .context("invalid account identity")?
+                .to_string()
+        };
+        r.account = Some(selected);
+    }
     use reqwest::Method;
     let result = match cli.command {
         Command::Status => r.get("v1/status").await?,
@@ -509,8 +1054,50 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Accounts { command } => match command {
             AccountCommand::List => r.get("v1/accounts").await?,
-            AccountCommand::Create { id } => r.post("v1/accounts", json!({"id":id})).await?,
-            AccountCommand::Get => r.get(r.path("")?.trim_end_matches('/')).await?,
+            AccountCommand::Create { id, alias } => {
+                if id.is_none() && alias.is_none() {
+                    bail!("choose an account ID or --alias");
+                }
+                let mut body = json!({});
+                if let Some(id) = id {
+                    body["id"] = json!(id);
+                }
+                if let Some(alias) = alias {
+                    body["alias"] = json!(alias);
+                }
+                r.post("v1/accounts", body).await?
+            }
+            AccountCommand::Get { id } => {
+                let path = if let Some(id) = id {
+                    format!("v1/accounts/{}", encode(&id))
+                } else {
+                    r.path("")?.trim_end_matches('/').to_string()
+                };
+                r.get(&path).await?
+            }
+            AccountCommand::Alias { id, alias } => {
+                r.request(
+                    Method::PATCH,
+                    &format!("v1/accounts/{}", encode(&id)),
+                    Some(json!({"alias":alias})),
+                    None,
+                )
+                .await?
+            }
+            AccountCommand::Default { id } => {
+                let account = r.get(&format!("v1/accounts/{}", encode(&id))).await?;
+                let id = account["id"].as_str().context("invalid account response")?;
+                let server = selected_server
+                    .context("save/select a named server before setting its account default")?;
+                settings
+                    .settings
+                    .servers
+                    .get_mut(&server)
+                    .context("saved server not found")?
+                    .default_account_id = Some(id.into());
+                settings.save()?;
+                json!({"server":server,"accountId":id})
+            }
         },
         Command::Threads { cursor, limit } => {
             r.get(&query(
@@ -519,14 +1106,30 @@ async fn run(cli: Cli) -> Result<()> {
             ))
             .await?
         }
-        Command::Contacts { search, cursor } => {
+        Command::Contacts {
+            command: Some(command),
+            ..
+        } => client_actions::catalog(&r, "contacts", command).await?,
+        Command::Contacts {
+            command: None,
+            search,
+            cursor,
+        } => {
             r.get(&query(
                 r.path("contacts")?,
                 &[("cursor", cursor), ("search", search)],
             ))
             .await?
         }
-        Command::Groups { search, cursor } => {
+        Command::Groups {
+            command: Some(command),
+            ..
+        } => client_actions::catalog(&r, "groups", command).await?,
+        Command::Groups {
+            command: None,
+            search,
+            cursor,
+        } => {
             r.get(&query(
                 r.path("groups")?,
                 &[("cursor", cursor), ("search", search)],
@@ -534,75 +1137,38 @@ async fn run(cli: Cli) -> Result<()> {
             .await?
         }
         Command::Auth { command } => match command {
+            AuthCommand::Attempts { command } => {
+                client_actions::resource(&r, "operations", command).await?
+            }
+            AuthCommand::Status => r.get(r.path("")?.trim_end_matches('/')).await?,
             AuthCommand::Login {
+                idempotency_key,
                 force_qr,
                 no_qr,
                 timeout,
                 detach,
                 qr_output,
+                strategy,
+                qr_refresh,
+                max_refreshes,
             } => {
-                let mut op = r
-                    .post(
-                        &r.path("auth/login")?,
-                        json!({"forceQr":force_qr,"allowQr":!no_qr,"timeoutSeconds":timeout}),
-                    )
-                    .await?;
-                if detach {
-                    op
-                } else {
-                    let id = op["id"]
-                        .as_str()
-                        .context("invalid login operation")?
-                        .to_owned();
-                    let start = std::time::Instant::now();
-                    let mut shown = 0;
-                    while !matches!(
-                        op["state"].as_str(),
-                        Some(
-                            "succeeded"
-                                | "failed"
-                                | "cancelled"
-                                | "expired"
-                                | "rejected"
-                                | "needs_login"
-                        )
-                    ) {
-                        if start.elapsed() > Duration::from_secs(timeout + 35) {
-                            bail!("login wait ended; inspect operation {id}");
-                        }
-                        let generation = op["result"]["qrGeneration"].as_u64().unwrap_or(0);
-                        if op["result"]["qrAvailable"] == true && generation > shown {
-                            if let Some(path) = &qr_output {
-                                let path = if generation == 1 {
-                                    path.clone()
-                                } else {
-                                    path.with_file_name(format!(
-                                        "{}-{generation}.png",
-                                        path.file_stem().unwrap_or_default().to_string_lossy()
-                                    ))
-                                };
-                                let response = r
-                                    .response(
-                                        Method::GET,
-                                        &r.path(&format!("operations/{}/qr", encode(&id)))?,
-                                        None,
-                                        None,
-                                    )
-                                    .await?;
-                                private_output(&path, &response.bytes().await?)?;
-                                eprintln!("QR available: {}", path.display());
-                            } else {
-                                eprintln!("QR available: wx --account {} auth qr {} --output /absolute/path/login.png",r.account()?,id);
-                            }
-                            shown = generation;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        op = r
-                            .get(&r.path(&format!("operations/{}", encode(&id)))?)
-                            .await?;
-                    }
-                    op
-                }
+                login::login(
+                    &r,
+                    &settings,
+                    login::Options {
+                        idempotency_key,
+                        force_qr,
+                        no_qr,
+                        timeout,
+                        detach,
+                        qr_output,
+                        strategy,
+                        qr_refresh,
+                        max_refreshes,
+                        json: cli.json,
+                    },
+                )
+                .await?
             }
             AuthCommand::Operation { id } => {
                 r.get(&r.path(&format!("operations/{}", encode(&id)))?)
@@ -618,23 +1184,155 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?
             }
             AuthCommand::Qr { id, output } => {
-                let bytes = r
-                    .response(
-                        Method::GET,
-                        &r.path(&format!("operations/{}/qr", encode(&id)))?,
-                        None,
-                        None,
-                    )
-                    .await?
-                    .bytes()
-                    .await?;
-                private_output(&output, &bytes)?;
-                json!({"path":std::fs::canonicalize(output)?})
+                login::qr(&r, &settings, &id, output, cli.json).await?
             }
             AuthCommand::Disconnect => r.post(&r.path("auth/disconnect")?, json!({})).await?,
             AuthCommand::LogoutLocal => r.post(&r.path("auth/logout-local")?, json!({})).await?,
+            AuthCommand::Logout {
+                idempotency_key,
+                detach,
+                wait,
+            } => {
+                let key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let op = r
+                    .request(
+                        Method::POST,
+                        &r.path("logout")?,
+                        Some(json!({})),
+                        Some(&key),
+                    )
+                    .await?;
+                wait_operation(&r, op, if detach { 0 } else { wait }).await?
+            }
+            AuthCommand::Forget {
+                yes: _,
+                idempotency_key,
+            } => {
+                r.request(
+                    Method::POST,
+                    &r.path("forget-credentials")?,
+                    Some(json!({"confirm":true})),
+                    Some(&idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())),
+                )
+                .await?
+            }
         },
+        Command::Account { command } => match command {
+            AccountAction::Status => r.get(r.path("")?.trim_end_matches('/')).await?,
+            AccountAction::Capabilities => r.get(&r.path("capabilities")?).await?,
+            AccountAction::Disconnect => r.post(&r.path("disconnect")?, json!({})).await?,
+            AccountAction::Connect { detach, wait } => {
+                let op = r.post(&r.path("connect")?, json!({})).await?;
+                wait_operation(&r, op, if detach { 0 } else { wait }).await?
+            }
+        },
+        Command::Sync { detach, wait } => {
+            let op = r.post(&r.path("sync")?, json!({})).await?;
+            wait_operation(&r, op, if detach { 0 } else { wait }).await?
+        }
+        Command::Chats { command } => match command {
+            ChatCommand::List {
+                limit,
+                cursor,
+                kind,
+            } => {
+                r.get(&query(
+                    r.path("threads")?,
+                    &[
+                        ("limit", limit.map(|v| v.to_string())),
+                        ("cursor", cursor),
+                        ("kind", kind),
+                    ],
+                ))
+                .await?
+            }
+            ChatCommand::Get { id } => r.get(&r.path(&format!("threads/{}", encode(&id)))?).await?,
+            ChatCommand::Find {
+                query: search,
+                kind,
+            } => {
+                r.get(&query(
+                    r.path("threads")?,
+                    &[("query", Some(search)), ("kind", kind)],
+                ))
+                .await?
+            }
+            ChatCommand::Read {
+                id,
+                through,
+                message_id,
+                expected_version,
+            } => {
+                if through.is_none() && message_id.is_empty() {
+                    bail!("choose --through or --message-id");
+                }
+                let mut body = json!({"expectedVersion":expected_version});
+                if let Some(through) = through {
+                    body["throughMessageId"] = json!(through);
+                } else {
+                    body["messageIds"] = json!(message_id);
+                }
+                r.post(
+                    &r.path(&format!("threads/{}/read-state", encode(&id)))?,
+                    body,
+                )
+                .await?
+            }
+            ChatCommand::Open { id: _ } => bail!(
+                "unsupported_capability: native has no GUI; use chats get or explicit chats read"
+            ),
+        },
+        Command::Jobs { command } => client_actions::jobs(&r, command).await?,
+        Command::Operations { command } => {
+            client_actions::resource(&r, "operations", command).await?
+        }
         Command::Messages { command } => match command {
+            MessageCommand::Watch { after, cursor_file } => {
+                return events::watch(&r, after, cursor_file, true).await
+            }
+            MessageCommand::Media {
+                thread,
+                id,
+                quality,
+                output,
+                cached_only,
+                detach,
+                wait,
+            } => {
+                client_actions::media(
+                    &r,
+                    &thread,
+                    &id,
+                    &quality,
+                    output,
+                    cached_only,
+                    detach,
+                    wait,
+                )
+                .await?
+            }
+            MessageCommand::Voice { command } => {
+                client_actions::resource(&r, "jobs", command).await?
+            }
+            MessageCommand::Sends { command } => match command {
+                SendAction::Get { id } => {
+                    r.get(&r.path(&format!("sends/{}", encode(&id)))?).await?
+                }
+                SendAction::Cancel { id } => {
+                    r.post(
+                        &r.path(&format!("sends/{}/cancel", encode(&id)))?,
+                        json!({}),
+                    )
+                    .await?
+                }
+                SendAction::Lookup { idempotency_key } => {
+                    r.get(&query(
+                        r.path("sends/by-idempotency-key")?,
+                        &[("key", Some(idempotency_key))],
+                    ))
+                    .await?
+                }
+            },
             MessageCommand::List {
                 thread,
                 cursor,
@@ -646,21 +1344,41 @@ async fn run(cli: Cli) -> Result<()> {
                 ))
                 .await?
             }
-            MessageCommand::Get { id } => {
-                r.get(&r.path(&format!("messages/{}", encode(&id)))?)
-                    .await?
+            MessageCommand::Get { thread_or_id, id } => {
+                let message = r
+                    .get(&r.path(&format!(
+                        "messages/{}",
+                        encode(id.as_deref().unwrap_or(&thread_or_id))
+                    ))?)
+                    .await?;
+                if id.is_some() && message["threadId"] != thread_or_id {
+                    bail!("message does not belong to selected thread");
+                }
+                message
             }
             MessageCommand::Send {
                 thread,
                 text,
+                image,
+                file,
+                video,
+                voice,
+                detach,
+                wait,
                 idempotency_key,
             } => {
-                let key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                r.request(
-                    Method::POST,
-                    &r.path("sends")?,
-                    Some(json!({"threadId":thread,"text":text})),
-                    Some(&key),
+                client_actions::send(
+                    &r,
+                    &settings,
+                    thread,
+                    text,
+                    image,
+                    file,
+                    video,
+                    voice,
+                    idempotency_key,
+                    detach,
+                    wait,
                 )
                 .await?
             }
@@ -704,30 +1422,116 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?
             }
         },
-        Command::Events { after, watch } => {
+        Command::Events {
+            command: Some(command),
+            ..
+        } => match command {
+            EventCommand::Watch { after, cursor_file } => {
+                return events::watch(&r, after, cursor_file, false).await
+            }
+            EventCommand::List { after, limit } => {
+                r.get(&query(
+                    r.path("events")?,
+                    &[("after", Some(after)), ("limit", Some(limit.to_string()))],
+                ))
+                .await?
+            }
+            EventCommand::Ack { consumer, through } => {
+                r.post(
+                    &r.path(&format!("consumers/{}/ack", encode(&consumer)))?,
+                    json!({"cursor":through}),
+                )
+                .await?
+            }
+        },
+        Command::Events {
+            command: None,
+            after,
+            watch,
+        } => {
             if watch {
-                use futures_util::StreamExt;
-                let path = query(r.path("events/stream")?, &[("after", Some(after))]);
-                let mut stream = r
-                    .response(Method::GET, &path, None, None)
-                    .await?
-                    .bytes_stream();
-                use std::io::Write;
-                while let Some(chunk) = stream.next().await {
-                    std::io::stdout().write_all(&chunk?)?;
-                    std::io::stdout().flush()?;
-                }
-                return Ok(());
+                return events::watch(&r, after, None, false).await;
             }
             r.get(&query(r.path("events")?, &[("after", Some(after))]))
                 .await?
         }
-        Command::Version | Command::Config { .. } | Command::Serve | Command::Store { .. } => {
+        Command::Version
+        | Command::Licenses
+        | Command::Config { .. }
+        | Command::Serve
+        | Command::Store { .. }
+        | Command::Profile { .. }
+        | Command::Daemon { .. } => {
             unreachable!()
         }
     };
+    outcome::record(&result);
     output(&result)
 }
+async fn serve(config: wechat_config::ServerConfig) -> Result<()> {
+    let store = Arc::new(wechat_store::Store::open(&config.data_dir)?);
+    let token = wechat_api::provision_token(&config.token_file, !config.token_explicit)?;
+    let core = Core::new(store.clone(), config.storage_key_file.as_deref())?;
+    if let Some(path) = &config.profile_format_key_file {
+        core.configure_profile_format_key(&private_input(path, 16)?)?;
+    }
+    let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    core.start_workers()?;
+    eprintln!(
+        "{}",
+        json!({"state":"ready","listen":listener.local_addr()?.to_string(),"serverId":store.server_id,"nativeLogin":true})
+    );
+    axum::serve(listener, wechat_api::router(core.clone(), &token))
+        .with_graceful_shutdown(shutdown(core))
+        .await?;
+    Ok(())
+}
+async fn wait_operation(r: &Remote, mut op: Value, wait: u64) -> Result<Value> {
+    if wait == 0 {
+        return Ok(op);
+    }
+    if wait > 900 {
+        bail!("wait must be at most900seconds");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(wait);
+    while matches!(
+        op["state"].as_str(),
+        Some(
+            "queued"
+                | "running"
+                | "starting"
+                | "submitting"
+                | "resuming"
+                | "awaiting_scan"
+                | "awaiting_approval"
+                | "authenticating"
+        )
+    ) {
+        if std::time::Instant::now() >= deadline {
+            op["clientWaitExpired"] = json!(true);
+            return Ok(op);
+        }
+        let id = op["id"]
+            .as_str()
+            .context("operation identity missing")?
+            .to_string();
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let next = tokio::select! {_=tokio::signal::ctrl_c()=>{set_exit(130);op["clientInterrupted"]=json!(true);return Ok(op);},next=tokio::time::timeout(remaining,async{tokio::time::sleep(Duration::from_millis(250)).await;r.get(&r.path(&format!("operations/{}",encode(&id)))?).await})=>next};
+        match next {
+            Ok(result) => {
+                op = result.with_context(|| {
+                    format!("operation {id} remains owned by the daemon; inspect its status")
+                })?
+            }
+            Err(_) => {
+                op["clientWaitExpired"] = json!(true);
+                return Ok(op);
+            }
+        }
+    }
+    Ok(op)
+}
+
 fn offline(
     config: wechat_config::ServerConfig,
     account: String,
@@ -754,6 +1558,11 @@ fn offline(
     } else {
         wechat_store::Store::open_existing(&config.data_dir)?
     });
+    let account = if !account.is_empty() && !initialize {
+        store.resolve_account(&account)?
+    } else {
+        account
+    };
     match command {
         StoreCommand::List => output(&store.accounts()?),
         StoreCommand::Create { id } => output(&store.create_account(&id)?),
@@ -770,15 +1579,10 @@ fn offline(
             source_stopped,
             allow_incomplete,
         } => {
-            let pending = store.pending_sync_count(&account)?;
-            let pending_reads = store.pending_reads(&account)?;
-            if (pending > 0 || pending_reads > 0) && !allow_incomplete {
-                bail!("unprojected native sync remains; --allow-incomplete exports only current official files");
-            }
+            let projection = profile_export::ProjectionState::read(&store, &account)?;
+            projection.require_copy_permission(allow_incomplete)?;
             let manifest = store.export(&account, &destination, source_stopped)?;
-            output(
-                &json!({"state":"copied","entries":manifest.entries.len(),"pendingProjectionBatches":pending,"pendingReadProjections":pending_reads,"nativeCredentialsIncluded":false,"officialTakeover":"unverified","syncCheckpointProjected":false}),
-            )
+            output(&projection.receipt(manifest.entries.len())?)
         }
         StoreCommand::BindKeys { keys_file } => {
             wechat_profile::KeyFile::load(&keys_file)?;
@@ -838,6 +1642,19 @@ fn offline(
             )?;
             output(&json!({"state":"enabled","coverage":"verified_existing_schema_families"}))
         }
+        StoreCommand::BindIdentity {
+            mmkv_store,
+            format_key_file,
+            official_client_stopped: _,
+        } => {
+            let core = Core::new(store, config.storage_key_file.as_deref())?;
+            core.bind_profile_identity(
+                &account,
+                &mmkv_store,
+                &private_input(&format_key_file, 16)?,
+            )?;
+            output(&json!({"state":"identity_bound","officialWritesEnabled":false}))
+        }
         StoreCommand::RecoverProjection => {
             let core = Core::new(store, config.storage_key_file.as_deref())?;
             output(&core.recover_projection(&account)?)
@@ -847,4 +1664,24 @@ fn offline(
             output(&core.profile_schema(&account)?)
         }
     }
+}
+
+async fn bounded_bytes(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    use futures_util::StreamExt;
+    if response
+        .content_length()
+        .is_some_and(|size| size > limit as u64)
+    {
+        bail!("response exceeds bounded size");
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            bail!("response exceeds bounded size");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }

@@ -1,0 +1,561 @@
+{
+  "repository": "https://github.com/kn007/silk-v3-decoder",
+  "commit": "507be6bca8ce1fb977a061481f1d79e8c610e309",
+  "scope": "Public SDK C/header files only; no executables, captures or research artifacts",
+  "sdkLicense": "BSD-style notice retained in every source/header",
+  "projectLicense": "LICENSE-MIT",
+  "files": [
+    {
+      "path": "src/SKP_Silk_A2NLSF.c",
+      "sha256": "e39b15bba6d31fe5c75c9d5eee9842ae7db2ba88e87906d51b40680f57f18b61"
+    },
+    {
+      "path": "src/SKP_Silk_AsmHelper.h",
+      "sha256": "a229b7229ebb1e0630f0b186d1945aea7c4368ffed525c4f29b11121b77bd716"
+    },
+    {
+      "path": "src/SKP_Silk_AsmPreproc.h",
+      "sha256": "27d2dda5d1b6e6661adc6d822269fdc4ee403828e59c5cb0b2b512e16b60a121"
+    },
+    {
+      "path": "src/SKP_Silk_CNG.c",
+      "sha256": "8e5126b356d25d774e48dacd7ae66067750578735243e6b7d8c744ea8e428a2f"
+    },
+    {
+      "path": "src/SKP_Silk_HP_variable_cutoff_FIX.c",
+      "sha256": "cafc2b0196727c09bf1b1254450d0142806af03e14174bf95fc62d51cd006c90"
+    },
+    {
+      "path": "src/SKP_Silk_Inlines.h",
+      "sha256": "3a6ab114028372654e8f51560f3a9553ab940629b5eadb02b4f80346b3d3e3bf"
+    },
+    {
+      "path": "src/SKP_Silk_LBRR_reset.c",
+      "sha256": "6c6b286acef5b91973da36fb0e8b2d1ea7d9a1942d927277523289a96c9ad484"
+    },
+    {
+      "path": "src/SKP_Silk_LPC_inv_pred_gain.c",
+      "sha256": "1479d9bf11107f3e8b553eedd2cb771a83d1bbc9ad3f74d10097c4870d45fbf1"
+    },
+    {
+      "path": "src/SKP_Silk_LPC_synthesis_filter.c",
+      "sha256": "720a5fb09a53d95cdb76669bcb2f1d0d7f30d4a90366517bee8d77c89eb89bd2"
+    },
+    {
+      "path": "src/SKP_Silk_LPC_synthesis_order16.c",
+      "sha256": "6f29d7dfcf58497b0f7f9e1bb9146d3da0c994a0c15a12e81f693079f80348d2"
+    },
+    {
+      "path": "src/SKP_Silk_LP_variable_cutoff.c",
+      "sha256": "b22f7d8c9fc5bd07037d2824a27fbb31e1681900f22982520c76d22f88d2716e"
+    },
+    {
+      "path": "src/SKP_Silk_LSF_cos_table.c",
+      "sha256": "f22b0c0b18d1db2798c2a091e4fcf74c9bc0363267eace886298d49cf6991516"
+    },
+    {
+      "path": "src/SKP_Silk_LTP_analysis_filter_FIX.c",
+      "sha256": "da42c16fc5c6de23d7b9f72780227acf83c8645c6730cf3058f92461dfc7a7e3"
+    },
+    {
+      "path": "src/SKP_Silk_LTP_scale_ctrl_FIX.c",
+      "sha256": "432b77984301b7c91401feb1b33132ef4790e89ab1f57e63a5648fdedc5fa9a0"
+    },
+    {
+      "path": "src/SKP_Silk_MA.c",
+      "sha256": "aede09ac123ad8ecefd96228d3eb7268cee56eeaca9bb8e02c838e05be3826e6"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF2A.c",
+      "sha256": "5228d9388487eb424df33b28a11a7977f198ddea3d3fc7939da2e75757f43ee8"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF2A_stable.c",
+      "sha256": "1b69b21d690d61b738b04eeb049e69dcc9c888b46ff0c8bb934bd23132f61c4d"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF_MSVQ_decode.c",
+      "sha256": "c5661396e924d23dd3528a2992ded95203f1b3e97ffead896264e0acad87a854"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF_MSVQ_encode_FIX.c",
+      "sha256": "485d4570dc0c89e8b0d4fe2bcbee63083e07099479a5cef167fc30e206210039"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF_VQ_rate_distortion_FIX.c",
+      "sha256": "4c2faa6f8ec96ecfeb5ee65a5f6c0e92e9315ab2f33afc70ef35ece29f3e93c1"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF_VQ_sum_error_FIX.c",
+      "sha256": "a446889da6a28b2536e86e9e8ab02aaf7e4801403134bb7fddd11ce83068e2d9"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF_VQ_weights_laroia.c",
+      "sha256": "e8d4a22a16b2686f8399f3617cd0326921edae110a4b46e302102c2518b770eb"
+    },
+    {
+      "path": "src/SKP_Silk_NLSF_stabilize.c",
+      "sha256": "a4ddd2cb4db1d2670511007ef5f1f9ff01163b32e80d00a26eb70bde4d5baecb"
+    },
+    {
+      "path": "src/SKP_Silk_NSQ.c",
+      "sha256": "ccf8646be494f0e405081357f36d6ec2551ce07bf474e2b92fe830e28449e43c"
+    },
+    {
+      "path": "src/SKP_Silk_NSQ_del_dec.c",
+      "sha256": "294e173e23666e28f66b317b13d48ee78d444fcf81f01f5664575d113faa5371"
+    },
+    {
+      "path": "src/SKP_Silk_PLC.c",
+      "sha256": "277b8d8a22031ac8acee3713ad230dccb0871ad7a99a157e6727811e88c24abd"
+    },
+    {
+      "path": "src/SKP_Silk_PLC.h",
+      "sha256": "07cff64175dc00506139ec742b6ac59e4b754d9feebeab1a003a0fe0075ee460"
+    },
+    {
+      "path": "src/SKP_Silk_SigProc_FIX.h",
+      "sha256": "641e64a89d1ef1bd4aa02150722ccbf82981ef5d2a53b11e22ee7456a0dee92c"
+    },
+    {
+      "path": "src/SKP_Silk_VAD.c",
+      "sha256": "b241d8d8a9ee4037bc1be908cd3271eac64b8c3eb8533d196cc480d28c57b01d"
+    },
+    {
+      "path": "src/SKP_Silk_VQ_nearest_neighbor_FIX.c",
+      "sha256": "a60c80ba5e5bea8e62c9627323640024d0bb16d98165f1a89351eec86d0267e8"
+    },
+    {
+      "path": "src/SKP_Silk_ana_filt_bank_1.c",
+      "sha256": "fafb38b7e84242bbc99e1ab77bb834f7fbf5c0da226ca6601cc45225b3c8ec30"
+    },
+    {
+      "path": "src/SKP_Silk_apply_sine_window.c",
+      "sha256": "8529e1b4cc2d230d14a309594a65c97852804796b9d2f5d93be8bb21bc147b33"
+    },
+    {
+      "path": "src/SKP_Silk_array_maxabs.c",
+      "sha256": "85a92ec3405b53da069cef08daceb40af6d74f3d242ddc2af3ca76c369a7e35f"
+    },
+    {
+      "path": "src/SKP_Silk_autocorr.c",
+      "sha256": "0e51a72afc0f3b7f7e67ee3e227953ea30a78de605b5db7065ff265cc6bfff42"
+    },
+    {
+      "path": "src/SKP_Silk_biquad.c",
+      "sha256": "65c920b97a0a6c7adcf783cb8120edbf81a5b0177cd6ca8de38c1385bc788e8d"
+    },
+    {
+      "path": "src/SKP_Silk_biquad_alt.c",
+      "sha256": "5a14559baa67b77dafdc43e1683c0896a54e6caefb1f55fe3fb3cb6f7549e21f"
+    },
+    {
+      "path": "src/SKP_Silk_burg_modified.c",
+      "sha256": "810c827e4b88523fc9e24f546f38613c3d1103997a5ab0e4b9d1d8f80f7aab95"
+    },
+    {
+      "path": "src/SKP_Silk_bwexpander.c",
+      "sha256": "aea87d36eba87c5e31d6f1ad46cd93b8cf67edf2f5fc3a5442592a7f7963146d"
+    },
+    {
+      "path": "src/SKP_Silk_bwexpander_32.c",
+      "sha256": "236f61734099d54d97d7f9ce89b32c02986f02ff71ccaf3cb6e96a699f74bad3"
+    },
+    {
+      "path": "src/SKP_Silk_code_signs.c",
+      "sha256": "f767290ef1a7564a7ecf76ebbf6f7cdaeaf6c6e0ef39d845a3d763f00eaae9b2"
+    },
+    {
+      "path": "src/SKP_Silk_common_pitch_est_defines.h",
+      "sha256": "01885676ec4a5c99f2dda100a278d60470e6d4f47e15eaaec7a78474658d6cea"
+    },
+    {
+      "path": "src/SKP_Silk_control_audio_bandwidth.c",
+      "sha256": "45d80d807425878b53e9a9873074df0536de9e85113ae52ad0f5f9b73124e7e1"
+    },
+    {
+      "path": "src/SKP_Silk_control_codec_FIX.c",
+      "sha256": "c24e8114bcb75339b6e3a1894a7b4850902b556ee91058b25ffa769f52c43fdc"
+    },
+    {
+      "path": "src/SKP_Silk_corrMatrix_FIX.c",
+      "sha256": "e6e423dfc49b6c97c27f3bf8efc7ccb0c5787bf5676f1b890e2df10e9b4aaa3a"
+    },
+    {
+      "path": "src/SKP_Silk_create_init_destroy.c",
+      "sha256": "3d76545fb7ceafdb792146f7a4bf2e24116f9caf5630d4e240796b246406e46e"
+    },
+    {
+      "path": "src/SKP_Silk_dec_API.c",
+      "sha256": "873afb0ce668adada794c9c3541fec9aba434c5760efd83cd2fc8ee382d36d14"
+    },
+    {
+      "path": "src/SKP_Silk_decode_core.c",
+      "sha256": "d7b00fb1ce3461381a54879a51e3044b28e7bcfa1c6f88956ce08c61d71e22fc"
+    },
+    {
+      "path": "src/SKP_Silk_decode_frame.c",
+      "sha256": "e4c614359d19393647da8ec58a7bf42872f096cb55ba1236614fa69011ee8d64"
+    },
+    {
+      "path": "src/SKP_Silk_decode_parameters.c",
+      "sha256": "d687febc3064b1a899993a0d63cda5a67c308ddb20b31e2f041497791e41721d"
+    },
+    {
+      "path": "src/SKP_Silk_decode_pitch.c",
+      "sha256": "1a3027bcc9f3538568f3bd99e89e0dceeb563a7609787eb514e3dc493b5f5c87"
+    },
+    {
+      "path": "src/SKP_Silk_decode_pulses.c",
+      "sha256": "4b6fcc66298afb33aa164ca6990f775eb2f337bc1ee6a6d5b280bb523ed08721"
+    },
+    {
+      "path": "src/SKP_Silk_decoder_set_fs.c",
+      "sha256": "75718b8e2f61fe0c25f802f6bb16a7e07b67b6e1401de5212066ddf2a61f7b86"
+    },
+    {
+      "path": "src/SKP_Silk_define.h",
+      "sha256": "d1455c870d0b2ad3a8dbcb1b9f271196b6e7426f9a5bbab2a558668922fff2cb"
+    },
+    {
+      "path": "src/SKP_Silk_detect_SWB_input.c",
+      "sha256": "bfbc1fac5c6154e3d8a710fdb4eccb02a912de4b5ca8510e30075d37117d995a"
+    },
+    {
+      "path": "src/SKP_Silk_div_oabi.c",
+      "sha256": "8ba641b037485af7f32171dd6d029df6fc3d313efe1e3ad3c359014663cc6894"
+    },
+    {
+      "path": "src/SKP_Silk_enc_API.c",
+      "sha256": "1bccfeb0d2e29368532775f5bb526de440424ffacfbaa2cf89b571d30d59c586"
+    },
+    {
+      "path": "src/SKP_Silk_encode_frame_FIX.c",
+      "sha256": "b47c692525e322efc53c7f51a84570f43b67e2737a7e1cad1175dbd1ddab1cce"
+    },
+    {
+      "path": "src/SKP_Silk_encode_parameters.c",
+      "sha256": "a2474fd4a7b76c6257d863c1af0b3d77c542a2868404f210517d156ce8af45eb"
+    },
+    {
+      "path": "src/SKP_Silk_encode_pulses.c",
+      "sha256": "5070e8c891a5385dd1b7b59298f67312638e9a402e3dd4c9e574026500590892"
+    },
+    {
+      "path": "src/SKP_Silk_find_LPC_FIX.c",
+      "sha256": "c4c75b7beb9b726a5994c9a8a7c2f110fcb4b2ed7f53cb9f93635b48b8cf7abd"
+    },
+    {
+      "path": "src/SKP_Silk_find_LTP_FIX.c",
+      "sha256": "3be1ecc89865d36405b947dd3ebaea2bf2f7a09e799253dfd41204e722380c92"
+    },
+    {
+      "path": "src/SKP_Silk_find_pitch_lags_FIX.c",
+      "sha256": "b56d86e9ce82a95934c09c9ea73b904a685b46eef8fb4800c1444b228cac45f3"
+    },
+    {
+      "path": "src/SKP_Silk_find_pred_coefs_FIX.c",
+      "sha256": "85172ea387c87fbc756662bf8a1bfb5fdc03f49ec6d424196077e33d35fe87e9"
+    },
+    {
+      "path": "src/SKP_Silk_gain_quant.c",
+      "sha256": "98167041621ca81d64caa44f25c46c0d8cdcf60190524d87c9b829db588355af"
+    },
+    {
+      "path": "src/SKP_Silk_init_encoder_FIX.c",
+      "sha256": "6c1b141f4ae3e60dfd8fa84598e3b5c2431446768299fba756a3a325025ef156"
+    },
+    {
+      "path": "src/SKP_Silk_inner_prod_aligned.c",
+      "sha256": "cf3e2de043cdd9d0057324c3f9b034fa6a464151532ceaa9c60d7093f8360dea"
+    },
+    {
+      "path": "src/SKP_Silk_interpolate.c",
+      "sha256": "1ccafd65b9de9ba840b3a60a626e4c138240e1dd6c5ca533188b74fcc01424f4"
+    },
+    {
+      "path": "src/SKP_Silk_k2a.c",
+      "sha256": "57a9bf269c14e11e8504a78e33818707526243ea9cf5cdd80a3f8e6dd6c6e73b"
+    },
+    {
+      "path": "src/SKP_Silk_k2a_Q16.c",
+      "sha256": "06387387ca39e794d13ade8dd3b35ccfc93bbf2a697ed9bc8cac01552e9debac"
+    },
+    {
+      "path": "src/SKP_Silk_lin2log.c",
+      "sha256": "1d55747f1e92104f030fe276b9a82ab0df95f554da0c6a3f35dc5c40db77ba8f"
+    },
+    {
+      "path": "src/SKP_Silk_log2lin.c",
+      "sha256": "e9623e0bf19bc2bc40e58f3991c9eb616dd323c5aa3e1d2de0faba9e6eded125"
+    },
+    {
+      "path": "src/SKP_Silk_macros.h",
+      "sha256": "f90d6b7eec8c59de53c1281890f3ad17e1ef19ac48564b8d3757f0a9289400ac"
+    },
+    {
+      "path": "src/SKP_Silk_macros_arm.h",
+      "sha256": "e04f9ef016e352dcc4fb11823ab9d71668c9485719f7cfaf91a8b36634328097"
+    },
+    {
+      "path": "src/SKP_Silk_main.h",
+      "sha256": "87b8fabdbc75c5c6782cddcd0570e128c2567c02330c8e5112275a8fbba98b06"
+    },
+    {
+      "path": "src/SKP_Silk_main_FIX.h",
+      "sha256": "2e0554462da108c206ecc4a437fad092843cb0de1f583cd7b364f991b2d506ed"
+    },
+    {
+      "path": "src/SKP_Silk_noise_shape_analysis_FIX.c",
+      "sha256": "cf578b867081a1c7d7b346a9440b70853a2d3eab77822bfc0d3a8f4737f4f434"
+    },
+    {
+      "path": "src/SKP_Silk_pitch_analysis_core.c",
+      "sha256": "21b824930d0ed4b04a613e4594439950cf9388665bced3be817157bdb64c6ee4"
+    },
+    {
+      "path": "src/SKP_Silk_pitch_est_defines.h",
+      "sha256": "9f50109a78d9ecb5cb1b10e7f370ad98e06f45c8c7aeaec72cecccc64a0198e7"
+    },
+    {
+      "path": "src/SKP_Silk_pitch_est_tables.c",
+      "sha256": "a43bd273190ac148bae579d5af665bf8f9067d29ad933c052ab4eb0631985b18"
+    },
+    {
+      "path": "src/SKP_Silk_prefilter_FIX.c",
+      "sha256": "e0756322ea4963dcd08c005b6abb3ba1e7bc143794f3807c058d633311d0ccb6"
+    },
+    {
+      "path": "src/SKP_Silk_process_NLSFs_FIX.c",
+      "sha256": "055041c927216c9007fc8a47cb5c1885870f9b397287f8c1eab31519acaf1592"
+    },
+    {
+      "path": "src/SKP_Silk_process_gains_FIX.c",
+      "sha256": "705b50d2033d1f06707c6735ac0456c5d689d2399c8ed930608acd082a8f7c5d"
+    },
+    {
+      "path": "src/SKP_Silk_quant_LTP_gains_FIX.c",
+      "sha256": "eac6b501171c2c9a8f6bc6f0852e4b33dbb0dc0f5bb0a409b17cad18550464d2"
+    },
+    {
+      "path": "src/SKP_Silk_range_coder.c",
+      "sha256": "1c22fc2304ae939c3a7011a04594d3ef559b241746b35354e177c371babf34fe"
+    },
+    {
+      "path": "src/SKP_Silk_regularize_correlations_FIX.c",
+      "sha256": "391bb82523880fa83cd5d71fd6d30ff2dc718861c0384b2376749516b77098be"
+    },
+    {
+      "path": "src/SKP_Silk_resampler.c",
+      "sha256": "4fa4208b242bb52cd5f21970ba5f2d715c4dab435481a78d42f6be0dbbc15621"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_down2.c",
+      "sha256": "dc18a66bad0df6352ccaf6aed1e4fca3a3e2780a993502b4b4992bafcde996e7"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_down2_3.c",
+      "sha256": "96980f8a25be874fafc6c978be84cd1854439e785de8ebe5aac79249fd5e2463"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_down3.c",
+      "sha256": "6d1862ab2b23374f91ca73f12de67aaff1ea573e668a461160d6cfdca229ad84"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private.h",
+      "sha256": "1deed08724ccfac84900519df7665dc0c0408cde0074815ef8a96bf546e5bece"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_AR2.c",
+      "sha256": "eab7d5fa5ae111988e9c6b5590e5814f2ddb89216d533b52ca938563ff163f93"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_ARMA4.c",
+      "sha256": "587c83767197963373efb02659f421943107b8bf6d93200f31e1dc51aa6c3482"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_IIR_FIR.c",
+      "sha256": "610505537381fed110d2963ffc969a7e7dd9f4509e740bfed1d9e76ddf8d56f2"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_copy.c",
+      "sha256": "f57779cfe781ff6749e3d5f4eb16c112a13e0d80dc9eaaf359017d75e3efb128"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_down4.c",
+      "sha256": "711b85ea572e941c89cefdb04aa692e5a4bc4455afb26862938504f552ef8a1d"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_down_FIR.c",
+      "sha256": "937d159970502bd1a0097d82d0325c300f974b6e418eab36d7976c46384be424"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_up2_HQ.c",
+      "sha256": "e48111f2ba97fa1e25e508758ce7cf22b95f995719d8ce623488321334825e28"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_private_up4.c",
+      "sha256": "d8d49c59ca875fdfce70b57e5956125d3f572cc5d8dfc0e1ba6af28a4cb9e316"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_rom.c",
+      "sha256": "e90edee0d3a217d8081e14cb5e0b00de016af9b0b7b4d5dcee42a3f8fffa9ab0"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_rom.h",
+      "sha256": "ddd6eaf6d066c71f5d78c6972fc37d5d6672aacbc223a148c61646d18a043755"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_structs.h",
+      "sha256": "47b2eed38cc5e1c5e156a804cc9211ded2ec039ec0d86cbd25401e8bc915032b"
+    },
+    {
+      "path": "src/SKP_Silk_resampler_up2.c",
+      "sha256": "833090aaed7ae9a4c8a4a6477c270ed0bef4705c7444c48a1988e512fde25a7f"
+    },
+    {
+      "path": "src/SKP_Silk_residual_energy16_FIX.c",
+      "sha256": "8ddf5bd5b48e1f4825b74520044874def3f7dff5ad339cfb7283498bfb863b8e"
+    },
+    {
+      "path": "src/SKP_Silk_residual_energy_FIX.c",
+      "sha256": "7c31f70337c3183354b3b571fcdf97e6e63592c9099b91c76fe92ed9a47ba699"
+    },
+    {
+      "path": "src/SKP_Silk_scale_copy_vector16.c",
+      "sha256": "8f218049b162619e8963ff562fadf152fbcdc8c0a85e4dc10c48951c000d8daf"
+    },
+    {
+      "path": "src/SKP_Silk_scale_vector.c",
+      "sha256": "09c81e0050ef73e9771c20e9fc3b3c84ad893486c53082a28ea82daf540053e1"
+    },
+    {
+      "path": "src/SKP_Silk_schur.c",
+      "sha256": "2dba22a7f5c0a807e8dad997278cec48698864eee8e06eecac5b5cffa47a9db9"
+    },
+    {
+      "path": "src/SKP_Silk_schur64.c",
+      "sha256": "3ae2d286d633ca7a80a75ea8ee695026e49c7a97165436a05ed3553332e721d4"
+    },
+    {
+      "path": "src/SKP_Silk_setup_complexity.h",
+      "sha256": "2ee951a543938e6ecdd0e1ca67de11c6cef136e9cfe5aa994e402d34d1f86da5"
+    },
+    {
+      "path": "src/SKP_Silk_shell_coder.c",
+      "sha256": "d31be134a44617535186cd5395861c3039827f742198ddc2e009b0093d4962cb"
+    },
+    {
+      "path": "src/SKP_Silk_sigm_Q15.c",
+      "sha256": "53354bb074e41fd51d8b098d6c5218e09395c48cc414fbc4ce7b02a282c461e5"
+    },
+    {
+      "path": "src/SKP_Silk_solve_LS_FIX.c",
+      "sha256": "a8f3d9a73883f10b5a35431460ccca8da8e18abfc3b86d8f1f47ba697c45ae13"
+    },
+    {
+      "path": "src/SKP_Silk_sort.c",
+      "sha256": "df4b188dcaec9250e4bf4675174cf8fe462fcf25f804c2b23d0b1418233040a1"
+    },
+    {
+      "path": "src/SKP_Silk_structs.h",
+      "sha256": "86d9bb95a7f208ba6aeead03afa3d4562661551ef0c26c1b749de6b6a7953632"
+    },
+    {
+      "path": "src/SKP_Silk_structs_FIX.h",
+      "sha256": "6cc5c945b57dfb8fcdf878b1802848e5f62f95c0fb0512d82bff89f9aa62da71"
+    },
+    {
+      "path": "src/SKP_Silk_sum_sqr_shift.c",
+      "sha256": "114cc98785a8498023e40528d8767a0db8b092e919f18c7bd9d89d64ca3ba430"
+    },
+    {
+      "path": "src/SKP_Silk_tables.h",
+      "sha256": "cedcdffd881b6e3ecec4e05502e017ac9fbe5da1cf3d45ec4caa14e7f89f7cbc"
+    },
+    {
+      "path": "src/SKP_Silk_tables_LTP.c",
+      "sha256": "0bf5c4470f317d4c8b271a039eb3be03f60d3b60b1707dd4c91d4ea897cf0574"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB0_10.c",
+      "sha256": "648f989f2c3bbaacb7a78d20b40945b7a033fc227ed0c3adf572a3ebe082f663"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB0_10.h",
+      "sha256": "751f5471b778e3cb860c55c9ec282d49afa7e86fc58768ec301862b1113b7647"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB0_16.c",
+      "sha256": "2048df2ae9ecedec443d1f96f5634a888462df4cdabb118b84355e09c02ac4f7"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB0_16.h",
+      "sha256": "3e9cd00572020937e1e376c7f8c4582cff605927dd6553cb6dd5cb19a50242cd"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB1_10.c",
+      "sha256": "187dde4b2a402ddfce805acba829e16ef7f4f3a83f9534c62bae05dab4712f72"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB1_10.h",
+      "sha256": "34b43ceb5ef654bf18c0e6b72f0566cf018a0616c58c6136df95476e076c5ea3"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB1_16.c",
+      "sha256": "06ee8aafcb468c63bfab5dc25149dd91637f44eefa76df7e499799e1d991e69b"
+    },
+    {
+      "path": "src/SKP_Silk_tables_NLSF_CB1_16.h",
+      "sha256": "6dc4a5b2685741f61848bfebaa782e1b342057cdbb6a62ad85b30d7cc6574213"
+    },
+    {
+      "path": "src/SKP_Silk_tables_gain.c",
+      "sha256": "10f192f768570c45ceadd477bb52bfa8df029dc35fd3cf5b143123427434e879"
+    },
+    {
+      "path": "src/SKP_Silk_tables_other.c",
+      "sha256": "f0bb4dee09ced18291f905d0dc19d97875dc87bfa171ffb107f6452351964db0"
+    },
+    {
+      "path": "src/SKP_Silk_tables_pitch_lag.c",
+      "sha256": "26513c1ee1c3efb85c24240e3d43bdae0e6aba7fb588b11411cd9c26a6180857"
+    },
+    {
+      "path": "src/SKP_Silk_tables_pulses_per_block.c",
+      "sha256": "ad9181f789082b7e1e78eaa429807b41c5bc1efcec8eb42af24744cd02df7ac6"
+    },
+    {
+      "path": "src/SKP_Silk_tables_sign.c",
+      "sha256": "277d91d8b3045d92c5c68500013ec48dd0d2b27a9dd90b553bb90ca75173155b"
+    },
+    {
+      "path": "src/SKP_Silk_tables_type_offset.c",
+      "sha256": "7340705c5e4c75fc5e65c1578421a1c3b081fbe719bfa886788797d9a5d8ce02"
+    },
+    {
+      "path": "src/SKP_Silk_tuning_parameters.h",
+      "sha256": "4d6a07fc4a6b9b3907e95cc744fcd921d9f36800cfe5bc97fcfb5d113a08bc32"
+    },
+    {
+      "path": "src/SKP_Silk_warped_autocorrelation_FIX.c",
+      "sha256": "41185a06660742aa58000329382f9635e230423dfde974a46d8e70128bc7f015"
+    },
+    {
+      "path": "interface/SKP_Silk_SDK_API.h",
+      "sha256": "3290fa33059bf974dc48ca60eae03e93b87f5b08a121f28f68658c1169756c77"
+    },
+    {
+      "path": "interface/SKP_Silk_control.h",
+      "sha256": "aefa64ae3ca93d508c4b89b3783f85ee1e0b78d9489c9da82a235d50b7270d73"
+    },
+    {
+      "path": "interface/SKP_Silk_errors.h",
+      "sha256": "bf7a7b6ce52fd562d187eafdd02d2b5299decb0f52819fa1ae126ebe7b951624"
+    },
+    {
+      "path": "interface/SKP_Silk_typedef.h",
+      "sha256": "3c02104edf0fa8b5b938a5237cb785b140b09cb23b8597bdda41563a38411bfc"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+-- Inspected Linux 4.1.13.26 ordinary schema; no rows or private identifiers.
+CREATE TABLE ChatName2Id(user_name TEXT PRIMARY KEY, update_time INTEGER);
+CREATE TABLE FtsDeleteInfo(session_id INTEGER, max_message_id INTEGER);
+CREATE TABLE FtsRange(session_id INTEGER, db_time_stamp INTEGER, start_local_id INTEGER, end_local_id INTEGER, range_type INTEGER, CONSTRAINT _CHAT_TIME_TYPE UNIQUE(session_id, db_time_stamp, range_type));
+CREATE TABLE MessageResourceDetail(resource_id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER, type INTEGER, size INTEGER, create_time INTEGER, access_time INTEGER, status INTEGER, data_index TEXT, packed_info BLOB);
+CREATE TABLE MessageResourceInfo(message_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, sender_id INTEGER, message_local_type INTEGER, message_create_time INTEGER, message_local_id INTEGER, message_svr_id INTEGER, message_origin_source INTEGER, packed_info BLOB);
+CREATE TABLE SenderName2Id(user_name TEXT PRIMARY KEY, update_time INTEGER);
+CREATE INDEX ChatName2Id_TIME_INDEX ON ChatName2Id(update_time);
+CREATE UNIQUE INDEX FtsDeleteInfo_CHAT ON FtsDeleteInfo(session_id);
+CREATE INDEX MessageResourceDetail_ATIME_INDEX ON MessageResourceDetail(access_time);
+CREATE INDEX MessageResourceDetail_CTIME_INDEX ON MessageResourceDetail(create_time);
+CREATE INDEX MessageResourceDetail_MID_INDEX ON MessageResourceDetail(message_id);
+CREATE INDEX MessageResourceDetail_SIZE_INDEX ON MessageResourceDetail(size);
+CREATE INDEX MessageResourceDetail_TYPE_INDEX ON MessageResourceDetail(type);
+CREATE INDEX MessageResourceInfo_CCL_INDEX ON MessageResourceInfo(chat_id, message_create_time, message_local_id);
+CREATE INDEX MessageResourceInfo_CS_INDEX ON MessageResourceInfo(chat_id, message_svr_id);
+CREATE INDEX MessageResourceInfo_SENDER_INDEX ON MessageResourceInfo(sender_id);
+CREATE INDEX MessageResourceInfo_TIME_INDEX ON MessageResourceInfo(message_create_time);
+CREATE INDEX MessageResourceInfo_TYPE_INDEX ON MessageResourceInfo(message_local_type);
+CREATE INDEX SenderName2Id_TIME_INDEX ON SenderName2Id(update_time);

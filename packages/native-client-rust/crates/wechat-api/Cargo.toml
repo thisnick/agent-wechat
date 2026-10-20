@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +19,7 @@ wechat-core = { path = "../wechat-core" }
 wechat-profile = { path = "../wechat-profile" }
 futures-util = "0.3"
 async-stream = "0.3"
+ts-rs = { version = "10", features = ["no-serde-warnings"] }
 
 [dev-dependencies]
 tempfile.workspace = true

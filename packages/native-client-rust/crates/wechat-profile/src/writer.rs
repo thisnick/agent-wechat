@@ -41,7 +41,7 @@ pub struct AppliedText {
     pub cross_database_atomic: bool,
 }
 
-fn open_write(
+pub(crate) fn open_write(
     location: &ProfileLocation,
     rel: &str,
     keys: &KeyFile,
@@ -89,7 +89,7 @@ fn open_write(
     )?;
     Ok(c)
 }
-const MESSAGE_COLUMNS: &[&str] = &[
+pub(crate) const MESSAGE_COLUMNS: &[&str] = &[
     "local_id",
     "server_id",
     "local_type",
@@ -129,7 +129,7 @@ const SESSION_COLUMNS: &[&str] = &[
     "last_sender_display_name",
     "last_msg_ext_type",
 ];
-fn exact_columns(
+pub(crate) fn exact_columns(
     c: &Connection,
     db: &str,
     table: &str,
@@ -220,7 +220,7 @@ fn packed(from: i64, to: i64) -> Result<Vec<u8>> {
     v.extend([88, 0]);
     Ok(v)
 }
-fn find_database(location: &ProfileLocation, basename: &str) -> Result<String> {
+pub(crate) fn find_database(location: &ProfileLocation, basename: &str) -> Result<String> {
     fn walk(
         root: &Path,
         here: &Path,
@@ -264,6 +264,44 @@ fn find_database(location: &ProfileLocation, basename: &str) -> Result<String> {
         return Err(ProfileError::UnsupportedSchema(basename.into()));
     }
     Ok(found.remove(0))
+}
+/// Refuse implicit rotation/routing when another ordinary shard is present.
+pub(crate) fn require_single_message_shard(location: &ProfileLocation) -> Result<()> {
+    fn visit(path: &Path, depth: usize, count: &mut usize, entries: &mut usize) -> Result<()> {
+        if depth > 16 {
+            return Err(ProfileError::ResourceLimit);
+        }
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            *entries += 1;
+            if *entries > 16384 {
+                return Err(ProfileError::ResourceLimit);
+            }
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() {
+                return Err(ProfileError::UnsupportedFile);
+            }
+            if metadata.is_dir() {
+                visit(&entry.path(), depth + 1, count, entries)?;
+            } else if let Some(name) = entry.file_name().to_str() {
+                if name
+                    .strip_prefix("message_")
+                    .and_then(|s| s.strip_suffix(".db"))
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    *count += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+    let (mut count, mut entries) = (0, 0);
+    visit(&location.storage, 0, &mut count, &mut entries)?;
+    if count == 1 {
+        Ok(())
+    } else {
+        Err(ProfileError::WritesUnsupported)
+    }
 }
 /// Supports only the verified existing direct-chat incoming text family. It does
 /// not allocate new chats/maps, infer sort collisions, update FTS or project

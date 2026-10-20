@@ -1,11 +1,11 @@
 ---
 title: Native Client (experimental)
-description: Standalone Rust daemon, official-format profiles and native client compatibility.
+description: Standalone Rust daemon, native messaging and official-format profiles.
 ---
 
-The native `wx` executable runs without an official WeChat binary, desktop or Docker container. It speaks the native protocol, exposes an authenticated `/v1` API and keeps official-format profiles plus private daemon sidecars. The retained container CLI is `wx-legacy`; its commands and API are separate.
+The native `wx` executable speaks the WeChat protocol directly, exposes an authenticated `/v1` API and keeps official-format profiles plus private daemon sidecars. It runs without an official WeChat executable, desktop or Docker container. The retained container client is explicitly named `wx-legacy`; its commands and API are separate.
 
-The enabled release target is Linux x64 with glibc 2.36 or newer. Node.js 24.16+ is required by the npm launcher; the Rust executable can run independently after provisioning. A matching release asset and npm-bundled checksum manifest must exist before distribution.
+The enabled distribution target is Linux x64 with glibc 2.36 or newer. The npm launcher requires Node.js 24.16+; a separately provisioned Rust executable runs independently. Install an exact version after its matching native assets are published:
 
 ```bash
 npm install -g @agent-wechat/cli@VERSION
@@ -14,19 +14,23 @@ wx config show
 wx serve
 ```
 
-`serve` runs in the foreground and creates private implicit API/storage keys. It does not automatically open a QR. Other CLI invocations connect to that daemon:
+`serve` runs in the foreground and creates private API-token and storage-key files. It does not automatically create a login QR. In another terminal:
 
 ```bash
-wx accounts create test
-wx --account test auth login --qr-output /absolute/new-login.png
-wx --account test threads
+wx accounts create personal
+wx --account personal auth login --qr-output /private/new-login.png
+wx --account personal account status
+wx --account personal chats list
+wx --account personal messages list filehelper --limit 50
 ```
 
-An empty account slot can authenticate and stage sync commands, but does not yet initialize the official database set. Local history queries require a compatible initialized profile and authorized keys. Import/export are same-format copies; direct binding also remains available. The official client and daemon must take turns owning the profile.
+An approved native login can create a fresh official-format profile with seven encrypted databases, identity and saved-login storage. An existing official profile is optional. Login first tries eligible active or saved trust; scan and phone approval are conditional. `--saved-only` forbids QR fallback. QR output uses a white background, private files and bounded refreshes.
+
+For background operation, choose one owner: `wx daemon start|status|logs|stop`, systemd, Compose or OpenClaw managed mode. Do not nest these owners. `daemon stop` and `account disconnect` retain login trust; `auth logout` commits persistent local logout and records its separate remote outcome. `auth forget --yes` explicitly removes local authentication. Logout does not claim universal saved-device revocation.
 
 ## Configuration
 
-Server settings: `~/.config/agent-wechat/server/config.toml`, with XDG support:
+Server settings default to `~/.config/agent-wechat/server/config.toml`, with XDG support:
 
 ```toml
 schemaVersion = 1
@@ -34,23 +38,71 @@ listen = "127.0.0.1:6174"
 dataDir = "/private/agent-wechat"
 ```
 
-Data defaults to `~/.local/share/agent-wechat`. Client selections are separate, in `~/.config/agent-wechat/client.toml`:
+Without a data override, durable data lives under `~/.local/share/agent-wechat`. Client selections are separate, in `~/.config/agent-wechat/client.toml`:
 
 ```toml
 schemaVersion = 1
-endpoint = "http://127.0.0.1:6174"
+activeServer = "local"
+
+[servers.local]
+url = "http://127.0.0.1:6174"
 tokenFile = "/private/agent-wechat/api-token"
-account = "test"
+defaultAccountId = "personal"
 ```
 
-Credentials, tokens and database keys are separate secrets. Do not put token values in URLs. The daemon listens on loopback; remote clients need a protected TLS endpoint or tunnel.
+`--server-config` and `--data-dir` select server settings/storage. `--config`, `--server-name`, `--server`, `--token-file` and `--account` select client settings. Defaults belong to their endpoint; ambiguous account selection fails. Credentials, API tokens and database keys are separate. Tokens never belong in URLs. Remote access requires a protected TLS endpoint or tunnel; the daemon itself binds loopback.
+
+## History, metadata and media
+
+```bash
+wx --account personal contacts find Example
+wx --account personal groups refresh 'ROOM_ID@chatroom'
+wx --account personal groups get 'ROOM_ID@chatroom'
+wx --account personal groups members 'ROOM_ID@chatroom'
+wx --account personal contacts avatar USERNAME --output /private/new-avatar.jpg
+wx --account personal messages media filehelper MESSAGE_ID \
+  --quality original --output /private/new-image.jpg
+wx --account personal events watch --cursor-file /private/events.cursor.json
+```
+
+Group lookup does not require a message or visible thread. Contact/group catalogs and thread history are distinct, and sync is not a complete list of every server conversation. Refresh operations and transfers are durable jobs; inspect their operation/job results when pending.
+
+Image quality requests are strict: an explicit original cannot return a thumbnail. `best` selects the best available supported variant; `--cached-only` never queues a transfer. Cached bytes can remain available after remote expiry. Confirmed expiry is terminal. Reading history does not mark it read; explicit desktop read state is independent of the phone.
+
+Outgoing text, image, file, video and independently encoded voice use durable submission receipts:
+
+```bash
+wx --account personal messages send filehelper --text "A deliberate message" \
+  --idempotency-key one-logical-intent
+wx --account personal messages send filehelper --file /private/report.pdf
+wx --account personal messages send filehelper --image /private/photo.jpg
+wx --account personal messages send filehelper --video /private/clip.mp4
+wx --account personal messages send filehelper --voice /private/audio.wav
+wx --account personal messages sends lookup --idempotency-key one-logical-intent
+```
+
+Reusing the same key and input looks up the same intent; changed input conflicts. Native acceptance does not prove recipient delivery. Preserve partial voice note IDs and `needs_review` outcomes without resending uncertain work. Voice is encoded using bundled SILK; FFmpeg/FFprobe handle general source normalization. The current native source bound is 25 MiB minus 17 bytes. Large-file branches and sticker sending are unavailable.
+
+## Existing profiles and copies
+
+Direct offline readers need a selected stopped profile and an authorized key file, without a daemon or API token:
+
+```bash
+wx profile add archive --path /private/stopped-account \
+  --keys-file /private/profile-keys.json
+wx profile use archive
+wx profile inspect
+wx profile messages --chat filehelper --source-stopped
+```
+
+`store attach` can operate on an existing official profile; `store import|export` copy the same format. Stop the official client and daemon before these operations. Copies preserve opaque bytes and publish to a new destination without overwrite. Export refuses pending sync/cursor/saved-login/read/metadata/send projections and incomplete official media writeback. `--allow-incomplete` explicitly copies the current official files and reports those gaps. `wx jobs repair-writeback --limit 25 --wait 30` repairs supported retained media without downloading or resending; `--detach` returns its durable operation, and blocked results remain export gaps. A profile-only copy can contain official saved-login material; a complete native backup also needs the daemon sidecars and external secret references.
 
 ## Compatibility and validation
 
-Native Rust active-session renewal, heartbeat/sync and assembled daemon reads were validated using an isolated test account and copied stopped profiles. Official-format SQLCipher reads, cached media and narrow incoming direct-text/exact-read projection have tests and encrypted-clone validation. Other schemas refuse writes.
+Controlled native tests created fresh encrypted profiles, accepted text and all four outgoing media kinds, retrieved contact/group metadata and avatars, and downloaded three image qualities plus normal/original video with integrity and decoder checks. Phone playback remains a separate validation step.
 
-Group/media official-file projection, fresh official database initialization, complete send projection and server-side logout are still compatibility gates. Media protocol helpers exist as libraries with offline tests; general daemon media jobs are not enabled. Notifications currently use verified heartbeat-driven sync, rather than claiming unsolicited native push association. A pending sync projection means official files have not fully caught up.
+Supported file/video cache and resource joins now pass cold-read and local repair checks. Official-client takeover, FTS/index maintenance and unknown resource subtypes remain compatibility gates. Unsupported sync controls stay staged, and bounded contact synchronization may require resumed runs. Notifications use verified heartbeat/NewSync polling; fast unsolicited native push is unverified.
 
-OpenClaw native mode requires a separately provisioned native executable. Only live, committed incoming text enters its model-dispatch path. Released OpenClaw hosts inspected do not expose the prepared-model callback required for read receipts, so those hosts retain unread state with an explicit unconfirmed handoff. Native media forwarding is not enabled.
+OpenClaw native mode supports managed/external hosting, admitted text/media, independently encoded voice and an optional authenticated Gateway facade. It requires a separately installed global native `wx` or configured absolute executable; plugin startup never installs it. The pinned OpenClaw2026.10.2 Gateway has a verified text-only read boundary using exact current input, an immutable run manifest and the actual model-call hook. It requires an explicit host conversation-access grant; missing permission, unsupported/ambiguous handoffs and media without a prepared callback remain unread. Actual Gateway/local-stub-model checks are separate from external provider acceptance and user playback.
 
-The [complete native guide](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/README.md) covers profile ownership, keys, login operations, read-state conflicts, durable sends, event custody and tests. [Build/release and deployment templates](https://github.com/thisnick/agent-wechat/tree/main/deploy/native) include a user service and an image without the official client. Their preparation does not deploy them.
+See the [CLI workflows](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/CLI.md), [capability and validation matrix](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md), [native storage/API guide](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/README.md), and [OpenClaw configuration](https://github.com/thisnick/agent-wechat/blob/main/packages/openclaw-extension/README.md). [Build/release and deployment templates](https://github.com/thisnick/agent-wechat/tree/main/deploy/native) include a user service and an image without the official client. Preparing these assets does not deploy them.

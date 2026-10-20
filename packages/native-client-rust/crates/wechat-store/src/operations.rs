@@ -2,6 +2,8 @@ use super::*;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "logout.rs"]
+mod logout;
 
 pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
     let tx = db.transaction()?;
@@ -46,6 +48,8 @@ pub struct SendIntent {
     pub state: String,
     pub client_id: String,
     pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_message_id: Option<String>,
     pub error_code: Option<String>,
     pub created_at: String,
 }
@@ -154,6 +158,9 @@ impl Store {
             .context("account not found")
     }
     pub fn create_account(&self, id: &str) -> Result<Account> {
+        self.create_account_with_alias(id, None)
+    }
+    pub fn create_account_with_alias(&self, id: &str, alias: Option<&str>) -> Result<Account> {
         let target = self.account_dir(id)?;
         let parent = target.parent().unwrap();
         private_dir(parent)?;
@@ -172,6 +179,7 @@ impl Store {
                     entries: vec![],
                 },
             )),
+            alias,
         )
     }
     pub fn keys_file(&self, id: &str) -> Result<Option<PathBuf>> {
@@ -201,7 +209,11 @@ impl Store {
         db.execute("INSERT INTO account_settings(account_id,keys_file) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET keys_file=excluded.keys_file",params![id,path.to_str().context("keys path must be UTF-8")?])?;
         Ok(())
     }
-    fn control<T>(&self, id: &str, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+    pub(crate) fn control<T>(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
         self.account(id)?;
         // Serialize sidecar operations through the store lock as well as SQLite.
         let _guard = self
@@ -216,7 +228,7 @@ impl Store {
         let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=2).contains(&version) {
+        if !(1..=4).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -224,11 +236,23 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/account/V002__operations.sql"))?;
             tx.commit()?;
         }
+        if version < 3 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V003__media_jobs.sql"))?;
+            tx.commit()?;
+        }
+        if version < 4 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V004__pagination_views.sql"
+            ))?;
+            tx.commit()?;
+        }
         f(&mut db)
     }
     pub fn protected_state_exists(&self) -> Result<bool> {
         for account in self.accounts()? {
-            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
+            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
         }
         Ok(false)
     }
@@ -295,13 +319,40 @@ impl Store {
     })
     }
     pub fn save_operation(&self, op: &Operation) -> Result<()> {
-        self.control(&op.account_id,|db|{db.execute("INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET state=excluded.state,result_json=excluded.result_json,updated_at=excluded.updated_at",params![op.id,op.kind,op.state,serde_json::to_string(&op.result)?,op.created_at,op.updated_at])?;Ok(())})
+        self.control(&op.account_id,|db|{
+            let tx=db.transaction()?;
+            let changed=tx.execute("INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET state=excluded.state,result_json=excluded.result_json,updated_at=excluded.updated_at WHERE operations.state NOT IN ('cancelled','succeeded','failed','expired','rejected','needs_login','needs_review') OR operations.state=excluded.state",params![op.id,op.kind,op.state,serde_json::to_string(&op.result)?,op.created_at,op.updated_at])?;
+            if changed==1 {
+                tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('operation.updated',?1,?2)",params![serde_json::to_string(&serde_json::json!({"id":op.id,"state":op.state,"kind":op.kind}))?,op.updated_at])?;
+                let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+            }
+            tx.commit()?;Ok(())
+        })
     }
     pub fn operation(&self, account: &str, id: &str) -> Result<Operation> {
         self.control(account,|db|{
         let (kind,state,result,created,updated):(String,String,String,String,String)=db.query_row("SELECT kind,state,result_json,created_at,updated_at FROM operations WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         Ok(Operation {id:id.into(),account_id:account.into(),kind,state,result:serde_json::from_str(&result)?,created_at:created,updated_at:updated})
     })
+    }
+    /// A restarted owner cannot continue the previous process's network tasks.
+    /// Staged profile receipts are recovered separately; no RPC is replayed here.
+    pub fn recover_interrupted_operations(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let rows = {
+                let mut query = tx.prepare("SELECT id,kind FROM operations WHERE kind IN ('login','metadata','sync','media-writeback') AND state NOT IN ('cancelled','succeeded','failed','expired','rejected','needs_login','needs_review')")?;
+                let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+            for (id, kind) in &rows {
+                tx.execute("UPDATE operations SET state='failed',result_json=?1,updated_at=?2 WHERE id=?3", params![serde_json::to_string(&serde_json::json!({"code":"operation_interrupted","stagedDataRetained":true}))?,now,id])?;
+                tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('operation.updated',?1,?2)", params![serde_json::to_string(&serde_json::json!({"id":id,"kind":kind,"state":"failed"}))?,now])?;
+            }
+            tx.commit()?;
+            Ok(rows.len())
+        })
     }
     pub fn create_send(
         &self,
@@ -321,6 +372,14 @@ impl Store {
                 bail!("invalid send intent");
             }
             let tx = db.transaction()?;
+            let media_conflict: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_jobs WHERE idempotency_key=?1)",
+                [format!("send:{key}")],
+                |r| r.get(0),
+            )?;
+            if media_conflict {
+                bail!("idempotency_conflict");
+            }
             let existing: Option<(String, String)> = {
                 let mut q =
                     tx.prepare("SELECT id,payload_hash FROM outbox WHERE idempotency_key=?1")?;
@@ -374,8 +433,13 @@ impl Store {
         error: Option<&str>,
     ) -> Result<SendIntent> {
         self.control(account,|db|{
-        db.execute("UPDATE outbox SET state=?2,server_id=COALESCE(?3,server_id),error_code=?4 WHERE id=?1",params![id,state,server_id,error])?;read_send(db,account,id)
-    })
+            let tx=db.transaction()?;
+            tx.execute("UPDATE outbox SET state=?2,server_id=COALESCE(?3,server_id),error_code=?4 WHERE id=?1 AND state!='cancelled'",params![id,state,server_id,error])?;
+            let intent=read_send(&tx,account,id)?;
+            tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('send.updated',?1,?2)",params![serde_json::to_string(&intent)?,chrono::Utc::now().to_rfc3339()])?;
+            let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+            tx.commit()?;Ok(intent)
+        })
     }
     pub fn recover_uncertain_sends(&self, account: &str) -> Result<usize> {
         self.control(account,|db|Ok(db.execute("UPDATE outbox SET state='needs_review',error_code='restart_after_submission' WHERE state='submitting'",[])?))
@@ -391,7 +455,8 @@ impl Store {
     ) -> Result<()> {
         self.control(account,|db|{
         let tx=db.transaction()?;tx.execute("INSERT OR IGNORE INTO apply_intents VALUES(?1,?2,'pending',?3)",params![id,payload,chrono::Utc::now().to_rfc3339()])?;
-        tx.execute("INSERT INTO runtime VALUES('received-cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[received_cursor])?;tx.commit()?;Ok(())
+        tx.execute("INSERT INTO runtime VALUES('received-cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[received_cursor])?;
+        tx.execute("INSERT INTO runtime VALUES('cursor-projection-needed',?1) ON CONFLICT(key)DO UPDATE SET value=excluded.value",[b"1".as_slice()])?;tx.commit()?;Ok(())
     })
     }
     pub fn pending_reads(&self, account: &str) -> Result<usize> {
@@ -543,8 +608,19 @@ impl Store {
         })
     }
 }
-fn read_send(db: &Connection, account: &str, id: &str) -> Result<SendIntent> {
-    Ok(db.query_row("SELECT destination,state,client_id,server_id,error_code,created_at FROM outbox WHERE id=?1",[id],|r|Ok(SendIntent {id:id.into(),account_id:account.into(),destination:r.get(0)?,state:r.get(1)?,client_id:r.get(2)?,server_id:r.get(3)?,error_code:r.get(4)?,created_at:r.get(5)?}))?)
+pub(crate) fn read_send(db: &Connection, account: &str, id: &str) -> Result<SendIntent> {
+    let local: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT value FROM runtime WHERE key=?1",
+            [format!("send-projected:{id}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let local_message_id = local
+        .map(String::from_utf8)
+        .transpose()
+        .context("invalid text projection receipt")?;
+    Ok(db.query_row("SELECT destination,state,client_id,server_id,error_code,created_at FROM outbox WHERE id=?1",[id],|r|Ok(SendIntent {id:id.into(),account_id:account.into(),destination:r.get(0)?,state:r.get(1)?,client_id:r.get(2)?,server_id:r.get(3)?,local_message_id,error_code:r.get(4)?,created_at:r.get(5)?}))?)
 }
 
 #[cfg(test)]
@@ -591,6 +667,49 @@ mod tests {
         assert_eq!(store.recover_uncertain_sends("test").unwrap(), 1);
         assert_eq!(store.send("test", &first.id).unwrap().state, "needs_review");
         assert_eq!(store.recover_uncertain_sends("test").unwrap(), 0);
+    }
+    #[test]
+    fn restart_interrupts_only_unfinished_network_operations_atomically() {
+        let (_temp, store) = setup();
+        for (id, kind, state) in [
+            ("active-login", "login", "awaiting_approval"),
+            ("active-sync", "sync", "running"),
+            ("active-metadata", "metadata", "queued"),
+            ("done", "metadata", "succeeded"),
+            ("logout", "logout", "running"),
+        ] {
+            store
+                .save_operation(&Operation {
+                    id: id.into(),
+                    account_id: "test".into(),
+                    kind: kind.into(),
+                    state: state.into(),
+                    result: Value::Null,
+                    created_at: "now".into(),
+                    updated_at: "now".into(),
+                })
+                .unwrap();
+        }
+        store.control("test", |db| { db.execute_batch("CREATE TRIGGER reject_restart_event BEFORE INSERT ON events WHEN NEW.kind='operation.updated' BEGIN SELECT RAISE(ABORT,'event unavailable'); END;")?; Ok(()) }).unwrap();
+        assert!(store.recover_interrupted_operations("test").is_err());
+        assert_eq!(
+            store.operation("test", "active-sync").unwrap().state,
+            "running"
+        );
+        store
+            .control("test", |db| {
+                db.execute_batch("DROP TRIGGER reject_restart_event;")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.recover_interrupted_operations("test").unwrap(), 3);
+        assert_eq!(
+            store.operation("test", "active-login").unwrap().result["code"],
+            "operation_interrupted"
+        );
+        assert_eq!(store.operation("test", "done").unwrap().state, "succeeded");
+        assert_eq!(store.operation("test", "logout").unwrap().state, "running");
+        assert_eq!(store.recover_interrupted_operations("test").unwrap(), 0);
     }
     #[test]
     fn staging_and_received_cursor_commit_without_claiming_projection() {

@@ -132,8 +132,8 @@ pub enum ImageQuality {
 #[serde(rename_all = "camelCase")]
 pub struct CachedImage {
     pub media: CachedBytes,
-    /// Only a matching advertised original-content MD5 establishes Original.
-    /// Other cached variants retain Unknown instead of guessing from a suffix.
+    /// Original requires advertised content MD5. Standard/Thumbnail require an
+    /// exact native resource join; a filename suffix alone remains Unknown.
     pub quality: VerifiedImageQuality,
     pub width: u32,
     pub height: u32,
@@ -143,6 +143,8 @@ pub struct CachedImage {
 #[serde(rename_all = "snake_case")]
 pub enum VerifiedImageQuality {
     Original,
+    Standard,
+    Thumbnail,
     Unknown,
 }
 

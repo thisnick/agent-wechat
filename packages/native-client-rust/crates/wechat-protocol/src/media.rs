@@ -2,7 +2,7 @@
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
 use crate::{
     crypto::{md5, random, sha256},
-    protobuf as p, AccountState, MAX_MESSAGE_BYTES,
+    protobuf as p, AccountState,
 };
 use anyhow::{bail, ensure, Result};
 use openssl::symm::Cipher;
@@ -12,6 +12,14 @@ use zeroize::Zeroize;
 pub type CdnFields = BTreeMap<String, Vec<u8>>;
 const MAX_CDN_BODY: usize = 2 * 1024 * 1024;
 const UPLOAD_CHUNK: usize = 65536;
+pub const MAX_CDN_TRANSFER_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_NATIVE_UPLOAD_BYTES: usize = 25 * 1024 * 1024 - 17;
+#[path = "avatar.rs"]
+mod avatar;
+pub use avatar::*;
+#[path = "sticker.rs"]
+mod sticker;
+pub use sticker::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CdnConfig {
@@ -217,7 +225,7 @@ pub fn decrypt_cdn(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>> {
         key.len() == 16
             && !encrypted.is_empty()
             && encrypted.len().is_multiple_of(16)
-            && encrypted.len() <= MAX_MESSAGE_BYTES + 16,
+            && encrypted.len() <= MAX_CDN_TRANSFER_BYTES + 16,
         "Invalid CDN ciphertext"
     );
     Ok(openssl::symm::decrypt(
@@ -310,17 +318,35 @@ impl fmt::Debug for PreparedUpload {
     }
 }
 impl PreparedUpload {
-    /// Prepare and persist this complete result before the first upload request.
-    /// The small-object uploader deliberately caps plaintext at 1 MiB.
+    /// Generate independent upload material. Persist either this result or the
+    /// source bytes and its key/file-key before the first upload request.
     pub fn prepare(
         raw: &[u8],
         kind: MediaQuality,
         file_name: &str,
         destination: &str,
     ) -> Result<Self> {
+        Self::with_material(
+            raw,
+            kind,
+            file_name,
+            destination,
+            &random::<16>()?,
+            &hex::encode(random::<16>()?),
+        )
+    }
+    /// Rebuild exactly the same encrypted upload from durable owned source bytes.
+    pub fn with_material(
+        raw: &[u8],
+        kind: MediaQuality,
+        file_name: &str,
+        destination: &str,
+        key: &[u8],
+        file_key: &str,
+    ) -> Result<Self> {
         ensure!(
             !raw.is_empty()
-                && raw.len() <= 1024 * 1024
+                && raw.len() <= MAX_NATIVE_UPLOAD_BYTES
                 && [
                     MediaQuality::File,
                     MediaQuality::Original,
@@ -338,19 +364,23 @@ impl PreparedUpload {
                 && !file_name.chars().any(|c| c.is_control()),
             "Invalid upload filename"
         );
+        ensure!(
+            key.len() == 16
+                && file_key.len() == 32
+                && file_key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid durable upload material"
+        );
         encrypt_recipient(destination)?;
-        let aes_key = random::<16>()?.to_vec();
-        let encrypted = ecb_encrypt(raw, &aes_key)?;
         Ok(Self {
             kind,
-            aes_key,
-            file_key: hex::encode(random::<16>()?),
-            encrypted,
+            aes_key: key.to_vec(),
+            file_key: file_key.to_string(),
+            encrypted: ecb_encrypt(raw, key)?,
             plaintext_bytes: raw.len() as u32,
             md5: hex::encode(md5(raw)),
             sha256: hex::encode(sha256(raw)),
-            file_name: file_name.to_string(),
-            destination: destination.to_string(),
+            file_name: file_name.into(),
+            destination: destination.into(),
         })
     }
     fn validate(&self) -> Result<()> {
@@ -359,7 +389,7 @@ impl PreparedUpload {
                 && self.file_key.len() == 32
                 && self.file_key.bytes().all(|b| b.is_ascii_hexdigit())
                 && self.plaintext_bytes > 0
-                && self.plaintext_bytes <= 1024 * 1024
+                && self.plaintext_bytes <= MAX_NATIVE_UPLOAD_BYTES as u32
                 && self.encrypted.len() == ((self.plaintext_bytes as usize / 16) + 1) * 16,
             "Invalid prepared upload"
         );
@@ -428,6 +458,13 @@ impl CdnClient {
         unpack_cdn(&raw)
     }
     pub fn download(&self, descriptor: &MediaDescriptor) -> Result<DownloadedMedia> {
+        self.download_with_progress(descriptor, |_, _| Ok(()))
+    }
+    pub fn download_with_progress(
+        &self,
+        descriptor: &MediaDescriptor,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<DownloadedMedia> {
         ensure!(
             !descriptor.file_id.is_empty()
                 && descriptor.file_id.len() <= 8192
@@ -436,17 +473,18 @@ impl CdnClient {
             "Invalid download descriptor"
         );
         if let Some(expiry) = descriptor.expires_at {
-            ensure!(
-                expiry > crate::wire::unix_time()? as u64,
-                "Explicit media expiry has passed"
-            );
+            ensure!(expiry > crate::wire::unix_time()? as u64, "media_expired");
         }
         let mut position = 0usize;
         let mut total = 0usize;
         let mut encrypted = vec![];
         let mut substituted_filetype = None;
         let mut picture_format = None;
-        for sequence in 1..=257u32 {
+        for sequence in 1..=401u32 {
+            progress(
+                position as u64,
+                if total == 0 { None } else { Some(total as u64) },
+            )?;
             let mut fields = shared(&self.config, sequence, descriptor.quality.filetype());
             for (k, v) in [
                 ("wxautostart", 0),
@@ -478,7 +516,7 @@ impl CdnClient {
                 start == position
                     && !data.is_empty()
                     && size > 0
-                    && size <= MAX_MESSAGE_BYTES + 16
+                    && size <= MAX_CDN_TRANSFER_BYTES + 16
                     && size >= position
                     && data.len() <= size - position
                     && (total == 0 || total == size)
@@ -488,6 +526,7 @@ impl CdnClient {
             total = size;
             position += data.len();
             encrypted.extend(data);
+            progress(position as u64, Some(total as u64))?;
             for (key, target) in [
                 ("substituteftype", &mut substituted_filetype),
                 ("rsppicformat", &mut picture_format),
@@ -511,7 +550,7 @@ impl CdnClient {
         );
         let bytes = decrypt_cdn(&encrypted, &descriptor.aes_key)?;
         ensure!(
-            bytes.len() <= MAX_MESSAGE_BYTES,
+            bytes.len() <= MAX_CDN_TRANSFER_BYTES,
             "Decoded CDN body too large"
         );
         let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
@@ -540,16 +579,25 @@ impl CdnClient {
         })
     }
     pub fn upload(&self, prepared: &PreparedUpload) -> Result<UploadedMedia> {
+        self.upload_with_progress(prepared, |_, _| Ok(()))
+    }
+    pub fn upload_with_progress(
+        &self,
+        prepared: &PreparedUpload,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
         prepared.validate()?;
         let mut file_id = None;
         for (sequence, chunk) in prepared.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
             let start = sequence * UPLOAD_CHUNK;
+            progress(start as u64, Some(prepared.encrypted.len() as u64))?;
             let end = start + chunk.len() - 1;
             let mut fields =
                 upload_fields(&self.config, prepared, sequence as u32 + 1, start, end)?;
             fields.insert("filedata".into(), chunk.to_vec());
             let reply = self.post("/uploadv3", &fields)?;
             validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
+            progress((end + 1) as u64, Some(prepared.encrypted.len() as u64))?;
         }
         let file_id =
             file_id.ok_or_else(|| anyhow::anyhow!("CDN upload returned no file identifier"))?;
@@ -768,6 +816,36 @@ impl PreparedVariant {
     }
 }
 impl PreparedImageUpload {
+    pub fn with_material(
+        original: &[u8],
+        standard: &[u8],
+        thumbnail: &[u8],
+        file_name: &str,
+        destination: &str,
+        key: &[u8],
+        file_key: &str,
+    ) -> Result<Self> {
+        let (width, height) = jpeg_dimensions(original)?;
+        let original = PreparedUpload::with_material(
+            original,
+            MediaQuality::Original,
+            file_name,
+            destination,
+            key,
+            file_key,
+        )?;
+        let standard = PreparedVariant::new(standard, key)?;
+        let thumbnail = PreparedVariant::new(thumbnail, key)?;
+        let p = Self {
+            original,
+            standard,
+            thumbnail,
+            width,
+            height,
+        };
+        p.validate()?;
+        Ok(p)
+    }
     /// Supplied variants must be independent real JPEGs. This function decodes
     /// them fully but does not resize or invent an unsupplied representation.
     pub fn prepare(
@@ -815,6 +893,33 @@ impl PreparedImageUpload {
     }
 }
 impl PreparedVideoUpload {
+    pub fn with_material(
+        video: &[u8],
+        thumbnail: &[u8],
+        file_name: &str,
+        destination: &str,
+        key: &[u8],
+        file_key: &str,
+    ) -> Result<Self> {
+        ensure!(
+            video.len() >= 12 && video.len() <= MAX_NATIVE_UPLOAD_BYTES && video[4..8] == *b"ftyp",
+            "Expected bounded MP4 container"
+        );
+        let video = PreparedUpload::with_material(
+            video,
+            MediaQuality::Video,
+            file_name,
+            destination,
+            key,
+            file_key,
+        )?;
+        let thumbnail = PreparedVariant::new(thumbnail, key)?;
+        ensure!(
+            thumbnail.width <= 320 && thumbnail.height <= 320,
+            "Video thumbnail outside limit"
+        );
+        Ok(Self { video, thumbnail })
+    }
     pub fn prepare(
         video: &[u8],
         thumbnail: &[u8],
@@ -822,7 +927,7 @@ impl PreparedVideoUpload {
         destination: &str,
     ) -> Result<Self> {
         ensure!(
-            video.len() >= 12 && video.len() <= 65520 && video[4..8] == *b"ftyp",
+            video.len() >= 12 && video.len() <= MAX_NATIVE_UPLOAD_BYTES && video[4..8] == *b"ftyp",
             "Expected bounded MP4 container"
         );
         let video = PreparedUpload::prepare(video, MediaQuality::Video, file_name, destination)?;
@@ -928,24 +1033,36 @@ impl CdnClient {
         })
     }
     pub fn upload_video(&self, p: &PreparedVideoUpload) -> Result<UploadedVideo> {
+        self.upload_video_with_progress(p, |_, _| Ok(()))
+    }
+    pub fn upload_video_with_progress(
+        &self,
+        p: &PreparedVideoUpload,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedVideo> {
         p.video.validate()?;
-        ensure!(
-            p.video.kind == MediaQuality::Video && p.video.plaintext_bytes <= 65520,
-            "Video outside small-object profile"
-        );
+        ensure!(p.video.kind == MediaQuality::Video, "Invalid video kind");
         p.thumbnail.validate(&p.video.aes_key)?;
         ensure!(
             p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
             "Video thumbnail outside limit"
         );
-        let end = p.video.encrypted.len() - 1;
-        let mut f = upload_fields(&self.config, &p.video, 1, 0, end)?;
-        f.insert("filedata".into(), p.video.encrypted.clone());
-        add_thumbnail(&mut f, &p.thumbnail);
-        put(&mut f, "smallvideoflag", 0);
-        let reply = self.post("/uploadv3", &f)?;
         let mut file_id = None;
-        validate_upload_reply(&reply, 1, 0, end, &mut file_id)?;
+        for (sequence, chunk) in p.video.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
+            let start = sequence * UPLOAD_CHUNK;
+            let end = start + chunk.len() - 1;
+            progress(start as u64, Some(p.video.encrypted.len() as u64))?;
+            let mut fields =
+                upload_fields(&self.config, &p.video, sequence as u32 + 1, start, end)?;
+            fields.insert("filedata".into(), chunk.to_vec());
+            if start == 0 {
+                add_thumbnail(&mut fields, &p.thumbnail);
+            }
+            put(&mut fields, "smallvideoflag", 0);
+            let reply = self.post("/uploadv3", &fields)?;
+            validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
+            progress((end + 1) as u64, Some(p.video.encrypted.len() as u64))?;
+        }
         let id =
             file_id.ok_or_else(|| anyhow::anyhow!("Video upload returned no file identifier"))?;
         Ok(UploadedVideo {

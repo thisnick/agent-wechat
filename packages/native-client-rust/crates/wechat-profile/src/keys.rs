@@ -60,6 +60,23 @@ impl ImageDatKey {
             xor,
         }
     }
+    /// Inspected Linux V2 DAT format key. This public identity derivation is
+    /// separate from database passwords and authenticated network credentials.
+    /// The AES key uses sixteen lowercase-hex ASCII bytes, not decoded MD5.
+    pub fn derive(uin: u32, username: &str) -> Result<Self> {
+        use md5::{Digest, Md5};
+        crate::projection::identity(username)?;
+        let text = format!("{uin}{username}");
+        let hex = format!("{:x}", Md5::digest(text.as_bytes()));
+        let mut aes = [0u8; 16];
+        aes.copy_from_slice(&hex.as_bytes()[..16]);
+        // Native code tries bit shifts0,1,2,3 (not byte shifts).
+        let xor = (0..=3)
+            .map(|s| (uin >> s) as u8)
+            .find(|x| *x != 0)
+            .unwrap_or(0);
+        Ok(Self::new(aes, xor))
+    }
     /// Convert the older authorized cache representation: first 16 ASCII bytes
     /// of the 32-character cache string, not hex-decoding that string.
     pub fn from_legacy_cache(value: &str, xor: u8) -> Result<Self> {
@@ -313,4 +330,78 @@ pub(crate) fn verify_first_page(page: &[u8], key: &[u8], salt: &[u8; 16]) -> boo
     mac.update(&page[16..4032]);
     mac.update(&1u32.to_le_bytes());
     mac.verify_slice(&page[4032..4096]).is_ok()
+}
+
+/// Confirm a server-issued account database password against every actual DB
+/// header and the already authorized page-key map. Only 4096-byte headers are
+/// read; SQLite never opens these files, and no key/password bytes are returned.
+/// The caller must hold exclusive profile ownership or supply a stopped copy.
+/// Missing coverage, a different salt generation or one mismatched key fails
+/// closed. This does not rekey, repair, replace or switch the attached profile.
+pub fn verify_profile_password(
+    location: &crate::ProfileLocation,
+    keys: &KeyFile,
+    password: &[u8],
+) -> Result<usize> {
+    use std::io::Read;
+    if keys.account_binding != location.account_directory() {
+        return Err(ProfileError::AccountMismatch);
+    }
+    if password.len() != 32 {
+        return Err(ProfileError::InvalidKeysFile);
+    }
+    let mut files = vec![];
+    crate::snapshot::walk(&location.storage, &mut files, 0, 4096)?;
+    if files.is_empty() {
+        return Err(ProfileError::KeysMissing);
+    }
+    let mut verified = 0;
+    for path in files {
+        let relative = path
+            .strip_prefix(&location.storage)
+            .ok()
+            .and_then(|p| p.to_str())
+            .ok_or(ProfileError::UnsupportedFile)?
+            .replace('\\', "/");
+        let cached = keys
+            .databases
+            .get(&relative)
+            .ok_or_else(|| ProfileError::KeyUnavailable(relative.clone()))?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(&path)?;
+        let before = file.metadata()?;
+        if !before.is_file() {
+            return Err(ProfileError::UnsupportedFile);
+        }
+        let mut page = [0u8; 4096];
+        file.read_exact(&mut page)
+            .map_err(|_| ProfileError::KeyMismatch(relative.clone()))?;
+        let after = fs::metadata(&path)?;
+        if before.len() != after.len() || before.modified()? != after.modified()? {
+            return Err(ProfileError::SourceChanged);
+        }
+        let mut salt = [0; 16];
+        salt.copy_from_slice(&page[..16]);
+        if salt != cached.salt || !verify_first_page(&page, cached.raw_page_key.expose(), &salt) {
+            return Err(ProfileError::KeyMismatch(relative));
+        }
+        let derived = derive_key(password, &salt);
+        if !openssl::memcmp::eq(derived.expose(), cached.raw_page_key.expose())
+            || !verify_first_page(&page, derived.expose(), &salt)
+        {
+            return Err(ProfileError::KeyMismatch(relative));
+        }
+        verified += 1;
+    }
+    Ok(verified)
+}
+
+pub fn derive_image_dat_key(uin: u32, username: &str) -> Result<ImageDatKey> {
+    ImageDatKey::derive(uin, username)
 }

@@ -12,6 +12,11 @@
 !packages/native-client-rust/crates/*/src/
 !packages/native-client-rust/crates/*/src/**/
 !packages/native-client-rust/crates/*/src/**/*.rs
+!packages/native-client-rust/crates/wechat-profile/src/layout/*.sql
+!packages/native-client-rust/crates/wechat-protocol/src/silk_bridge.c
+!packages/native-client-rust/crates/wechat-protocol/vendor/
+!packages/native-client-rust/crates/wechat-protocol/vendor/silk/
+!packages/native-client-rust/crates/wechat-protocol/vendor/silk/**
 !packages/native-client-rust/crates/*/tests/
 !packages/native-client-rust/crates/*/tests/**/
 !packages/native-client-rust/crates/*/tests/**/*.rs

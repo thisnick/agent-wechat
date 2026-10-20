@@ -1,0 +1,1408 @@
+//! Projection of sealed native sync commands into exclusively owned local files.
+//! Original protocol bytes remain in the encrypted apply journal. Ordinary row
+//! policy is deliberately separate from an exhaustive native status enum.
+use super::*;
+use anyhow::ensure;
+use wechat_profile::{
+    ContactProjection, MessageProjection, MessageSessionProjection, RawFields, SqlValue,
+};
+use wechat_protocol::wire::{AddMessage, SyncCommand};
+
+/// A safe, typed obligation. The sealed batch retains the original command;
+/// reporting this value never constitutes applying its native side effects.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectionBlocked {
+    command_id: i32,
+    message_type: Option<i32>,
+    classification: &'static str,
+    operation_ids: Vec<u32>,
+    system_kind: Option<&'static str>,
+    reason: &'static str,
+}
+impl std::fmt::Display for ProjectionBlocked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.reason)
+    }
+}
+impl std::error::Error for ProjectionBlocked {}
+pub(crate) fn projection_blocker(error: &anyhow::Error) -> Option<Value> {
+    error
+        .downcast_ref::<ProjectionBlocked>()
+        .and_then(|value| serde_json::to_value(value).ok())
+}
+fn command_blocker(command: &SyncCommand) -> ProjectionBlocked {
+    // Linux 4.1.13.26 dispatch at 0x6226f90 (table 0x1f201bc) calls:
+    // 1 -> 0x6227930 -> ModUserInfo constructor 0x7ca80a0;
+    // 4 -> 0x6228370 -> DelContact constructor 0x7bfb450;
+    // 35 -> 0x62280d0 -> ModUserImg constructor 0x7cac120;
+    // 44 -> 0x6227d50 -> UserInfoExt constructor 0x7c9b410.
+    // These generated consumers establish types; complete SQL maps remain open.
+    let classification = match command.id {
+        1 => "mod_user_info",
+        4 => "delete_contact",
+        35 => "mod_user_image",
+        44 => "user_info_ext",
+        _ => "unknown_native_command",
+    };
+    ProjectionBlocked {
+        command_id: command.id,
+        message_type: None,
+        classification,
+        operation_ids: vec![],
+        system_kind: None,
+        reason: "unsupported_sync_control",
+    }
+}
+fn message_blocker(message: &AddMessage) -> ProjectionBlocked {
+    let mut result = ProjectionBlocked {
+        command_id: 5,
+        message_type: Some(message.message_type),
+        classification: match message.message_type {
+            51 => "status_notification",
+            10002 => "system_control",
+            _ => "unsupported_message_variant",
+        },
+        operation_ids: vec![],
+        system_kind: None,
+        reason: "unsupported_message_projection_type",
+    };
+    if !matches!(message.message_type, 51 | 10002) {
+        return result;
+    }
+    result.reason = "unsupported_sync_control";
+    let parse = || -> Result<(Vec<u32>, Option<&'static str>)> {
+        let content = std::str::from_utf8(&message.content)?;
+        ensure!(
+            content.len() <= 1024 * 1024
+                && !content.to_ascii_uppercase().contains("<!DOCTYPE")
+                && !content.to_ascii_uppercase().contains("<!ENTITY"),
+            "invalid_control_xml"
+        );
+        let doc = roxmltree::Document::parse(content)?;
+        ensure!(doc.descendants().count() <= 4096, "invalid_control_xml");
+        let root = doc.root_element();
+        if message.message_type == 51 {
+            ensure!(
+                root.tag_name().name() == "msg" && root.tag_name().namespace().is_none(),
+                "invalid_control_xml"
+            );
+            let mut ids = vec![];
+            for op in root.children().filter(|node| node.is_element()) {
+                ensure!(
+                    op.tag_name().name() == "op" && op.tag_name().namespace().is_none(),
+                    "invalid_control_xml"
+                );
+                let raw = op.attribute("id").context("invalid_control_xml")?;
+                ensure!(
+                    !raw.is_empty() && raw.bytes().all(|byte| byte.is_ascii_digit()),
+                    "invalid_control_xml"
+                );
+                ids.push(raw.parse()?);
+                ensure!(ids.len() <= 64, "invalid_control_xml");
+            }
+            ensure!(!ids.is_empty(), "invalid_control_xml");
+            Ok((ids, None))
+        } else {
+            // Only known discriminator labels may enter an event. Arbitrary XML
+            // names/attributes can contain private data and stay sealed.
+            let kind = if root.tag_name().name() == "sysmsg"
+                && root.tag_name().namespace().is_none()
+            {
+                match root.attribute("type") {
+                    Some("functionmsg") => Some("functionmsg"),
+                    Some("dynacfg") => Some("dynacfg"),
+                    Some("WeChatOut") => Some("WeChatOut"),
+                    Some("ClientCheckGetExtInfo") => Some("ClientCheckGetExtInfo"),
+                    Some("revokemsg") => Some("revokemsg"),
+                    _ => Some("unknown"),
+                }
+            } else if root.tag_name().name() == "appmsg" && root.tag_name().namespace().is_none() {
+                Some("appmsg")
+            } else {
+                Some("unknown")
+            };
+            Ok((vec![], kind))
+        }
+    };
+    match parse() {
+        Ok((ids, kind)) => {
+            result.operation_ids = ids;
+            result.system_kind = kind;
+        }
+        Err(_) => result.reason = "invalid_sync_control_metadata",
+    }
+    result
+}
+
+fn deleted_contact_username(payload: &[u8]) -> Result<String> {
+    use wechat_protocol::protobuf as p;
+    let fields = p::decode(payload)?;
+    let nested = p::decode(p::data(&fields, 1)?)?;
+    let username = std::str::from_utf8(p::data(&nested, 1)?)?.to_string();
+    identity(&username)?;
+    for number in [2, 3] {
+        if let Some(value) = p::optional(&fields, number)? {
+            let p::Value::Varint(value) = value else {
+                bail!("invalid_delete_contact_metadata")
+            };
+            u32::try_from(*value)?;
+        }
+    }
+    Ok(username)
+}
+fn contact_absent(reader: &wechat_profile::ProfileReader, username: &str) -> Result<bool> {
+    let mut query = wechat_profile::ListQuery {
+        search: Some(username.into()),
+        limit: Some(200),
+        ..Default::default()
+    };
+    // The official contacts reader queries every Contact row, including groups
+    // and nonfriend categories. Absence is established only after a complete
+    // exact-name search over one coherent snapshot, never from a friend list.
+    for _ in 0..100 {
+        let page = reader.contacts(&query)?;
+        if page
+            .items
+            .iter()
+            .any(|contact| contact.username == username)
+        {
+            return Ok(false);
+        }
+        match page.next_cursor {
+            Some(cursor) => query.cursor = Some(cursor),
+            None => return Ok(true),
+        }
+    }
+    bail!("contact_absence_scan_bound")
+}
+
+fn identity(value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        bail!("invalid_message_identity")
+    }
+    Ok(())
+}
+fn envelope(message: &AddMessage) -> Result<(String, &[u8])> {
+    if message.from.ends_with("@chatroom") && !message.outgoing && message.message_type != 10000 {
+        let end = message
+            .content
+            .windows(2)
+            .take(513)
+            .position(|p| p == b":\n")
+            .context("unsupported_group_sender_envelope")?;
+        let sender = std::str::from_utf8(&message.content[..end])?;
+        identity(sender)?;
+        if sender.ends_with("@chatroom") {
+            bail!("invalid_group_sender_envelope")
+        }
+        Ok((sender.into(), &message.content[end + 2..]))
+    } else {
+        Ok((
+            message
+                .sender_id
+                .clone()
+                .unwrap_or_else(|| message.from.clone()),
+            &message.content,
+        ))
+    }
+}
+fn app_fields(content: &[u8]) -> Result<(u32, Option<String>)> {
+    let text = std::str::from_utf8(content)?;
+    if text.len() > 4 * 1024 * 1024
+        || text.to_ascii_uppercase().contains("<!DOCTYPE")
+        || text.to_ascii_uppercase().contains("<!ENTITY")
+    {
+        bail!("invalid_app_message_metadata")
+    }
+    let doc = roxmltree::Document::parse(text)?;
+    let root = doc.root_element();
+    let app = if root.tag_name().name() == "appmsg" {
+        root
+    } else {
+        let mut apps = root
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "appmsg");
+        let app = apps.next().context("missing_app_message_metadata")?;
+        if apps.next().is_some() {
+            bail!("ambiguous_app_message_metadata")
+        }
+        app
+    };
+    let mut types = app
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "type");
+    let subtype = types
+        .next()
+        .and_then(|n| n.text())
+        .context("missing_app_message_type")?
+        .parse::<u32>()?;
+    if types.next().is_some() || subtype > i32::MAX as u32 {
+        bail!("invalid_app_message_type")
+    }
+    let mut titles = app
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "title");
+    let title = titles.next().and_then(|n| n.text()).map(str::to_owned);
+    if titles.next().is_some() {
+        bail!("ambiguous_app_message_title")
+    }
+    Ok((subtype, title))
+}
+fn fields(message: &AddMessage, body: &[u8], sort: i64) -> Result<(RawFields, String)> {
+    if message.content.len() > 4 * 1024 * 1024 {
+        bail!("message_content_too_large")
+    }
+    if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
+        bail!("unsupported_message_projection_type")
+    }
+    let (subtype, title) = if message.message_type == 49 {
+        app_fields(body)?
+    } else {
+        (0, None)
+    };
+    let local_type = (u64::from(subtype) << 32) | message.message_type as u64;
+    let mut fields = RawFields::new();
+    for (key, value) in [
+        ("local_type", local_type as i64),
+        ("sort_seq", sort),
+        ("create_time", message.created_at as i64),
+        ("status", if message.message_type == 10000 { 4 } else { 3 }),
+        ("upload_status", 0),
+        (
+            "download_status",
+            if message.message_type == 34 && !message.inline_data.is_empty() {
+                1
+            } else {
+                0
+            },
+        ),
+        (
+            "server_seq",
+            message
+                .server_sequence
+                .context("missing_verified_message_sequence")? as i64,
+        ),
+        ("origin_source", 2),
+        (
+            "WCDB_CT_message_content",
+            if message.message_type == 1 || message.message_type >= 10000 {
+                0
+            } else {
+                4
+            },
+        ),
+        ("WCDB_CT_source", 4),
+    ] {
+        fields.insert(key.into(), SqlValue::Integer(value.to_string()));
+    }
+    // Uncached media starts pending (download_status0); caching later has its own
+    // exact resource transition. These rows are not represented as downloaded.
+    fields.insert(
+        "message_content".into(),
+        if message.message_type == 1 || message.message_type >= 10000 {
+            SqlValue::Text(std::str::from_utf8(&message.content)?.to_string())
+        } else {
+            wechat_profile::compressed_profile_field(&message.content)?
+        },
+    );
+    fields.insert(
+        "source".into(),
+        wechat_profile::compressed_profile_field(message.msgsource.as_deref().unwrap_or_default())?,
+    );
+    fields.insert("compress_content".into(), SqlValue::Text(String::new()));
+    let summary = match message.message_type {
+        1 | 10000 => std::str::from_utf8(body)?.to_string(),
+        49 => title.unwrap_or_default(),
+        _ => String::new(),
+    };
+    Ok((fields, summary))
+}
+impl Core {
+    fn retain_control_raw(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+    ) -> Result<()> {
+        let key = format!("sync-control:{receipt}");
+        if let Some(sealed) = self.store.runtime(account, &key)? {
+            ensure!(
+                *self.vault.open_record(account, &key, &sealed)? == command.payload,
+                "sync_control_receipt_conflict"
+            );
+        } else {
+            self.store.put_runtime(
+                account,
+                &key,
+                &self.vault.seal(account, &key, &command.payload)?,
+            )?;
+        }
+        Ok(())
+    }
+    fn retain_ignored_sync_control(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+    ) -> Result<()> {
+        ensure!(command.id == 23, "unknown_sync_control_cannot_be_ignored");
+        self.retain_control_raw(account, command, receipt)?;
+        self.store.append_event_once(account, &format!("control-observed:{receipt}"), "account.control_observed", &json!({"commandId":23,"classification":"native_dispatcher_ignored","projection":"not_applicable_current_build","policy":"linux_4_1_13_26","origin":origin}))?;
+        self.store.put_runtime(account, receipt, b"1")?;
+        Ok(())
+    }
+    pub(crate) fn apply_sync_command(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+    ) -> Result<()> {
+        if command.id == 4 {
+            // Native DelContact handler 0x6228370 calls 0x786f830. Lookup
+            // 0x786e260 returning no Contact jumps to 0x786fe54 without mutation.
+            // Existing-row transitions
+            // involve category/flag/group state and remain blocked here.
+            self.account_state(account)?;
+            let username = deleted_contact_username(&command.payload)?;
+            if !contact_absent(&self.profile_reader(account)?, &username)? {
+                let mut blocked = command_blocker(command);
+                blocked.reason = "unsupported_existing_contact_deletion";
+                return Err(blocked.into());
+            }
+            self.retain_control_raw(account, command, receipt)?;
+            self.store.append_event_once(account, &format!("control-observed:{receipt}"), "account.control_observed", &json!({"commandId":4,"classification":"delete_contact_absent","projection":"no_change","policy":"linux_4_1_13_26","origin":origin}))?;
+            self.store.put_runtime(account, receipt, b"1")?;
+            return Ok(());
+        }
+        if command.id == 23 {
+            // The pinned NewSync dispatcher 0x61e0180 (mask 0x100800000016)
+            // and metadata dispatcher 0x622719d log command 23 and continue
+            // without parsing or forwarding it.
+            // Retain it explicitly; this is not a general unknown-command rule.
+            self.account_state(account)?;
+            self.retain_ignored_sync_control(account, command, receipt, origin)?;
+            return Ok(());
+        }
+        if !matches!(command.id, 2 | 5) {
+            return Err(command_blocker(command).into());
+        }
+        let state = self.account_state(account)?;
+        let parsed = if command.id == 5 {
+            let message =
+                wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)?;
+            if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
+                let blocked = message_blocker(&message);
+                if matches!(message.message_type, 51 | 10002) {
+                    self.store.append_event_once(
+                        account,
+                        &format!("control-observed:{receipt}"),
+                        "account.control_observed",
+                        &json!({"control":blocked,"origin":origin,"projection":"blocked"}),
+                    )?;
+                }
+                return Err(blocked.into());
+            }
+            Some(message)
+        } else {
+            None
+        };
+        let options = self.write_options(account, receipt)?;
+        let (location, keys) = self.profile_location_keys(account)?;
+        if command.id == 2 {
+            let contact = wechat_protocol::wire::decode_contact_record(&command.payload)?;
+            wechat_profile::apply_contact_patch(
+                &location,
+                &keys,
+                &super::metadata::contact_patch(&contact)?,
+                &options,
+            )?;
+            if contact.username.ends_with("@chatroom") {
+                // Explicit native contact metadata establishes catalog presence.
+                // Missing owner/roster fields remain NULL/preserved; a group seen
+                // only in an AddMsg does not create this catalog row.
+                wechat_profile::apply_group_patch(
+                    &location,
+                    &keys,
+                    &wechat_profile::GroupProjection {
+                        username: contact.username.clone(),
+                        fields: RawFields::new(),
+                        detail_fields: None,
+                        members: vec![],
+                        complete_roster: false,
+                    },
+                    &options,
+                )?;
+            }
+            self.store.append_event_once(
+                account,
+                &format!("contact:{receipt}"),
+                "contacts.updated",
+                &json!({"contactId":contact.username,"origin":origin}),
+            )?;
+            self.store.put_runtime(account, receipt, b"1")?;
+            return Ok(());
+        }
+        let message = parsed.context("missing_parsed_message")?;
+        let (sender, body) = envelope(&message)?;
+        identity(&sender)?;
+        let sid = message
+            .server_message_id
+            .as_deref()
+            .context("missing_message_server_identity")?;
+        let planned_sort = wechat_profile::choose_message_sort_sequence(
+            &location,
+            &keys,
+            &message.peer,
+            sid,
+            message.created_at as i64,
+            &options,
+        )?;
+        let (stored_fields, summary) = fields(&message, body, planned_sort)?;
+        // Minimal cached identities do not manufacture friendship flags, owner,
+        // nickname, membership or a contact/group catalog entry from remote names.
+        for name in [&message.peer, &sender, &message.from, &message.to] {
+            identity(name)?;
+            wechat_profile::apply_contact_patch(
+                &location,
+                &keys,
+                &ContactProjection {
+                    username: name.clone(),
+                    fields: RawFields::new(),
+                },
+                &options,
+            )?;
+        }
+        let existing =
+            wechat_profile::find_projected_message(&location, &keys, &message.peer, sid, &options)?;
+        let own_phase = format!("{receipt}:message-started");
+        let started = self.store.runtime(account, &own_phase)?.is_some();
+        let (source, created_by_intent) = if let Some(id) = existing {
+            let stored = self
+                .profile_reader(account)?
+                .message(&id, Some(&state.own_username))?;
+            let expected = std::str::from_utf8(&message.content)?;
+            if stored.create_time != message.created_at as i64
+                || stored.content.text.as_deref() != Some(expected)
+                || stored.local_type
+                    != match stored_fields.get("local_type") {
+                        Some(SqlValue::Integer(n)) => n.clone(),
+                        _ => bail!("invalid_stored_message_type"),
+                    }
+            {
+                bail!("message_identity_conflict")
+            }
+            if stored.sender.as_deref().is_some_and(|s| s != sender) {
+                bail!("message_sender_conflict")
+            }
+            (id, started)
+        } else {
+            // Persist before the first profile transaction. A retry can distinguish its
+            // own interrupted row from an independently imported native observation.
+            self.store.put_runtime(account, &own_phase, b"1")?;
+            let applied = wechat_profile::apply_message_projection(
+                &location,
+                &keys,
+                &MessageProjection {
+                    peer: message.peer.clone(),
+                    sender: sender.clone(),
+                    from: message.from.clone(),
+                    to: message.to.clone(),
+                    server_message_id: sid.into(),
+                    fields: stored_fields,
+                    packed_other_fields: vec![88, 0],
+                },
+                &options,
+            )?;
+            (applied.source_id, true)
+        };
+        if message.message_type == 34 && !message.inline_data.is_empty() {
+            wechat_profile::cache_voice_projection(
+                &location,
+                &keys,
+                &source,
+                &message.peer,
+                &message.inline_data,
+                &options,
+            )?;
+        }
+        wechat_profile::apply_message_session_projection(
+            &location,
+            &keys,
+            &MessageSessionProjection {
+                source: source.clone(),
+                peer: message.peer.clone(),
+                summary,
+                outgoing: message.outgoing,
+                unread: origin != "profile_import",
+                sender: Some(sender),
+                sender_display: None,
+                created_by_this_intent: created_by_intent,
+            },
+            &options,
+        )?;
+        let id = crate::message_id(&source)?;
+        self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
+        self.store.put_runtime(account, receipt, b"1")?;
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn control_delete_contact_only_proves_absence_in_complete_all_category_snapshot() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("profile");
+        let path = root.join("db_storage/contact/contact.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(include_str!(
+            "../../wechat-profile/src/layout/contact.db.sql"
+        ))
+        .unwrap();
+        db.execute_batch("INSERT INTO contact(id,username,local_type)VALUES(1,'peer-long',1),(2,'room@chatroom',2),(3,'other',4)").unwrap();
+        drop(db);
+        let before = std::fs::read(&path).unwrap();
+        let reader = wechat_profile::ProfileReader::open(
+            wechat_profile::ProfileLocation::new(root).unwrap(),
+            wechat_profile::KeyFile::empty("profile"),
+            wechat_profile::ReadOptions {
+                allow_plaintext: true,
+                stopped_or_consistent_snapshot: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(contact_absent(&reader, "peer").unwrap());
+        for name in ["peer-long", "room@chatroom", "other"] {
+            assert!(!contact_absent(&reader, name).unwrap());
+        }
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        use wechat_protocol::protobuf as p;
+        let payload = p::message(&[
+            p::bytes(1, &p::bytes(1, b"synthetic")),
+            p::uint(2, 0),
+            p::uint(3, 1),
+        ])
+        .unwrap();
+        assert_eq!(deleted_contact_username(&payload).unwrap(), "synthetic");
+        assert!(deleted_contact_username(&p::bytes(1, b"not nested")).is_err());
+    }
+    #[test]
+    fn control_ignored_policy_seals_raw_once_and_never_extends_to_other_commands() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let command = SyncCommand {
+            id: 23,
+            payload: b"synthetic private opaque control".to_vec(),
+        };
+        for _ in 0..2 {
+            core.retain_ignored_sync_control("one", &command, "receipt", "catchup")
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .events("one", 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "account.control_observed")
+                .count(),
+            1
+        );
+        let raw = store
+            .runtime("one", "sync-control:receipt")
+            .unwrap()
+            .unwrap();
+        assert!(!raw
+            .windows(command.payload.len())
+            .any(|v| v == command.payload));
+        assert_eq!(
+            *core
+                .vault
+                .open_record("one", "sync-control:receipt", &raw)
+                .unwrap(),
+            command.payload
+        );
+        assert!(core
+            .retain_ignored_sync_control(
+                "one",
+                &SyncCommand {
+                    id: 4,
+                    payload: vec![]
+                },
+                "other",
+                "catchup"
+            )
+            .is_err());
+        assert!(core
+            .retain_ignored_sync_control(
+                "one",
+                &SyncCommand {
+                    id: 23,
+                    payload: b"conflicting".to_vec()
+                },
+                "receipt",
+                "catchup"
+            )
+            .is_err());
+    }
+    #[test]
+    fn control_diagnostics_keep_unknown_commands_blocked_and_never_serialize_payloads() {
+        for (id, expected) in [
+            (1, "mod_user_info"),
+            (4, "delete_contact"),
+            (35, "mod_user_image"),
+            (44, "user_info_ext"),
+            (23, "unknown_native_command"),
+            (999, "unknown_native_command"),
+        ] {
+            let blocked = command_blocker(&SyncCommand {
+                id,
+                payload: b"secret credential material".to_vec(),
+            });
+            let error = anyhow::Error::new(blocked).context("projection unavailable");
+            let value = projection_blocker(&error).unwrap();
+            assert_eq!(value["commandId"], id);
+            assert_eq!(value["classification"], expected);
+            assert!(!value.to_string().contains("secret"));
+        }
+    }
+    #[test]
+    fn control_diagnostics_type51_is_not_a_message_or_read_receipt() {
+        let mut message = example();
+        message.message_type = 51;
+        message.content = b"<msg><op id=\"11\"><name>secret</name><arg>private</arg></op><op id=\"4\"><username>secret-user</username></op></msg>".to_vec();
+        let blocked = message_blocker(&message);
+        assert_eq!(blocked.operation_ids, vec![11, 4]);
+        assert_eq!(blocked.classification, "status_notification");
+        assert_eq!(blocked.reason, "unsupported_sync_control");
+        let value = serde_json::to_value(blocked).unwrap().to_string();
+        assert!(!value.contains("secret") && !value.contains("private"));
+        message.content =
+            b"<!DOCTYPE msg [<!ENTITY e SYSTEM 'file:///private'>]><msg><op id=\"1\"/></msg>"
+                .to_vec();
+        assert_eq!(
+            message_blocker(&message).reason,
+            "invalid_sync_control_metadata"
+        );
+    }
+    #[test]
+    fn control_diagnostics_system_configuration_and_revocation_remain_explicit() {
+        let mut message = example();
+        message.message_type = 10002;
+        for (raw, kind) in [
+            (
+                "<sysmsg type=\"functionmsg\"><private>secret</private></sysmsg>",
+                "functionmsg",
+            ),
+            ("<sysmsg type=\"revokemsg\"/>", "revokemsg"),
+            ("<sysmsg type=\"private-secret\"/>", "unknown"),
+        ] {
+            message.content = raw.as_bytes().to_vec();
+            let blocked = message_blocker(&message);
+            assert_eq!(blocked.system_kind, Some(kind));
+            assert_eq!(blocked.reason, "unsupported_sync_control");
+            assert!(!serde_json::to_string(&blocked).unwrap().contains("secret"));
+        }
+    }
+    fn example() -> AddMessage {
+        AddMessage {
+            from: "room@chatroom".into(),
+            to: "self".into(),
+            peer: "room@chatroom".into(),
+            sender_id: None,
+            outgoing: false,
+            server_message_id: Some("9".into()),
+            numbered1: 0,
+            message_type: 49,
+            content:
+                b"member:\n<msg><appmsg><type>6</type><title>synthetic.txt</title></appmsg></msg>"
+                    .to_vec(),
+            content_text: None,
+            numbered6: 0,
+            numbered7: 0,
+            inline_data: vec![],
+            created_at: 100,
+            msgsource: Some(b"<msgsource/>".to_vec()),
+            opaque11: None,
+            numbered13: Some(7),
+            server_sequence: Some(7),
+            raw: vec![],
+        }
+    }
+    #[test]
+    fn group_envelope_and_app_subtype_are_mapped_without_dropping_stored_prefix() {
+        let message = example();
+        let (sender, body) = envelope(&message).unwrap();
+        assert_eq!(sender, "member");
+        let (fields, summary) = fields(&message, body, 100000).unwrap();
+        assert_eq!(
+            fields.get("local_type"),
+            Some(&SqlValue::Integer(((6u64 << 32) | 49).to_string()))
+        );
+        assert_eq!(summary, "synthetic.txt");
+        assert_eq!(
+            fields.get("download_status"),
+            Some(&SqlValue::Integer("0".into()))
+        );
+    }
+    #[test]
+    fn malformed_group_or_app_metadata_and_unmapped_sequence_fail() {
+        let mut message = example();
+        message.content = b"<msg/>".to_vec();
+        assert!(envelope(&message).is_err());
+        message.content =
+            b"member:\n<msg><appmsg><type>6</type><type>5</type></appmsg></msg>".to_vec();
+        let (_, body) = envelope(&message).unwrap();
+        assert!(fields(&message, body, 100000).is_err());
+        let mut message = example();
+        message.server_sequence = None;
+        let (_, body) = envelope(&message).unwrap();
+        assert!(fields(&message, body, 100000).is_err());
+    }
+}
+
+impl Core {
+    /// Local post-ack text insertion. The observed native outgoing row has a
+    /// nonzero accepted server ID with server_seq0/status2/origin1; it does not wait
+    /// for an absent NewSync echo or manufacture a network field13 sequence.
+    pub(crate) fn project_accepted_text(
+        &self,
+        account: &str,
+        destination: &str,
+        text: &str,
+        created_at: u64,
+        server_message_id: &str,
+        receipt: &str,
+    ) -> Result<wechat_profile::SourceMessageId> {
+        identity(destination)?;
+        if text.is_empty() || text.len() > 64 * 1024 {
+            bail!("invalid_accepted_text")
+        }
+        let options = self.write_options(account, receipt)?;
+        let (location, keys) = self.profile_location_keys(account)?;
+        let state = self.account_state(account)?;
+        let time = i64::try_from(created_at)?;
+        for name in [&state.own_username, destination] {
+            wechat_profile::apply_contact_patch(
+                &location,
+                &keys,
+                &ContactProjection {
+                    username: name.to_string(),
+                    fields: RawFields::new(),
+                },
+                &options,
+            )?;
+        }
+        let source = if let Some(source) = wechat_profile::find_projected_message(
+            &location,
+            &keys,
+            destination,
+            server_message_id,
+            &options,
+        )? {
+            let existing = self
+                .profile_reader(account)?
+                .message(&source, Some(&state.own_username))?;
+            if existing.message_type != 1
+                || existing.sender.as_deref() != Some(&state.own_username)
+                || existing.content.text.as_deref() != Some(text)
+            {
+                bail!("accepted_message_identity_conflict")
+            }
+            source
+        } else {
+            let sort = wechat_profile::choose_message_sort_sequence(
+                &location,
+                &keys,
+                destination,
+                server_message_id,
+                time,
+                &options,
+            )?;
+            let mut fields = RawFields::new();
+            for (k, n) in [
+                ("local_type", 1),
+                ("sort_seq", sort),
+                ("create_time", time),
+                ("status", 2),
+                ("upload_status", 0),
+                ("download_status", 0),
+                ("server_seq", 0),
+                ("origin_source", 1),
+                ("WCDB_CT_message_content", 0),
+                ("WCDB_CT_source", 0),
+            ] {
+                fields.insert(k.into(), SqlValue::Integer(n.to_string()));
+            }
+            fields.insert("message_content".into(), SqlValue::Text(text.into()));
+            fields.insert(
+                "source".into(),
+                SqlValue::Text("<msgsource><alnode><fr>1</fr></alnode></msgsource>".into()),
+            );
+            fields.insert("compress_content".into(), SqlValue::Text(String::new()));
+            wechat_profile::apply_message_projection(
+                &location,
+                &keys,
+                &MessageProjection {
+                    peer: destination.into(),
+                    sender: state.own_username.clone(),
+                    from: state.own_username.clone(),
+                    to: destination.into(),
+                    server_message_id: server_message_id.into(),
+                    fields,
+                    packed_other_fields: vec![],
+                },
+                &options,
+            )?
+            .source_id
+        };
+        wechat_profile::apply_message_session_projection(
+            &location,
+            &keys,
+            &MessageSessionProjection {
+                source: source.clone(),
+                peer: destination.into(),
+                summary: text.into(),
+                outgoing: true,
+                unread: false,
+                sender: Some(state.own_username.clone()),
+                sender_display: None,
+                created_by_this_intent: true,
+            },
+            &options,
+        )?;
+        let id = crate::message_id(&source)?;
+        self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":destination,"origin":"local_send","direction":"outgoing"}))?;
+        self.store.put_runtime(account, receipt, b"1")?;
+        Ok(source)
+    }
+}
+
+#[cfg(test)]
+mod encrypted_roundtrip {
+    use super::*;
+    use wechat_protocol::protobuf as p;
+    fn state() -> AccountState {
+        AccountState {
+            schema: 1,
+            device: DeviceProfile {
+                device_id: vec![b'A'; 16],
+                device_type: "UnifiedPCLinux x86_64".into(),
+                client_version: -227271398,
+            },
+            uin: 7,
+            own_username: "synthetic_self".into(),
+            cookie: vec![1; 15],
+            session_key: vec![1; 16],
+            request_key: vec![2; 24],
+            response_key: vec![3; 24],
+            auto_auth_key: p::message(&[
+                p::bytes(1, &p::buffer(b"synthetic-a")),
+                p::bytes(2, &p::buffer(b"synthetic-b")),
+            ])
+            .unwrap(),
+            key_info: vec![4; 180],
+            database_password: vec![42; 32],
+            auth_snapshot: Default::default(),
+            long_host: "long.weixin.qq.com".into(),
+            short_host: "short.weixin.qq.com".into(),
+        }
+    }
+    fn add(kind: u32, from: &str, to: &str, body: &[u8], sid: u64, time: u32) -> SyncCommand {
+        let inline = if kind == 34 {
+            b"\x02#!SILK_V3\x02\x00xy".as_slice()
+        } else {
+            b"".as_slice()
+        };
+        SyncCommand {
+            id: 5,
+            payload: p::message(&[
+                p::uint(1, 1),
+                p::bytes(2, &p::bytes(1, from.as_bytes())),
+                p::bytes(3, &p::bytes(1, to.as_bytes())),
+                p::uint(4, kind as u64),
+                p::bytes(5, &p::bytes(1, body)),
+                p::uint(6, 0),
+                p::uint(7, 0),
+                p::bytes(8, &p::buffer(inline)),
+                p::uint(9, time as u64),
+                p::bytes(10, b"<msgsource/>"),
+                p::uint(12, sid),
+                p::uint(13, 9),
+            ])
+            .unwrap(),
+        }
+    }
+    #[test]
+    fn encrypted_all_families_new_groups_outgoing_u64_and_replay_have_durable_rows_before_events() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let state = state();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state, None).unwrap();
+        core.ensure_managed_profile("one", &state).unwrap();
+        let mut commands = vec![];
+        for (name, flag) in [
+            ("peer", 1),
+            ("member", 1),
+            ("synthetic_self", 1),
+            ("room@chatroom", 2),
+        ] {
+            commands.push(SyncCommand {
+                id: 2,
+                payload: p::message(&[
+                    p::bytes(1, &p::bytes(1, name.as_bytes())),
+                    p::bytes(2, &p::bytes(1, format!("Synthetic {name}").as_bytes())),
+                    p::uint(7, 3),
+                    p::uint(8, flag),
+                ])
+                .unwrap(),
+            });
+        }
+        let cases = [
+            (1, b"Synthetic text \xf0\x9f\x99\x82".as_slice()),
+            (
+                3,
+                b"<msg><img md5=\"00112233445566778899aabbccddeeff\"/></msg>".as_slice(),
+            ),
+            (34, b"<msg><voicemsg voiceformat=\"4\"/></msg>".as_slice()),
+            (43, b"<msg><videomsg/></msg>".as_slice()),
+            (47, b"<msg><emoji/></msg>".as_slice()),
+            (
+                49,
+                b"<msg><appmsg><type>6</type><title>synthetic.txt</title></appmsg></msg>"
+                    .as_slice(),
+            ),
+        ];
+        let mut index = 0;
+        for (scope, outgoing) in [
+            ("peer", false),
+            ("peer", true),
+            ("room@chatroom", false),
+            ("room@chatroom", true),
+        ] {
+            for (kind, plain) in cases {
+                index += 1;
+                let body = if scope.ends_with("@chatroom") && !outgoing {
+                    [b"member:\n".as_slice(), plain].concat()
+                } else {
+                    plain.to_vec()
+                };
+                let from = if outgoing { "synthetic_self" } else { scope };
+                let to = if outgoing { scope } else { "synthetic_self" };
+                commands.push(add(
+                    kind,
+                    from,
+                    to,
+                    &body,
+                    u64::MAX - index,
+                    100 + index as u32,
+                ));
+            }
+        }
+        index += 1;
+        commands.push(add(
+            10000,
+            "room@chatroom",
+            "synthetic_self",
+            b"Synthetic system event",
+            u64::MAX - index,
+            100 + index as u32,
+        ));
+        let count = commands.len();
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            commands,
+            continuation: false,
+        };
+        let raw = serde_json::to_vec(&batch).unwrap();
+        store
+            .stage_sync(
+                "one",
+                "all-families",
+                &core.vault.seal("one", "apply:all-families", &raw).unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &batch.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
+        store
+            .put_runtime("one", "apply-origin:all-families", b"live")
+            .unwrap();
+        let result = core.recover_projection("one").unwrap();
+        assert_eq!(result["projectedCommands"], count);
+        assert_eq!(result["pendingCommands"], 0);
+        assert!(store.pending_sync("one").unwrap().is_empty());
+        let reader = core.profile_reader("one").unwrap();
+        let messages = reader
+            .messages(&wechat_profile::MessageQuery {
+                own_username: Some("synthetic_self".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items;
+        assert_eq!(messages.len(), 25);
+        assert_eq!(
+            messages.iter().filter(|m| m.outgoing == Some(true)).count(),
+            12
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.sender.as_deref() == Some("member"))
+                .count(),
+            6
+        );
+        assert!(messages.iter().all(|m| m
+            .server_message_id
+            .as_deref()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > i64::MAX as u64));
+        let voice = messages
+            .iter()
+            .find(|m| {
+                m.peer.as_deref() == Some("peer") && m.message_type == 34 && !m.outgoing.unwrap()
+            })
+            .unwrap();
+        assert_eq!(
+            reader
+                .cached_voice(
+                    "message/media_0.db",
+                    "peer",
+                    &voice.id.local_id,
+                    voice.server_message_id.as_deref()
+                )
+                .unwrap()
+                .bytes,
+            b"\x02#!SILK_V3\x02\x00xy"
+        );
+        drop(reader);
+        let event_count = store
+            .events("one", 0, 200)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "message.committed")
+            .count();
+        assert_eq!(event_count, 25);
+        assert_eq!(
+            core.recover_projection("one").unwrap()["projectedCommands"],
+            0
+        );
+        assert_eq!(
+            store
+                .events("one", 0, 200)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "message.committed")
+                .count(),
+            25
+        );
+        let source = core
+            .project_accepted_text(
+                "one",
+                "peer",
+                "Synthetic accepted without sync echo",
+                200,
+                "77",
+                "send:synthetic",
+            )
+            .unwrap();
+        assert_eq!(
+            source,
+            core.project_accepted_text(
+                "one",
+                "peer",
+                "Synthetic accepted without sync echo",
+                200,
+                "77",
+                "send:synthetic"
+            )
+            .unwrap()
+        );
+        let stored = core
+            .profile_reader("one")
+            .unwrap()
+            .message(&source, Some("synthetic_self"))
+            .unwrap();
+        assert_eq!(
+            stored.raw_fields.get("server_seq"),
+            Some(&SqlValue::Integer("0".into()))
+        );
+        assert_eq!(
+            stored.raw_fields.get("origin_source"),
+            Some(&SqlValue::Integer("1".into()))
+        );
+        assert_eq!(
+            store
+                .events("one", 0, 200)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "message.committed")
+                .count(),
+            26
+        );
+        // An adopted duplicate with a different native status/codec is not rewritten.
+        core.apply_sync_command(
+            "one",
+            &add(
+                1,
+                "synthetic_self",
+                "peer",
+                b"Synthetic accepted without sync echo",
+                77,
+                200,
+            ),
+            "late-sync-echo",
+            "catchup",
+        )
+        .unwrap();
+        let stored = core
+            .profile_reader("one")
+            .unwrap()
+            .message(&source, None)
+            .unwrap();
+        assert_eq!(
+            stored.raw_fields.get("origin_source"),
+            Some(&SqlValue::Integer("1".into()))
+        );
+        assert_eq!(
+            store
+                .events("one", 0, 200)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind == "message.committed")
+                .count(),
+            26
+        );
+        for (i, (kind, xml)) in [
+            (3, "<msg><img/></msg>"),
+            (34, "<msg><voicemsg/></msg>"),
+            (43, "<msg><videomsg/></msg>"),
+            (
+                49,
+                "<msg><appmsg><type>6</type><title>synthetic</title></appmsg></msg>",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let server = (80 + i).to_string();
+            let receipt = format!("send-media:{i}");
+            let source = core
+                .project_accepted_media(
+                    "one",
+                    "peer",
+                    kind,
+                    xml,
+                    "Synthetic media",
+                    210 + i as u64,
+                    &server,
+                    &receipt,
+                )
+                .unwrap();
+            assert_eq!(
+                source,
+                core.project_accepted_media(
+                    "one",
+                    "peer",
+                    kind,
+                    xml,
+                    "Synthetic media",
+                    210 + i as u64,
+                    &server,
+                    &receipt
+                )
+                .unwrap()
+            );
+            let stored = core
+                .profile_reader("one")
+                .unwrap()
+                .message(&source, Some("synthetic_self"))
+                .unwrap();
+            assert_eq!(stored.message_type, kind as i64);
+            assert_eq!(stored.content.text.as_deref(), Some(xml));
+            assert_eq!(
+                stored.raw_fields.get("server_seq"),
+                Some(&SqlValue::Integer("0".into()))
+            );
+            assert_eq!(
+                stored.raw_fields.get("status"),
+                Some(&SqlValue::Integer("2".into()))
+            );
+            assert!(core
+                .project_accepted_media(
+                    "one",
+                    "peer",
+                    kind,
+                    "conflict",
+                    "Synthetic media",
+                    210 + i as u64,
+                    &server,
+                    &receipt
+                )
+                .is_err());
+        }
+        assert_eq!(
+            store
+                .events("one", 0, 200)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "message.committed")
+                .count(),
+            30
+        );
+    }
+}
+
+impl Core {
+    /// Commit one accepted outgoing media acknowledgement before publishing its
+    /// message event. Voice/video local flags have bounded native examples. Image
+    /// and application-file status2/origin1/sequence0 are explicit local insertion
+    /// policy; their exact native local transition still needs a same-build check.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn project_accepted_media(
+        &self,
+        account: &str,
+        destination: &str,
+        message_type: u32,
+        content: &str,
+        summary: &str,
+        created_at: u64,
+        server_message_id: &str,
+        receipt: &str,
+    ) -> Result<wechat_profile::SourceMessageId> {
+        identity(destination)?;
+        if ![3, 34, 43, 49].contains(&message_type)
+            || content.is_empty()
+            || content.len() > 4 * 1024 * 1024
+            || summary.len() > 65536
+        {
+            bail!("invalid_accepted_media")
+        }
+        let options = self.write_options(account, receipt)?;
+        let (location, keys) = self.profile_location_keys(account)?;
+        let state = self.account_state(account)?;
+        let time = i64::try_from(created_at)?;
+        let subtype = if message_type == 49 {
+            app_fields(content.as_bytes())?.0
+        } else {
+            0
+        };
+        let local_type = (u64::from(subtype) << 32) | message_type as u64;
+        for name in [&state.own_username, destination] {
+            wechat_profile::apply_contact_patch(
+                &location,
+                &keys,
+                &ContactProjection {
+                    username: name.to_string(),
+                    fields: RawFields::new(),
+                },
+                &options,
+            )?;
+        }
+        let source = if let Some(source) = wechat_profile::find_projected_message(
+            &location,
+            &keys,
+            destination,
+            server_message_id,
+            &options,
+        )? {
+            let existing = self
+                .profile_reader(account)?
+                .message(&source, Some(&state.own_username))?;
+            if existing.local_type != local_type.to_string()
+                || existing.sender.as_deref() != Some(&state.own_username)
+                || existing.content.text.as_deref() != Some(content)
+            {
+                bail!("accepted_media_identity_conflict")
+            }
+            source
+        } else {
+            let sort = wechat_profile::choose_message_sort_sequence(
+                &location,
+                &keys,
+                destination,
+                server_message_id,
+                time,
+                &options,
+            )?;
+            let source_compressed = message_type == 43;
+            let mut fields = RawFields::new();
+            for (k, n) in [
+                ("local_type", local_type as i64),
+                ("sort_seq", sort),
+                ("create_time", time),
+                ("status", 2),
+                ("upload_status", if message_type == 43 { 3 } else { 0 }),
+                ("download_status", 0),
+                ("server_seq", 0),
+                ("origin_source", 1),
+                ("WCDB_CT_message_content", 4),
+                ("WCDB_CT_source", if source_compressed { 4 } else { 0 }),
+            ] {
+                fields.insert(k.into(), SqlValue::Integer(n.to_string()));
+            }
+            let local_source = b"<msgsource><alnode><fr>1</fr></alnode></msgsource>";
+            fields.insert(
+                "message_content".into(),
+                wechat_profile::compressed_profile_field(content.as_bytes())?,
+            );
+            fields.insert(
+                "source".into(),
+                if source_compressed {
+                    wechat_profile::compressed_profile_field(local_source)?
+                } else {
+                    SqlValue::Text(std::str::from_utf8(local_source)?.into())
+                },
+            );
+            fields.insert("compress_content".into(), SqlValue::Text(String::new()));
+            wechat_profile::apply_message_projection(
+                &location,
+                &keys,
+                &MessageProjection {
+                    peer: destination.into(),
+                    sender: state.own_username.clone(),
+                    from: state.own_username.clone(),
+                    to: destination.into(),
+                    server_message_id: server_message_id.into(),
+                    fields,
+                    packed_other_fields: vec![],
+                },
+                &options,
+            )?
+            .source_id
+        };
+        wechat_profile::apply_message_session_projection(
+            &location,
+            &keys,
+            &MessageSessionProjection {
+                source: source.clone(),
+                peer: destination.into(),
+                summary: summary.into(),
+                outgoing: true,
+                unread: false,
+                sender: Some(state.own_username.clone()),
+                sender_display: None,
+                created_by_this_intent: true,
+            },
+            &options,
+        )?;
+        let id = crate::message_id(&source)?;
+        self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":destination,"origin":"local_send","direction":"outgoing"}))?;
+        self.store.put_runtime(account, receipt, b"1")?;
+        Ok(source)
+    }
+}

@@ -16,12 +16,17 @@ node scripts/native-package-smoke.mjs artifacts/native
 # Substitute the exact artifact version emitted by the build:
 node --experimental-strip-types scripts/native-openclaw-smoke.mjs artifacts/native/wx-vVERSION-linux-x64-gnu
 python3 scripts/native-service-verify.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 scripts/native-cli-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 scripts/native-cli-fixture-test.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 scripts/native-export-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
 docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:local .
 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:local --json version
 python3 scripts/native-container-smoke.py agent-wechat-native:local
 ```
 
-The build script uses the Bookworm builder to keep the release glibc baseline at 2.36, refuses existing artifact output files, runs Rust tests and the local daemon smoke harness, validates version/native identity/target, and emits a raw executable plus a checksums manifest. Local uncommitted source is marked `sourceTreeDirty`; publication rejects those validation artifacts. It never uploads artifacts, accesses account credentials or starts a persistent service. The package smoke uses temporary directories and local assets. The image checks print executable identity and start/stop one disposable service with empty tmpfs state and no network/ports or account material. They do not start a persistent deployment.
+The build script uses the Bookworm builder to keep the release glibc baseline at 2.36, refuses existing artifact output files, runs Rust tests and the local daemon smoke harness, validates version/native identity/target, and emits a raw executable, a checksums manifest and third-party notices. Local uncommitted source is marked `sourceTreeDirty`; publication rejects those validation artifacts. It never uploads artifacts, accesses account credentials or starts a persistent service. The package smoke uses temporary directories and local assets. The image checks print executable identity and start/stop one disposable service with empty tmpfs state and no network/ports or account material. They do not start a persistent deployment.
+
+The runtime includes FFmpeg/FFprobe for bounded audio/video normalization and independently compiled public SILK code. Direct binary operators must provision FFmpeg/FFprobe for those source-preparation paths; encoding is not delegated to an official executable. `wx licenses` and the accompanying notices preserve codec attribution.
 
 The Dockerfile-specific ignore file excludes local target output and private data from its build context. Review dependency/base-image changes and pin approved image digests for an operator's reproducible production build. No cross-build support is implied by `--platform linux/amd64`.
 

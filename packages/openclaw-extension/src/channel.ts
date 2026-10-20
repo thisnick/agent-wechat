@@ -7,7 +7,7 @@ import { getWeChatRuntime } from "./runtime.js";
 import { startWeChatMonitor } from "./monitor.js";
 
 import { collectWeChatStatusIssues } from "./status.js";
-import { WeChatClient } from "@agent-wechat/shared";
+import { isNativeTombstone, WeChatClient, type NativeContact, type NativeGroup } from "@agent-wechat/shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatLoginTool } from "./agent-tools.js";
@@ -425,8 +425,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       if (!account?.serverUrl) return [];
       if (account.backend === "native") {
         const { client } = await ensureNativeHost(account.native!);
-        const page = await client.contacts(account.native!.accountId);
-        return page.items.filter(item => typeof item.id === "string" && (!query || String(item.displayName ?? item.id).includes(query))).slice(0, limit ?? 50)
+        const page = await client.contacts(account.native!.accountId, { query: query ?? undefined, limit: Math.min(limit ?? 50, 200) });
+        return page.items.filter((item): item is NativeContact => !isNativeTombstone(item)).filter(item => typeof item.id === "string" && (!query || String(item.displayName ?? item.id).includes(query))).slice(0, limit ?? 50)
           .map(item => ({ kind: "user" as const, id: String(item.id), name: String(item.displayName ?? item.id) }));
       }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
@@ -450,8 +450,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       if (!account?.serverUrl) return [];
       if (account.backend === "native") {
         const { client } = await ensureNativeHost(account.native!);
-        const page = await client.groups(account.native!.accountId);
-        return page.items.filter(item => typeof item.id === "string" && (!query || String(item.displayName ?? item.id).includes(query))).slice(0, limit ?? 50)
+        const page = await client.groups(account.native!.accountId, { query: query ?? undefined, limit: Math.min(limit ?? 50, 200) });
+        return page.items.filter((item): item is NativeGroup => !isNativeTombstone(item)).filter(item => typeof item.id === "string" && (!query || String(item.displayName ?? item.id).includes(query))).slice(0, limit ?? 50)
           .map(item => ({ kind: "group" as const, id: String(item.id), name: String(item.displayName ?? item.id) }));
       }
       const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });

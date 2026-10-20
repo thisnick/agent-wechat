@@ -2,3 +2,5 @@ schemaVersion = 1
 listen = "127.0.0.1:6174"
 dataDir = "/var/lib/agent-wechat"
 tokenFile = "/run/secrets/wechat-api-token"
+# Optional compatibility override for the supported build's bundled MMKV format constant:
+# profileFormatKeyFile = "/run/secrets/wechat-profile-format-key"

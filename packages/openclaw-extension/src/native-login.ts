@@ -26,7 +26,8 @@ export async function nativeLoginWait(accountId: string, timeoutMs = 30000, stop
     if (state === "succeeded") return { connected: true, message: "Native login succeeded" };
     if (terminal.has(state)) return { connected: false, message: `Native login ${state}` };
     if (stopAtQr && (active.operation.result as any)?.qrAvailable === true) {
-      const png = await active.client.qr(active.accountId, active.operation.id);
+      const generation=(active.operation.result as any)?.qrGeneration;
+      const png = await active.client.qr(active.accountId, active.operation.id, typeof generation === "number" ? generation : undefined);
       return { connected: false, qrDataUrl: `data:image/png;base64,${Buffer.from(png).toString("base64")}`, message: "Scan the white-background native QR and approve login" };
     }
     if (stopAtQr && state === "awaiting_approval") return { connected: false, message: "Approve native login on your phone" };
@@ -43,10 +44,10 @@ export async function sendNativeText(account: ResolvedWeChatAccount, threadId: s
 export function createNativeLoginTool(account: ResolvedWeChatAccount) {
   return {
     label: "WeChat Login", name: "wechat_login",
-    description: "Inspect or start native WeChat login, disconnect retaining trust, or log out locally. Local logout fences saved authorization; server-side revocation is not implemented. A QR is returned as an image when available.",
-    parameters: { type: "object", properties: { action: { type: "string", enum: ["status", "start", "disconnect", "logout"] }, force: { type: "boolean" } }, required: ["action"] },
+    description: "Inspect/start native login, disconnect retaining trust, or request durable logout. Logout commits local inhibition and reports its native server outcome separately; it does not promise saved-device revocation. Explicitly confirmed forget removes local authentication while retaining history. A QR is returned as an image when available.",
+    parameters: { type: "object", properties: { action: { type: "string", enum: ["status", "start", "disconnect", "logout", "forget"] }, force: { type: "boolean" }, confirm: { type: "boolean" } }, required: ["action"] },
     execute: async (_id: string, params: unknown) => {
-      const args = params as { action: string; force?: boolean };
+      const args = params as { action: string; force?: boolean; confirm?: boolean };
       const native = account.native!; const { client } = await ensureNativeHost(native);
       if (args.action === "start") {
         const result = await nativeLoginStart(account, { force: args.force });
@@ -56,7 +57,8 @@ export function createNativeLoginTool(account: ResolvedWeChatAccount) {
       }
       const result = args.action === "status" ? await client.account(native.accountId)
         : args.action === "disconnect" ? await client.disconnect(native.accountId)
-        : args.action === "logout" ? await client.logoutLocal(native.accountId)
+        : args.action === "logout" ? await client.logout(native.accountId, randomUUID())
+        : args.action === "forget" && args.confirm === true ? await client.forgetCredentials(native.accountId, randomUUID(), true)
         : (() => { throw new Error("Unknown native login action"); })();
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result };
     },

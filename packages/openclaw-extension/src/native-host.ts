@@ -108,7 +108,7 @@ export async function startNativeHost(config: WeChatNativeConfig): Promise<Nativ
         if (exited || status.version.backend !== "native" || status.version.apiVersion !== 1 || status.pid !== child.pid
           || status.dataDir !== config.dataDir || typeof status.serverId !== "string" || typeof status.ownershipGeneration !== "string") throw new Error("native_owner_conflict: readiness identity does not match the owned process/store");
         requireNativeIdentity(status.version);
-        return { client, stop: () => stopOwnedChild(child) };
+        return { client: new NativeWeChatClient({ baseUrl: url.href, token }), stop: () => stopOwnedChild(child) };
       } catch (error) {
         if (String(error).includes("native_owner_conflict")) throw error;
         await new Promise(resolve => setTimeout(resolve, 100));

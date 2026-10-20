@@ -86,3 +86,20 @@ test("read CAS retries same sparse IDs without marking concurrent arrival or gap
   assert.deepEqual(requests, [{ ids: ["m1"], expectedVersion: "0" }, { ids: ["m1"], expectedVersion: "1" }]);
   assert.equal(value.state.get("gap")?.readPending, undefined); assert.equal(value.state.get("m1")?.readPending, false);
 });
+test("rejected group media never reaches retrieval, transcription or the model", async t => {
+  const value=fixture(t,{group:true});value.message.type=34;value.message.body=null;let preparations=0;
+  assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>{preparations++;throw Error('must not prepare');}}),'ignored');assert.equal(preparations,0);assert.equal(value.runs.length,0);assert.equal(value.state.get('m1')?.readPending,undefined);
+});
+test("pending native media keeps dispatch custody without model or read receipt",async t=>{
+  const value=fixture(t);value.message.type=3;value.message.body='<private transport XML>';
+  assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'image pending',pending:true})}),'pending');assert.equal(value.runs.length,0);assert.equal(value.state.get('m1')?.state,'received');assert.equal(value.state.get('m1')?.readPending,undefined);
+});
+test("verified native media path is included in the correlated prepared model input",async t=>{
+  const value=fixture(t);value.message.type=3;value.message.body='<private transport XML>';
+  assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'<media:image>',pending:false,mediaPath:'/managed/fixture.png',mediaMime:'image/png',attachment:{kind:'image',status:'ready',filename:'fixture.png',path:'/managed/fixture.png',mime:'image/png'}})}),'completed');
+  assert.equal(value.runs[0].ctx.MediaPath,'/managed/fixture.png');assert.equal(value.runs[0].ctx.BodyForAgent,'<media:image>');assert.equal(value.state.get('m1')?.readPending,true);assert.equal(value.state.get('m1')?.runId,'run_1');
+});
+test("media preparation failure cannot record a prepared input or mark read",async t=>{
+  const value=fixture(t);value.message.type=3;
+  assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>{throw Error('integrity failure');}}),'needs_review');assert.equal(value.runs.length,0);assert.equal(value.state.get('m1')?.readPending,undefined);
+});

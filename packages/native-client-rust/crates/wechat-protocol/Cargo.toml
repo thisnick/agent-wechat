@@ -14,4 +14,7 @@ base64 = "0.22"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zeroize = { version = "1", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+[build-dependencies]
+cc = "1"

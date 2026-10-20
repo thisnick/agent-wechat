@@ -31,4 +31,5 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo build --workspace --locked
+      - run: bash ../../scripts/native-generate-types.sh --check
       - run: python3 scripts/smoke.py target/debug/wx

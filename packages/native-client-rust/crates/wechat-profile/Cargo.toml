@@ -26,3 +26,5 @@ libc.workspace = true
 
 openssl.workspace = true
 crc32fast = "1"
+
+chrono.workspace = true

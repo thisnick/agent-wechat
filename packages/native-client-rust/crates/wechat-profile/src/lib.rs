@@ -7,18 +7,26 @@
 //! explicit ownership and a durable caller intent.
 mod dat;
 mod images;
+mod initialize;
 mod keys;
+mod login_storage;
+mod media;
 mod mmkv;
 mod model;
+mod projection;
 mod reader;
 mod schema;
 mod snapshot;
 mod writer;
 
 pub use dat::*;
+pub use initialize::*;
 pub use keys::*;
+pub use login_storage::*;
+pub use media::*;
 pub use mmkv::*;
 pub use model::*;
+pub use projection::*;
 pub use reader::*;
 pub use schema::*;
 pub use snapshot::{keys_from_agent_cache, keys_from_password, ProfileLocation, ReadOptions};

@@ -90,8 +90,11 @@ only per-file keys. This is not password recovery or a full logical-page audit.
 copy of an explicitly selected agent database using its existing unlock token;
 it never calls an initializer, migrator, server, or extraction helper. Multiple
 cached sessions require explicit selection. Missing cache entries remain gaps.
-An available `_image_aes` plus `_image_xor` pair is normalized separately; absent
-XOR is not guessed. The legacy AES representation uses its first 16 ASCII bytes.
+An available `_image_aes` plus `_image_xor` pair is normalized separately.
+`ImageDatKey::derive(uin, username)` implements the inspected native rule: the
+first 16 ASCII bytes of lowercase MD5(unsigned-decimal UIN concatenated with
+username), with the native UIN shift/XOR selector. This is independent of the
+SQLCipher password and does not authenticate a network account.
 
 Cached avatars are validated raw JPEG/PNG blobs inside SQLCipher. Encoded voice
 bytes retain their media-shard namespace. V2 DAT encode/decode independently
@@ -100,45 +103,63 @@ Other DAT versions/control values and the observed encoding policy below 1024
 plaintext bytes are unsupported. ECB/XOR wrapping is not authenticated encryption.
 
 `cached_image` resolves a selected message through original-content MD5 and its
-hardlink directory maps, rejects multiple cache groups and validates decrypted
-JPEG/PNG with decoding limits. Best returns the best available candidate with
-qualified quality. Original requires a decoded MD5 match to the advertised
-original; `_h` alone is insufficient. Standard/thumbnail role selection, missing
-or ambiguous bindings, generic file/video/sticker caches and uncached downloads
-remain explicit gaps. No media method fetches from the network.
+hardlink directory maps, rejects ambiguous groups and validates decoded bytes.
+Original requires an MD5 match; a filename suffix alone is insufficient.
+`cached_voice` retains encoded voice bytes. `cached_hardlink_file` checks the
+requested file/video MD5 and rejects ambiguous bindings. Network downloads and
+sticker CDN jobs belong to the daemon, not this crate.
 
-## Narrow profile writes
+## Fresh layout and explicit projections
 
-Generic `require_writable()` remains unsupported. Additive schema changes may be
-readable but never authorize generic writes. The separate `apply_incoming_text`
-operation implements only an initialized direct-chat incoming plain-text family
-validated against Linux 4.1.13.26. It requires confirmed exclusive ownership,
-keys/account binding and a caller-provided reference to an **already durable**
-application intent. The caller must hold its profile lease and coordinate all
-account writes. An advisory lease cannot exclude an unmanaged official app.
+`initialize_profile` creates seven encrypted ordinary databases using the
+inspected Linux 4.1.13.26 schemas. `initialize_official_home_with_login` also
+creates known full-HOME identity/global MMKV records, the selected account's
+`config/login_configv2`, and the native legacy key-info fallback. It publishes
+only into a new or empty target, preserves failed staging for inspection, and
+never overwrites a populated profile. The password must be the server-returned
+account database password; a newly generated unrelated password cannot unlock
+an existing profile. The account basename and image key are derived from the
+bound native identity. A same-build official startup/rendering test remains
+separate from schema creation and encrypted reopen tests.
 
-The writer requires exactly one ordinary message shard, existing sender/receiver
-and session maps, the exact known column/type/default/PK declarations, four
-message indexes and no relevant triggers. It never creates chats, maps, schemas,
-shards, FTS indexes, credentials or native cursor projections. Incoming status,
-origin and compression constants apply only to this verified family. Source
-metadata and full server identity must be supplied exactly; missing server
-sequence is not replaced by zero. Retained native AddMsg field 13 matched stored
-`server_seq` in 319 exact same-account message joins; fields 6/7 did not.
+Generic `require_writable()` remains unsupported. Explicit message/session,
+contact/group/member, avatar, media-cache, saved-login and SyncKey projection
+functions require exclusive ownership, account/key binding, exact supported
+schema declarations and an **already durable** intent ID. The caller must hold
+its profile lease and serialize all account writes. Advisory locks cannot stop
+an unmanaged official app. Additive readable columns do not authorize writes.
 
-New local IDs use the table's AUTOINCREMENT. The supported sort recipe is
-`create_time * 1000` only when collision-free; collisions are rejected. A retry
-compares all supported stored values under the same full server ID. A different
-row is an error. Session updates preserve unrelated draft/options/clear fields.
+Message IDs include database/table/local ID; server IDs retain all 64 bits.
+Message writers currently require one ordinary message shard. New per-chat IDs
+use AUTOINCREMENT and same-second sort allocation is bounded and collision
+checked. Idempotent retries compare the full supported row. Native AddMsg
+sequence is supplied explicitly; accepted outgoing messages use their separately
+identified local pending/acknowledged policy rather than inventing an incoming
+sequence. Message/session transactions preserve unrelated drafts/options and
+read-counter exceptions. New nullable unknown fields are explicitly initialized
+to SQL NULL; this policy is not evidence of every native constructor default.
 
-Message and session transactions are separate: **cross-database crash atomicity
-is not established**. An error can follow a committed message row. Retain the
-intent, retry/reconcile the same payload, and do not advance native SyncKey or
-publish committed events until all required profile/cursor projections complete.
-This narrow writer alone does not implement that account-wide barrier. Group,
-outgoing, media and unrecognized native commands remain pending/unsupported.
-A profile-only export cannot include our sidecar recovery state or guarantee a
-compatible saved-login projection.
+Sparse contact updates distinguish an absent field from explicit empty text.
+Roster patches map proved member identity/display fields, retain unknown root
+and nested protobuf fields, and remove absent members only for a validated
+complete roster. Group catalog entries do not fabricate a conversation, owner,
+membership or complete remote group list. Custom native FTS tokenizers/index
+writers are unsupported; source index files and backups must be preserved.
+
+Image cache projection encodes V2 DAT and writes supported hardlink/resource
+records for original, standard and thumbnail roles. The hardlink MD5 hash uses
+the native 32-bit SuperFastHash of the ASCII MD5 string. Voice projection writes
+encoded bytes in the bound media shard. File and video projections bind plain
+cache bytes and supported ResourceInfo/Detail metadata to an existing message,
+validate lengths/digests, and refuse unknown packed metadata. All cache file
+publication is bounded, no-clobber/idempotent and separate from network transfer.
+This does not imply every media subtype or stock UI transition is covered.
+
+Cross-database/file crash atomicity is not provided by a single SQLite
+transaction. The daemon must retain an encrypted replayable intent, reconcile
+all rows/files, and publish the native cursor and committed event only after all
+required projections complete. A profile-only export cannot carry sidecar
+recovery state or promise a completed saved-login generation.
 
 `mark_read_messages` removes only selected source-qualified unread observations
 in one session transaction. It decrements by actual removed rows and preserves
@@ -153,7 +174,10 @@ Run `cargo test -p wechat-profile` and `cargo clippy -p wechat-profile --all-tar
 -- -D warnings` from the native Rust workspace. Synthetic tests cover SQLCipher,
 key-file protection, key cache export, WAL preservation, all-shard mappings,
 uint64 identities, cursors, Zstandard limits, schema drift, DAT round trips,
-media binding and narrow text/read retry/recovery.
+media bindings, sparse projections, saved-login CAS/replay and text/read
+retry/recovery. Core tests separately exercise encrypted multi-file checkpoint
+and accepted-credential restart journals. Unit tests do not prove stock-client
+startup or another build/architecture.
 
 Independent network-disabled validation opened 20 databases in an authorized
 stopped encrypted snapshot: 2,736 contacts, 104 threads, 32 groups, 2,918 member
@@ -171,4 +195,32 @@ private input data and keys are never shipped with the crate.
 
 ## Stored identity
 
-`read_mmkv_identity` decodes only the inspected v4 framing with a caller-supplied 16-byte format key. It bounds sizes/records, verifies ciphertext CRC, applies overwrite/tombstone semantics and reads the exact username/UIN/device fields. Unknown versions and nonzero expiration/flags metadata are rejected. CRC is not authentication; the daemon compares stored identity against its independently authenticated account before enabling writers and rechecks it before each write. No format key, private store, official binary reader or MMKV writer is included.
+`read_mmkv_identity` decodes only the inspected v4 framing with a caller-supplied 16-byte format key. It bounds sizes/records, verifies ciphertext CRC, applies overwrite/tombstone semantics and reads the exact username/UIN/device fields. Unknown versions and nonzero expiration/flags metadata are rejected. CRC is not authentication; the daemon compares stored identity against its independently authenticated account before enabling writers and rechecks it before each write. The global format key must be explicitly supplied; it is not discovered here.
+Account `login_configv2` uses the separately derived account key. MMKV append
+publication preserves unrelated records, verifies CRC/metadata generations and
+supports replay after data-first interruption. New-pair publication never
+overwrites existing/partial foreign pairs. CRC is corruption detection, not
+cryptographic authentication.
+
+`stage_account_sync_key` targets only the account SyncKey store. Native SyncKey,
+received/applied sidecar checkpoints, local pagination cursors and login cookies
+are distinct. The daemon coordinator must block cursor advancement across any
+unapplied intent, compare received generations and retire its encrypted journal
+with its public commit event atomically.
+
+Saved-login helpers preserve launch policy and unknown settings. Only the
+explicit server-accepted staging API clears the desktop logout lock and may
+clear a cookie. `plan_saved_key_info` records hash-only expected generations;
+publication requires the known LoginKeyInfoTable schema/unique index and writes
+the inspected native empty `key_md5`, while retaining unrelated/history rows.
+Native latest-row selection and legacy fallback remain distinct. An unknown
+authoritative schema is a pending compatibility gap, never permission to replace
+it with a legacy file. SQLCipher keys, saved login tokens and active session
+keys are not interchangeable.
+
+A coordinator must bind the publication journal to an accepted credential
+generation and logout epoch, recheck the fence before each durable file write,
+then verify the stored result before retiring the journal. A logout can occur
+between separate file commits; that window retains a visible pending journal,
+not a claim of atomic rollback. Imported credentials alone are not acceptance
+proof, and recovery does not authenticate or perform network requests.

@@ -1,10 +1,19 @@
 //! Official-format profiles remain opaque here; only our sidecar schema is migrated.
+mod authorization;
+mod checkpoint;
 pub mod copy;
+mod media;
+mod metadata;
 mod operations;
+mod outbox;
+mod pagination;
+mod settings;
 pub mod vault;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+pub use media::*;
 pub use operations::*;
+pub use pagination::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -248,7 +257,7 @@ impl Store {
         }
         let _profile_lease = profile_lease(&profile)?;
         // Registration never opens SQLCipher, changes a source, or asserts write compatibility.
-        self.register(id, "direct", &profile, None)
+        self.register(id, "direct", &profile, None, None)
     }
     pub fn import(&self, id: &str, source: &Path, source_stopped: bool) -> Result<Account> {
         validate_source_placement(&self.root, source)?;
@@ -267,6 +276,7 @@ impl Store {
             "managed",
             &target.join("profile"),
             Some((stage, manifest)),
+            None,
         )
     }
     fn register(
@@ -275,6 +285,7 @@ impl Store {
         mode: &str,
         profile: &Path,
         staged: Option<(tempfile::TempDir, copy::Manifest)>,
+        alias: Option<&str>,
     ) -> Result<Account> {
         let target = self.account_dir(id)?;
         let parent = target.parent().unwrap();
@@ -287,11 +298,39 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
         let tx = db.transaction()?;
+        let alias_collision: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_settings WHERE alias=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if alias_collision {
+            bail!("account_alias_conflict");
+        }
+        if let Some(alias) = alias {
+            if alias.is_empty()
+                || alias.len() > 64
+                || !alias
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                bail!("invalid account alias");
+            }
+            let conflict:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1 UNION ALL SELECT 1 FROM account_settings WHERE alias=?1)",[alias],|r|r.get(0))?;
+            if conflict {
+                bail!("account_alias_conflict");
+            }
+        }
         let path = profile.to_str().context("profile path is not UTF-8")?;
         tx.execute(
             "INSERT INTO accounts VALUES(?1,?2,?3,'unverified')",
             params![id, mode, path],
         )?;
+        if let Some(alias) = alias {
+            tx.execute(
+                "INSERT INTO account_settings(account_id,alias)VALUES(?1,?2)",
+                params![id, alias],
+            )?;
+        }
         let (stage, manifest) = match staged {
             Some((s, m)) => (s, Some(m)),
             None => (

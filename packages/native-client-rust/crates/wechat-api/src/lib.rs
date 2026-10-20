@@ -1,4 +1,7 @@
 //! Authenticated, account-scoped native daemon API.
+mod actions;
+pub mod contracts;
+mod media;
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Extension, Path, Query, Request, State},
@@ -119,6 +122,77 @@ impl From<anyhow::Error> for ApiError {
         let message = error.to_string();
         for (needle, status, code) in [
             (
+                "unsupported_media_variant",
+                StatusCode::CONFLICT,
+                "media_variant_unavailable",
+            ),
+            (
+                "media_asset_not_found",
+                StatusCode::NOT_FOUND,
+                "media_asset_not_found",
+            ),
+            (
+                "media_not_cached",
+                StatusCode::NOT_FOUND,
+                "media_not_cached",
+            ),
+            (
+                "media_not_available",
+                StatusCode::CONFLICT,
+                "media_not_available",
+            ),
+            (
+                "media_encoder_unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "media_encoder_unavailable",
+            ),
+            (
+                "media_metadata_unavailable",
+                StatusCode::CONFLICT,
+                "media_metadata_unavailable",
+            ),
+            (
+                "unsupported_media",
+                StatusCode::CONFLICT,
+                "unsupported_media",
+            ),
+            (
+                "account_alias_conflict",
+                StatusCode::CONFLICT,
+                "account_alias_conflict",
+            ),
+            (
+                "account_identity_mismatch",
+                StatusCode::CONFLICT,
+                "account_identity_mismatch",
+            ),
+            (
+                "account_database_password_mismatch",
+                StatusCode::CONFLICT,
+                "account_database_password_mismatch",
+            ),
+            (
+                "account_device_mismatch",
+                StatusCode::CONFLICT,
+                "account_device_mismatch",
+            ),
+            (
+                "profile_identity_unavailable",
+                StatusCode::CONFLICT,
+                "profile_identity_unavailable",
+            ),
+            (
+                "pagination_cursor_expired",
+                StatusCode::CONFLICT,
+                "pagination_cursor_expired",
+            ),
+            ("invalid_cursor", StatusCode::BAD_REQUEST, "invalid_cursor"),
+            (
+                "pagination_capacity_exceeded",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "pagination_capacity_exceeded",
+            ),
+            (
                 "account not found",
                 StatusCode::NOT_FOUND,
                 "account_not_found",
@@ -167,6 +241,9 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 async fn authorize(State(app): State<App>, mut request: Request, next: Next) -> Response {
+    if request.method() == axum::http::Method::GET && request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
     let Some(token) = request
         .headers()
         .get("authorization")
@@ -201,6 +278,24 @@ async fn authorize(State(app): State<App>, mut request: Request, next: Next) -> 
         return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     };
     request.extensions_mut().insert(claims);
+    if let Some(rest) = request.uri().path().strip_prefix("/v1/accounts/") {
+        let (name, tail) = rest
+            .split_once('/')
+            .map(|(name, tail)| (name, format!("/{tail}")))
+            .unwrap_or((rest, String::new()));
+        if let Ok(canonical) = app.core.store.resolve_account(name) {
+            if canonical != name {
+                let query = request
+                    .uri()
+                    .query()
+                    .map(|q| format!("?{q}"))
+                    .unwrap_or_default();
+                if let Ok(uri) = format!("/v1/accounts/{canonical}{tail}{query}").parse() {
+                    *request.uri_mut() = uri;
+                }
+            }
+        }
+    }
     next.run(request).await
 }
 async fn work<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> ApiResult<T> {
@@ -209,11 +304,16 @@ async fn work<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))?
         .map_err(Into::into)
 }
+fn checked<T: serde::de::DeserializeOwned>(value: Value) -> ApiResult<Json<Value>> {
+    Ok(Json(contracts::checked::<T>(value).map_err(|_| {
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_server_response")
+    })?))
+}
 async fn status(State(app): State<App>, Extension(c): Extension<Claims>) -> ApiResult<Json<Value>> {
     c.require(None, "read")?;
-    Ok(Json(
+    checked::<contracts::NativeStatus>(
         json!({"serverId":app.core.store.server_id,"dataDir":app.core.store.root,"pid":std::process::id(),"ownershipGeneration":app.core.ownership_generation,"version":version(),"state":"ready"}),
-    ))
+    )
 }
 async fn accounts(
     State(app): State<App>,
@@ -232,7 +332,8 @@ async fn accounts(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateAccount {
-    id: String,
+    id: Option<String>,
+    alias: Option<String>,
 }
 async fn create_account(
     State(app): State<App>,
@@ -246,7 +347,12 @@ async fn create_account(
     {
         return Err(ApiError(StatusCode::FORBIDDEN, "forbidden"));
     }
-    let account = app.core.create_account(&input.id)?;
+    let id = input
+        .id
+        .unwrap_or_else(|| format!("account-{}", rand::random::<u64>()));
+    let account = app
+        .core
+        .create_account_with_alias(&id, input.alias.as_deref())?;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::to_value(account).map_err(anyhow::Error::from)?),
@@ -264,45 +370,87 @@ async fn login(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path(a): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<LoginRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     c.require(Some(&a), "login")?;
+    let key = if headers.contains_key("idempotency-key") {
+        Some(idempotency_key(&headers)?)
+    } else {
+        None
+    };
     Ok((
         StatusCode::ACCEPTED,
-        Json(serde_json::to_value(app.core.login(&a, input).await?).map_err(anyhow::Error::from)?),
+        checked::<contracts::NativeOperation>(
+            serde_json::to_value(app.core.login_keyed(&a, input, key).await?)
+                .map_err(anyhow::Error::from)?,
+        )?,
     ))
+}
+fn require_operation_scope(claims: &Claims, account: &str, kind: &str) -> ApiResult<()> {
+    claims.require(
+        Some(account),
+        match kind {
+            "login" | "logout" | "forget_credentials" => "login",
+            "media-writeback" => "media",
+            "sync" | "metadata" => "read",
+            _ => "admin",
+        },
+    )
 }
 async fn operation(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    c.require(Some(&a), "login")?;
-    Ok(Json(
-        serde_json::to_value(app.core.store.operation(&a, &id)?).map_err(anyhow::Error::from)?,
-    ))
+    c.require(Some(&a), "read")
+        .or_else(|_| c.require(Some(&a), "login"))
+        .or_else(|_| c.require(Some(&a), "media"))?;
+    let op = app.core.store.operation(&a, &id)?;
+    require_operation_scope(&c, &a, &op.kind)?;
+    checked::<contracts::NativeOperation>(serde_json::to_value(op).map_err(anyhow::Error::from)?)
 }
 async fn cancel(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    c.require(Some(&a), "login")?;
-    Ok(Json(
+    c.require(Some(&a), "read")
+        .or_else(|_| c.require(Some(&a), "login"))
+        .or_else(|_| c.require(Some(&a), "media"))?;
+    let current = app.core.store.operation(&a, &id)?;
+    require_operation_scope(&c, &a, &current.kind)?;
+    checked::<contracts::NativeOperation>(
         serde_json::to_value(app.core.cancel_operation(&a, &id)?).map_err(anyhow::Error::from)?,
-    ))
+    )
 }
 async fn qr(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
+    Query(q): Query<QrQuery>,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "login")?;
+    if q.generation.is_some_and(|expected| {
+        app.core
+            .store
+            .operation(&a, &id)
+            .ok()
+            .and_then(|op| op.result["qrGeneration"].as_u64())
+            .is_none_or(|current| current != expected)
+    }) {
+        return Err(ApiError(StatusCode::CONFLICT, "login_challenge_superseded"));
+    }
     Ok((
         [("content-type", "image/png"), ("cache-control", "no-store")],
         app.core.qr(&a, &id)?,
     )
         .into_response())
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QrQuery {
+    generation: Option<u64>,
 }
 async fn disconnect(
     State(app): State<App>,
@@ -330,16 +478,36 @@ async fn sync(
     Path(a): Path<String>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "login")?;
-    Ok(Json(app.core.sync(&a).await?))
+    Ok(Json(
+        serde_json::to_value(app.core.sync_operation(&a)?).map_err(anyhow::Error::from)?,
+    ))
 }
 #[derive(Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageQuery {
     limit: Option<usize>,
     cursor: Option<String>,
+    #[serde(alias = "query")]
     search: Option<String>,
+    kind: Option<String>,
 }
 impl PageQuery {
+    fn catalog(&self) -> ApiResult<wechat_core::CatalogQuery> {
+        self.profile()?;
+        if self
+            .kind
+            .as_ref()
+            .is_some_and(|k| !matches!(k.as_str(), "direct" | "group" | "system"))
+        {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+        }
+        Ok(wechat_core::CatalogQuery {
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+            search: self.search.clone(),
+            thread_kind: self.kind.clone(),
+        })
+    }
     fn profile(&self) -> ApiResult<wechat_profile::ListQuery> {
         if self.limit.is_some_and(|v| v == 0 || v > 200)
             || self.cursor.as_ref().is_some_and(|v| v.len() > 8192)
@@ -363,9 +531,22 @@ macro_rules! listing {
             Query(q): Query<PageQuery>,
         ) -> ApiResult<Json<Value>> {
             c.require(Some(&a), "read")?;
-            let q = q.profile()?;
-            let _guard = app.core.lock_account(&a).await?;
-            Ok(Json(work(move || app.core.$method(&a, &q)).await?))
+            let q = q.catalog()?;
+            let guard = app.core.lock_account(&a).await?;
+            let value = work(move || {
+                let _guard = guard;
+                app.core.catalog_page(&a, stringify!($method), None, &q)
+            })
+            .await?;
+            match stringify!($method) {
+                "threads" => checked::<contracts::NativePage<contracts::NativeThread>>(value),
+                "contacts" => checked::<contracts::NativePage<contracts::NativeContact>>(value),
+                "groups" => checked::<contracts::NativePage<contracts::NativeGroup>>(value),
+                _ => Err(ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_server_response",
+                )),
+            }
         }
     };
 }
@@ -378,8 +559,14 @@ async fn schema(
     Path(a): Path<String>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let _guard = app.core.lock_account(&a).await?;
-    Ok(Json(work(move || app.core.profile_schema(&a)).await?))
+    let guard = app.core.lock_account(&a).await?;
+    Ok(Json(
+        work(move || {
+            let _guard = guard;
+            app.core.profile_schema(&a)
+        })
+        .await?,
+    ))
 }
 async fn members(
     State(app): State<App>,
@@ -388,11 +575,17 @@ async fn members(
     Query(q): Query<PageQuery>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let q = q.profile()?;
-    let _guard = app.core.lock_account(&a).await?;
-    Ok(Json(
-        work(move || app.core.group_members(&a, &room, &q)).await?,
-    ))
+    let q = q.catalog()?;
+    let guard = app.core.lock_account(&a).await?;
+    Ok(Json(contracts::checked::<
+        contracts::NativePage<contracts::NativeGroupMember>,
+    >(
+        work(move || {
+            let _guard = guard;
+            app.core.catalog_page(&a, "members", Some(&room), &q)
+        })
+        .await?,
+    )?))
 }
 async fn messages(
     State(app): State<App>,
@@ -401,11 +594,17 @@ async fn messages(
     Query(q): Query<PageQuery>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    q.profile()?;
-    let _guard = app.core.lock_account(&a).await?;
-    Ok(Json(
-        work(move || app.core.messages(&a, &thread, q.limit, q.cursor)).await?,
-    ))
+    let q = q.catalog()?;
+    let guard = app.core.lock_account(&a).await?;
+    Ok(Json(contracts::checked::<
+        contracts::NativePage<contracts::NativeMessage>,
+    >(
+        work(move || {
+            let _guard = guard;
+            app.core.catalog_page(&a, "messages", Some(&thread), &q)
+        })
+        .await?,
+    )?))
 }
 async fn message(
     State(app): State<App>,
@@ -413,8 +612,14 @@ async fn message(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let _guard = app.core.lock_account(&a).await?;
-    Ok(Json(work(move || app.core.message(&a, &id)).await?))
+    let guard = app.core.lock_account(&a).await?;
+    checked::<contracts::NativeMessage>(
+        work(move || {
+            let _guard = guard;
+            app.core.message(&a, &id)
+        })
+        .await?,
+    )
 }
 async fn avatar(
     State(app): State<App>,
@@ -422,8 +627,12 @@ async fn avatar(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "media")?;
-    let _guard = app.core.lock_account(&a).await?;
-    let media = work(move || app.core.avatar(&a, &id)).await?;
+    let guard = app.core.lock_account(&a).await?;
+    let media = work(move || {
+        let _guard = guard;
+        app.core.avatar(&a, &id)
+    })
+    .await?;
     Ok((
         [
             ("content-type", media.media_type),
@@ -452,8 +661,12 @@ async fn image(
         "thumbnail" => wechat_profile::ImageQuality::Thumbnail,
         _ => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_quality")),
     };
-    let _guard = app.core.lock_account(&a).await?;
-    let media = work(move || app.core.image(&a, &id, quality)).await?;
+    let guard = app.core.lock_account(&a).await?;
+    let media = work(move || {
+        let _guard = guard;
+        app.core.image(&a, &id, quality)
+    })
+    .await?;
     Ok((
         [
             ("content-type", media.media.media_type),
@@ -506,8 +719,14 @@ async fn recover_projection(
     Path(a): Path<String>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "admin")?;
-    let _guard = app.core.lock_account(&a).await?;
-    Ok(Json(work(move || app.core.recover_projection(&a)).await?))
+    let guard = app.core.lock_account(&a).await?;
+    Ok(Json(
+        work(move || {
+            let _guard = guard;
+            app.core.recover_projection(&a)
+        })
+        .await?,
+    ))
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -515,14 +734,7 @@ struct TextSend {
     thread_id: String,
     text: String,
 }
-async fn send_text(
-    State(app): State<App>,
-    Extension(c): Extension<Claims>,
-    Path(a): Path<String>,
-    headers: HeaderMap,
-    Json(input): Json<TextSend>,
-) -> ApiResult<(StatusCode, Json<Value>)> {
-    c.require(Some(&a), "send")?;
+fn idempotency_key(headers: &HeaderMap) -> ApiResult<&str> {
     let key = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -530,14 +742,11 @@ async fn send_text(
             StatusCode::BAD_REQUEST,
             "idempotency_key_required",
         ))?;
-    let intent = app
-        .core
-        .send_text(&a, key, &input.thread_id, &input.text)
-        .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(serde_json::to_value(intent).map_err(anyhow::Error::from)?),
-    ))
+    if key.is_empty() || key.len() > 200 || !key.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+    {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_idempotency_key"));
+    }
+    Ok(key)
 }
 async fn send_status(
     State(app): State<App>,
@@ -545,14 +754,17 @@ async fn send_status(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "send")?;
-    Ok(Json(
-        serde_json::to_value(app.core.store.send(&a, &id)?).map_err(anyhow::Error::from)?,
-    ))
+    let value = match app.core.store.send(&a, &id) {
+        Ok(send) => serde_json::to_value(send),
+        Err(_) => serde_json::to_value(app.core.media_job(&a, &id)?),
+    };
+    Ok(Json(value.map_err(anyhow::Error::from)?))
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadState {
-    message_ids: Vec<String>,
+    message_ids: Option<Vec<String>>,
+    through_message_id: Option<String>,
     expected_version: String,
 }
 async fn read_state(
@@ -562,11 +774,20 @@ async fn read_state(
     Json(input): Json<ReadState>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read-state")?;
-    Ok(Json(
-        app.core
-            .mark_read(&a, &thread, input.message_ids, &input.expected_version)
-            .await?,
-    ))
+    let result = match (input.message_ids, input.through_message_id) {
+        (Some(ids), None) => {
+            app.core
+                .mark_read(&a, &thread, ids, &input.expected_version)
+                .await?
+        }
+        (None, Some(id)) => {
+            app.core
+                .mark_through(&a, &thread, &id, &input.expected_version)
+                .await?
+        }
+        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_read_set")),
+    };
+    Ok(Json(result))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -587,14 +808,25 @@ async fn events(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path(a): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<EventQuery>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
+    if headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|part| part.trim().split(';').next() == Some("text/event-stream"))
+        })
+    {
+        return stream(State(app), Extension(c), Path(a), headers, Query(q)).await;
+    }
     c.require(Some(&a), "read")?;
     let after = decimal(q.after.as_deref())?;
     let items = app.core.store.events(&a, after, q.limit.unwrap_or(100))?;
     Ok(Json(
         json!({"items":items,"nextCursor":items.last().map(|v|v.cursor.clone()).unwrap_or_else(||after.to_string())}),
-    ))
+    ).into_response())
 }
 async fn stream(
     State(app): State<App>,
@@ -686,12 +918,21 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         core,
         token_hash: Sha256::digest(token.as_bytes()).into(),
     };
-    Router::new()
+    let routes = Router::new()
+        .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/v1/status", get(status))
         .route("/v1/tokens", get(tokens).post(issue_token))
+        .route("/v1/access-tokens", get(tokens).post(issue_token))
         .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
+        .route(
+            "/v1/access-tokens/{id}",
+            axum::routing::delete(revoke_token),
+        )
         .route("/v1/accounts", get(accounts).post(create_account))
-        .route("/v1/accounts/{a}", get(account))
+        .route(
+            "/v1/accounts/{a}",
+            get(account).patch(actions::update_account),
+        )
         .route("/v1/accounts/{a}/schema", get(schema))
         .route(
             "/v1/accounts/{a}/projection/recover",
@@ -716,18 +957,25 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .route("/v1/accounts/{a}/messages/{id}", get(message))
         .route("/v1/accounts/{a}/avatars/{id}", get(avatar))
         .route("/v1/accounts/{a}/messages/{id}/image", get(image))
-        .route("/v1/accounts/{a}/sends", post(send_text))
+        .route("/v1/accounts/{a}/sends", post(media::send))
         .route("/v1/accounts/{a}/sends/{id}", get(send_status))
         .route(
             "/v1/accounts/{a}/threads/{thread}/read-state",
             post(read_state),
         )
         .route("/v1/accounts/{a}/events", get(events))
+        .route("/v1/accounts/{a}/event-log", get(events))
         .route("/v1/accounts/{a}/events/stream", get(stream))
         .route("/v1/accounts/{a}/consumers/{consumer}/ack", post(ack))
         .layer(DefaultBodyLimit::max(128 * 1024))
-        .layer(middleware::from_fn_with_state(app.clone(), authorize))
-        .with_state(app)
+        .merge(media::routes())
+        .merge(actions::routes())
+        .with_state(app.clone());
+    // Resolve aliases before route matching so scope checks and vault AAD always
+    // use the canonical account identifier.
+    Router::new()
+        .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(app, authorize))
 }
 pub fn read_token(path: &FsPath) -> Result<String> {
     let file = OpenOptions::new()
@@ -801,6 +1049,233 @@ mod tests {
         let core = Core::new(store, None).unwrap();
         let app = router(core.clone(), OWNER);
         (t, core, app)
+    }
+    #[tokio::test]
+    async fn cached_media_writeback_repair_is_bounded_durable_and_media_scoped() {
+        let (_temp, core, app) = setup();
+        let media = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let read = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(media, "media"), (read, "read")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        let path = "/v1/accounts/one/media-writeback/repair";
+        for limit in [0, 101] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "POST",
+                    path,
+                    Some(media),
+                    Some(json!({"limit":limit}))
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                path,
+                Some(read),
+                Some(json!({"limit":25}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, operation) = call(
+            app.clone(),
+            "POST",
+            path,
+            Some(media),
+            Some(json!({"limit":25})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(operation["kind"], "media-writeback");
+        let lookup = format!(
+            "/v1/accounts/one/operations/{}",
+            operation["id"].as_str().unwrap()
+        );
+        assert_eq!(
+            call(app.clone(), "GET", &lookup, Some(media), None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(app.clone(), "GET", &lookup, Some(read), None).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                app,
+                "POST",
+                "/v1/accounts/two/media-writeback/repair",
+                Some(media),
+                Some(json!({"limit":25}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert!(core.store.queued_sends("one").unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn aliases_resolve_before_account_grant_checks() {
+        let (_temp, core, app) = setup();
+        core.store.set_account_alias("one", "personal").unwrap();
+        let (_, account) = call(
+            app.clone(),
+            "GET",
+            "/v1/accounts/personal",
+            Some(OWNER),
+            None,
+        )
+        .await;
+        assert_eq!(account["id"], "one");
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        core.store
+            .issue_token(
+                "other-account",
+                &format!("{:x}", Sha256::digest(token.as_bytes())),
+                &["two".into()],
+                &["read".into()],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            call(app, "GET", "/v1/accounts/personal", Some(token), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    #[tokio::test]
+    async fn multipart_uploads_are_owned_bounded_and_never_return_original_bytes() {
+        let (_temp, _core, app) = setup();
+        let content = "private synthetic file";
+        let body=format!("--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--test-boundary--\r\n");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accounts/one/uploads")
+                    .header("authorization", format!("Bearer {OWNER}"))
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=test-boundary",
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let source: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(source["byteLength"], content.len());
+        assert_eq!(
+            source["sha256"],
+            format!("{:x}", Sha256::digest(content.as_bytes()))
+        );
+        assert!(!String::from_utf8_lossy(&body).contains(content));
+        let oversized = "x".repeat(wechat_core::MAX_SOURCE_BYTES + 1);
+        let body=format!("--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"large\"\r\n\r\n{oversized}\r\n--test-boundary--\r\n");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accounts/one/uploads")
+                    .header("authorization", format!("Bearer {OWNER}"))
+                    .header(
+                        "content-type",
+                        "multipart/form-data; boundary=test-boundary",
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    #[tokio::test]
+    async fn unauthenticated_logout_still_has_a_durable_receipt_and_fence() {
+        let (_temp, core, app) = setup();
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/one/logout")
+                .header("authorization", format!("Bearer {OWNER}"))
+                .header("idempotency-key", "logout-test")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let first: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(core.store.runtime("one", "logged-out").unwrap().is_some());
+        assert!(core.store.runtime("two", "logged-out").unwrap().is_none());
+        let response = app.oneshot(request()).await.unwrap();
+        let repeat: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(first["id"], repeat["id"]);
+    }
+    #[tokio::test]
+    async fn saved_only_login_retries_return_one_operation_without_a_network_login() {
+        let (_temp, core, app) = setup();
+        let body = json!({"strategy":"saved-device","allowQr":false});
+        let request = |body: &Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/one/login-attempts")
+                .header("authorization", format!("Bearer {OWNER}"))
+                .header("idempotency-key", "login-retry-test")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request(&body)).await.unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first: Value =
+            serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let repeated = app.clone().oneshot(request(&body)).await.unwrap();
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let repeated: Value =
+            serde_json::from_slice(&repeated.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(first["id"], repeated["id"]);
+        let mut different = body;
+        different["computerName"] = json!("other-name");
+        assert_eq!(
+            app.oneshot(request(&different)).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        for _ in 0..20 {
+            if core
+                .store
+                .operation("one", first["id"].as_str().unwrap())
+                .unwrap()
+                .state
+                == "needs_login"
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("saved-only empty account did not reach needs_login");
     }
     async fn call(
         app: Router,

@@ -1,0 +1,20 @@
+-- Inspected Linux 4.1.13.26 ordinary schema; no rows or private identifiers.
+CREATE TABLE biz_info(id INTEGER PRIMARY KEY, username TEXT, type INTEGER, accept_type INTEGER, child_type INTEGER, home_url TEXT, version INTEGER, sync_version TEXT, external_info TEXT, brand_info TEXT, brand_icon_url TEXT, brand_list TEXT, brand_flag INTEGER, belong TEXT, ext_buffer BLOB);
+CREATE TABLE chat_room(id INTEGER PRIMARY KEY, username TEXT, owner TEXT, ext_buffer BLOB);
+CREATE TABLE chat_room_info_detail(room_id_ INTEGER PRIMARY KEY, username_ TEXT, announcement_ TEXT, announcement_editor_ TEXT, announcement_publish_time_ INTEGER, chat_room_status_ INTEGER, xml_announcement_ TEXT, ext_buffer_ BLOB);
+CREATE TABLE chatroom_member(room_id INTEGER, member_id INTEGER, CONSTRAINT room_member UNIQUE(room_id, member_id));
+CREATE TABLE contact(id INTEGER PRIMARY KEY, username TEXT, local_type INTEGER, alias TEXT, encrypt_username TEXT, flag INTEGER, delete_flag INTEGER, verify_flag INTEGER, remark TEXT, remark_quan_pin TEXT, remark_pin_yin_initial TEXT, nick_name TEXT, pin_yin_initial TEXT, quan_pin TEXT, big_head_url TEXT, small_head_url TEXT, head_img_md5 TEXT, chat_room_notify INTEGER, is_in_chat_room INTEGER, description TEXT, extra_buffer BLOB, chat_room_type INTEGER);
+CREATE TABLE contact_label(label_id_ INTEGER PRIMARY KEY, label_name_ TEXT, sort_order_ INTEGER);
+CREATE TABLE encrypt_name2id(username TEXT PRIMARY KEY);
+CREATE TABLE name2id(username TEXT PRIMARY KEY);
+CREATE TABLE openim_acct_type(lang_id INTEGER, acc_type_id TEXT, update_time INTEGER, ext_buffer BLOB, CONSTRAINT accTypeId_langId PRIMARY KEY(acc_type_id, lang_id));
+CREATE TABLE openim_appid(lang_id INTEGER, app_id TEXT, acct_type_id TEXT, update_time INTEGER, ext_buffer BLOB, CONSTRAINT appId_langId PRIMARY KEY(app_id, lang_id));
+CREATE TABLE openim_wording(lang_id INTEGER, app_id TEXT, wording_id TEXT, wording TEXT, pinyin TEXT, quan_pin TEXT, update_time INTEGER, ext_buffer BLOB, CONSTRAINT appId_langId_wordingId PRIMARY KEY(app_id, lang_id, wording_id));
+CREATE TABLE oplog(id INTEGER PRIMARY KEY ASC AUTOINCREMENT, buffer BLOB);
+CREATE TABLE stranger(id INTEGER PRIMARY KEY, username TEXT, local_type INTEGER, alias TEXT, encrypt_username TEXT, flag INTEGER, delete_flag INTEGER, verify_flag INTEGER, remark TEXT, remark_quan_pin TEXT, remark_pin_yin_initial TEXT, nick_name TEXT, pin_yin_initial TEXT, quan_pin TEXT, big_head_url TEXT, small_head_url TEXT, head_img_md5 TEXT, chat_room_notify INTEGER, is_in_chat_room INTEGER, description TEXT, extra_buffer BLOB, chat_room_type INTEGER);
+CREATE TABLE stranger_ticket_info(id INTEGER PRIMARY KEY, ticket TEXT);
+CREATE TABLE ticket_info(id INTEGER PRIMARY KEY, ticket TEXT);
+CREATE INDEX chatroom_member_member_id ON chatroom_member(member_id);
+CREATE INDEX chatroom_member_room_id ON chatroom_member(room_id);
+CREATE INDEX contact_localType ON contact(local_type);
+CREATE INDEX stranger_localType ON stranger(local_type);
