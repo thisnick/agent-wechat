@@ -33,13 +33,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-      - name: Validate requested release version
+      - name: Require an unpublished CLI version and exact source tag
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: node --input-type=module -e 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("packages/cli/package.json")); if(p.version!==process.env.RELEASE_VERSION)throw Error("Version differs from committed CLI package");'
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/native-release-preflight.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli... build
       - run: pnpm --filter @agent-wechat/cli test
+      - run: node --test scripts/native-release-preflight.test.mjs
       - run: bash scripts/native-build-release.sh
       - run: node scripts/native-package-smoke.mjs artifacts/native
       - uses: actions/attest-build-provenance@v4.2.2
@@ -50,8 +52,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          node scripts/native-release-preflight.mjs
           TAG="v$RELEASE_VERSION"
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
+          fi
+          node scripts/native-release-preflight.mjs
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "Validated native Linux x64 GNU assets. npm publication and deployment are separate steps."
+            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes "Validated native Linux x64 GNU assets. npm publication and deployment are separate steps."
           fi
           gh release upload "$TAG" artifacts/native/*

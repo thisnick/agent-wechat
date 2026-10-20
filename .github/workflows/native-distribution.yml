@@ -45,7 +45,7 @@ jobs:
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - run: pnpm --filter @agent-wechat/agent-wechat typecheck
       - run: pnpm --filter @agent-wechat/agent-wechat test
-      - run: node --test scripts/pending-release-packages.test.mjs
+      - run: node --test scripts/pending-release-packages.test.mjs scripts/native-release-preflight.test.mjs
       - run: bash scripts/native-build-release.sh
       - run: node scripts/native-package-smoke.mjs artifacts/native
       - name: Validate real managed/external OpenClaw hosting without account credentials

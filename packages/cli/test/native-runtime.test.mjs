@@ -14,7 +14,7 @@ import { prepareNativePackage, nativePackageUnpublished } from '../../../scripts
 const exec = promisify(execFile);
 const version = '0.16.0';
 const identity = { product: 'agent-wechat', backend: 'native', version, apiVersion: 1, target: supportedTarget.rustTarget, capabilities: ['serve'] };
-const code = `#!/bin/sh\nexec node - "$@" <<'NATIVE_FIXTURE'\nif(process.argv[2]==='--json')console.log(${JSON.stringify(JSON.stringify(identity))});else if(process.argv[2]==='wait'){console.log('ready');process.on('SIGTERM',()=>process.exit(23));setInterval(()=>{},1000)}else {console.log(JSON.stringify(process.argv.slice(2)));process.exit(7)}\nNATIVE_FIXTURE\n`;
+const code = `#!/bin/sh\nexec node - "$@" <<'NATIVE_FIXTURE'\nif(process.argv[2]==='--json')console.log(${JSON.stringify(JSON.stringify(identity))});else if(process.argv[2]==='wait'){process.on('SIGTERM',()=>process.exit(23));setInterval(()=>{},1000);console.log('ready')}else {console.log(JSON.stringify(process.argv.slice(2)));process.exit(7)}\nNATIVE_FIXTURE\n`;
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'wx-native-package-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -118,8 +118,9 @@ test('launcher forwards SIGTERM to a managed foreground runtime', { timeout: 100
   const child = spawn(process.execPath, [launcher, 'wait'], { stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
   await once(child.stdout, 'data');
+  const exit = once(child, 'exit');
   child.kill('SIGTERM');
-  const [code, signal] = await once(child, 'exit');
+  const [code, signal] = await exit;
   assert.equal(code, 23); assert.equal(signal, null);
 });
 test('installer fetches pinned bytes from a local HTTP fixture and validates before install', async t => {

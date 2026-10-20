@@ -15,7 +15,7 @@ use std::{
     sync::Mutex,
 };
 
-pub struct Lease(File);
+pub struct Lease(Vec<File>);
 
 /// Reject overlapping source/control roots before a caller initializes the store.
 pub fn validate_source_placement(data_dir: &Path, source: &Path) -> Result<()> {
@@ -51,7 +51,9 @@ pub fn validate_source_placement(data_dir: &Path, source: &Path) -> Result<()> {
 }
 impl Drop for Lease {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        for file in &self.0 {
+            let _ = FileExt::unlock(file);
+        }
     }
 }
 
@@ -78,7 +80,7 @@ fn lock(path: &Path) -> Result<Lease> {
         .open(path)?;
     f.try_lock_exclusive()
         .context("storage is already owned by another operation")?;
-    Ok(Lease(f))
+    Ok(Lease(vec![f]))
 }
 
 /// Our process lock does not exclude an unmanaged official application.
@@ -92,9 +94,32 @@ pub fn profile_lease(profile: &Path) -> Result<Lease> {
         });
     let locks = runtime.join("agent-wechat-profile-locks");
     private_dir(&locks)?;
+    // A full home and its account subtree are two spellings of the same
+    // operating databases. Lock those canonical roots as well as the binding.
+    let mut roots = std::collections::BTreeSet::from([profile.clone()]);
+    if profile.join("db_storage").is_dir() {
+        roots.insert(fs::canonicalize(profile.join("db_storage"))?);
+    }
+    let accounts = profile.join("xwechat_files");
+    if accounts.is_dir() {
+        for (index, entry) in fs::read_dir(accounts)?.enumerate() {
+            if index >= 4096 {
+                bail!("profile account inventory exceeds limit");
+            }
+            let path = entry?.path().join("db_storage");
+            if path.is_dir() {
+                roots.insert(fs::canonicalize(path)?);
+            }
+        }
+    }
+    let mut held = Lease(vec![]);
     use std::os::unix::ffi::OsStrExt;
-    let hash = format!("{:x}", Sha256::digest(profile.as_os_str().as_bytes()));
-    lock(&locks.join(hash))
+    for root in roots {
+        let hash = format!("{:x}", Sha256::digest(root.as_os_str().as_bytes()));
+        let mut lease = lock(&locks.join(hash))?;
+        held.0.append(&mut lease.0);
+    }
+    Ok(held)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

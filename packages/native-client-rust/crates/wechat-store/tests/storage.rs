@@ -163,3 +163,28 @@ fn zero_version_does_not_authorize_replacing_a_foreign_schema() {
     assert!(error.to_string().contains("unrecognized registry schema"));
     assert_eq!(fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn full_home_and_direct_account_bindings_share_database_ownership() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("official-home");
+    let account = home.join("xwechat_files/synthetic-account");
+    std::fs::create_dir_all(account.join("db_storage/message")).unwrap();
+    std::fs::write(
+        account.join("db_storage/message/message_0.db"),
+        b"synthetic opaque bytes",
+    )
+    .unwrap();
+    let first = wechat_store::profile_lease(&home).unwrap();
+    assert!(wechat_store::profile_lease(&account).is_err());
+    assert!(wechat_store::profile_lease(&account.join("db_storage")).is_err());
+    drop(first);
+    let second = wechat_store::profile_lease(&account).unwrap();
+    assert!(wechat_store::profile_lease(&home).is_err());
+    drop(second);
+    assert!(wechat_store::profile_lease(&home).is_ok());
+    assert_eq!(
+        std::fs::read(account.join("db_storage/message/message_0.db")).unwrap(),
+        b"synthetic opaque bytes"
+    );
+}
