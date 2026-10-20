@@ -1,0 +1,322 @@
+//! Official-format profiles remain opaque here; only our sidecar schema is migrated.
+pub mod copy;
+use anyhow::{bail, Context, Result};
+use fs2::FileExt;
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::{
+    fs::{self, File, OpenOptions},
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+pub struct Lease(File);
+
+/// Reject overlapping source/control roots before a caller initializes the store.
+pub fn validate_source_placement(data_dir: &Path, source: &Path) -> Result<()> {
+    let source = fs::canonicalize(source)?;
+    let mut ancestor = data_dir.to_owned();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(
+            ancestor
+                .file_name()
+                .context("data directory needs an existing ancestor")?
+                .to_owned(),
+        );
+        ancestor = ancestor
+            .parent()
+            .context("data directory needs a parent")?
+            .to_owned();
+    }
+    let mut resolved = fs::canonicalize(ancestor)?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    if resolved
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!("use a data directory path without unresolved parent components");
+    }
+    if resolved.starts_with(&source) || source.starts_with(&resolved) {
+        bail!("profile source and daemon data directory must be separate");
+    }
+    Ok(())
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+pub fn private_dir(path: &Path) -> Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    let m = fs::symlink_metadata(path)?;
+    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.permissions().mode() & 0o077 != 0 {
+        bail!("data directory must be an owner-only real directory");
+    }
+    Ok(())
+}
+
+fn lock(path: &Path) -> Result<Lease> {
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    f.try_lock_exclusive()
+        .context("storage is already owned by another operation")?;
+    Ok(Lease(f))
+}
+
+/// Our process lock does not exclude an unmanaged official application.
+pub fn profile_lease(profile: &Path) -> Result<Lease> {
+    let profile = fs::canonicalize(profile)?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("agent-wechat-{}", unsafe { libc::geteuid() }))
+        });
+    let locks = runtime.join("agent-wechat-profile-locks");
+    private_dir(&locks)?;
+    use std::os::unix::ffi::OsStrExt;
+    let hash = format!("{:x}", Sha256::digest(profile.as_os_str().as_bytes()));
+    lock(&locks.join(hash))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub id: String,
+    pub storage_mode: String,
+    pub profile_path: PathBuf,
+    pub schema_compatibility: String,
+}
+
+pub struct Store {
+    pub root: PathBuf,
+    pub server_id: String,
+    db: Mutex<Connection>,
+    _lease: Lease,
+}
+
+impl Store {
+    pub fn open(root: &Path) -> Result<Self> {
+        Self::open_inner(root, true)
+    }
+    pub fn open_existing(root: &Path) -> Result<Self> {
+        if !root.is_dir() || !root.join("registry.sqlite").is_file() {
+            bail!("store is not initialized");
+        }
+        Self::open_inner(root, false)
+    }
+    fn open_inner(root: &Path, initialize: bool) -> Result<Self> {
+        private_dir(root)?;
+        let root = fs::canonicalize(root)?;
+        let lease = lock(&root.join("owner.lock"))?;
+        let db_path = root.join("registry.sqlite");
+        if !db_path.exists() {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&db_path)?
+                .sync_all()?;
+        }
+        let m = fs::symlink_metadata(&db_path)?;
+        if !m.is_file()
+            || m.uid() != unsafe { libc::geteuid() }
+            || m.permissions().mode() & 0o077 != 0
+        {
+            bail!("registry must be an owner-only regular file");
+        }
+        let mut db = Connection::open(&db_path)?;
+        db.pragma_update(None, "foreign_keys", true)?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if !matches!(version, 0 | 1) {
+            bail!("unsupported registry schema version");
+        }
+        if version == 0 {
+            if !initialize {
+                bail!("registry is not initialized; existing data preserved");
+            }
+            let count: i64 = db.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )?;
+            if count != 0 {
+                bail!("unrecognized registry schema; existing data preserved");
+            }
+            let tx = db.transaction()?;
+            tx.execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE accounts(id TEXT PRIMARY KEY,storage_mode TEXT NOT NULL,profile_path TEXT NOT NULL UNIQUE,schema_compatibility TEXT NOT NULL); PRAGMA user_version=1;")?;
+            tx.execute(
+                "INSERT INTO metadata VALUES('server_id',?1)",
+                [uuid::Uuid::new_v4().to_string()],
+            )?;
+            tx.commit()?;
+        }
+        let server_id = db.query_row(
+            "SELECT value FROM metadata WHERE key='server_id'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(Self {
+            root,
+            server_id,
+            db: Mutex::new(db),
+            _lease: lease,
+        })
+    }
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        let mut q = db.prepare(
+            "SELECT id,storage_mode,profile_path,schema_compatibility FROM accounts ORDER BY id",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Account {
+                id: r.get(0)?,
+                storage_mode: r.get(1)?,
+                profile_path: PathBuf::from(r.get::<_, String>(2)?),
+                schema_compatibility: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+    fn account_dir(&self, id: &str) -> Result<PathBuf> {
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        {
+            bail!("invalid local account ID");
+        }
+        Ok(self.root.join("accounts").join(id))
+    }
+    pub fn attach(&self, id: &str, profile: &Path, source_stopped: bool) -> Result<Account> {
+        if !source_stopped {
+            bail!("confirm that the source is stopped or a consistent snapshot");
+        }
+        let profile = fs::canonicalize(profile)?;
+        if !profile.is_dir() || profile.starts_with(&self.root) || self.root.starts_with(&profile) {
+            bail!("direct profile must be a separate directory");
+        }
+        let _profile_lease = profile_lease(&profile)?;
+        // Registration never opens SQLCipher, changes a source, or asserts write compatibility.
+        self.register(id, "direct", &profile, None)
+    }
+    pub fn import(&self, id: &str, source: &Path, source_stopped: bool) -> Result<Account> {
+        validate_source_placement(&self.root, source)?;
+        let target = self.account_dir(id)?;
+        if fs::symlink_metadata(&target).is_ok() {
+            bail!("account directory already exists; refusing overwrite");
+        }
+        let parent = target.parent().unwrap();
+        private_dir(parent)?;
+        let stage = tempfile::Builder::new()
+            .prefix(".account-")
+            .tempdir_in(parent)?;
+        let manifest = copy::copy_profile(source, &stage.path().join("profile"), source_stopped)?;
+        self.register(
+            id,
+            "managed",
+            &target.join("profile"),
+            Some((stage, manifest)),
+        )
+    }
+    fn register(
+        &self,
+        id: &str,
+        mode: &str,
+        profile: &Path,
+        staged: Option<(tempfile::TempDir, copy::Manifest)>,
+    ) -> Result<Account> {
+        let target = self.account_dir(id)?;
+        let parent = target.parent().unwrap();
+        private_dir(parent)?;
+        if fs::symlink_metadata(&target).is_ok() {
+            bail!("account directory already exists; refusing overwrite");
+        }
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        let tx = db.transaction()?;
+        let path = profile.to_str().context("profile path is not UTF-8")?;
+        tx.execute(
+            "INSERT INTO accounts VALUES(?1,?2,?3,'unverified')",
+            params![id, mode, path],
+        )?;
+        let (stage, manifest) = match staged {
+            Some((s, m)) => (s, Some(m)),
+            None => (
+                tempfile::Builder::new()
+                    .prefix(".account-")
+                    .tempdir_in(parent)?,
+                None,
+            ),
+        };
+        let agent = stage.path().join("agent");
+        private_dir(&agent)?;
+        let control_path = agent.join("control.sqlite");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&control_path)?;
+        let control = Connection::open(&control_path)?;
+        control.execute_batch("CREATE TABLE copy_receipts(id INTEGER PRIMARY KEY,manifest_json TEXT NOT NULL); PRAGMA user_version=1;")?;
+        if let Some(m) = manifest {
+            control.execute(
+                "INSERT INTO copy_receipts(manifest_json) VALUES(?1)",
+                [serde_json::to_string(&m)?],
+            )?;
+        }
+        drop(control);
+        File::open(&control_path)?.sync_all()?;
+        File::open(&agent)?.sync_all()?;
+        copy::publish(stage.path(), &target)?;
+        // A crash before this commit leaves an unregistered directory. Refuse reuse;
+        // do not erase it or infer authenticated account state during recovery.
+        tx.commit().context("profile published but registry commit failed; preserve the account directory for recovery")?;
+        Ok(Account {
+            id: id.into(),
+            storage_mode: mode.into(),
+            profile_path: profile.into(),
+            schema_compatibility: "unverified".into(),
+        })
+    }
+    pub fn export(
+        &self,
+        id: &str,
+        destination: &Path,
+        source_stopped: bool,
+    ) -> Result<copy::Manifest> {
+        let account = self
+            .accounts()?
+            .into_iter()
+            .find(|a| a.id == id)
+            .context("account is not registered")?;
+        copy::copy_profile(&account.profile_path, destination, source_stopped)
+    }
+    pub fn profile_leases(&self) -> Result<Vec<Lease>> {
+        self.accounts()?
+            .into_iter()
+            .map(|a| profile_lease(&a.profile_path))
+            .collect()
+    }
+}

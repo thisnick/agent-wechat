@@ -157,6 +157,8 @@ pnpm build:image:amd64       # Build Docker image (Intel)
 
 See [AGENTS.md](./AGENTS.md) for contributor guidance and implementation pointers.
 
+The separately built [native Rust client foundation](./packages/native-client-rust/README.md) provides server configuration, profile registration and same-format copy tools. Native WeChat login/sync and official database writes are not enabled by that workspace yet; the npm CLI above continues to use the container backend.
+
 ## Ports
 
 | Port | Service |

@@ -1,0 +1,34 @@
+name: Native client foundation
+
+on:
+  pull_request:
+    paths:
+      - 'packages/native-client-rust/**'
+      - '.github/workflows/native-client.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/native-client-rust/**'
+      - '.github/workflows/native-client.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/native-client-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo build --workspace --locked
+      - run: python3 scripts/smoke.py target/debug/wx
