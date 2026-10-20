@@ -143,8 +143,25 @@ fn client() -> Result<NativeClient> {
     NativeClient::new(NativeOptions::default())
 }
 fn auth_rejected(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains(" -13") || message.ends_with(" -13")
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        [
+            "Native envelope returned ",
+            "Heartbeat returned ",
+            "Sync service returned ",
+            "Contact service returned ",
+            "Saved-device login returned ",
+            "Account authentication returned ",
+            "Automatic authentication returned ",
+        ]
+        .iter()
+        .any(|prefix| {
+            message
+                .strip_prefix(prefix)
+                .and_then(|v| v.parse::<i32>().ok())
+                == Some(-13)
+        })
+    })
 }
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f)
@@ -352,8 +369,9 @@ impl Core {
                 .as_deref()
                 == Some(self.ownership_generation.as_bytes());
         let desired = self.store.runtime(account, "desired")?.unwrap_or_default();
+        let auto_connect = self.store.runtime(account, "auto-connect")?.as_deref() != Some(b"0");
         Ok(
-            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&desired==b"connected"{"reconnecting"}else{"disconnected"},"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":self.store.runtime(account,"auto-connect")?.as_deref()!=Some(b"0")}),
+            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
@@ -1413,6 +1431,32 @@ mod tests {
         }
     }
     #[test]
+    fn auth_fallback_requires_a_whole_rejection_from_a_known_protocol_boundary() {
+        for prefix in [
+            "Native envelope returned ",
+            "Heartbeat returned ",
+            "Contact service returned ",
+            "Automatic authentication returned ",
+        ] {
+            assert!(auth_rejected(
+                &anyhow::anyhow!(format!("{prefix}-13")).context("operation failed")
+            ));
+            for suffix in ["-130", "-1317", "-13 extra", "-13/secret"] {
+                assert!(!auth_rejected(&anyhow::anyhow!(format!(
+                    "{prefix}{suffix}"
+                ))));
+            }
+        }
+        for message in [
+            "network failed -13",
+            "checksum -13",
+            "profile /private/-13",
+            "auth_required",
+        ] {
+            assert!(!auth_rejected(&anyhow::anyhow!(message.to_owned())));
+        }
+    }
+    #[test]
     fn protected_credentials_survive_restart_without_plaintext_or_token_coupling() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("data");
@@ -1436,6 +1480,38 @@ mod tests {
         assert!(Core::new(store, None).is_err());
         assert!(!key.exists());
         assert_eq!(saved.len(), 32);
+    }
+    #[test]
+    fn disabled_auto_connect_reports_disconnected_until_explicitly_validated() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let store = Arc::new(Store::open(&root).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.restore_credentials("one", &serde_json::to_vec(&state()).unwrap())
+            .unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store.put_runtime("one", "auto-connect", b"0").unwrap();
+        assert_eq!(
+            core.account_status("one").unwrap()["connection"],
+            "disconnected"
+        );
+        store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        assert_eq!(core.account_status("one").unwrap()["connection"], "online");
+        drop(core);
+        drop(store);
+        let store = Arc::new(Store::open_existing(&root).unwrap());
+        let core = Core::new(store.clone(), None).unwrap();
+        let status = core.account_status("one").unwrap();
+        assert_eq!(status["authenticated"], false);
+        assert_eq!(status["connection"], "disconnected");
+        store.put_runtime("one", "auto-connect", b"1").unwrap();
+        assert_eq!(
+            core.account_status("one").unwrap()["connection"],
+            "reconnecting"
+        );
     }
     #[test]
     fn logout_fences_active_credentials_and_identity_cannot_be_replaced() {

@@ -94,14 +94,25 @@ impl NativeClient {
         );
         Ok(page)
     }
+    /// Verified native business payload, retained before strict contact decoding.
+    /// Callers must protect this account data at rest. The transport's global
+    /// message bound applies; no identities or opaque fields are exposed in logs.
+    pub fn lookup_contacts_raw(&self, state: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+        let request = wire::contact_request(state, ids)?;
+        let raw =
+            self.authenticated_rpc(state, 182, "/cgi-bin/micromsg-bin/getcontact", &request)?;
+        ensure!(
+            raw.len() <= crate::MAX_MESSAGE_BYTES,
+            "Contact response exceeds bound"
+        );
+        Ok(raw)
+    }
     pub fn lookup_contacts_receipt(
         &self,
         state: &mut AccountState,
         ids: &[String],
     ) -> Result<MetadataReply<ContactLookup>> {
-        let request = wire::contact_request(state, ids)?;
-        let raw =
-            self.authenticated_rpc(state, 182, "/cgi-bin/micromsg-bin/getcontact", &request)?;
+        let raw = self.lookup_contacts_raw(state, ids)?;
         Ok(MetadataReply {
             value: wire::decode_contacts(&raw, ids)?,
             raw,

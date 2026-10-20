@@ -17,7 +17,7 @@ const temporary = await mkdtemp(join(tmpdir(), 'wx-native-pack-smoke-'));
 try {
   const staged = join(temporary, 'source');
   await mkdir(staged);
-  for (const name of ['package.json', 'README.md', 'LEGACY.md', 'scripts', 'dist']) await cp(join(source, name), join(staged, name), { recursive: true });
+  for (const name of ['package.json', 'README.md', 'LEGACY.md', 'THIRD_PARTY_NOTICES.txt', 'scripts', 'dist']) await cp(join(source, name), join(staged, name), { recursive: true });
   await writeFile(join(staged, 'native-release.json'), JSON.stringify(manifest));
   const { stdout } = await exec('npm', ['pack', '--json', '--pack-destination', temporary], { cwd: staged, maxBuffer: 1024 * 1024 });
   const [packed] = JSON.parse(stdout);

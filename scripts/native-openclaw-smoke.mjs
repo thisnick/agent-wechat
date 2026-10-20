@@ -15,10 +15,11 @@ try {
   const tokenFile = join(directory, 'api-token'); await writeFile(tokenFile, randomBytes(32).toString('hex'), { mode: 0o600 });
   const reservation = createServer(); reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
   const port = reservation.address().port; await new Promise(done => reservation.close(done));
-  const config = { mode: 'managed', executable, accountId: 'smoke-a', dataDir: join(directory, 'data'),
+  const config = { mode: 'managed', executable, accountId: 'smoke-a', dataDir: join(directory, 'data') + '/',
     tokenFile, consumerStateDir: join(directory, 'consumer'), listen: `127.0.0.1:${port}`, readPolicy: 'never' };
   owned = await startNativeHost(config);
   const first = await owned.client.status(); assert.equal(first.version.backend, 'native'); assert.equal(first.state, 'ready');
+  assert.equal(first.dataDir, join(directory, 'data'));
   const a = await owned.client.createAccount('smoke-a'); const b = await owned.client.createAccount('smoke-b');
   const accounts = await owned.client.accounts(); assert.equal(accounts.items.length, 2);
   const account = await owned.client.account('smoke-a'); assert.equal(account.authenticated, false); assert.equal(account.connection, 'disconnected');

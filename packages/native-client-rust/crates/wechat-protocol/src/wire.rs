@@ -655,44 +655,83 @@ pub struct ContactLookup {
     pub contacts: Vec<ContactRecord>,
     pub results: Vec<i32>,
 }
+fn contact_result_code(value: u64) -> Result<i32> {
+    let signed = value as u32 as i32;
+    ensure!(
+        value <= u32::MAX as u64 || (signed < 0 && value == signed as i64 as u64),
+        "Invalid per-contact int32 result"
+    );
+    Ok(signed)
+}
 pub fn decode_contacts(input: &[u8], requested: &[String]) -> Result<ContactLookup> {
+    ensure!(
+        input.len() <= crate::MAX_MESSAGE_BYTES,
+        "Contact response exceeds bound"
+    );
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
     ensure!(code == 0, "Contact service returned {code}");
-    let mut contacts = vec![];
-    let mut seen = HashSet::new();
+    let mut slots = vec![];
     let mut results = vec![];
     for field in &f {
         match (field.number, &field.value) {
-            (3, p::Value::Bytes(raw)) => {
-                let record = decode_contact_record(raw)?;
-                ensure!(
-                    requested.contains(&record.username) && seen.insert(record.username.clone()),
-                    "Unrequested or duplicate contact"
-                );
-                contacts.push(record);
-            }
-            (4, p::Value::Varint(n)) => results.push(*n as u32 as i32),
+            (3, p::Value::Bytes(raw)) => slots.push(raw.as_slice()),
+            (4, p::Value::Varint(n)) => results.push(contact_result_code(*n)?),
             (4, p::Value::Bytes(raw)) => {
                 let mut offset = 0;
                 while offset < raw.len() {
-                    results.push(p::read_varint(raw, &mut offset)? as u32 as i32);
+                    results.push(contact_result_code(p::read_varint(raw, &mut offset)?)?);
                 }
             }
             (3 | 4, _) => bail!("Invalid contact response field"),
             _ => {}
         }
     }
+    // The declared count includes default ModContact placeholders for rejected
+    // slots. Count the wire slots before interpreting their contact identities.
     ensure!(
-        p::scalar(&f, 2)? == contacts.len() as u64 && contacts.len() <= requested.len(),
+        p::scalar(&f, 2)? == slots.len() as u64 && slots.len() <= requested.len(),
         "Contact count mismatch"
     );
     ensure!(
         results.is_empty() || results.len() == requested.len(),
         "Contact result count mismatch"
     );
-    Ok(ContactLookup { contacts, results })
+    let aligned = slots.len() == requested.len() && results.len() == requested.len();
+    let mut contacts = vec![];
+    let mut seen = HashSet::new();
+    let mut omitted_unavailable = false;
+    for (index, raw) in slots.iter().enumerate() {
+        let fields = p::decode(raw)?;
+        let identity = p::optional_data(&fields, 1)?;
+        // Observed service code1 accompanies an explicitly present, empty
+        // SKString slot. It rejects this lookup; it does not prove deletion or
+        // permanent unavailability. Other empty/missing/unknown cases fail.
+        if identity == Some(&[][..]) && aligned && results[index] == 1 {
+            omitted_unavailable = true;
+            continue;
+        }
+        let record = decode_contact_record(raw)?;
+        ensure!(
+            requested.contains(&record.username) && seen.insert(record.username.clone()),
+            "Unrequested or duplicate contact"
+        );
+        contacts.push((index, record));
+    }
+    if omitted_unavailable {
+        ensure!(
+            contacts
+                .iter()
+                .all(|(index, record)| requested.get(*index) == Some(&record.username)),
+            "Unavailable contact slot alignment mismatch"
+        );
+    }
+    Ok(ContactLookup {
+        contacts: contacts.into_iter().map(|(_, record)| record).collect(),
+        results,
+    })
 }
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RoomMember {
     pub username: String,
@@ -938,6 +977,104 @@ mod tests {
             p::bytes(2, &p::message(&[p::uint(1, k), p::uint(2, v)]).unwrap()),
         ])
         .unwrap()
+    }
+    #[test]
+    fn explicit_code1_contact_slot_does_not_hide_successful_neighbor() {
+        let requested = vec!["unavailable".into(), "available".into()];
+        let empty = p::bytes(1, &[]);
+        let available = p::bytes(1, &p::bytes(1, b"available"));
+        for codes in [
+            p::bytes(4, &[1, 0]),
+            p::message(&[p::uint(4, 1), p::uint(4, 0)]).unwrap(),
+        ] {
+            let raw = p::message(&[
+                p::bytes(1, &p::uint(1, 0)),
+                p::uint(2, 2),
+                p::bytes(3, &empty),
+                p::bytes(3, &available),
+                codes,
+            ])
+            .unwrap();
+            let result = decode_contacts(&raw, &requested).unwrap();
+            assert_eq!(result.results, vec![1, 0]);
+            assert_eq!(result.contacts.len(), 1);
+            assert_eq!(result.contacts[0].username, "available");
+            assert!(decode_contact_record(&empty).is_err());
+        }
+    }
+    #[test]
+    fn contact_result_overflow_cannot_alias_success_or_unavailable() {
+        let requested = vec!["unavailable".into(), "available".into()];
+        let empty = p::bytes(1, &[]);
+        let available = p::bytes(1, &p::bytes(1, b"available"));
+        for overflow in [1u64 << 32, (1u64 << 32) + 1, (1u64 << 32) + u32::MAX as u64] {
+            let packed = p::uint(1, overflow)[1..].to_vec();
+            for codes in [
+                p::message(&[p::uint(4, overflow), p::uint(4, 0)]).unwrap(),
+                p::bytes(4, &[packed.as_slice(), &[0]].concat()),
+            ] {
+                let raw = p::message(&[
+                    p::bytes(1, &p::uint(1, 0)),
+                    p::uint(2, 2),
+                    p::bytes(3, &empty),
+                    p::bytes(3, &available),
+                    codes,
+                ])
+                .unwrap();
+                assert!(decode_contacts(&raw, &requested).is_err());
+            }
+        }
+        assert_eq!(contact_result_code(0).unwrap(), 0);
+        assert_eq!(contact_result_code(1).unwrap(), 1);
+        assert_eq!(contact_result_code(u32::MAX as u64).unwrap(), -1);
+        assert_eq!(contact_result_code(u64::MAX).unwrap(), -1);
+        assert_eq!(
+            contact_result_code(i32::MIN as i64 as u64).unwrap(),
+            i32::MIN
+        );
+    }
+    #[test]
+    fn unexplained_empty_contact_slots_and_unproved_alignment_remain_errors() {
+        let ids = vec!["unavailable".into(), "available".into()];
+        let empty = p::bytes(1, &[]);
+        let available = p::bytes(1, &p::bytes(1, b"available"));
+        for codes in [vec![], p::bytes(4, &[0, 0]), p::bytes(4, &[2, 0])] {
+            let raw = p::message(&[
+                p::bytes(1, &p::uint(1, 0)),
+                p::uint(2, 2),
+                p::bytes(3, &empty),
+                p::bytes(3, &available),
+                codes,
+            ])
+            .unwrap();
+            assert!(decode_contacts(&raw, &ids).is_err());
+        }
+        let partial = p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(2, 1),
+            p::bytes(3, &empty),
+            p::bytes(4, &[1, 0]),
+        ])
+        .unwrap();
+        assert!(decode_contacts(&partial, &ids).is_err());
+        let wrong = p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(2, 2),
+            p::bytes(3, &empty),
+            p::bytes(3, &p::bytes(1, &p::bytes(1, b"unavailable"))),
+            p::bytes(4, &[1, 0]),
+        ])
+        .unwrap();
+        assert!(decode_contacts(&wrong, &ids).is_err());
+        let absent = p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(2, 2),
+            p::bytes(3, &[]),
+            p::bytes(3, &available),
+            p::bytes(4, &[1, 0]),
+        ])
+        .unwrap();
+        assert!(decode_contacts(&absent, &ids).is_err());
     }
     #[test]
     fn cursor_merge_and_reset() {

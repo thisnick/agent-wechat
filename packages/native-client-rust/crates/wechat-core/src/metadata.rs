@@ -1,5 +1,6 @@
 //! Durable remote metadata refresh with sparse official-file projection.
 use super::*;
+use anyhow::ensure;
 use wechat_profile::{ContactProjection, RawFields, SqlValue};
 use wechat_protocol::{
     protobuf as p, ContactLookup, ContactRecord, GroupMetadataPage, InitContactPage, MetadataReply,
@@ -40,6 +41,104 @@ enum ReceiptBody {
 #[derive(Serialize, Deserialize)]
 struct MetadataReceipt {
     body: ReceiptBody,
+}
+#[derive(Serialize, Deserialize)]
+struct ContactWireReceipt {
+    requested: Vec<String>,
+    raw: Vec<u8>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CatalogRejection {
+    username: String,
+    service_code: i32,
+}
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CatalogHydration {
+    schema: u32,
+    settled: Vec<String>,
+    rejections: Vec<CatalogRejection>,
+}
+struct ContactHydration {
+    applied: usize,
+    failed: usize,
+    unresolved: usize,
+    settled: Vec<String>,
+    rejections: Vec<CatalogRejection>,
+}
+fn contact_hydration(
+    requested: &[String],
+    reply: &ContactLookup,
+    applied: usize,
+) -> ContactHydration {
+    let mut out = ContactHydration {
+        applied,
+        failed: 0,
+        unresolved: 0,
+        settled: vec![],
+        rejections: vec![],
+    };
+    for (index, username) in requested.iter().enumerate() {
+        let present = reply
+            .contacts
+            .iter()
+            .any(|record| &record.username == username);
+        match reply.results.get(index).copied() {
+            Some(0) | None if present => out.settled.push(username.clone()),
+            Some(1) => {
+                out.failed += 1;
+                out.settled.push(username.clone());
+                out.rejections.push(CatalogRejection {
+                    username: username.clone(),
+                    service_code: 1,
+                });
+            }
+            _ => {
+                out.failed += 1;
+                out.unresolved += 1;
+            }
+        }
+    }
+    out
+}
+fn catalog_hydration(bytes: Option<&[u8]>, catalog: &[String]) -> Result<CatalogHydration> {
+    let mut out = match bytes {
+        Some(bytes) => match serde_json::from_slice::<Vec<String>>(bytes) {
+            Ok(settled) => CatalogHydration {
+                schema: 1,
+                settled,
+                rejections: vec![],
+            },
+            Err(_) => serde_json::from_slice(bytes)?,
+        },
+        None => CatalogHydration {
+            schema: 1,
+            ..Default::default()
+        },
+    };
+    ensure!(
+        out.schema == 1 && out.settled.len() <= catalog.len(),
+        "invalid_metadata_hydration_checkpoint"
+    );
+    let mut settled = std::collections::HashSet::new();
+    ensure!(
+        out.settled
+            .iter()
+            .all(|name| catalog.contains(name) && settled.insert(name.clone())),
+        "invalid_metadata_hydration_checkpoint"
+    );
+    let mut rejected = std::collections::HashSet::new();
+    ensure!(
+        out.rejections.iter().all(|r| r.service_code == 1
+            && settled.contains(&r.username)
+            && rejected.insert(r.username.clone())),
+        "invalid_metadata_hydration_checkpoint"
+    );
+    // Keep stable serialization and the existing catalog order on replay.
+    out.settled
+        .sort_by_key(|name| catalog.iter().position(|candidate| candidate == name));
+    Ok(out)
 }
 fn valid_name(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
@@ -105,6 +204,14 @@ pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection>
         username: record.username.clone(),
         fields: out,
     })
+}
+fn contact_catalog_result(
+    count: usize,
+    pages: u32,
+    catalog_complete: bool,
+    unavailable: usize,
+) -> Value {
+    json!({"recordCount":count,"failedItems":unavailable,"pages":pages,"complete":catalog_complete&&unavailable==0,"catalogComplete":catalog_complete,"unavailableCount":unavailable,"reason":if !catalog_complete{json!("page_bound")}else if unavailable>0{json!("contact_lookup_unavailable")}else{Value::Null},"resumeAvailable":!catalog_complete||unavailable>0,"coverage":"contact_inventory","profileProjection":if unavailable==0{"complete"}else{"partial"}})
 }
 fn bounded_catalog_result(count: usize, pages: u32, coverage: &str) -> Value {
     json!({"recordCount":count,"pages":pages,"complete":false,"reason":"time_bound","coverage":coverage,"resumeAvailable":true,"profileProjection":"pending"})
@@ -195,6 +302,7 @@ impl Core {
         let (location, keys) = self.profile_location_keys(account)?;
         let mut cursor: Option<(&str, Vec<u8>)> = None;
         let mut count = 0;
+        let mut rejected_slots = 0;
         let mut apply = |record: &ContactRecord| -> Result<()> {
             wechat_profile::apply_contact_patch(
                 &location,
@@ -249,6 +357,24 @@ impl Core {
                 "group_catalog"
             }
             ReceiptBody::ContactCatalog(reply) => {
+                let hydration_key = format!("metadata-hydrated:{id}");
+                if let Some(sealed) = self.store.runtime(account, &hydration_key)? {
+                    let plain = self.vault.open_record(account, &hydration_key, &sealed)?;
+                    let progress = catalog_hydration(Some(&plain), &reply.value.usernames)?;
+                    rejected_slots = progress.rejections.len();
+                    if rejected_slots > 0 {
+                        let key = format!("metadata-unavailable:{id}");
+                        self.store.put_runtime(
+                            account,
+                            &key,
+                            &self.vault.seal(
+                                account,
+                                &key,
+                                &serde_json::to_vec(&progress.rejections)?,
+                            )?,
+                        )?;
+                    }
+                }
                 cursor = Some((
                     "metadata-contacts-cursor",
                     self.vault.seal(
@@ -295,7 +421,7 @@ impl Core {
             account,
             id,
             cursor.as_ref().map(|(k, v)| (*k, v.as_slice())),
-            &json!({"receiptId":id,"kind":kind,"recordCount":count,"profileProjection":"complete"}),
+            &json!({"receiptId":id,"kind":kind,"recordCount":count,"failedItems":rejected_slots,"profileProjection":if rejected_slots==0{"complete"}else{"partial"}}),
         )?;
         Ok(count)
     }
@@ -323,23 +449,82 @@ impl Core {
         }
         Ok(n)
     }
-    fn metadata_contact_lookup(&self, account: &str, ids: &[String]) -> Result<(usize, usize)> {
+    fn retain_contact_wire(&self, account: &str, ids: &[String], raw: &[u8]) -> Result<String> {
+        let key = format!("metadata-wire:{}", uuid::Uuid::new_v4());
+        let body = ContactWireReceipt {
+            requested: ids.to_vec(),
+            raw: raw.to_vec(),
+        };
+        let sealed = self
+            .vault
+            .seal(account, &key, &serde_json::to_vec(&body)?)?;
+        self.store.put_runtime(account, &key, &sealed)?;
+        Ok(key)
+    }
+    fn metadata_contact_reply(
+        &self,
+        account: &str,
+        ids: &[String],
+    ) -> Result<MetadataReply<ContactLookup>> {
         let mut state = self.account_state(account)?;
         let native = client()?;
-        let reply = match native.lookup_contacts_receipt(&mut state, ids) {
-            Ok(r) => r,
-            Err(e) if auth_rejected(&e) => {
+        let capture =
+            |state: &mut wechat_protocol::AccountState| -> Result<MetadataReply<ContactLookup>> {
+                let raw = native.lookup_contacts_raw(state, ids)?;
+                // Persist the verified body before any schema/identity decoding. A
+                // decoder failure can be investigated offline without repeating RPC.
+                self.retain_contact_wire(account, ids, &raw)?;
+                let value = wechat_protocol::wire::decode_contacts(&raw, ids)?;
+                self.save_state(account, state)?;
+                Ok(MetadataReply { value, raw })
+            };
+        match capture(&mut state) {
+            Ok(reply) => Ok(reply),
+            Err(error) if auth_rejected(&error) => {
                 state = native.renew_session(&state, "agent-wechat metadata")?;
-                native.lookup_contacts_receipt(&mut state, ids)?
+                capture(&mut state)
             }
-            Err(e) => return Err(e),
+            Err(error) => Err(error),
+        }
+    }
+    fn contact_unavailable(&self, account: &str) -> Result<Vec<CatalogRejection>> {
+        const KEY: &str = "metadata-contacts-unavailable";
+        let values = match self.store.runtime(account, KEY)? {
+            Some(sealed) => serde_json::from_slice::<Vec<CatalogRejection>>(
+                &self.vault.open_record(account, KEY, &sealed)?,
+            )?,
+            None => vec![],
         };
-        self.save_state(account, &state)?;
-        let failed = reply.value.results.iter().filter(|n| **n != 0).count().max(
-            ids.iter()
-                .filter(|id| !reply.value.contacts.iter().any(|r| &r.username == *id))
-                .count(),
+        let mut seen = std::collections::HashSet::new();
+        ensure!(
+            values.len() <= 10000
+                && values.iter().all(|v| v.service_code == 1
+                    && valid_name(&v.username).is_ok()
+                    && seen.insert(v.username.clone())),
+            "invalid_contact_unavailable_ledger"
         );
+        Ok(values)
+    }
+    fn record_contact_hydration(&self, account: &str, outcome: &ContactHydration) -> Result<usize> {
+        const KEY: &str = "metadata-contacts-unavailable";
+        let mut ledger = self.contact_unavailable(account)?;
+        // A successful explicit refresh clears an earlier rejection. Still
+        // unavailable entries rotate behind other entries for the next pass.
+        ledger.retain(|r| !outcome.settled.contains(&r.username));
+        ledger.extend(outcome.rejections.clone());
+        ensure!(ledger.len() <= 10000, "contact_unavailable_ledger_limit");
+        self.store.put_runtime(
+            account,
+            KEY,
+            &self
+                .vault
+                .seal(account, KEY, &serde_json::to_vec(&ledger)?)?,
+        )?;
+        Ok(ledger.len())
+    }
+    fn metadata_contact_lookup(&self, account: &str, ids: &[String]) -> Result<ContactHydration> {
+        let reply = self.metadata_contact_reply(account, ids)?;
+        let mut hydration = contact_hydration(ids, &reply.value, 0);
         let id = self.stage_metadata_body(
             account,
             ReceiptBody::Contacts {
@@ -347,7 +532,9 @@ impl Core {
                 reply,
             },
         )?;
-        Ok((self.apply_metadata_receipt(account, &id, false)?, failed))
+        hydration.applied = self.apply_metadata_receipt(account, &id, false)?;
+        self.record_contact_hydration(account, &hydration)?;
+        Ok(hydration)
     }
     fn run_metadata(
         &self,
@@ -363,9 +550,9 @@ impl Core {
             | MetadataAction::Group {
                 group_id: contact_id,
             } => {
-                let (n, failed) = self.metadata_contact_lookup(account, &[contact_id])?;
+                let outcome = self.metadata_contact_lookup(account, &[contact_id])?;
                 Ok(
-                    json!({"recordCount":n,"failedItems":failed,"profileProjection":"complete","coverage":"known_identity"}),
+                    json!({"recordCount":outcome.applied,"failedItems":outcome.failed,"profileProjection":if outcome.failed==0{"complete"}else{"partial"},"coverage":"known_identity"}),
                 )
             }
             MetadataAction::Members { group_id, version } => {
@@ -385,10 +572,8 @@ impl Core {
                 )
             }
             MetadataAction::Avatar { contact_id } => {
-                let mut state = self.account_state(account)?;
-                let reply = client()?
-                    .lookup_contacts_receipt(&mut state, std::slice::from_ref(&contact_id))?;
-                self.save_state(account, &state)?;
+                let reply =
+                    self.metadata_contact_reply(account, std::slice::from_ref(&contact_id))?;
                 let source = reply
                     .value
                     .contacts
@@ -444,13 +629,32 @@ impl Core {
             None => (0, 0),
         };
         let mut count = 0;
+        // Explicit catalog passes retry at most one batch of earlier code1
+        // rejections, then continue inventory. No permanent/deletion inference.
+        let retry = self
+            .contact_unavailable(account)?
+            .into_iter()
+            .take(2)
+            .map(|r| r.username)
+            .collect::<Vec<_>>();
+        if !retry.is_empty() {
+            self.metadata_check(account, operation, deadline)?;
+            let outcome = self.metadata_contact_lookup(account, &retry)?;
+            count += outcome.applied;
+            if outcome.unresolved > 0 {
+                return Ok(
+                    json!({"recordCount":count,"failedItems":outcome.failed,"complete":false,"catalogComplete":false,"unavailableCount":self.contact_unavailable(account)?.len(),"reason":"unresolved_contact_results","resumeAvailable":true,"profileProjection":"partial"}),
+                );
+            }
+        }
+        let mut rejected_count = self.contact_unavailable(account)?.len();
         for page_index in 0..max_pages {
             if Instant::now() >= deadline {
-                return Ok(bounded_catalog_result(
-                    count,
-                    page_index,
-                    "contact_inventory",
-                ));
+                let mut result = bounded_catalog_result(count, page_index, "contact_inventory");
+                result["failedItems"] = rejected_count.into();
+                result["unavailableCount"] = rejected_count.into();
+                result["catalogComplete"] = false.into();
+                return Ok(result);
             }
             self.metadata_check(account, operation, deadline)?;
             let mut pending = None;
@@ -474,58 +678,68 @@ impl Core {
                 (id, reply)
             };
             let checkpoint_key = format!("metadata-hydrated:{id}");
-            let mut done = match self.store.runtime(account, &checkpoint_key)? {
-                Some(v) => serde_json::from_slice::<Vec<String>>(&self.vault.open_record(
-                    account,
-                    &checkpoint_key,
-                    &v,
-                )?)?,
-                None => vec![],
-            };
+            let sealed_progress = self.store.runtime(account, &checkpoint_key)?;
+            let plain_progress = sealed_progress
+                .map(|sealed| self.vault.open_record(account, &checkpoint_key, &sealed))
+                .transpose()?;
+            let mut progress = catalog_hydration(
+                plain_progress.as_deref().map(|v| v.as_slice()),
+                &reply.value.usernames,
+            )?;
+            rejected_count = self.contact_unavailable(account)?.len();
             let remaining = reply
                 .value
                 .usernames
                 .iter()
-                .filter(|name| !done.contains(name))
+                .filter(|name| !progress.settled.contains(name))
                 .cloned()
                 .collect::<Vec<_>>();
             for names in remaining.chunks(2) {
                 if Instant::now() >= deadline {
-                    return Ok(bounded_catalog_result(
-                        count,
-                        page_index + 1,
-                        "contact_inventory",
-                    ));
+                    let mut result =
+                        bounded_catalog_result(count, page_index + 1, "contact_inventory");
+                    result["failedItems"] = rejected_count.into();
+                    result["unavailableCount"] = rejected_count.into();
+                    result["catalogComplete"] = false.into();
+                    return Ok(result);
                 }
                 self.metadata_check(account, operation, deadline)?;
-                let (n, failed) = self.metadata_contact_lookup(account, names)?;
-                count += n;
-                if failed > 0 {
-                    return Ok(
-                        json!({"recordCount":count,"pages":page_index+1,"complete":false,"reason":"partial_contact_results","profileProjection":"pending"}),
-                    );
-                }
-                done.extend(names.iter().cloned());
+                let outcome = self.metadata_contact_lookup(account, names)?;
+                count += outcome.applied;
+                rejected_count = self.contact_unavailable(account)?.len();
+                progress.settled.extend(outcome.settled);
+                progress.rejections.extend(outcome.rejections);
                 self.store.put_runtime(
                     account,
                     &checkpoint_key,
                     &self
                         .vault
-                        .seal(account, &checkpoint_key, &serde_json::to_vec(&done)?)?,
+                        .seal(account, &checkpoint_key, &serde_json::to_vec(&progress)?)?,
                 )?;
+                if outcome.unresolved > 0 {
+                    return Ok(
+                        json!({"recordCount":count,"failedItems":rejected_count+outcome.unresolved,"pages":page_index+1,"complete":false,"reason":"unresolved_contact_results","catalogComplete":false,"unavailableCount":rejected_count,"resumeAvailable":true,"profileProjection":"partial"}),
+                    );
+                }
             }
             self.apply_metadata_receipt(account, &id, true)?;
             self.store.clear_runtime(account, &checkpoint_key)?;
             sequences = (reply.value.contact_sequence, reply.value.room_sequence);
             if !reply.value.more {
-                return Ok(
-                    json!({"recordCount":count,"pages":page_index+1,"complete":true,"coverage":"contact_inventory","profileProjection":"complete"}),
-                );
+                return Ok(contact_catalog_result(
+                    count,
+                    page_index + 1,
+                    true,
+                    rejected_count,
+                ));
             }
         }
-        Ok(
-            json!({"recordCount":count,"pages":max_pages,"complete":false,"reason":"page_bound","profileProjection":"complete"}),
-        )
+        Ok(contact_catalog_result(
+            count,
+            max_pages,
+            false,
+            rejected_count,
+        ))
     }
     fn sync_metadata_groups(
         &self,
@@ -638,6 +852,132 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn synthetic_record(name: &str) -> ContactRecord {
+        wechat_protocol::wire::decode_contact_record(&p::bytes(1, &p::bytes(1, name.as_bytes())))
+            .unwrap()
+    }
+    #[test]
+    fn recognized_rejection_settles_only_current_pass_and_unknown_results_remain_pending() {
+        let requested = vec!["unavailable".into(), "available".into()];
+        let reply = ContactLookup {
+            contacts: vec![synthetic_record("available")],
+            results: vec![1, 0],
+        };
+        let outcome = contact_hydration(&requested, &reply, 1);
+        assert_eq!(outcome.applied, 1);
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(outcome.unresolved, 0);
+        assert_eq!(outcome.settled, requested);
+        assert_eq!(outcome.rejections[0].service_code, 1);
+        let reply = ContactLookup {
+            contacts: vec![synthetic_record("available")],
+            results: vec![2, 0],
+        };
+        let outcome = contact_hydration(&requested, &reply, 1);
+        assert_eq!(outcome.unresolved, 1);
+        assert_eq!(outcome.settled, vec!["available"]);
+        assert!(outcome.rejections.is_empty());
+    }
+    #[test]
+    fn catalog_checkpoint_accepts_legacy_progress_and_preserves_explicit_rejections() {
+        let catalog = vec!["one".into(), "two".into()];
+        let legacy = catalog_hydration(Some(br#"["one"]"#), &catalog).unwrap();
+        assert_eq!(legacy.settled, vec!["one"]);
+        assert!(legacy.rejections.is_empty());
+        let mut progress = legacy;
+        progress.settled.push("two".into());
+        progress.rejections.push(CatalogRejection {
+            username: "two".into(),
+            service_code: 1,
+        });
+        let bytes = serde_json::to_vec(&progress).unwrap();
+        let restored = catalog_hydration(Some(&bytes), &catalog).unwrap();
+        assert_eq!(restored.rejections.len(), 1);
+        progress.rejections[0].service_code = 2;
+        assert!(
+            catalog_hydration(Some(&serde_json::to_vec(&progress).unwrap()), &catalog).is_err()
+        );
+        assert!(catalog_hydration(Some(br#"["foreign"]"#), &catalog).is_err());
+    }
+    #[test]
+    fn catalog_drain_is_separate_from_successful_contact_hydration() {
+        let result = contact_catalog_result(99, 1, true, 1);
+        assert_eq!(result["catalogComplete"], true);
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["unavailableCount"], 1);
+        assert_eq!(result["profileProjection"], "partial");
+        assert_eq!(result["resumeAvailable"], true);
+        assert_eq!(contact_catalog_result(100, 1, true, 0)["complete"], true);
+    }
+    #[test]
+    fn malformed_raw_contact_receipt_and_rejection_rotation_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let store = Arc::new(wechat_store::Store::open(&root).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store, None).unwrap();
+        let ids = vec!["synthetic".into()];
+        let raw = b"synthetic malformed contact response";
+        let key = core.retain_contact_wire("one", &ids, raw).unwrap();
+        assert!(wechat_protocol::wire::decode_contacts(raw, &ids).is_err());
+        let failed = ContactHydration {
+            applied: 0,
+            failed: 3,
+            unresolved: 0,
+            settled: vec!["a".into(), "b".into(), "c".into()],
+            rejections: ["a", "b", "c"]
+                .into_iter()
+                .map(|username| CatalogRejection {
+                    username: username.into(),
+                    service_code: 1,
+                })
+                .collect(),
+        };
+        core.record_contact_hydration("one", &failed).unwrap();
+        let retry = contact_hydration(
+            &["a".into()],
+            &ContactLookup {
+                contacts: vec![],
+                results: vec![1],
+            },
+            0,
+        );
+        core.record_contact_hydration("one", &retry).unwrap();
+        assert_eq!(
+            core.contact_unavailable("one")
+                .unwrap()
+                .iter()
+                .map(|r| r.username.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c", "a"]
+        );
+        let success = contact_hydration(
+            &["b".into()],
+            &ContactLookup {
+                contacts: vec![synthetic_record("b")],
+                results: vec![0],
+            },
+            1,
+        );
+        core.record_contact_hydration("one", &success).unwrap();
+        drop(core);
+        let store = Arc::new(wechat_store::Store::open_existing(&root).unwrap());
+        let core = Core::new(store, None).unwrap();
+        let sealed = core.store.runtime("one", &key).unwrap().unwrap();
+        assert!(!sealed.windows(raw.len()).any(|w| w == raw));
+        let body: ContactWireReceipt =
+            serde_json::from_slice(&core.vault.open_record("one", &key, &sealed).unwrap()).unwrap();
+        assert_eq!(body.requested, ids);
+        assert_eq!(body.raw, raw);
+        assert_eq!(
+            core.contact_unavailable("one")
+                .unwrap()
+                .iter()
+                .map(|r| r.username.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "a"]
+        );
+    }
     #[test]
     fn bounded_catalog_retains_explicit_resume_and_incomplete_projection() {
         let value = bounded_catalog_result(4, 1, "contact_inventory");

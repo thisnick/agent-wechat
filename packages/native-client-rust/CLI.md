@@ -143,6 +143,14 @@ Unknown/nonmember group IDs do not imply creation or joining. Check current
 account capabilities and operation results rather than treating route presence
 as successful server resolution.
 
+Contact sync resumes its saved inventory after a time or page bound. Inspect
+`catalogComplete` separately from `complete`: the catalog can finish while
+`unavailableCount` reports contacts explicitly rejected by the current lookup.
+Those entries do not block later contacts or imply deletion. A later explicit
+sync retries a bounded batch; a successful exact refresh clears its rejection.
+Unexplained empty records remain errors, with the verified reply retained in
+the encrypted sidecar for diagnosis.
+
 To reconcile media already retained by this daemon into supported official files:
 
 ```bash

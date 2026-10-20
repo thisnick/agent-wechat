@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Real pinned Gateway/model runtime; both native API and model are local fixtures.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, realpath } from 'node:fs/promises';
@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
+const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
 assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.2');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -45,7 +46,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
   try {
     await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
     for (const file of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', file), join(temporary, 'plugin', file));
-    await promisify(execFile)(process.execPath, [join(root, 'packages/openclaw-extension/node_modules/esbuild/bin/esbuild'), join(root, 'packages/openclaw-extension/test/fixtures/native-model-plugin.ts'), '--bundle', '--format=esm', '--platform=node', '--external:openclaw', '--outfile=' + join(temporary, 'plugin/dist/index.js')], { cwd: root });
+    await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
     upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const nativePort = upstream.address().port;
     const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
     await writeFile(join(temporary, 'token'), token, { mode: 0o600 });
