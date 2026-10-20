@@ -62,7 +62,8 @@ jobs:
           mkdir -p deploy/native/secrets
           printf 'validation-placeholder-not-a-real-secret\n' > deploy/native/secrets/api-token
           docker compose -f deploy/native/compose.yaml config --quiet
-          systemd-analyze --user verify deploy/native/agent-wechat-native.service
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          python3 scripts/native-service-verify.py "$PWD/artifacts/native/wx-v${VERSION}-linux-x64-gnu"
       - uses: actions/upload-artifact@v4
         with:
           name: native-linux-x64-gnu-validation

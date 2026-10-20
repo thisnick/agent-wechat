@@ -15,6 +15,7 @@ bash scripts/native-build-release.sh
 node scripts/native-package-smoke.mjs artifacts/native
 # Substitute the exact artifact version emitted by the build:
 node --experimental-strip-types scripts/native-openclaw-smoke.mjs artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 scripts/native-service-verify.py artifacts/native/wx-vVERSION-linux-x64-gnu
 docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:local .
 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:local --json version
 python3 scripts/native-container-smoke.py agent-wechat-native:local
@@ -76,4 +77,4 @@ This validates configuration; it does not prove native login, account synchroniz
 
 `agent-wechat-native.service` is an example user unit using a separately installed native executable at `~/.local/bin/wx`. Provision the default durable directory, config and mode-0600 token before starting. The unit uses filesystem restrictions and a private temporary directory, with write access only to the default durable root. If `dataDir` differs or a direct official profile is used, explicitly extend `ReadWritePaths` and ensure the necessary parent paths exist. Do not weaken all filesystem restrictions to fix a missing path.
 
-`systemd-analyze --user verify deploy/native/agent-wechat-native.service` parses the unit without installing, enabling or starting it. A headless host may need an approved user-session/linger arrangement; setting that up is an operator deployment step. Stop the service before a source/profile snapshot or official-client handoff. Preserve data when rolling binaries back; a binary rollback is not a schema downgrade.
+`python3 scripts/native-service-verify.py /absolute/path/to/wx` checks a temporary copy of this unit against the built executable, leaving every other setting unchanged. It does not install a binary or unit, enable a service, or start one. Direct `systemd-analyze --user verify deploy/native/agent-wechat-native.service` also works once the configured `~/.local/bin/wx` exists; systemd verifies that executable as well as unit syntax. A headless host may need an approved user-session/linger arrangement; setting that up is an operator deployment step. Stop the service before a source/profile snapshot or official-client handoff. Preserve data when rolling binaries back; a binary rollback is not a schema downgrade.
