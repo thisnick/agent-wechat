@@ -1,5 +1,35 @@
 use wechat_profile::*;
 #[test]
+fn authenticated_encryption_does_not_mask_an_unopenable_schema_as_a_wrong_password() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = temp.path().join("synthetic_account/db_storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    let file = storage.join("contact.db");
+    let password = [42u8; 32];
+    let db = rusqlite::Connection::open(&file).unwrap();
+    assert_eq!(
+        unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+        0
+    );
+    db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;CREATE TABLE synthetic(value TEXT);PRAGMA writable_schema=ON;UPDATE sqlite_master SET sql='CREATE TABLE synthetic(' WHERE name='synthetic';").unwrap();
+    drop(db);
+    let before = std::fs::read(&file).unwrap();
+    let location = ProfileLocation::new(storage.parent().unwrap()).unwrap();
+    let options = ReadOptions {
+        stopped_or_consistent_snapshot: true,
+        ..Default::default()
+    };
+    assert!(matches!(
+        keys_from_password(location.clone(), &password, options.clone()),
+        Err(ProfileError::DatabaseOpen(relative)) if relative == "contact.db"
+    ));
+    assert!(matches!(
+        keys_from_password(location, &[43; 32], options),
+        Err(ProfileError::KeyMismatch(relative)) if relative == "contact.db"
+    ));
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+#[test]
 fn account_directory_rejects_path_components_before_creating_files() {
     for username in [
         "",

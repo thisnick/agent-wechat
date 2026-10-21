@@ -546,21 +546,7 @@ impl Core {
                 .login_worker(worker_op.clone(), request, cancel, logout_epoch)
                 .await;
             if let Err(error) = outcome {
-                let message = error.to_string();
-                let code = if message.contains("account_identity_mismatch") {
-                    "account_identity_mismatch"
-                } else if message.contains("account_database_password_mismatch") {
-                    "account_database_password_mismatch"
-                } else if message.contains("account_device_mismatch") {
-                    "account_device_mismatch"
-                } else if message.contains("profile_identity_unavailable") {
-                    "profile_identity_unavailable"
-                } else if auth_rejected(&error) {
-                    "auth_required"
-                } else {
-                    "login_failed"
-                };
-                let _ = core.progress(&worker_op, "failed", json!({"code":code,"retryable":false}));
+                let _ = core.progress(&worker_op, "failed", login_failure_result(&error));
             }
             if let Ok(mut map) = core.cancels.lock() {
                 map.remove(&active_key);
@@ -667,14 +653,16 @@ impl Core {
             if let Some(saved) = self.official_saved_login(&account)? {
                 self.progress(&op, "resuming", json!({"method":"official_saved_device"}))?;
                 let mut device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
-                device.device_id = saved.identity.device_id.clone();
+                device.device_id = saved.identity.request_device_id()?.to_vec();
                 let name = request.computer_name.clone();
+                let options = self.official_login_options(&account)?;
                 match blocking(move || {
-                    client()?.start_profile_saved_device_login(
+                    NativeClient::new(options)?.start_profile_saved_device_login(
                         &device,
                         &saved.identity.username,
                         &saved.auto_auth_key,
                         &saved.cookie,
+                        &saved.key_info,
                         &name,
                     )
                 })
@@ -709,9 +697,7 @@ impl Core {
                 let mut device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
                 if let Some(binding) = self.identity_binding(&account)? {
                     let identity = self.read_bound_identity(&account, &binding)?;
-                    if !identity.device_id.is_empty() {
-                        device.device_id = identity.device_id;
-                    }
+                    device.device_id = identity.request_device_id()?.to_vec();
                     device.validate()?;
                 }
                 self.store.put_runtime(
@@ -725,12 +711,24 @@ impl Core {
             };
             if let Some(binding) = self.identity_binding(&account)? {
                 let identity = self.read_bound_identity(&account, &binding)?;
-                if !identity.device_id.is_empty() && identity.device_id != device.device_id {
+                if identity.request_device_id()? != device.device_id {
                     bail!("account_device_mismatch");
                 }
             }
             let name = request.computer_name.clone();
-            blocking(move || client()?.start_qr_login(device, &name)).await?
+            let key_info = zeroize::Zeroizing::new(match &previous {
+                Some(state) => state.key_info.clone(),
+                None => self.official_login_key_info(&account)?,
+            });
+            let mut options = self.official_login_options(&account)?;
+            if let Some(state) = &previous {
+                options.long_host = state.long_host.clone();
+                options.short_host = state.short_host.clone();
+            }
+            blocking(move || {
+                NativeClient::new(options)?.start_profile_qr_login(device, &name, &key_info)
+            })
+            .await?
         };
         let mut generation = 1;
         let mut scanned = false;
@@ -826,9 +824,7 @@ impl Core {
                         && generation <= request.qr_refresh.max_refreshes as u32 =>
                 {
                     generation += 1;
-                    let device = attempt.device.clone();
-                    let name = request.computer_name.clone();
-                    attempt = blocking(move || client()?.start_qr_login(device, &name)).await?;
+                    attempt = blocking(move || client()?.refresh_qr_login(&attempt)).await?;
                 }
                 LoginStatus::Expired => {
                     self.progress(&op, "expired", json!({}))?;
@@ -1454,6 +1450,53 @@ impl Core {
         }
     }
 }
+fn login_failure_result(error: &anyhow::Error) -> Value {
+    let message = error.to_string();
+    let code = [
+        "account_identity_mismatch",
+        "account_database_password_mismatch",
+        "account_device_mismatch",
+        "profile_identity_unavailable",
+        "profile_database_password_required",
+        "profile_saved_key_info_unavailable",
+        "profile_network_routing_unavailable",
+        "profile_keys_unavailable",
+        "profile_database_unavailable",
+        "profile_changed_during_login",
+        "profile_resource_limit",
+        "profile_cipher_unavailable",
+        "profile_io_failed",
+        "profile_unavailable",
+    ]
+    .into_iter()
+    .find(|code| message == *code)
+    .unwrap_or_else(|| {
+        if auth_rejected(error) {
+            "auth_required"
+        } else {
+            "login_failed"
+        }
+    });
+    let mut result = json!({"code":code,"retryable":false});
+    if let Some(
+        wechat_profile::ProfileError::KeyMismatch(relative)
+        | wechat_profile::ProfileError::KeyUnavailable(relative)
+        | wechat_profile::ProfileError::DatabaseOpen(relative),
+    ) = error.downcast_ref::<wechat_profile::ProfileError>()
+    {
+        // Relative profile inventory names are useful for repair. Never include
+        // source HOME paths, SQL, parameters or credential material.
+        if relative.len() <= 4096
+            && std::path::Path::new(relative)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+            && !relative.contains(['\\', '\0'])
+        {
+            result["database"] = json!(relative);
+        }
+    }
+    result
+}
 fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
     use image::{ImageFormat, ImageReader, Rgba, RgbaImage};
     let mut reader = ImageReader::with_format(std::io::Cursor::new(bytes), ImageFormat::Png);
@@ -1476,6 +1519,52 @@ fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn login_admission_preserves_the_failure_kind_without_disclosing_credential_material() {
+        use wechat_profile::ProfileError;
+        for (error, code, database) in [
+            (
+                ProfileError::KeyMismatch("contact/contact.db".into()),
+                "account_database_password_mismatch",
+                Some("contact/contact.db"),
+            ),
+            (
+                ProfileError::DatabaseOpen("contact/contact.db".into()),
+                "profile_database_unavailable",
+                Some("contact/contact.db"),
+            ),
+            (
+                ProfileError::SourceChanged,
+                "profile_changed_during_login",
+                None,
+            ),
+            (ProfileError::ResourceLimit, "profile_resource_limit", None),
+            (
+                ProfileError::SqlcipherUnavailable,
+                "profile_cipher_unavailable",
+                None,
+            ),
+            (
+                ProfileError::Io(std::io::Error::other("private path and secret parameters")),
+                "profile_io_failed",
+                None,
+            ),
+        ] {
+            let error = super::identity::password_admission_error(error);
+            let result = login_failure_result(&error);
+            assert_eq!(result["code"], code);
+            assert_eq!(result["database"].as_str(), database);
+            assert_eq!(result["retryable"], false);
+            assert!(!result.to_string().contains("secret"));
+            assert!(!result.to_string().contains("private path"));
+        }
+        for relative in ["/private/home/contact.db", "../other.db", "bad\\path.db"] {
+            let error = super::identity::password_admission_error(ProfileError::KeyMismatch(
+                relative.into(),
+            ));
+            assert!(login_failure_result(&error).get("database").is_none());
+        }
+    }
     pub(super) fn state() -> AccountState {
         AccountState {
             schema: 1,

@@ -133,7 +133,7 @@ impl Core {
                 wechat_profile::read_profile_saved_login(&record.profile_path, &format_key, true)?;
             if saved.identity.username != state.own_username
                 || saved.identity.uin != state.uin
-                || saved.identity.device_id != state.device.device_id
+                || saved.identity.request_device_id()? != state.device.device_id
             {
                 bail!("account_identity_mismatch");
             }

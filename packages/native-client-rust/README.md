@@ -116,6 +116,13 @@ app must stay closed. Discovery refuses multiple profiles. The persisted
 unrelated HOME files and native sidecars. Other profiles are never silently
 replaced. See [login workflows](CLI.md#login-and-logout).
 
+Existing installation key-info and saved regional host redirects under
+`.xwechat/net/host` are restored for saved-device approval and QR recovery. The complete stored device ID stays unchanged; native requests use
+its inspected sixteen-byte prefix. A scanned approval remains bounded by the
+login timeout rather than the QR image's display expiry. Login failures separate
+key validation from database-open, filesystem and snapshot errors. These guards
+do not establish successful takeover of an arbitrary official profile.
+
 The lower-level direct mode can select a complete official home containing `xwechat_files/<account>/db_storage`, or an existing account directory containing `db_storage`. Managed copy/import should preserve the complete official home and original account directory name:
 
 ```bash

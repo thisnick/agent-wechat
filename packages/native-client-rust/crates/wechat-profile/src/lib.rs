@@ -56,6 +56,8 @@ pub enum ProfileError {
     KeyUnavailable(String),
     #[error("supplied key or database generation did not validate for {0}")]
     KeyMismatch(String),
+    #[error("validated database could not be opened for {0}")]
+    DatabaseOpen(String),
     #[error("the database engine does not provide SQLCipher support")]
     SqlcipherUnavailable,
     #[error("unsupported database schema for {0}")]

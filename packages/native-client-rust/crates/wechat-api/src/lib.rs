@@ -110,6 +110,25 @@ impl IntoResponse for ApiError {
 }
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        let message = error.to_string();
+        // Admission attaches a stable public code while retaining its typed
+        // profile cause. Prefer that code over the general profile fallback.
+        for code in [
+            "account_database_password_mismatch",
+            "profile_database_unavailable",
+            "profile_changed_during_login",
+            "profile_resource_limit",
+            "profile_keys_unavailable",
+        ] {
+            if message == code {
+                return Self(StatusCode::CONFLICT, code);
+            }
+        }
+        for code in ["profile_cipher_unavailable", "profile_io_failed"] {
+            if message == code {
+                return Self(StatusCode::SERVICE_UNAVAILABLE, code);
+            }
+        }
         if let Some(profile) = error.downcast_ref::<wechat_profile::ProfileError>() {
             use wechat_profile::ProfileError::*;
             return match profile {
@@ -120,7 +139,6 @@ impl From<anyhow::Error> for ApiError {
                 _ => Self(StatusCode::CONFLICT, "profile_unavailable"),
             };
         }
-        let message = error.to_string();
         for code in [
             "official_profile_not_found",
             "official_profile_ambiguous",
@@ -1075,6 +1093,35 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+    #[test]
+    fn admission_codes_survive_typed_profile_error_context() {
+        for (cause, code, expected) in [
+            (
+                wechat_profile::ProfileError::KeyMismatch("contact.db".into()),
+                "account_database_password_mismatch",
+                StatusCode::CONFLICT,
+            ),
+            (
+                wechat_profile::ProfileError::DatabaseOpen("contact.db".into()),
+                "profile_database_unavailable",
+                StatusCode::CONFLICT,
+            ),
+            (
+                wechat_profile::ProfileError::SourceChanged,
+                "profile_changed_during_login",
+                StatusCode::CONFLICT,
+            ),
+            (
+                wechat_profile::ProfileError::SqlcipherUnavailable,
+                "profile_cipher_unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let ApiError(status, actual) = ApiError::from(anyhow::Error::new(cause).context(code));
+            assert_eq!(status, expected);
+            assert_eq!(actual, code);
+        }
+    }
     const OWNER: &str = "0123456789abcdef0123456789abcdef";
     fn setup() -> (tempfile::TempDir, Arc<Core>, Router) {
         let t = tempfile::tempdir().unwrap();

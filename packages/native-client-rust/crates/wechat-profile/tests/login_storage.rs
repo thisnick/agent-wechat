@@ -44,6 +44,11 @@ fn stopped_saved_login_retains_locked_state_and_uses_native_legacy_fallback() {
     let got = read_profile_saved_login(d.path(), &[7; 16], true).unwrap();
     assert_eq!(got.identity.username, "synthetic_self");
     assert_eq!(got.identity.uin, 7);
+    assert_eq!(got.identity.device_id, b"synthetic-device-16");
+    assert_eq!(
+        got.identity.request_device_id().unwrap(),
+        &b"synthetic-device-16"[..16]
+    );
     assert_eq!(got.auto_login_flag, 3);
     assert_eq!(got.logout_locked, Some(true));
     assert_eq!(got.key_info_source, KeyInfoSource::LegacyFallback);
@@ -51,6 +56,33 @@ fn stopped_saved_login_retains_locked_state_and_uses_native_legacy_fallback() {
     assert!(got.cookie.is_empty());
     assert!(got.pc_account_name.is_none());
     assert!(read_profile_saved_login(d.path(), &[8; 16], true).is_err());
+}
+#[test]
+fn qr_recovery_retains_selected_key_info_without_requiring_reusable_auto_auth() {
+    let d = fixture();
+    let global = d
+        .path()
+        .join("xwechat_files/all_users/config/global_config");
+    let pair = stage_mmkv_values(
+        &fs::read(&global).unwrap(),
+        &fs::read(global.with_extension("crc")).unwrap(),
+        &[7; 16],
+        &[("mmkv_key_auto_auth_key".into(), None)],
+    )
+    .unwrap();
+    fs::write(&global, pair.data()).unwrap();
+    fs::write(global.with_extension("crc"), pair.metadata()).unwrap();
+    assert!(read_profile_saved_login(d.path(), &[7; 16], true).is_err());
+    let before = fs::read(&global).unwrap();
+    let (key_info, source) = read_profile_key_info(d.path(), "synthetic_self", true).unwrap();
+    assert_eq!(key_info.as_slice(), b"synthetic legacy key info");
+    assert_eq!(source, KeyInfoSource::LegacyFallback);
+    assert_eq!(fs::read(&global).unwrap(), before);
+    assert!(read_profile_key_info(d.path(), "different_account", true).is_err());
+    assert!(matches!(
+        read_profile_key_info(d.path(), "synthetic_self", false),
+        Err(ProfileError::SnapshotRequired)
+    ));
 }
 #[test]
 fn newest_database_row_is_used_or_falls_back_without_selecting_an_older_row() {

@@ -167,7 +167,7 @@ impl Core {
         )?;
         Ok(saved.identity.username == state.own_username
             && saved.identity.uin == state.uin
-            && saved.identity.device_id == state.device.device_id
+            && saved.identity.request_device_id()? == state.device.device_id
             && saved.auto_auth_key.as_slice() == state.auto_auth_key
             && saved.cookie.as_slice() == state.cookie
             && saved.key_info.as_slice() == state.key_info
@@ -282,7 +282,7 @@ impl Core {
         let identity = self.read_bound_identity(account, &binding)?;
         if identity.username != accepted.own_username
             || identity.uin != accepted.uin
-            || identity.device_id != accepted.device.device_id
+            || identity.request_device_id()? != accepted.device.device_id
         {
             bail!("account_identity_mismatch");
         }

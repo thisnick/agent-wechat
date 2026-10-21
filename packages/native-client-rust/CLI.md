@@ -70,6 +70,10 @@ explicit path. Preparing the profile creates/selects a daemon account, binds its
 stored identity and takes ownership without copying data or importing an active
 session. No separate key export or identity-binding command is required. Saved
 trust is tried when usable; QR remains available when trust is absent/rejected.
+The full stored device ID, selected key-info and regional host redirects under
+`.xwechat/net/host` are retained across that flow. Host selection follows the
+saved INI selector and matching XML; only validated native login destinations
+are used.
 Successful authentication must match username, UIN, device and every encrypted
 database before writes are enabled. An explicit `--account` must already refer
 to that profile; an unrelated configured default cannot redirect attachment.

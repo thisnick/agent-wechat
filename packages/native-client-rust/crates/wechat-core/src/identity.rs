@@ -2,6 +2,23 @@
 use super::*;
 use std::{io::Read, os::unix::fs::OpenOptionsExt, path::Path};
 
+// Keep the typed cause: only a failed key proof is a password mismatch. A
+// snapshot, filesystem, engine or schema error must not be reported as one.
+pub(super) fn password_admission_error(error: wechat_profile::ProfileError) -> anyhow::Error {
+    use wechat_profile::ProfileError;
+    let code = match &error {
+        ProfileError::KeyMismatch(_) => "account_database_password_mismatch",
+        ProfileError::KeyUnavailable(_) | ProfileError::KeysMissing => "profile_keys_unavailable",
+        ProfileError::DatabaseOpen(_) | ProfileError::Database => "profile_database_unavailable",
+        ProfileError::SourceChanged => "profile_changed_during_login",
+        ProfileError::ResourceLimit => "profile_resource_limit",
+        ProfileError::SqlcipherUnavailable => "profile_cipher_unavailable",
+        ProfileError::Io(_) => "profile_io_failed",
+        _ => "profile_unavailable",
+    };
+    anyhow::Error::new(error).context(code)
+}
+
 impl Core {
     /// Local history keeps its account identity after network logout or forgetting.
     pub(crate) fn profile_username(&self, account: &str) -> Result<Option<String>> {
@@ -174,7 +191,7 @@ impl Core {
         if identity.username != state.own_username || identity.uin != state.uin {
             bail!("account_identity_mismatch");
         }
-        if !identity.device_id.is_empty() && identity.device_id != state.device.device_id {
+        if identity.request_device_id()? != state.device.device_id {
             bail!("account_device_mismatch");
         }
         if !state.database_password.is_empty() {
@@ -224,7 +241,7 @@ impl Core {
                 != Some(&stamp)
             {
                 wechat_profile::verify_profile_password(&location, &keys, &state.database_password)
-                    .map_err(|_| anyhow::anyhow!("account_database_password_mismatch"))?;
+                    .map_err(password_admission_error)?;
                 self.password_proofs
                     .lock()
                     .map_err(|_| anyhow::anyhow!("identity proof unavailable"))?

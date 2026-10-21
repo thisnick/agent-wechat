@@ -342,7 +342,7 @@ impl Snapshot {
         c.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
             r.get::<_, i64>(0)
         })
-        .map_err(|_| ProfileError::KeyMismatch(rel.into()))?;
+        .map_err(|_| ProfileError::DatabaseOpen(rel.into()))?;
         c.execute_batch(
             "PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; PRAGMA trusted_schema=OFF;",
         )?;
@@ -374,7 +374,7 @@ pub(crate) fn configure_cipher(c: &Connection, key: &SecretBytes, rel: &str) -> 
         hex::encode(key.expose())
     ));
     c.execute_batch(&sql)
-        .map_err(|_| ProfileError::KeyMismatch(rel.into()))
+        .map_err(|_| ProfileError::DatabaseOpen(rel.into()))
 }
 
 /// Export only validated per-file keys from an explicitly supplied existing
@@ -410,12 +410,12 @@ pub fn keys_from_password(
         if !verify_first_page(&page, key.expose(), &salt) {
             return Err(ProfileError::KeyMismatch(rel.clone()));
         }
-        let c = Connection::open(path)?;
+        let c = Connection::open(path).map_err(|_| ProfileError::DatabaseOpen(rel.clone()))?;
         configure_cipher(&c, &key, rel)?;
         c.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
             r.get::<_, i64>(0)
         })
-        .map_err(|_| ProfileError::KeyMismatch(rel.clone()))?;
+        .map_err(|_| ProfileError::DatabaseOpen(rel.clone()))?;
         keys.databases.insert(
             rel.clone(),
             DatabaseKey {

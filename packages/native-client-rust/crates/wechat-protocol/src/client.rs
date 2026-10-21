@@ -317,6 +317,8 @@ pub struct LoginAttempt {
     pub long_host: String,
     pub short_host: String,
     pub status: LoginStatus,
+    #[serde(default)]
+    key_info: Vec<u8>,
     credential3: Option<Vec<u8>>,
     credential4: Option<Vec<u8>>,
 }
@@ -335,6 +337,7 @@ impl Drop for LoginAttempt {
         self.identifier.zeroize();
         self.notify_key.zeroize();
         self.cookie.zeroize();
+        self.key_info.zeroize();
         self.credential3.zeroize();
         self.credential4.zeroize();
     }
@@ -350,8 +353,24 @@ impl LoginAttempt {
         Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"530\" height=\"530\" viewBox=\"0 0 265 265\"><rect width=\"265\" height=\"265\" fill=\"white\"/><image x=\"40\" y=\"40\" width=\"185\" height=\"185\" style=\"image-rendering:pixelated\" href=\"data:image/png;base64,{encoded}\"/></svg>"))
     }
     fn validate(&self) -> Result<()> {
+        self.validate_at(wire::unix_time()?)
+    }
+    fn locally_expired(&self, now: u32) -> bool {
+        // A scanned QR is an approval challenge. Its image expiry must not end
+        // that challenge; the operation and this hard bound still limit it.
+        let hard_deadline = self.created_at.saturating_add(900);
+        let deadline = if self.qr_png.is_empty()
+            || matches!(self.status, LoginStatus::Scanned | LoginStatus::Approved)
+        {
+            hard_deadline
+        } else {
+            self.expires_at.min(hard_deadline)
+        };
+        now >= deadline
+    }
+    fn validate_at(&self, now: u32) -> Result<()> {
         ensure!(
-            self.schema == 1 && wire::unix_time()? < self.expires_at,
+            self.schema == 1 && !self.locally_expired(now),
             "Login attempt expired"
         );
         self.device.validate()?;
@@ -360,7 +379,8 @@ impl LoginAttempt {
                 && self.identifier.len() <= 4096
                 && !self.notify_key.is_empty()
                 && self.notify_key.len() <= 1024
-                && self.cookie.len() <= 15,
+                && self.cookie.len() <= 15
+                && self.key_info.len() <= 1024 * 1024,
             "Invalid login attempt"
         );
         mmtls::validate_host(&self.long_host)?;
@@ -370,6 +390,20 @@ impl LoginAttempt {
             "Unsupported login key version"
         );
         Ok(())
+    }
+    fn manual_auth_request(&self, point: &[u8]) -> Result<Vec<u8>> {
+        wire::manual_auth(
+            &self.device,
+            &self.computer_name,
+            self.credential3
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Missing approval"))?,
+            self.credential4
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Missing approval"))?,
+            point,
+            &self.key_info,
+        )
     }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -495,7 +529,18 @@ impl NativeClient {
         device: DeviceProfile,
         computer_name: &str,
     ) -> Result<LoginAttempt> {
+        self.start_profile_qr_login(device, computer_name, &[])
+    }
+    /// QR approval for an existing installation retains its selected key-info.
+    /// This neither bypasses phone approval nor imports active authorization.
+    pub fn start_profile_qr_login(
+        &self,
+        device: DeviceProfile,
+        computer_name: &str,
+        key_info: &[u8],
+    ) -> Result<LoginAttempt> {
         device.validate()?;
+        ensure!(key_info.len() <= 1024 * 1024, "Invalid saved key-info");
         let plain = wire::qr_request(&device, computer_name)?;
         let (reply, cookie, key_version) = self.prelogin_rpc(
             &self.options.long_host,
@@ -525,6 +570,7 @@ impl NativeClient {
             long_host: self.options.long_host.clone(),
             short_host: self.options.short_host.clone(),
             status: LoginStatus::Pending,
+            key_info: key_info.to_vec(),
             credential3: None,
             credential4: None,
         })
@@ -542,6 +588,7 @@ impl NativeClient {
             &state.own_username,
             &state.auto_auth_key,
             &state.cookie,
+            &state.key_info,
             &state.long_host,
             &state.short_host,
             computer_name,
@@ -554,6 +601,7 @@ impl NativeClient {
         username: &str,
         auto_auth_key: &[u8],
         cookie: &[u8],
+        key_info: &[u8],
         computer_name: &str,
     ) -> Result<LoginAttempt> {
         self.start_saved_login(
@@ -561,6 +609,7 @@ impl NativeClient {
             username,
             auto_auth_key,
             cookie,
+            key_info,
             &self.options.long_host,
             &self.options.short_host,
             computer_name,
@@ -573,6 +622,7 @@ impl NativeClient {
         username: &str,
         auto_auth_key: &[u8],
         cookie: &[u8],
+        key_info: &[u8],
         long_host: &str,
         short_host: &str,
         computer_name: &str,
@@ -584,7 +634,8 @@ impl NativeClient {
                 && !username.contains('\0')
                 && !auto_auth_key.is_empty()
                 && auto_auth_key.len() <= 1024 * 1024
-                && cookie.len() <= 15,
+                && cookie.len() <= 15
+                && key_info.len() <= 1024 * 1024,
             "Invalid saved-device credentials"
         );
         let rsa = Rsa::generate(1024)?;
@@ -618,16 +669,18 @@ impl NativeClient {
             long_host: long_host.into(),
             short_host: short_host.into(),
             status: LoginStatus::Pending,
+            key_info: key_info.to_vec(),
             credential3: None,
             credential4: None,
         })
     }
     pub fn poll_login(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
-        if wire::unix_time()? >= attempt.expires_at {
+        let now = wire::unix_time()?;
+        if attempt.locally_expired(now) {
             attempt.status = LoginStatus::Expired;
             return Ok(attempt.status);
         }
-        attempt.validate()?;
+        attempt.validate_at(now)?;
         ensure!(
             !matches!(
                 attempt.status,
@@ -652,6 +705,7 @@ impl NativeClient {
         }
         if let Some(status) = response.status {
             attempt.status = match status {
+                0 if attempt.status == LoginStatus::Scanned => LoginStatus::Scanned,
                 0 => LoginStatus::Pending,
                 1 => LoginStatus::Scanned,
                 2 => LoginStatus::Approved,
@@ -673,20 +727,7 @@ impl NativeClient {
             "Login has not been approved"
         );
         let inner = Ecdh::generate(Nid::SECP224R1)?;
-        let request = wire::manual_auth(
-            &attempt.device,
-            &attempt.computer_name,
-            attempt
-                .credential3
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Missing approval"))?,
-            attempt
-                .credential4
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Missing approval"))?,
-            &inner.public()?,
-            &[],
-        )?;
+        let request = attempt.manual_auth_request(&inner.public()?)?;
         let mut long_host = attempt.long_host.clone();
         let mut short_host = attempt.short_host.clone();
         let mut cookie = attempt.cookie.clone();
@@ -719,6 +760,23 @@ impl NativeClient {
             return Ok(state);
         }
         bail!("Native authentication redirect limit reached")
+    }
+    /// Replace an expired, unscanned QR while preserving installation key-info.
+    pub fn refresh_qr_login(&self, attempt: &LoginAttempt) -> Result<LoginAttempt> {
+        ensure!(
+            attempt.status == LoginStatus::Expired && !attempt.qr_png.is_empty(),
+            "Only an expired QR may be refreshed"
+        );
+        let options = NativeOptions {
+            long_host: attempt.long_host.clone(),
+            short_host: attempt.short_host.clone(),
+            ..self.options.clone()
+        };
+        Self::new(options)?.start_profile_qr_login(
+            attempt.device.clone(),
+            &attempt.computer_name,
+            &attempt.key_info,
+        )
     }
     /// One trusted AutoAuth exchange, retaining identity and replacing selected key
     /// sections atomically in the returned value. Does not silently fall back to QR.
@@ -1123,6 +1181,70 @@ fn reduce_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn attempt(status: LoginStatus, qr: bool) -> LoginAttempt {
+        LoginAttempt {
+            schema: 1,
+            device: state().device.clone(),
+            computer_name: "synthetic desktop".into(),
+            qr_png: if qr { vec![1] } else { Vec::new() },
+            width: 0,
+            height: 0,
+            created_at: 1000,
+            expires_at: 1240,
+            identifier: vec![1; 16],
+            notify_key: vec![2; 16],
+            cookie: vec![3; 15],
+            key_version: 10014,
+            long_host: "long.weixin.qq.com".into(),
+            short_host: "short.weixin.qq.com".into(),
+            status,
+            key_info: b"persisted installation key-info".to_vec(),
+            credential3: Some(vec![4; 16]),
+            credential4: Some(vec![5; 16]),
+        }
+    }
+    #[test]
+    fn final_approval_request_restores_key_info_for_both_saved_device_and_qr() {
+        let inner = Ecdh::generate(Nid::SECP224R1).unwrap();
+        for qr in [false, true] {
+            let attempt = attempt(LoginStatus::Approved, qr);
+            let restored: LoginAttempt =
+                serde_json::from_slice(&serde_json::to_vec(&attempt).unwrap()).unwrap();
+            assert_eq!(restored.key_info, attempt.key_info);
+            let request = p::decode(
+                &restored
+                    .manual_auth_request(&inner.public().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            let aes = p::decode(p::data(&request, 2).unwrap()).unwrap();
+            let base = p::decode(p::data(&aes, 1).unwrap()).unwrap();
+            // Retained official requests use1 for both approval paths.
+            assert_eq!(p::scalar(&base, 6).unwrap(), 1);
+            let auth = p::decode(p::data(&aes, 2).unwrap()).unwrap();
+            assert_eq!(
+                p::unbuffer(p::data(&auth, 5).unwrap()).unwrap(),
+                attempt.key_info
+            );
+            assert!(!format!("{restored:?}").contains("persisted installation"));
+        }
+    }
+    #[test]
+    fn scanned_and_saved_device_approval_outlive_image_expiry_but_remain_bounded() {
+        let qr = attempt(LoginStatus::Pending, true);
+        assert!(qr.validate_at(1239).is_ok());
+        assert!(qr.validate_at(1240).is_err());
+        for (status, qr) in [
+            (LoginStatus::Scanned, true),
+            (LoginStatus::Approved, true),
+            (LoginStatus::Pending, false),
+        ] {
+            let attempt = attempt(status, qr);
+            assert!(attempt.validate_at(1240).is_ok());
+            assert!(attempt.validate_at(1899).is_ok());
+            assert!(attempt.validate_at(1900).is_err());
+        }
+    }
     fn state() -> AccountState {
         AccountState {
             schema: 1,

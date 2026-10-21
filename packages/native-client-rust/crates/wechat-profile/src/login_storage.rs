@@ -246,6 +246,21 @@ fn read_key_info(home: &Path, username: &str) -> Result<(Zeroizing<Vec<u8>>, Key
     Ok((Zeroizing::new(data), KeyInfoSource::LegacyFallback))
 }
 
+/// Restore only the existing account's key-info for a new approval/QR exchange.
+/// This remains useful when saved AutoAuth trust is expired or unavailable; a
+/// fresh approval does not justify dropping the installation's key-info.
+pub fn read_profile_key_info(
+    home: impl AsRef<Path>,
+    username: &str,
+    stopped_or_consistent_snapshot: bool,
+) -> Result<(Zeroizing<Vec<u8>>, KeyInfoSource)> {
+    if !stopped_or_consistent_snapshot {
+        return Err(ProfileError::SnapshotRequired);
+    }
+    crate::official_account_directory(username, 1)?;
+    read_key_info(&fs::canonicalize(home)?, username)
+}
+
 /// Stage accepted saved credentials against an already bound identity store. No
 /// filesystem mutation occurs, so a coordinator can journal the complete sealed
 /// generation before publishing the MMKV pair and legacy key-info file.

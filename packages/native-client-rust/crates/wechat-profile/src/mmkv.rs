@@ -9,6 +9,16 @@ pub struct ProfileIdentity {
     pub uin: u32,
     pub device_id: Vec<u8>,
 }
+impl ProfileIdentity {
+    /// The complete persisted installation ID remains in MMKV. The inspected
+    /// native BaseRequest transmits only its first sixteen bytes.
+    pub fn request_device_id(&self) -> Result<&[u8]> {
+        if !(16..=256).contains(&self.device_id.len()) {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        Ok(&self.device_id[..16])
+    }
+}
 fn var(input: &[u8], at: &mut usize) -> Result<u64> {
     let mut value = 0;
     for i in 0..10 {
