@@ -924,7 +924,13 @@ fn selected_message_ids_keep_shard_namespaces_and_skip_only_missing_rows() {
     assert_eq!(got.len(), 2);
     for message in got {
         let expected = r.message(&message.id, Some("self")).unwrap();
-        assert_eq!(serde_json::to_value(message).unwrap(), serde_json::to_value(expected).unwrap());
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
-    assert!(matches!(r.messages_by_ids(&vec![selected[0].clone(); 201], None), Err(ProfileError::InvalidQuery)));
+    assert!(matches!(
+        r.messages_by_ids(&vec![selected[0].clone(); 201], None),
+        Err(ProfileError::InvalidQuery)
+    ));
 }
