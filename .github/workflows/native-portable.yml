@@ -60,8 +60,22 @@ jobs:
       # Git Bash prepends its coreutils link.exe ahead of the MSVC linker.
       - run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
         shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
       - run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
         shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+      - name: Check Windows standalone runtime dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe"
+          $dependencies = & dumpbin /DEPENDENTS $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect native executable dependencies' }
+          if ($dependencies -match '(?i)(VCRUNTIME|MSVCP|libcrypto-|libssl-|libgcc|libstdc\+\+)') {
+            throw 'Release executable must not require compiler or separately installed crypto DLLs'
+          }
       - run: node scripts/native-portable-build.mjs
       - name: Validate actual executable and npm installation
         run: |

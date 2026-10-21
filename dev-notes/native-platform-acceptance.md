@@ -9,8 +9,8 @@ The native distribution validation run combines all six fragments after every
 build passes, uploading `native-release-candidate`. Download that bundle or the individual artifact matching the test machine's OS and CPU.
 These are candidate artifacts from the checked-out source; they are not an npm
 publication or a deployment. To build additional candidates without publication,
-run **Native macOS and Windows candidates** with `workflow_dispatch` on the PR
-branch. The existing separately approved release workflow publishes all six
+once that workflow is available on main, run **Native macOS and Windows candidates**
+with `workflow_dispatch` and select the candidate branch. The existing separately approved release workflow publishes all six
 verified fragments from an exact committed version on main.
 
 ## Offline checks on each respective machine
