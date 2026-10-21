@@ -1410,7 +1410,7 @@ impl Core {
                 let _guard = guard;
                 let _ = core.recover_text_projections(&owned)?;
                 if core.store.pending_sync_count(&owned)? == 0 {
-                    let _ = core.publish_profile_checkpoint(&owned)?;
+                    core.publish_profile_checkpoint(&owned)?;
                 }
                 Ok(())
             })
