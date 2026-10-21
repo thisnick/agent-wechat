@@ -220,8 +220,33 @@ pub(crate) fn normalized_message(
         }
     }
     let created = chrono::DateTime::from_timestamp(msg.create_time, 0).map(|d| d.to_rfc3339());
+    let app = crate::quotes::message_app(&msg);
+    let forwarded = crate::quotes::forwarded_body(&msg);
+    let app_type = (msg.message_type == 49)
+        .then(|| {
+            let stored = msg.local_type.parse::<u64>().unwrap_or(0) >> 32;
+            if stored > 0 {
+                Some(stored)
+            } else if forwarded.is_some() {
+                Some(19)
+            } else {
+                app.as_ref().map(|a| a.subtype as u64)
+            }
+        })
+        .flatten();
+    let quote = app
+        .as_ref()
+        .filter(|a| a.subtype == 57)
+        .and_then(|a| a.reference.as_ref())
+        .map(|(id, kind)| json!({"serverId":id,"type":kind}));
+    if let Some(app) = app.filter(|a| a.subtype == 57) {
+        text = app.title;
+    }
+    if forwarded.is_some() {
+        text = forwarded;
+    }
     Ok(
-        json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":msg.sender,"direction":msg.outgoing.map(|out|if out{"outgoing"}else{"incoming"}),"type":msg.message_type,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"}),
+        json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":msg.sender,"direction":msg.outgoing.map(|out|if out{"outgoing"}else{"incoming"}),"type":msg.message_type,"appMessageType":app_type,"quote":quote,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"}),
     )
 }
 

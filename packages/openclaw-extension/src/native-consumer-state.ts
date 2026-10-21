@@ -6,6 +6,8 @@ export type NativeSuppliedAsset = Readonly<{
   id: string; sha256: string; byteLength: number; mime: string; path: string;
   role: "model_image" | "file_reference"; kind: "image" | "audio" | "video" | "file";
   runtimeMedia: boolean; contextRole: "trigger" | "history"; messageId?: string;
+  /** Actual stored message owning the bytes, when this input quotes it. */
+  sourceMessageId?: string;
   sourceSha256?: string; sourceByteLength?: number; sourceMime?: string; sourcePath?: string;
 }>;
 export type NativeDispatchManifest = Readonly<{

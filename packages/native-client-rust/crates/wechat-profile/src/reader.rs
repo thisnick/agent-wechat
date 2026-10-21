@@ -661,6 +661,79 @@ impl ProfileReader {
         Ok(result)
     }
 
+    /// Resolve an unsigned server ID in one conversation only. Return up to two
+    /// observations so callers can reject ambiguous IDs across shards.
+    pub fn messages_by_server_id(
+        &self,
+        chat: &str,
+        server_id: &str,
+        own_username: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        validate_name(chat)?;
+        let server = server_id
+            .parse::<u64>()
+            .map_err(|_| ProfileError::InvalidQuery)?;
+        if server == 0 || server.to_string() != server_id {
+            return Err(ProfileError::InvalidQuery);
+        }
+        let table_name = format!("Msg_{:x}", Md5::digest(chat.as_bytes()));
+        let labels = self.labels()?;
+        let mut result = Vec::new();
+        let shards: Vec<_> = self.schemas.iter().filter(|s| shard(&s.database)).collect();
+        if shards.len() > 128 {
+            return Err(ProfileError::InvalidQuery);
+        }
+        if self
+            .coverage()
+            .databases
+            .iter()
+            .any(|d| shard(&d.relative_path) && d.state != DatabaseState::Readable)
+        {
+            return Err(ProfileError::KeyUnavailable("message shards".into()));
+        }
+        for schema in shards {
+            let Some(table) = schema.tables.iter().find(|t| t.name == table_name) else {
+                continue;
+            };
+            if !["local_id", "server_id"]
+                .iter()
+                .all(|name| table.columns.iter().any(|c| c.name == *name))
+            {
+                return Err(ProfileError::UnsupportedSchema(schema.database.clone()));
+            }
+            let c = self.snapshot.open(&schema.database)?;
+            let names = name_map(&c)?;
+            let mut statement = c.prepare(&format!(
+                "SELECT local_id FROM {} WHERE server_id=?1 LIMIT 2",
+                quote_identifier(&table_name)
+            ))?;
+            let ids = statement
+                .query_map([server as i64], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for local in ids {
+                let mut message = self.message_from_connection(
+                    &c,
+                    &SourceMessageId {
+                        database: schema.database.clone(),
+                        table: table_name.clone(),
+                        local_id: local.to_string(),
+                    },
+                    own_username,
+                    &labels,
+                    &names,
+                )?;
+                // The exact table hash proves the peer even when Name2Id no
+                // longer contains this conversation's label.
+                message.peer = Some(chat.into());
+                result.push(message);
+                if result.len() == 2 {
+                    return Ok(result);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     fn message_from_connection(
         &self,
         c: &Connection,

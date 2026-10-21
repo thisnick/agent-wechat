@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
@@ -25,6 +26,25 @@ for (const [id, file, kind, mime] of [['image-a','native-model.png','image','ima
   else bytes = Buffer.from('Synthetic stored attachment body');
   assets.set(id, { bytes, asset: { id: `asset-${id}`, accountId: 'a', messageId: id, kind, variant: kind === 'image' ? 'original' : 'normal', actualVariant: kind === 'image' ? 'original' : 'normal', state: ['pending-image','history-image'].includes(id) ? 'pending' : 'available', contentType: mime, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), filename: `${id}.${mime.split('/')[1]}`, officialWriteback: 'complete', retryable: false } });
 }
+const quoteScenarios = [
+  { id:'quote-text', type:49, appMessageType:57, mention:true, body:'Comment about quoted text', quote:{serverId:'18446744073709551615',type:1} },
+  { id:'quote-image', type:49, appMessageType:57, mention:true, body:'Comment about quoted image', quote:{serverId:'9007199254740998',type:3} },
+  { id:'quote-embedded-text', type:49, appMessageType:57, threadId:'u1', body:'Embedded text comment', quote:{serverId:'9007199254740997',type:1} },
+  { id:'quote-embedded-image', type:49, appMessageType:57, mention:true, body:'Embedded image comment', quote:{serverId:'9007199254740996',type:3} },
+  { id:'forwarded-bundle', type:49, appMessageType:19, mention:true, body:'[Chat History] Shared discussion\nAlice: Forwarded text\nBob: [media]\n  Carol: Nested forwarded text' },
+];
+for(const id of ['quoted-original-image','quote-embedded-image']) {
+  const source=assets.get('dm-image');
+  const text=Buffer.from(`Comment\0${id}`),chunk=Buffer.alloc(text.length+12);chunk.writeUInt32BE(text.length,0);chunk.write('tEXt',4);text.copy(chunk,8);chunk.writeUInt32BE(crc32(chunk.subarray(4,-4)),chunk.length-4);
+  const bytes=Buffer.concat([source.bytes.subarray(0,-12),chunk,source.bytes.subarray(-12)]);
+  assets.set(id,{bytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.png`,byteLength:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+}
+const quoteResolutions = {
+  'quote-text':{state:'resolved',message:{id:'quoted-original-text',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'18446744073709551615',direction:'incoming',type:1,body:'Quoted original stored text',version:'v1'}},
+  'quote-image':{state:'resolved',message:{id:'quoted-original-image',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'9007199254740998',direction:'incoming',type:3,version:'v1'}},
+  'quote-embedded-text':{state:'embedded',message:null,senderId:'u1',embeddedText:'Quoted embedded text with no original row',embeddedImage:false},
+  'quote-embedded-image':{state:'embedded',message:null,senderId:'u1',embeddedImage:true},
+};
 const toolSteps = [
   ['tool_search', { query:'wechat_search search stored WeChat conversation messages', limit:4 }],
   ['tool_call', { id:'wechat_search', args:{ query:'earlier-project-note', limit:2 } }],
@@ -51,6 +71,8 @@ const upstream = createServer(async (req, res) => {
     }
     const lookup = /^\/v1\/accounts\/a\/messages\/(history-image|history-file|foreign-image)$/.exec(url.pathname);
     if (lookup) { lookups.push(lookup[1]); return json({id:lookup[1],accountId:'a',threadId:lookup[1]==='foreign-image'?'private-peer':'room@chatroom',senderId:'u1',direction:'incoming',type:lookup[1]==='history-file'?49:3,body:'<private transport XML>',version:'v1',media:[]}); }
+    const quoteLookup = /^\/v1\/accounts\/a\/messages\/([^/]+)\/quote$/.exec(url.pathname);
+    if(quoteLookup){const scenario=quoteScenarios.find(value=>value.id===quoteLookup[1]);assert.ok(scenario);return json({accountId:'a',messageId:scenario.id,threadId:scenario.threadId??'room@chatroom',...quoteResolutions[scenario.id]});}
     const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
     if (media) { assert.notEqual(media[1],'foreign-image','Foreign conversation must be rejected before attachment access'); return json({ items: [assets.get(media[1]).asset] }); }
     const content = /^\/v1\/accounts\/a\/media\/asset-([^/]+)\/content$/.exec(url.pathname);
@@ -97,7 +119,7 @@ try {
     models:{mode:'merge',providers:{fixture:{baseUrl:`http://127.0.0.1:${apiPort}/model/v1`,api:'openai-completions',apiKey:'synthetic-model-key',models:[{id:'fixture-model',name:'Fixture',reasoning:false,input:['text','image'],contextWindow:32768,maxTokens:256,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}},
     tools:{media:{models:[{type:'cli',command:process.execPath,args:[transcriber,'{{MediaPath}}'],capabilities:['audio']}],audio:{enabled:true},image:{enabled:false},video:{enabled:false}}},agents:{defaults:{workspace:join(temporary,'workspace'),model:{primary:'fixture/fixture-model',fallbacks:[]}}},
     plugins:{allow:['agent-wechat'],load:{paths:[join(temporary,'plugin')]},entries:{'agent-wechat':{enabled:true,config:{native}}}},channels:{'agent-wechat':{enabled:true,dmPolicy:'allowlist',allowFrom:['u1'],groupPolicy:'allowlist',groupAllowFrom:['u1']}}};
-  const scenarios=[{id:'earlier-text',type:1,body:'Earlier group discussion'},...['image-a','file','image-file','video','voice','image-b','pending-image'].map(id=>({id,type:id==='image-file'||id==='file'?49:id.includes('image')?3:id==='video'?43:34,body:'<private transport XML>'})),{id:'trigger',type:1,mention:true,body:'Search earlier-project-note in this conversation.'},{id:'dm-image',type:3,threadId:'u1',body:'<private transport XML>'}];
+  const scenarios=[{id:'earlier-text',type:1,body:'Earlier group discussion'},...['image-a','file','image-file','video','voice','image-b','pending-image'].map(id=>({id,type:id==='image-file'||id==='file'?49:id.includes('image')?3:id==='video'?43:34,body:'<private transport XML>'})),{id:'trigger',type:1,mention:true,body:'Search earlier-project-note in this conversation.'},{id:'dm-image',type:3,threadId:'u1',body:'<private transport XML>'},...quoteScenarios];
   await writeFile(join(temporary,'scenarios.json'),JSON.stringify(scenarios)); const configPath=join(temporary,'config.json'); await writeFile(configPath,JSON.stringify(config),{mode:0o600});
   child=spawn(process.execPath,[join(sdk,'openclaw.mjs'),'gateway','run'],{env:{PATH:process.env.PATH,HOME:temporary,TMPDIR:temporary,OPENCLAW_STATE_DIR:join(temporary,'state'),OPENCLAW_CONFIG_PATH:configPath,NATIVE_HISTORY_FIXTURE_DIR:temporary,AGENT_WECHAT_TOKEN:token,NO_COLOR:'1'},stdio:['ignore','pipe','pipe']});
   for (const stream of [child.stdout,child.stderr]) stream.on('data',chunk=>{log=(log+chunk.toString()).slice(-131072);});
@@ -106,8 +128,8 @@ try {
   const evidence=process.env.NATIVE_HISTORY_PROOF_DIR;
   if(evidence){await mkdir(evidence,{recursive:true,mode:0o700});await writeFile(join(evidence,'observations.json'),JSON.stringify({result,requests,queries,reads,transfers,lookups,log}),{mode:0o600});}
   assert.ifError(fixtureError); assert.ok(result,`Gateway deadline: ${log}`); assert.equal(result.error,undefined,`${result.error}; ${log}`);
-  for(const scenario of scenarios)assert.equal(result.outcomes[scenario.id],['trigger','dm-image'].includes(scenario.id)?'completed':'ignored');
-  assert.equal(requests.length,8); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,2);
+  for(const scenario of scenarios)assert.equal(result.outcomes[scenario.id],['trigger','dm-image',...quoteScenarios.map(value=>value.id)].includes(scenario.id)?'completed':'ignored');
+  assert.equal(requests.length,13); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,7);
   assert.deepEqual(lookups,['foreign-image','history-image','history-file']);assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
   const group=result.contexts.find(ctx=>ctx.MessageSid==='wechat-native:a:trigger'),direct=result.contexts.find(ctx=>ctx.MessageSid==='wechat-native:a:dm-image');
   assert.equal(group.Attachments.length,6);assert.equal(group.InboundHistory.length,8);assert.match(group.BodyForAgent,/pending/);assert.match(group.BodyForAgent,/historical voice transcript/);assert.equal(group.WasMentioned,true);
@@ -117,9 +139,26 @@ try {
   assert.equal(images(requests[0]).length,1);const image=/^data:([^;]+);base64,(.+)$/.exec(images(requests[0])[0].image_url.url);assert.equal(createHash('sha256').update(Buffer.from(image[2],'base64')).digest('hex'),selected.sha256);
   assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(requests[7].messages).includes(direct.Attachments[0].path));assert.equal(images(requests[7]).length,1);
   assert.equal(images(requests[5]).length,2);const retrieved=/^data:([^;]+);base64,(.+)$/.exec(images(requests[5])[1].image_url.url);assert.ok(retrieved);assert.equal(createHash('sha256').update(Buffer.from(retrieved[2],'base64')).digest('hex'),assets.get('history-image').asset.sha256);
+  for(let index=0;index<quoteScenarios.length;index++) {
+    const scenario=quoteScenarios[index],request=requests[8+index];
+    assert.ok(JSON.stringify(request.messages).includes(scenario.body),'Quote comment or forwarded bundle missing from provider');
+    if(scenario.id==='quote-text')assert.ok(JSON.stringify(request.messages).includes('Quoted original stored text'));
+    if(scenario.id==='quote-embedded-text')assert.ok(JSON.stringify(request.messages).includes('Quoted embedded text with no original row'));
+    const isImage=['quote-image','quote-embedded-image'].includes(scenario.id);
+    const context=result.contexts.find(ctx=>ctx.MessageSid===`wechat-native:a:${scenario.id}`);
+    assert.equal(!!context.MediaPath,isImage);
+    if(isImage) {
+      const expected=assets.get(scenario.id==='quote-image'?'quoted-original-image':scenario.id).asset.sha256;
+      const matches=images(request).filter(block=>{const encoded=/^data:([^;]+);base64,(.+)$/.exec(block.image_url.url);return encoded&&createHash('sha256').update(Buffer.from(encoded[2],'base64')).digest('hex')===expected;});
+      assert.equal(matches.length,1,'Exact new quoted image must reach provider once, independently of prior history');
+      const item=result.items.find(item=>item.message.id===scenario.id);
+      assert.equal(item.dispatchManifest.assets[0].messageId,scenario.id);
+      if(scenario.id==='quote-image')assert.equal(item.dispatchManifest.assets[0].sourceMessageId,'quoted-original-image');
+    }
+  }
   const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
-  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,reads:reads.length}));
+  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   for(const stream of streams)stream.destroy();await new Promise(resolve=>upstream.close(resolve));upstream.closeAllConnections();await rm(temporary,{recursive:true,force:true});

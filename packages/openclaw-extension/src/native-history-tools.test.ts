@@ -337,3 +337,27 @@ test("existing download jobs are polled and terminal failures never resubmit, ev
     assert.equal(value.calls.some(call => call[0] === "transferMedia" || call[0] === "mediaContent"), false);
   }
 });
+
+test("quote recall advertises original retrieval and enforces original sender admission", async () => {
+  const value=fixture();
+  const parent={id:"quote",accountId:"a",threadId:"room@chatroom",senderId:"u1",direction:"incoming",type:49,appMessageType:57,body:"Please explain",quote:{serverId:"42",type:1}};
+  value.setMessages([parent]);
+  value.client.quotedMessage=async()=>({accountId:"a",messageId:"quote",threadId:"room@chatroom",state:"resolved",message:{id:"original",accountId:"a",threadId:"room@chatroom",serverId:"42",senderId:"blocked",direction:"incoming",type:1,body:"blocked text"}});
+  const history:any=await value.run("wechat_history",{});
+  assert.equal(history.details.items[0].quote.serverId,"42"); assert.equal(history.details.items[0].attachment.retrievalTool,"wechat_media");
+  const media:any=await value.run("wechat_media",{messageId:"quote"});
+  assert.match(media.details.body,/not permitted/); assert.ok(!JSON.stringify(media).includes("blocked text"));
+  assert.ok(value.calls.every(call=>["messages","message"].includes(call[0])));
+  value.client.quotedMessage=async()=>({accountId:"a",messageId:"quote",threadId:"room@chatroom",state:"embedded",message:null,senderId:"blocked",embeddedText:"blocked embedded text"});
+  const embedded:any=await value.run("wechat_media",{messageId:"quote"});
+  assert.match(embedded.details.body,/not permitted/);assert.ok(!JSON.stringify(embedded).includes("blocked embedded text"));
+});
+test("archive quote recall keeps account/chat identity while allowing cross-author originals", async () => {
+  const value=fixture({},undefined,true);
+  value.setMessages([{id:"quote",accountId:"a",threadId:"private-peer",senderId:"blocked",direction:"incoming",type:49,appMessageType:57,body:"Comment",quote:{serverId:"42",type:1}}]);
+  value.client.quotedMessage=async()=>({accountId:"a",messageId:"quote",threadId:"private-peer",state:"resolved",message:{id:"original",accountId:"a",threadId:"private-peer",serverId:"42",senderId:"other",direction:"incoming",type:1,body:"Quoted stored text"}});
+  const result:any=await value.run("wechat_archive_media",{messageId:"quote"});
+  assert.match(result.details.body,/Quoted stored text/); assert.equal(result.details.status,"resolved");
+  value.client.quotedMessage=async()=>({accountId:"a",messageId:"quote",threadId:"foreign",state:"embedded",message:null,embeddedText:"foreign"});
+  await assert.rejects(value.run("wechat_archive_media",{messageId:"quote"}),/identity/);
+});

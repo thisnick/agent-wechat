@@ -27,6 +27,8 @@ export function nativeDispatchManifest(params: {
       || !["image", "audio", "video", "file"].includes(asset.kind) || !["model_image", "file_reference"].includes(asset.role)
       || (asset.role === "model_image" && (asset.kind !== "image" || !asset.mime.startsWith("image/") || !asset.runtimeMedia))
       || !["trigger", "history"].includes(asset.contextRole)
+      || (asset.sourceMessageId != null && (typeof asset.sourceMessageId !== "string" || !asset.sourceMessageId || asset.sourceMessageId.length > 8192
+        || ![params.message, ...history].some(message => message.id === asset.messageId && message.type === 49 && message.appMessageType === 57 && message.quote?.type === 3)))
       || (asset.contextRole === "history" && !history.some(message => message.id === asset.messageId))) throw Error("Invalid native supplied asset manifest");
     return Object.freeze({ ...asset });
   }));
@@ -37,9 +39,9 @@ export function nativeDispatchManifest(params: {
     channelAccountId: params.channelAccountId, inputBodySha256: digest(params.inputBody),
     newInputs: Object.freeze([Object.freeze({ id: params.message.id, version: params.message.version ?? "",
       contentSha256: digest(JSON.stringify([params.message.id, params.message.version, params.message.senderId, params.message.type,
-        params.message.body, params.message.mentions, params.message.serverId])), role: "trigger" as const })]),
+        params.message.body, params.message.mentions, params.message.serverId, params.message.appMessageType, params.message.quote])), role: "trigger" as const })]),
     ...(history.length ? { historyInputs: Object.freeze(history.map(message => Object.freeze({ id: message.id, version: message.version ?? "",
-      contentSha256: digest(JSON.stringify([message.id, message.version, message.senderId, message.type, message.body, message.mentions, message.serverId])), role: "history" as const }))) } : {}),
+      contentSha256: digest(JSON.stringify([message.id, message.version, message.senderId, message.type, message.body, message.mentions, message.serverId, message.appMessageType, message.quote])), role: "history" as const }))) } : {}),
     assets, policySha256: digest(JSON.stringify(params.policy ?? null)),
     // Exact released 2026.10.2 source-turn identity. Requiring it in the later
     // snapshot prevents an identical older image/body from proving this input.

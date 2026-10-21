@@ -1,5 +1,5 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -151,6 +151,14 @@ export class NativeWeChatClient {
     const message = await this.request<NativeMessage>(`v1/accounts/${id(accountId)}/messages/${id(messageId)}`);
     if (message.id !== messageId || message.accountId !== accountId || (message.serverId != null && (typeof message.serverId !== "string" || !/^\d+$/.test(message.serverId)))) throw new Error("Invalid native message identity");
     return message;
+  }
+  /** Resolve only the stored original in this message's own conversation. */
+  async quotedMessage(accountId: string, messageId: string): Promise<NativeQuoteResolution> {
+    const quote = await this.request<NativeQuoteResolution>(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/quote`);
+    if (quote.accountId !== accountId || quote.messageId !== messageId || typeof quote.threadId !== "string"
+      || !["resolved", "embedded", "missing", "invalid", "unsupported", "ambiguous"].includes(quote.state)
+      || (quote.state === "resolved" ? !quote.message || quote.message.accountId !== accountId || quote.message.threadId !== quote.threadId || quote.message.id === messageId : quote.message != null)) throw new Error("Invalid native quote identity");
+    return quote;
   }
   /** Account-wide local search, with the daemon's query-bound opaque cursor. */
   async searchMessages(accountId: string, options: NativeListOptions): Promise<NativePage<NativeMessage>> {

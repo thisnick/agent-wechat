@@ -26,11 +26,13 @@ function threadId(value: unknown): string {
   return string(string(value, "thread ID").replace(/^(?:agent-)?wechat:(?:group:)?/i, ""), "thread ID");
 }
 function messageResult(message: NativeMessage, retrievalTool = "wechat_media") {
-  const kind = message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 ? "file" : "unsupported";
-  const body = message.type === 1 ? message.body ?? "" : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
+  const isQuote = message.type === 49 && message.appMessageType === 57;
+  const isForward = message.type === 49 && message.appMessageType === 19;
+  const kind = isQuote ? "quote" : isForward ? "forwarded_history" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
+  const body = message.type === 1 || isForward ? message.body ?? "" : isQuote ? `${message.body ?? ""}\n[Quoted original not retrieved; use ${retrievalTool} with this message ID]` : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
   return { id: message.id, threadId: message.threadId, serverId: message.serverId, senderId: message.senderId,
-    direction: message.direction, type: message.type, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
-    attachment: message.type !== 1 && kind !== "unsupported" ? { kind, retrievalTool, messageId: message.id } : undefined };
+    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote: message.quote, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
+    attachment: message.type !== 1 && !isForward && kind !== "unsupported" ? { kind, retrievalTool, messageId: message.id } : undefined };
 }
 
 type Dependencies = { host?: typeof ensureNativeHost; core?: any };
@@ -138,6 +140,7 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
           let prepared: Awaited<ReturnType<typeof prepareNativeAttachment>>;
           try { prepared = await prepareNativeAttachment({ client, account, message, core, cfg,
             quality: quality as typeof qualities[number], download: args.download !== false, waitMs: 2000, signal, assertCurrent: guard,
+            allowQuotedMessage: async original => original.direction === "outgoing" || await allowed(original.senderId ?? undefined),
             beforeMediaAccess: async () => {
               if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
             } }); }
@@ -151,8 +154,8 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
           }
           guard();
           if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
-          const details = { messageId: message.id, threadId: message.threadId, status: prepared.pending ? "pending" : prepared.attachment?.status ?? "unsupported",
-            attachment: prepared.attachment, variant: prepared.variant, jobId: prepared.jobId, retryable: prepared.retryable ?? false, reason: prepared.reason, body: prepared.body };
+          const details = { messageId: message.id, threadId: message.threadId, status: prepared.pending ? "pending" : prepared.attachment?.status ?? prepared.quote?.state ?? "unsupported",
+            attachment: prepared.attachment, quote: prepared.quote, variant: prepared.variant, jobId: prepared.jobId, retryable: prepared.retryable ?? false, reason: prepared.reason, body: prepared.body };
           const image = prepared.suppliedAssets?.find(asset => asset.role === "model_image");
           const output = image ? await imageResultFromFile({ label: "WeChat attachment", path: image.path, extraText: JSON.stringify(details), details })
             : { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
@@ -186,13 +189,13 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
     tool(archiveNames[1], "search", "Search locally stored messages across every thread in the configured WeChat account, including other senders. Optional threadId narrows the search. Follow nextCursor with the same query and thread selection; no remote backfill or read marking.", { query: querySchema, threadId: messageIdSchema, ...pageSchema }, ["query"]),
     tool(archiveNames[2], "history", "Read the locally stored history of any thread in the configured WeChat account, newest first, without sender filtering or read marking. Use wechat_archive_threads to find thread IDs.", { threadId: messageIdSchema, ...pageSchema }, ["threadId"]),
     tool(archiveNames[3], "message", "Look up a stored message in any thread of the configured WeChat account by its exact opaque message ID. Use wechat_archive_media to retrieve its attachment.", { messageId: messageIdSchema }, ["messageId"]),
-    tool(archiveNames[4], "media", "Retrieve an attachment from any thread in the configured WeChat account by its message ID. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.", mediaSchema, ["messageId"]),
+    tool(archiveNames[4], "media", "Retrieve an attachment or quoted text/image from any thread in the configured WeChat account by its message ID. Use the parent quote message ID for quotes. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.", mediaSchema, ["messageId"]),
   ];
   return [
     tool(names[0], "history", "Read the current WeChat conversation's locally stored messages, newest first, beyond the recent inbound buffer. Follow nextCursor for older history; no remote history backfill or read marking.", { ...pageSchema }),
     tool(names[1], "search", "Search the current WeChat conversation's locally stored message text by case-insensitive substring, beyond buffered messages. Follow nextCursor with the same query in this conversation.", { query: querySchema, ...pageSchema }, ["query"]),
     tool(names[2], "message", "Look up a stored message by its exact opaque message ID in the current WeChat conversation. Media is described without downloading it; use wechat_media to retrieve its attachment. Long text is bounded.", { messageId: messageIdSchema }, ["messageId"]),
-    tool(names[3], "media", "Retrieve a message attachment from the current WeChat conversation. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.", mediaSchema, ["messageId"]),
+    tool(names[3], "media", "Retrieve a message attachment or quoted text/image from the current WeChat conversation. Use the parent quote message ID for quotes. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.", mediaSchema, ["messageId"]),
   ];
 }
 export function registerNativeHistoryTools(api: OpenClawPluginApi): void {

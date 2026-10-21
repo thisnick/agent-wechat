@@ -170,3 +170,18 @@ test('official profile preparation uses daemon-host paths and a global admin res
   }});
   assert.equal((await client.prepareOfficialProfile({ path: '/server/official-home' })).accountId, 'official-fixture');
 });
+
+test('quoted originals are parent-bound with embedded fallback and no caller-selected chat', async () => {
+  const original={id:'original',accountId:'a',threadId:'t',serverId:'18446744073709551615',type:3};
+  const response={accountId:'a',messageId:'parent',threadId:'t',state:'resolved',message:original};
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url)=>{requests.push(String(url));return Response.json(response);}});
+  assert.equal((await client.quotedMessage('a','parent')).message.serverId,'18446744073709551615');
+  assert.equal(requests[0],'http://127.0.0.1:6174/v1/accounts/a/messages/parent/quote');
+  for(const change of [{accountId:'other'},{threadId:'foreign'},{id:'parent'}]) {
+    const foreign=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,message:{...original,...change}})});
+    await assert.rejects(foreign.quotedMessage('a','parent'),/identity/);
+  }
+  const embedded=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'embedded',message:null,embeddedText:'inside quote'})});
+  assert.equal((await embedded.quotedMessage('a','parent')).embeddedText,'inside quote');
+});

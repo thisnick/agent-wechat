@@ -23,6 +23,12 @@ pub struct NativeMessage {
     pub sender_id: Option<String>,
     #[serde(rename = "type")]
     pub message_type: i32,
+    #[serde(default)]
+    #[ts(optional)]
+    pub app_message_type: Option<i32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub quote: Option<NativeQuoteReference>,
     pub direction: Option<String>,
     pub body: Option<String>,
     pub created_at: Option<String>,
@@ -30,6 +36,31 @@ pub struct NativeMessage {
     pub version: String,
     #[ts(type = "unknown[]")]
     pub media: Vec<Value>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeQuoteReference {
+    pub server_id: String,
+    #[serde(rename = "type")]
+    pub message_type: i32,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeQuoteResolution {
+    pub account_id: String,
+    pub message_id: String,
+    pub thread_id: String,
+    pub state: String,
+    pub message: Option<NativeMessage>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub embedded_text: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub embedded_image: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub sender_id: Option<String>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -201,7 +232,9 @@ pub fn checked<T: serde::de::DeserializeOwned>(value: Value) -> anyhow::Result<V
 pub fn typescript() -> String {
     let declarations = [
         NativeMentions::decl(),
+        NativeQuoteReference::decl(),
         NativeMessage::decl(),
+        NativeQuoteResolution::decl(),
         NativeThread::decl(),
         NativeContact::decl(),
         NativeGroup::decl(),

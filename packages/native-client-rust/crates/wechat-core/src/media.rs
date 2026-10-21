@@ -249,7 +249,14 @@ impl Core {
             .text
             .as_deref()
             .context("media_metadata_unavailable")?;
-        let mut plans = discover(&msg, content)?;
+        let quoted_image = crate::quotes::quoted_image_content(&msg);
+        let mut quoted = msg.clone();
+        let mut plans = if let Some(content) = &quoted_image {
+            quoted.message_type = 3;
+            discover(&quoted, content)?
+        } else {
+            discover(&msg, content)?
+        };
         if msg.message_type == 34 {
             if let Some(server) = &msg.server_message_id {
                 let cached = msg.peer.as_ref().and_then(|chat| {
@@ -316,10 +323,14 @@ impl Core {
                     job_id: None,
                     content_url: None,
                     animation_frames: None,
-                    official_writeback: if matches!(
-                        kind,
-                        MediaKind::Voice | MediaKind::Image | MediaKind::File | MediaKind::Video
-                    ) {
+                    official_writeback: if quoted_image.is_none()
+                        && matches!(
+                            kind,
+                            MediaKind::Voice
+                                | MediaKind::Image
+                                | MediaKind::File
+                                | MediaKind::Video
+                        ) {
                         "pending"
                     } else {
                         "unsupported"
@@ -343,7 +354,7 @@ impl Core {
                 )?;
                 asset
             };
-            if asset.state != "available" && kind == MediaKind::Image {
+            if asset.state != "available" && kind == MediaKind::Image && quoted_image.is_none() {
                 let q = match variant {
                     MediaVariant::Original => wechat_profile::ImageQuality::Original,
                     MediaVariant::Thumbnail => wechat_profile::ImageQuality::Thumbnail,
@@ -773,14 +784,18 @@ impl Core {
                     None
                 };
                 ensure!(actual == Some(asset.variant), "unsupported_media_variant");
-                official_writeback = match asset.kind {
-                    MediaKind::Image => {
-                        Some(self.project_received_image(account, id, &asset, &media.bytes))
+                official_writeback = if asset.official_writeback == "unsupported" {
+                    None
+                } else {
+                    match asset.kind {
+                        MediaKind::Image => {
+                            Some(self.project_received_image(account, id, &asset, &media.bytes))
+                        }
+                        MediaKind::File | MediaKind::Video => {
+                            Some(self.project_received_hardlink(account, id, &asset, &media.bytes))
+                        }
+                        _ => None,
                     }
-                    MediaKind::File | MediaKind::Video => {
-                        Some(self.project_received_hardlink(account, id, &asset, &media.bytes))
-                    }
-                    _ => None,
                 };
                 (media.bytes, mime, actual, frames)
             }
@@ -894,7 +909,9 @@ impl Core {
         )
     }
     fn repair_cached_asset(&self, account: &str, mut asset: MediaAsset) -> Result<MediaAsset> {
-        if asset.state != "available" || asset.official_writeback == "complete" {
+        if asset.state != "available"
+            || ["complete", "unsupported"].contains(&asset.official_writeback.as_str())
+        {
             return Ok(asset);
         }
         if asset.actual_variant != Some(asset.variant) {

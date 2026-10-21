@@ -23,8 +23,8 @@ export default { ...base, register(api: any) {
       const core = { ...api.runtime, channel: { ...api.runtime.channel, reply: { ...api.runtime.channel.reply,
         finalizeInboundContext: (ctx: any) => { contexts.push(structuredClone(ctx)); return api.runtime.channel.reply.finalizeInboundContext(ctx); } } } };
       const scenarios = JSON.parse(readFileSync(join(directory, "scenarios.json"), "utf8"));
-      for (const { id, type, threadId = "room@chatroom", mention = false, body = null } of scenarios) {
-        const message: NativeMessage = { id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body,
+      for (const { id, type, threadId = "room@chatroom", mention = false, body = null, appMessageType, quote } of scenarios) {
+        const message: NativeMessage = { id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body, appMessageType, quote,
           direction: "incoming", createdAt: new Date().toISOString(), version: "v1", media: [],
           mentions: { state: "known", userIds: mention ? ["self"] : [], self: mention, all: false, source: "msgsource.atuserlist" } };
         state.accept(String(++sequence), message, "live");

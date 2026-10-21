@@ -108,6 +108,35 @@ fn discovers_all_shards_and_uses_each_name_map() {
     assert_eq!(p.items[0].server_id_signed.as_deref(), Some("103"));
 }
 #[test]
+fn server_id_lookup_is_chat_scoped_unsigned_and_reports_ambiguity() {
+    let d = fixture();
+    let r = reader(d.path());
+    let found = r
+        .messages_by_server_id("peer", "103", Some("self"))
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id.database, "message/message_1.db");
+    assert_eq!(found[0].sender.as_deref(), Some("peer"));
+    assert_eq!(found[0].peer.as_deref(), Some("peer"));
+    assert!(r
+        .messages_by_server_id("room@chatroom", "103", Some("self"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        r.messages_by_server_id("peer", &u64::MAX.to_string(), None)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(r
+        .messages_by_server_id("peer", "999", None)
+        .unwrap()
+        .is_empty());
+    for invalid in ["0", "-1", "0103", "18446744073709551616"] {
+        assert!(r.messages_by_server_id("peer", invalid, None).is_err());
+    }
+}
+#[test]
 fn cursor_pages_equal_timestamps_without_skips_across_shards() {
     let d = fixture();
     let r = reader(d.path());

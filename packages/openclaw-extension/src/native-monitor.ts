@@ -84,7 +84,9 @@ export async function dispatchNativeMessage(params: {
     state.update(message.id, { state: "ignored" }); return "ignored";
   }
   let preparedMedia;
-  try { preparedMedia = await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message, core, cfg }); }
+  const allowQuotedMessage = async (original: Pick<NativeMessage, "senderId" | "direction">) => original.direction === "outgoing"
+    || !!original.senderId && (await senderAdmission(original.senderId)).ingress.admission === "dispatch";
+  try { preparedMedia = await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message, core, cfg, allowQuotedMessage }); }
   catch { state.update(message.id, { state: "needs_review" }); return "needs_review"; }
   if (preparedMedia.pending) return "pending";
   preparedMedia = await transcribeNativeAttachment(preparedMedia, core, cfg);
@@ -95,7 +97,7 @@ export async function dispatchNativeMessage(params: {
     if (item.message.senderId && (await senderAdmission(item.message.senderId)).ingress.admission === "dispatch") admitted.push(item.message);
   }
   const history = await prepareNativeHistory(admitted, async historical => transcribeNativeAttachment(
-    await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message: historical, core, cfg }), core, cfg));
+    await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message: historical, core, cfg, allowQuotedMessage }), core, cfg));
   const context = buildNativeContext(history, message, preparedMedia);
   const inputBody = context.inputBody;
   const route = core.channel.routing.resolveAgentRoute({ cfg, channel: "agent-wechat", accountId: account.accountId,
@@ -122,7 +124,9 @@ export async function dispatchNativeMessage(params: {
     agentId: route.agentId, channelAccountId: account.accountId, policy, assets: context.assets, history: admitted });
   state.beginDispatch(message.id, dispatchManifest, buffered.map(item => item.message.id));
   const callback = readPolicy !== "on_inbound"
-    && (message.type === 1 || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length))
+    && (message.type === 1 || (message.type === 49 && message.appMessageType === 19 && !!message.body)
+      || (preparedMedia.quote?.type === 1 && ["resolved", "embedded"].includes(preparedMedia.quote.state))
+      || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length))
     ? state.preparedCallback([message.id], readPolicy) : undefined;
   if (callback) trackNativePreparedInput(dispatchManifest, callback);
   let failed = false; let delivery = 0;

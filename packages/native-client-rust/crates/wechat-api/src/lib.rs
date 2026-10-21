@@ -691,6 +691,21 @@ async fn message(
         .await?,
     )
 }
+async fn quoted_message(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "read")?;
+    let guard = app.core.lock_account(&a).await?;
+    checked::<contracts::NativeQuoteResolution>(
+        work(move || {
+            let _guard = guard;
+            app.core.quoted_message(&a, &id)
+        })
+        .await?,
+    )
+}
 async fn avatar(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -1012,6 +1027,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .route("/v1/accounts/{a}/threads/{thread}/messages", get(messages))
         .route("/v1/accounts/{a}/messages", get(archive_messages))
         .route("/v1/accounts/{a}/messages/{id}", get(message))
+        .route("/v1/accounts/{a}/messages/{id}/quote", get(quoted_message))
         .route("/v1/accounts/{a}/avatars/{id}", get(avatar))
         .route("/v1/accounts/{a}/messages/{id}/image", get(image))
         .route("/v1/accounts/{a}/sends", post(media::send))
@@ -1164,6 +1180,41 @@ mod tests {
                     app.clone(),
                     "GET",
                     &format!("/v1/accounts/{account}/messages?query=match&limit=0"),
+                    token,
+                    None
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+    }
+    #[tokio::test]
+    async fn quote_lookup_checks_account_read_scope_before_profile_io() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let media = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(read, "read"), (media, "media")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        for (account, token, expected) in [
+            ("one", None, StatusCode::UNAUTHORIZED),
+            ("one", Some(media), StatusCode::FORBIDDEN),
+            ("two", Some(read), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "GET",
+                    &format!("/v1/accounts/{account}/messages/parent/quote"),
                     token,
                     None
                 )

@@ -1,7 +1,9 @@
 // Generated from wechat-api/src/contracts.rs. Do not edit.
 export const NATIVE_MAX_SOURCE_BYTES = 26214383 as const;
 export type NativeMentions = { state: string, userIds: Array<string>, self: boolean | null, all: boolean | null, source: string | null, };
-export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
+export type NativeQuoteReference = { serverId: string, type: number, };
+export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
+export type NativeQuoteResolution = { accountId: string, messageId: string, threadId: string, state: string, message: NativeMessage | null, embeddedText?: string, embeddedImage?: boolean, senderId?: string, };
 export type NativeThread = { id: string, accountId: string, peerId: string, kind: string, displayName: string | null, unreadCount: number | null, readStateVersion: string, history: unknown, };
 export type NativeContact = { id: string, username: string, displayName: string | null, nickname: string | null, remark: string | null, alias: string | null, relation: string, };
 export type NativeGroup = { id: string, roomId: string, displayName: string | null, ownerId: string | null, announcement: string | null, };
