@@ -174,12 +174,8 @@ impl Core {
                 // The retained query and table hash establish the peer even
                 // after contact/name metadata changes after page one.
                 message.peer = Some(peer.into());
-                let value = normalized_message(
-                    account,
-                    message,
-                    own.as_deref(),
-                    reader.generation(),
-                )?;
+                let value =
+                    normalized_message(account, message, own.as_deref(), reader.generation())?;
                 encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&value)?.len());
                 if encoded_bytes > 32 * 1024 * 1024 {
                     bail!("pagination_capacity_exceeded");
