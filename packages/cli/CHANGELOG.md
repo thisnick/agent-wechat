@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.7
+
+### Patch Changes
+
+- [#234](https://github.com/thisnick/agent-wechat/pull/234) [`a59b59d`](https://github.com/thisnick/agent-wechat/commit/a59b59d0a0dd465d5991daa72f47a5f9ed9431fc) Thanks [@thisnick](https://github.com/thisnick)! - Support text and image quotes with parent-bound same-chat original lookup, bounded embedded-content fallback when the original is absent, and verified quoted-image delivery to OpenClaw. Preserve comments and explicit pending/expired status, keep image source identity, enforce quoted-author admission for default tools, and restore bounded forwarded chat bundle rendering from the stable release.
+
 ## 1.0.0-beta.6
 
 ### Minor Changes

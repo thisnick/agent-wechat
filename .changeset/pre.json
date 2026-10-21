@@ -14,6 +14,7 @@
     "native-inbound-thread-read",
     "native-inbound-unread-column-order",
     "native-large-history-pages",
+    "native-quotes-and-forwarded-history",
     "native-release-clean-checkout",
     "native-thread-read-sync",
     "native-upstream-push"
