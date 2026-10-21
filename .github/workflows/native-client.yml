@@ -42,6 +42,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo build --workspace --locked
+      - run: cargo build --workspace --profile test --locked
       - run: bash ../../scripts/native-generate-types.sh --check
+        env:
+          # Reuse the optimized test dependencies for cargo run in this script.
+          CARGO_PROFILE_DEV_OPT_LEVEL: 1
       - run: python3 scripts/smoke.py target/debug/wx
