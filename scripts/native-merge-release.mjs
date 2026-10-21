@@ -13,6 +13,7 @@ export async function mergeNativeRelease(output, directories) {
     const names = (await readdir(directory)).filter(name => /^wx-v.+-checksums\.json$/.test(name));
     if (names.length !== 1) throw new Error('Require exactly one manifest per architecture');
     const manifest = JSON.parse(await readFile(join(directory, names[0]), 'utf8'));
+    if (manifest.sourceTreeDirty === true) throw new Error('Dirty source artifacts cannot be merged for publication');
     if (manifest.assets?.length !== 1) throw new Error('Require one independently tested architecture per fragment');
     const target = supportedTargets.find(item => item.arch === manifest.assets[0].arch);
     if (!target) throw new Error('Unsupported architecture');

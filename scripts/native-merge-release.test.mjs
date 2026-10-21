@@ -42,3 +42,14 @@ test('merge rejects missing/duplicate targets, source mismatch and corrupted byt
   await writeFile(join(directories[1], manifest.assets[0].name), 'corrupt');
   await assert.rejects(mergeNativeRelease(output, directories), /SHA-256/);
 });
+test('merge refuses dirty source fragments even when every architecture agrees', async t => {
+  const { directories, output } = await fixture(t);
+  for (const directory of directories) {
+    const path = join(directory, manifestName('1.0.0'));
+    const manifest = JSON.parse(await readFile(path));
+    manifest.sourceTreeDirty = true;
+    await writeFile(path, JSON.stringify(manifest));
+  }
+  await assert.rejects(mergeNativeRelease(output, directories), /Dirty source artifacts/);
+  await assert.rejects(readFile(join(output, manifestName('1.0.0'))), { code: 'ENOENT' });
+});

@@ -45,7 +45,7 @@ jobs:
           node --test scripts/native-release-policy.test.mjs
           node scripts/native-release-policy.mjs --check-registry
           node --test scripts/native-release-notes.test.mjs
-          node scripts/native-release-notes.mjs --output artifacts/release-notes.md
+          node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
