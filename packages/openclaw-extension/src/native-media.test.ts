@@ -144,3 +144,18 @@ test("forwarded bundles render stored text and unsupported cards never enter the
     if(type===19)assert.match(result.body,/Alice: forwarded text/);else assert.match(result.body,/Unsupported/);
   }
 });
+
+test("repeated quotes reuse a cached original even after CDN expiry without another transfer", async () => {
+  let transfers=0,contents=0;
+  const client={
+    quotedMessage:async(_a:string,id:string)=>({accountId:"a",messageId:id,threadId:"u",state:"resolved",message:quotedOriginal}),
+    mediaAssets:async(_a:string,id:string)=>{assert.equal(id,"original");return {items:[asset({messageId:"original",expiresAt:1})]};},
+    mediaContent:async()=>{contents++;return {bytes,contentType:"image/gif"};},
+    transferMedia:async()=>{transfers++;throw Error("cached original must not be downloaded again");},
+  } as unknown as NativeWeChatClient;
+  for(const id of ["quote-one","quote-two"]){
+    const result=await prepareNativeAttachment({client,account,message:{...quoteMessage,id},core:quoteCore});
+    assert.equal(result.attachment?.status,"ready");assert.equal(result.suppliedAssets![0].sourceMessageId,"original");
+  }
+  assert.equal(contents,2);assert.equal(transfers,0);
+});
