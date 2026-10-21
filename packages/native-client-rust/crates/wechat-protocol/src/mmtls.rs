@@ -159,6 +159,8 @@ pub struct Session {
     traffic: Traffic,
     outgoing: u64,
     incoming: u64,
+    record_pending: Vec<u8>,
+    application_pending: LonglinkDecoder,
 }
 
 fn host_valid(name: &str) -> bool {
@@ -389,6 +391,11 @@ impl Session {
             traffic: application,
             outgoing: 3,
             incoming: 5,
+            record_pending: Vec::new(),
+            application_pending: LonglinkDecoder {
+                pending: Vec::new(),
+                max_payload: receive_budget,
+            },
         })
     }
     pub fn send_application(&mut self, command: u32, sequence: u32, payload: &[u8]) -> Result<()> {
@@ -425,6 +432,77 @@ impl Session {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
         unpack_longlink(&plain)
+    }
+
+    /// A bounded idle wait on an established connection. Partial encrypted
+    /// records and application packets survive a timeout; MMTLS record
+    /// boundaries need not coincide with longlink packet boundaries.
+    pub fn poll_application(&mut self, timeout: Duration) -> Result<Option<Longlink>> {
+        ensure!(
+            !timeout.is_zero() && timeout <= Duration::from_secs(120),
+            "Invalid longlink poll timeout"
+        );
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(packet) = self.application_pending.next_packet()? {
+                return Ok(Some(packet));
+            }
+            if self.record_pending.len() >= 5 {
+                let h: [u8; 5] = self.record_pending[..5].try_into()?;
+                ensure!(
+                    (0x15..=0x19).contains(&h[0]) && u16::from_be_bytes([h[1], h[2]]) == VERSION,
+                    "Unexpected MMTLS header"
+                );
+                let n = u16::from_be_bytes([h[3], h[4]]) as usize;
+                if self.record_pending.len() >= n + 5 {
+                    ensure!(h[0] == 0x17, "Unexpected persistent MMTLS record");
+                    let record = Record {
+                        header: h,
+                        body: self.record_pending[5..n + 5].to_vec(),
+                    };
+                    let plain = open(
+                        &record,
+                        &self.traffic.server_key,
+                        &self.traffic.server_iv,
+                        self.incoming,
+                    )?;
+                    self.incoming = self
+                        .incoming
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
+                    self.record_pending.drain(..n + 5);
+                    self.application_pending.feed(&plain)?;
+                    continue;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            self.socket.set_read_timeout(Some(remaining))?;
+            let mut bytes = [0u8; 65540];
+            match self.socket.read(&mut bytes) {
+                Ok(0) => anyhow::bail!("MMTLS connection closed"),
+                Ok(n) => {
+                    // At most one incomplete record precedes a socket read.
+                    ensure!(
+                        self.record_pending.len() + n <= 131080,
+                        "MMTLS pending record limit"
+                    );
+                    self.record_pending.extend_from_slice(&bytes[..n]);
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(None)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 }
 struct ServerHello {
@@ -515,6 +593,50 @@ pub struct Longlink {
     pub command: u32,
     pub sequence: u32,
     pub payload: Vec<u8>,
+}
+struct LonglinkDecoder {
+    pending: Vec<u8>,
+    max_payload: usize,
+}
+impl Default for LonglinkDecoder {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            max_payload: crate::MAX_MESSAGE_BYTES,
+        }
+    }
+}
+impl LonglinkDecoder {
+    fn feed(&mut self, bytes: &[u8]) -> Result<()> {
+        ensure!(
+            self.pending.len().saturating_add(bytes.len()) <= self.max_payload + 65540,
+            "Longlink pending packet limit"
+        );
+        self.pending.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn next_packet(&mut self) -> Result<Option<Longlink>> {
+        if self.pending.len() < 4 {
+            return Ok(None);
+        }
+        let n = u32::from_be_bytes(self.pending[..4].try_into()?) as usize;
+        ensure!(
+            (16..=self.max_payload + 16).contains(&n),
+            "Invalid longlink packet length"
+        );
+        if self.pending.len() >= 8 {
+            ensure!(
+                self.pending[4..8] == [0, 16, 0, 1],
+                "Invalid longlink envelope"
+            );
+        }
+        if self.pending.len() < n {
+            return Ok(None);
+        }
+        let packet = unpack_longlink(&self.pending[..n])?;
+        self.pending.drain(..n);
+        Ok(Some(packet))
+    }
 }
 pub fn pack_longlink(command: u32, sequence: u32, payload: &[u8]) -> Result<Vec<u8>> {
     ensure!(payload.len() <= 65503, "Longlink body too large");
@@ -742,6 +864,130 @@ fn decode_short_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn longlink_frames_can_split_or_share_records_and_reject_bad_lengths_early() {
+        let a = pack_longlink(24, 0, &6u32.to_be_bytes()).unwrap();
+        let b = pack_longlink(1000000238, 23, &[2; 256]).unwrap();
+        let both = [a.as_slice(), b.as_slice()].concat();
+        for cut in 0..a.len() {
+            let mut decoder = LonglinkDecoder::default();
+            decoder.feed(&both[..cut]).unwrap();
+            assert!(decoder.next_packet().unwrap().is_none());
+            decoder.feed(&both[cut..]).unwrap();
+            assert_eq!(decoder.next_packet().unwrap().unwrap().command, 24);
+            assert_eq!(decoder.next_packet().unwrap().unwrap().sequence, 23);
+            assert!(decoder.next_packet().unwrap().is_none());
+        }
+        for n in [0u32, 15, (crate::MAX_MESSAGE_BYTES + 17) as u32, u32::MAX] {
+            let mut decoder = LonglinkDecoder::default();
+            decoder.feed(&n.to_be_bytes()).unwrap();
+            assert!(decoder.next_packet().is_err());
+        }
+        let mut invalid = a.clone();
+        invalid[7] = 2;
+        let mut decoder = LonglinkDecoder::default();
+        decoder.feed(&invalid[..8]).unwrap();
+        assert!(decoder.next_packet().is_err());
+        let mut limited = LonglinkDecoder {
+            pending: Vec::new(),
+            max_payload: 128,
+        };
+        limited.feed(&b[..4]).unwrap();
+        assert!(limited.next_packet().is_err());
+        let payload = vec![7; 200_000];
+        let large = [
+            (payload.len() as u32 + 16).to_be_bytes().to_vec(),
+            vec![0, 16, 0, 1],
+            1000000121u32.to_be_bytes().to_vec(),
+            9u32.to_be_bytes().to_vec(),
+            payload.clone(),
+        ]
+        .concat();
+        let mut decoder = LonglinkDecoder::default();
+        for part in large.chunks(20_000) {
+            decoder.feed(part).unwrap();
+        }
+        assert_eq!(decoder.next_packet().unwrap().unwrap().payload, payload);
+    }
+    #[test]
+    fn encrypted_idle_timeout_keeps_partial_record_and_packet_bytes() {
+        use std::{net::TcpListener, sync::mpsc, thread};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let first = pack_longlink(24, 0, &6u32.to_be_bytes()).unwrap();
+        let second = pack_longlink(1000000006, u32::MAX, &[]).unwrap();
+        let key = vec![1; 16];
+        let iv = vec![2; 12];
+        let r1 = seal(0x17, &first[..10], &key, &iv, 5).unwrap();
+        let r2 = seal(0x17, &[first[10..].to_vec(), second].concat(), &key, &iv, 6).unwrap();
+        let mut corrupt = seal(0x17, &first, &key, &iv, 7).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        let (sent, observed) = mpsc::channel();
+        let (resume, waiting) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            peer.write_all(&r1[..3]).unwrap();
+            sent.send(()).unwrap();
+            waiting.recv().unwrap();
+            peer.write_all(&r1[3..]).unwrap();
+            peer.write_all(&r2).unwrap();
+            peer.write_all(&corrupt).unwrap();
+        });
+        let mut session = Session {
+            socket,
+            deadline: Instant::now(),
+            received: 0,
+            receive_budget: 1024,
+            short: ShortSession {
+                access_psk: vec![],
+                ticket: Ticket {
+                    kind: 1,
+                    lifetime: 0,
+                    reserved: 0,
+                    nonce: vec![],
+                    opaque: vec![],
+                },
+            },
+            certificate_region: 0,
+            certificate_version: 0,
+            traffic: Traffic {
+                client_key: key.clone(),
+                server_key: key,
+                client_iv: iv.clone(),
+                server_iv: iv,
+            },
+            outgoing: 3,
+            incoming: 5,
+            record_pending: Vec::new(),
+            application_pending: LonglinkDecoder::default(),
+        };
+        observed.recv().unwrap();
+        assert!(session
+            .poll_application(Duration::from_millis(10))
+            .unwrap()
+            .is_none());
+        assert_eq!(session.record_pending.len(), 3);
+        resume.send(()).unwrap();
+        assert_eq!(
+            session
+                .poll_application(Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+                .command,
+            24
+        );
+        assert_eq!(
+            session
+                .poll_application(Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+                .sequence,
+            u32::MAX
+        );
+        assert!(session.poll_application(Duration::from_secs(1)).is_err());
+        assert_eq!(session.incoming, 7);
+        writer.join().unwrap();
+    }
     #[test]
     fn published_mmtls_vector() {
         let key = hex::decode("29b37affd98238fb0370c564d8fa992e").unwrap();

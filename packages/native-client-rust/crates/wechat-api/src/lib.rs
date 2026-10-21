@@ -58,6 +58,7 @@ pub fn version() -> Version {
             "native-login",
             "official-profile-login",
             "native-sync",
+            "native-push",
             "text-send",
             "events",
             "scoped-tokens",

@@ -28,7 +28,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Explicit QR login, white PNG, scan/approval, cancellation, bounded refresh | Implemented | Pixel-grid white renderer test; actual CLI generation/PNG/interrupt fixture; controlled native account validation remains distinct |
 | Admission-bound auth epochs and persistent logout inhibition | Implemented | Late authorization cannot cross a committed logout epoch |
 | One-attempt native logout and explicit local forgetting | Implemented | Controlled native logout returned success; the same old authorization passed a heartbeat before logout and was rejected with -13 afterward, without renewal. Idempotent replay did not resubmit. Saved-device trust revocation remains unverified |
-| Heartbeat/NewSync incoming detection | Implemented | Native polling is distinct from unresolved fast push association |
+| Native push, persistent heartbeat and NewSync incoming detection | Implemented | Controlled standalone native push with polling disabled matched the exact sent message ID; notification arrived 1.366 seconds after submission and sync completed 254 ms later. Packet fragmentation/authentication, notification coalescing and credential/logout fences have focused tests. Built-daemon live validation is pending |
 | Durable original sync staging and official-file projection barrier | Implemented | Fault/retry fixtures; unsupported commands remain staged |
 | Text, metadata, media and local read-state official writeback | Implemented for supported schemas | Supported encrypted-family fixtures, accepted outgoing history rows and image/voice/file/video cache/resource joins pass, including cold reads. FTS/search-index maintenance, unknown packed resources and arbitrary official schemas are outside the supported writers; existing unknown files are retained |
 | Independent local image keys, DAT encoding and hardlink hashes | Implemented | Identity-derived image keys decrypt all 185 retained image files; native hash rule matches 84 hardlink records; fresh image cache projection also checked |
@@ -81,7 +81,6 @@ those gaps.
 - Group creation, invitation, joining/leaving and rename mutations require a
   separately approved destination/member experiment and uncertainty handling.
 - A web application follows stabilization of the API, events and media surface.
-- Fast unsolicited native push association is separate from verified polling.
 - Large-file variants, sticker sending/packs, platforms beyond Linux x64/ARM64 and
   arbitrary official-build migration require independent evidence and testing.
 

@@ -82,6 +82,27 @@ impl Store {
     pub fn save_accepted_authorization(&self, account: &str, encrypted: &[u8]) -> Result<()> {
         self.save_authorization(account, encrypted, true)
     }
+    /// A persistent connection may complete after disconnect/logout or after a
+    /// newer login. Publish its cookie update only for the admitted generation.
+    pub fn save_push_authorization(
+        &self,
+        account: &str,
+        encrypted: &[u8],
+        expected: &[u8],
+        epoch: Option<&[u8]>,
+    ) -> Result<()> {
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let connected: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key='desired' AND value=CAST('connected' AS BLOB))", [], |r| r.get(0))?;
+            if !connected || !saved_login_generation(&tx, expected, epoch)? {
+                bail!("push_session_superseded");
+            }
+            tx.execute("UPDATE runtime SET value=?1 WHERE key='account-state'", [encrypted])?;
+            accepted_projection_needed(&tx, encrypted)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
     fn save_authorization(&self, account: &str, encrypted: &[u8], accepted: bool) -> Result<()> {
         self.control(account, |db| {
             let tx = db.transaction()?;
@@ -264,6 +285,54 @@ fn saved_login_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persistent_connection_updates_require_current_accepted_connected_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .save_active_authorization("one", b"unverified")
+            .unwrap();
+        assert!(store
+            .save_push_authorization("one", b"late", b"unverified", None)
+            .is_err());
+        store
+            .save_accepted_authorization("one", b"accepted")
+            .unwrap();
+        store
+            .save_push_authorization("one", b"cookie-update", b"accepted", None)
+            .unwrap();
+        assert!(store
+            .saved_login_authorization_current("one", b"cookie-update", None)
+            .unwrap());
+        assert!(store
+            .save_push_authorization("one", b"old-socket", b"accepted", None)
+            .is_err());
+        store
+            .put_runtime("one", "desired", b"disconnected")
+            .unwrap();
+        assert!(store
+            .save_push_authorization("one", b"after-disconnect", b"cookie-update", None)
+            .is_err());
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .put_runtime("one", "logout-epoch", b"new-epoch")
+            .unwrap();
+        assert!(store
+            .save_push_authorization("one", b"after-logout", b"cookie-update", None)
+            .is_err());
+        store.put_runtime("one", "logged-out", b"1").unwrap();
+        assert!(store
+            .save_push_authorization("one", b"after-logout", b"cookie-update", Some(b"new-epoch"))
+            .is_err());
+        assert_eq!(
+            store.runtime("one", "account-state").unwrap().unwrap(),
+            b"cookie-update"
+        );
+        assert!(store.runtime("two", "account-state").unwrap().is_none());
+    }
     #[test]
     fn late_responses_and_old_logins_cannot_cross_logout() {
         let temp = tempfile::tempdir().unwrap();

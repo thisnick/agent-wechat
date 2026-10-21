@@ -487,6 +487,9 @@ impl NativeClient {
     fn session(&self, host: &str) -> Result<Session> {
         Session::connect(host, self.options.timeout, self.options.receive_budget)
     }
+    pub fn push_connection(&self, state: &AccountState) -> Result<crate::push::Connection> {
+        crate::push::Connection::open(state, self.options.timeout, self.options.receive_budget)
+    }
     #[allow(clippy::too_many_arguments)]
     fn prelogin_rpc(
         &self,

@@ -18,6 +18,8 @@ mod official_profile;
 pub use official_profile::{OfficialProfileRequest, OfficialProfileSelection};
 #[path = "profile_network.rs"]
 mod profile_network;
+#[path = "push.rs"]
+mod push;
 #[path = "read_control.rs"]
 mod read_control;
 #[path = "read_sync.rs"]
@@ -53,6 +55,7 @@ pub struct Core {
     gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     workers: Mutex<std::collections::BTreeSet<String>>,
+    push_health: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     official_profiles: AsyncMutex<()>,
     pub stopping: AtomicBool,
 }
@@ -224,6 +227,7 @@ impl Core {
             gates: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(std::collections::BTreeSet::new()),
+            push_health: Mutex::new(BTreeMap::new()),
             official_profiles: AsyncMutex::new(()),
             stopping: AtomicBool::new(false),
         });
@@ -392,8 +396,17 @@ impl Core {
                 == Some(self.ownership_generation.as_bytes());
         let desired = self.store.runtime(account, "desired")?.unwrap_or_default();
         let auto_connect = self.store.runtime(account, "auto-connect")?.as_deref() != Some(b"0");
+        let incoming = if auth && desired == b"connected" {
+            if self.push_connected(account) {
+                "native_push"
+            } else {
+                "heartbeat_polling"
+            }
+        } else {
+            "disconnected"
+        };
         Ok(
-            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
+            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
@@ -854,19 +867,27 @@ impl Core {
         let _guard = gate.lock().await;
         let core = self.clone();
         let account = account.to_owned();
-        blocking(move||{
-            let mut state=core.account_state(&account)?;let cursor=core.cursor(&account)?;let native=client()?;
-            let batch=match native.sync(&mut state,&cursor) {Ok(batch)=>batch,Err(error) if auth_rejected(&error)=>{state=native.renew_session(&state,"agent-wechat")?;native.sync(&mut state,&cursor)?},Err(e)=>return Err(e)};
-            core.save_state(&account,&state)?;core.store.put_runtime(&account,"validated-generation",core.ownership_generation.as_bytes())?;
-            let origin=if core.store.runtime(&account,"history-caught-up")?.is_some(){"live"}else{"catchup"};
-            let raw=serde_json::to_vec(&batch)?;let id=format!("{:x}",Sha256::digest(&raw));
-            core.store.stage_sync(&account,&id,&core.vault.seal(&account,&format!("apply:{id}"),&raw)?,&core.vault.seal(&account,"received-cursor",&batch.cursor)?)?;
-            core.store.put_runtime(&account,&format!("apply-origin:{id}"),origin.as_bytes())?;
-            let projection=core.project_pending(&account)?;
-            if !batch.continuation {core.store.put_runtime(&account,"history-caught-up",b"1")?;}
-            core.store.append_event(&account,"sync.received",&json!({"batchId":id,"commandCount":batch.commands.len(),"profileProjection":"pending","continuation":batch.continuation}))?;
-            Ok(json!({"batchId":id,"commandCount":batch.commands.len(),"continuation":batch.continuation,"projection":projection,"profileProjection":if core.store.pending_sync_count(&account)?==0{"complete"}else{"pending"},"checkpointProjection":if core.store.pending_cursor_projection(&account)?{"pending"}else{"complete"}}))
-        }).await
+        blocking(move || {
+            let mut state = core.account_state(&account)?;
+            let cursor = core.cursor(&account)?;
+            let native = client()?;
+            let batch = match native.sync(&mut state, &cursor) {
+                Ok(batch) => batch,
+                Err(error) if auth_rejected(&error) => {
+                    state = native.renew_session(&state, "agent-wechat")?;
+                    native.sync(&mut state, &cursor)?
+                }
+                Err(e) => return Err(e),
+            };
+            core.save_state(&account, &state)?;
+            core.store.put_runtime(
+                &account,
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )?;
+            core.commit_sync_batch(&account, batch, "shortlink", "manual_or_fallback")
+        })
+        .await
     }
     pub async fn lookup_contacts(
         self: &Arc<Self>,
@@ -1319,6 +1340,7 @@ impl Core {
                 continue;
             }
             self.store.clear_runtime(&account.id, "history-caught-up")?;
+            self.start_push_worker(&account.id)?;
             let core = self.clone();
             tokio::spawn(async move {
                 let mut delay = 1;
@@ -1377,6 +1399,25 @@ impl Core {
         Ok(())
     }
     async fn tick(self: &Arc<Self>, account: &str) -> Result<u64> {
+        if self.push_connected(account) {
+            // The persistent connection owns account heartbeats and incoming
+            // sync while healthy. Keep local recovery and queued sends moving;
+            // a failed push connection immediately restores bounded polling.
+            let guard = self.lock_account(account).await?;
+            let core = self.clone();
+            let owned = account.to_owned();
+            blocking(move || {
+                let _guard = guard;
+                let _ = core.recover_text_projections(&owned)?;
+                if core.store.pending_sync_count(&owned)? == 0 {
+                    let _ = core.publish_profile_checkpoint(&owned)?;
+                }
+                Ok(())
+            })
+            .await?;
+            self.drain_queued_sends(account).await?;
+            return Ok(5);
+        }
         let gate = self.gate(account)?;
         let heartbeat = {
             let _guard = gate.lock().await;
@@ -1428,6 +1469,10 @@ impl Core {
                 }
             }
         }
+        self.drain_queued_sends(account).await?;
+        Ok((heartbeat.next_interval as u64).clamp(5, 30))
+    }
+    async fn drain_queued_sends(self: &Arc<Self>, account: &str) -> Result<()> {
         for id in self.store.queued_sends(account)? {
             if self.stopping.load(Ordering::SeqCst)
                 || self.store.runtime(account, "desired")?.as_deref() != Some(b"connected")
@@ -1436,9 +1481,7 @@ impl Core {
             }
             self.perform_send(account, &id).await?;
         }
-        // Heartbeat polling is the verified fallback. Unsolicited long-link
-        // push association is not claimed as supported by this actor.
-        Ok((heartbeat.next_interval as u64).clamp(5, 30))
+        Ok(())
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::SeqCst);

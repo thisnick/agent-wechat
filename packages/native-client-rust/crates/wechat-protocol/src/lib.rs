@@ -11,6 +11,7 @@ pub mod media_send;
 pub mod mmtls;
 mod notice;
 pub mod protobuf;
+pub mod push;
 pub mod silk;
 pub mod wire;
 pub use client::*;
