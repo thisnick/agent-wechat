@@ -149,7 +149,17 @@ pub(crate) fn check_known_table(c: &Connection, table: &str) -> Result<()> {
             .map(|i| (i.name.clone(), i.unique, i.partial, i.columns.clone()))
             .collect::<Vec<_>>()
     };
-    if a.columns != e.columns || !a.triggers.is_empty() || index(a) != index(e) {
+    // Existing official profiles also place create_time before local_id in this
+    // table. Every supported access names its columns, so physical order does
+    // not change their meaning. Keep all column attributes, keys and indexes
+    // strict; this is not admission of arbitrary official schema changes.
+    let columns_match = if table == "SessionUnreadListTable_1" {
+        a.columns.len() == e.columns.len()
+            && a.columns.iter().all(|column| e.columns.contains(column))
+    } else {
+        a.columns == e.columns
+    };
+    if !columns_match || !a.triggers.is_empty() || index(a) != index(e) {
         return Err(ProfileError::UnsupportedSchema(relative.into()));
     }
     Ok(())

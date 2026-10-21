@@ -939,6 +939,134 @@ mod encrypted_roundtrip {
             .unwrap(),
         }
     }
+    #[tokio::test]
+    async fn reordered_unread_columns_recover_message_only_commit_and_exact_read_once() {
+        use base64::Engine;
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let state = state();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state, None).unwrap();
+        core.ensure_managed_profile("one", &state).unwrap();
+        let keys_path = store.keys_file("one").unwrap().unwrap();
+        let key_file: Value = serde_json::from_slice(&std::fs::read(keys_path).unwrap()).unwrap();
+        let key = key_file["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|key| key["relativePath"] == "session/session.db")
+            .unwrap()["rawPageKeyBase64"]
+            .as_str()
+            .unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(key)
+            .unwrap();
+        let hex: String = raw.iter().map(|byte| format!("{byte:02x}")).collect();
+        let (location, _) = core.profile_location_keys("one").unwrap();
+        let sessions =
+            rusqlite::Connection::open(location.root().join("db_storage/session/session.db"))
+                .unwrap();
+        sessions
+            .execute_batch(&format!(
+                "PRAGMA key=\"x'{hex}'\";PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;"
+            ))
+            .unwrap();
+        sessions.execute_batch("DROP TABLE SessionUnreadListTable_1;
+            CREATE TABLE SessionUnreadListTable_1(username_id INTEGER,server_id INTEGER,create_time INTEGER,local_id INTEGER,CONSTRAINT _NameId_ServerId PRIMARY KEY(username_id,server_id));
+            CREATE INDEX SessionUnreadListTable_1_NameId_CreateTime ON SessionUnreadListTable_1(username_id ASC,create_time ASC);
+            CREATE INDEX unsupported_fixture_index ON SessionUnreadListTable_1(local_id);
+            INSERT INTO SessionTable(username,unread_count,draft,last_timestamp,last_clear_unread_timestamp)VALUES('peer',5,'preserved draft',50,0);").unwrap();
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            commands: vec![add(1, "peer", "synthetic_self", b"Synthetic ping", 77, 100)],
+            continuation: false,
+        };
+        let raw = serde_json::to_vec(&batch).unwrap();
+        store
+            .stage_sync(
+                "one",
+                "unread-order",
+                &core.vault.seal("one", "apply:unread-order", &raw).unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &batch.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
+        store
+            .put_runtime("one", "apply-origin:unread-order", b"live")
+            .unwrap();
+        assert_eq!(
+            core.recover_projection("one").unwrap()["pendingCommands"],
+            1
+        );
+        assert_eq!(
+            core.messages("one", "peer", None, None).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store
+            .events("one", 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "message.committed"));
+        sessions
+            .execute_batch("DROP INDEX unsupported_fixture_index")
+            .unwrap();
+        assert_eq!(
+            core.recover_projection("one").unwrap()["projectedCommands"],
+            1
+        );
+        assert_eq!(
+            core.recover_projection("one").unwrap()["projectedCommands"],
+            0
+        );
+        let events = store.events("one", 0, 100).unwrap();
+        let committed: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "message.committed")
+            .collect();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].data["origin"], "live");
+        assert_eq!(
+            sessions
+                .query_row(
+                    "SELECT unread_count FROM SessionTable WHERE username='peer'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            6
+        );
+        let threads = core.threads("one", &Default::default()).unwrap();
+        let version = threads["items"][0]["readStateVersion"].as_str().unwrap();
+        let id = committed[0].data["messageId"].as_str().unwrap().to_string();
+        core.mark_read("one", "peer", vec![id], version)
+            .await
+            .unwrap();
+        let kept: (i64, String) = sessions
+            .query_row(
+                "SELECT unread_count,draft FROM SessionTable WHERE username='peer'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, (5, "preserved draft".into()));
+        assert_eq!(
+            sessions
+                .query_row("SELECT count(*) FROM SessionUnreadListTable_1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
     #[test]
     fn encrypted_all_families_new_groups_outgoing_u64_and_replay_have_durable_rows_before_events() {
         let temporary = tempfile::tempdir().unwrap();

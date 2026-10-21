@@ -31,6 +31,50 @@ fn options() -> WriteOptions {
         durable_intent_id: "synthetic-accepted-intent".into(),
     }
 }
+#[test]
+fn unread_column_reordering_does_not_admit_other_schema_changes() {
+    for change in [
+        "ALTER TABLE SessionUnreadListTable_1 ADD COLUMN unsupported INTEGER;",
+        "CREATE TRIGGER unsupported AFTER INSERT ON SessionUnreadListTable_1 BEGIN SELECT 1; END;",
+        "DROP INDEX SessionUnreadListTable_1_NameId_CreateTime;",
+    ] {
+        let d = fixture();
+        let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+        let keys = KeyFile::empty("account");
+        let o = options();
+        let applied =
+            apply_message_projection(&loc, &keys, &message("peer", "peer", "7", 100), &o).unwrap();
+        let c = Connection::open(d.path().join("account/db_storage/session/session.db")).unwrap();
+        c.execute_batch("DROP TABLE SessionUnreadListTable_1;
+            CREATE TABLE SessionUnreadListTable_1(username_id INTEGER,server_id INTEGER,create_time INTEGER,local_id INTEGER,CONSTRAINT _NameId_ServerId PRIMARY KEY(username_id,server_id));
+            CREATE INDEX SessionUnreadListTable_1_NameId_CreateTime ON SessionUnreadListTable_1(username_id ASC,create_time ASC);").unwrap();
+        c.execute_batch(change).unwrap();
+        assert!(matches!(
+            apply_message_session_projection(
+                &loc,
+                &keys,
+                &MessageSessionProjection {
+                    source: applied.source_id,
+                    peer: "peer".into(),
+                    summary: "Synthetic".into(),
+                    outgoing: false,
+                    unread: true,
+                    sender: Some("peer".into()),
+                    sender_display: None,
+                    created_by_this_intent: true,
+                },
+                &o
+            ),
+            Err(ProfileError::UnsupportedSchema(_))
+        ));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM SessionTable", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
 fn null_fields(c: &Connection, t: &str, omit: &[&str]) -> RawFields {
     c.prepare(&format!("PRAGMA table_info({t})"))
         .unwrap()

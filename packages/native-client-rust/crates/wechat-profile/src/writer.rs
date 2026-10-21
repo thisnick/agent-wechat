@@ -141,13 +141,15 @@ pub(crate) fn exact_columns(
         .into_iter()
         .find(|t| t.name == table)
         .ok_or_else(|| ProfileError::UnsupportedSchema(db.into()))?;
-    if t.columns
+    let names = t
+        .columns
         .iter()
         .map(|v| v.name.as_str())
-        .collect::<Vec<_>>()
-        != expected
-        || !t.triggers.is_empty()
-    {
+        .collect::<Vec<_>>();
+    let named_unread_columns = table == "SessionUnreadListTable_1"
+        && names.len() == expected.len()
+        && names.iter().all(|name| expected.contains(name));
+    if (names != expected && !named_unread_columns) || !t.triggers.is_empty() {
         return Err(ProfileError::UnsupportedSchema(db.into()));
     }
     for col in &t.columns {
