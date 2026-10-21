@@ -20,20 +20,12 @@ jobs:
         include:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            cargo_shell: bash
-            rustflags: ""
           - runner: macos-15
             target: aarch64-apple-darwin
-            cargo_shell: bash
-            rustflags: ""
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
-            cargo_shell: pwsh
-            rustflags: "-C target-feature=+crt-static"
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            cargo_shell: pwsh
-            rustflags: "-C target-feature=+crt-static"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     defaults:
@@ -65,15 +57,25 @@ jobs:
           echo 'C:\Strawberry\perl\bin' >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - name: Test Unix platform primitives
+        if: runner.os != 'Windows'
+        run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
       # Git Bash prepends its coreutils link.exe ahead of the MSVC linker.
-      - run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
-        shell: ${{ matrix.cargo_shell }}
+      - name: Test Windows platform primitives
+        if: runner.os == 'Windows'
+        shell: pwsh
         env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
-      - run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
-        shell: ${{ matrix.cargo_shell }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+      - name: Build Unix release executable
+        if: runner.os != 'Windows'
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+      - name: Build Windows release executable
+        if: runner.os == 'Windows'
+        shell: pwsh
         env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
       - name: Check Windows standalone runtime dependencies
         if: runner.os == 'Windows'
         shell: pwsh
