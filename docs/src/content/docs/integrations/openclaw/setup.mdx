@@ -1,94 +1,55 @@
 ---
 title: OpenClaw Setup
-description: Add WeChat as a channel in your OpenClaw AI agent.
+description: Install the plugin and choose a native daemon owner.
 ---
 
-The `@agent-wechat/agent-wechat` plugin connects [OpenClaw](https://openclaw.ai) to WeChat via agent-wechat.
-
-## Prerequisites
-
-- **A WeChat account logged in on your phone** — this account will be used by the bot. Keep it logged in on your phone at all times.
-- **A second screen** — WeChat login requires scanning a QR code with your phone camera. You need the QR code on a screen separate from the phone.
-- **An agent-wechat server** — either self-hosted via Docker or through [Managed Hosting](/hosting/managed-hosting). You need the server URL and auth token.
-
-## Local setup (self-hosted)
-
-If you're running agent-wechat locally or on your own server, you'll need Docker installed. On macOS, install [Colima](https://github.com/abiosoft/colima) (`brew install colima && colima start`) or [Docker Desktop](https://www.docker.com/products/docker-desktop/).
-
-### 1. Start the agent-wechat server
-
-See [Container Setup](/getting-started/container-setup/cli) for options. The quickest:
-
-```bash
-npm install -g @agent-wechat/cli
-wx-legacy up
-```
-
-### 2. Install the plugin
+Install the published plugin and a matching native `wx` separately:
 
 ```bash
 openclaw plugins install @agent-wechat/agent-wechat
 ```
 
-### 3. Add the WeChat channel
+The plugin never installs/repairs an executable. Provision the native daemon's account/profile first with the [quick start](/getting-started/quickstart/). Choose external hosting when the daemon already has an owner, or managed hosting for a local child owned by OpenClaw. One configured channel maps to one selected daemon account. Sender and group policy defaults remain disabled.
 
-```bash
-# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
+## Native external mode
+
+Configure plugin defaults under `plugins.entries.agent-wechat.config` (or the same `native` configuration in the channel):
+
+```json
+{
+  "native": {
+    "mode": "external",
+    "accountId": "example",
+    "endpoint": "http://127.0.0.1:6174",
+    "tokenFile": "/private/native-api-token",
+    "consumerStateDir": "/private/openclaw-native-consumer",
+    "readPolicy": "on_model_dispatch"
+  }
+}
 ```
 
-### 4. Restart the gateway
+The external service remains independently owned. Plugin stop closes its stream and never stops/logs out the daemon or cancels its sends. Remote endpoints require verified HTTPS or an encrypted tunnel terminating at loopback. Token files must be private regular files (0600), contain at least 32 bytes, and are references rather than inline credentials. The API token needs read/media/send/login for the selected account, plus read-state only when automatic local read projection is enabled; do not grant admin solely to run the plugin. Normal sender/DM/group/mention policy remains in `channels.agent-wechat`; defaults remain closed.
 
-```bash
-openclaw gateway restart
+## Native managed mode
+
+```json
+{
+  "native": {
+    "mode": "managed",
+    "accountId": "example",
+    "executable": "/opt/agent-wechat/bin/wx",
+    "listen": "127.0.0.1:6174",
+    "dataDir": "/private/native-store",
+    "tokenFile": "/private/native-api-token",
+    "consumerStateDir": "/private/openclaw-native-consumer",
+    "readPolicy": "never"
+  }
+}
 ```
 
-## Remote setup (managed hosting)
+Provision the native executable and account registration separately. Omitting `executable` resolves `wx` once from absolute trusted PATH entries. The plugin supports the package's tested npm launcher layout by selecting its already installed checksum-verified ELF payload directly. It never invokes an installer or shell. Unknown wrappers/old container CLIs are rejected. Managed startup refuses an occupied port and requires authenticated readiness matching the owned child PID, store path, server identity and process generation; it never adopts or terminates another process. Stop sends a graceful termination to its own child with bounded escalation. An unexpected child/stream failure is reported; automatic process crash restart is not implemented in this increment.
 
-If you don't want to run Docker or manage infrastructure, use [Managed Hosting](/hosting/managed-hosting). You'll receive a server URL and auth token.
+Keep `dataDir` and `consumerStateDir` on separate explicit persistent mounts. The daemon owns official-format profile/sidecar data; the consumer directory holds private intake/deduplication/model-handoff/read receipts bound to server and account identities. Executable upgrades do not remove either. One configured OpenClaw account maps to one selected native daemon account in this increment, while the daemon itself supports independent account slots.
 
-### 1. Install the plugin
 
-```bash
-openclaw plugins install @agent-wechat/agent-wechat
-```
-
-### 2. Add the WeChat channel
-
-```bash
-openclaw channels add --channel wechat --url <your-server-url> --token <your-token>
-```
-
-### 3. Restart the gateway
-
-```bash
-openclaw gateway restart
-```
-
-## Log in to WeChat
-
-Ask your bot:
-
-> "Log in to WeChat"
-
-Your bot generates a QR code image. Alternatively:
-
-```bash
-openclaw channels login --channel wechat
-```
-
-Display the QR code on a screen separate from your phone. Scan it using WeChat's built-in scanner (tap **+** > **Scan**), then tap **Login** on the confirmation screen.
-
-:::tip
-Scan the QR code in WeChat if prompted.
-:::
-
-## Configure policies
-
-Once connected, configure how the bot handles DMs and group chats. See the [Configuration](/integrations/openclaw/configuration) page.
-
-## Limitations
-
-- **The WeChat account must stay logged in on your phone.** Logging out on the phone disconnects the bot.
-- **Only one desktop session.** You cannot simultaneously use WeChat on another computer or WeChat Web.
-- **Infrastructure updates disconnect the bot.** If the server restarts, the bot disconnects. Ask your bot to log in again — scan the QR code in WeChat if prompted.
+After setting the daemon configuration, enable the intended channel and explicitly configure sender/group policies under `channels.agent-wechat`. See [configuration](/integrations/openclaw/configuration/) for access/read/media behavior. Legacy `serverUrl`/inline-token settings are rejected.

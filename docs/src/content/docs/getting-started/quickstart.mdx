@@ -1,84 +1,33 @@
 ---
 title: Quick Start
-description: Get agent-wechat running in under 5 minutes.
+description: Run the native daemon and take over a stopped official profile.
 ---
 
-:::note[Container backend]
-This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
-:::
-
-The fastest way to get started is with the CLI. If you'd rather not manage infrastructure yourself, see [Managed Hosting](/hosting/managed-hosting).
-
-:::note[Prerequisites]
-You need **Docker** running on your machine. On macOS, install [Colima](https://github.com/abiosoft/colima) (`brew install colima && colima start`) or [Docker Desktop](https://www.docker.com/products/docker-desktop/). On Linux, install [Docker Engine](https://docs.docker.com/engine/install/).
-:::
-
-## 1. Install the CLI
+Install an exact published native release on Linux x64/ARM64 with glibc 2.36+ and Node 24.16+:
 
 ```bash
-npm install -g @agent-wechat/cli
+npm install -g @agent-wechat/cli@VERSION
+wx --json version
+wx config show
+wx serve
 ```
 
-This installs the `wx-legacy` command globally.
+Replace `VERSION` with the intended release. The npm installer verifies the matching executable against hashes bundled in the package. Direct executable installation needs no Node; see [installation](/getting-started/cli/installation/). Audio/video source preparation additionally needs FFmpeg/FFprobe, included in the runtime image.
 
-## 2. Start the container
+`serve` runs in the foreground, binds loopback and creates private credentials/sidecars under the configured data directory. It neither starts Docker nor creates a QR automatically. In a second terminal:
 
 ```bash
-wx-legacy up
+# Close the official app and preserve a backup before takeover.
+wx auth login --official
+# Select a specific complete profile on the daemon host when necessary:
+# wx auth login --official=/absolute/official-home
+wx accounts list
+wx threads
+wx messages list filehelper
 ```
 
-This automatically pulls the Docker image from `ghcr.io/thisnick/agent-wechat` and starts the container with the correct flags, volume mounts, and auth token.
+The saved username/UIN/device/key information must match the profile. Saved trust is tried when available; WeChat may require phone approval or a fresh white QR. History becomes readable only after the accepted credentials unlock every selected database. With multiple accounts, pass `--account ACCOUNT_ID`.
 
-## 3. Log in to WeChat
+The official profile stays at its selected path. Native settings default to `~/.config/agent-wechat/server/config.toml`; additional data defaults to `~/.local/share/agent-wechat`. [Storage](/operations/data/) explains overrides and backups. For a background owner, use `wx daemon start` and `wx daemon stop`; do not run foreground, systemd, Compose and OpenClaw owners for the same profile simultaneously.
 
-```bash
-wx-legacy auth login
-```
-
-A QR code is displayed in your terminal. Scan it with WeChat on your phone (tap **+** > **Scan**), then confirm the login.
-
-:::tip
-Scan the QR code in WeChat if prompted.
-:::
-
-## 4. Interact with WeChat
-
-```bash
-# List your chats
-wx-legacy chats list
-
-# Find a chat by name
-wx-legacy chats find "John"
-
-# Send a message (--text, --image, or --file)
-wx-legacy messages send <chatId> --text "Hello from agent-wechat!"
-wx-legacy messages send <chatId> --image photo.jpg
-wx-legacy messages send <chatId> --file document.pdf
-
-# Read messages
-wx-legacy messages list <chatId>
-
-# Download media (images, voice, video) from a message
-wx-legacy messages media <chatId> <messageId>
-```
-
-## 5. View the container via VNC
-
-Open your browser to `http://localhost:6174/vnc/` to see the WeChat desktop UI running inside the container. You'll be prompted for the auth token — find it with:
-
-```bash
-cat ~/.config/agent-wechat/token
-```
-
-## 6. Stop the container
-
-```bash
-wx-legacy down
-```
-
-## Next steps
-
-- [OpenClaw integration](/integrations/openclaw/setup) — add WeChat as a channel in your OpenClaw AI agent
-- [Wechaty integration](/integrations/wechaty/puppet-setup) — connect existing Wechaty bots to WeChat
-- [CLI commands reference](/getting-started/cli/commands) — full list of everything the `wx-legacy` command can do
-- [Docker Compose setup](/getting-started/container-setup/docker-compose) — for production or networked deployments
+Reading history does not send messages or mark them read. See the [CLI reference](/getting-started/cli/commands/) for deliberate sends, media jobs and explicit local reads.

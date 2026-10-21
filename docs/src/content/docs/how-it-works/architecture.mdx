@@ -1,81 +1,14 @@
 ---
 title: Architecture
-description: How agent-wechat works under the hood.
+description: Native protocol, official files, durable sidecars and client boundaries.
 ---
 
-:::note[Container backend]
-This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
-:::
+`wx serve` composes independent Rust libraries: configuration, protected sidecar store, official-profile reader/writers, protocol/crypto, serialized account workers and the HTTP/SSE API. The same executable supplies the command-line client. It communicates directly with WeChat; the official app is needed only to supply an existing supported profile for the initial takeover workflow.
 
-## Overview
+Each account has its own identity, credentials, mutation guard, worker, sync state and event journal. One daemon can host independent accounts. Native ownership leases protect cooperating clients; the official app must also be stopped explicitly. Authorization must match the stored username, UIN, device and all encrypted databases.
 
-agent-wechat runs the official WeChat desktop client inside a Docker container and controls it via UI automation. A Rust server (Axum) sits alongside WeChat in the container and exposes a REST + WebSocket API.
+The official profile contains history, metadata, desktop read state and supported media caches. Native sidecars hold protected credentials, original sync commands, projection journals, outbox/jobs and independent consumer receipts. Received sync and successful projection are separate checkpoints. Unsupported commands are retained; a complete official cursor cannot advance over them.
 
-```
-┌─────────────────────────────────────────────────────┐
-│                Docker Container                     │
-│                                                     │
-│   WeChat Linux  ←──  Xvfb + AT-SPI (accessibility)  │
-│        ↕                                            │
-│   agent-server (Rust/Axum, port 6174)               │
-│     - FSM engine for UI automation                  │
-│     - REST + WebSocket API                          │
-│     - VNC web viewer at /vnc/                       │
-└──────────────────────┬──────────────────────────────┘
-                       │ HTTP / WebSocket
-                       ↓
-               CLI, AI agent, or custom code
-```
+Heartbeat/NewSync polling detects incoming work. Durable message commits produce account events and replayable SSE. An event acknowledgement confirms consumer custody, not message read state. HTTP disconnects do not undo submitted durable jobs. Sending uses idempotency keys and preserves uncertain outcomes so a lost response does not cause an automatic duplicate.
 
-## Key components
-
-### Container environment
-
-- **Xvfb** — headless X11 display server (no physical monitor needed)
-- **Fluxbox** — lightweight window manager
-- **AT-SPI2** — accessibility framework used to read the WeChat UI tree
-- **xdotool / xclip** — input simulation (clicks, keystrokes, clipboard)
-- **noVNC + websockify** — browser-based VNC viewer at `/vnc/`
-- **ffmpeg** — media format conversion (WXGF to JPEG/GIF, SILK to MP3)
-
-### Rust server (agent-server)
-
-The server is the core of agent-wechat. It:
-
-1. **Reads the accessibility tree** of the WeChat window to understand the current UI state
-2. **Executes FSM plans** to perform actions (login, open chat, send message, etc.)
-3. **Reads WeChat's SQLite databases** directly for fast message and contact retrieval
-4. **Exposes REST endpoints** for all operations
-5. **Serves a WebSocket** for login flow events
-
-### FSM engine
-
-All UI automation is driven by a **deterministic finite state machine** — no LLM is involved. Each action (login, send message, open chat) is defined as a plan with states, transitions, and selectors:
-
-- **CSS-like selectors** match elements in the accessibility tree
-- **States** define what to look for and what action to take
-- **Transitions** move between states based on what's visible on screen
-
-This makes actions fast, cheap, and reliable.
-
-### Database access
-
-Instead of scraping the UI for messages, agent-wechat reads WeChat's internal SQLite databases directly using SQLCipher (the databases are encrypted). This provides:
-
-- Fast message retrieval without scrolling the UI
-- Access to the full contact list
-- Media file lookup (images, voice, video)
-
-### Data flow
-
-```
-Client (CLI / OpenClaw / Wechaty / custom)
-    │
-    │  REST API (port 6174)
-    ↓
-agent-server (Rust)
-    │
-    ├── Read: SQLite DBs → messages, contacts, chat list
-    ├── Write: FSM plans → xdotool/xclip → WeChat UI
-    └── Media: WeChat file system → decode → serve via API
-```
+OpenClaw either owns a native child or connects to an external daemon. It stores event custody before acknowledgement, applies access/mention policy before media retrieval, and confirms exact prepared model input before sparse local read projection. It never downloads a runtime at plugin startup.

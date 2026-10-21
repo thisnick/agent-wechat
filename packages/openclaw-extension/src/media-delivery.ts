@@ -1,5 +1,3 @@
-import type { MediaResult } from "@agent-wechat/shared";
-
 export type AttachmentKind = "image" | "file" | "audio" | "video";
 export type AttachmentStatus = "ready" | "pending" | "expired" | "unavailable" | "unsupported" | "too_large" | "error";
 
@@ -55,7 +53,7 @@ export function mediaRequestQuality(baseType: number): "best" | "full" {
 }
 
 export function attachmentKindForResult(
-  result: MediaResult,
+  result: { type: string },
   fallback: AttachmentKind,
 ): AttachmentKind {
   if (result.type === "image" || result.type === "emoji") return "image";

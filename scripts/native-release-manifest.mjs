@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assetName, inspectBinary, releaseRepository, supportedTarget, validateManifest } from '../packages/cli/scripts/native-runtime.mjs';
+import { assetName, inspectBinary, releaseRepository, targetFor, validateManifest } from '../packages/cli/scripts/native-runtime.mjs';
 
 export async function generateManifest(binary, version, sourceCommit, sourceTreeDirty = false) {
   const bytes = await readFile(binary);
   const manifest = { schemaVersion: 1, version, repository: releaseRepository, sourceCommit, sourceTreeDirty,
-    assets: [{ name: assetName(version), ...supportedTarget, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }] };
+    assets: [{ name: assetName(version), ...targetFor(), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }] };
   validateManifest(manifest, version);
   await inspectBinary(resolve(binary), version);
   return manifest;

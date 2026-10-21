@@ -9,14 +9,6 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    },
-    "./types": {
-      "import": "./dist/types/index.js",
-      "types": "./dist/types/index.d.ts"
-    },
-    "./schemas": {
-      "import": "./dist/schemas/index.js",
-      "types": "./dist/schemas/index.d.ts"
     }
   },
   "scripts": {
@@ -24,9 +16,6 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types test/*.test.mjs"
-  },
-  "dependencies": {
-    "zod": "^3.24.2"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

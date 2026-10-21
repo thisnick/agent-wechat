@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { DEFAULT_MEDIA_MAX_MB, resolveWeChatAccount } from "./types.ts";
 
 function config(mediaMaxMb?: number): Record<string, unknown> {
-  return { channels: { "agent-wechat": { serverUrl: "http://localhost:6174", mediaMaxMb } } };
+  return { channels: { "agent-wechat": { native: { mode: "external", accountId: "a", endpoint: "http://localhost:6174", tokenFile: "/private/token", consumerStateDir: "/private/consumer" }, mediaMaxMb } } };
 }
 
 test("media size uses a bounded explicit account setting", () => {
@@ -23,7 +23,9 @@ test("native plugin defaults resolve without a legacy serverUrl and channel rema
   assert.equal(account?.backend, "native"); assert.equal(account?.native?.accountId, "native-a");
   assert.equal(account?.serverUrl, "https://daemon.example.net"); assert.equal(account?.dmPolicy, "disabled");
 });
-test("legacy remains the default and native does not inherit a legacy endpoint", () => {
-  assert.equal(resolveWeChatAccount(config())?.backend, "legacy");
-  assert.equal(resolveWeChatAccount({ channels: { "agent-wechat": { backend: "native", serverUrl: "http://legacy.invalid" } } }), null);
+test("native is the default and container configurations require migration", () => {
+  assert.equal(resolveWeChatAccount(config())?.backend, "native");
+  assert.throws(() => resolveWeChatAccount({ channels: { "agent-wechat": { serverUrl: "http://old.invalid" } } }), /has been removed/);
+  assert.throws(() => resolveWeChatAccount({ channels: { "agent-wechat": { backend: "legacy" } } }), /has been removed/);
+  assert.equal(resolveWeChatAccount({}), null);
 });

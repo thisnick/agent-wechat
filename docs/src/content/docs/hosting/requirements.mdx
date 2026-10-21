@@ -1,52 +1,14 @@
 ---
-title: Hosting Requirements
-description: What you need to run agent-wechat in production.
+title: Requirements
+description: Native host, supported profile and media dependencies.
 ---
 
-agent-wechat has specific infrastructure requirements due to how it controls the WeChat desktop process.
+The native runtime targets Linux x64 or ARM64 with glibc 2.36+. Direct source builds use Rust 1.93.1 and a C compiler; release builds use Bookworm in CI. The npm launcher needs Node 24.16+. The standalone executable needs neither Node nor Docker. OpenClaw integration is validated against OpenClaw 2026.10.2.
 
-## Required capabilities
+Initial account setup needs a complete, supported existing official Linux profile, a stopped official app, legitimate read/write permissions and the matching WeChat account. Saved-device trust may skip QR scanning; phone approval or a fresh QR may still be needed. An empty sidecar directory does not create a supported fresh official account store.
 
-The container **must** have:
+Provide persistent disk for the official profile and native `dataDir`, plus private scratch capacity for consistent read snapshots. A database snapshot is bounded at 2 GiB per database and 8 GiB total; allow additional headroom for concurrent accounts and SQLite work. No fixed memory estimate substitutes for workload testing.
 
-- **`seccomp=unconfined`** — allows all syscalls (required for ptrace)
-- **`SYS_PTRACE`** capability — required to interact with the WeChat desktop process
-- **`NET_ADMIN`** capability — required only if using a proxy
+FFmpeg and FFprobe normalize outbound audio/video sources; the runtime image includes them. SILK voice encoding is compiled from the bundled public sources and does not use the official binary. No GUI, ptrace capability, unconfined seccomp or Docker socket is needed by the native service.
 
-```yaml
-security_opt:
-  - seccomp=unconfined
-cap_add:
-  - SYS_PTRACE
-  - NET_ADMIN    # only if using proxy
-```
-
-## Incompatible environments
-
-agent-wechat **cannot** run in:
-
-| Environment | Why |
-|-------------|-----|
-| AWS Fargate | No ptrace support |
-| Google Cloud Run | No ptrace support |
-| Azure Container Instances | No ptrace support |
-| Any serverless container platform | No ptrace support |
-| Restricted Kubernetes clusters | If seccomp/ptrace is blocked by policy |
-
-## Compatible environments
-
-| Environment | Notes |
-|-------------|-------|
-| VPS (any provider) | Recommended. Full Docker support. |
-| Bare-metal servers | Full control, best performance |
-| AWS EC2 / GCP Compute Engine / Azure VMs | Run Docker directly on the VM |
-| Docker Desktop (local) | For development |
-| Colima (macOS) | For development on macOS |
-| Self-managed Kubernetes | Must allow privileged containers or ptrace capabilities |
-
-## Resource recommendations
-
-- **RAM**: 2 GB minimum (WeChat + Xvfb + agent server)
-- **Disk**: 10 GB+ for WeChat data (grows over time with messages and media)
-- **CPU**: 1 core minimum, 2 recommended
-- **Network**: Stable connection to WeChat servers (or use a proxy)
+The daemon binds loopback. For other hosts, use verified HTTPS through a reverse proxy or an authenticated encrypted tunnel. Outbound native proxy configuration is not implemented in this release.

@@ -1,8 +1,6 @@
 # @agent-wechat/cli
 
-`wx` is the native Rust client and foreground daemon. The npm package installs a matching release executable; it does not implement the native protocol in JavaScript. The previous Docker/UI client remains available explicitly as `wx-legacy`. There is no automatic fallback between the backends. On a platform without native release support, an explicit `AGENT_WECHAT_SKIP_NATIVE_INSTALL=1` installation can still provision the retained `wx-legacy` tool; it does not enable native commands.
-
-The native implementation is under active validation. Use `wx --json version` and authenticated `/v1/status` to inspect actual capabilities. A registered official-format profile does not establish a native login or prove every file writer is compatible. Linux x64 with glibc 2.36 or newer is the only distribution target currently enabled; ARM64, macOS and musl are rejected until independently tested.
+`wx` is the native Rust client and foreground daemon. The npm package installs a matching release executable; it does not implement the native protocol in JavaScript. The supported distribution targets are Linux x64 and ARM64 with glibc 2.36+. macOS, Windows and musl do not have a native release. Clients on other systems can use the HTTP API of a supported Linux daemon. `wx --json version` and `/v1/status` expose the runtime and account capabilities; unsupported official schemas fail explicitly.
 
 ## Installation
 
@@ -81,4 +79,10 @@ python3 scripts/native-export-smoke.py artifacts/native/wx-vVERSION-linux-x64-gn
 
 Source-workspace postinstall defers release installation; run the Rust binary from its target directory or use an explicit trusted executable override. The local release builder tests the Rust workspace, verifies executable identity and creates versioned assets; it does not publish, deploy or log an account in. The package smoke test packs/unpacks an actual npm tarball and installs from local artifacts into a temporary directory.
 
-Deployment examples and the deliberate release preparation sequence are in [deploy/native](../../deploy/native/README.md). The separate [legacy client guide](LEGACY.md) covers container/UI behavior retained by `wx-legacy`.
+Deployment examples and the deliberate release preparation sequence are in [deploy/native](../../deploy/native/README.md). The previous container CLI and Wechaty packages are retired; see the [migration guide](../../docs/src/content/docs/getting-started/migration.mdx).
+
+## Package helper scripts
+
+`native-install.mjs` runs during npm installation, or through `wx-native-install` for offline/disabled-script installs. It selects the host architecture, checks the npm-bundled hash and verifies executable identity before atomic installation. `native-launcher.mjs` only runs an already installed executable.
+
+`native-check-package.mjs` is the prepack/prepublish gate. It checks version/source/target/checksum metadata; before publication it additionally requires both architecture assets to exist and match the package's manifest. A local pack smoke can use one architecture fragment; publication requires the complete matrix. These helpers belong to the existing CLI package, not additional npm packages.

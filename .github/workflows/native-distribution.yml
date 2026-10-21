@@ -27,8 +27,18 @@ permissions:
   contents: read
 jobs:
   package:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,21 +58,21 @@ jobs:
       - run: node scripts/native-gateway-smoke.mjs
       - run: node scripts/native-model-smoke.mjs
       - run: node scripts/native-media-model-smoke.mjs
-      - run: node --test scripts/pending-release-packages.test.mjs scripts/native-release-preflight.test.mjs
+      - run: node --test scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
       - run: bash scripts/native-build-release.sh
       - run: node scripts/native-package-smoke.mjs artifacts/native
       - name: Validate actual CLI lifecycle and account selection without a native login
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          python3 scripts/native-cli-smoke.py "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
-          python3 scripts/native-cli-fixture-test.py "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
-          python3 scripts/native-export-smoke.py "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
+          python3 scripts/native-cli-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          python3 scripts/native-cli-fixture-test.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          python3 scripts/native-export-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Validate real managed/external OpenClaw hosting without account credentials
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          node --experimental-strip-types scripts/native-openclaw-smoke.mjs "artifacts/native/wx-v${VERSION}-linux-x64-gnu"
+          node --experimental-strip-types scripts/native-openclaw-smoke.mjs "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Build standalone image without publishing or starting a service
-        run: docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:ci .
+        run: docker build --platform ${{ matrix.platform }} -f deploy/native/Dockerfile -t agent-wechat-native:ci .
       - name: Check image identity without touching account data
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
       - run: python3 scripts/native-container-smoke.py agent-wechat-native:ci
@@ -72,9 +82,24 @@ jobs:
           printf 'validation-placeholder-not-a-real-secret\n' > deploy/native/secrets/api-token
           docker compose -f deploy/native/compose.yaml config --quiet
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          python3 scripts/native-service-verify.py "$PWD/artifacts/native/wx-v${VERSION}-linux-x64-gnu"
+          python3 scripts/native-service-verify.py "$PWD/artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - uses: actions/upload-artifact@v4
         with:
-          name: native-linux-x64-gnu-validation
+          name: native-linux-${{ matrix.arch }}-gnu-validation
           path: artifacts/native/*
           if-no-files-found: error
+
+  matrix-manifest:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-linux-*-gnu-validation
+          path: artifacts/fragments
+      - name: Verify complete release matrix without publication
+        run: node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-linux-x64-gnu-validation artifacts/fragments/native-linux-arm64-gnu-validation

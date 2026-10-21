@@ -1,8 +1,8 @@
 # Standalone native client
 
-This experimental Rust workspace implements the native `wx` executable, reusable protocol/profile libraries and an authenticated multi-account daemon. It neither loads nor launches an official WeChat executable. Docker is optional as a compiler or deployment wrapper.
+This Rust workspace implements the native `wx` executable, reusable protocol/profile libraries and an authenticated multi-account daemon. It neither loads nor launches an official WeChat executable. Docker is optional as a compiler or deployment wrapper.
 
-The supported development and release baseline is Linux x64, glibc 2.36+, Rust 1.93.1. Compatibility has been investigated against a specific official Linux profile family; another build or architecture needs separate validation.
+The supported development and release baseline is Linux x64 and ARM64, glibc 2.36+, Rust 1.93.1. Compatibility has been investigated against a specific official Linux profile family; unknown official layouts need separate validation. CI runs synthetic protocol/profile/runtime checks on both CPU architectures; the controlled live account/profile validation was on x64.
 
 The initial scope is taking over an existing stopped official profile and continuing supported writes in place. Creating a profile from scratch, exporting it and returning it to the official app are experimental extras, not requirements for this scope. Unknown files are preserved; official FTS/search indexes are not maintained.
 
@@ -234,4 +234,6 @@ Use `tokens create NAME --accounts ACCOUNT --scopes read` to issue a restricted 
 - `wechat-api`: account/scoped HTTP and SSE router.
 - `wx-native`: CLI/server composition.
 
-This is a tested experimental implementation, with explicit remaining gates. It is not ready to replace arbitrary production official profiles. No deployment, release publication or production profile handoff is part of the validation performed here.
+The supported existing-profile workflow has explicit compatibility limits. It is not ready to replace arbitrary production official profiles. No deployment, release publication or production profile handoff is part of the validation performed here.
+
+The workspace crates have `publish = false`. They are reusable within the workspace or through pinned git/path dependencies; this release does not publish crates.io packages. The executable distribution is GitHub release assets, the npm launcher and the native container. A separately versioned public crate API can be designed later without blocking binary delivery.

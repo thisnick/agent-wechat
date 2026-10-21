@@ -1,42 +1,14 @@
 ---
 title: What is agent-wechat?
-description: A programmable WeChat interface for AI agents and automation.
+description: A standalone native WeChat daemon, CLI and OpenClaw channel.
 ---
 
-:::note[Container backend]
-This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
-:::
+agent-wechat communicates directly with WeChat and uses supported official-format local profiles. The Rust `wx` executable is both the CLI and server: `wx serve` runs an authenticated daemon; other CLI invocations, OpenClaw and custom clients use its account-scoped HTTP/SSE API.
 
-**agent-wechat** is a programmable WeChat interface. It runs the WeChat desktop application inside a Docker container and exposes a REST + WebSocket API for controlling it — send and receive messages, list chats, download media, and more.
+No official executable or desktop runs inside the daemon. The initial workflow takes over a stopped existing official Linux profile, preserves its account/device identity and continues supported database and media writes in place. Keep the official app closed while the daemon owns these files.
 
-## What you can do
+Supported workflows include native login, saved-device recovery, QR approval, local history, incoming sync, contact/group/roster/avatar lookup, image/file/video/voice retrieval and durable sends. Sync does not return all server history or every thread. Groups have their own catalog and can be looked up without an existing conversation. Local read state is separate from phone read state.
 
-- **Read** chats, messages, and media (images, voice, files)
-- **Send** text messages, images, files, and voice notes
-- **Login** via QR code displayed in your terminal or through your AI agent
-- **Monitor** for new messages through client polling
+The distribution targets Linux x64 and ARM64 with glibc 2.36+. Profile compatibility is checked separately from CPU compatibility: unknown database layouts fail explicitly. FTS/search-index maintenance, group creation, fast unsolicited push, sticker sending and large-file branches remain outside this scope. Fresh-profile creation, copy import/export and returning a profile to the official app are experimental extras.
 
-## How you can use it
-
-There are several ways to interact with agent-wechat:
-
-| Method | Best for |
-|--------|----------|
-| [CLI (`wx-legacy` command)](/getting-started/cli/installation) | Quick local use, scripting, debugging |
-| [OpenClaw plugin](/integrations/openclaw/setup) | Adding WeChat as a channel in [OpenClaw](https://openclaw.ai) |
-| [Wechaty puppet](/integrations/wechaty/puppet-setup) | Using existing Wechaty bots with WeChat |
-| [REST API directly](/reference/api) | Custom integrations |
-
-## Requirements
-
-- **Docker** (Colima on macOS, or Docker Desktop)
-- **Node.js >= 22** (for the CLI)
-- **Not compatible with serverless environments** — the container requires `ptrace` capabilities (see [Hosting Requirements](/hosting/requirements))
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| [`@agent-wechat/cli`](https://www.npmjs.com/package/@agent-wechat/cli) | CLI for managing the container and interacting with WeChat |
-| [`@agent-wechat/agent-wechat`](https://www.npmjs.com/package/@agent-wechat/agent-wechat) | OpenClaw plugin for AI agent integration |
-| [`@agent-wechat/wechaty-puppet`](https://www.npmjs.com/package/@agent-wechat/wechaty-puppet) | Wechaty puppet implementation |
+Start with the [quick start](/getting-started/quickstart/), [distribution matrix](/hosting/distribution/) or [migration guide](/getting-started/migration/).

@@ -10,7 +10,7 @@ import { submitNativeText } from "./native-send.ts";
 import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
 import { getWeChatRuntime } from "./runtime.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
-import type { WeChatMonitorOptions } from "./monitor.js";
+import type { WeChatMonitorOptions } from "./types.js";
 export function nativeWasMentioned(message: NativeMessage): boolean {
   // Unknown/malformed direct metadata and displayed @names never satisfy a gate.
   return message.mentions?.state === "known" && message.mentions.self === true;

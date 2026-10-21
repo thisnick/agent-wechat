@@ -1,72 +1,29 @@
 ---
-title: Data & Storage
-description: Where data is stored and how to access it.
+title: Data and Storage
+description: Separate configuration, official profiles and native sidecars.
 ---
 
-## Docker volumes
+| Data | Default location |
+| --- | --- |
+| Server configuration | `~/.config/agent-wechat/server/config.toml` |
+| CLI endpoint/account selections | `~/.config/agent-wechat/client.toml` |
+| Native registry, protected credentials, journals/jobs/events | `~/.local/share/agent-wechat` |
+| In-place official profile | Path selected with `wx auth login --official` |
+| OpenClaw consumer receipts | Explicit `native.consumerStateDir` |
 
-agent-wechat uses two persistent Docker volumes:
+XDG config/data roots are honored. Server configuration can set `dataDir`, `listen` and secret-file references; relative paths resolve against the config file. Explicit flags override environment, then file/default settings.
 
-| Volume | Container path | Contents |
-|--------|---------------|----------|
-| `agent-wechat-data` | `/data` | Agent database (`agent.db`), auth token |
-| `agent-wechat-home` | `/home/wechat` | WeChat user data, databases, media files |
-
-## What's stored where
-
-### `/data` — Agent data
-
-- `agent.db` — SQLite database used by the agent server. Stores persisted app state, session info, and internal tracking data.
-- `auth-token` — Read-only mount of your host token file.
-
-### `/home/wechat` — WeChat data
-
-This is the WeChat user's home directory. After logging in, it contains:
-
-- **SQLite databases** — WeChat stores contacts, messages, and sessions in encrypted SQLite databases (SQLCipher). The agent server reads these directly for fast message retrieval.
-- **Media files** — Images, voice messages, videos, and other attachments received through WeChat.
-- **Configuration** — WeChat's own configuration and cache files.
-
-## Getting data out of the container
-
-### Via the API
-
-The recommended way to access data:
-
-```bash
-# List chats
-wx-legacy chats list --json
-
-# Get messages
-wx-legacy messages list <chatId> --json
-
-# Download media
-wx-legacy messages media <chatId> <localId> --output photo.jpg
+```toml
+schemaVersion = 1
+listen = "127.0.0.1:6174"
+dataDir = "/srv/agent-wechat"
+tokenFile = "/private/native-api-token"
 ```
 
-### Via Docker volume inspection
+`--server-config`/`AGENT_WECHAT_SERVER_CONFIG` select the file; `--data-dir`/`AGENT_WECHAT_DATA_DIR` override its data location. Unknown keys/versions fail explicitly. The CLI's endpoint/default account belongs to the selected server and cannot silently carry over to another endpoint.
 
-To access the raw files:
+An official profile can be the active operating store directly; import is unnecessary. The native daemon writes supported official databases/media there and keeps extra state separately. It checks schema fingerprints and identity before writing. A newer official build is not permission to migrate unknown schemas; stop and preserve a snapshot when the layout is unsupported.
 
-```bash
-# Find the volume mount point
-docker volume inspect agent-wechat-data
+The database contains local conversation/read state; native sidecars retain exact read receipts, pending work and projection progress. Desktop read state is separate from phone state. Server sync tokens, original received commands and the official projected cursor serve different purposes; unknown commands cannot be skipped when publishing a complete official cursor.
 
-# Copy files from the container
-docker cp agent-wechat:/data/agent.db ./agent.db
-docker cp agent-wechat:/home/wechat/ ./wechat-data/
-```
-
-### Via the VNC viewer
-
-Open `http://localhost:6174/vnc/` to visually inspect the WeChat UI state.
-
-## Disk space
-
-WeChat accumulates data over time — messages, media, and cache files. Monitor your volume sizes:
-
-```bash
-docker system df -v | grep agent-wechat
-```
-
-If you run out of disk space, see [Troubleshooting — Disk Space](/reference/troubleshooting#disk-space).
+Back up both the stopped official profile and native durable root, including protected keys. A profile-only copy excludes pending native jobs and consumer receipts. Experimental `store import/export` copy official-format files rather than convert schemas; they require exclusive ownership and report incomplete projection. Upgrading an executable never authorizes removing account data.

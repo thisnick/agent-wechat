@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { manifestName, validateManifest } from '../packages/cli/scripts/native-runtime.mjs';
+import { manifestName, targetFor, validateManifest } from '../packages/cli/scripts/native-runtime.mjs';
 const exec = promisify(execFile);
 const artifactDir = resolve(process.argv[2] ?? 'artifacts/native');
 const source = resolve('packages/cli');
@@ -17,12 +17,14 @@ const temporary = await mkdtemp(join(tmpdir(), 'wx-native-pack-smoke-'));
 try {
   const staged = join(temporary, 'source');
   await mkdir(staged);
-  for (const name of ['package.json', 'README.md', 'LEGACY.md', 'THIRD_PARTY_NOTICES.txt', 'scripts', 'dist']) await cp(join(source, name), join(staged, name), { recursive: true });
+  for (const name of ['package.json', 'README.md', 'THIRD_PARTY_NOTICES.txt', 'scripts']) await cp(join(source, name), join(staged, name), { recursive: true });
   await writeFile(join(staged, 'native-release.json'), JSON.stringify(manifest));
   const { stdout } = await exec('npm', ['pack', '--json', '--pack-destination', temporary], { cwd: staged, maxBuffer: 1024 * 1024 });
   const [packed] = JSON.parse(stdout);
   const names = packed.files.map(file => file.path);
-  for (const required of ['native-release.json', 'LEGACY.md', 'THIRD_PARTY_NOTICES.txt', 'scripts/native-launcher.mjs', 'scripts/native-runtime.mjs', 'scripts/native-install.mjs', 'dist/cli.js']) assert.ok(names.includes(required), `Missing ${required}`);
+  for (const required of ['native-release.json', 'THIRD_PARTY_NOTICES.txt', 'scripts/native-launcher.mjs', 'scripts/native-runtime.mjs', 'scripts/native-install.mjs']) assert.ok(names.includes(required), `Missing ${required}`);
+  assert.equal(pkg.bin['wx-legacy'], undefined);
+  assert.ok(!names.some(name => name.startsWith('dist/') || name === 'LEGACY.md'));
   assert.ok(!names.some(name => name.startsWith('src/') || name.startsWith('test/') || name.startsWith('native/')));
   const unpacked = join(temporary, 'unpacked');
   await mkdir(unpacked);
@@ -38,7 +40,7 @@ try {
   assert.equal(identity.product, 'agent-wechat');
   assert.equal(identity.backend, 'native');
   assert.equal(identity.version, pkg.version);
-  assert.equal(identity.target, 'x86_64-unknown-linux-gnu');
+  assert.equal(identity.target, targetFor().rustTarget);
   assert.ok(identity.capabilities.includes('serve'));
   // Exercise the same canonical npm-bin symlink/payload adapter used by managed
   // OpenClaw hosting; this creates only temporary empty account slots.

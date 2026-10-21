@@ -22,16 +22,20 @@ export async function prepareNativePackage({ root = resolve('packages/cli'), sou
   if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? '')) throw new Error('A full source commit is required before CLI publication');
   const data = await fetchBytes(releaseUrl(version, manifestName(version)), 65536, fetchOptions);
   const manifest = JSON.parse(data);
-  const asset = validateManifest(manifest, version);
+  const asset = validateManifest(manifest, version, { requireAllTargets: true });
   if (manifest.sourceTreeDirty === true) throw new Error('Dirty local validation artifacts cannot be published');
   if (manifest.sourceCommit !== sourceCommit) throw new Error('Prepared native release does not match the publication source commit');
-  const binary = await fetchBytes(releaseUrl(version, asset.name), asset.bytes, fetchOptions);
-  verifyBytes(binary, asset);
   const temporary = await mkdtemp(join(tmpdir(), 'agent-wechat-native-release-'));
   try {
-    const path = join(temporary, 'wx');
-    await writeFile(path, binary, { mode: 0o755, flag: 'wx' });
-    await inspect(path, version);
+    for (const item of manifest.assets) {
+      const binary = await fetchBytes(releaseUrl(version, item.name), item.bytes, fetchOptions);
+      verifyBytes(binary, item);
+      if (item.name === asset.name) {
+        const path = join(temporary, 'wx');
+        await writeFile(path, binary, { mode: 0o755, flag: 'wx' });
+        await inspect(path, version);
+      }
+    }
   } finally { await rm(temporary, { recursive: true, force: true }); }
   await mkdir(root, { recursive: true });
   await writeFile(join(root, 'native-release.json'), `${JSON.stringify(manifest, null, 2)}\n`);

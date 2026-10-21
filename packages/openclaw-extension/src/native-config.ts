@@ -13,5 +13,5 @@ export const nativeConfigSchema = {
 };
 export const nativePluginConfigSchema = {
   type: "object", additionalProperties: false,
-  properties: { backend: { type: "string", enum: ["legacy", "native"] }, native: nativeConfigSchema },
+  properties: { backend: { type: "string", enum: ["native"] }, native: nativeConfigSchema },
 };

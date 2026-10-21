@@ -1,7 +1,6 @@
 # Native CLI workflows
 
-`wx` is the native executable. It never starts the official app. `wx-legacy` is
-the explicit existing container client. Install/provision a matching native
+`wx` is the native executable and never starts the official app. Install/provision a matching native
 release separately before configuring OpenClaw; invocation never downloads it.
 See [installation](../cli/README.md) and [deployment preparation](../../deploy/native/README.md).
 

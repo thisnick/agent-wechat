@@ -47,7 +47,7 @@ pub fn version() -> Version {
         product: "agent-wechat",
         backend: "native",
         version: env!("CARGO_PKG_VERSION"),
-        stage: "experimental",
+        stage: "supported-profile",
         target: env!("WX_TARGET"),
         api_version: 1,
         capabilities: vec![

@@ -1,19 +1,18 @@
 # agent-wechat
 
-A programmable WeChat interface with an experimental standalone native daemon and the retained official-client container backend.
+A standalone native WeChat daemon, CLI and OpenClaw channel.
 
-The native `wx` executable speaks the protocol directly and uses official-format local profiles. It needs no official WeChat executable or desktop at runtime. Its compatibility scope is still limited; see the [implemented capabilities and validation](packages/native-client-rust/README.md). The existing container client is available explicitly as `wx-legacy`.
+The native `wx` executable speaks the protocol directly and uses official-format local profiles. It needs no official WeChat executable or desktop at runtime. See the supported profile scope and remaining limits in [implemented capabilities and validation](packages/native-client-rust/README.md).
 
 | Package | Responsibility |
 | --- | --- |
-| [`@agent-wechat/cli`](packages/cli) | Native `wx`, explicit `wx-legacy`, verified native installer |
-| [`@agent-wechat/shared`](packages/shared) | Native HTTP/SSE SDK and retained container client |
-| [`@agent-wechat/agent-wechat`](packages/openclaw-extension) | OpenClaw integration with explicit backend selection |
-| [`@agent-wechat/wechaty-puppet`](packages/wechaty-puppet) | Existing container-backed Wechaty adapter |
+| [`@agent-wechat/cli`](packages/cli) | Native `wx` and verified executable installer |
+| [`@agent-wechat/shared`](packages/shared) | Private native HTTP/SSE SDK; bundled into OpenClaw |
+| [`@agent-wechat/agent-wechat`](packages/openclaw-extension) | OpenClaw managed or external native daemon integration |
 
 ## Native client
 
-The enabled distribution target is Linux x64 with glibc 2.36 or newer. Build from source with Rust 1.93.1, or install a matching native release once published:
+The distribution targets are Linux x64 and ARM64 with glibc 2.36 or newer. Build from source with Rust 1.93.1, or install a matching native release once published:
 
 ```bash
 npm install -g @agent-wechat/cli@VERSION
@@ -42,20 +41,11 @@ Server configuration defaults to `~/.config/agent-wechat/server/config.toml`; da
 
 See the [native guide](packages/native-client-rust/README.md) for configuration, profile ownership, recovery, API commands and current limits. [Deployment templates](deploy/native/README.md) include a user service and an official-binary-free image. Building these assets does not deploy them.
 
-## Retained container backend
+## Distribution and migration
 
-The container backend controls an official Linux client, reads its local data and provides the previous HTTP API. It supports the existing text/media/voice workflows. It requires Docker and its own persistent volumes; the Wechaty integrations continue to use this backend. The OpenClaw extension defaults to this backend unless native mode is explicitly selected.
+The native executable runs directly on Linux x64/ARM64 with glibc 2.36+, or inside the native-only container. The npm CLI installs the matching executable; OpenClaw is a separate npm plugin. The Rust crates and TypeScript SDK are internal source libraries, not new registry publications. See the [distribution matrix and release sequence](deploy/native/README.md).
 
-```bash
-wx-legacy up
-wx-legacy auth login
-wx-legacy chats list
-wx-legacy messages send <chatId> --text "Hello"
-wx-legacy messages send <chatId> --voice ./reply.mp3
-wx-legacy down
-```
-
-See the [legacy CLI guide](packages/cli/LEGACY.md), [container compose example](docker-compose.yml), and [public documentation](https://thisnick.github.io/agent-wechat/). Commands in the older container guide refer to `wx-legacy` in this source version; the native and container APIs are different.
+This major release retires the old UI server/image, `wx-legacy` and Wechaty puppet/gateway integrations. Existing installations and volumes are not removed. Stop the old owner, preserve a backup and select its complete official profile with the native login command. Old `/api` clients and inline-token OpenClaw configurations require migration to native `/v1`; see the [migration guide](docs/src/content/docs/getting-started/migration.mdx).
 
 ## Development
 
@@ -68,4 +58,4 @@ pnpm native:build
 python3 packages/native-client-rust/scripts/smoke.py packages/native-client-rust/target/debug/wx
 ```
 
-The native smoke check uses synthetic profiles and loopback HTTP. Native protocol/media tests use synthetic fixtures; live account validation is separate and must use an isolated test account. See [AGENTS.md](AGENTS.md) for contributor rules and the [native guide](packages/native-client-rust/README.md) for the exact test/build commands. Existing `pnpm dev:deploy` changes a running container and must only be invoked for an explicitly selected development target.
+The native smoke check uses synthetic profiles and loopback HTTP. Native protocol/media tests use synthetic fixtures; live account validation is separate and must use an isolated test account. See [AGENTS.md](AGENTS.md) for contributor rules and the [native guide](packages/native-client-rust/README.md) for the exact test/build commands. CI builds/tests both native architectures without publishing or deploying.

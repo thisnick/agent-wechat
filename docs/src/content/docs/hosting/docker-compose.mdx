@@ -1,0 +1,19 @@
+---
+title: Docker Compose
+description: Prepare the native-only container without the official runtime.
+---
+
+The native image contains `wx`, FFmpeg/FFprobe, certificates and a small init process. Its multi-architecture tag selects x64/ARM64. It contains no official WeChat executable or desktop tooling.
+
+The reviewed example is [`deploy/native/compose.yaml`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/compose.yaml). It uses Linux host networking with a loopback-only daemon, an unprivileged user, a read-only image, no capabilities, private persistent data/scratch volumes, and separately mounted settings and API token. It does not automatically restart or discover a profile.
+
+Build/validate without deployment:
+
+```bash
+docker build -f deploy/native/Dockerfile -t agent-wechat-native:local .
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:local --json version
+```
+
+These commands belong on the corresponding native build worker or CI. CI also starts a disposable synthetic daemon, validates the Compose template and verifies the optional service file. Use the full [deployment preparation guide](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md) to provision token permissions, UID 10001 volume ownership and an explicit mount for a stopped official profile. Profile paths in CLI requests refer to the container filesystem.
+
+`/var/lib/agent-wechat` is durable state; `/var/cache/agent-wechat` is private disk-backed scratch selected by `TMPDIR`. An official profile must never be mounted as scratch. Preserve volumes across upgrades; starting the service and attaching a profile remain explicit operator actions.

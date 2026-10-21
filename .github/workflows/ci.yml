@@ -13,7 +13,6 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
       - 'scripts/install-ci-npm.sh'
-      - 'scripts/pending-release-packages*.mjs'
       - 'scripts/verify-ci-publisher*.mjs'
 
 jobs:
@@ -21,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ts: ${{ steps.filter.outputs.ts }}
-      rust: ${{ steps.filter.outputs.rust }}
       docs: ${{ steps.filter.outputs.docs }}
       release: ${{ steps.filter.outputs.release }}
     steps:
@@ -33,22 +31,16 @@ jobs:
             release:
               - '.github/workflows/release.yml'
               - 'scripts/install-ci-npm.sh'
-              - 'scripts/pending-release-packages*.mjs'
               - 'scripts/verify-ci-publisher*.mjs'
             ts:
               - 'packages/cli/**'
               - 'packages/shared/**'
               - 'packages/openclaw-extension/**'
-              - 'packages/wechaty-gateway/**'
-              - 'packages/wechaty-puppet/**'
               - 'pnpm-lock.yaml'
               - 'package.json'
               - 'pnpm-workspace.yaml'
               - 'turbo.json'
               - 'tsconfig.json'
-              - '.github/workflows/ci.yml'
-            rust:
-              - 'packages/agent-server-rust/**'
               - '.github/workflows/ci.yml'
             docs:
               - 'docs/**'
@@ -70,7 +62,7 @@ jobs:
       - run: bash scripts/install-ci-npm.sh
       - run: |
           test "$(npm --version)" = "11.12.1"
-          node --test scripts/verify-ci-publisher.test.mjs scripts/pending-release-packages.test.mjs
+          node --test scripts/verify-ci-publisher.test.mjs
           node scripts/verify-ci-publisher.mjs
 
   ts:
@@ -103,25 +95,6 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
-
-  rust:
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cargo check
-        run: cargo check --manifest-path packages/agent-server-rust/Cargo.toml
-
-      - name: Cargo test
-        run: cargo test --manifest-path packages/agent-server-rust/Cargo.toml
 
   docs:
     needs: changes

@@ -1,48 +1,34 @@
 ---
 title: CLI Installation
-description: Install the wx-legacy command-line tool.
+description: Verified Linux x64 and ARM64 native executable installation.
 ---
 
-:::note[Container backend]
-This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
-:::
+Linux x64 and ARM64 with glibc 2.36+ are supported. Node 24.16+ is needed for the npm launcher; a direct release executable needs no Node.
 
-The `wx-legacy` CLI lets you manage the agent-wechat container and interact with WeChat from your terminal.
+## Installation
 
-## Install
+After a matching release has been published:
 
 ```bash
-AGENT_WECHAT_SKIP_NATIVE_INSTALL=1 npm install -g @agent-wechat/cli
+npm install -g @agent-wechat/cli@VERSION
+wx --json version
 ```
 
-This installs the `wx-legacy` command globally.
+The explicit npm installation downloads one exact-version asset over verified HTTPS. Its size and SHA-256 must match `native-release.json` inside the npm package, then a bounded local identity check must report the same version, native backend, Rust target and serve capability before atomic installation. Normal command invocation never downloads a missing runtime. A missing manifest, unsupported platform, corrupt asset or wrong backend is an error.
 
-## Prerequisites
-
-- **Node.js >= 24.16**
-- **Docker** installed and running
-
-## Verify installation
+Installers that disable lifecycle scripts are supported:
 
 ```bash
-wx-legacy --version
+npm install -g --ignore-scripts @agent-wechat/cli@VERSION
+wx-native-install
 ```
 
-## Configuration
+For offline deployment, provision the release binary and its `wx-vVERSION-checksums.json` into one local directory, then run:
 
-The CLI reads configuration from:
+```bash
+AGENT_WECHAT_NATIVE_ARTIFACT_DIR=/absolute/release-assets wx-native-install
+```
 
-| Source | Description |
-|--------|-------------|
-| `AGENT_WECHAT_URL` | Server URL (default: `http://localhost:6174`) |
-| `AGENT_WECHAT_TOKEN` | Auth token (overrides token file) |
-| `~/.config/agent-wechat/token` | Auto-generated auth token (created on first `wx-legacy up`) |
+The offline manifest must agree with the npm-bundled manifest. Alternatively, provision a trusted executable yourself and set `AGENT_WECHAT_NATIVE_BINARY=/absolute/path/to/wx`; the launcher verifies its native identity/version rather than downloading. This explicit override trusts the operator-provisioned bytes and does not assert they are identical to a release asset. `AGENT_WECHAT_SKIP_NATIVE_INSTALL=1` defers installation during image/package provisioning; commands remain unavailable until the runtime is provided. Do not disable TLS verification.
 
-The auth token is generated automatically on first run and shared with the container via a read-only volume mount.
-
-## Global options
-
-| Option | Description |
-|--------|-------------|
-| `-V, --version` | Show version |
-| `-h, --help` | Show help |
+The OpenClaw plugin uses an already installed global native `wx` or a configured absolute executable. It never downloads binaries or relies on its plugin installer running npm lifecycle scripts. For managed processes, prefer the actual release executable path to avoid an extra launcher process; the npm launcher also forwards arguments, standard streams, exit codes and termination signals.

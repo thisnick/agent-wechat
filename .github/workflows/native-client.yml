@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - 'packages/native-client-rust/**'
+      - 'packages/shared/src/native*'
+      - 'scripts/native-generate-types.sh'
       - '.github/workflows/native-client.yml'
   push:
     branches: [main]
     paths:
       - 'packages/native-client-rust/**'
+      - 'packages/shared/src/native*'
+      - 'scripts/native-generate-types.sh'
       - '.github/workflows/native-client.yml'
 
 permissions:
@@ -16,8 +20,12 @@ permissions:
 
 jobs:
   native:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: packages/native-client-rust

@@ -15,35 +15,62 @@ permissions:
   contents: read
 concurrency: native-release-${{ inputs.version }}
 jobs:
-  prepare:
+  build:
     if: inputs.confirm_publish && github.ref == 'refs/heads/main'
-    environment: native-release
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
       - uses: pnpm/action-setup@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
       - name: Require an unpublished CLI version and exact source tag
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/native-release-preflight.mjs
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @agent-wechat/cli... build
+      - run: pnpm --filter @agent-wechat/cli build
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
       - run: pnpm --filter @agent-wechat/cli test
-      - run: node --test scripts/native-release-preflight.test.mjs
       - run: bash scripts/native-build-release.sh
       - run: node scripts/native-package-smoke.mjs artifacts/native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-release-${{ matrix.arch }}
+          path: artifacts/native/*
+          if-no-files-found: error
+  prepare:
+    needs: build
+    environment: native-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-release-*
+          path: artifacts/fragments
+      - name: Verify and combine independently tested executables
+        run: |
+          node --test scripts/native-merge-release.test.mjs
+          node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-x64 artifacts/fragments/native-release-arm64
       - uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-path: artifacts/native/*
@@ -59,6 +86,6 @@ jobs:
           fi
           node scripts/native-release-preflight.mjs
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes "Validated native Linux x64 GNU assets. npm publication and deployment are separate steps."
+            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes "Validated native Linux x64 and ARM64 GNU assets. npm publication and deployment are separate steps."
           fi
           gh release upload "$TAG" artifacts/native/*

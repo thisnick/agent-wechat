@@ -23,36 +23,29 @@ export type WeChatNativeConfig = {
 };
 
 export type WeChatConfig = {
-  backend?: "legacy" | "native";
+  backend?: "native";
   native?: WeChatNativeConfig;
   enabled?: boolean;
-  serverUrl?: string;
-  token?: string;
   dmPolicy?: WeChatDmPolicy;
   allowFrom?: string[];
   groupPolicy?: WeChatGroupPolicy;
   groupAllowFrom?: string[];
   groups?: Record<string, WeChatGroupConfig>;
-  pollIntervalMs?: number;
-  authPollIntervalMs?: number;
   /** Maximum inbound attachment size kept in OpenClaw-managed storage. */
   mediaMaxMb?: number;
 };
 
 export type ResolvedWeChatAccount = {
-  backend?: "legacy" | "native";
+  backend?: "native";
   native?: WeChatNativeConfig;
   accountId: string;
   enabled: boolean;
   serverUrl: string;
-  token?: string;
   dmPolicy: WeChatDmPolicy;
   allowFrom: string[];
   groupPolicy: WeChatGroupPolicy;
   groupAllowFrom: string[];
   groups: Record<string, WeChatGroupConfig>;
-  pollIntervalMs: number;
-  authPollIntervalMs: number;
   mediaMaxMb: number;
 };
 
@@ -69,8 +62,6 @@ function normalizeGroupPolicy(policy: unknown): WeChatGroupPolicy {
 }
 
 // Defaults
-export const DEFAULT_POLL_INTERVAL_MS = 1000;
-export const DEFAULT_AUTH_POLL_INTERVAL_MS = 30_000;
 export const DEFAULT_MEDIA_MAX_MB = 50;
 export const DEFAULT_ACCOUNT_ID = "default";
 
@@ -81,31 +72,38 @@ export function resolveWeChatAccount(
   const wechat = (cfg as { channels?: { "agent-wechat"?: WeChatConfig } })
     .channels?.["agent-wechat"];
   const plugin = (cfg as any)?.plugins?.entries?.["agent-wechat"]?.config as Partial<WeChatConfig> | undefined;
-  const backend = wechat?.backend ?? plugin?.backend ?? "legacy";
+  const requested = wechat?.backend ?? plugin?.backend;
+  if ((requested && requested !== "native") || (wechat && ("serverUrl" in wechat || "token" in wechat))) {
+    throw new Error("The official-client container backend has been removed. Configure channels.agent-wechat.native with a managed or external native daemon and a tokenFile; preserve the stopped official profile for takeover.");
+  }
   const native = wechat?.native ?? plugin?.native;
-  const serverUrl = backend === "native"
-    ? native?.mode === "external" ? native.endpoint ?? "" : `http://${native?.listen ?? "127.0.0.1:6174"}`
-    : wechat?.serverUrl;
-  if (!serverUrl || (backend === "native" && !native)) return null;
+  if (!native) return null;
+  const serverUrl = native.mode === "external" ? native.endpoint ?? "" : `http://${native.listen ?? "127.0.0.1:6174"}`;
+  if (!serverUrl) return null;
 
   return {
-    backend,
+    backend: "native",
     native,
     accountId: accountId ?? DEFAULT_ACCOUNT_ID,
     enabled: wechat?.enabled !== false,
     serverUrl,
-    token: wechat?.token,
     dmPolicy: normalizeDmPolicy(wechat?.dmPolicy),
     allowFrom: wechat?.allowFrom ?? [],
     groupPolicy: normalizeGroupPolicy(wechat?.groupPolicy),
     groupAllowFrom: wechat?.groupAllowFrom ?? [],
     groups: wechat?.groups ?? {},
-    pollIntervalMs: wechat?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-    authPollIntervalMs:
-      wechat?.authPollIntervalMs ?? DEFAULT_AUTH_POLL_INTERVAL_MS,
     mediaMaxMb: Number.isInteger(wechat?.mediaMaxMb) && (wechat?.mediaMaxMb ?? 0) > 0 &&
         (wechat?.mediaMaxMb ?? 0) <= 1024
       ? wechat?.mediaMaxMb!
       : DEFAULT_MEDIA_MAX_MB,
   };
+}
+
+export interface WeChatMonitorOptions {
+  account: ResolvedWeChatAccount;
+  abortSignal: AbortSignal;
+  runtime: any;
+  setStatus: (next: any) => void;
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
+  cfg: any;
 }

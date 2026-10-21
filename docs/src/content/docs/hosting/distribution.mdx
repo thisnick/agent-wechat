@@ -1,0 +1,19 @@
+---
+title: Distribution Matrix
+description: Executables, npm packages, images and reusable source libraries.
+---
+
+| Deliverable | Linux x64 | Linux ARM64 | Role |
+| --- | --- | --- | --- |
+| Rust executable | `wx-vVERSION-linux-x64-gnu` | `wx-vVERSION-linux-arm64-gnu` | GitHub assets; includes both CLI and `serve`, glibc 2.36+ |
+| `@agent-wechat/cli` | Selects x64 executable | Selects ARM64 executable | Existing npm installer/launcher, Node 24.16+ |
+| Native image | `linux/amd64` | `linux/arm64` | One versioned `ghcr.io/thisnick/agent-wechat-native:vVERSION` manifest; includes FFmpeg/FFprobe |
+| `@agent-wechat/agent-wechat` | Managed/external hosting | Managed/external hosting | OpenClaw plugin; external clients may run on other OSes |
+| `@agent-wechat/shared` | Source SDK | Source SDK | Existing private internal package, bundled into OpenClaw |
+| Rust crates | Workspace/git/path | Workspace/git/path | `publish = false`; no crates.io release |
+
+The native container replaces the old official-client-plus-UI-server image. Direct `wx serve` needs no Docker, Node, X11 or VNC. macOS/Windows/musl executables are not provided. Host CPU architecture does not replace the saved account/device identity. Supported official-profile schemas remain a separate compatibility check.
+
+CI runs each architecture on its own native worker and checks Rust tests, real executable/daemon behavior, npm tarball installation, OpenClaw hosting, container execution and deployment-template syntax. The final artifact gate verifies both executable fragments have the same source/version and correct hashes. PR validation neither publishes nor deploys.
+
+A release first commits the Changesets version/Rust lockfile update, then manually prepares both tested executables and their complete manifest from that exact commit. npm publication verifies those assets before embedding their hashes. Native image publication is a separate approved workflow; deployment is another separate action. The optional systemd unit and Compose file are examples, not automatic installers. See the repository's [release instructions](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md).

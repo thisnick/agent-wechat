@@ -1,114 +1,16 @@
 ---
 title: Troubleshooting
-description: Common issues and how to fix them.
+description: Diagnose native installation, login, profile and media issues.
 ---
 
-## Disk space
+- **No native runtime installed:** install the exact release or use `wx-native-install` after provisioning its matching assets. The launcher never downloads at invocation time. x64/ARM64 GNU targets require glibc 2.36+.
+- **Old serverUrl/backend configuration rejected:** follow the [migration guide](/getting-started/migration/). The retired container `/api` is not the native `/v1` API.
+- **Owner/listener conflict:** stop the existing intended owner, or use OpenClaw external mode. Never terminate an unrelated process just because it owns a port.
+- **Account/database mismatch:** select the profile's account and retain its saved identity/key information. A fresh QR cannot bypass username/UIN/device/database validation. Preserve the source rather than deleting it.
+- **QR required/expired:** start explicit login and use its current white PNG. Bounded refresh is distinct from scan/phone approval; a transient poll timeout does not discard an approved challenge.
+- **Unsupported schema/projection:** retain the snapshot and unknown commands. Do not reopen the official app concurrently, delete FTS files or manually advance an official cursor over unknown work.
+- **Media pending:** inspect the existing durable transfer/job with a bounded retry policy. Explicit expiry is terminal; cached verified bytes can still work. XML is not an attachment.
+- **Uncertain send:** inspect the same idempotency key/job and retained receipts. Do not submit a new send to resolve uncertainty.
+- **OpenClaw remains unread:** check access gates, prepared model input and the explicit conversation-access hook permission. Event acknowledgement and reply delivery alone do not mark messages read.
 
-**Symptom**: The container stops working, logs show disk-related errors, or WeChat becomes unresponsive.
-
-**Cause**: WeChat accumulates messages, media, and cache files over time. The Docker volume can fill up.
-
-**Fix**:
-
-1. Check disk usage:
-   ```bash
-   docker system df -v | grep agent-wechat
-   ```
-
-2. If the volume is full, you can:
-   - **Increase disk space** on the host
-   - **Wipe WeChat data** and start fresh (you'll need to re-scan the QR code):
-     ```bash
-     wx-legacy down
-     docker volume rm agent-wechat-home
-     wx-legacy up
-     wx-legacy auth login
-     ```
-
-**Prevention**: Monitor disk usage and provision enough storage. 10 GB is a minimum; active accounts may need 20 GB+.
-
-## "No action selected" errors
-
-**Symptom**: The logs show "no action selected" repeatedly. The bot may stop responding.
-
-**Cause**: The FSM engine couldn't find a matching action for the current UI state. This can happen when WeChat shows an unexpected dialog, popup, or update prompt.
-
-**Fix**:
-
-1. Check the VNC viewer at `http://localhost:6174/vnc/` to see what's on screen
-2. If there's an unexpected dialog, you may need to dismiss it manually via VNC
-3. Restart the container:
-   ```bash
-   wx-legacy down && wx-legacy up
-   ```
-
-## Not receiving new messages
-
-**Symptom**: The bot is logged in but doesn't see new messages.
-
-**Cause**: This can happen if:
-- The WeChat UI is in an unexpected state
-- The polling loop is stuck
-- The WeChat session has silently expired
-
-**Fix**:
-
-1. Check login status:
-   ```bash
-   wx-legacy auth status
-   ```
-
-2. Check the VNC viewer to see the UI state
-
-3. Restart the container:
-   ```bash
-   wx-legacy down && wx-legacy up
-   ```
-
-4. If restarting doesn't help, wipe WeChat data and re-login:
-   ```bash
-   wx-legacy down
-   docker volume rm agent-wechat-home
-   wx-legacy up
-   wx-legacy auth login
-   ```
-
-## Container won't start
-
-**Symptom**: `wx-legacy up` or `docker compose up` fails.
-
-**Cause**: Usually missing capabilities or Docker configuration issues.
-
-**Fix**:
-
-1. Ensure Docker is running
-2. Check that your Docker setup supports `SYS_PTRACE` and `seccomp=unconfined`:
-   ```bash
-   docker run --rm --security-opt seccomp=unconfined --cap-add SYS_PTRACE alpine echo "OK"
-   ```
-3. On macOS with Colima, ensure Colima is started: `colima start`
-
-## QR code won't scan
-
-**Symptom**: The QR code appears but WeChat won't scan it.
-
-**Fix**:
-
-- Make sure you're using WeChat's built-in scanner (tap **+** > **Scan**), not a generic QR scanner
-- The QR code must be displayed on a **separate screen** from the phone running WeChat — WeChat's scanner uses the camera only, it cannot scan from the phone's gallery
-- QR codes expire after a few minutes. If it doesn't work, run `wx-legacy auth login` again to get a fresh one
-- Try `wx-legacy auth login --new` to force a new account login instead of reusing an existing session
-
-## WeChat session disconnects
-
-**Symptom**: The bot was working but suddenly stops. Login status shows logged out.
-
-**Cause**: WeChat sessions can disconnect when:
-- The server or container restarts
-- The WeChat account is logged in on another desktop
-- WeChat's servers force a re-authentication
-
-**Fix**:
-
-Run `wx-legacy auth login` — if the disconnection was brief, you may not need a new QR scan. If a QR code appears, scan it again.
+CI, fixture checks, live protocol acceptance and recipient playback are distinct evidence. Report the exact runtime version, supported profile layout and redacted status; keep credentials, signed URLs and raw account data private.

@@ -5,7 +5,6 @@ services:
     build:
       context: ../..
       dockerfile: deploy/native/Dockerfile
-    platform: linux/amd64
     # Initial native daemon accepts loopback only. Other local clients/tunnel can
     # reach host 127.0.0.1:6174; no unauthenticated bridge/public port is enabled.
     network_mode: host

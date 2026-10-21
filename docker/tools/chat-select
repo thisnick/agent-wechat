@@ -1,4 +1,0 @@
-#!/bin/bash
-# Wrapper to run chat-select.py with correct HOME directory
-# WeChat runs as 'wechat' user, so databases are under /home/wechat/
-exec env HOME=/home/wechat python3 /opt/tools/chat-select.py "$@"

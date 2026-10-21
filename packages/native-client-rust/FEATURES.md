@@ -2,7 +2,7 @@
 
 This checklist tracks implementation and validation separately. A command or
 route appearing in help is not evidence of a successful native exchange. The
-runtime remains experimental. The initial scope is taking over an existing
+supported-profile runtime has explicit compatibility limits. The initial scope is taking over an existing
 stopped official profile, using its saved identity and continuing supported
 database/media writes in place. Fresh-profile creation, export and returning the
 store to the official app are outside this scope.
@@ -58,7 +58,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Exact prepared-model read receipts | Implemented for pinned host boundary | Actual OpenClaw2026.10.2 Gateway/local-model checks pass for four text scenarios and five media scenarios, including direct/group turns, exact image bytes, bounded labeled previews, file/video/voice references, SDK transcription, missing permission, never-read policy, late/lost read recovery and duplicate prevention. Manifests bind message versions, policy, source/representation hashes and roles; unsupported/ambiguous inputs remain unread. Reference delivery does not prove semantic media analysis |
 | OpenClaw native attachment paths, voice and outbound media | Implemented | Integrity/pending/expired fixtures and correlated model harness; gates precede retrieval/transcription, ordinary audio remains a file |
 | Optional authenticated Gateway HTTP facade | Implemented | Actual pinned OpenClaw2026.10.2 Gateway plugin load/auth, separate tokens, account restriction, Range206 and SSE/cancellation; default disabled |
-| Verified exact-version npm/native artifacts and offline provisioning | Implemented | Linux x64/glibc2.36 package/image/owned-host smoke |
+| Verified exact-version npm/native artifacts and offline provisioning | Implemented | Linux x64/ARM64 GNU matrix; glibc2.36 package/image/owned-host smoke |
 | Fail-closed release gates and source/tag/version integrity | Implemented | Mock registry/tag tests; existing published versions cannot be repurposed |
 | Standalone Docker, systemd and Compose assets | Implemented | Private persistent data/scratch, no official runtime; examples never deployed |
 
@@ -83,7 +83,7 @@ those gaps.
   separately approved destination/member experiment and uncertainty handling.
 - A web application follows stabilization of the API, events and media surface.
 - Fast unsolicited native push association is separate from verified polling.
-- Large-file variants, sticker sending/packs, additional architectures and
+- Large-file variants, sticker sending/packs, platforms beyond Linux x64/ARM64 and
   arbitrary official-build migration require independent evidence and testing.
 
 ## Release gate

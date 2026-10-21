@@ -1,0 +1,17 @@
+---
+title: Migration to the Native Runtime
+description: Move from the retired UI container to a supported native profile owner.
+---
+
+This major release replaces the official-client UI server/image and `wx-legacy` with the Rust `wx` daemon/CLI. It retires the Wechaty puppet and gateway packages from the workspace, documentation and release pipeline. Published older versions remain historical; this change does not delete installed containers, images, volumes or account data. npm registry deprecation, if desired for those historical packages, is a separate release-administration action.
+
+1. Preserve a consistent backup of the old container's complete official HOME/profile and additional agent data. Identify the actual mounts; the old agent database alone is not the official profile.
+2. Stop the old container/app so it no longer owns the profile. Do not delete its volumes. Registering an existing path is not permission to share a writer.
+3. Install the exact native executable or native container, choose a separate native `dataDir`, and give its OS user legitimate access to the complete official profile.
+4. Start one daemon owner and run `wx auth login --official=/absolute/profile`. The path belongs to the daemon host or container. This uses the files in place; an import is unnecessary. Account/device/database checks must pass before writes begin. QR/phone approval may be required if saved trust is unusable.
+5. Migrate API consumers to native `/v1` and configure account-scoped tokens. Old `/api` requests, container session commands, UI screenshots and VNC are removed. The native API does not emulate UI operations.
+6. For OpenClaw, replace `serverUrl`/inline `token` with `native` managed/external settings and a private `tokenFile`. Old configurations fail with a migration error. Choose external mode for a daemon already owned by systemd, Compose or `wx daemon`.
+
+The old `wx up/down` workflow becomes `wx serve` or `wx daemon start/status/stop`. `wx chats list` and `wx messages list` read native resources. Restarting/stopping the daemon keeps reusable saved trust; `wx auth logout` is an explicit protocol/local action.
+
+Official-profile FTS/search-index maintenance and universal reverse handoff are not promised. Never reopen the official app while the daemon owns the same files. Experimental copies preserve the same format but do not convert an unsupported schema. Proxy configuration from the former container is removed; native outbound proxy support is a follow-up.

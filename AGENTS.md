@@ -1,31 +1,27 @@
 # Agent guide for agent-wechat
 
-This repository provides a programmable interface to WeChat. The existing container backend controls the official Linux client's UI and reads its local data. The experimental native backend implements protocol communication and official-format local storage independently. Check the implementation before describing a behavior as supported. In particular, a registered route is not proof that it delivers useful events.
+This repository provides a standalone native WeChat daemon, Rust CLI and OpenClaw channel. It communicates directly with WeChat and reads/writes supported official-format profiles without an official executable at runtime. Check implementation and validation before describing a capability as supported.
 
 ## Repository map
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/agent-server-rust/` | Axum server, UI plans, sessions, local data readers, media jobs |
-| `packages/native-client-rust/` | Standalone native protocol, profile, sidecar store, HTTP daemon and Rust `wx` CLI |
-| `packages/shared/` | TypeScript client and types generated from Rust |
-| `packages/cli/` | Native `wx` launcher, verified executable installer and legacy container CLI |
-| `packages/openclaw-extension/` | OpenClaw channel, inbound polling and media, outbound messages |
-| `packages/wechaty-puppet/` | Wechaty adapter |
-| `packages/wechaty-gateway/` | Wechaty gateway |
-| `docker/` | Image, entrypoint, and container-side tools |
-| `deploy/native/` | Standalone native image and service examples |
+| `packages/native-client-rust/` | Protocol, profile, sidecar store, account actors, HTTP daemon and Rust `wx` CLI |
+| `packages/shared/` | Private native TypeScript HTTP/SSE SDK and generated Rust contracts |
+| `packages/cli/` | npm `wx` launcher and verified executable installer |
+| `packages/openclaw-extension/` | OpenClaw native hosting, event custody, model handoff and media |
+| `deploy/native/` | Native-only image, Compose and optional user-service examples |
 | `docs/` | Public documentation site |
 
-Container-backend HTTP routes are assembled in `packages/agent-server-rust/src/router/mod.rs`. Request/response types live in `packages/agent-server-rust/src/ia/types.rs` and `packages/shared/src/`; keep them in sync with `pnpm generate-types` when changing Rust-exported types. Native routes and contracts live in `packages/native-client-rust/crates/wechat-api/`; regenerate their SDK types with `bash scripts/native-generate-types.sh`. The README is a concise user guide, not an exhaustive API specification.
+Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`; run `pnpm generate-types` after exported Rust contract changes. The README is a concise user guide, not an exhaustive API specification. The former UI server, image, container CLI and Wechaty integrations are retired; Git history retains their implementation.
 
 ## Working rules
 
 - Use neutral, accurate technical language in code, comments, docs, commits, and PRs. Do not imply unauthorized access or conceal how a feature works.
 - Keep account credentials, tokens, private infrastructure details, and research-only material out of this public repository. Do not link to private research repositories from public docs.
 - Use an isolated test container and test account for behavior changes. Do not send messages to a live bot or modify a production container unless the task explicitly calls for it. Confirm the intended destination before any send.
-- Preserve container data and backups unless removal is explicitly requested. The VNC viewer is read-only by default (`docker/entrypoint.sh` uses `x11vnc -viewonly`); do not change that for a shipped image. Temporary interactive debugging must not change the default.
-- WeChat UI behavior is build- and architecture-sensitive. Avoid claiming a local unit test proves end-to-end behavior on another architecture. Verify actual chat selection and message creation in the client when changing UI control.
+- Preserve existing container data, official profiles and backups unless removal is explicitly requested. Retiring runtime source does not authorize deleting deployed containers, registry tags or volumes.
+- Use one writer per official profile. Stop the official app before takeover; a caller assertion is not proof that an unmanaged app stopped. Do not infer arbitrary official-build or live ARM64 compatibility from synthetic tests.
 - Add a changeset for user-facing behavior or package changes. Documentation-only edits do not need one.
 
 ## Runtime boundaries
@@ -34,33 +30,17 @@ Container-backend HTTP routes are assembled in `packages/agent-server-rust/src/r
 
 Read `packages/native-client-rust/FEATURES.md` before claiming native compatibility. Native tests and live server acceptance do not establish official-client rendering or recipient playback. Keep account/profile identity admission, per-account mutation guards, accepted credential generations, logout fences and durable projection journals intact. Retain unknown sync commands rather than advancing the official projected cursor past them. Local repair uses already owned bytes and receipts; it must never resend or start a transfer. Profile handoff requires exclusive ownership and complete projection checks, or an explicit incomplete-copy request with reported gaps. Preserve unknown official files and never delete FTS databases as a general repair.
 
-### UI plans and concurrency
-
-The deterministic observe/identify/reduce/action loop is in `packages/agent-server-rust/src/execution/mod.rs`; UI states and plans are in `src/ia/states/` and `src/plans/`. UI-changing plans share `acquire_gui_guard()`, which serializes GUI work and pauses the health monitor for the duration. New UI operations must coordinate through that guard rather than run concurrently with login, chat selection, sending, or voice recording. Accessibility trees and screenshots are observations; recheck controls and the destination before committing a send.
-
-Chat selection is implemented by `src/plans/chat_open.rs` and `src/tools/chat_select.rs`. A successful helper return is not enough by itself for a regression test: verify the selected chat in the UI and ensure the composer responds. Text, image, and file sends run through `src/plans/send_message.rs`.
-
 ### Local data and media
 
-Chat, message, and media readers are under `packages/agent-server-rust/src/tools/wechat_*.rs`. Session metadata and access credentials are stored in the agent database (`/data/agent.db` by default); schema changes belong in a new `packages/agent-server-rust/migrations/V*__*.sql` migration. Do not assume a message or its media is present immediately after notification.
+Account registry/sidecars live under the configured `dataDir`; directly attached official profiles stay at their registered paths. Sidecar migrations belong in `crates/wechat-store/migrations/`; official schemas are checked before supported writers run. Never migrate an unknown official layout automatically.
 
-`GET /api/messages/{chat_id}/media/{local_id}` first checks locally available media. Uncached attachments whose explicit message expiry has passed return `type: "expired"`, `expiresAt` (Unix seconds), a reason, and `retryable: false`, without queuing a download. Cached bytes remain usable after CDN expiry; missing or invalid expiry metadata is not evidence of expiration. When native transfer metadata is available, the server can queue a transfer through `src/tools/media_download.rs`, wait up to 20 seconds for local bytes, and otherwise return `pending`. The transfer is server-owned; an HTTP disconnect does not cancel its submission. Callers should retry a pending result with a bounded policy, but never automatically retry confirmed expiry. Never present raw message XML as a successfully retrieved attachment.
+Notifications do not imply that a message or its media is already available. Keep advertised and verified media variants separate. Cached verified bytes precede explicit expiry checks; missing expiry metadata or CDN 403/404 alone does not establish expiration. Never present raw XML as a retrieved attachment. Keep bounded pending/expired/unsupported/available responses and integrity/range checks intact. Local writeback repair uses owned bytes/receipts and must never resend or start a transfer.
 
-For image media, omitted `quality` defaults to `best`. It requests a native transfer only when the message advertises an Original, then returns the best cached variant and labels it in the `quality` field. Explicit `quality=full` is strict. The media endpoint never selects a chat: on the tested AMD64 build, the native full-image request does not fetch the standard-size variant. Opening a chat separately may cause WeChat to cache standard images in the visible history.
-
-Type-47 sticker retrieval uses `src/tools/sticker_media.rs`, not the native transfer queue. The existing media endpoint returns validated original bytes as `type: "emoji"`; GIF animation is preserved. Downloads accept only verified CDN sources, public pinned DNS answers, and no redirects. Signed URLs and encryption keys are not exposed or logged. The server-owned cache lives beside `AGENT_DB_PATH` under `media-cache/stickers`, is account-scoped, and retains up to 512 MiB per account. Sticker payloads are limited to 16 MiB, with separate decoding limits. Cached bytes precede explicit expiry checks; CDN 403/404 alone is not evidence of expiry. Terminal failures carry a reason and `retryable: false`; transient errors are bounded pending results. This does not enable automatic OpenClaw type-47 attachment handling.
-
-The current upload limit is defined in `src/router/mod.rs` (`MAX_UPLOAD_BYTES`, 128 MiB); HTTP body size includes base64 expansion. If changing limits, update the server, clients, error reporting, and boundary tests together.
-
-### Outgoing voice notes
-
-The voice endpoints are implemented in `src/router/voice.rs`: create a job with multipart audio and an `Idempotency-Key`, then inspect or cancel it by job ID. The container worker is `docker/tools/voice-send-worker`; audio setup is in `docker/tools/voice-audio-ready`. The worker prepares audio before opening the recorder, splits source audio at 50 seconds, feeds a dedicated virtual microphone, and verifies each outgoing note before starting the next. The 55-second recording deadline cancels rather than approaching the client's automatic cutoff.
-
-Voice sends can partially succeed. Preserve the job's per-chunk statuses and message IDs; after an uncertain send, stop and report `needs_review` instead of resending. A reused idempotency key must not create a duplicate send. Keep the UI guard and health-monitor coordination intact. The CLI surface is `wx messages send <chatId> --voice <path> [--detach]` and `wx messages voice status|cancel <jobId>`.
+Outgoing media/voice uses durable jobs and idempotency keys. Preserve per-note IDs, partial results and uncertain outcomes; stop with `needs_review` instead of blindly retrying a possibly accepted send. Keep account mutation guards, logout epochs and source bounds intact. Voice is independently encoded with the bundled SILK code; FFmpeg/FFprobe handle source preparation.
 
 ### OpenClaw integration
 
-The extension polls inbound messages in `packages/openclaw-extension/src/monitor.ts`, stores attachments through `src/attachment-store.ts`, and applies media/catch-up rules in `src/media-delivery.ts`. Group mention policy is separate from direct-message policy. Voice transcription, when configured, uses OpenClaw's media-understanding runtime after message gating. Outbound media is handled in `src/outbound-media.ts`; `audioAsVoice` requests a voice job, while ordinary audio remains a file attachment. Preserve pending/unavailable status and file paths rather than claiming media reached the model when it did not.
+The extension consumes committed inbound events in `packages/openclaw-extension/src/native-monitor.ts`, stores attachments through `src/attachment-store.ts`, and applies media/catch-up rules in `src/media-delivery.ts`. Group mention policy is separate from direct-message policy. Voice transcription, when configured, uses OpenClaw's media-understanding runtime after message gating. Outbound media is handled in `src/outbound-media.ts`; `audioAsVoice` requests a voice job, while ordinary audio remains a file attachment. Preserve pending/unavailable status and file paths rather than claiming media reached the model when it did not.
 
 ## Development and verification
 
@@ -69,12 +49,10 @@ pnpm install
 pnpm build
 pnpm typecheck
 pnpm --filter @agent-wechat/agent-wechat test
-pnpm --filter @agent-wechat/wechaty-puppet test
-cargo test --manifest-path packages/agent-server-rust/Cargo.toml
 cargo test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml
 bash scripts/native-generate-types.sh --check
 ```
 
-Use `pnpm generate-types` after changing exported Rust types. Build images with `pnpm build:image:amd64` or `pnpm build:image:arm64`; `pnpm dev:deploy` updates a running development container, so identify the target before using it. For end-to-end changes, test the built image and CLI against an isolated container in addition to unit tests. The public CLI entry point is `wx`; `pnpm cli` runs the local build.
+Use `pnpm generate-types` after changing exported Rust types. CI runs tests and builds independently on native x64/ARM64 Linux workers. Prefer CI or an already configured remote builder for release/image builds; do not require local cross-compilers. Build images with `pnpm build:image:amd64` or `pnpm build:image:arm64` on a suitable worker. Builds never authorize deployment. For end-to-end changes, test the built image and CLI against an isolated container in addition to unit tests. The public CLI entry point is `wx`; `pnpm cli` runs the local build.
 
 For user-facing changes, add a `.changeset/*.md` file with the affected package and appropriate patch/minor/major bump. Keep package docs and README commands aligned with the shipped CLI. Do not document stubs, unverified behavior, or planned features as working.

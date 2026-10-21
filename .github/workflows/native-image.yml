@@ -23,8 +23,16 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,26 +45,65 @@ jobs:
           node --input-type=module -e 'import fs from "node:fs"; if(JSON.parse(fs.readFileSync("packages/cli/package.json")).version!==process.env.RELEASE_VERSION)throw Error("Version mismatch");'
           node scripts/native-prepare-package.mjs
       - uses: docker/setup-buildx-action@v4.4.1
-      - name: Build and test image before publishing
+      - name: Build and test on the native architecture before publishing
         run: |
-          docker build --platform linux/amd64 -f deploy/native/Dockerfile -t native-candidate .
+          docker build --platform linux/${{ matrix.arch }} -f deploy/native/Dockerfile -t native-candidate .
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges native-candidate --json version
+          python3 scripts/native-container-smoke.py native-candidate
       - uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish versioned native image with provenance
+      - name: Publish tested architecture by digest
         id: image
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: deploy/native/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ github.repository }}-native:v${{ inputs.version }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }}-native,push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ inputs.version }}
           provenance: mode=max
           sbom: true
+      - name: Record digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          mkdir -p artifacts/digests
+          touch "artifacts/digests/${IMAGE_DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-image-${{ matrix.arch }}
+          path: artifacts/digests/*
+          if-no-files-found: error
+  manifest:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-image-*
+          path: artifacts/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish versioned multi-architecture image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}-native
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          refs=()
+          for digest in artifacts/digests/*; do refs+=("$IMAGE@sha256:${digest##*/}"); done
+          test "${#refs[@]}" = 2
+          docker buildx imagetools create --tag "$IMAGE:v$RELEASE_VERSION" "${refs[@]}"

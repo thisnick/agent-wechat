@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readNativeToken, resolveNativeExecutable, startNativeHost } from "./native-host.ts";
+import { nativeHostTarget, readNativeToken, resolveNativeExecutable, startNativeHost } from "./native-host.ts";
 async function fixture(t: any) {
   const dir = await mkdtemp(join(tmpdir(), "native-host-")); t.after(() => rm(dir, { recursive: true, force: true }));
   const tokenFile = join(dir, "token"); await writeFile(tokenFile, "fixture-".repeat(8), { mode: 0o600 });
@@ -38,4 +38,10 @@ test("managed mode rejects an existing listener without inspecting or terminatin
   t.after(() => new Promise<void>(done => { server.closeAllConnections(); server.close(() => done()); }));
   await assert.rejects(startNativeHost({ mode: "managed", listen: `127.0.0.1:${(server.address() as any).port}`, executable: "/missing/wx", dataDir: dir, accountId: "a", tokenFile, consumerStateDir: dir }), /native_owner_conflict/);
   assert.equal(server.listening, true);
+});
+
+test("managed executable selection binds the host architecture while external mode stays portable", () => {
+  assert.equal(nativeHostTarget("linux", "arm64").rustTarget, "aarch64-unknown-linux-gnu");
+  assert.equal(nativeHostTarget("linux", "x64").rustTarget, "x86_64-unknown-linux-gnu");
+  assert.throws(() => nativeHostTarget("darwin", "arm64"), /external mode/);
 });

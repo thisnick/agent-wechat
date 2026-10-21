@@ -17,27 +17,20 @@ const plugin: {
 } = {
   id: "agent-wechat",
   name: "WeChat",
-  description: "WeChat channel with explicit native and legacy container backends",
+  description: "WeChat channel for the standalone native daemon",
   configSchema: { jsonSchema: nativePluginConfigSchema },
   register(api: OpenClawPluginApi) {
     setWeChatRuntime(api.runtime);
     const selected = resolveWeChatAccount(api.config as unknown as Record<string, unknown>);
-    // Capabilities are channel-global: this increment selects one backend per
-    // registered channel, rather than mixing native and legacy account support.
-    const channel = selected?.backend === "native" ? {
-      ...wechatPlugin,
-      capabilities: { ...wechatPlugin.capabilities, media: true },
-      message: { ...(wechatPlugin.message as any), capabilities: { ...(wechatPlugin.message as any)?.capabilities, media: true } },
-    } : wechatPlugin;
-    api.registerChannel({ plugin: channel });
-    const stopFacade = selected?.backend === "native" && selected.native ? registerNativeFacade(api, selected.native) : () => {};
-    const stopPreparedBoundary = selected?.backend === "native" ? registerNativePreparedBoundary(api) : () => {};
+    api.registerChannel({ plugin: wechatPlugin });
+    const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
+    const stopPreparedBoundary = registerNativePreparedBoundary(api);
     api.registerService({
       id: "agent-wechat-native",
       reload: { configPrefixes: ["plugins.entries.agent-wechat.config", "channels.agent-wechat"] },
       start: async context => {
         const account = resolveWeChatAccount(context.config as unknown as Record<string, unknown>);
-        if (account?.backend === "native" && account.native && account.enabled) await ensureNativeHost(account.native);
+        if (account?.native && account.enabled) await ensureNativeHost(account.native);
       },
       stop: async () => { stopFacade(); stopPreparedBoundary(); await stopNativeHost(); },
     });

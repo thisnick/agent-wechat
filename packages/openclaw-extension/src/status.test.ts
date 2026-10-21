@@ -46,19 +46,6 @@ test("collectWeChatStatusIssues: no issue when connected is undefined (static sn
   assert.deepStrictEqual(issues, []);
 });
 
-test("collectWeChatStatusIssues: reports app_not_running auth status", () => {
-  const issues = collectWeChatStatusIssues([
-    {
-      accountId: "default",
-      connected: true,
-      authStatus: "app_not_running",
-    },
-  ]);
-  assert.equal(issues.length, 1);
-  assert.equal(issues[0].kind, "runtime");
-  assert.ok(issues[0].message.includes("not running"));
-});
-
 test("collectWeChatStatusIssues: reports unlinked session", () => {
   const issues = collectWeChatStatusIssues([
     {

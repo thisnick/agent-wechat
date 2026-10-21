@@ -9,34 +9,46 @@ import { fileURLToPath } from 'node:url';
 const exec = promisify(execFile);
 export const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 export const releaseRepository = 'thisnick/agent-wechat';
-export const supportedTarget = Object.freeze({ platform: 'linux', arch: 'x64', libc: 'gnu', minimumGlibc: '2.36', rustTarget: 'x86_64-unknown-linux-gnu' });
+export const supportedTargets = Object.freeze([
+  Object.freeze({ platform: 'linux', arch: 'x64', libc: 'gnu', minimumGlibc: '2.36', rustTarget: 'x86_64-unknown-linux-gnu' }),
+  Object.freeze({ platform: 'linux', arch: 'arm64', libc: 'gnu', minimumGlibc: '2.36', rustTarget: 'aarch64-unknown-linux-gnu' }),
+]);
+export const supportedTarget = supportedTargets[0];
 const maxBinaryBytes = 256 * 1024 * 1024;
 const allowedDownloadHosts = new Set(['github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com']);
 
 export function targetFor({ platform = process.platform, arch = process.arch, glibc = process.report?.getReport().header.glibcVersionRuntime } = {}) {
   const [major, minor] = String(glibc ?? '').split('.').map(Number);
-  if (platform !== 'linux' || arch !== 'x64' || !glibc || !Number.isFinite(major) || !Number.isFinite(minor) || major < 2 || (major === 2 && minor < 36)) {
-    throw new Error('Native wx currently supports Linux x64 with glibc 2.36 or newer only. Other targets require independent validation. Use wx-legacy explicitly for the existing container client.');
+  const target = supportedTargets.find(item => item.platform === platform && item.arch === arch);
+  if (!target || !glibc || !Number.isFinite(major) || !Number.isFinite(minor) || major < 2 || (major === 2 && minor < 36)) {
+    throw new Error('Native wx requires Linux x64 or ARM64 with glibc 2.36 or newer. Install a supported native runtime or connect remotely to its API.');
   }
-  return supportedTarget;
+  return target;
 }
-export function assetName(version) { return `wx-v${version}-linux-x64-gnu`; }
+export function assetName(version, target = targetFor()) { return `wx-v${version}-${target.platform}-${target.arch}-${target.libc}`; }
 export function manifestName(version) { return `wx-v${version}-checksums.json`; }
 export function releaseUrl(version, name) {
   return `https://github.com/${releaseRepository}/releases/download/v${version}/${name}`;
 }
-export function validateManifest(manifest, version) {
+export function validateManifest(manifest, version, { target = targetFor(), requireAllTargets = false } = {}) {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || manifest?.schemaVersion !== 1
     || manifest.version !== version || manifest.repository !== releaseRepository
-    || !/^[a-f0-9]{40}$/.test(manifest.sourceCommit ?? '') || typeof manifest.sourceTreeDirty !== 'boolean' || !Array.isArray(manifest.assets) || manifest.assets.length !== 1) {
+    || !/^[a-f0-9]{40}$/.test(manifest.sourceCommit ?? '') || typeof manifest.sourceTreeDirty !== 'boolean' || !Array.isArray(manifest.assets) || manifest.assets.length < 1 || manifest.assets.length > supportedTargets.length) {
     throw new Error('Invalid or mismatched native release manifest');
   }
-  const asset = manifest.assets[0];
-  if (Object.entries(supportedTarget).some(([key, value]) => asset[key] !== value)
-    || asset.name !== assetName(version) || !/^[a-f0-9]{64}$/.test(asset.sha256 ?? '')
-    || !Number.isSafeInteger(asset.bytes) || asset.bytes < 1 || asset.bytes > maxBinaryBytes) {
-    throw new Error('Invalid native release asset or unsupported target');
+  const seen = new Set();
+  for (const asset of manifest.assets) {
+    const expected = supportedTargets.find(item => item.arch === asset.arch);
+    if (!expected || seen.has(asset.arch) || Object.entries(expected).some(([key, value]) => asset[key] !== value)
+      || asset.name !== assetName(version, expected) || !/^[a-f0-9]{64}$/.test(asset.sha256 ?? '')
+      || !Number.isSafeInteger(asset.bytes) || asset.bytes < 1 || asset.bytes > maxBinaryBytes) {
+      throw new Error('Invalid native release asset, duplicate or unsupported target');
+    }
+    seen.add(asset.arch);
   }
+  if (requireAllTargets && seen.size !== supportedTargets.length) throw new Error('Native publication requires every supported target');
+  const asset = manifest.assets.find(item => item.arch === target.arch);
+  if (!asset) throw new Error(`Native manifest has no asset for ${target.arch}`);
   return asset;
 }
 export async function readManifest(root = packageRoot) {
@@ -95,12 +107,12 @@ export async function inspectBinary(path, version) {
   const { stdout } = await exec(path, ['--json', 'version'], { timeout: 5000, maxBuffer: 65536, windowsHide: true });
   const value = JSON.parse(stdout);
   if (value.product !== 'agent-wechat' || value.backend !== 'native' || value.version !== version
-    || value.target !== supportedTarget.rustTarget || value.apiVersion !== 1 || !value.capabilities?.includes('serve')) {
+    || value.target !== targetFor().rustTarget || value.apiVersion !== 1 || !value.capabilities?.includes('serve')) {
     throw new Error('Executable is not a matching native wx runtime; no container fallback is performed');
   }
   return value;
 }
-export function installPath(root, version) { return join(root, 'native', version, 'linux-x64-gnu', 'wx'); }
+export function installPath(root, version, target = targetFor()) { return join(root, 'native', version, `${target.platform}-${target.arch}-${target.libc}`, 'wx'); }
 export async function installNative({ root = packageRoot, artifactDir, fetchOptions, downloadUrl, inspect = inspectBinary } = {}) {
   targetFor();
   const { version, asset } = await readManifest(root);

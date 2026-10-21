@@ -1,78 +1,18 @@
 ---
-title: Restarting & Recovery
-description: How to restart the container and recover from common issues.
+title: Restarting and Recovery
+description: Preserve login trust, durable work and profile ownership.
 ---
 
-## Restarting the container
+Use the same process owner to stop and restart the native daemon. `wx daemon stop` terminates only the verified process it owns; systemd, Compose and OpenClaw managed mode have their own owners. A normal stop/disconnect retains reusable saved credentials and history. Never run two writers over the same official profile.
 
-### Via the CLI
+On restart, accepted credential generations, logout epochs, staged sync commands, projection journals, outgoing intents/jobs and consumer cursors are recovered separately. Background connection can validate or renew eligible authorization; it does not create a QR silently. Use an explicit login when phone approval/QR is needed.
 
-```bash
-wx-legacy down && wx-legacy up
-```
-
-### Via Docker Compose
+A lost send response may mean WeChat accepted it. Keep the idempotency key and submission receipt, inspect the existing send/job, and never resend `needs_review` work automatically. Partial voice jobs retain each completed note ID. HTTP or Gateway disconnect does not cancel server-owned durable work.
 
 ```bash
-docker compose restart agent-wechat
+wx --account ACCOUNT_ID messages sends lookup --idempotency-key EXISTING_KEY
+wx --account ACCOUNT_ID jobs get JOB_ID
+wx --account ACCOUNT_ID jobs repair-writeback --limit 25 --wait 30
 ```
 
-Or for a full stop and start:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-## What happens on restart
-
-- The WeChat session usually persists across restarts. Scan the QR code in WeChat if prompted.
-- If the session does expire, the API will report a logged-out status. Run `wx-legacy auth login` or ask your OpenClaw bot to log in again.
-- The agent database (`/data/agent.db`) persists across restarts.
-- All WeChat data (messages, contacts, media) persists in the `agent-wechat-home` volume.
-
-## When to restart
-
-Restart the container when:
-- The bot stops responding to messages
-- You see "no action selected" errors in the logs
-- The container appears healthy but WeChat is unresponsive
-- After updating the auth token
-
-## Wiping WeChat data (fresh start)
-
-If restarting doesn't fix the issue, you can wipe the WeChat data and start from scratch. **This will delete all cached messages and media, and you will need to scan the QR code again.**
-
-```bash
-# Stop the container
-wx-legacy down
-# or: docker compose down
-
-# Remove the WeChat home volume
-docker volume rm agent-wechat-home
-
-# Start fresh
-wx-legacy up
-# or: docker compose up -d
-```
-
-:::caution
-This deletes all WeChat data inside the container including the login session, cached messages, and media. You will need to re-scan the QR code to log in.
-:::
-
-## Wiping everything (full reset)
-
-To completely reset both agent data and WeChat data:
-
-```bash
-wx-legacy down
-docker volume rm agent-wechat-data agent-wechat-home
-wx-legacy up
-```
-
-This removes:
-- The agent database
-- All WeChat user data
-- The login session
-
-You will need to generate a new auth token and re-scan the QR code.
+Local writeback repair reconciles owned bytes/accepted receipts into supported official files and never submits another network transfer or message. Unknown layouts remain blocked. Preserve profiles and sidecars before diagnosis; deleting files to force a fresh login can lose device trust, database keys or pending receipts.

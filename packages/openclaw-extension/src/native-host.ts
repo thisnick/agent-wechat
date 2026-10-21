@@ -24,7 +24,12 @@ export async function readNativeToken(path: string): Promise<string> {
   if (token.length < 32 || /[\r\n]/.test(token)) throw new Error("Native API token must contain at least 32 bytes on one line");
   return token;
 }
+export function nativeHostTarget(platform = process.platform, arch = process.arch): { arch: string; rustTarget: string } {
+  if (platform !== "linux" || !["x64", "arm64"].includes(arch)) throw new Error("native_binary_incompatible: managed hosting requires Linux x64 or ARM64; use external mode for remote daemons");
+  return { arch, rustTarget: arch === "arm64" ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu" };
+}
 export async function resolveNativeExecutable(explicit?: string, path = process.env.PATH ?? ""): Promise<string> {
+  const target = nativeHostTarget();
   let candidate = explicit;
   if (candidate && !isAbsolute(candidate)) throw new Error("native.executable must be absolute");
   if (!candidate) {
@@ -41,9 +46,9 @@ export async function resolveNativeExecutable(explicit?: string, path = process.
     const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
     if (pkg.name !== "@agent-wechat/cli" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version)) throw new Error("Unsupported native CLI launcher");
     const manifest = JSON.parse(await readFile(join(root, "native-release.json"), "utf8"));
-    const asset = manifest.assets?.find((value: any) => value.rustTarget === "x86_64-unknown-linux-gnu");
+    const asset = manifest.assets?.find((value: any) => value.rustTarget === target.rustTarget && value.platform === "linux" && value.arch === target.arch && value.libc === "gnu");
     if (manifest.version !== pkg.version || !asset || !/^[a-f0-9]{64}$/.test(asset.sha256)) throw new Error("Native CLI manifest is incompatible");
-    candidate = await realpath(join(root, "native", pkg.version, "linux-x64-gnu", "wx"));
+    candidate = await realpath(join(root, "native", pkg.version, `linux-${target.arch}-gnu`, "wx"));
     const bytes = await readFile(candidate);
     if (bytes.length !== asset.bytes || createHash("sha256").update(bytes).digest("hex") !== asset.sha256) throw new Error("Installed native executable checksum mismatch");
   }
@@ -55,7 +60,7 @@ export async function resolveNativeExecutable(explicit?: string, path = process.
   const { stdout } = await exec(candidate, ["--json", "version"], { timeout: 5000, maxBuffer: 65536 });
   const version = JSON.parse(stdout);
   requireNativeIdentity(version);
-  if (version.target !== "x86_64-unknown-linux-gnu") throw new Error("native_binary_incompatible: only the validated Linux x64 GNU target is supported");
+  if (version.target !== target.rustTarget) throw new Error("native_binary_incompatible: executable architecture differs from this host");
   return candidate;
 }
 async function portOccupied(url: URL): Promise<boolean> {

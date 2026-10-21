@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1
 # Standalone native runtime: no official client, desktop, X11, VNC or ptrace tools.
-# Build from the repository root. Only this validated target is supported initially.
-FROM --platform=linux/amd64 rust:1.93.1-bookworm AS builder
+# Build on a native x64 or ARM64 worker (CI runs each architecture separately).
+FROM rust:1.93.1-bookworm AS builder
 WORKDIR /build
 COPY packages/native-client-rust/ ./
 ENV CARGO_BUILD_JOBS=4
 RUN cargo test --workspace --locked \
-    && cargo build --release --locked --target x86_64-unknown-linux-gnu
+    && cargo build --release --locked
 
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tini ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
@@ -17,7 +17,7 @@ RUN apt-get update \
     && mkdir -p /var/lib/agent-wechat /var/cache/agent-wechat /etc/agent-wechat/server \
     && chown 10001:10001 /var/lib/agent-wechat /var/cache/agent-wechat \
     && chmod 0700 /var/lib/agent-wechat /var/cache/agent-wechat
-COPY --from=builder /build/target/x86_64-unknown-linux-gnu/release/wx /usr/local/bin/wx
+COPY --from=builder /build/target/release/wx /usr/local/bin/wx
 COPY --from=builder /build/crates/wechat-protocol/NOTICE /usr/share/doc/agent-wechat-native/NOTICE
 COPY --from=builder /build/crates/wechat-protocol/fixtures/LICENSE-CITIZENLAB /usr/share/doc/agent-wechat-native/LICENSE-CITIZENLAB
 COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-MIT /usr/share/doc/agent-wechat-native/LICENSE-SILK-MIT

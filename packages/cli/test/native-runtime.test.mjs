@@ -9,10 +9,11 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { assetName, fetchBytes, inspectBinary, installNative, installPath, manifestName, readManifest,
-  resolveNative, supportedTarget, targetFor, validateManifest } from '../scripts/native-runtime.mjs';
+  resolveNative, supportedTargets, targetFor, validateManifest } from '../scripts/native-runtime.mjs';
 import { prepareNativePackage, nativePackageUnpublished } from '../../../scripts/native-prepare-package.mjs';
 const exec = promisify(execFile);
 const version = '0.16.0';
+const supportedTarget = targetFor();
 const identity = { product: 'agent-wechat', backend: 'native', version, apiVersion: 1, target: supportedTarget.rustTarget, capabilities: ['serve'] };
 const code = `#!/bin/sh\nexec node - "$@" <<'NATIVE_FIXTURE'\nif(process.argv[2]==='--json')console.log(${JSON.stringify(JSON.stringify(identity))});else if(process.argv[2]==='wait'){process.on('SIGTERM',()=>process.exit(23));setInterval(()=>{},1000);console.log('ready')}else {console.log(JSON.stringify(process.argv.slice(2)));process.exit(7)}\nNATIVE_FIXTURE\n`;
 async function fixture(t) {
@@ -22,7 +23,7 @@ async function fixture(t) {
   await mkdir(artifacts);
   const bytes = Buffer.from(code);
   const asset = { name: assetName(version), ...supportedTarget, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
-  const manifest = { schemaVersion: 1, version, repository: 'thisnick/agent-wechat', sourceCommit: 'a'.repeat(40), sourceTreeDirty: false, assets: [asset] };
+  const manifest = { schemaVersion: 1, version, repository: 'thisnick/agent-wechat', sourceCommit: 'a'.repeat(40), sourceTreeDirty: false, assets: [asset, ...supportedTargets.filter(target => target.arch !== supportedTarget.arch).map(target => ({ ...asset, ...target, name: assetName(version, target) }))] };
   await writeFile(join(root, 'package.json'), JSON.stringify({ version, type: 'module' }));
   await writeFile(join(root, 'native-release.json'), JSON.stringify(manifest));
   await writeFile(join(artifacts, manifestName(version)), JSON.stringify(manifest));
@@ -43,16 +44,17 @@ async function copyLauncher(root) {
   return join(root, 'scripts/native-launcher.mjs');
 }
 
-test('supported platform matrix rejects macOS, ARM64 and musl explicitly', () => {
+test('supported platform matrix accepts x64 and ARM64 and rejects macOS, old glibc and musl', () => {
   assert.deepEqual(targetFor({ platform: 'linux', arch: 'x64', glibc: '2.36' }), supportedTarget);
+  assert.equal(targetFor({ platform: 'linux', arch: 'arm64', glibc: '2.36' }).rustTarget, 'aarch64-unknown-linux-gnu');
   for (const args of [{ platform: 'darwin', arch: 'x64', glibc: '2' }, { platform: 'linux', arch: 'arm64', glibc: '2' }, { platform: 'linux', arch: 'x64', glibc: null }, { platform: 'linux', arch: 'x64', glibc: '2.35' }]) {
-    assert.throws(() => targetFor(args), /Linux x64 with glibc/);
+    assert.throws(() => targetFor(args), /Linux x64 or ARM64 with glibc/);
   }
 });
 test('manifest pins exact version, source commit, target, SHA-256 and bounded size', async t => {
   const { root, manifest } = await fixture(t);
   assert.equal((await readManifest(root)).version, version);
-  for (const mutation of [m => m.version = 'latest', m => m.sourceCommit = 'main', m => m.assets[0].rustTarget = 'aarch64-unknown-linux-gnu', m => m.assets[0].name = '../wx', m => m.assets[0].sha256 = 'short', m => m.assets[0].bytes = 2 ** 32, m => m.assets.push(m.assets[0])]) {
+  for (const mutation of [m => m.version = 'latest', m => m.sourceCommit = 'main', m => m.assets[0].rustTarget = 'incorrect-target', m => m.assets[0].name = '../wx', m => m.assets[0].sha256 = 'short', m => m.assets[0].bytes = 2 ** 32, m => m.assets.push(m.assets[0])]) {
     const value = structuredClone(manifest); mutation(value);
     assert.throws(() => validateManifest(value, version), /Invalid/);
   }
@@ -157,4 +159,16 @@ test('ordinary pushes skip native preparation after exact CLI version is publish
   assert.equal(await nativePackageUnpublished({ root, fetchImpl: async () => ({ status: 200, json: async () => ({ name: '@agent-wechat/cli', version }) }) }), false);
   assert.equal(await nativePackageUnpublished({ root, fetchImpl: async () => ({ status: 404 }) }), true);
   await assert.rejects(nativePackageUnpublished({ root, fetchImpl: async () => ({ status: 503 }) }), /HTTP 503/);
+});
+
+test('publication requires both targets; an ARM manifest selects only the ARM bytes', async t => {
+  const { manifest } = await fixture(t);
+  const arm = supportedTargets.find(target => target.arch === 'arm64');
+  const x64 = supportedTargets.find(target => target.arch === 'x64');
+  assert.equal(validateManifest(manifest, version, { target: arm, requireAllTargets: true }).rustTarget, arm.rustTarget);
+  assert.notEqual(assetName(version, arm), assetName(version, x64));
+  assert.notEqual(installPath('/fixture', version, arm), installPath('/fixture', version, x64));
+  const fragment = { ...manifest, assets: [manifest.assets.find(asset => asset.arch === 'arm64')] };
+  assert.throws(() => validateManifest(fragment, version, { target: arm, requireAllTargets: true }), /every supported target/);
+  assert.throws(() => validateManifest(fragment, version, { target: x64 }), /no asset for x64/);
 });

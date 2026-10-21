@@ -4,34 +4,20 @@
   "type": "module",
   "bin": {
     "wx": "./scripts/native-launcher.mjs",
-    "wx-legacy": "./dist/cli.js",
     "wx-native-install": "./scripts/native-install.mjs"
   },
   "files": [
-    "dist",
     "scripts",
     "native-release.json",
-    "LEGACY.md",
     "THIRD_PARTY_NOTICES.txt"
   ],
   "scripts": {
     "build": "node build.js",
-    "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/lib/*.test.mjs test/*.test.mjs",
+    "typecheck": "node build.js",
+    "test": "node --test test/*.test.mjs",
     "postinstall": "node scripts/native-install.mjs --postinstall",
     "prepack": "node scripts/native-check-package.mjs",
     "prepublishOnly": "node scripts/native-check-package.mjs --publication"
-  },
-  "dependencies": {
-    "qrcode-terminal": "^0.12.0"
-  },
-  "devDependencies": {
-    "@agent-wechat/shared": "workspace:*",
-    "commander": "^14.0.3",
-    "esbuild": "^0.25.0",
-    "@types/node": "^22",
-    "@types/qrcode-terminal": "^0.12.2",
-    "typescript": "^5.4.5"
   },
   "publishConfig": {
     "access": "public",
@@ -44,5 +30,6 @@
   },
   "engines": {
     "node": ">=24.16"
-  }
+  },
+  "description": "Standalone native WeChat CLI and daemon launcher"
 }

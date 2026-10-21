@@ -1,86 +1,29 @@
 ---
-title: REST API
-description: API endpoint reference for agent-wechat.
+title: Native HTTP API
+description: Account-scoped v1 resources, jobs, events and media.
 ---
 
-:::note[Container backend]
-This page describes the retained official-client container backend and `wx-legacy`. The experimental standalone `wx` daemon has a separate [native client guide](/getting-started/native-client/), configuration and versioned API.
-:::
+The native API is versioned under `/v1`. Except the minimal `/health` liveness endpoint, requests require bearer authentication and appropriate account scopes. Use lossless decimal-string IDs and opaque server-issued cursors. The Rust contracts generate the private TypeScript SDK; a route alone is not evidence of a successful network operation.
 
-The agent-wechat server exposes a REST API on port `6174`. API requests require a `Bearer` token in the `Authorization` header. The `/health` probe does not require authentication.
+| Surface | Routes / behavior |
+| --- | --- |
+| Runtime/account status | `GET /v1/status`, `GET /v1/accounts`, `GET /v1/accounts/{account}`, account `/capabilities` |
+| Official profile selection | `POST /v1/profiles/official`; prepares in-place identity-bound ownership before login |
+| Login | Account `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
+| Lifecycle | Account `POST /connect`, `/disconnect`, `/logout`, `/forget-credentials`; persistent logout/forget fences |
+| Catalog/history | Account `GET /threads`, `/contacts`, `/groups`, `/groups/{id}/members`, `/threads/{id}/messages`, `/messages/{id}` |
+| Exact metadata | Account `POST /contacts/lookup`, `GET /groups/{id}/lookup`; refresh/sync operations retain their own checkpoints |
+| Sends | Account `POST /sends`, `GET /sends/{id}`, `GET /sends/by-idempotency-key`, `POST /sends/{id}/cancel` |
+| Media | Account `POST /uploads`, message `GET /media`, `POST /media-transfers`, asset `GET /media/{id}/content` |
+| Durable jobs | Account `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `/retry`, `POST /media-writeback/repair` |
+| Local reads | Account `POST /threads/{id}/read-state`; expected-version checking and exact sparse IDs or explicit human through-boundary |
+| Events | Account `GET /events`, `GET /events/stream`, `POST /consumers/{consumer}/ack` |
+| Access tokens | `GET/POST /v1/access-tokens`, `DELETE /v1/access-tokens/{id}`; owner/admin permissions |
 
-## Authentication
+Paths containing placeholders must be URL encoded. A send/upload/login response retains a durable identity before asynchronous work; use idempotency and inspect the same resource after a lost response. `needs_review`, partial voice receipts and confirmed expiry must not trigger blind retries. Native acceptance does not prove recipient delivery/playback.
 
-```
-Authorization: Bearer <token>
-```
+Media separates advertised variants from verified cached bytes and returns pending/expired/unsupported states explicitly. Cached content supports bounded byte ranges and integrity/length checks. Cached bytes can outlive remote expiry. HTTP cancellation closes streaming without cancelling already submitted jobs.
 
-## Endpoints
+Resource cursors bind the account, query and retained view; an expired cursor requires an explicit new view. Tombstones preserve deleted positions. SSE supports journal replay, bounded retention and gap reporting. Persist custody before acknowledgement. Consumer acknowledgements never change unread state; desktop read state also does not synchronize the phone's read state.
 
-### Chats
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/chats` | List chats (with unread counts) |
-| `GET` | `/api/chats/:id` | Get a specific chat |
-| `POST` | `/api/chats/:id/open` | Open a chat in the WeChat UI |
-
-### Messages
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/messages/:chatId` | List messages in a chat |
-| `POST` | `/api/messages/send` | Send a message (text, image, or file) |
-| `GET` | `/api/messages/:chatId/media/:localId` | Retrieve media; may return `pending` while the server requests a local copy |
-| `POST` | `/api/messages/voice` | Start a voice-note job (multipart audio; requires `Idempotency-Key`) |
-| `GET` | `/api/messages/voice/:jobId` | Check voice-job status |
-| `POST` | `/api/messages/voice/:jobId/cancel` | Request voice-job cancellation |
-
-For image media, `?quality=full` requires the original-resolution copy,
-`?quality=standard` requires the mid-size copy, and `?quality=thumbnail`
-requests the preview. `?quality=best` returns the best valid local copy.
-When the message advertises an Original image, it requests the native full-size
-transfer and waits up to 20 seconds before returning the best cached fallback.
-Its `quality` response field is `full`, `standard`, or `thumbnail`. A regular
-phone send may advertise only a standard image; opening its chat can make
-WeChat cache that copy. The media endpoint does not open chats itself. Without
-the standard copy, `best` returns a thumbnail and strict `standard` has no
-image data yet. Omitting `quality` now uses `best`; pass `quality=full` to
-require the original-resolution copy.
-
-### Auth
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/status/auth` | Check login status |
-| `POST` | `/api/status/logout` | Log out of WeChat |
-| `WS` | `/api/ws/login` | WebSocket for login flow (QR code events) |
-
-### Contacts
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/contacts` | List all contacts |
-
-### Sessions
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/sessions` | List sessions |
-| `POST` | `/api/sessions` | Create a session |
-| `POST` | `/api/sessions/:id/start` | Start a session |
-| `POST` | `/api/sessions/:id/stop` | Stop a session |
-| `DELETE` | `/api/sessions/:id` | Delete a session |
-
-### Debug
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/debug/screenshot` | Take a screenshot |
-| `GET` | `/api/debug/a11y` | Dump the accessibility tree |
-
-### VNC
-
-| Path | Description |
-|------|-------------|
-| `/vnc/` | Read-only browser-based VNC viewer (noVNC) |
+See the [CLI workflows](/getting-started/cli/commands/) and public source contracts in [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api). The old container `/api` and UI operations are removed.

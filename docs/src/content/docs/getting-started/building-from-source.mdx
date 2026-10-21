@@ -1,0 +1,21 @@
+---
+title: Building from Source
+description: Use CI or a native Linux worker for builds and validation.
+---
+
+CI is the normal validation path and builds on separate Linux x64 and ARM64 workers. It tests real executables, packaged installers and containers with synthetic data, without deploying. An existing remote Docker context can offload builds; no local cross-compiler is required.
+
+For a developer build on a suitable Linux worker:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm native:test
+pnpm native:build
+pnpm generate-types
+```
+
+Rust 1.93.1, a C compiler, Node 24.16+ and pinned pnpm 9.15.4 are the source-tool baseline. `pnpm build` builds the SDK, npm launcher checks, OpenClaw bundle and docs; the Rust workspace has its own build/test commands. The library crates remain workspace/git/path dependencies rather than crates.io packages.
+
+`bash scripts/native-build-release.sh` builds/tests the host architecture in Bookworm and emits versioned executable/checksum/notice artifacts. `node scripts/native-package-smoke.mjs artifacts/native` tests a real tarball and offline installation. Local dirty output is explicitly marked and cannot pass publication. Release and image workflows are separately gated; running build/test commands does not publish or deploy.

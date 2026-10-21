@@ -34,19 +34,13 @@
     "channelConfigs": {
       "agent-wechat": {
         "label": "WeChat",
-        "description": "WeChat messaging through a native daemon or explicit legacy container backend.",
+        "description": "WeChat messaging through the standalone native daemon.",
         "schema": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "enabled": {
               "type": "boolean"
-            },
-            "serverUrl": {
-              "type": "string"
-            },
-            "token": {
-              "type": "string"
             },
             "dmPolicy": {
               "type": "string",
@@ -104,14 +98,6 @@
                 }
               }
             },
-            "pollIntervalMs": {
-              "type": "integer",
-              "minimum": 100
-            },
-            "authPollIntervalMs": {
-              "type": "integer",
-              "minimum": 1000
-            },
             "mediaMaxMb": {
               "type": "integer",
               "minimum": 1,
@@ -120,7 +106,6 @@
             "backend": {
               "type": "string",
               "enum": [
-                "legacy",
                 "native"
               ]
             },

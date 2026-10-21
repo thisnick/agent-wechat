@@ -1,4 +1,0 @@
--- V2 intentionally left empty.
--- Previously added novnc_port column, but noVNC is now proxied through the
--- agent server so no separate port tracking is needed. The websockify port
--- is derived at runtime from vnc_port + 180.

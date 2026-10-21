@@ -1,2 +1,0 @@
-#!/bin/bash
-exec env HOME=/home/wechat python3 /opt/tools/media-convert.py "$@"

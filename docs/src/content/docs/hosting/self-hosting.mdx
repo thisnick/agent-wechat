@@ -1,66 +1,25 @@
 ---
 title: Self-Hosting
-description: Run agent-wechat on your own infrastructure.
+description: Choose one owner for the native daemon.
 ---
 
-## Recommended setup
-
-The simplest production setup is a VPS with Docker:
-
-1. **Provision a VPS** — any provider (AWS EC2, DigitalOcean, Hetzner, etc.) with at least 2 GB RAM and 10 GB disk
-2. **Install Docker** — follow [Docker's official docs](https://docs.docker.com/engine/install/)
-3. **Deploy with Docker Compose** — see [Docker Compose setup](/getting-started/container-setup/docker-compose)
-
-## Security considerations
-
-- The auth token secures the API. Keep it secret and use HTTPS if exposing the port externally.
-- The container runs with elevated privileges (`SYS_PTRACE`, `seccomp=unconfined`). Run it on a dedicated VM or isolated Docker host.
-- Use HTTPS if exposing port 6174 externally. Both the API and VNC viewer at `/vnc/` require the auth token.
-
-## Monitoring
-
-Check the container health:
+Start the native daemon directly:
 
 ```bash
-# Container status
-docker ps | grep agent-wechat
-
-# Server and login status
-wx-legacy status
-
-# Container logs
-wx-legacy logs
-# or
-docker compose logs -f agent-wechat
+wx serve --server-config /absolute/server/config.toml
 ```
 
-## Backups
-
-Back up the Docker volumes periodically:
+Or use its verified background process manager:
 
 ```bash
-# Back up WeChat data
-docker run --rm -v agent-wechat-home:/data -v $(pwd):/backup ubuntu tar czf /backup/wechat-home-backup.tar.gz -C /data .
-
-# Back up agent data
-docker run --rm -v agent-wechat-data:/data -v $(pwd):/backup ubuntu tar czf /backup/agent-data-backup.tar.gz -C /data .
+wx daemon start
+wx daemon status
+wx daemon logs --follow
+wx daemon stop
 ```
 
-## Updates
+Stopping preserves history and reusable saved login; it does not submit logout. Pick exactly one owner: foreground, `wx daemon`, systemd, Compose or OpenClaw managed mode. OpenClaw external mode connects to any independently owned daemon.
 
-To update to the latest image:
+The optional `deploy/native/agent-wechat-native.service` is a systemd **user** unit running `wx serve` from `~/.local/bin/wx`. It provides user-session lifecycle, restart handling and restrictive filesystem access. It is not installed/enabled automatically. Provision the executable, private settings/token/data paths, and explicitly add any attached official profile to its allowed write paths before a deliberate deployment. Validation checks unit syntax without starting it.
 
-```bash
-docker compose pull
-docker compose up -d
-```
-
-Or with the CLI:
-
-```bash
-wx-legacy down
-docker pull ghcr.io/thisnick/agent-wechat:latest
-wx-legacy up
-```
-
-After updating, the WeChat session usually persists. Scan the QR code in WeChat if prompted.
+For a container, follow [Docker Compose](/hosting/docker-compose/). Server settings and data are described under [storage](/operations/data/). Both the official profile and native sidecars belong in backups. Exposing the API, starting a service or changing account ownership are deployment operations; a successful build does not perform them.

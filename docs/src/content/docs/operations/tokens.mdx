@@ -1,73 +1,18 @@
 ---
-title: Tokens & Authentication
-description: How auth tokens work, where to find them, and how to rotate them.
+title: Tokens and Authentication
+description: API access and native WeChat authorization have separate lifetimes.
 ---
 
-agent-wechat uses a simple token-based authentication to secure the REST API.
+The API bearer token controls access to the daemon; WeChat active/saved credentials authorize native protocol exchanges. Rotating one does not refresh or revoke the other. Default daemon initialization creates owner-only token/key files under `dataDir`; a `tokenFile` setting can instead reference an explicitly provisioned private file. Keep tokens out of URLs and source control.
 
-## Where the token lives
-
-| Location | Description |
-|----------|-------------|
-| `~/.config/agent-wechat/token` | File on your host machine. Auto-generated on first `wx-legacy up`. |
-| `/data/auth-token` | Inside the container (read-only mount of the host file) |
-| `AGENT_WECHAT_TOKEN` env var | Overrides the file-based token |
-
-## How the token is used
-
-The token serves two purposes:
-
-1. **API authentication** — every API request must include it in the `Authorization` header:
-   ```
-   Authorization: Bearer <token>
-   ```
-2. **Database encryption** — the token is used to encrypt `agent.db`, the internal database that stores session state and metadata.
-
-The CLI, OpenClaw plugin, and Wechaty puppet all read the token automatically from `~/.config/agent-wechat/token` when connecting to `localhost`.
-
-:::caution
-Changing or losing the token means `agent.db` can no longer be read. If you regenerate the token, the old database is effectively lost and a new one will be created.
-:::
-
-## Generating a token manually
+The CLI accepts `--token-file` and endpoint-scoped configuration. OpenClaw requires an absolute regular mode-0600 token file with at least 32 bytes on one line. Remote API access requires verified HTTPS or an authenticated encrypted tunnel to loopback.
 
 ```bash
-mkdir -p ~/.config/agent-wechat
-openssl rand -hex 32 > ~/.config/agent-wechat/token
-chmod 600 ~/.config/agent-wechat/token
+wx tokens create integration --accounts ACCOUNT_ID --scopes read
+wx tokens list
+wx tokens revoke TOKEN_ID
 ```
 
-## Regenerating the token
+Available scopes are `read`, `media`, `send`, `read-state`, `login` and `admin`. Grant only the selected accounts/scopes. OpenClaw uses read/media/send/login, plus read-state when automatic local reads are wanted; normal operation does not need admin. The optional Gateway facade uses the Gateway's own authentication and a separate daemon token reference.
 
-Using the CLI:
-
-```bash
-wx-legacy auth token --regenerate
-```
-
-Or manually:
-
-```bash
-openssl rand -hex 32 > ~/.config/agent-wechat/token
-```
-
-Then restart the container so it picks up the new token:
-
-```bash
-wx-legacy down && wx-legacy up
-# or
-docker compose restart agent-wechat
-```
-
-## Remote access
-
-When connecting to a remote agent-wechat server, you need the token value:
-
-```bash
-cat ~/.config/agent-wechat/token
-```
-
-Then set it in your client configuration:
-- **OpenClaw**: `"token": "<value>"` in `~/.openclaw/openclaw.json`
-- **Wechaty**: `token: '<value>'` in the puppet constructor
-- **CLI**: `export AGENT_WECHAT_TOKEN=<value>`
+Stopping/disconnecting keeps reusable WeChat trust. Explicit native logout commits a persistent local fence and makes at most one authenticated logout exchange without renewing merely to log out. Saved-device trust revocation is not established. Explicit local forgetting is separately confirmed and retains history/media; neither action deletes backups or proves removal from the phone's device list.
