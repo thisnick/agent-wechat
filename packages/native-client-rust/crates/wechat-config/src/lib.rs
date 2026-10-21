@@ -33,9 +33,21 @@ impl Environment {
                 .map(PathBuf::from)
         }
         Self {
-            home: value("HOME"),
-            config_home: value("XDG_CONFIG_HOME"),
-            data_home: value("XDG_DATA_HOME"),
+            home: value("HOME").or_else(|| value("USERPROFILE")),
+            config_home: value("XDG_CONFIG_HOME").or_else(|| {
+                if cfg!(windows) {
+                    value("APPDATA")
+                } else {
+                    None
+                }
+            }),
+            data_home: value("XDG_DATA_HOME").or_else(|| {
+                if cfg!(windows) {
+                    value("LOCALAPPDATA")
+                } else {
+                    None
+                }
+            }),
             server_config: value("AGENT_WECHAT_SERVER_CONFIG"),
             data_dir: value("AGENT_WECHAT_DATA_DIR"),
         }

@@ -19,7 +19,6 @@ fn optional_file(home: &Path, relative: &Path, max: u64) -> Result<Option<Vec<u8
 // The official app does not honor our lease. The caller must already hold
 // exclusive profile ownership; these checks also reject redirected ancestors.
 fn safe_parent(home: &Path, relative: &Path, create: bool) -> Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
     use std::path::Component;
     if std::fs::canonicalize(home)? != home || relative.is_absolute() {
         bail!("invalid saved routing path");
@@ -35,17 +34,17 @@ fn safe_parent(home: &Path, relative: &Path, create: bool) -> Result<PathBuf> {
         };
         current.push(part);
         match std::fs::symlink_metadata(&current) {
-            Ok(m) if m.is_dir() && !m.is_symlink() => {}
+            Ok(m) if m.is_dir() && !wechat_platform::is_link(&m) => {}
             Ok(_) => bail!("invalid saved routing path"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if !create {
                     continue;
                 }
-                match std::fs::DirBuilder::new().mode(0o700).create(&current) {
-                    Ok(()) => std::fs::File::open(current.parent().unwrap())?.sync_all()?,
+                match wechat_platform::private_dir(&current) {
+                    Ok(()) => wechat_platform::sync_dir(current.parent().unwrap())?,
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         let m = std::fs::symlink_metadata(&current)?;
-                        if !m.is_dir() || m.is_symlink() {
+                        if !m.is_dir() || wechat_platform::is_link(&m) {
                             bail!("invalid saved routing path");
                         }
                     }
@@ -247,7 +246,7 @@ pub(super) fn publish_routing(
     options: &wechat_profile::WriteOptions,
     mut guard: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    use std::{io::Write, os::unix::fs::PermissionsExt};
+    use std::io::Write;
     use wechat_profile::ProfileError;
     if !options.exclusive_ownership_confirmed || options.durable_intent_id.is_empty() {
         return Err(ProfileError::SnapshotRequired.into());
@@ -274,9 +273,7 @@ pub(super) fn publish_routing(
         let parent = safe_parent(home, &entry.relative, true)?;
         let path = home.join(&entry.relative);
         let mut staged = tempfile::NamedTempFile::new_in(&parent)?;
-        staged
-            .as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        wechat_platform::protect(staged.as_file())?;
         staged.write_all(&entry.after)?;
         staged.as_file().sync_all()?;
         guard()?;
@@ -292,7 +289,7 @@ pub(super) fn publish_routing(
         } else {
             staged.persist_noclobber(&path).map_err(|e| e.error)?;
         }
-        std::fs::File::open(&parent)?.sync_all()?;
+        wechat_platform::sync_dir(&parent)?;
     }
     Ok(())
 }

@@ -1,12 +1,10 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::os::unix::{
-    ffi::OsStrExt,
-    fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -69,11 +67,13 @@ fn inventory_inner(root: &Path, official_home: bool) -> Result<Manifest> {
                 bytes: 0,
                 sha256: None,
                 link_target: None,
-                mode: m.permissions().mode() & 0o777,
-                modified_seconds: m.mtime(),
-                modified_nanos: m.mtime_nsec(),
+                mode: file_mode(&m),
+                modified_seconds: filetime::FileTime::from_last_modification_time(&m)
+                    .unix_seconds(),
+                modified_nanos: filetime::FileTime::from_last_modification_time(&m).nanoseconds()
+                    as i64,
             };
-            if m.file_type().is_symlink() {
+            if wechat_platform::is_link(&m) {
                 let target = fs::read_link(&path)?;
                 if target.is_absolute()
                     || !fs::canonicalize(&path)
@@ -91,12 +91,15 @@ fn inventory_inner(root: &Path, official_home: bool) -> Result<Manifest> {
                 if *total > 512 * 1024 * 1024 * 1024 {
                     bail!("profile byte limit exceeded");
                 }
-                let mut f = OpenOptions::new()
+                let mut f = wechat_platform::OpenOptions::new()
                     .read(true)
-                    .custom_flags(libc::O_NOFOLLOW)
+                    .custom_flags(wechat_platform::NOFOLLOW)
                     .open(&path)?;
                 let opened = f.metadata()?;
-                if opened.dev() != m.dev() || opened.ino() != m.ino() {
+                let same = wechat_platform::same_path_file(&path, &f)?;
+                #[cfg(unix)]
+                let same = same && wechat_platform::same_file(&opened, &m);
+                if !same || opened.len() != m.len() {
                     bail!("profile changed during inventory");
                 }
                 let mut hash = Sha256::new();
@@ -145,35 +148,23 @@ fn inventory_inner(root: &Path, official_home: bool) -> Result<Manifest> {
 
 /// Publish a directory on the same filesystem without replacing even an empty target.
 pub fn publish(stage: &Path, destination: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
+    wechat_platform::publish_directory(stage, destination)
+        .context("cannot publish profile without overwrite")
+}
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
     {
-        let from = std::ffi::CString::new(stage.as_os_str().as_bytes())?;
-        let to = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
-        // Both paths are caller-selected local paths; RENAME_NOREPLACE makes refusal atomic.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                from.as_ptr(),
-                libc::AT_FDCWD,
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("cannot publish profile without overwrite");
-        }
-        File::open(destination.parent().context("destination needs parent")?)?.sync_all()?;
-        Ok(())
+        metadata.permissions().mode() & 0o777
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
     {
-        let _ = (stage, destination);
-        bail!("copy publication is currently supported on Linux only");
+        if metadata.is_dir() {
+            0o700
+        } else {
+            0o600
+        }
     }
 }
-
 /// Byte-preserving snapshot copy. This does not decode or migrate official databases.
 pub fn copy_profile(source: &Path, destination: &Path, source_stopped: bool) -> Result<Manifest> {
     copy_inner(source, destination, source_stopped, false)
@@ -226,11 +217,11 @@ fn copy_inner(
                 fs::create_dir(&target)?;
             }
             "file" => {
-                let input = OpenOptions::new()
+                let input = wechat_platform::OpenOptions::new()
                     .read(true)
-                    .custom_flags(libc::O_NOFOLLOW)
+                    .custom_flags(wechat_platform::NOFOLLOW)
                     .open(source.join(&entry.path))?;
-                let mut output = OpenOptions::new()
+                let mut output = wechat_platform::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .mode(0o600)
@@ -248,7 +239,13 @@ fn copy_inner(
     }
     for entry in &before.entries {
         if let Some(target) = &entry.link_target {
+            #[cfg(unix)]
             std::os::unix::fs::symlink(target, stage.path().join(&entry.path))?;
+            #[cfg(windows)]
+            {
+                let _ = target;
+                bail!("profile symbolic-link copying is unsupported on Windows");
+            }
         }
     }
     for entry in before.entries.iter().rev() {
@@ -266,7 +263,10 @@ fn copy_inner(
             )?;
         } else {
             let target = stage.path().join(&entry.path);
+            #[cfg(unix)]
             fs::set_permissions(&target, fs::Permissions::from_mode(entry.mode))?;
+            #[cfg(windows)]
+            wechat_platform::protect_path(&target, target.is_dir())?;
             filetime::set_file_mtime(
                 &target,
                 filetime::FileTime::from_unix_time(
@@ -274,13 +274,17 @@ fn copy_inner(
                     entry.modified_nanos as u32,
                 ),
             )?;
-            File::open(&target)?.sync_all()?;
+            if target.is_dir() {
+                wechat_platform::sync_dir(&target)?;
+            } else {
+                File::open(&target)?.sync_all()?;
+            }
         }
     }
     if inventory(stage.path())? != before || inventory_inner(&source, official_home)? != before {
         bail!("profile changed or copied bytes/metadata did not verify");
     }
-    File::open(stage.path())?.sync_all()?;
+    wechat_platform::sync_dir(stage.path())?;
     publish(stage.path(), &destination)?;
     Ok(before)
 }

@@ -167,7 +167,7 @@ pub(crate) fn read_cache(root: &Path, relative: &Path, max: usize) -> Result<Vec
                 e.into()
             }
         })?;
-        if m.file_type().is_symlink()
+        if wechat_platform::is_link(&m)
             || if i + 1 == components.len() {
                 !m.is_file()
             } else {
@@ -177,11 +177,10 @@ pub(crate) fn read_cache(root: &Path, relative: &Path, max: usize) -> Result<Vec
             return Err(ProfileError::UnsupportedFile);
         }
     }
-    let mut o = fs::OpenOptions::new();
+    let mut o = wechat_platform::OpenOptions::new();
     o.read(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         o.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let f = o.open(&here)?;
@@ -810,7 +809,7 @@ pub fn publish_cache_file(
         here.push(p.as_os_str());
         match fs::symlink_metadata(&here) {
             Ok(m) => {
-                if !m.is_dir() || m.file_type().is_symlink() {
+                if !m.is_dir() || wechat_platform::is_link(&m) {
                     return Err(ProfileError::UnsupportedFile);
                 }
             }
@@ -821,7 +820,7 @@ pub fn publish_cache_file(
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(&here, fs::Permissions::from_mode(0o700))?;
                 }
-                fs::File::open(here.parent().ok_or(ProfileError::InvalidMetadata)?)?.sync_all()?;
+                wechat_platform::sync_dir(here.parent().ok_or(ProfileError::InvalidMetadata)?)?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -839,7 +838,7 @@ pub fn publish_cache_file(
     f.as_file().sync_all()?;
     f.persist_noclobber(&target)
         .map_err(|e| ProfileError::Io(e.error))?;
-    fs::File::open(parent)?.sync_all()?;
+    wechat_platform::sync_dir(parent)?;
     Ok(true)
 }
 

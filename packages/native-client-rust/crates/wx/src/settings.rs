@@ -86,8 +86,7 @@ impl File {
         let settings = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => {
                 if !metadata.is_file()
-                    || metadata.uid() != unsafe { libc::geteuid() }
-                    || metadata.mode() & 0o077 != 0
+                    || !wechat_platform::private_path(&path)?
                     || metadata.len() > 65536
                 {
                     bail!("client config must be a bounded owner-only regular file");
@@ -142,25 +141,21 @@ impl File {
         let parent = self.path.parent().context("invalid client config path")?;
         std::fs::create_dir_all(parent)?;
         let metadata = std::fs::symlink_metadata(parent)?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        if !metadata.is_dir() || !wechat_platform::owned_path(parent)? {
             bail!("client config directory must be owned by this user");
         }
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        wechat_platform::protect_path(parent, true)?;
         if let Ok(metadata) = std::fs::symlink_metadata(&self.path) {
-            if !metadata.is_file()
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.mode() & 0o077 != 0
-            {
+            if !metadata.is_file() || !wechat_platform::private_path(&self.path)? {
                 bail!("client config must be an owner-only regular file");
             }
         }
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        wechat_platform::protect(file.as_file())?;
         file.write_all(toml::to_string_pretty(&self.settings)?.as_bytes())?;
         file.as_file().sync_all()?;
         file.persist(&self.path)?;
-        std::fs::File::open(parent)?.sync_all()?;
+        wechat_platform::sync_dir(parent)?;
         Ok(())
     }
     pub fn server_name(&self, name: Option<&str>, url: Option<&str>) -> Result<Option<String>> {

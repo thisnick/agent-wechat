@@ -299,7 +299,7 @@ impl ProfileReader {
         for part in parts {
             current.push(part);
             let m = fs::symlink_metadata(&current).map_err(|_| ProfileError::NotCached)?;
-            if !m.is_dir() || m.file_type().is_symlink() {
+            if !m.is_dir() || wechat_platform::is_link(&m) {
                 return Err(ProfileError::UnsupportedFile);
             }
         }
@@ -311,7 +311,7 @@ impl ProfileReader {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e.into()),
             };
-            if !m.is_file() || m.file_type().is_symlink() {
+            if !m.is_file() || wechat_platform::is_link(&m) {
                 return Err(ProfileError::UnsupportedFile);
             }
             if m.len() > crate::MAX_DAT_PLAINTEXT_BYTES as u64 + 31 {

@@ -9,7 +9,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { assetName, fetchBytes, inspectBinary, installNative, installPath, manifestName, readManifest,
-  resolveNative, supportedTargets, targetFor, validateManifest } from '../scripts/native-runtime.mjs';
+  resolveNative, targetKey, supportedTargets, targetFor, validateManifest } from '../scripts/native-runtime.mjs';
 import { prepareNativePackage, nativePackageUnpublished } from '../../../scripts/native-prepare-package.mjs';
 const exec = promisify(execFile);
 const version = '0.16.0';
@@ -23,7 +23,7 @@ async function fixture(t) {
   await mkdir(artifacts);
   const bytes = Buffer.from(code);
   const asset = { name: assetName(version), ...supportedTarget, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
-  const manifest = { schemaVersion: 1, version, repository: 'thisnick/agent-wechat', sourceCommit: 'a'.repeat(40), sourceTreeDirty: false, assets: [asset, ...supportedTargets.filter(target => target.arch !== supportedTarget.arch).map(target => ({ ...asset, ...target, name: assetName(version, target) }))] };
+  const manifest = { schemaVersion: 1, version, repository: 'thisnick/agent-wechat', sourceCommit: 'a'.repeat(40), sourceTreeDirty: false, assets: [asset, ...supportedTargets.filter(target => targetKey(target) !== targetKey(supportedTarget)).map(target => ({ bytes: asset.bytes, sha256: asset.sha256, ...target, name: assetName(version, target) }))] };
   await writeFile(join(root, 'package.json'), JSON.stringify({ version, type: 'module' }));
   await writeFile(join(root, 'native-release.json'), JSON.stringify(manifest));
   await writeFile(join(artifacts, manifestName(version)), JSON.stringify(manifest));
@@ -44,12 +44,13 @@ async function copyLauncher(root) {
   return join(root, 'scripts/native-launcher.mjs');
 }
 
-test('supported platform matrix accepts x64 and ARM64 and rejects macOS, old glibc and musl', () => {
-  assert.deepEqual(targetFor({ platform: 'linux', arch: 'x64', glibc: '2.36' }), supportedTargets.find(target => target.arch === 'x64'));
-  assert.equal(targetFor({ platform: 'linux', arch: 'arm64', glibc: '2.36' }).rustTarget, 'aarch64-unknown-linux-gnu');
-  for (const args of [{ platform: 'darwin', arch: 'x64', glibc: '2' }, { platform: 'linux', arch: 'arm64', glibc: '2' }, { platform: 'linux', arch: 'x64', glibc: null }, { platform: 'linux', arch: 'x64', glibc: '2.35' }]) {
-    assert.throws(() => targetFor(args), /Linux x64 or ARM64 with glibc/);
-  }
+test('platform matrix keeps OS and architecture distinct and only checks glibc on Linux', () => {
+  for (const target of supportedTargets) assert.deepEqual(targetFor({ ...target, glibc: target.platform === 'linux' ? '2.36' : null }), target);
+  for (const glibc of [null, '2', '2.35']) assert.throws(() => targetFor({ platform: 'linux', arch: 'x64', glibc }), /glibc/);
+  assert.throws(() => targetFor({ platform: 'freebsd', arch: 'x64' }), /Unsupported/);
+  const windows = targetFor({ platform: 'win32', arch: 'arm64' });
+  assert.match(assetName(version, windows), /win32-arm64\.exe$/);
+  assert.match(installPath('/fixture', version, windows), /wx\.exe$/);
 });
 test('manifest pins exact version, source commit, target, SHA-256 and bounded size', async t => {
   const { root, manifest } = await fixture(t);
@@ -170,5 +171,5 @@ test('publication requires both targets; an ARM manifest selects only the ARM by
   assert.notEqual(installPath('/fixture', version, arm), installPath('/fixture', version, x64));
   const fragment = { ...manifest, assets: [manifest.assets.find(asset => asset.arch === 'arm64')] };
   assert.throws(() => validateManifest(fragment, version, { target: arm, requireAllTargets: true }), /every supported target/);
-  assert.throws(() => validateManifest(fragment, version, { target: x64 }), /no asset for x64/);
+  assert.throws(() => validateManifest(fragment, version, { target: x64 }), /no asset for linux-x64/);
 });

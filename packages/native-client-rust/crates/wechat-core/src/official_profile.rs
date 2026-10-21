@@ -3,9 +3,7 @@ use super::profile_network::saved_business_hosts;
 use super::saved_login::read_saved_file;
 use super::*;
 use std::{
-    collections::BTreeSet,
     io::Read,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use wechat_profile::{ProfileLocation, ProfileSavedLogin, ReadOptions};
@@ -85,13 +83,15 @@ fn selected_home(path: &Path, explicit: bool) -> Result<(PathBuf, Option<PathBuf
 
 // This supplements the ownership lease. The official app does not honor our lock;
 // --official is the operator's exclusive-handoff instruction, not an OS lock on it.
+#[cfg(target_os = "linux")]
 fn reject_open_profile(home: &Path) -> Result<()> {
+    use std::{collections::BTreeSet, os::unix::fs::MetadataExt};
     fn files(path: &Path, depth: usize, ids: &mut BTreeSet<(u64, u64)>) -> Result<()> {
         if depth > 6 || ids.len() > 8192 {
             bail!("official_profile_inventory_limit");
         }
         let meta = std::fs::symlink_metadata(path)?;
-        if meta.is_symlink() {
+        if wechat_platform::is_link(&meta) {
             bail!("invalid official profile path");
         }
         if meta.is_dir() {
@@ -135,6 +135,11 @@ fn reject_open_profile(home: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reject_open_profile(_home: &Path) -> Result<()> {
+    bail!("official_profile_host_unsupported: official-app takeover is currently validated on Linux only; use an explicitly provisioned supported-format profile");
 }
 
 impl Core {

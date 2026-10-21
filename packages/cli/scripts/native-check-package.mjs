@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // prepack checks bundled metadata; prepublishOnly additionally verifies the
 // complete, already published executable matrix before npm can be published.
-import { fetchBytes, manifestName, readManifest, releaseUrl, validateManifest, verifyBytes } from './native-runtime.mjs';
+import { fetchBytes, targetKey, manifestName, readManifest, releaseUrl, validateManifest, verifyBytes } from './native-runtime.mjs';
 const { manifest, asset } = await readManifest();
 if (process.env.GITHUB_SHA && manifest.sourceCommit !== process.env.GITHUB_SHA) throw new Error('Native manifest source commit differs from publication commit');
 if (process.argv.includes('--publication')) {
@@ -13,7 +13,7 @@ if (process.argv.includes('--publication')) {
   validateManifest(remote, manifest.version, { requireAllTargets: true });
   if (remote.sourceCommit !== manifest.sourceCommit || remote.sourceTreeDirty === true) throw new Error('Prepared release differs from this npm package');
   for (const item of manifest.assets) {
-    const published = remote.assets.find(candidate => candidate.arch === item.arch);
+    const published = remote.assets.find(candidate => targetKey(candidate) === targetKey(item));
     if (published.sha256 !== item.sha256 || published.bytes !== item.bytes) throw new Error('Prepared release differs from this npm package');
     verifyBytes(await fetchBytes(releaseUrl(manifest.version, item.name), item.bytes), item);
   }

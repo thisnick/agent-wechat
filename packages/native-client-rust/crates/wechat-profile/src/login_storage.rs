@@ -339,7 +339,7 @@ pub fn publish_legacy_key_info(
             .persist(path)
             .map_err(|e| ProfileError::Io(e.error))?;
     }
-    fs::File::open(parent)?.sync_all()?;
+    wechat_platform::sync_dir(parent)?;
     Ok(true)
 }
 
@@ -513,7 +513,7 @@ fn create_login_parent(home: &Path, relative: &Path) -> Result<()> {
     {
         path.push(part.as_os_str());
         match fs::symlink_metadata(&path) {
-            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+            Ok(m) if m.is_dir() && !wechat_platform::is_link(&m) => {}
             Ok(_) => return Err(ProfileError::UnsupportedFile),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_dir(&path)?;
@@ -522,7 +522,7 @@ fn create_login_parent(home: &Path, relative: &Path) -> Result<()> {
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
                 }
-                fs::File::open(path.parent().ok_or(ProfileError::InvalidQuery)?)?.sync_all()?;
+                wechat_platform::sync_dir(path.parent().ok_or(ProfileError::InvalidQuery)?)?;
             }
             Err(e) => return Err(e.into()),
         }

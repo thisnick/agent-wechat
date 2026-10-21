@@ -2,9 +2,9 @@
 // Local process/API integration only; no credentials, WeChat login or messages.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm, readFile, stat, access } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, realpath, stat, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, toNamespacedPath } from 'node:path';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { startNativeHost } from '../packages/openclaw-extension/src/native-host.ts';
@@ -21,11 +21,14 @@ try {
     token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(directory, 'consumer'), listen: `127.0.0.1:${port}`, readPolicy: 'never' };
   owned = await startNativeHost(config);
   const first = await owned.client.status();
-  assert.equal((await readFile(`/proc/${first.pid}/cmdline`, 'utf8')).includes(token), false);
-  assert.equal((await readFile(`/proc/${first.pid}/environ`, 'utf8')).includes(token), false);
+  if (process.platform === 'linux') {
+    assert.equal((await readFile(`/proc/${first.pid}/cmdline`, 'utf8')).includes(token), false);
+    assert.equal((await readFile(`/proc/${first.pid}/environ`, 'utf8')).includes(token), false);
+  }
   await assert.rejects(access(join(config.dataDir, 'api-token')));
   assert.equal(first.version.backend, 'native'); assert.equal(first.state, 'ready');
-  assert.equal(first.dataDir, join(directory, 'data'));
+  const canonicalData = await realpath(join(directory, 'data'));
+  assert.equal(first.dataDir, process.platform === 'win32' ? toNamespacedPath(canonicalData) : canonicalData);
   const a = await owned.client.createAccount('smoke-a'); const b = await owned.client.createAccount('smoke-b');
   const accounts = await owned.client.accounts(); assert.equal(accounts.items.length, 2);
   const account = await owned.client.account('smoke-a'); assert.equal(account.authenticated, false); assert.equal(account.connection, 'disconnected');

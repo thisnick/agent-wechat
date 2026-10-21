@@ -2242,6 +2242,7 @@ dependencies = [
  "tower",
  "ts-rs",
  "wechat-core",
+ "wechat-platform",
  "wechat-profile",
  "wechat-store",
 ]
@@ -2254,6 +2255,7 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
+ "wechat-platform",
 ]
 
 [[package]]
@@ -2278,6 +2280,7 @@ dependencies = [
  "ts-rs",
  "uuid",
  "wechat-media",
+ "wechat-platform",
  "wechat-profile",
  "wechat-protocol",
  "wechat-store",
@@ -2294,6 +2297,15 @@ dependencies = [
  "md-5",
  "serde",
  "tempfile",
+]
+
+[[package]]
+name = "wechat-platform"
+version = "1.0.0-beta.8"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2320,6 +2332,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "wechat-media",
+ "wechat-platform",
  "zeroize",
  "zstd",
 ]
@@ -2359,6 +2372,7 @@ dependencies = [
  "tempfile",
  "ts-rs",
  "uuid",
+ "wechat-platform",
  "zeroize",
 ]
 
@@ -2563,6 +2577,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "fs2",
  "futures-util",
  "image",
  "libc",
@@ -2577,6 +2592,7 @@ dependencies = [
  "wechat-api",
  "wechat-config",
  "wechat-core",
+ "wechat-platform",
  "wechat-profile",
  "wechat-store",
 ]

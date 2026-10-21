@@ -1,9 +1,8 @@
 use super::*;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::process::CommandExt,
     process::{Command as ProcessCommand, Stdio},
     time::Instant,
 };
@@ -33,35 +32,15 @@ struct OwnedProcess {
     ownership_generation: String,
 }
 fn fingerprint(pid: u32) -> Option<String> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let tail = text
-        .rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    if tail.first() == Some(&"Z") {
-        return None;
-    }
-    tail.get(19).map(|s| s.to_string())
+    wechat_platform::process_identity(pid).map(|(created, _)| created)
 }
 fn process_matches(owned: &OwnedProcess) -> bool {
-    fingerprint(owned.pid).is_some_and(|value| value == owned.start_ticks)
-        && std::fs::read_link(format!("/proc/{}/exe", owned.pid))
-            .is_ok_and(|value| value == owned.executable)
+    wechat_platform::process_identity(owned.pid).is_some_and(|(created, executable)| {
+        created == owned.start_ticks && executable == owned.executable
+    })
 }
 fn private_directory(path: &Path) -> Result<()> {
-    if !path.exists() {
-        std::fs::create_dir_all(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        bail!("daemon state directory must be a private owned real directory");
-    }
-    Ok(())
+    Ok(wechat_platform::private_dir(path)?)
 }
 fn load(path: &Path) -> Result<Option<OwnedProcess>> {
     match private_input(path, 16384) {
@@ -117,20 +96,14 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
             private_directory(&config.data_dir)?;
             config.data_dir = std::fs::canonicalize(&config.data_dir)?;
             private_directory(&directory)?;
-            let lock = OpenOptions::new()
+            let lock = wechat_platform::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
+                .custom_flags(wechat_platform::NOFOLLOW)
                 .open(directory.join("management.lock"))?;
-            if unsafe {
-                libc::flock(
-                    std::os::fd::AsRawFd::as_raw_fd(&lock),
-                    libc::LOCK_EX | libc::LOCK_NB,
-                )
-            } != 0
-            {
+            if lock.try_lock_exclusive().is_err() {
                 bail!("daemon lifecycle operation already in progress");
             }
             if let Some(owned) = load(&record)? {
@@ -143,17 +116,14 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
                 .context("daemon listener is occupied; no owner was adopted or stopped")?;
             drop(listener);
             let _token = wechat_api::provision_token(&config.token_file, !config.token_explicit)?;
-            let output_file = OpenOptions::new()
+            let output_file = wechat_platform::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
+                .custom_flags(wechat_platform::NOFOLLOW)
                 .open(&log)?;
             let metadata = output_file.metadata()?;
-            if !metadata.is_file()
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.mode() & 0o077 != 0
-            {
+            if !metadata.is_file() || !wechat_platform::private_file(&output_file)? {
                 bail!("daemon log must be a private owned regular file");
             }
             let executable = std::fs::canonicalize(std::env::current_exe()?)?;
@@ -172,14 +142,7 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
             if config.config_present {
                 command.arg("--server-config").arg(&config.config_file);
             }
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
+            wechat_platform::detach(&mut command);
             let mut child = command.spawn().context("cannot launch native daemon")?;
             let deadline = Instant::now() + Duration::from_secs(20);
             let readiness = async {
@@ -233,9 +196,14 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
                     if child.try_wait()?.is_some() {
                         return Err(error);
                     }
+                    #[cfg(unix)]
                     unsafe {
                         libc::kill(child.id() as i32, libc::SIGTERM);
-                    };
+                    }
+                    #[cfg(windows)]
+                    {
+                        let _ = child.kill();
+                    }
                     for _ in 0..50 {
                         if child.try_wait()?.is_some() {
                             return Err(error);
@@ -259,20 +227,14 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
                 private_directory(&directory)?;
             }
             let _lock = if directory.exists() {
-                let file = OpenOptions::new()
+                let file = wechat_platform::OpenOptions::new()
                     .read(true)
                     .write(true)
                     .create(true)
                     .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
+                    .custom_flags(wechat_platform::NOFOLLOW)
                     .open(directory.join("management.lock"))?;
-                if unsafe {
-                    libc::flock(
-                        std::os::fd::AsRawFd::as_raw_fd(&file),
-                        libc::LOCK_EX | libc::LOCK_NB,
-                    )
-                } != 0
-                {
+                if file.try_lock_exclusive().is_err() {
                     bail!("daemon lifecycle operation already in progress");
                 }
                 Some(file)
@@ -290,6 +252,9 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
                 return output(&json!({"state":"stopped","managed":true}));
             }
             identity(&config, &owned).await?;
+            #[cfg(windows)]
+            remote(&config)?.post("v1/daemon/shutdown", json!({"pid":owned.pid,"serverId":owned.server_id,"ownershipGeneration":owned.ownership_generation})).await?;
+            #[cfg(unix)]
             if unsafe { libc::kill(owned.pid as i32, libc::SIGTERM) } != 0 {
                 return Err(std::io::Error::last_os_error()).context("cannot signal owned daemon");
             }
@@ -304,15 +269,12 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
             output(&json!({"state":"stopped","pid":owned.pid,"logout":false}))
         }
         DaemonCommand::Logs { follow } => {
-            let mut file = OpenOptions::new()
+            let mut file = wechat_platform::OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
+                .custom_flags(wechat_platform::NOFOLLOW)
                 .open(&log)?;
             let metadata = file.metadata()?;
-            if !metadata.is_file()
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.mode() & 0o077 != 0
-            {
+            if !metadata.is_file() || !wechat_platform::private_file(&file)? {
                 bail!("daemon log must be a private owned regular file");
             }
             let length = metadata.len();

@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+wechat-platform = { path = "../wechat-platform" }
 anyhow.workspace = true
 axum = { workspace = true, features = ["multipart"] }
 tokio.workspace = true

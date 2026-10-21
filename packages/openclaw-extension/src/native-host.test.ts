@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeChildEnvironment, nativeHostTarget, resolveNativeExecutable, startNativeHost } from "./native-host.ts";
+import { nativeChildEnvironment, nativeExecutableFormat, nativeHostTarget, resolveNativeExecutable, startNativeHost } from "./native-host.ts";
 async function fixture(t: any) {
   const dir = await mkdtemp(join(tmpdir(), "native-host-")); t.after(() => rm(dir, { recursive: true, force: true }));
   return { dir, token: "fixture-".repeat(8) };
@@ -44,5 +44,17 @@ test("managed mode rejects an existing listener without inspecting or terminatin
 test("managed executable selection binds the host architecture while external mode stays portable", () => {
   assert.equal(nativeHostTarget("linux", "arm64").rustTarget, "aarch64-unknown-linux-gnu");
   assert.equal(nativeHostTarget("linux", "x64").rustTarget, "x86_64-unknown-linux-gnu");
-  assert.throws(() => nativeHostTarget("darwin", "arm64"), /external mode/);
+  assert.equal(nativeHostTarget("darwin", "arm64").rustTarget, "aarch64-apple-darwin");
+  assert.equal(nativeHostTarget("win32", "arm64").rustTarget, "aarch64-pc-windows-msvc");
+  assert.equal(nativeHostTarget("win32", "x64").executable, "wx.exe");
+  assert.throws(() => nativeHostTarget("freebsd", "arm64"), /external mode/);
+});
+
+test("native executable validation recognizes ELF, Mach-O and bounded PE headers", () => {
+  assert.ok(nativeExecutableFormat(Buffer.from([0x7f, 0x45, 0x4c, 0x46]), "linux"));
+  assert.ok(nativeExecutableFormat(Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), "darwin"));
+  const pe = Buffer.alloc(128); pe.write("MZ"); pe.writeUInt32LE(64, 60); pe.write("PE\0\0", 64);
+  assert.ok(nativeExecutableFormat(pe, "win32"));
+  pe.writeUInt32LE(0xffffffff, 60); assert.equal(nativeExecutableFormat(pe, "win32"), false);
+  assert.equal(nativeExecutableFormat(Buffer.from("#!/bin/sh"), "darwin"), false);
 });

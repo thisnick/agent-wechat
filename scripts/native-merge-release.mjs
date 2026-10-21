@@ -3,7 +3,7 @@
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { manifestName, supportedTargets, validateManifest, verifyBytes } from '../packages/cli/scripts/native-runtime.mjs';
+import { manifestName, targetKey, supportedTargets, validateManifest, verifyBytes } from '../packages/cli/scripts/native-runtime.mjs';
 
 export async function mergeNativeRelease(output, directories) {
   if (directories.length !== supportedTargets.length) throw new Error('Require one artifact directory per supported target');
@@ -15,7 +15,7 @@ export async function mergeNativeRelease(output, directories) {
     const manifest = JSON.parse(await readFile(join(directory, names[0]), 'utf8'));
     if (manifest.sourceTreeDirty === true) throw new Error('Dirty source artifacts cannot be merged for publication');
     if (manifest.assets?.length !== 1) throw new Error('Require one independently tested architecture per fragment');
-    const target = supportedTargets.find(item => item.arch === manifest.assets[0].arch);
+    const target = supportedTargets.find(item => targetKey(item) === targetKey(manifest.assets[0]));
     if (!target) throw new Error('Unsupported architecture');
     const asset = validateManifest(manifest, manifest.version, { target });
     if (!merged) merged = { ...manifest, assets: [] };
@@ -29,7 +29,7 @@ export async function mergeNativeRelease(output, directories) {
     files.push({ source: join(directory, asset.name), name: asset.name, notices });
     merged.assets.push(asset);
   }
-  merged.assets.sort((a, b) => a.arch.localeCompare(b.arch));
+  merged.assets.sort((a, b) => targetKey(a).localeCompare(targetKey(b)));
   validateManifest(merged, merged.version, { requireAllTargets: true });
   await mkdir(output, { recursive: true });
   if ((await readdir(output)).length) throw new Error('Merged artifact directory must be empty');
@@ -40,6 +40,6 @@ export async function mergeNativeRelease(output, directories) {
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const [output, ...directories] = process.argv.slice(2).map(value => resolve(value));
-  if (!output) throw new Error('Usage: native-merge-release.mjs OUTPUT X64_DIRECTORY ARM64_DIRECTORY');
+  if (!output) throw new Error('Usage: native-merge-release.mjs OUTPUT TARGET_DIRECTORY...');
   await mergeNativeRelease(output, directories);
 }

@@ -1,6 +1,6 @@
 # @agent-wechat/cli
 
-`wx` is the native Rust client and foreground daemon. The npm package installs a matching release executable; it does not implement the native protocol in JavaScript. The supported distribution targets are Linux x64 and ARM64 with glibc 2.36+. macOS, Windows and musl do not have a native release. Clients on other systems can use the HTTP API of a supported Linux daemon. `wx --json version` and `/v1/status` expose the runtime and account capabilities; unsupported official schemas fail explicitly.
+`wx` is the native Rust client and foreground daemon. The npm package installs a matching release executable; it does not implement the native protocol in JavaScript. Linux x64/ARM64 with glibc 2.36+ is validated. The release matrix also builds macOS x64/ARM64 and native Windows x64/ARM64 candidates; native-machine account acceptance is pending. musl remains unsupported. Official-app profile takeover is Linux-only. Clients on other systems can use the HTTP API of a supported Linux daemon. `wx --json version` and `/v1/status` expose the runtime and account capabilities; unsupported official schemas fail explicitly.
 
 ## Installation
 
@@ -88,3 +88,5 @@ Deployment examples and the deliberate release preparation sequence are in [depl
 `native-install.mjs` runs during npm installation, or through `wx-native-install` for offline/disabled-script installs. It selects the host architecture, checks the npm-bundled hash and verifies executable identity before atomic installation. `native-launcher.mjs` only runs an already installed executable.
 
 `native-check-package.mjs` is the prepack/prepublish gate. It checks version/source/target/checksum metadata; before publication it additionally requires both architecture assets to exist and match the package's manifest. A local pack smoke can use one architecture fragment; publication requires the complete matrix. These helpers belong to the existing CLI package, not additional npm packages.
+
+Candidate platform validation and remaining profile boundaries are tracked in [the acceptance checklist](../../dev-notes/native-platform-acceptance.md). Windows executables are named `wx.exe`; the npm launcher chooses the OS/CPU-specific asset. A native ARM64 Node installation selects the native Windows ARM64 executable.

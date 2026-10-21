@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, lstat, readFile, realpath } from "node:fs/promises";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, toNamespacedPath } from "node:path";
 import { createConnection } from "node:net";
 import { NativeWeChatClient, validateNativeBaseUrl } from "@agent-wechat/shared";
 import type { WeChatNativeConfig } from "./types.js";
@@ -26,12 +26,23 @@ export function requireNativeIdentity(value: any): void {
 }
 /** Child startup receives credentials only through its private stdin pipe. */
 export function nativeChildEnvironment(token: string, environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return Object.fromEntries(["PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"]
+  return Object.fromEntries(["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SystemRoot", "WINDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"]
     .filter(name => environment[name] !== undefined && environment[name] !== token).map(name => [name, environment[name]]));
 }
-export function nativeHostTarget(platform = process.platform, arch = process.arch): { arch: string; rustTarget: string } {
-  if (platform !== "linux" || !["x64", "arm64"].includes(arch)) throw new Error("native_binary_incompatible: managed hosting requires Linux x64 or ARM64; use external mode for remote daemons");
-  return { arch, rustTarget: arch === "arm64" ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu" };
+export function nativeHostTarget(platform = process.platform, arch = process.arch): { platform: string; arch: string; rustTarget: string; key: string; executable: string } {
+  const cpu = arch === "arm64" ? "aarch64" : "x86_64";
+  const suffix = ({ linux: "unknown-linux-gnu", darwin: "apple-darwin", win32: "pc-windows-msvc" } as Partial<Record<string, string>>)[platform];
+  if (!suffix || !["x64", "arm64"].includes(arch)) throw new Error("native_binary_incompatible: unsupported host platform; use external mode for remote daemons");
+  return { platform, arch, rustTarget: `${cpu}-${suffix}`, key: `${platform}-${arch}${platform === "linux" ? "-gnu" : ""}`, executable: platform === "win32" ? "wx.exe" : "wx" };
+}
+export function nativeExecutableFormat(bytes: Buffer, platform = process.platform): boolean {
+  if (platform === "linux") return bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  if (platform === "darwin") return bytes.subarray(0, 4).equals(Buffer.from([0xcf, 0xfa, 0xed, 0xfe]));
+  if (platform === "win32" && bytes.length >= 64 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
+    const offset = bytes.readUInt32LE(60);
+    return offset >= 64 && offset <= bytes.length - 4 && bytes.subarray(offset, offset + 4).equals(Buffer.from([0x50, 0x45, 0, 0]));
+  }
+  return false;
 }
 export async function resolveNativeExecutable(explicit?: string, path = process.env.PATH ?? "", environment = nativeChildEnvironment("")): Promise<string> {
   const target = nativeHostTarget();
@@ -39,29 +50,32 @@ export async function resolveNativeExecutable(explicit?: string, path = process.
   if (candidate && !isAbsolute(candidate)) throw new Error("native.executable must be absolute");
   if (!candidate) {
     for (const directory of path.split(delimiter).filter(isAbsolute)) {
-      try { await access(join(directory, "wx"), constants.X_OK); candidate = join(directory, "wx"); break; } catch {}
+      try { await access(join(directory, target.executable), constants.X_OK); candidate = join(directory, target.executable); break; } catch {}
+      if (process.platform === "win32") {
+        const payload = join(directory, "node_modules", "@agent-wechat", "cli", "scripts", "native-launcher.mjs");
+        try { await access(payload); candidate = payload; break; } catch {}
+      }
     }
   }
   if (!candidate) throw new Error("native_binary_missing: install native wx separately or configure its absolute path");
   candidate = await realpath(candidate);
-  // Tested adapter for our npm launcher: execute the installed ELF directly so
+  // Tested adapter for our npm launcher: execute the installed executable directly so
   // authenticated daemon pid can be bound to the child this service owns.
-  if (candidate.endsWith("/scripts/native-launcher.mjs")) {
+  if (candidate.replaceAll("\\", "/").endsWith("/scripts/native-launcher.mjs")) {
     const root = dirname(dirname(candidate));
     const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
     if (pkg.name !== "@agent-wechat/cli" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version)) throw new Error("Unsupported native CLI launcher");
     const manifest = JSON.parse(await readFile(join(root, "native-release.json"), "utf8"));
-    const asset = manifest.assets?.find((value: any) => value.rustTarget === target.rustTarget && value.platform === "linux" && value.arch === target.arch && value.libc === "gnu");
+    const asset = manifest.assets?.find((value: any) => value.rustTarget === target.rustTarget && value.platform === target.platform && value.arch === target.arch && (target.platform !== "linux" || value.libc === "gnu"));
     if (manifest.version !== pkg.version || !asset || !/^[a-f0-9]{64}$/.test(asset.sha256)) throw new Error("Native CLI manifest is incompatible");
-    candidate = await realpath(join(root, "native", pkg.version, `linux-${target.arch}-gnu`, "wx"));
+    candidate = await realpath(join(root, "native", pkg.version, target.key, target.executable));
     const bytes = await readFile(candidate);
     if (bytes.length !== asset.bytes || createHash("sha256").update(bytes).digest("hex") !== asset.sha256) throw new Error("Installed native executable checksum mismatch");
   }
   const stat = await lstat(candidate);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Native executable must be a regular file");
   await access(candidate, constants.X_OK);
-  const magic = (await readFile(candidate)).subarray(0, 4);
-  if (!magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) throw new Error("native_binary_required: configure the actual native ELF executable, not an unverified process wrapper");
+  if (!nativeExecutableFormat(await readFile(candidate))) throw new Error("native_binary_required: configure the actual native executable for this OS");
   const { stdout } = await exec(candidate, ["--json", "version"], { env: environment, timeout: 5000, maxBuffer: 65536 });
   const version = JSON.parse(stdout);
   requireNativeIdentity(version);
@@ -77,12 +91,13 @@ async function portOccupied(url: URL): Promise<boolean> {
     socket.once("timeout", () => { socket.destroy(); reject(new Error("Managed listener ownership check timed out")); });
   });
 }
-async function stopOwnedChild(child: ChildProcess): Promise<void> {
+async function stopOwnedChild(child: ChildProcess, graceful?: () => Promise<void>): Promise<void> {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>(resolve => {
     const kill = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 5000);
     child.once("exit", () => { clearTimeout(kill); resolve(); });
-    child.kill("SIGTERM");
+    if (graceful) void graceful().catch(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); });
+    else child.kill("SIGTERM");
   });
 }
 export async function startNativeHost(config: WeChatNativeConfig): Promise<NativeHost> {
@@ -117,11 +132,17 @@ export async function startNativeHost(config: WeChatNativeConfig): Promise<Nativ
       if (exited) throw new Error("Native owned child exited before readiness");
       try {
         const status = await client.status();
-        const dataDir = await realpath(config.dataDir);
+        const canonical = await realpath(config.dataDir);
+        const dataDir = process.platform === "win32" ? toNamespacedPath(canonical) : canonical;
         if (exited || status.version.backend !== "native" || status.version.apiVersion !== 1 || status.pid !== child.pid
           || status.dataDir !== dataDir || typeof status.serverId !== "string" || typeof status.ownershipGeneration !== "string") throw new Error("native_owner_conflict: readiness identity does not match the owned process/store");
         requireNativeIdentity(status.version);
-        return host(new NativeWeChatClient({ baseUrl: url.href, token }), token, () => stopOwnedChild(child));
+        return host(new NativeWeChatClient({ baseUrl: url.href, token }), token, () => stopOwnedChild(child, async () => {
+          const response = await fetch(new URL("v1/daemon/shutdown", url), { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ pid: status.pid, serverId: status.serverId, ownershipGeneration: status.ownershipGeneration }), redirect: "error", signal: AbortSignal.timeout(3000) });
+          if (!response.ok) throw new Error("Owned daemon refused graceful shutdown");
+          await response.body?.cancel();
+        }));
       } catch (error) {
         if (String(error).includes("native_owner_conflict")) throw error;
         await new Promise(resolve => setTimeout(resolve, 100));

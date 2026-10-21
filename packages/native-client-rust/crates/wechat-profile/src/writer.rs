@@ -56,7 +56,7 @@ pub(crate) fn open_write(
         return Err(ProfileError::UnsupportedFile);
     }
     let m = fs::symlink_metadata(&path)?;
-    if !m.is_file() || m.file_type().is_symlink() {
+    if !m.is_file() || wechat_platform::is_link(&m) {
         return Err(ProfileError::UnsupportedFile);
     }
     let mut page = [0u8; 4096];
@@ -235,7 +235,7 @@ pub(crate) fn find_database(location: &ProfileLocation, basename: &str) -> Resul
         for e in fs::read_dir(here)? {
             let e = e?;
             let m = fs::symlink_metadata(e.path())?;
-            if m.file_type().is_symlink() {
+            if wechat_platform::is_link(&m) {
                 return Err(ProfileError::UnsupportedFile);
             }
             if m.is_dir() {
@@ -279,7 +279,7 @@ pub(crate) fn require_single_message_shard(location: &ProfileLocation) -> Result
                 return Err(ProfileError::ResourceLimit);
             }
             let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.file_type().is_symlink() {
+            if wechat_platform::is_link(&metadata) {
                 return Err(ProfileError::UnsupportedFile);
             }
             if metadata.is_dir() {

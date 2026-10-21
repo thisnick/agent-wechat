@@ -100,10 +100,7 @@ pub async fn watch(
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let metadata = std::fs::symlink_metadata(parent)?;
-        if !metadata.is_dir()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
+        if !metadata.is_dir() || !wechat_platform::private_path(parent)? {
             bail!("cursor file requires a private owned directory");
         }
     }

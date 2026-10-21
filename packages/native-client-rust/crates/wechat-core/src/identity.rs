@@ -1,6 +1,6 @@
 //! An existing operating profile determines the permitted native account.
 use super::*;
-use std::{io::Read, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{io::Read, path::Path};
 
 // Keep the typed cause: only a failed key proof is a password mismatch. A
 // snapshot, filesystem, engine or schema error must not be reported as one.
@@ -62,9 +62,9 @@ impl Core {
             if !p.starts_with(&root) || std::fs::canonicalize(p)? != p {
                 bail!("invalid profile identity path");
             }
-            let f = std::fs::OpenOptions::new()
+            let f = wechat_platform::OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
+                .custom_flags(wechat_platform::NOFOLLOW)
                 .open(p)?;
             if !f.metadata()?.is_file() || f.metadata()?.len() > max {
                 bail!("invalid profile identity file");

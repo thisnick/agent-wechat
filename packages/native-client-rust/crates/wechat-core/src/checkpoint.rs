@@ -21,13 +21,13 @@ impl Drop for CursorPublication {
     }
 }
 fn read_cursor_file(path: &std::path::Path, root: &std::path::Path, max: u64) -> Result<Vec<u8>> {
-    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    use std::io::Read;
     if std::fs::canonicalize(path)? != path || !path.starts_with(root) {
         bail!("invalid account cursor path");
     }
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = wechat_platform::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(wechat_platform::NOFOLLOW)
         .open(path)?;
     let before = file.metadata()?;
     if !before.is_file() || before.len() > max {

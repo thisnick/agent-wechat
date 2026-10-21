@@ -136,8 +136,11 @@ jobs:
           path: artifacts/native/*
           if-no-files-found: error
 
+  portable:
+    uses: ./.github/workflows/native-portable.yml
+
   matrix-manifest:
-    needs: [package, openclaw-smoke]
+    needs: [package, openclaw-smoke, portable]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -146,7 +149,12 @@ jobs:
           node-version: 24
       - uses: actions/download-artifact@v4
         with:
-          pattern: native-linux-*-gnu-validation
+          pattern: native-*validation*
           path: artifacts/fragments
       - name: Verify complete release matrix without publication
-        run: node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-linux-x64-gnu-validation artifacts/fragments/native-linux-arm64-gnu-validation
+        run: node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-linux-x64-gnu-validation artifacts/fragments/native-linux-arm64-gnu-validation artifacts/fragments/native-validation-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-release-candidate
+          path: artifacts/native/*
+          if-no-files-found: error

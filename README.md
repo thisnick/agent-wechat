@@ -12,7 +12,7 @@ The native `wx` executable speaks the protocol directly and uses official-format
 
 ## Native client
 
-The distribution targets are Linux x64 and ARM64 with glibc 2.36 or newer. Build from source with Rust 1.93.1, or install a matching native release once published:
+The release target matrix includes Linux x64/ARM64 with glibc 2.36+, macOS x64/ARM64 and Windows x64/ARM64. macOS/Windows are release candidates pending native-machine acceptance; official-app profile takeover remains Linux-only. Build from source with Rust 1.93.1, or install a matching native release once published:
 
 ```bash
 npm install -g @agent-wechat/cli@VERSION
@@ -39,13 +39,13 @@ wx messages list filehelper
 
 The initial scope is taking over an existing official profile and continuing supported database and media writes in place. Native history, text/media sends, contact/group lookup, rosters, avatars and downloads use that profile. Unsupported sync controls remain staged. Fresh-profile creation, copy export and returning a profile to the official app are experimental extras outside this scope. FTS/search-index maintenance is not supported. See the [capability checklist](packages/native-client-rust/FEATURES.md) for the tested scope.
 
-Server configuration defaults to `~/.config/agent-wechat/server/config.toml`; daemon data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. The operating official profile stays at its selected path; daemon state stays in sidecars.
+On Windows, configuration defaults under `%APPDATA%/agent-wechat` and durable data under `%LOCALAPPDATA%/agent-wechat`; `USERPROFILE` supplies the home fallback. Explicit and XDG overrides take precedence. On Unix, server configuration defaults to `~/.config/agent-wechat/server/config.toml`; daemon data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. The operating official profile stays at its selected path; daemon state stays in sidecars.
 
 See the [native guide](packages/native-client-rust/README.md) for configuration, profile ownership, recovery, API commands and current limits. [Deployment templates](deploy/native/README.md) include a user service and an official-binary-free image. Building these assets does not deploy them.
 
 ## Distribution and migration
 
-The native executable runs directly on Linux x64/ARM64 with glibc 2.36+, or inside the native-only container. The npm CLI installs the matching executable; OpenClaw is a separate npm plugin. The Rust crates and TypeScript SDK are internal source libraries, not new registry publications. See the [distribution matrix and release sequence](deploy/native/README.md).
+Linux x64/ARM64 is validated with glibc 2.36+. macOS and Windows x64/ARM64 have candidate build/install/lifecycle workflows; see the [platform acceptance checklist](dev-notes/native-platform-acceptance.md). The native-only container remains Linux. The npm CLI installs the matching executable; OpenClaw is a separate npm plugin. The Rust crates and TypeScript SDK are internal source libraries, not new registry publications. See the [distribution matrix and release sequence](deploy/native/README.md).
 
 This major release retires the old UI server/image, `wx-legacy` and Wechaty puppet/gateway integrations. Existing installations and volumes are not removed. Stop the old owner, preserve a backup and select its complete official profile with the native login command. Old `/api` clients and inline-token OpenClaw configurations require migration to native `/v1`; see the [migration guide](docs/src/content/docs/getting-started/migration.mdx).
 

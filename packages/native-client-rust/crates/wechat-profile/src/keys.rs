@@ -156,31 +156,22 @@ impl KeyFile {
                 e.into()
             }
         })?;
-        if !m.is_file() || m.file_type().is_symlink() || m.len() > 4 * 1024 * 1024 {
+        if !m.is_file() || wechat_platform::is_link(&m) || m.len() > 4 * 1024 * 1024 {
             return Err(ProfileError::InsecureKeysFile);
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if m.mode() & 0o077 != 0 || m.uid() != unsafe { libc::geteuid() } {
-                return Err(ProfileError::InsecureKeysFile);
-            }
+        if !wechat_platform::private_path(path)? {
+            return Err(ProfileError::InsecureKeysFile);
         }
-        let mut options = fs::OpenOptions::new();
+        let mut options = wechat_platform::OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let opened = options.open(path)?;
         let m = opened.metadata()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if !m.is_file() || m.mode() & 0o077 != 0 || m.uid() != unsafe { libc::geteuid() } {
-                return Err(ProfileError::InsecureKeysFile);
-            }
+        if !m.is_file() || !wechat_platform::private_file(&opened)? {
+            return Err(ProfileError::InsecureKeysFile);
         }
         let mut input = Zeroizing::new(Vec::new());
         use std::io::Read;
@@ -301,11 +292,12 @@ impl KeyFile {
         output.push(b'\n');
         let mut f = tempfile::NamedTempFile::new_in(parent)?;
         use std::io::Write;
+        wechat_platform::protect(f.as_file())?;
         f.write_all(&output)?;
         f.as_file().sync_all()?;
         f.persist_noclobber(path)
             .map_err(|e| ProfileError::Io(e.error))?;
-        fs::File::open(parent)?.sync_all()?;
+        wechat_platform::sync_dir(parent)?;
         Ok(())
     }
 }
@@ -367,11 +359,10 @@ pub fn verify_profile_password(
             .databases
             .get(&relative)
             .ok_or_else(|| ProfileError::KeyUnavailable(relative.clone()))?;
-        let mut options = fs::OpenOptions::new();
+        let mut options = wechat_platform::OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let mut file = options.open(&path)?;

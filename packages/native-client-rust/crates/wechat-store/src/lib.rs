@@ -17,9 +17,8 @@ pub use pagination::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -67,25 +66,17 @@ impl Drop for Lease {
 }
 
 pub fn private_dir(path: &Path) -> Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)?;
-    let m = fs::symlink_metadata(path)?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.permissions().mode() & 0o077 != 0 {
-        bail!("data directory must be an owner-only real directory");
-    }
-    Ok(())
+    Ok(wechat_platform::private_dir(path)?)
 }
 
 fn lock(path: &Path) -> Result<Lease> {
-    let f = OpenOptions::new()
+    let f = wechat_platform::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(wechat_platform::NOFOLLOW)
         .open(path)?;
     f.try_lock_exclusive()
         .context("storage is already owned by another operation")?;
@@ -99,7 +90,7 @@ pub fn profile_lease(profile: &Path) -> Result<Lease> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("agent-wechat-{}", unsafe { libc::geteuid() }))
+            std::env::temp_dir().join(format!("agent-wechat-{}", wechat_platform::user_key()))
         });
     let locks = runtime.join("agent-wechat-profile-locks");
     private_dir(&locks)?;
@@ -122,9 +113,8 @@ pub fn profile_lease(profile: &Path) -> Result<Lease> {
         }
     }
     let mut held = Lease(vec![]);
-    use std::os::unix::ffi::OsStrExt;
     for root in roots {
-        let hash = format!("{:x}", Sha256::digest(root.as_os_str().as_bytes()));
+        let hash = format!("{:x}", Sha256::digest(wechat_platform::path_bytes(&root)));
         let mut lease = lock(&locks.join(hash))?;
         held.0.append(&mut lease.0);
     }
@@ -163,7 +153,7 @@ impl Store {
         let lease = lock(&root.join("owner.lock"))?;
         let db_path = root.join("registry.sqlite");
         if !db_path.exists() {
-            OpenOptions::new()
+            wechat_platform::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
@@ -171,10 +161,7 @@ impl Store {
                 .sync_all()?;
         }
         let m = fs::symlink_metadata(&db_path)?;
-        if !m.is_file()
-            || m.uid() != unsafe { libc::geteuid() }
-            || m.permissions().mode() & 0o077 != 0
-        {
+        if !m.is_file() || !wechat_platform::private_path(&db_path)? {
             bail!("registry must be an owner-only regular file");
         }
         let mut db = Connection::open(&db_path)?;
@@ -370,7 +357,7 @@ impl Store {
         let agent = stage.path().join("agent");
         private_dir(&agent)?;
         let control_path = agent.join("control.sqlite");
-        OpenOptions::new()
+        wechat_platform::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
@@ -384,8 +371,8 @@ impl Store {
             )?;
         }
         drop(control);
-        File::open(&control_path)?.sync_all()?;
-        File::open(&agent)?.sync_all()?;
+        wechat_platform::sync_file(&control_path)?;
+        wechat_platform::sync_dir(&agent)?;
         copy::publish(stage.path(), &target)?;
         // A crash before this commit leaves an unregistered directory. Refuse reuse;
         // do not erase it or infer authenticated account state during recovery.

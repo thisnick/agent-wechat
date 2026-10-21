@@ -109,7 +109,7 @@ pub(crate) fn walk(root: &Path, out: &mut Vec<PathBuf>, depth: usize, max: usize
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let m = fs::symlink_metadata(e.path())?;
-        if m.file_type().is_symlink() || (!m.is_file() && !m.is_dir()) {
+        if wechat_platform::is_link(&m) || (!m.is_file() && !m.is_dir()) {
             return Err(ProfileError::UnsupportedFile);
         }
         if m.is_dir() {
@@ -130,17 +130,16 @@ fn hash_copy(
     max: u64,
 ) -> Result<(u64, String)> {
     let m = fs::symlink_metadata(source)?;
-    if !m.is_file() || m.file_type().is_symlink() {
+    if !m.is_file() || wechat_platform::is_link(&m) {
         return Err(ProfileError::UnsupportedFile);
     }
     if m.len() > max || m.len() > *remaining {
         return Err(ProfileError::ResourceLimit);
     }
-    let mut options = fs::OpenOptions::new();
+    let mut options = wechat_platform::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let mut from = options.open(source)?;
@@ -148,11 +147,10 @@ fn hash_copy(
         return Err(ProfileError::UnsupportedFile);
     }
     let mut to = if let Some(destination) = destination {
-        let mut options = fs::OpenOptions::new();
+        let mut options = wechat_platform::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             options
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);

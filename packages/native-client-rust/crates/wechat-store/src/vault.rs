@@ -5,9 +5,7 @@ use openssl::{
     rand::rand_bytes,
     symm::{decrypt_aead, encrypt_aead, Cipher},
 };
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
-    fs::{File, OpenOptions},
     io::{Read, Write},
     path::Path,
 };
@@ -23,33 +21,29 @@ impl Vault {
             crate::private_dir(parent)?;
             let mut key = Zeroizing::new(vec![0u8; 32]);
             rand_bytes(&mut key)?;
-            match OpenOptions::new()
+            match wechat_platform::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
+                .custom_flags(wechat_platform::NOFOLLOW)
                 .open(path)
             {
                 Ok(mut f) => {
                     f.write_all(&key)?;
                     f.sync_all()?;
-                    File::open(parent)?.sync_all()?;
+                    wechat_platform::sync_dir(parent)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e).context("cannot create storage key"),
             }
         }
-        let mut file = OpenOptions::new()
+        let mut file = wechat_platform::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(wechat_platform::NOFOLLOW)
             .open(path)
             .context("storage key unavailable; existing data preserved")?;
         let meta = file.metadata()?;
-        if !meta.is_file()
-            || meta.uid() != unsafe { libc::geteuid() }
-            || meta.permissions().mode() & 0o077 != 0
-            || meta.len() != 32
-        {
+        if !meta.is_file() || !wechat_platform::private_file(&file)? || meta.len() != 32 {
             bail!("storage key must be an owner-only 32-byte file");
         }
         let mut key = Zeroizing::new(vec![0u8; 32]);

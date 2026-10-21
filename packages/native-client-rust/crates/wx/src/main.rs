@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(all(unix, test))]
+use std::os::unix::fs::MetadataExt;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -563,16 +564,12 @@ fn output(value: &impl serde::Serialize) -> Result<()> {
 }
 fn private_input(path: &Path, max: u64) -> Result<Vec<u8>> {
     use std::io::Read;
-    let f = std::fs::OpenOptions::new()
+    let f = wechat_platform::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(wechat_platform::NOFOLLOW)
         .open(path)?;
     let m = f.metadata()?;
-    if !m.is_file()
-        || m.uid() != unsafe { libc::geteuid() }
-        || m.mode() & 0o077 != 0
-        || m.len() > max
-    {
+    if !m.is_file() || !wechat_platform::private_file(&f)? || m.len() > max {
         bail!("input must be an owner-only bounded regular file");
     }
     let mut bytes = vec![];
@@ -591,13 +588,12 @@ fn private_output(path: &Path, bytes: &[u8]) -> Result<()> {
     let temp = tempfile::Builder::new()
         .prefix(".wx-output-")
         .tempfile_in(parent)?;
-    temp.as_file()
-        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    wechat_platform::protect(temp.as_file())?;
     temp.as_file().write_all(bytes)?;
     temp.as_file().sync_all()?;
     temp.persist_noclobber(path)
         .map_err(|_| anyhow::anyhow!("output already exists or cannot be installed"))?;
-    std::fs::File::open(parent)?.sync_all()?;
+    wechat_platform::sync_dir(parent)?;
     Ok(())
 }
 #[tokio::main]
@@ -637,11 +633,22 @@ async fn main() {
     std::process::exit(outcome::exit());
 }
 async fn shutdown(core: Arc<Core>) {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("signal registration");
-    tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
+    async fn requested(core: &Core) {
+        while !core.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("signal registration");
+        tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=term.recv()=>{}, _=requested(&core)=>{} }
+    }
+    #[cfg(windows)]
+    tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{} }
     core.shutdown();
 }
+
 struct Remote {
     http: reqwest::Client,
     base: reqwest::Url,

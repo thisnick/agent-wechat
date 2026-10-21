@@ -17,9 +17,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(all(unix, test))]
+use std::os::unix::fs::PermissionsExt;
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self},
     io::{Read, Write},
     path::Path as FsPath,
     sync::Arc,
@@ -63,7 +64,10 @@ pub fn version() -> Version {
             "events",
             "scoped-tokens",
             "config",
-        ],
+        ]
+        .into_iter()
+        .filter(|capability| *capability != "official-profile-login" || cfg!(target_os = "linux"))
+        .collect(),
         native_login: true,
         official_database_writes: true,
     }
@@ -367,6 +371,24 @@ fn checked<T: serde::de::DeserializeOwned>(value: Value) -> ApiResult<Json<Value
     Ok(Json(contracts::checked::<T>(value).map_err(|_| {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_server_response")
     })?))
+}
+// Lifecycle requests require the owner token and bind to the current store generation.
+async fn shutdown_daemon(
+    State(app): State<App>,
+    Extension(claims): Extension<Claims>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    if claims.grant.is_some() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "owner_token_required"));
+    }
+    if body["pid"].as_u64() != Some(std::process::id() as u64)
+        || body["serverId"] != app.core.store.server_id
+        || body["ownershipGeneration"] != app.core.ownership_generation
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "daemon_ownership_mismatch"));
+    }
+    app.core.shutdown();
+    Ok(Json(json!({"state":"stopping","logout":false})))
 }
 async fn status(State(app): State<App>, Extension(c): Extension<Claims>) -> ApiResult<Json<Value>> {
     c.require(None, "read")?;
@@ -1011,6 +1033,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
     let routes = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/v1/status", get(status))
+        .route("/v1/daemon/shutdown", post(shutdown_daemon))
         .route("/v1/tokens", get(tokens).post(issue_token))
         .route("/v1/access-tokens", get(tokens).post(issue_token))
         .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
@@ -1071,17 +1094,13 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .layer(middleware::from_fn_with_state(app, authorize))
 }
 pub fn read_token(path: &FsPath) -> Result<String> {
-    let file = OpenOptions::new()
+    let file = wechat_platform::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(wechat_platform::NOFOLLOW)
         .open(path)
         .context("cannot open API token file")?;
     let meta = file.metadata().context("cannot read API token metadata")?;
-    if !meta.is_file()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.permissions().mode() & 0o077 != 0
-        || meta.len() > 1024
-    {
+    if !meta.is_file() || !wechat_platform::private_file(&file)? || meta.len() > 1024 {
         bail!("API token must be an owner-only regular file of at most 1024 bytes");
     }
     let mut token = String::new();
@@ -1110,7 +1129,7 @@ pub fn provision_token(path: &FsPath, allow_create: bool) -> Result<String> {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    match OpenOptions::new()
+    match wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
@@ -1119,7 +1138,7 @@ pub fn provision_token(path: &FsPath, allow_create: bool) -> Result<String> {
         Ok(mut file) => {
             writeln!(file, "{token}")?;
             file.sync_all()?;
-            std::fs::File::open(parent)?.sync_all()?;
+            wechat_platform::sync_dir(parent)?;
             Ok(token)
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_token(path),
@@ -1161,6 +1180,61 @@ mod tests {
             assert_eq!(status, expected);
             assert_eq!(actual, code);
         }
+    }
+    #[tokio::test]
+    async fn shutdown_requires_owner_and_matching_process_store_generation() {
+        let (_temp, core, app) = setup();
+        let body = json!({"pid":std::process::id(),"serverId":core.store.server_id,"ownershipGeneration":core.ownership_generation});
+        let scoped = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        core.store
+            .issue_token(
+                "scoped-admin",
+                &format!("{:x}", Sha256::digest(scoped.as_bytes())),
+                &["*".into()],
+                &["admin".into()],
+                None,
+            )
+            .unwrap();
+        for (token, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some(scoped), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "POST",
+                    "/v1/daemon/shutdown",
+                    token,
+                    Some(body.clone())
+                )
+                .await
+                .0,
+                expected
+            );
+            assert!(!core.stopping.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        let mut wrong = body.clone();
+        wrong["ownershipGeneration"] = json!("stale");
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/v1/daemon/shutdown",
+                Some(OWNER),
+                Some(wrong)
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert!(!core.stopping.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            call(app, "POST", "/v1/daemon/shutdown", Some(OWNER), Some(body))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert!(core.stopping.load(std::sync::atomic::Ordering::SeqCst));
     }
     const OWNER: &str = "0123456789abcdef0123456789abcdef";
     #[test]

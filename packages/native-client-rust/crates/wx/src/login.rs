@@ -146,10 +146,10 @@ async fn present(
             .join("qr");
         std::fs::create_dir_all(&directory)?;
         let metadata = std::fs::symlink_metadata(&directory)?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        if !metadata.is_dir() || !wechat_platform::owned_path(&directory)? {
             bail!("QR output directory must be owned by this user");
         }
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        wechat_platform::protect_path(&directory, true)?;
         directory.join(format!(
             "{:x}-{generation}.png",
             Sha256::digest(id.as_bytes())
@@ -239,10 +239,10 @@ pub async fn login(r: &Remote, settings: &settings::File, options: Options) -> R
         .join("login-receipts");
     std::fs::create_dir_all(&directory)?;
     let meta = std::fs::symlink_metadata(&directory)?;
-    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+    if !meta.is_dir() || !wechat_platform::owned_path(&directory)? {
         bail!("login receipt directory must be owned by this user");
     }
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+    wechat_platform::protect_path(&directory, true)?;
     let receipt_path = directory.join(format!(
         "{:x}.json",
         Sha256::digest(format!("{}\0{}\0{key}", r.base, r.account()?).as_bytes())

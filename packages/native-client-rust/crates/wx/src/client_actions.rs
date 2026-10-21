@@ -165,13 +165,11 @@ pub async fn wait_resource(r: &Remote, mut value: Value, kind: &str, wait: u64) 
 pub(super) fn write_replace(path: &Path, value: &Value) -> Result<()> {
     let parent = path.parent().context("invalid receipt path")?;
     let mut output = tempfile::NamedTempFile::new_in(parent)?;
-    output
-        .as_file()
-        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    wechat_platform::protect(output.as_file())?;
     output.write_all(&serde_json::to_vec(value)?)?;
     output.as_file().sync_all()?;
     output.persist(path)?;
-    std::fs::File::open(parent)?.sync_all()?;
+    wechat_platform::sync_dir(parent)?;
     Ok(())
 }
 fn receipt(
@@ -192,10 +190,10 @@ fn receipt(
         .join("receipts");
     std::fs::create_dir_all(&directory)?;
     let metadata = std::fs::symlink_metadata(&directory)?;
-    if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+    if !metadata.is_dir() || !wechat_platform::owned_path(&directory)? {
         bail!("receipt directory must be owned by this user");
     }
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+    wechat_platform::protect_path(&directory, true)?;
     let path = directory.join(format!(
         "{:x}.json",
         Sha256::digest(format!("{}\0{}\0{key}", r.base, r.account()?).as_bytes())
@@ -253,9 +251,9 @@ pub async fn send(
         ("text", text.into_bytes(), None)
     } else {
         let (kind, path) = &inputs[0];
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = wechat_platform::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(wechat_platform::NOFOLLOW)
             .open(path)?;
         let metadata = file.metadata()?;
         if !metadata.is_file()

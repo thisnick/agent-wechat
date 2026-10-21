@@ -2315,13 +2315,12 @@ fn run_ffmpeg(
 ) -> Result<Vec<u8>> {
     use std::{
         io::Write,
-        os::unix::fs::OpenOptionsExt,
         process::{Command, Stdio},
     };
     let dir = tempfile::tempdir()?;
     let input_path = dir.path().join("input.bin");
     let output_path = dir.path().join(output);
-    let mut f = std::fs::OpenOptions::new()
+    let mut f = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
@@ -2466,20 +2465,19 @@ fn audio_pcm(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<
 fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Result<u32> {
     use std::{
         io::Write,
-        os::unix::fs::OpenOptionsExt,
         process::{Command, Stdio},
     };
     let dir = tempfile::tempdir()?;
     let input_path = dir.path().join("input.bin");
     let result_path = dir.path().join("probe.json");
-    let mut source = std::fs::OpenOptions::new()
+    let mut source = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&input_path)?;
     source.write_all(input)?;
     drop(source);
-    let result = std::fs::OpenOptions::new()
+    let result = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)

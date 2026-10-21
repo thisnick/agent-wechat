@@ -199,7 +199,7 @@ impl Store {
         self.account(id)?;
         let path = fs::canonicalize(path)?;
         let m = fs::symlink_metadata(&path)?;
-        if !m.is_file() || m.permissions().mode() & 0o077 != 0 {
+        if !m.is_file() || !wechat_platform::private_path(&path)? {
             bail!("keys file must be an owner-only regular file");
         }
         let db = self
@@ -222,7 +222,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
         let path = self.account_dir(id)?.join("agent/control.sqlite");
         let m = fs::symlink_metadata(&path)?;
-        if !m.is_file() || m.permissions().mode() & 0o077 != 0 {
+        if !m.is_file() || !wechat_platform::private_path(&path)? {
             bail!("invalid account sidecar permissions");
         }
         let mut db = Connection::open(path)?;

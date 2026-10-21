@@ -127,14 +127,14 @@ pub fn initialize_profile(
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
         }
-        fs::File::open(&file)?.sync_all()?;
+        wechat_platform::sync_file(&file)?;
         databases.push((*relative).into());
     }
     // Refuse a destination created while staging. persist_noclobber for directory
     // publication is provided by renameat2(RENAME_NOREPLACE) on Linux.
     let destination = parent.join(name);
     publish_staging(staging, &destination)?;
-    fs::File::open(&parent)?.sync_all()?;
+    wechat_platform::sync_dir(&parent)?;
     let location = ProfileLocation::new(&destination)?;
     Ok((
         location,
@@ -169,13 +169,13 @@ fn sync_created_directories(path: &Path, depth: usize) -> Result<()> {
     for e in fs::read_dir(path)? {
         let e = e?;
         let m = fs::symlink_metadata(e.path())?;
-        if m.file_type().is_symlink() {
+        if wechat_platform::is_link(&m) {
             return Err(ProfileError::UnsupportedFile);
         } else if m.is_dir() {
             sync_created_directories(&e.path(), depth + 1)?;
         }
     }
-    fs::File::open(path)?.sync_all()?;
+    wechat_platform::sync_dir(path)?;
     Ok(())
 }
 fn publish_directory(source: &Path, target: &Path) -> Result<()> {
@@ -185,7 +185,8 @@ fn publish_directory(source: &Path, target: &Path) -> Result<()> {
         let exists = target.exists();
         if exists {
             let m = fs::symlink_metadata(target)?;
-            if !m.is_dir() || m.file_type().is_symlink() || fs::read_dir(target)?.next().is_some() {
+            if !m.is_dir() || wechat_platform::is_link(&m) || fs::read_dir(target)?.next().is_some()
+            {
                 return Err(ProfileError::InvalidProfile);
             }
         }
@@ -231,8 +232,8 @@ fn publish_directory(source: &Path, target: &Path) -> Result<()> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (source, target);
-        Err(ProfileError::WritesUnsupported)
+        wechat_platform::publish_directory(source, target)?;
+        Ok(())
     }
 }
 /// Observed directory naming in the inspected Linux profile. The suffix is the
@@ -350,11 +351,10 @@ fn initialize_official_home_impl(
     let populated = populated?;
     fn put(path: &Path, bytes: &[u8]) -> Result<()> {
         use std::io::Write;
-        let mut o = fs::OpenOptions::new();
+        let mut o = wechat_platform::OpenOptions::new();
         o.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             o.mode(0o600);
         }
         let mut f = o.open(path)?;
@@ -392,7 +392,7 @@ fn initialize_official_home_impl(
     }
     let destination = parent.join(name);
     publish_staging(stage, &destination)?;
-    fs::File::open(&parent)?.sync_all()?;
+    wechat_platform::sync_dir(&parent)?;
     let location = ProfileLocation::new(destination.join("xwechat_files").join(&account))?;
     Ok((
         location,
