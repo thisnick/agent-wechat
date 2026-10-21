@@ -109,7 +109,12 @@ async fn transfer(
             "message_identity_mismatch",
         ));
     }
-    let job = app.core.start_media_transfer(&a, input)?;
+    let guard = app.core.lock_account(&a).await?;
+    let job = work(move || {
+        let _guard = guard;
+        app.core.start_media_transfer(&a, input)
+    })
+    .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::to_value(job).map_err(anyhow::Error::from)?),
@@ -173,16 +178,30 @@ async fn content(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
+    Query(query): Query<ContentQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "media")?;
-    let media = work(move || app.core.media_content(&a, &id)).await?;
+    let media = work(move || match query.representation {
+        ContentRepresentation::Original => app.core.media_content(&a, &id),
+        ContentRepresentation::Preview => app.core.media_preview_content(&a, &id),
+    })
+    .await?;
+    content_response(media, &headers)
+}
+fn content_response(
+    media: wechat_core::media_types::MediaContent,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
     let total = media.bytes.len();
     let etag = format!("\"{}\"", media.sha256);
     let mut response = Response::builder()
         .header("cache-control", "private, no-store")
         .header("accept-ranges", "bytes")
         .header("etag", &etag);
+    if let Some(source_sha256) = media.source_sha256 {
+        response = response.header("x-source-sha256", source_sha256);
+    }
     if headers
         .get("if-none-match")
         .is_some_and(|v| v.as_bytes() == etag.as_bytes())
@@ -222,6 +241,19 @@ async fn content(
         .status(status)
         .body(axum::body::Body::from(body))
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_media_response"))
+}
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContentRepresentation {
+    #[default]
+    Original,
+    Preview,
+}
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ContentQuery {
+    #[serde(default)]
+    representation: ContentRepresentation,
 }
 fn byte_range(value: &str, total: usize) -> Option<(usize, usize)> {
     let (start, end) = value.strip_prefix("bytes=")?.split_once('-')?;
@@ -282,6 +314,43 @@ pub(super) async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn preview_response_binds_source_hash_and_ranges_to_preview_bytes() {
+        let source = "a".repeat(64);
+        let preview_hash = "b".repeat(64);
+        let make = || wechat_core::media_types::MediaContent {
+            bytes: vec![1, 2, 3, 4],
+            content_type: "image/jpeg".into(),
+            sha256: preview_hash.clone(),
+            filename: Some("synthetic.still.jpg".into()),
+            source_sha256: Some(source.clone()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("range", "bytes=1-2".parse().unwrap());
+        let response = content_response(make(), &headers).unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-range"], "bytes 1-2/4");
+        assert_eq!(response.headers()["x-source-sha256"], source);
+        assert_eq!(response.headers()["etag"], format!("\"{preview_hash}\""));
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            &[2, 3]
+        );
+        headers.insert(
+            "if-none-match",
+            format!("\"{preview_hash}\"").parse().unwrap(),
+        );
+        let response = content_response(make(), &headers).unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()["x-source-sha256"], source);
+    }
     #[test]
     fn ranges_are_single_bounded_and_support_suffixes() {
         assert_eq!(byte_range("bytes=2-5", 10), Some((2, 5)));

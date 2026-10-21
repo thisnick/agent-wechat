@@ -4,7 +4,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { crc32 } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
@@ -33,11 +32,20 @@ const quoteScenarios = [
   { id:'quote-embedded-image', type:49, appMessageType:57, mention:true, body:'Embedded image comment', quote:{serverId:'9007199254740996',type:3} },
   { id:'forwarded-bundle', type:49, appMessageType:19, mention:true, body:'[Chat History] Shared discussion\nAlice: Forwarded text\nBob: [media]\n  Carol: Nested forwarded text' },
 ];
-for(const id of ['quoted-original-image','quote-embedded-image']) {
-  const source=assets.get('dm-image');
-  const text=Buffer.from(`Comment\0${id}`),chunk=Buffer.alloc(text.length+12);chunk.writeUInt32BE(text.length,0);chunk.write('tEXt',4);text.copy(chunk,8);chunk.writeUInt32BE(crc32(chunk.subarray(4,-4)),chunk.length-4);
-  const bytes=Buffer.concat([source.bytes.subarray(0,-12),chunk,source.bytes.subarray(-12)]);
-  assets.set(id,{bytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.png`,byteLength:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+{
+  const id='quoted-original-image',source=assets.get('dm-image');
+  const jpeg=await readFile(join(root,'packages/native-client-rust/crates/wechat-media/tests/fixtures/progressive.jpg'));
+  const footer=Buffer.alloc(8);footer.writeUInt32LE(0x12345678);
+  const bytes=Buffer.concat([jpeg,footer,createHash('md5').update(jpeg).digest()]);
+  assets.set(id,{bytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.jpg`,contentType:'image/jpeg',byteLength:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+}
+{
+  const id='quote-embedded-image',source=assets.get('dm-image');
+  const bytes=await readFile(join(root,'packages/native-client-rust/crates/wechat-media/tests/fixtures/static.wxgf'));
+  const previewBytes=await readFile(join(root,'packages/openclaw-extension/test/fixtures/native-wxgf-still.jpg'));
+  const sha256=createHash('sha256').update(bytes).digest('hex');
+  assets.set(id,{bytes,previewBytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.wxgf`,contentType:'image/x-wxgf',byteLength:bytes.length,sha256,animationFrames:null,
+    preview:{sourceSha256:sha256,contentType:'image/jpeg',byteLength:previewBytes.length,sha256:createHash('sha256').update(previewBytes).digest('hex'),filename:`${id}.still.jpg`,contentUrl:`/v1/accounts/a/media/asset-${id}/content?representation=preview`}}});
 }
 const quoteResolutions = {
   'quote-text':{state:'resolved',message:{id:'quoted-original-text',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'18446744073709551615',direction:'incoming',type:1,body:'Quoted original stored text',version:'v1'}},
@@ -76,7 +84,11 @@ const upstream = createServer(async (req, res) => {
     const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
     if (media) { assert.notEqual(media[1],'foreign-image','Foreign conversation must be rejected before attachment access'); return json({ items: [assets.get(media[1]).asset] }); }
     const content = /^\/v1\/accounts\/a\/media\/asset-([^/]+)\/content$/.exec(url.pathname);
-    if (content) { const value = assets.get(content[1]); res.setHeader('content-type', value.asset.contentType); res.end(value.bytes); return; }
+    if (content) {
+      const value = assets.get(content[1]);
+      if(url.searchParams.get('representation')==='preview') {assert.ok(value.previewBytes);res.setHeader('x-source-sha256',value.asset.sha256);res.setHeader('content-type',value.asset.preview.contentType);res.end(value.previewBytes);}
+      else {res.setHeader('content-type',value.asset.contentType);res.end(value.bytes);}return;
+    }
     let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 8 * 1024 * 1024); }
     if (url.pathname.endsWith('/media-transfers')) {
       if(url.pathname.includes('/history-image/')) { transfers.push(JSON.parse(raw)); assets.get('history-image').asset.state='available'; return json({id:'history-transfer',accountId:'a',kind:'download',state:'available',retryable:false}); }
@@ -149,17 +161,24 @@ try {
     const context=result.contexts.find(ctx=>ctx.MessageSid===`wechat-native:a:${scenario.id}`);
     assert.equal(!!context.MediaPath,isImage);
     if(isImage) {
-      const expected=assets.get(scenario.id==='quote-image'?'quoted-original-image':scenario.id).asset.sha256;
+      const sourceAsset=assets.get(scenario.id==='quote-image'?'quoted-original-image':scenario.id).asset;
+      const expected=sourceAsset.preview?.sha256??sourceAsset.sha256;
       const matches=images(request).filter(block=>{const encoded=/^data:([^;]+);base64,(.+)$/.exec(block.image_url.url);return encoded&&createHash('sha256').update(Buffer.from(encoded[2],'base64')).digest('hex')===expected;});
       assert.equal(matches.length,1,'Exact new quoted image must reach provider once, independently of prior history');
       const item=result.items.find(item=>item.message.id===scenario.id);
       assert.equal(item.dispatchManifest.assets[0].messageId,scenario.id);
       if(scenario.id==='quote-image')assert.equal(item.dispatchManifest.assets[0].sourceMessageId,'quoted-original-image');
+      if(scenario.id==='quote-embedded-image') {
+        assert.equal(item.dispatchManifest.assets[0].sourceSha256,sourceAsset.sha256);
+        assert.equal(item.dispatchManifest.assets[0].sourceMime,'image/x-wxgf');
+        assert.equal(item.dispatchManifest.assets[0].mime,'image/jpeg');
+        assert.ok(providerText.includes('WXGF still preview'));
+      }
     }
   }
   const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
-  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,reads:reads.length}));
+  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   for(const stream of streams)stream.destroy();await new Promise(resolve=>upstream.close(resolve));upstream.closeAllConnections();await rm(temporary,{recursive:true,force:true});

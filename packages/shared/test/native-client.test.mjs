@@ -133,6 +133,13 @@ test('cached media range reads preserve bytes/status and reject oversized bodies
   const content=await client.mediaContent('a','asset_fixture',{range:'bytes=1-2',maxBytes:2});assert.equal(content.status,206);assert.equal(content.contentRange,'bytes 1-2/3');assert.deepEqual(content.bytes,new Uint8Array([2,3]));
   await assert.rejects(client.mediaContent('a','asset_fixture',{range:'bytes=1-2',maxBytes:1}),/bound/);
 });
+test('derived media reads use an explicit representation and retain the source hash', async () => {
+  const sourceHash='a'.repeat(64);
+  const client=new NativeWeChatClient({...options,fetch:async url=>{assert.equal(new URL(url).searchParams.get('representation'),'preview');return new Response(new Uint8Array([1,2]),{headers:{'content-type':'image/jpeg','content-length':'2','x-source-sha256':sourceHash}});}});
+  const content=await client.mediaContent('a','asset_fixture',{representation:'preview',maxBytes:2});
+  assert.equal(content.sourceSha256,sourceHash);assert.equal(content.contentType,'image/jpeg');assert.deepEqual(content.bytes,new Uint8Array([1,2]));
+  await assert.rejects(client.mediaContent('a','asset_fixture',{representation:'arbitrary'}),/bounded content/);
+});
 
 test('native resource pagination retains tombstones and binds continuation query without losing IDs', async () => {
   const tombstone={id:'deleted-message',deleted:true,version:'2'};let requested;

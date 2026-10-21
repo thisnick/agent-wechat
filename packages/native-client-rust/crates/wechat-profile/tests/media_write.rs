@@ -407,11 +407,6 @@ fn native_md5_hash_matches_public_synthetic_vectors() {
 }
 #[test]
 fn jpeg_trailers_survive_official_image_writeback_and_readback() {
-    let d = fixture();
-    let location = ProfileLocation::new(d.path().join("account")).unwrap();
-    let mut keys = KeyFile::empty("account");
-    keys.image_dat = Some(ImageDatKey::new([7; 16], 19));
-    let o = options();
     let pixels = image::RgbImage::from_fn(64, 48, |x, y| {
         image::Rgb([(x * 37 + y * 19) as u8, (x * 13) as u8, (y * 31) as u8])
     });
@@ -423,12 +418,35 @@ fn jpeg_trailers_survive_official_image_writeback_and_readback() {
     let checksum = Md5::digest(&bytes);
     bytes.extend_from_slice(&0x12345678u64.to_le_bytes());
     bytes.extend_from_slice(&checksum);
+    assert_exact_image_cache(&bytes);
+}
+
+#[test]
+fn wxgf_writeback_and_readback_preserve_original_container_in_every_quality() {
+    assert_exact_image_cache(include_bytes!(
+        "../../wechat-media/tests/fixtures/static.wxgf"
+    ));
+}
+
+#[test]
+fn animated_webp_with_appended_source_data_survives_official_image_cache() {
+    let mut bytes = include_bytes!("../../wechat-media/tests/fixtures/two-frame.webp").to_vec();
+    bytes.extend_from_slice(&[0x42; 1200]);
+    assert_exact_image_cache(&bytes);
+}
+
+fn assert_exact_image_cache(bytes: &[u8]) {
+    let d = fixture();
+    let location = ProfileLocation::new(d.path().join("account")).unwrap();
+    let mut keys = KeyFile::empty("account");
+    keys.image_dat = Some(ImageDatKey::new([7; 16], 19));
+    let o = options();
     let mut message = row(3);
     message.fields.insert(
         "message_content".into(),
         SqlValue::Text(format!(
             "<msg><img md5=\"{:x}\"/></msg>",
-            Md5::digest(&bytes)
+            Md5::digest(bytes)
         )),
     );
     let source = apply_message_projection(&location, &keys, &message, &o)
@@ -440,7 +458,7 @@ fn jpeg_trailers_survive_official_image_writeback_and_readback() {
         ImageQuality::Thumbnail,
     ] {
         let applied =
-            cache_image_projection(&location, &keys, &source, "peer", quality, &bytes, &o).unwrap();
+            cache_image_projection(&location, &keys, &source, "peer", quality, bytes, &o).unwrap();
         let encoded = fs::read(d.path().join("account").join(&applied.relative_path)).unwrap();
         let (decoded, layout) = decode_dat_v2(&encoded, keys.image_dat.as_ref().unwrap()).unwrap();
         assert_eq!(decoded, bytes);
@@ -457,7 +475,7 @@ fn jpeg_trailers_survive_official_image_writeback_and_readback() {
             bytes
         );
         assert!(
-            !cache_image_projection(&location, &keys, &source, "peer", quality, &bytes, &o)
+            !cache_image_projection(&location, &keys, &source, "peer", quality, bytes, &o)
                 .unwrap()
                 .changed
         );

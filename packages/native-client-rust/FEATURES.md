@@ -38,7 +38,8 @@ from fixture tests. Capability responses must reflect these limits.
 | Known-ID contact/group lookups and roster lookup without messages | Implemented | Controlled native contact/group lookup and seven-member roster retrieval passed, with sparse official-file projection |
 | Contact/group sync checkpoints and avatar refresh/cache | Implemented | Separate durable streams and recovery fixtures; native group-sync page and small-avatar retrieval passed. Native contact inventory resumed across stored checkpoints and drained its catalog; three explicitly unavailable contacts remain reported as partial hydration. Their rejection does not imply deletion |
 | Whole-thread reads, optimistic version checking and cross-device notification | Implemented | Frozen local ordering boundary, expected-version check, local clear watermark and durable one-attempt native notification; accepted, rejected and uncertain outcomes remain distinct. Reading a thread includes earlier messages that were not model input. Strict incoming opcode 1 controls have a separate local projection. Recognized opcode 5 controls can clear unread state once for existing visible ordinary sessions; interrupted attempts remain uncertain, and the complete session-exit control remains blocked. Local cutoffs use whole seconds; same-second arrivals and live phone comparison need separate validation |
-| Incoming image qualities, normal/original video, file, short voice | Implemented | Three distinct JPEG qualities passed native download/hash/HTTP range checks. Normal H.264 video (720×960, 882,298 bytes) and original HEVC (1440×1080, 10,034,538 bytes) downloaded and decoded. Broader media/playback coverage remains separate |
+| Incoming image qualities, normal/original video, file, short voice | Implemented | Three distinct JPEG qualities passed native download/hash/HTTP range checks. Normal H.264 video (720×960, 882,298 bytes) and original HEVC (1440×1080, 10,034,538 bytes) downloaded and decoded. An incoming PDF advertising file encryption version 0 downloaded through the native CDN with exact advertised size and MD5; discovery fixtures retain strict checks for versions 0/1 and reject unknown/malformed metadata. Broader media/playback coverage remains separate |
+| Incoming WXGF source retention and representative still previews | Implemented for observed v2 containers | Twelve saved official samples decoded through the shared Rust/FFmpeg path and exactly re-encoded to their DAT bytes. Synthetic original/standard/thumbnail cache tests retain WXGF sources; Gateway fixtures verify a separately hashed JPEG reaches vision. Source animation/timing/alpha and official-client rendering remain unverified |
 | Eligible incoming original sticker bytes, animation/integrity bounds | Implemented | Restricted pinned source, size/integrity and complete-frame fixtures; no sticker-send substitution or pack support |
 | Durable outgoing text with idempotency and uncertain outcome | Implemented | Controlled File Transfer acceptance and lost-response/restart fixtures |
 | Outgoing image/file/video/independently encoded voice | Implemented | Fresh native File Transfer submissions accepted all four kinds and committed history rows; all four supported official caches/resource joins complete after local repair. CDN readback checked before final CGI; the account owner confirmed the latest file/image open and video/voice playback |
@@ -83,6 +84,9 @@ those gaps.
 - A web application follows stabilization of the API, events and media surface.
 - Large-file variants, sticker sending/packs, platforms beyond Linux x64/ARM64 and
   arbitrary official-build migration require independent evidence and testing.
+- WXGF encoding/sending, source animation timing and faithful alpha rendering
+  require separate evidence. Current incoming support preserves the container
+  and supplies a representative still preview.
 
 ## Release gate
 

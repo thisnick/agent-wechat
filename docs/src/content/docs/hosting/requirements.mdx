@@ -9,6 +9,6 @@ Initial account setup needs a complete, supported existing official Linux profil
 
 Provide persistent disk for the official profile and native `dataDir`, plus private scratch capacity for consistent read snapshots. A database snapshot is bounded at 2 GiB per database and 8 GiB total; allow additional headroom for concurrent accounts and SQLite work. No fixed memory estimate substitutes for workload testing.
 
-FFmpeg and FFprobe normalize outbound audio/video sources; the runtime image includes them. SILK voice encoding is compiled from the bundled public sources and does not use the official binary. No GUI, ptrace capability, unconfined seccomp or Docker socket is needed by the native service.
+FFmpeg decodes incoming WXGF still previews; FFmpeg and FFprobe normalize outbound audio/video sources. The runtime image includes both tools; direct installs must make them available on the daemon's PATH for those operations. SILK voice encoding is compiled from the bundled public sources and does not use the official binary. No GUI, ptrace capability, unconfined seccomp or Docker socket is needed by the native service.
 
 The daemon binds loopback. For other hosts, use verified HTTPS through a reverse proxy or an authenticated encrypted tunnel. Outbound native proxy configuration is not implemented in this release.

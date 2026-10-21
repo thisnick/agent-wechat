@@ -43,6 +43,18 @@ pub struct MediaSendRequest {
     pub play_seconds: Option<u32>,
     pub duration_ms: Option<u32>,
 }
+/// A separately hashed still image. Its bytes never replace the source asset.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaImagePreview {
+    pub source_sha256: String,
+    pub content_type: String,
+    #[ts(type = "number")]
+    pub byte_length: u64,
+    pub sha256: String,
+    pub filename: String,
+    pub content_url: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaAsset {
@@ -66,6 +78,9 @@ pub struct MediaAsset {
     pub content_url: Option<String>,
     pub animation_frames: Option<u32>,
     pub official_writeback: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preview: Option<MediaImagePreview>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -97,4 +112,5 @@ pub struct MediaContent {
     pub content_type: String,
     pub sha256: String,
     pub filename: Option<String>,
+    pub source_sha256: Option<String>,
 }

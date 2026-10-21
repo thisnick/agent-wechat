@@ -71,6 +71,9 @@ struct SendPlan {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn wxgf_preview_source_id(source_sha256: &str) -> String {
+    format!("wxgf-preview-v1_{source_sha256}")
+}
 fn media_request_hash(
     request: &MediaSendRequest,
     primary: &str,
@@ -178,6 +181,32 @@ impl Core {
                 .unwrap_or_else(|| "application/octet-stream".into()),
             sha256: asset.sha256.context("media_integrity_failed")?,
             filename: asset.filename,
+            source_sha256: None,
+        })
+    }
+    pub fn media_preview_content(&self, account: &str, id: &str) -> Result<MediaContent> {
+        // Verify the retained source as well as the separately encrypted preview.
+        let original = self.media_content(account, id)?;
+        let asset = self.media_asset(account, id)?;
+        let preview = asset.preview.context("media_preview_unavailable")?;
+        ensure!(
+            preview.source_sha256 == original.sha256,
+            "media_integrity_failed"
+        );
+        let (source, bytes) =
+            self.source_bytes(account, &wxgf_preview_source_id(&original.sha256))?;
+        ensure!(
+            source.sha256 == preview.sha256
+                && source.byte_length == preview.byte_length
+                && source.media_type == preview.content_type,
+            "media_integrity_failed"
+        );
+        Ok(MediaContent {
+            bytes,
+            content_type: preview.content_type,
+            sha256: preview.sha256,
+            filename: Some(preview.filename),
+            source_sha256: Some(original.sha256),
         })
     }
     pub fn media_job(&self, account: &str, id: &str) -> Result<MediaJob> {
@@ -323,6 +352,7 @@ impl Core {
                     job_id: None,
                     content_url: None,
                     animation_frames: None,
+                    preview: None,
                     official_writeback: if quoted_image.is_none()
                         && matches!(
                             kind,
@@ -607,6 +637,15 @@ impl Core {
         frames: Option<u32>,
     ) -> Result<MediaAsset> {
         let mut asset = self.media_asset(account, id)?;
+        asset.preview = if mime == "image/x-wxgf" {
+            ensure!(
+                matches!(asset.kind, MediaKind::Image | MediaKind::Sticker),
+                "unsupported_media"
+            );
+            Some(self.cache_wxgf_preview(account, id, &bytes)?)
+        } else {
+            None
+        };
         asset.state = "available".into();
         asset.content_type = Some(mime.into());
         asset.byte_length = Some(bytes.len() as u64);
@@ -615,11 +654,74 @@ impl Core {
         asset.retryable = false;
         asset.reason = None;
         asset.content_url = Some(format!("/v1/accounts/{account}/media/{id}/content"));
-        asset.animation_frames = frames;
+        asset.animation_frames = if mime == "image/x-wxgf" { None } else { frames };
+        if mime == "image/x-wxgf" {
+            asset.filename = Some(format!("{id}.wxgf"));
+        }
         let sealed = self.vault.seal(account, &format!("asset:{id}"), &bytes)?;
         self.store
             .save_media_asset(account, id, &serde_json::to_value(&asset)?, Some(&sealed))?;
         Ok(asset)
+    }
+    fn cache_wxgf_preview(
+        &self,
+        account: &str,
+        asset_id: &str,
+        bytes: &[u8],
+    ) -> Result<MediaImagePreview> {
+        let source_sha256 = digest(bytes);
+        let id = wxgf_preview_source_id(&source_sha256);
+        let source = if self.store.media_source(account, &id).is_ok() {
+            self.source_bytes(account, &id)?.0
+        } else {
+            let decoded = wechat_media::wxgf_preview(bytes)?;
+            ensure!(
+                ["image/jpeg", "image/png"].contains(&decoded.inspection.content_type.as_str())
+                    && !decoded.bytes.is_empty()
+                    && decoded.bytes.len() <= 16 * 1024 * 1024,
+                "image_decode_failed"
+            );
+            let extension = if decoded.inspection.content_type == "image/png" {
+                "png"
+            } else {
+                "jpg"
+            };
+            let name = format!("{asset_id}.still.{extension}");
+            let hash = digest(&decoded.bytes);
+            let sealed = self
+                .vault
+                .seal(account, &format!("source:{id}"), &decoded.bytes)?;
+            match self.store.create_media_source(
+                account,
+                &id,
+                &name,
+                &decoded.inspection.content_type,
+                decoded.bytes.len() as u64,
+                &hash,
+                &sealed,
+            ) {
+                Ok(source) => source,
+                // A concurrent discovery may already have published this exact
+                // source's preview. Reuse only its authenticated owned bytes.
+                Err(error) => self.source_bytes(account, &id).map_err(|_| error)?.0,
+            }
+        };
+        ensure!(
+            ["image/jpeg", "image/png"].contains(&source.media_type.as_str())
+                && source.byte_length > 0
+                && source.byte_length <= 16 * 1024 * 1024,
+            "media_integrity_failed"
+        );
+        Ok(MediaImagePreview {
+            source_sha256,
+            content_type: source.media_type,
+            byte_length: source.byte_length,
+            sha256: source.sha256,
+            filename: source.name,
+            content_url: format!(
+                "/v1/accounts/{account}/media/{asset_id}/content?representation=preview"
+            ),
+        })
     }
     fn media_network_suspended(&self, account: &str) -> Result<bool> {
         let disconnected =
@@ -1167,8 +1269,16 @@ fn classify_error(error: &anyhow::Error) -> String {
             "image_decode_failed",
             "image_no_frames",
             "jpeg_trailer_missing",
+            "png_trailer_missing",
             "gif_trailer_missing",
             "webp_length_invalid",
+            "wxgf_invalid",
+            "wxgf_partition_missing",
+            "wxgf_partition_limit",
+            "wxgf_decode_failed",
+            "wxgf_decoder_unavailable",
+            "wxgf_decode_timeout",
+            "wxgf_preview_limit",
         ]
         .contains(&message.as_str())
         {
@@ -1274,7 +1384,8 @@ fn validate_media_bytes(kind: MediaKind, bytes: &[u8]) -> Result<(String, Option
     match kind {
         MediaKind::Image | MediaKind::Sticker => {
             let result = wechat_protocol::media::inspect_image(bytes)?;
-            Ok((result.content_type, Some(result.frames)))
+            let frames = (result.content_type != "image/x-wxgf").then_some(result.frames);
+            Ok((result.content_type, frames))
         }
         MediaKind::Video => {
             ensure!(
@@ -1468,8 +1579,19 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     .find(|n| n.is_element() && n.tag_name().name() == name)
                     .and_then(|n| n.text())
             };
-            let encryption = number(value("encryver")).unwrap_or(1);
-            ensure!(encryption == 1, "unsupported_attachment_encryption");
+            let encryption = match attach
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "encryver")
+            {
+                None => 1,
+                Some(version) => number(version.text()).context("media_metadata_invalid")?,
+            };
+            // Both observed versions use the supplied AES key and file CDN
+            // transport. Version 0 files still require full size/digest checks.
+            ensure!(
+                matches!(encryption, 0 | 1),
+                "unsupported_attachment_encryption"
+            );
             let filename = child("title")
                 .and_then(|n| n.text())
                 .filter(|s| {
@@ -2577,6 +2699,7 @@ mod tests {
             content_url: None,
             animation_frames: None,
             official_writeback: "unsupported".into(),
+            preview: None,
         };
         let plan = core
             .vault
@@ -2632,6 +2755,127 @@ mod tests {
             raw
         );
         assert!(core.media_content("two", "asset_synthetic").is_err());
+    }
+    #[test]
+    fn wxgf_source_and_preview_remain_distinct_encrypted_account_scoped_and_restartable() {
+        let (dir, core) = test_core();
+        let raw = include_bytes!("../../wechat-media/tests/fixtures/static.wxgf");
+        let asset: MediaAsset = serde_json::from_value(json!({
+            "id":"asset_wxgf", "accountId":"one", "kind":"image", "variant":"original",
+            "state":"pending", "retryable":true, "officialWriteback":"unsupported", "expiresAt":1
+        }))
+        .unwrap();
+        core.store
+            .put_media_asset(
+                "one",
+                &MediaAssetRecord {
+                    id: asset.id.clone(),
+                    message_id: None,
+                    variant: "original".into(),
+                    kind: "image".into(),
+                    metadata: serde_json::to_value(&asset).unwrap(),
+                    plan: vec![],
+                    payload: None,
+                },
+            )
+            .unwrap();
+        let available = core
+            .cache_asset(
+                "one",
+                &asset.id,
+                raw.to_vec(),
+                "image/x-wxgf",
+                Some(MediaVariant::Original),
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(available.animation_frames, None);
+        assert_eq!(available.sha256.as_deref(), Some(digest(raw).as_str()));
+        assert_eq!(available.expires_at, Some(1));
+        let preview = available.preview.as_ref().unwrap();
+        assert_eq!(preview.source_sha256, digest(raw));
+        assert_ne!(preview.sha256, preview.source_sha256);
+        let original = core.media_content("one", &asset.id).unwrap();
+        assert_eq!(original.bytes, raw);
+        assert_eq!(original.content_type, "image/x-wxgf");
+        let still = core.media_preview_content("one", &asset.id).unwrap();
+        assert_eq!(still.source_sha256.as_deref(), Some(digest(raw).as_str()));
+        assert_eq!(digest(&still.bytes), preview.sha256);
+        assert_eq!(wechat_media::inspect_image(&still.bytes).unwrap().frames, 1);
+        let cache_id = wxgf_preview_source_id(&digest(raw));
+        let (metadata, sealed) = core.store.media_source("one", &cache_id).unwrap();
+        assert!(!sealed.windows(still.bytes.len()).any(|b| b == still.bytes));
+        let again = core
+            .cache_asset(
+                "one",
+                &asset.id,
+                raw.to_vec(),
+                "image/x-wxgf",
+                Some(MediaVariant::Original),
+                None,
+            )
+            .unwrap();
+        assert_eq!(again.preview.unwrap().sha256, preview.sha256);
+        assert_eq!(
+            core.store
+                .media_source("one", &cache_id)
+                .unwrap()
+                .0
+                .created_at,
+            metadata.created_at
+        );
+        assert!(core.media_preview_content("two", &asset.id).is_err());
+        drop(core);
+        let core = Core::new(
+            Arc::new(wechat_store::Store::open_existing(&dir.path().join("data")).unwrap()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(core.media_content("one", &asset.id).unwrap().bytes, raw);
+        assert_eq!(
+            core.media_preview_content("one", &asset.id).unwrap().bytes,
+            still.bytes
+        );
+        let mut tampered = core.media_asset("one", &asset.id).unwrap();
+        tampered.preview.as_mut().unwrap().source_sha256 = "0".repeat(64);
+        core.store
+            .save_media_asset(
+                "one",
+                &asset.id,
+                &serde_json::to_value(tampered).unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            core.media_preview_content("one", &asset.id)
+                .err()
+                .unwrap()
+                .to_string(),
+            "media_integrity_failed"
+        );
+    }
+    #[test]
+    fn concurrent_wxgf_discoveries_reuse_the_same_verified_preview() {
+        let (_dir, core) = test_core();
+        let barrier = std::sync::Barrier::new(2);
+        let bytes = include_bytes!("../../wechat-media/tests/fixtures/static.wxgf");
+        let previews = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                barrier.wait();
+                core.cache_wxgf_preview("one", "first", bytes)
+            });
+            let second = scope.spawn(|| {
+                barrier.wait();
+                core.cache_wxgf_preview("one", "second", bytes)
+            });
+            (
+                first.join().unwrap().unwrap(),
+                second.join().unwrap().unwrap(),
+            )
+        });
+        assert_eq!(previews.0.sha256, previews.1.sha256);
+        assert_eq!(previews.0.source_sha256, digest(bytes));
+        assert_eq!(previews.1.source_sha256, digest(bytes));
     }
     #[test]
     fn uncertain_send_is_terminal_and_preserves_full_decimal_server_id() {
@@ -2694,6 +2938,71 @@ mod tests {
         let msg = message(47);
         let xml="<msg><emoji md5=\"00000000000000000000000000000000\" len=\"42\" cdnurl=\"https://127.0.0.1/private\"/></msg>";
         assert!(discover(&msg, xml).is_err());
+    }
+    fn file_message_xml(encryption: &str, transport: &str) -> String {
+        format!(
+            "<msg><appmsg><title>synthetic.pdf</title><type>6</type><md5>0123456789abcdef0123456789abcdef</md5><appattach><totallen>8260</totallen><fileext>pdf</fileext>{transport}<aeskey>01010101010101010101010101010101</aeskey>{encryption}</appattach></appmsg></msg>"
+        )
+    }
+    #[test]
+    fn file_cdn_versions_zero_one_and_omitted_keep_strict_integrity_metadata() {
+        for encryption in ["", "<encryver>0</encryver>", "<encryver>1</encryver>"] {
+            let xml =
+                file_message_xml(encryption, "<cdnattachurl>synthetic-file-id</cdnattachurl>");
+            let plans = discover(&message(49), &xml).unwrap();
+            assert_eq!(plans.len(), 1);
+            let (kind, variant, plan, filename) = &plans[0];
+            assert_eq!(*kind, MediaKind::File);
+            assert_eq!(*variant, MediaVariant::Original);
+            assert_eq!(filename.as_deref(), Some("synthetic.pdf"));
+            let DownloadPlan::Cdn { descriptor } = plan else {
+                panic!("file must use the verified CDN path");
+            };
+            assert_eq!(descriptor.quality, MediaQuality::File);
+            assert_eq!(descriptor.file_id, "synthetic-file-id");
+            assert_eq!(descriptor.aes_key, vec![1; 16]);
+            assert_eq!(descriptor.expected_bytes, Some(8260));
+            assert_eq!(
+                descriptor.expected_md5.as_deref(),
+                Some("0123456789abcdef0123456789abcdef")
+            );
+            assert!(descriptor.strict_size);
+        }
+    }
+    #[test]
+    fn file_discovery_rejects_unknown_or_malformed_versions_and_missing_transport() {
+        for (version, expected) in [
+            ("2", "unsupported_attachment_encryption"),
+            ("-1", "media_metadata_invalid"),
+            ("invalid", "media_metadata_invalid"),
+            ("18446744073709551616", "media_metadata_invalid"),
+            ("", "media_metadata_invalid"),
+        ] {
+            let xml = file_message_xml(
+                &format!("<encryver>{version}</encryver>"),
+                "<cdnattachurl>synthetic-file-id</cdnattachurl>",
+            );
+            assert_eq!(
+                discover(&message(49), &xml).err().unwrap().to_string(),
+                expected
+            );
+        }
+        for transport in ["", "<cdnattachurl/>"] {
+            let xml = file_message_xml("<encryver>0</encryver>", transport);
+            assert_eq!(
+                discover(&message(49), &xml).err().unwrap().to_string(),
+                "unsupported_attachment_transport"
+            );
+        }
+        let xml = file_message_xml(
+            "<encryver>0</encryver>",
+            "<cdnattachurl>synthetic-file-id</cdnattachurl>",
+        )
+        .replace("<type>6</type>", "<type>74</type>");
+        assert_eq!(
+            discover(&message(49), &xml).err().unwrap().to_string(),
+            "unsupported_application_media"
+        );
     }
     fn message(kind: i64) -> wechat_profile::Message {
         wechat_profile::Message {
@@ -2883,6 +3192,9 @@ mod tests {
             "image_decode_failed",
             "image_decode_limit",
             "jpeg_trailer_missing",
+            "png_trailer_missing",
+            "gif_trailer_missing",
+            "webp_length_invalid",
         ] {
             let error = anyhow::anyhow!("{code}").context("opaque validation wrapper");
             assert_eq!(classify_error(&error), code);

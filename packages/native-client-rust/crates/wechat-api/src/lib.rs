@@ -102,6 +102,7 @@ impl Claims {
         }
     }
 }
+#[derive(Debug)]
 struct ApiError(StatusCode, &'static str);
 type ApiResult<T> = std::result::Result<T, ApiError>;
 impl IntoResponse for ApiError {
@@ -112,6 +113,20 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
+        // Remote message metadata failures are media errors. Never diagnose
+        // these as a local profile/schema mismatch through the broad fallback.
+        for code in [
+            "unsupported_application_media",
+            "unsupported_attachment_encryption",
+            "unsupported_attachment_transport",
+            "media_metadata_invalid",
+            "media_metadata_limit",
+            "media_key_missing",
+        ] {
+            if error.chain().any(|cause| cause.to_string() == code) {
+                return Self(StatusCode::CONFLICT, code);
+            }
+        }
         // Admission attaches a stable public code while retaining its typed
         // profile cause. Prefer that code over the general profile fallback.
         for code in [
@@ -174,6 +189,11 @@ impl From<anyhow::Error> for ApiError {
                 "media_not_cached",
                 StatusCode::NOT_FOUND,
                 "media_not_cached",
+            ),
+            (
+                "media_preview_unavailable",
+                StatusCode::NOT_FOUND,
+                "media_preview_unavailable",
             ),
             (
                 "media_not_available",
@@ -1143,6 +1163,26 @@ mod tests {
         }
     }
     const OWNER: &str = "0123456789abcdef0123456789abcdef";
+    #[test]
+    fn attachment_discovery_errors_keep_exact_media_codes() {
+        for code in [
+            "unsupported_application_media",
+            "unsupported_attachment_encryption",
+            "unsupported_attachment_transport",
+            "media_metadata_invalid",
+            "media_metadata_limit",
+            "media_key_missing",
+        ] {
+            let ApiError(status, actual) =
+                ApiError::from(anyhow::anyhow!("{code}").context("bounded media discovery"));
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(actual, code);
+        }
+        let ApiError(_, actual) = ApiError::from(anyhow::anyhow!(
+            "unsupported_attachment_transport https://private.invalid/file"
+        ));
+        assert_eq!(actual, "unsupported_profile");
+    }
     fn setup() -> (tempfile::TempDir, Arc<Core>, Router) {
         let t = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&t.path().join("data")).unwrap());

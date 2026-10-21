@@ -11,6 +11,9 @@ COPY packages/native-client-rust/ ./
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /build/recipe.json recipe.json
 # Exportable dependency layers survive source changes and fresh CI workers.
 # Match both profiles used below; no source or host target cache is imported.
@@ -34,6 +37,8 @@ COPY --from=builder /build/crates/wechat-protocol/NOTICE /usr/share/doc/agent-we
 COPY --from=builder /build/crates/wechat-protocol/fixtures/LICENSE-CITIZENLAB /usr/share/doc/agent-wechat-native/LICENSE-CITIZENLAB
 COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-MIT /usr/share/doc/agent-wechat-native/LICENSE-SILK-MIT
 COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-SDK /usr/share/doc/agent-wechat-native/LICENSE-SILK-SDK
+COPY --from=builder /build/crates/wechat-media/NOTICE.md /usr/share/doc/agent-wechat-native/NOTICE-WXGF
+COPY --from=builder /build/crates/wechat-media/LICENSE-CHATLOG /usr/share/doc/agent-wechat-native/LICENSE-CHATLOG
 USER 10001:10001
 ENV HOME=/var/lib/agent-wechat
 ENV TMPDIR=/var/cache/agent-wechat

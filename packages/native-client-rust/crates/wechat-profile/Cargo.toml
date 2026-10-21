@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+wechat-media = { path = "../wechat-media" }
 serde.workspace = true
 serde_json.workspace = true
 rusqlite = { workspace = true, features = ["limits", "hooks"] }

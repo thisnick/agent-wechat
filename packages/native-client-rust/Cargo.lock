@@ -2277,10 +2277,23 @@ dependencies = [
  "tokio",
  "ts-rs",
  "uuid",
+ "wechat-media",
  "wechat-profile",
  "wechat-protocol",
  "wechat-store",
  "zeroize",
+]
+
+[[package]]
+name = "wechat-media"
+version = "1.0.0-beta.7"
+dependencies = [
+ "anyhow",
+ "image",
+ "libc",
+ "md-5",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -2306,6 +2319,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "wechat-media",
  "zeroize",
  "zstd",
 ]
@@ -2324,6 +2338,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "wechat-media",
  "zeroize",
 ]
 

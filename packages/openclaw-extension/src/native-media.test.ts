@@ -17,6 +17,50 @@ test("native original media preserves exact bytes, managed path and explicit qua
   const result=await prepareNativeAttachment({client,account,message,core:{channel:{media:{saveMediaBuffer:async(buffer:Buffer,mime:string,_subdir:string,max:number,name:string)=>{saved++;assert.deepEqual(new Uint8Array(buffer),bytes);assert.equal(mime,"image/gif");assert.equal(name,"animated.gif");assert.equal(max,50*1024*1024);return{path:"/managed/animated.gif"};}}}}});
   assert.equal(saved,1);assert.equal(result.mediaPath,"/managed/animated.gif");assert.equal(result.attachment?.quality,"full");assert.equal(result.pending,false);
 });
+test("PDF attachments preserve exact source bytes as file references without image preparation", async t => {
+  const { readFile } = await import("node:fs/promises");
+  // An account-independent blank PDF with a complete cross-reference table.
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 4 0 R >>",
+    "<< /Length 0 >>\nstream\n\nendstream",
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = objects.map((object, index) => {
+    const offset = Buffer.byteLength(pdf);
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    return offset;
+  });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 5\n0000000000 65535 f \n${offsets.map(offset => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  const original = Buffer.from(pdf), originalHash = createHash("sha256").update(original).digest("hex");
+  const directory = await mkdtemp(join(tmpdir(), "native-pdf-reference-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const metadata = asset({ kind: "file", filename: "synthetic.pdf", contentType: "application/octet-stream", byteLength: original.length,
+    sha256: originalHash, animationFrames: null, expiresAt: 1 });
+  const calls: string[] = [];
+  const client = { mediaAssets: async () => ({ items: [metadata] }), mediaContent: async (_account: string, _id: string, options: any) => {
+    calls.push("original"); assert.equal(options.representation, undefined);
+    return { bytes: original, contentType: "application/octet-stream" };
+  }, transferMedia: async () => { throw Error("Cached PDF must not request a transfer"); } } as unknown as NativeWeChatClient;
+  const result = await prepareNativeAttachment({ client, account, message: { ...message, type: 49, appMessageType: 6 },
+    cfg: { get agents() { throw Error("PDF must not enter image preparation"); } },
+    core: { channel: { media: { saveMediaBuffer: async (buffer: Buffer, mime: string, subdir: string, _max: number, filename: string) => {
+      calls.push("save"); assert.deepEqual(buffer, original); assert.equal(mime, "application/octet-stream"); assert.equal(subdir, "inbound");
+      const path = join(directory, filename); await writeFile(path, buffer); return { path };
+    } } } } });
+  assert.deepEqual(calls, ["original", "save"]);
+  assert.equal(result.pending, false); assert.equal(result.attachment?.status, "ready"); assert.equal(result.attachment.kind, "file");
+  assert.deepEqual(await readFile(result.attachment.path!), original);
+  assert.equal(result.mediaPath, undefined); assert.equal(result.mediaMime, "application/octet-stream");
+  assert.match(result.body, /\[Local file: </); assert.ok(result.body.includes(`<${result.attachment.path}>`));
+  assert.equal(result.suppliedAssets?.length, 1);
+  const supplied = result.suppliedAssets![0];
+  assert.equal(supplied.role, "file_reference"); assert.equal(supplied.kind, "file"); assert.equal(supplied.runtimeMedia, false);
+  assert.equal(supplied.path, result.attachment.path); assert.equal(supplied.sourcePath, supplied.path);
+  assert.equal(supplied.sha256, originalHash); assert.equal(supplied.sourceSha256, originalHash); assert.equal(supplied.byteLength, original.length);
+  assert.equal(createHash("sha256").update(await readFile(supplied.path)).digest("hex"), originalHash);
+});
 test("expired native media never requests a transfer or invents a local path",async()=>{
   const client={mediaAssets:async()=>({items:[asset({state:"expired"})]}),transferMedia:async()=>{throw Error("must not fetch");}}as unknown as NativeWeChatClient;
   const result=await prepareNativeAttachment({client,account,message,core:{}});assert.equal(result.attachment?.status,"expired");assert.equal(result.mediaPath,undefined);assert.match(result.body,/expired/);
@@ -51,6 +95,48 @@ test("large model image has a separately bound preview while original bytes rema
   assert.equal(supplied.mime, "image/jpeg"); assert.equal(supplied.role, "model_image"); assert.notEqual(supplied.path, supplied.sourcePath);
   assert.equal(createHash("sha256").update(await readFile(supplied.path)).digest("hex"), supplied.sha256);
   assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /prepared still preview/); assert.ok(result.body.includes(`[Image file: <${supplied.sourcePath}>]`));
+});
+
+test("WXGF images and stickers keep original bytes while supplying a source-bound still preview", async t => {
+  const { readFile } = await import("node:fs/promises");
+  const original = Buffer.from("wxgf synthetic source bytes");
+  const originalHash = createHash("sha256").update(original).digest("hex");
+  const preview = await readFile(new URL("../test/fixtures/native-model.png", import.meta.url));
+  const previewHash = createHash("sha256").update(preview).digest("hex");
+  const directory = await mkdtemp(join(tmpdir(), "native-wxgf-preview-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const type of [3, 47]) {
+    const metadata = asset({ kind: type === 47 ? "sticker" : "image", filename: "original.wxgf", contentType: "image/x-wxgf", byteLength: original.length, sha256: originalHash,
+      animationFrames: null, preview: { sourceSha256: originalHash, sha256: previewHash, byteLength: preview.length, contentType: "image/png", filename: "preview.png", contentUrl: "/unused" } });
+    const representations: unknown[] = [];
+    const client = { mediaAssets: async () => ({ items: [metadata] }), mediaContent: async (_a: string, _id: string, options: any) => {
+      representations.push(options.representation ?? "original");
+      return options.representation === "preview" ? { bytes: preview, contentType: "image/png", sourceSha256: originalHash } : { bytes: original, contentType: "image/x-wxgf" };
+    } } as unknown as NativeWeChatClient;
+    const result = await prepareNativeAttachment({ client, account, message: { ...message, type }, cfg: {}, core: { channel: { media: { saveMediaBuffer: async (buffer: Buffer, _mime: string, _dir: string, _max: number, name: string) => {
+      const path = join(directory, `${type}-${name}`); await writeFile(path, buffer); return { path };
+    } } } } });
+    assert.deepEqual(representations, ["original", "preview"]);
+    assert.deepEqual(await readFile(result.attachment!.path!), original);
+    const supplied = result.suppliedAssets![0]; assert.equal(supplied.sourceSha256, originalHash); assert.equal(supplied.sha256, previewHash);
+    assert.equal(supplied.sourceMime, "image/x-wxgf"); assert.equal(supplied.mime, "image/png");
+    assert.notEqual(supplied.path, supplied.sourcePath); assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /WXGF still preview/);
+  }
+});
+
+test("WXGF preview metadata and bytes cannot cross the original source boundary", async () => {
+  const original = Buffer.from("wxgf synthetic source bytes"), originalHash = createHash("sha256").update(original).digest("hex");
+  const preview = new Uint8Array([1,2,3]), previewHash = createHash("sha256").update(preview).digest("hex");
+  for (const bad of ["metadata-source", "metadata-size", "content-source", "content-hash", "content-mime"]) {
+    let previewReads=0;
+    const metadata = asset({contentType:"image/x-wxgf",byteLength:original.length,sha256:originalHash,preview:{sourceSha256:bad==="metadata-source"?"f".repeat(64):originalHash,
+      sha256:previewHash,byteLength:bad==="metadata-size"?17*1024*1024:preview.length,contentType:"image/png",filename:"preview.png",contentUrl:"/unused"}});
+    const client = { mediaAssets:async()=>({items:[metadata]}),mediaContent:async(_a:string,_id:string,options:any)=>{
+      if(options.representation!=="preview") return {bytes:original,contentType:"image/x-wxgf"};
+      previewReads++; return {bytes:bad==="content-hash"?new Uint8Array([0,0,0]):preview,contentType:bad==="content-mime"?"text/plain":"image/png",sourceSha256:bad==="content-source"?"f".repeat(64):originalHash};
+    }} as unknown as NativeWeChatClient;
+    await assert.rejects(prepareNativeAttachment({client,account,message,cfg:{},core:{channel:{media:{saveMediaBuffer:async()=>({path:"/managed/original.wxgf"})}}}}),/WXGF preview/);
+    assert.equal(previewReads,bad.startsWith("metadata-")?0:1);
+  }
 });
 
 

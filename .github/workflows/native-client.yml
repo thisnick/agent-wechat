@@ -44,6 +44,12 @@ jobs:
           add-rust-environment-hash-key: false
           key: native-${{ matrix.runner }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
       - run: cargo fmt --all --check
+      - name: Ensure image decoder runtime
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo build --workspace --profile test --locked

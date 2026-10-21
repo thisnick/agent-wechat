@@ -193,12 +193,13 @@ export class NativeWeChatClient {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid media writeback limit");
     return this.request(`v1/accounts/${id(accountId)}/media-writeback/repair`, { method: "POST", body: JSON.stringify({ limit }) });
   }
-  async mediaContent(accountId: string, assetId: string, options: { maxBytes?: number; range?: string; signal?: AbortSignal } = {}): Promise<{ bytes: Uint8Array; contentType: string; etag: string | null; contentRange: string | null; status: number }> {
+  async mediaContent(accountId: string, assetId: string, options: { maxBytes?: number; range?: string; representation?: "original" | "preview"; signal?: AbortSignal } = {}): Promise<{ bytes: Uint8Array; contentType: string; etag: string | null; contentRange: string | null; sourceSha256: string | null; status: number }> {
     const max = options.maxBytes ?? 128 * 1024 * 1024;
-    if (!Number.isInteger(max) || max < 1 || max > 128 * 1024 * 1024 || (options.range && !/^bytes=(?:\d+-\d*|-\d+)$/.test(options.range))) throw new Error("Invalid bounded content request");
-    const response = await this.response(`v1/accounts/${id(accountId)}/media/${id(assetId)}/content`, { signal: options.signal, headers: options.range ? { Range: options.range } : {} });
+    if (!Number.isInteger(max) || max < 1 || max > 128 * 1024 * 1024 || (options.range && !/^bytes=(?:\d+-\d*|-\d+)$/.test(options.range)) || (options.representation != null && !["original", "preview"].includes(options.representation))) throw new Error("Invalid bounded content request");
+    const query = options.representation === "preview" ? "?representation=preview" : "";
+    const response = await this.response(`v1/accounts/${id(accountId)}/media/${id(assetId)}/content${query}`, { signal: options.signal, headers: options.range ? { Range: options.range } : {} });
     const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native media response exceeds its bound"); }
-    return { bytes: await this.readBounded(response, max), contentType: response.headers.get("content-type") ?? "application/octet-stream", etag: response.headers.get("etag"), contentRange: response.headers.get("content-range"), status: response.status };
+    return { bytes: await this.readBounded(response, max), contentType: response.headers.get("content-type") ?? "application/octet-stream", etag: response.headers.get("etag"), contentRange: response.headers.get("content-range"), sourceSha256: response.headers.get("x-source-sha256"), status: response.status };
   }
   markRead(accountId: string, threadId: string, expectedVersion: string): Promise<unknown> {
     if (typeof expectedVersion !== "string" || !expectedVersion || expectedVersion.length > 128) throw new Error("Read version is required");

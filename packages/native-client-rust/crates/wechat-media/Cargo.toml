@@ -1,0 +1,15 @@
+[package]
+name = "wechat-media"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+[dev-dependencies]
+md-5 = "0.10"

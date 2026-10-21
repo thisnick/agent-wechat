@@ -180,13 +180,30 @@ export async function prepareNativeAttachment(params: NativePrepareMediaParams):
     quality: actual === "original" ? "full" : actual === "standard" ? "standard" : actual === "thumbnail" ? "thumbnail" : undefined };
   let suppliedPath = saved.path, suppliedMime = mime, suppliedHash = hash, suppliedLength = content.bytes.length;
   let body = renderAttachmentBody("", attachment);
-  if (attachmentKind === "image" && params.cfg) {
-    const representation = await prepareImageRepresentation(Buffer.from(content.bytes), mime, params.cfg);
-    if (representation.preview) {
+  if (attachmentKind === "image" && (params.cfg || mime === "image/x-wxgf")) {
+    let imageBytes = Buffer.from(content.bytes), imageMime = mime;
+    const wxgf = mime === "image/x-wxgf";
+    if (wxgf) {
+      const preview = asset.preview;
+      if (!preview || preview.sourceSha256 !== hash || !/^[a-f0-9]{64}$/.test(preview.sha256)
+        || !Number.isInteger(preview.byteLength) || preview.byteLength <= 0 || preview.byteLength > 16 * 1024 * 1024
+        || !["image/jpeg", "image/png"].includes(preview.contentType)) throw Error("Native WXGF preview metadata did not verify");
+      await authorize();
+      const derived = await client.mediaContent(accountId, asset.id, { maxBytes: preview.byteLength, representation: "preview", signal: params.signal });
+      guard();
+      const derivedMime = derived.contentType.split(";", 1)[0].trim().toLowerCase();
+      if (derived.sourceSha256 !== hash || derivedMime !== preview.contentType || derived.bytes.length !== preview.byteLength
+        || createHash("sha256").update(derived.bytes).digest("hex") !== preview.sha256) throw Error("Native WXGF preview integrity did not verify");
+      imageBytes = Buffer.from(derived.bytes); imageMime = derivedMime;
+    }
+    const representation = await prepareImageRepresentation(imageBytes, imageMime, params.cfg);
+    if (wxgf || representation.preview) {
+      const extension = representation.mime === "image/png" ? "png" : "jpg";
       const normalized = await saveManagedAttachment({ data: representation.bytes.toString("base64"), mime: representation.mime,
-        filename: `${filename}.model.jpg`, maxBytes: 5 * 1024 * 1024, saveMediaBuffer: core.channel.media.saveMediaBuffer });
+        filename: `${filename}.model.${extension}`, maxBytes: 5 * 1024 * 1024, saveMediaBuffer: core.channel.media.saveMediaBuffer });
       suppliedPath = normalized.path; suppliedMime = representation.mime; suppliedHash = normalized.sha256; suppliedLength = normalized.size;
-      body += `\n[Model image: prepared still preview; original retained separately]`;
+      body += wxgf ? `\n[Model image: WXGF still preview; original retained separately; animation and transparency are not represented]`
+        : `\n[Model image: prepared still preview; original retained separately]`;
     }
   }
   guard();

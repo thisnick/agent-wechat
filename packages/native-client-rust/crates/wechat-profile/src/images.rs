@@ -15,6 +15,14 @@ use std::{
 };
 
 pub(crate) fn validate_image(bytes: &[u8]) -> Result<(String, u32, u32)> {
+    if bytes.starts_with(b"wxgf")
+        || bytes.starts_with(b"GIF8")
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
+    {
+        let inspection =
+            wechat_media::inspect_image(bytes).map_err(|_| ProfileError::InvalidMetadata)?;
+        return Ok((inspection.content_type, inspection.width, inspection.height));
+    }
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| ProfileError::InvalidMetadata)?;
@@ -377,5 +385,43 @@ impl ProfileReader {
             )
         });
         variants.pop().ok_or(ProfileError::NotCached)
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_jpeg_png_profile_dimension_limits_are_unchanged() {
+        for format in [ImageFormat::Jpeg, ImageFormat::Png] {
+            let mut encoded = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(5000, 1)
+                .write_to(&mut encoded, format)
+                .unwrap();
+            let (_, width, height) = validate_image(encoded.get_ref()).unwrap();
+            assert_eq!((width, height), (5000, 1));
+        }
+    }
+
+    #[test]
+    fn additional_image_formats_use_shared_bounded_inspection() {
+        let webp = include_bytes!("../../wechat-media/tests/fixtures/two-frame.webp");
+        assert_eq!(validate_image(webp).unwrap(), ("image/webp".into(), 12, 8));
+        let wxgf = include_bytes!("../../wechat-media/tests/fixtures/static.wxgf");
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            assert_eq!(
+                validate_image(wxgf).unwrap(),
+                ("image/x-wxgf".into(), 32, 24)
+            );
+        } else {
+            assert!(validate_image(wxgf).is_err());
+        }
     }
 }

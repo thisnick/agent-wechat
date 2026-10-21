@@ -261,6 +261,7 @@ pub fn typescript() -> String {
         wechat_core::media_types::MediaVariant::decl(),
         wechat_core::media_types::MediaTransferRequest::decl(),
         wechat_core::media_types::MediaSendRequest::decl(),
+        wechat_core::media_types::MediaImagePreview::decl(),
         wechat_core::media_types::MediaAsset::decl(),
         wechat_core::media_types::MediaJob::decl(),
         wechat_store::OwnedMediaSource::decl(),
