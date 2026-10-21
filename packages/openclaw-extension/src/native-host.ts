@@ -32,7 +32,7 @@ export function nativeChildEnvironment(token: string, environment: NodeJS.Proces
 export function nativeHostTarget(platform = process.platform, arch = process.arch): { platform: string; arch: string; rustTarget: string; key: string; executable: string } {
   const cpu = arch === "arm64" ? "aarch64" : "x86_64";
   const suffix = ({ linux: "unknown-linux-gnu", darwin: "apple-darwin", win32: "pc-windows-msvc" } as Partial<Record<string, string>>)[platform];
-  if (!suffix || !["x64", "arm64"].includes(arch)) throw new Error("native_binary_incompatible: unsupported host platform; use external mode for remote daemons");
+  if (!suffix || !["x64", "arm64"].includes(arch) || (platform === "darwin" && arch !== "arm64")) throw new Error("native_binary_incompatible: unsupported host platform; use external mode for remote daemons");
   return { platform, arch, rustTarget: `${cpu}-${suffix}`, key: `${platform}-${arch}${platform === "linux" ? "-gnu" : ""}`, executable: platform === "win32" ? "wx.exe" : "wx" };
 }
 export function nativeExecutableFormat(bytes: Buffer, platform = process.platform): boolean {

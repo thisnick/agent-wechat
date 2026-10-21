@@ -1,16 +1,26 @@
 # Native platform release candidate acceptance
 
-The target matrix is Linux x64/ARM64 GNU (glibc 2.36+), macOS x64/ARM64,
+The target matrix is Linux x64/ARM64 GNU (glibc 2.36+), macOS ARM64,
 and Windows x64/ARM64 MSVC. Windows ARM64 is a native executable, without an
 x64-emulation fallback. Containers and systemd examples remain Linux targets.
 
+The GitHub-hosted runner matrix builds each executable on its native CPU:
+
+| Target | Runner |
+| --- | --- |
+| Linux x64 | `ubuntu-24.04` (Bookworm build container) |
+| Linux ARM64 | `ubuntu-24.04-arm` (Bookworm build container) |
+| macOS ARM64 | `macos-15` |
+| Windows x64 | `windows-2025` |
+| Windows ARM64 | `windows-11-arm` |
+
 PR validation produces executable/checksum/notice fragments for each target.
-The native distribution validation run combines all six fragments after every
+The native distribution validation run combines all five fragments after every
 build passes, uploading `native-release-candidate`. Download that bundle or the individual artifact matching the test machine's OS and CPU.
 These are candidate artifacts from the checked-out source; they are not an npm
 publication or a deployment. To build additional candidates without publication,
 once that workflow is available on main, run **Native macOS and Windows candidates**
-with `workflow_dispatch` and select the candidate branch. The existing separately approved release workflow publishes all six
+with `workflow_dispatch` and select the candidate branch. The existing separately approved release workflow publishes all five
 verified fragments from an exact committed version on main.
 
 ## Offline checks on each respective machine

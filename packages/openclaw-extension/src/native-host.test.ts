@@ -45,6 +45,7 @@ test("managed executable selection binds the host architecture while external mo
   assert.equal(nativeHostTarget("linux", "arm64").rustTarget, "aarch64-unknown-linux-gnu");
   assert.equal(nativeHostTarget("linux", "x64").rustTarget, "x86_64-unknown-linux-gnu");
   assert.equal(nativeHostTarget("darwin", "arm64").rustTarget, "aarch64-apple-darwin");
+  assert.throws(() => nativeHostTarget("darwin", "x64"), /unsupported host platform/);
   assert.equal(nativeHostTarget("win32", "arm64").rustTarget, "aarch64-pc-windows-msvc");
   assert.equal(nativeHostTarget("win32", "x64").executable, "wx.exe");
   assert.throws(() => nativeHostTarget("freebsd", "arm64"), /external mode/);

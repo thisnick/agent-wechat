@@ -48,6 +48,7 @@ test('platform matrix keeps OS and architecture distinct and only checks glibc o
   for (const target of supportedTargets) assert.deepEqual(targetFor({ ...target, glibc: target.platform === 'linux' ? '2.36' : null }), target);
   for (const glibc of [null, '2', '2.35']) assert.throws(() => targetFor({ platform: 'linux', arch: 'x64', glibc }), /glibc/);
   assert.throws(() => targetFor({ platform: 'freebsd', arch: 'x64' }), /Unsupported/);
+  assert.throws(() => targetFor({ platform: 'darwin', arch: 'x64' }), /Unsupported/);
   const windows = targetFor({ platform: 'win32', arch: 'arm64' });
   assert.match(assetName(version, windows), /win32-arm64\.exe$/);
   assert.match(installPath('/fixture', version, windows), /wx\.exe$/);
@@ -162,7 +163,7 @@ test('ordinary pushes skip native preparation after exact CLI version is publish
   await assert.rejects(nativePackageUnpublished({ root, fetchImpl: async () => ({ status: 503 }) }), /HTTP 503/);
 });
 
-test('publication requires both targets; an ARM manifest selects only the ARM bytes', async t => {
+test('publication requires every target; an ARM manifest selects only the ARM bytes', async t => {
   const { manifest } = await fixture(t);
   const arm = supportedTargets.find(target => target.arch === 'arm64');
   const x64 = supportedTargets.find(target => target.arch === 'x64');

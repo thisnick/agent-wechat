@@ -12,7 +12,6 @@ export const releaseRepository = 'thisnick/agent-wechat';
 export const supportedTargets = Object.freeze([
   Object.freeze({ platform: 'linux', arch: 'x64', libc: 'gnu', minimumGlibc: '2.36', rustTarget: 'x86_64-unknown-linux-gnu' }),
   Object.freeze({ platform: 'linux', arch: 'arm64', libc: 'gnu', minimumGlibc: '2.36', rustTarget: 'aarch64-unknown-linux-gnu' }),
-  Object.freeze({ platform: 'darwin', arch: 'x64', rustTarget: 'x86_64-apple-darwin' }),
   Object.freeze({ platform: 'darwin', arch: 'arm64', rustTarget: 'aarch64-apple-darwin' }),
   Object.freeze({ platform: 'win32', arch: 'x64', rustTarget: 'x86_64-pc-windows-msvc' }),
   Object.freeze({ platform: 'win32', arch: 'arm64', rustTarget: 'aarch64-pc-windows-msvc' }),
