@@ -87,11 +87,11 @@ const upstream = createServer(async (req, res) => {
       const toolResults = body.messages.filter(item => item.role === 'tool');
       if (role !== 'privileged') {
         assert.ok(!body.tools.some(tool => tool.function.name.startsWith('wechat_archive_')), 'Denied or unselected archive tool exposed directly');
-        if (stage === 1) assert.ok(!/"name"\s*:\s*"wechat_archive_/.test(JSON.stringify(toolResults.at(-1)?.content)), 'Archive tool appeared in discovery');
+        if (stage === 1) assert.ok(JSON.parse(toolResults.at(-1).content).every(tool => !tool.name.startsWith('wechat_archive_')), 'Archive tool appeared in discovery');
         if (stage >= 2) assert.match(JSON.stringify(toolResults.at(-1)?.content), /unknown|not found|unavailable|not available/i, 'Guessed archive name was not rejected');
       } else {
         assert.ok(body.tools.some(tool => tool.function.name === 'wechat_archive_media'), 'Granted media tool missing');
-        if (stage === 1) assert.ok(JSON.stringify(toolResults).includes('wechat_archive_search'), 'Granted search not discoverable');
+        if (stage === 1) assert.equal(JSON.parse(toolResults.at(-1).content)[0]?.name, 'wechat_archive_search', 'Granted search not discoverable');
         if (stage === 4) assert.ok(JSON.stringify(toolResults).includes('other@chatroom'), 'Cross-thread continuation did not reach provider');
         if (stage === 8) assert.ok(JSON.stringify(toolResults.at(-1)?.content).includes('outside the permitted conversation'), 'Default media tool widened for a privileged agent');
       }
@@ -147,7 +147,10 @@ try {
   assert.deepEqual(accesses.filter(access => access.kind === 'media').map(access => access.id), ['archive-image', 'archive-file']);
   const imageBlocks = requests.filter(request => request.role === 'privileged').flatMap(request => request.body.messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(block => block.type === 'image_url') : []));
   assert.ok(imageBlocks.some(block => createHash('sha256').update(Buffer.from(block.image_url.url.split(',')[1], 'base64')).digest('hex') === createHash('sha256').update(image).digest('hex')), 'Archive image bytes did not reach provider vision input');
-  assert.ok(JSON.stringify(requests.at(-1).body.messages).includes('archive-file'), 'Archive file path missing from provider input');
+  const fileResult = JSON.parse(requests.at(-1).body.messages.filter(message => message.role === 'tool').at(-1).content);
+  assert.equal(fileResult.messageId, 'archive-file'); assert.equal(fileResult.threadId, 'private-peer'); assert.equal(fileResult.status, 'ready');
+  assert.ok(fileResult.attachment.path.startsWith(join(temporary, 'state/media') + '/'), 'Archive file path must be in managed media storage');
+  assert.deepEqual(await readFile(fileResult.attachment.path), file, 'Provider file path must resolve to the verified attachment bytes');
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));
   console.log(JSON.stringify({ gatewayVersion: '2026.10.2', optionalToolsAbsentWithoutGrant: true, denyOverridesFullProfile: true, guessedArchiveCallsRejected: true,
     accountWideSearchAndPagination: true, otherSenderHistoryAndMedia: true, defaultToolsRemainCurrentThread: true, archiveImageHashReachedProvider: true, archiveFilePathReachedProvider: true }));
