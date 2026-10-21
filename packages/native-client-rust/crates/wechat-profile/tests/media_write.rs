@@ -420,7 +420,9 @@ fn jpeg_trailers_survive_official_image_writeback_and_readback() {
         .write_to(&mut output, image::ImageFormat::Jpeg)
         .unwrap();
     let mut bytes = output.into_inner();
-    bytes.extend_from_slice(b"synthetic-photo-trailer!");
+    let checksum = Md5::digest(&bytes);
+    bytes.extend_from_slice(&0x12345678u64.to_le_bytes());
+    bytes.extend_from_slice(&checksum);
     let mut message = row(3);
     message.fields.insert(
         "message_content".into(),

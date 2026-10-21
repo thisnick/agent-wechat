@@ -325,7 +325,9 @@ mod tests {
     #[test]
     fn jpeg_with_trailing_data_decodes_without_changing_source_bytes() {
         let mut bytes = jpeg();
-        bytes.extend_from_slice(b"synthetic-photo-trailer!");
+        let checksum = crate::crypto::md5(&bytes);
+        bytes.extend_from_slice(&0x12345678u64.to_le_bytes());
+        bytes.extend_from_slice(&checksum);
         let original = bytes.clone();
         let inspected = inspect_image(&bytes).unwrap();
         assert_eq!(inspected.content_type, "image/jpeg");
