@@ -564,15 +564,17 @@ mod tests {
         let unavailable_path = temp.path().join("unavailable-keys.json");
         unavailable.write_new(&unavailable_path).unwrap();
         core.store.set_keys_file("a", &unavailable_path).unwrap();
-        let error = core.catalog_page(
-            "a",
-            "messages",
-            Some("peer"),
-            &CatalogQuery {
-                cursor: Some(next["nextCursor"].as_str().unwrap().into()),
-                ..Default::default()
-            },
-        ).unwrap_err();
+        let error = core
+            .catalog_page(
+                "a",
+                "messages",
+                Some("peer"),
+                &CatalogQuery {
+                    cursor: Some(next["nextCursor"].as_str().unwrap().into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
         assert!(matches!(
             error.downcast_ref::<wechat_profile::ProfileError>(),
             Some(wechat_profile::ProfileError::KeyMismatch(_))
