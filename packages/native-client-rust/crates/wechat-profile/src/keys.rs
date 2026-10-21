@@ -290,9 +290,8 @@ impl KeyFile {
         );
         encoded.zeroize();
         output.push(b'\n');
-        let mut f = tempfile::NamedTempFile::new_in(parent)?;
+        let mut f = wechat_platform::private_tempfile_in(parent, ".wx-keys-")?;
         use std::io::Write;
-        wechat_platform::protect(f.as_file())?;
         f.write_all(&output)?;
         f.as_file().sync_all()?;
         f.persist_noclobber(path)

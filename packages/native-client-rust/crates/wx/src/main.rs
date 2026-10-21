@@ -585,10 +585,7 @@ fn private_output(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let temp = tempfile::Builder::new()
-        .prefix(".wx-output-")
-        .tempfile_in(parent)?;
-    wechat_platform::protect(temp.as_file())?;
+    let temp = wechat_platform::private_tempfile_in(parent, ".wx-output-")?;
     temp.as_file().write_all(bytes)?;
     temp.as_file().sync_all()?;
     temp.persist_noclobber(path)

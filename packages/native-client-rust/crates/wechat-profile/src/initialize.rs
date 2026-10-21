@@ -64,10 +64,7 @@ pub fn initialize_profile(
         return Err(ProfileError::InvalidProfile);
     }
     let parent = fs::canonicalize(parent)?;
-    let staging = tempfile::Builder::new()
-        .prefix(".profile-create-")
-        .tempdir_in(&parent)?
-        .keep();
+    let staging = wechat_platform::private_tempdir_in(&parent, ".profile-create-")?.keep();
     let root = staging.as_path();
     let mut keys = KeyFile::empty(name);
     let mut databases = vec![];
@@ -294,10 +291,7 @@ fn initialize_official_home_impl(
     if home.exists() && (!home.is_dir() || fs::read_dir(home)?.next().is_some()) {
         return Err(ProfileError::InvalidProfile);
     }
-    let stage = tempfile::Builder::new()
-        .prefix(".official-home-create-")
-        .tempdir_in(&parent)?
-        .keep();
+    let stage = wechat_platform::private_tempdir_in(&parent, ".official-home-create-")?.keep();
     let files = stage.join("xwechat_files");
     fs::create_dir(&files)?;
     let account_path = files.join(&account);

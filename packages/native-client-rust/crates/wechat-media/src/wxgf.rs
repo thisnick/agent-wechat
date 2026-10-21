@@ -226,8 +226,7 @@ fn wait_for_preview(child: &mut Child, output: &Path, timeout: Duration) -> Resu
 }
 
 fn decode_hevc(bytes: &[u8], program: &Path) -> Result<Vec<u8>> {
-    let directory = tempfile::Builder::new().prefix("wechat-wxgf-").tempdir()?;
-    wechat_platform::protect_path(directory.path(), true)?;
+    let directory = wechat_platform::private_tempdir("wechat-wxgf-")?;
     let input = directory.path().join("frame.hevc");
     let output = directory.path().join("preview.jpg");
     private_file(&input, bytes)?;
@@ -305,8 +304,7 @@ mod tests {
 
     #[test]
     fn decoder_files_are_private_and_never_overwrite_existing_input() {
-        let directory = tempfile::tempdir().unwrap();
-        wechat_platform::protect_path(directory.path(), true).unwrap();
+        let directory = wechat_platform::private_tempdir("wechat-wxgf-test-").unwrap();
         assert!(wechat_platform::private_path(directory.path()).unwrap());
         let input = directory.path().join("frame.hevc");
         private_file(&input, FIXTURE).unwrap();

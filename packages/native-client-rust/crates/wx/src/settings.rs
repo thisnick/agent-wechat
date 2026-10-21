@@ -150,8 +150,7 @@ impl File {
                 bail!("client config must be an owner-only regular file");
             }
         }
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        wechat_platform::protect(file.as_file())?;
+        let mut file = wechat_platform::private_tempfile_in(parent, ".wx-config-")?;
         file.write_all(toml::to_string_pretty(&self.settings)?.as_bytes())?;
         file.as_file().sync_all()?;
         file.persist(&self.path)?;

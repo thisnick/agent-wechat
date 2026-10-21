@@ -310,11 +310,15 @@ pub fn create_dir(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_dir(parent)?;
     }
+    match create_dir_new(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
+}
+pub fn create_dir_new(path: &Path) -> io::Result<()> {
     let descriptor = descriptor()?;
     let attributes = attributes(&descriptor);
-    if unsafe { CreateDirectoryW(wide(path)?.as_ptr(), &attributes) } == 0
-        && error().kind() != io::ErrorKind::AlreadyExists
-    {
+    if unsafe { CreateDirectoryW(wide(path)?.as_ptr(), &attributes) } == 0 {
         return Err(error());
     }
     Ok(())

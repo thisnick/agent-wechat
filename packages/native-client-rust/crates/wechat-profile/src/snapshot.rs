@@ -91,7 +91,7 @@ pub(crate) struct Snapshot {
     pub generation: String,
     pub inventory: Vec<DatabaseInventory>,
     pub paths: BTreeMap<String, PathBuf>,
-    _temp: tempfile::TempDir,
+    _temp: wechat_platform::PrivateTempDir,
 }
 
 fn relative(root: &Path, p: &Path) -> Result<String> {
@@ -214,9 +214,7 @@ impl Snapshot {
         {
             return Err(ProfileError::InvalidQuery);
         }
-        let temp = tempfile::Builder::new()
-            .prefix("agent-wechat-read-")
-            .tempdir()?;
+        let temp = wechat_platform::private_tempdir("agent-wechat-read-")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -449,9 +447,7 @@ pub fn keys_from_agent_cache(
     if pass.is_empty() || pass.contains('\0') {
         return Err(ProfileError::InvalidKeysFile);
     }
-    let temp = tempfile::Builder::new()
-        .prefix("agent-wechat-key-export-")
-        .tempdir()?;
+    let temp = wechat_platform::private_tempdir("agent-wechat-key-export-")?;
     let copied = temp.path().join("agent.db");
     let mut hashes = BTreeMap::new();
     let mut total = options.max_total_bytes;

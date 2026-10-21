@@ -281,9 +281,7 @@ impl Store {
         }
         let parent = target.parent().unwrap();
         private_dir(parent)?;
-        let stage = tempfile::Builder::new()
-            .prefix(".account-")
-            .tempdir_in(parent)?;
+        let stage = wechat_platform::private_tempdir_in(parent, ".account-")?;
         let manifest = copy::copy_profile(source, &stage.path().join("profile"), source_stopped)?;
         self.register(
             id,
@@ -298,7 +296,7 @@ impl Store {
         id: &str,
         mode: &str,
         profile: &Path,
-        staged: Option<(tempfile::TempDir, copy::Manifest)>,
+        staged: Option<(wechat_platform::PrivateTempDir, copy::Manifest)>,
         alias: Option<&str>,
     ) -> Result<Account> {
         let target = self.account_dir(id)?;
@@ -348,9 +346,7 @@ impl Store {
         let (stage, manifest) = match staged {
             Some((s, m)) => (s, Some(m)),
             None => (
-                tempfile::Builder::new()
-                    .prefix(".account-")
-                    .tempdir_in(parent)?,
+                wechat_platform::private_tempdir_in(parent, ".account-")?,
                 None,
             ),
         };

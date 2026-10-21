@@ -206,7 +206,7 @@ fn read_key_info(home: &Path, username: &str) -> Result<(Zeroizing<Vec<u8>>, Key
     if source.exists() {
         // Main/WAL/SHM form one caller-confirmed stopped generation. Opening only the
         // copied files avoids changes to source SHM reader lock metadata.
-        let temp = tempfile::tempdir()?;
+        let temp = wechat_platform::private_tempdir("wechat-key-info-")?;
         for suffix in ["", "-wal", "-shm"] {
             let path = format!("{relative}{suffix}");
             match crate::media::read_cache(home, Path::new(&path), 16 * 1024 * 1024) {
@@ -327,7 +327,7 @@ pub fn publish_legacy_key_info(
     if !matches {
         return Err(ProfileError::SourceChanged);
     }
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    let mut staged = wechat_platform::private_tempfile_in(parent, ".wx-login-")?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     if old.is_none() {
@@ -469,7 +469,7 @@ pub fn plan_saved_key_info(
     let database = home.join(&relative);
     let database_present = fs::symlink_metadata(&database).is_ok();
     let expected_selection_sha256 = if database_present {
-        let temp = tempfile::tempdir()?;
+        let temp = wechat_platform::private_tempdir("wechat-key-info-")?;
         for suffix in ["", "-wal", "-shm"] {
             match crate::media::read_cache(
                 &home,

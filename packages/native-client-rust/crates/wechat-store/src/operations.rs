@@ -164,9 +164,7 @@ impl Store {
         let target = self.account_dir(id)?;
         let parent = target.parent().unwrap();
         private_dir(parent)?;
-        let stage = tempfile::Builder::new()
-            .prefix(".account-")
-            .tempdir_in(parent)?;
+        let stage = wechat_platform::private_tempdir_in(parent, ".account-")?;
         private_dir(&stage.path().join("profile"))?;
         self.register(
             id,

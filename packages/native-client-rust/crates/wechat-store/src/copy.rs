@@ -207,14 +207,12 @@ fn copy_inner(
     }
     let _lease = crate::profile_lease(&source)?;
     let before = inventory_inner(&source, official_home)?;
-    let stage = tempfile::Builder::new()
-        .prefix(".wx-copy-")
-        .tempdir_in(&parent)?;
+    let stage = wechat_platform::private_tempdir_in(&parent, ".wx-copy-")?;
     for entry in &before.entries {
         let target = stage.path().join(&entry.path);
         match entry.kind.as_str() {
             "directory" => {
-                fs::create_dir(&target)?;
+                wechat_platform::private_dir(&target)?;
             }
             "file" => {
                 let input = wechat_platform::OpenOptions::new()

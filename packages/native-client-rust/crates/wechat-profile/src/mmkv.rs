@@ -481,7 +481,7 @@ fn safe_pair_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
 fn replace_mmkv_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let parent = path.parent().ok_or(ProfileError::InvalidQuery)?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    let mut staged = wechat_platform::private_tempfile_in(parent, ".wx-mmkv-")?;
     staged.write_all(bytes)?;
     staged.as_file().sync_all()?;
     staged
@@ -679,7 +679,7 @@ pub fn publish_mmkv_create(
     let meta_exists = exists_exact(&meta, staged.metadata())?;
     fn create(path: &Path, bytes: &[u8]) -> Result<()> {
         let parent = path.parent().ok_or(ProfileError::InvalidQuery)?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut temp = wechat_platform::private_tempfile_in(parent, ".wx-mmkv-")?;
         temp.write_all(bytes)?;
         temp.as_file().sync_all()?;
         temp.persist_noclobber(path)

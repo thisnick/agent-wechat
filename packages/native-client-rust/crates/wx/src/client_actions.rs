@@ -164,8 +164,7 @@ pub async fn wait_resource(r: &Remote, mut value: Value, kind: &str, wait: u64) 
 }
 pub(super) fn write_replace(path: &Path, value: &Value) -> Result<()> {
     let parent = path.parent().context("invalid receipt path")?;
-    let mut output = tempfile::NamedTempFile::new_in(parent)?;
-    wechat_platform::protect(output.as_file())?;
+    let mut output = wechat_platform::private_tempfile_in(parent, ".wx-receipt-")?;
     output.write_all(&serde_json::to_vec(value)?)?;
     output.as_file().sync_all()?;
     output.persist(path)?;

@@ -272,8 +272,7 @@ pub(super) fn publish_routing(
         }
         let parent = safe_parent(home, &entry.relative, true)?;
         let path = home.join(&entry.relative);
-        let mut staged = tempfile::NamedTempFile::new_in(&parent)?;
-        wechat_platform::protect(staged.as_file())?;
+        let mut staged = wechat_platform::private_tempfile_in(&parent, ".wx-network-")?;
         staged.write_all(&entry.after)?;
         staged.as_file().sync_all()?;
         guard()?;

@@ -833,7 +833,7 @@ pub fn publish_cache_file(
         return Err(ProfileError::SourceChanged);
     }
     use std::io::Write;
-    let mut f = tempfile::NamedTempFile::new_in(parent)?;
+    let mut f = wechat_platform::private_tempfile_in(parent, ".wx-media-")?;
     f.write_all(bytes)?;
     f.as_file().sync_all()?;
     f.persist_noclobber(&target)

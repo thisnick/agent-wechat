@@ -189,6 +189,69 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// A randomly named scratch directory, owned by this user from creation.
+/// Windows' default temporary-directory owner can be Administrators when elevated.
+pub struct PrivateTempDir {
+    path: std::path::PathBuf,
+}
+impl PrivateTempDir {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn keep(mut self) -> std::path::PathBuf {
+        std::mem::take(&mut self.path)
+    }
+}
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        if !self.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+pub fn private_tempdir(prefix: &str) -> io::Result<PrivateTempDir> {
+    private_tempdir_in(&std::env::temp_dir(), prefix)
+}
+pub fn private_tempdir_in(parent: &Path, prefix: &str) -> io::Result<PrivateTempDir> {
+    let temporary = tempfile::Builder::new()
+        .prefix(prefix)
+        .rand_bytes(16)
+        .make_in(parent, |path| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().mode(0o700).create(path)?;
+            }
+            #[cfg(windows)]
+            windows::create_dir_new(path)?;
+            let directory = PrivateTempDir { path: path.into() };
+            if !private_path(path)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "scratch directory must be private and owned",
+                ));
+            }
+            Ok(directory)
+        })?;
+    let (directory, mut path) = temporary.into_parts();
+    // PrivateTempDir owns recursive cleanup; TempPath only removes files.
+    path.disable_cleanup(true);
+    Ok(directory)
+}
+pub fn private_tempfile_in(parent: &Path, prefix: &str) -> io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .rand_bytes(16)
+        .make_in(parent, |path| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+        })
+}
 /// Windows has no directory fsync equivalent; files are flushed before publication.
 pub fn sync_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
@@ -374,6 +437,29 @@ pub fn sync_file(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn scratch_ownership_cleanup_and_no_overwrite_persistence() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory_path;
+        {
+            let directory = private_tempdir_in(parent.path(), "private scratch ").unwrap();
+            directory_path = directory.path().to_owned();
+            assert!(private_path(directory.path()).unwrap());
+            let mut file = private_tempfile_in(directory.path(), ".private-").unwrap();
+            assert!(private_path(file.path()).unwrap());
+            file.write_all(b"synthetic data").unwrap();
+            let destination = directory.path().join("saved");
+            file.persist_noclobber(&destination).unwrap();
+            assert!(private_path(&destination).unwrap());
+            let another = private_tempfile_in(directory.path(), ".private-").unwrap();
+            assert!(another.persist_noclobber(&destination).is_err());
+            assert_eq!(std::fs::read(destination).unwrap(), b"synthetic data");
+        }
+        assert!(!directory_path.exists());
+        let kept = private_tempdir_in(parent.path(), "kept-").unwrap().keep();
+        assert!(private_path(&kept).unwrap());
+        std::fs::remove_dir(kept).unwrap();
+    }
     #[test]
     fn private_creation_and_no_overwrite_publication() {
         let temp = tempfile::tempdir().unwrap();
