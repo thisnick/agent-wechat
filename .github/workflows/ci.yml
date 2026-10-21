@@ -12,6 +12,8 @@ on:
       - 'tsconfig.json'
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
+      - '.github/workflows/native-release.yml'
+      - 'scripts/native-release-notes*.mjs'
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
 
@@ -30,6 +32,8 @@ jobs:
           filters: |
             release:
               - '.github/workflows/release.yml'
+              - '.github/workflows/native-release.yml'
+              - 'scripts/native-release-notes*.mjs'
               - 'scripts/install-ci-npm.sh'
               - 'scripts/verify-ci-publisher*.mjs'
             ts:
@@ -63,6 +67,7 @@ jobs:
       - run: |
           test "$(npm --version)" = "11.12.1"
           node --test scripts/verify-ci-publisher.test.mjs
+          node --test scripts/native-release-notes.test.mjs
           node scripts/verify-ci-publisher.mjs
 
   ts:

@@ -38,6 +38,12 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/native-release-preflight.mjs
+      - name: Validate versioned Changesets notes before building
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          node --test scripts/native-release-notes.test.mjs
+          node scripts/native-release-notes.mjs --output artifacts/release-notes.md
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
@@ -71,6 +77,10 @@ jobs:
         run: |
           node --test scripts/native-merge-release.test.mjs
           node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-x64 artifacts/fragments/native-release-arm64
+      - name: Render release notes from versioned package changelogs
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node scripts/native-release-notes.mjs --output artifacts/release-notes.md
       - uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-path: artifacts/native/*
@@ -85,7 +95,10 @@ jobs:
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
           fi
           node scripts/native-release-preflight.mjs
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes "Validated native Linux x64 and ARM64 GNU assets. npm publication and deployment are separate steps."
+          if gh release view "$TAG" --json body --jq .body > artifacts/existing-release-notes.md; then
+            node scripts/native-release-notes.mjs --existing artifacts/existing-release-notes.md --output artifacts/release-notes.md
+            gh release edit "$TAG" --notes-file artifacts/release-notes.md
+          else
+            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes-file artifacts/release-notes.md
           fi
           gh release upload "$TAG" artifacts/native/*

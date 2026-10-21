@@ -1,6 +1,6 @@
 # OpenClaw WeChat channel
 
-The plugin uses the standalone native daemon. Install/provision `wx` separately; plugin installation/startup never downloads or repairs a binary. Choose managed hosting for an owned local daemon or external hosting for an independently operated daemon. Old container API configurations require explicit migration.
+The plugin uses the standalone native daemon. External mode connects by endpoint/token to an independently operated daemon, including a native server container; the Gateway needs neither `wx` nor Docker tools. Managed mode starts an owned local daemon and requires a separately installed `wx`. Plugin installation/startup never downloads or repairs a binary. Old container API configurations require explicit migration.
 
 ## Native external mode
 

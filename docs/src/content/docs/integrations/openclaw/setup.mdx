@@ -3,13 +3,13 @@ title: OpenClaw Setup
 description: Install the plugin and choose a native daemon owner.
 ---
 
-Install the published plugin and a matching native `wx` separately:
+Install the published plugin:
 
 ```bash
 openclaw plugins install @agent-wechat/agent-wechat
 ```
 
-The plugin never installs/repairs an executable. Provision the native daemon's account/profile first with the [quick start](/getting-started/quickstart/). Choose external hosting when the daemon already has an owner, or managed hosting for a local child owned by OpenClaw. One configured channel maps to one selected daemon account. Sender and group policy defaults remain disabled.
+In **external mode**, the plugin connects by endpoint/token to an independently operated daemon, including a native server container. The Gateway needs neither `wx` nor Docker tools and may run on another OS. In **managed mode**, install a matching native `wx` on the Gateway host so OpenClaw can start its own local child. The plugin never installs/repairs an executable. Provision the native daemon's account/profile first with the [quick start](/getting-started/quickstart/). One configured channel maps to one selected daemon account. Sender and group policy defaults remain disabled.
 
 ## Native external mode
 
