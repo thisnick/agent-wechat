@@ -15,16 +15,24 @@ const { build } = createRequire(join(root, 'packages/openclaw-extension/package.
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
 assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.2');
 const temporary = await mkdtemp(join(tmpdir(), 'native-history-model-'));
-const requests = [], queries = [], reads = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0;
+const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0;
 const token = 'synthetic-native-token-'.repeat(3), assets = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-for (const [id, file, kind, mime] of [['image-a','native-model.png','image','image/png'], ['image-b','native-model-large.png','image','image/png'], ['dm-image','native-model.png','image','image/png'], ['image-file','native-model.png','file','image/png'], ['video','native-model.mp4','video','video/mp4'], ['voice',null,'voice','audio/wav'], ['file',null,'file','text/plain'], ['pending-image','native-model.png','image','image/png']]) {
+for (const [id, file, kind, mime] of [['image-a','native-model.png','image','image/png'], ['image-b','native-model-large.png','image','image/png'], ['dm-image','native-model.png','image','image/png'], ['image-file','native-model.png','file','image/png'], ['video','native-model.mp4','video','video/mp4'], ['voice',null,'voice','audio/wav'], ['file',null,'file','text/plain'], ['pending-image','native-model.png','image','image/png'], ['history-image','native-model.png','image','image/png'], ['history-file',null,'file','text/plain']]) {
   let bytes;
   if (file) bytes = await readFile(join(root, 'packages/openclaw-extension/test/fixtures', file));
   else if (kind === 'voice') { bytes = Buffer.alloc(44 + 3200); bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8); bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22); bytes.writeUInt32LE(16000, 24); bytes.writeUInt32LE(32000, 28); bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(3200, 40); }
   else bytes = Buffer.from('Synthetic stored attachment body');
-  assets.set(id, { bytes, asset: { id: `asset-${id}`, accountId: 'a', messageId: id, kind, variant: kind === 'image' ? 'original' : 'normal', actualVariant: kind === 'image' ? 'original' : 'normal', state: id === 'pending-image' ? 'pending' : 'available', contentType: mime, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), filename: `${id}.${mime.split('/')[1]}`, officialWriteback: 'complete', retryable: false } });
+  assets.set(id, { bytes, asset: { id: `asset-${id}`, accountId: 'a', messageId: id, kind, variant: kind === 'image' ? 'original' : 'normal', actualVariant: kind === 'image' ? 'original' : 'normal', state: ['pending-image','history-image'].includes(id) ? 'pending' : 'available', contentType: mime, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), filename: `${id}.${mime.split('/')[1]}`, officialWriteback: 'complete', retryable: false } });
 }
+const toolSteps = [
+  ['tool_search', { query:'wechat_search search stored WeChat conversation messages', limit:4 }],
+  ['tool_call', { id:'wechat_search', args:{ query:'earlier-project-note', limit:2 } }],
+  ['tool_call', { id:'wechat_search', args:{ query:'earlier-project-note', limit:2, cursor:'older-matches' } }],
+  ['wechat_media', { messageId:'foreign-image' }],
+  ['wechat_media', { messageId:'history-image' }],
+  ['wechat_media', { messageId:'history-file', download:false }],
+];
 const upstream = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://fixture');
@@ -37,31 +45,39 @@ const upstream = createServer(async (req, res) => {
     if (url.pathname === '/v1/accounts/a/threads/room%40chatroom/messages') {
       assert.equal(url.searchParams.get('query'), 'earlier-project-note'); queries.push(Object.fromEntries(url.searchParams));
       const id = url.searchParams.has('cursor') ? 'older-page-2' : 'stored-before-buffer';
-      return json({ items: [{ id, accountId: 'a', threadId: 'room@chatroom', senderId: 'u1', serverId: '9007199254740999', direction: 'incoming', type: 1, body: `earlier-project-note: ${id}`, version: 'v1', media: [] }], nextCursor: id === 'older-page-2' ? null : 'older-matches', sourceGeneration: 'fixture', coverage: { history: 'partial' } });
+      const attachmentId = id === 'stored-before-buffer' ? 'history-image' : 'history-file';
+      return json({ items: [{ id, accountId: 'a', threadId: 'room@chatroom', senderId: 'u1', serverId: '9007199254740999', direction: 'incoming', type: 1, body: `earlier-project-note: ${id}`, version: 'v1', media: [] },
+        { id:attachmentId, accountId:'a', threadId:'room@chatroom', senderId:'u1', direction:'incoming', type:attachmentId==='history-image'?3:49, body:'<private transport XML>', version:'v1', media:[] }], nextCursor: id === 'older-page-2' ? null : 'older-matches', sourceGeneration: 'fixture', coverage: { history: 'partial' } });
     }
+    const lookup = /^\/v1\/accounts\/a\/messages\/(history-image|history-file|foreign-image)$/.exec(url.pathname);
+    if (lookup) { lookups.push(lookup[1]); return json({id:lookup[1],accountId:'a',threadId:lookup[1]==='foreign-image'?'private-peer':'room@chatroom',senderId:'u1',direction:'incoming',type:lookup[1]==='history-file'?49:3,body:'<private transport XML>',version:'v1',media:[]}); }
     const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
-    if (media) return json({ items: [assets.get(media[1]).asset] });
+    if (media) { assert.notEqual(media[1],'foreign-image','Foreign conversation must be rejected before attachment access'); return json({ items: [assets.get(media[1]).asset] }); }
     const content = /^\/v1\/accounts\/a\/media\/asset-([^/]+)\/content$/.exec(url.pathname);
     if (content) { const value = assets.get(content[1]); res.setHeader('content-type', value.asset.contentType); res.end(value.bytes); return; }
     let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 8 * 1024 * 1024); }
-    if (url.pathname.endsWith('/media-transfers')) return json({ id: 'pending-job', state: 'queued' });
+    if (url.pathname.endsWith('/media-transfers')) {
+      if(url.pathname.includes('/history-image/')) { transfers.push(JSON.parse(raw)); assets.get('history-image').asset.state='available'; return json({id:'history-transfer',accountId:'a',kind:'download',state:'available',retryable:false}); }
+      assert.ok(url.pathname.includes('/pending-image/'),'Only authorized missing media may request a transfer'); return json({ id: 'pending-job', state: 'queued' });
+    }
     if (url.pathname.endsWith('/read-state')) { reads.push(url.pathname); return json({ phoneNotification: {state:'accepted'} }); }
     if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'fixture-send', state: 'accepted' });
     if (url.pathname === '/model/v1/chat/completions') {
       const body = JSON.parse(raw); requests.push(body);
-      const requestedTool = modelStep === 0 ? 'tool_search' : 'tool_call';
-      if (modelStep < 3) assert.ok(body.tools.some(tool => tool.function.name === requestedTool), `${requestedTool} missing from real Gateway catalog`);
+      const [requestedTool, args] = toolSteps[modelStep] ?? [];
+      if (requestedTool) assert.ok(body.tools.some(tool => tool.function.name === requestedTool), `${requestedTool} missing from real Gateway catalog`);
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const chunk = (delta, finish_reason) => `data: ${JSON.stringify({ id: `fixture-${requests.length}`, object: 'chat.completion.chunk', created: 1, model: 'fixture-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
-      if (modelStep < 3) {
+      if (requestedTool) {
         if (modelStep === 1) assert.ok(JSON.stringify(body.messages.filter(message=>message.role==='tool')).includes('wechat_search'), 'Stored-history tool missing from discovery results');
         if (modelStep === 2) assert.ok(JSON.stringify(body.messages).includes('stored-before-buffer'), 'Search result missing from the next provider request');
-        const args = modelStep === 0 ? {query:'wechat_search search stored WeChat conversation messages',limit:4}
-          : { id:'wechat_search', args:{query:'earlier-project-note',limit:2,...(modelStep === 2 ? {cursor:'older-matches'} : {})} };
+        if (modelStep === 3) assert.ok(JSON.stringify(body.messages).includes('older-page-2'), 'Continuation result missing from provider request');
+        if (modelStep === 4) assert.ok(JSON.stringify(body.messages).includes('outside the permitted conversation'), 'Foreign message lookup was not rejected');
+        if (modelStep === 5) assert.ok(JSON.stringify(body.messages).includes('history-image.png'), 'Downloaded image result missing from provider request');
         res.write(chunk({ role:'assistant', tool_calls:[{ index:0, id:`fixture-search-${modelStep++}`, type:'function', function:{ name:requestedTool, arguments:JSON.stringify(args) } }] }, null));
         res.write(chunk({}, 'tool_calls'));
       } else {
-        if (modelStep === 3) assert.ok(JSON.stringify(body.messages).includes('older-page-2'), 'Continuation result missing from provider request');
+        if (modelStep === toolSteps.length) assert.ok(JSON.stringify(body.messages).includes('history-file.plain'), 'Cached file result missing from provider request');
         modelStep++; res.write(chunk({role:'assistant',content:'Located the stored project notes and attachment paths.'}, null)); res.write(chunk({}, 'stop'));
       }
       res.end('data: [DONE]\n\n'); return;
@@ -88,19 +104,22 @@ try {
   let result;
   for(let attempt=0;attempt<900;attempt++){if(fixtureError)break;if(child.exitCode!==null||child.signalCode)throw Error(`Gateway exited: ${log}`);try{result=JSON.parse(await readFile(join(temporary,'result.json'),'utf8'));break;}catch{await sleep(100);}}
   const evidence=process.env.NATIVE_HISTORY_PROOF_DIR;
-  if(evidence){await mkdir(evidence,{recursive:true,mode:0o700});await writeFile(join(evidence,'observations.json'),JSON.stringify({result,requests,queries,reads,log}),{mode:0o600});}
+  if(evidence){await mkdir(evidence,{recursive:true,mode:0o700});await writeFile(join(evidence,'observations.json'),JSON.stringify({result,requests,queries,reads,transfers,lookups,log}),{mode:0o600});}
   assert.ifError(fixtureError); assert.ok(result,`Gateway deadline: ${log}`); assert.equal(result.error,undefined,`${result.error}; ${log}`);
   for(const scenario of scenarios)assert.equal(result.outcomes[scenario.id],['trigger','dm-image'].includes(scenario.id)?'completed':'ignored');
-  assert.equal(requests.length,5); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,2);
+  assert.equal(requests.length,8); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,2);
+  assert.deepEqual(lookups,['foreign-image','history-image','history-file']);assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
   const group=result.contexts.find(ctx=>ctx.MessageSid==='wechat-native:a:trigger'),direct=result.contexts.find(ctx=>ctx.MessageSid==='wechat-native:a:dm-image');
   assert.equal(group.Attachments.length,6);assert.equal(group.InboundHistory.length,8);assert.match(group.BodyForAgent,/pending/);assert.match(group.BodyForAgent,/historical voice transcript/);assert.equal(group.WasMentioned,true);
   for(const attachment of group.Attachments)assert.ok(JSON.stringify(requests[0].messages).includes(attachment.path),`Missing group ${attachment.kind} path`);
   const trigger=result.items.find(item=>item.message.id==='trigger'),selected=trigger.dispatchManifest.assets.find(asset=>asset.role==='model_image');assert.equal(selected.messageId,'image-b');assert.equal(selected.contextRole,'history');assert.notEqual(selected.sha256,selected.sourceSha256);assert.equal(group.MediaPath,selected.path);
   const images=request=>request.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='image_url'):[]);
   assert.equal(images(requests[0]).length,1);const image=/^data:([^;]+);base64,(.+)$/.exec(images(requests[0])[0].image_url.url);assert.equal(createHash('sha256').update(Buffer.from(image[2],'base64')).digest('hex'),selected.sha256);
-  assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(requests[4].messages).includes(direct.Attachments[0].path));assert.equal(images(requests[4]).length,1);
+  assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(requests[7].messages).includes(direct.Attachments[0].path));assert.equal(images(requests[7]).length,1);
+  assert.equal(images(requests[5]).length,2);const retrieved=/^data:([^;]+);base64,(.+)$/.exec(images(requests[5])[1].image_url.url);assert.ok(retrieved);assert.equal(createHash('sha256').update(Buffer.from(retrieved[2],'base64')).digest('hex'),assets.get('history-image').asset.sha256);
+  const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
-  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,conversationAccess:false,reads:reads.length}));
+  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   for(const stream of streams)stream.destroy();await new Promise(resolve=>upstream.close(resolve));upstream.closeAllConnections();await rm(temporary,{recursive:true,force:true});
