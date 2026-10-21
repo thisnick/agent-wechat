@@ -27,8 +27,19 @@ if [ -e "$ASSET" ] || [ -e "$OUT/wx-v$VERSION-checksums.json" ]; then
 fi
 # Build the release in Bookworm (glibc 2.36), not against ubuntu-latest's
 # newer libc. Only source enters the builder; no account paths are mounted.
-BUILDER_TAG="agent-wechat-native-release-build:local-${COMMIT:0:12}-$$"
-docker build --platform "$PLATFORM" --target builder -f deploy/native/Dockerfile -t "$BUILDER_TAG" .
+BUILDER_TAG=${NATIVE_RELEASE_BUILDER_IMAGE:-"agent-wechat-native-release-build:local-${COMMIT:0:12}-$$"}
+if [ -n "${NATIVE_RELEASE_BUILDER_IMAGE:-}" ]; then
+  # CI supplies its cached, tested builder. Refuse artifacts from another commit
+  # or architecture before attaching the current source identity to them.
+  REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$BUILDER_TAG")
+  IMAGE_PLATFORM=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$BUILDER_TAG")
+  if [ "$REVISION" != "$COMMIT" ] || [ "$IMAGE_PLATFORM" != "$PLATFORM" ]; then
+    echo 'Release builder must match the current commit and native platform.' >&2
+    exit 1
+  fi
+else
+  docker build --platform "$PLATFORM" --target builder -f deploy/native/Dockerfile -t "$BUILDER_TAG" .
+fi
 CONTAINER=$(docker create "$BUILDER_TAG")
 trap 'docker rm "$CONTAINER" >/dev/null' EXIT
 BINARY="$OUT/.wx-local-build-$$"

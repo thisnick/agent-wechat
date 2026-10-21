@@ -33,6 +33,8 @@ jobs:
         with:
           node-version: 24
       - uses: pnpm/action-setup@v4
+      - uses: docker/setup-buildx-action@v4.4.1
+        id: buildx
       - name: Require an unpublished CLI version and exact source tag
         env:
           RELEASE_VERSION: ${{ inputs.version }}
@@ -50,7 +52,22 @@ jobs:
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - run: pnpm --filter @agent-wechat/cli test
+      - name: Build and test the native release executable
+        uses: docker/build-push-action@v7.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: deploy/native/Dockerfile
+          target: builder
+          platforms: ${{ matrix.arch == 'x64' && 'linux/amd64' || 'linux/arm64' }}
+          load: true
+          tags: native-release-builder:ci
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
       - run: bash scripts/native-build-release.sh
+        env:
+          NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
       - run: node scripts/native-package-smoke.mjs artifacts/native
       - uses: actions/upload-artifact@v4
         with:

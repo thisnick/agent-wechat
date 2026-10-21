@@ -1,10 +1,22 @@
 # syntax=docker/dockerfile:1
 # Standalone native runtime: no official client, desktop, X11, VNC or ptrace tools.
 # Build on a native x64 or ARM64 worker (CI runs each architecture separately).
-FROM rust:1.93.1-bookworm AS builder
+FROM rust:1.93.1-bookworm AS chef
+RUN cargo install cargo-chef --version 0.1.77 --locked
 WORKDIR /build
-COPY packages/native-client-rust/ ./
 ENV CARGO_BUILD_JOBS=4
+
+FROM chef AS planner
+COPY packages/native-client-rust/ ./
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+# Exportable dependency layers survive source changes and fresh CI workers.
+# Match both profiles used below; no source or host target cache is imported.
+RUN cargo chef cook --workspace --tests --profile test --locked --recipe-path recipe.json
+RUN cargo chef cook --workspace --release --locked --recipe-path recipe.json
+COPY packages/native-client-rust/ ./
 RUN cargo test --workspace --locked \
     && cargo build --release --locked
 

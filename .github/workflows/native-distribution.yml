@@ -30,6 +30,26 @@ on:
 permissions:
   contents: read
 jobs:
+  openclaw-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - run: node scripts/native-gateway-smoke.mjs
+      - run: node scripts/native-model-smoke.mjs
+      - run: node scripts/native-media-model-smoke.mjs
+
   package:
     strategy:
       fail-fast: false
@@ -45,13 +65,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - uses: pnpm/action-setup@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
+          cache: pnpm
+      - uses: docker/setup-buildx-action@v4.4.1
+        id: buildx
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli... build
       - run: pnpm --filter @agent-wechat/cli test
@@ -59,11 +79,23 @@ jobs:
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - run: pnpm --filter @agent-wechat/agent-wechat typecheck
       - run: pnpm --filter @agent-wechat/agent-wechat test
-      - run: node scripts/native-gateway-smoke.mjs
-      - run: node scripts/native-model-smoke.mjs
-      - run: node scripts/native-media-model-smoke.mjs
       - run: node --test scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
+      - run: python3 scripts/native-build-release.test.py
+      - name: Build and test the native release executable
+        uses: docker/build-push-action@v7.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: deploy/native/Dockerfile
+          target: builder
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: native-release-builder:ci
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
       - run: bash scripts/native-build-release.sh
+        env:
+          NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
       - run: node scripts/native-package-smoke.mjs artifacts/native
       - name: Validate actual CLI lifecycle and account selection without a native login
         run: |
@@ -76,7 +108,16 @@ jobs:
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           node --experimental-strip-types scripts/native-openclaw-smoke.mjs "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Build standalone image without publishing or starting a service
-        run: docker build --platform ${{ matrix.platform }} -f deploy/native/Dockerfile -t agent-wechat-native:ci .
+        uses: docker/build-push-action@v7.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          file: deploy/native/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: agent-wechat-native:ci
+          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
       - name: Check image identity without touching account data
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
       - run: python3 scripts/native-container-smoke.py agent-wechat-native:ci
@@ -94,7 +135,7 @@ jobs:
           if-no-files-found: error
 
   matrix-manifest:
-    needs: package
+    needs: [package, openclaw-smoke]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

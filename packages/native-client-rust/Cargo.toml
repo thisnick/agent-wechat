@@ -25,3 +25,8 @@ openssl = { version = "0.10", features = ["vendored"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 zeroize = "1"
+
+# Encrypted-profile fixtures retain production KDF parameters. Optimize their
+# cryptographic work while keeping the test profile's debug assertions/checks.
+[profile.test]
+opt-level = 1
