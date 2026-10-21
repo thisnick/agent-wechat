@@ -17,6 +17,46 @@ fn event(tx: &rusqlite::Transaction<'_>, intent: &SendIntent) -> Result<()> {
     Ok(())
 }
 impl Store {
+    /// Admit one protected read notification while atomically checking logout.
+    /// An existing receipt must never be replaced by a fresh submission.
+    pub fn begin_read_notification(
+        &self,
+        account: &str,
+        key: &str,
+        encrypted: &[u8],
+        expected_logout_epoch: Option<&[u8]>,
+    ) -> Result<()> {
+        let hash = key
+            .strip_prefix("thread-read-notification:")
+            .context("invalid read notification key")?;
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!("invalid read notification key");
+        }
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let logged_out: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime WHERE key='logged-out')",
+                [],
+                |row| row.get(0),
+            )?;
+            let epoch: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT value FROM runtime WHERE key='logout-epoch'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if logged_out || epoch.as_deref() != expected_logout_epoch {
+                bail!("auth_required");
+            }
+            tx.execute(
+                "INSERT INTO runtime(key,value)VALUES(?1,?2)",
+                params![key, encrypted],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
     /// Retire the read recovery intent only together with its public event.
     pub fn finish_read_projection(
         &self,
@@ -106,6 +146,36 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn read_notification_admission_preserves_existing_receipts_and_logout_fences() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        store.create_account("a").unwrap();
+        let key = format!("thread-read-notification:{}", "a".repeat(64));
+        store
+            .begin_read_notification("a", &key, b"first", None)
+            .unwrap();
+        assert!(store
+            .begin_read_notification("a", &key, b"duplicate", None)
+            .is_err());
+        assert_eq!(store.runtime("a", &key).unwrap().unwrap(), b"first");
+        store.clear_runtime("a", &key).unwrap();
+        store.put_runtime("a", "logout-epoch", b"newer").unwrap();
+        assert!(store
+            .begin_read_notification("a", &key, b"stale", None)
+            .is_err());
+        assert!(store.runtime("a", &key).unwrap().is_none());
+        store.put_runtime("a", "logged-out", b"newer").unwrap();
+        assert!(store
+            .begin_read_notification("a", &key, b"late", Some(b"newer"))
+            .is_err());
+        assert!(store.runtime("a", &key).unwrap().is_none());
+        store.clear_runtime("a", "logged-out").unwrap();
+        store
+            .begin_read_notification("a", &key, b"fresh", Some(b"newer"))
+            .unwrap();
+        assert_eq!(store.runtime("a", &key).unwrap().unwrap(), b"fresh");
+    }
     #[test]
     fn read_completion_keeps_intent_until_event_commit_and_replay_is_exactly_once() {
         let temp = tempfile::tempdir().unwrap();

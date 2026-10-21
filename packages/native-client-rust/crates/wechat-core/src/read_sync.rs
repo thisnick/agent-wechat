@@ -274,17 +274,8 @@ impl Core {
         let cipher = self
             .vault
             .seal(account, &key, &serde_json::to_vec(&receipt)?)?;
-        self.store.control(account, |database| {
-            let tx = database.transaction()?;
-            let logged_out: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key='logged-out')", [], |row| row.get(0))?;
-            let current_epoch: Vec<u8> = tx.query_row("SELECT COALESCE((SELECT value FROM runtime WHERE key='logout-epoch'),CAST('' AS BLOB))", [], |row| row.get(0))?;
-            if logged_out || current_epoch.as_slice() != epoch.as_deref().unwrap_or_default() {
-                bail!("auth_required");
-            }
-            tx.execute("INSERT INTO runtime(key,value)VALUES(?1,?2)", (&key, &cipher))?;
-            tx.commit()?;
-            Ok(())
-        })?;
+        self.store
+            .begin_read_notification(account, &key, &cipher, epoch.as_deref())?;
         let outcome = remote(&mut state, &receipt.notification);
         // A successful service response is still retained if a concurrent
         // logout forbids publishing the resulting authorization cookie.
