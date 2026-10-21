@@ -15,7 +15,7 @@ export function collectWeChatStatusIssues(
     if (snapshot.handoffUnconfirmed) {
       issues.push({ channel: "agent-wechat", accountId: snapshot.accountId, kind: "runtime",
         message: "Prepared model handoff was not confirmed by this OpenClaw host; automatic read state remains unchanged.",
-        fix: "Use a compatible prepared-run SDK hook, or select native.readPolicy=never while retaining explicit local read control." });
+        fix: "Select native.readPolicy=on_inbound to mark successfully handled conversations read without model hooks, or use a compatible prepared-run SDK hook." });
     }
     if ((snapshot.needsReview ?? 0) > 0) {
       issues.push({ channel: "agent-wechat", accountId: snapshot.accountId, kind: "runtime",

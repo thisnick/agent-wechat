@@ -16,7 +16,7 @@ export function nativeWasMentioned(message: NativeMessage): boolean {
   return message.mentions?.state === "known" && message.mentions.self === true;
 }
 export async function projectNativeRead(client: NativeWeChatClient, accountId: string, state: NativeConsumerState): Promise<void> {
-  const pending = state.items().filter(value => value.readPending && value.runId);
+  const pending = state.items().filter(value => value.readPending);
   const threads = [...new Set(pending.map(item => item.message.threadId))];
   for (const threadId of threads) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -51,6 +51,7 @@ export async function dispatchNativeMessage(params: {
   onDelivered?: () => void;
 }): Promise<"ignored" | "completed" | "needs_review" | "pending"> {
   const { client, state, account, message, cfg, core } = params;
+  const readPolicy = account.native?.readPolicy ?? "on_inbound";
   const custody = state.get(message.id);
   if (!custody || custody.state !== "received") return "needs_review";
   if (custody.origin !== "live" || message.direction !== "incoming" || ![1,3,34,43,47,49].includes(message.type) || (message.type === 1 && !message.body) || !message.senderId) {
@@ -103,8 +104,9 @@ export async function dispatchNativeMessage(params: {
   const dispatchManifest = nativeDispatchManifest({ message, inputBody, sessionKey: route.sessionKey,
     agentId: route.agentId, channelAccountId: account.accountId, policy, assets: preparedMedia.suppliedAssets ?? [] });
   state.update(message.id, { state: "dispatching", dispatchManifest });
-  const callback = message.type === 1 || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length)
-    ? state.preparedCallback([message.id], account.native?.readPolicy ?? "on_model_dispatch") : undefined;
+  const callback = readPolicy !== "on_inbound"
+    && (message.type === 1 || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length))
+    ? state.preparedCallback([message.id], readPolicy) : undefined;
   if (callback) trackNativePreparedInput(dispatchManifest, callback);
   let failed = false; let delivery = 0;
   try {
@@ -124,8 +126,13 @@ export async function dispatchNativeMessage(params: {
       // and media-snapshot bridge; unsupported or ambiguous handoffs leave reads unchanged.
       replyOptions: { runId: dispatchManifest.runId, onModelSelected, onPreparedAgentRunStart: callback },
     });
-    const prepared = Boolean(state.get(message.id)?.runId);
-    state.update(message.id, { state: failed ? "needs_review" : "completed", handoffUnconfirmed: !prepared });
+    // Normal inbound completion includes commands handled without a model.
+    // Persist the read with completion so a restart can retry it independently
+    // of model hooks, conversation history and incoming event traffic.
+    const readPending = readPolicy === "on_inbound" && !failed && ingress.ingress.admission === "dispatch"
+      ? true : state.get(message.id)?.readPending;
+    state.update(message.id, { state: failed ? "needs_review" : "completed", readPending,
+      handoffUnconfirmed: readPolicy === "on_model_dispatch" && !state.get(message.id)?.runId });
     return failed ? "needs_review" : "completed";
   } catch {
     state.update(message.id, { state: "needs_review" }); return "needs_review";
@@ -151,7 +158,10 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
   const core = getWeChatRuntime();
   let backoff = 250;
   let readTask: Promise<void> | undefined;
-  const flushRead = () => readTask ??= projectNativeRead(host.client, native.accountId, state).finally(() => { readTask = undefined; });
+  const flushRead = () => {
+    if (native.readPolicy === "never") return Promise.resolve();
+    return readTask ??= projectNativeRead(host.client, native.accountId, state).finally(() => { readTask = undefined; });
+  };
   const process = async () => {
     const cfg = core.config.current();
     const account = resolveWeChatAccount(cfg as Record<string, unknown>, opts.account.accountId) ?? opts.account;
@@ -161,21 +171,21 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
         onDelivered: () => opts.setStatus({ accountId: account.accountId, lastOutboundAt: Date.now() }) });
     }
     try { await flushRead(); }
-    catch { opts.log?.error?.("Native read projection is pending; prepared thread receipt retained for retry"); }
+    catch { opts.log?.error?.("Native read projection is pending; thread read receipt retained for retry"); }
     const needsReview = state.items().filter(value => value.state === "needs_review" || value.phoneReadState === "needs_review" || value.phoneReadState === "rejected").length;
-    const handoffUnconfirmed = native.readPolicy !== "never" && state.items().some(value => value.handoffUnconfirmed);
+    const handoffUnconfirmed = native.readPolicy === "on_model_dispatch" && state.items().some(value => value.handoffUnconfirmed);
     const accountStatus = await host.client.account(native.accountId);
     opts.setStatus({ accountId: account.accountId, running: true, connected: true,
       linked: accountStatus.authenticated === true && accountStatus.connection === "online", needsReview, handoffUnconfirmed });
   };
   await process();
-  // Media confirmation can arrive after the dispatcher settles. Retry only
-  // durable whole-thread reads while an otherwise quiet SSE stream remains open.
+  // Retry durable whole-thread reads while an otherwise quiet SSE stream
+  // remains open, including late confirmations from the explicit model policy.
   const stopReadPump = startNativeReadPump(async () => {
     await flushRead();
     if (!opts.abortSignal.aborted) opts.setStatus({ accountId: opts.account.accountId,
-      handoffUnconfirmed: native.readPolicy !== "never" && state.items().some(value => value.handoffUnconfirmed) });
-  }, () => opts.log?.error?.("Native read projection remains pending; prepared thread receipts retained"));
+      handoffUnconfirmed: native.readPolicy === "on_model_dispatch" && state.items().some(value => value.handoffUnconfirmed) });
+  }, () => opts.log?.error?.("Native read projection remains pending; thread read receipts retained"));
   try { while (!opts.abortSignal.aborted) {
     try {
       // A prior ACK failure must not leave durable received items idle while an

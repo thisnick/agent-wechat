@@ -44,7 +44,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (content) { const value = assets.get(content[1]); res.setHeader('content-type', value.asset.contentType); res.end(content[1] === 'corrupt-image' ? Buffer.from('wrong') : value.bytes); return; }
       let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 4 * 1024 * 1024); }
       if (url.pathname.endsWith('/media-transfers')) return json({ id: 'pending-job', state: 'queued' });
-      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/read-state`) { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending&&item.runId).map(item=>item.message.id); reads.push(triggers); if (triggers.includes('file') && reads.filter(ids => ids.includes('file')).length === 1) { res.statusCode = 503; return json({error:{code:'fixture_lost_response'}}); } return json({}); }
+      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/read-state`) { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending).map(item=>item.message.id); reads.push(triggers); if (triggers.includes('file') && reads.filter(ids => ids.includes('file')).length === 1) { res.statusCode = 503; return json({error:{code:'fixture_lost_response'}}); } return json({}); }
       if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'synthetic-send', state: 'accepted' });
       if (url.pathname === '/model/v1/chat/completions') {
         assert.equal(req.headers.authorization, 'Bearer synthetic-model-key');
@@ -102,14 +102,20 @@ console.log('Synthetic local transcript');
       const destination = join(evidence, name + '-' + Date.now()); await mkdir(destination, { recursive: true, mode: 0o700 });
       await writeFile(join(destination, 'observations.json'), JSON.stringify({ result, requests, hooks, reads, transcriptions }), { mode: 0o600 });
     }
-    const eligible = conversationAccess && readPolicy !== 'never' && name !== 'text-only';
+    const inbound = readPolicy === 'on_inbound';
+    const eligible = inbound || conversationAccess && readPolicy !== 'never' && name !== 'text-only';
     for (const { id } of scenarios) {
       const item = items.get(id); assert.ok(item);
-      if (['pending-image','corrupt-image','expired-image'].includes(id)) { assert.equal(item.runId, undefined); assert.ok(!reads.flat().includes(id)); continue; }
+      if (['pending-image','corrupt-image','expired-image'].includes(id)) {
+        assert.equal(item.runId, undefined);
+        assert.equal(reads.flat().includes(id), inbound && id === 'expired-image');
+        continue;
+      }
       const asset = item.manifest.assets[0]; assert.ok(asset); assert.equal(item.manifest.newInputs[0].version,'v1');
       assert.equal(item.manifest.newInputs[0].role,'trigger'); assert.equal(item.manifest.manifestSha256.length,64);
       assert.equal(createHash('sha256').update(await readFile(asset.path)).digest('hex'),asset.sha256);
-      if (conversationAccess && name !== 'text-only') { assert.equal(item.runId,item.manifest.runId); assert.equal(item.handoffUnconfirmed,false); }
+      if (inbound) { assert.equal(item.runId,undefined); assert.equal(item.handoffUnconfirmed,false); }
+      else if (conversationAccess && name !== 'text-only') { assert.equal(item.runId,item.manifest.runId); assert.equal(item.handoffUnconfirmed,false); }
       else { assert.equal(item.runId,undefined); assert.equal(item.handoffUnconfirmed,true); }
       assert.equal(reads.flat().includes(id),eligible);
       const request = requests.find(request => JSON.stringify(request.messages.at(-1)).includes(`wechat-native:a:${id}`)); assert.ok(request);
@@ -132,7 +138,7 @@ console.log('Synthetic local transcript');
     for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });
   }
 }
-const phases = [['media',true,'on_model_dispatch'],['text-only',true,'on_model_dispatch'],['missing-grant',false,'on_model_dispatch'],['never-read',true,'never'],['group',true,'on_model_dispatch']];
+const phases = [['inbound',false,'on_inbound'],['media',true,'on_model_dispatch'],['text-only',true,'on_model_dispatch'],['missing-grant',false,'on_model_dispatch'],['never-read',true,'never'],['group',true,'on_model_dispatch']];
 for (const [name, access, policy] of phases) if (!process.argv[2] || process.argv[2] === name) await exercise(name, access, policy);
 assert.ok(!process.argv[2] || phases.some(phase=>phase[0]===process.argv[2]),'Unknown phase');
 console.log('All models, media, tokens and messages were synthetic local fixtures; no WeChat or external provider was used.');

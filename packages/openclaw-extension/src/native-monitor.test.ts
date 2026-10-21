@@ -1,16 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeApiError, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
 import { NativeConsumerState } from "./native-consumer-state.ts";
 import { dispatchNativeMessage, nativeWasMentioned, projectNativeRead, startNativeReadPump } from "./native-monitor.ts";
-import { resolveWeChatAccount } from "./types.ts";
-function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?: string } = {}) {
+import { resolveWeChatAccount, type WeChatNativeConfig } from "./types.ts";
+function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?: string; readPolicy?: WeChatNativeConfig["readPolicy"] } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-model-harness-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
   const cfg: any = { channels: { "agent-wechat": { backend: "native", dmPolicy: "open", allowFrom: ["*"], groupPolicy: "open", groupAllowFrom: ["*"],
-    native: { mode: "external", endpoint: "http://127.0.0.1:6174", accountId: "a", token: "synthetic-native-token-".repeat(3), consumerStateDir: directory } } } };
+    native: { mode: "external", endpoint: "http://127.0.0.1:6174", accountId: "a", token: "synthetic-native-token-".repeat(3), consumerStateDir: directory, readPolicy: options.readPolicy } } } };
   const account = resolveWeChatAccount(cfg)!;
   const state = new NativeConsumerState(directory, "s", "a");
   const message: NativeMessage = { id: "m1", accountId: "a", threadId: options.group ? "r@chatroom" : "u", senderId: "u", serverId: "9007199254740999", type: 1, direction: "incoming", body: "fixture", createdAt: "2026-10-20T12:00:00Z", version: "1", media: [], mentions: { state: options.mention ? "known" : "unknown", userIds: [], self: options.mention ?? null, all: null, source: null } };
@@ -23,7 +23,7 @@ function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?:
     routing: { resolveAgentRoute: () => ({ agentId: "main", sessionKey: "test", accountId: "default" }) },
     session: { resolveStorePath: () => "/unused", recordInboundSession: async () => {} },
     reply: { resolveEnvelopeFormatOptions: () => ({}), formatAgentEnvelope: ({ body }: any) => body, finalizeInboundContext: (ctx: any) => ctx,
-      dispatchReplyWithBufferedBlockDispatcher: async (params: any) => { runs.push(params); params.replyOptions.onPreparedAgentRunStart("run_1"); } },
+      dispatchReplyWithBufferedBlockDispatcher: async (params: any) => { runs.push(params); params.replyOptions.onPreparedAgentRunStart?.("run_1"); } },
   } };
   const client = { sendText: async () => ({ id: "send_1", state: "accepted" }) } as unknown as NativeWeChatClient;
   return { cfg, account, state, message, core, client, runs, createPipeline: (() => ({ onModelSelected: () => {} })) as any };
@@ -37,7 +37,7 @@ test("group mention gate runs before model dispatch and leaves ignored messages 
   assert.equal(value.runs.length, 0); assert.equal(value.state.get("m1")?.readPending, undefined);
 });
 test("prepared model harness records exact input custody and read projection separately", async t => {
-  const value = fixture(t); assert.equal(await dispatchNativeMessage(value), "completed");
+  const value = fixture(t, { readPolicy: "on_model_dispatch" }); assert.equal(await dispatchNativeMessage(value), "completed");
   assert.equal(value.runs.length, 1); assert.equal(value.state.get("m1")?.runId, "run_1"); assert.equal(value.state.get("m1")?.readPending, true);
   assert.equal(value.runs[0].ctx.MessageSid, "wechat-native:a:m1");
 });
@@ -45,16 +45,76 @@ test("catchup/import messages are not new automatic model turns or read projecti
   for (const origin of ["catchup", "import", "unknown"]) { const value = fixture(t, { origin }); assert.equal(await dispatchNativeMessage(value), "ignored"); assert.equal(value.runs.length, 0); }
 });
 test("released SDK missing prepared hook leaves read unchanged and records uncertainty", async t => {
-  const value = fixture(t); value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async () => {};
+  const value = fixture(t, { readPolicy: "on_model_dispatch" }); value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async () => {};
   assert.equal(await dispatchNativeMessage(value), "completed"); assert.equal(value.state.get("m1")?.readPending, undefined); assert.equal(value.state.get("m1")?.handoffUnconfirmed, true);
 });
+test("default inbound read is durable after normal handling without any model callback", async t => {
+  const value = fixture(t);
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+    assert.equal(params.replyOptions.onPreparedAgentRunStart, undefined);
+    assert.equal(value.state.get("m1")?.readPending, undefined);
+    value.runs.push(params);
+  };
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  const reopened = new NativeConsumerState(dirname(value.state.file), "s", "a");
+  assert.equal(reopened.get("m1")?.readPending, true);
+  assert.equal(reopened.get("m1")?.runId, undefined);
+  assert.equal(reopened.get("m1")?.handoffUnconfirmed, false);
+  let requests = 0;
+  value.client.threads = async () => ({ items: [{ id: "u", readStateVersion: "1" } as any], nextCursor: null, sourceGeneration: "g", coverage: {} });
+  value.client.markRead = async () => { requests++; return { phoneNotification: { state: "accepted" } }; };
+  await projectNativeRead(value.client, "a", reopened);
+  await projectNativeRead(value.client, "a", reopened);
+  assert.equal(reopened.get("m1")?.readPending, false);
+  assert.equal(reopened.get("m1")?.phoneReadState, "accepted");
+  assert.equal(await dispatchNativeMessage({ ...value, state: reopened }), "needs_review");
+  assert.equal(requests, 1); assert.equal(value.runs.length, 1);
+});
+test("inbound commands queue a thread read without starting a model", async t => {
+  const value = fixture(t, { readPolicy: "on_inbound" }); value.message.body = "/status";
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+    assert.equal(params.ctx.CommandBody, "/status");
+    assert.equal(params.replyOptions.onPreparedAgentRunStart, undefined);
+  };
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  assert.equal(value.state.get("m1")?.readPending, true);
+  assert.equal(value.state.get("m1")?.runId, undefined);
+});
+test("never policy does not queue an inbound read", async t => {
+  const value = fixture(t, { readPolicy: "never" });
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async () => {};
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  assert.equal(value.state.get("m1")?.readPending, undefined);
+  assert.equal(value.state.get("m1")?.handoffUnconfirmed, false);
+});
+test("failed or interrupted inbound handling stays unread without automatic replay", async t => {
+  for (const throws of [false, true]) {
+    const value = fixture(t);
+    value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+      value.runs.push(params);
+      if (throws) throw Error("fixture handler failure");
+      params.dispatcherOptions.onError();
+    };
+    assert.equal(await dispatchNativeMessage(value), "needs_review");
+    assert.equal(value.state.get("m1")?.readPending, undefined);
+    assert.equal(await dispatchNativeMessage(value), "needs_review");
+    assert.equal(value.runs.length, 1);
+  }
+});
+test("a command rejected by access checks does not gain an inbound read from its denial reply", async t => {
+  const value = fixture(t);
+  value.core.channel.inbound.ingress.resolveStable = async () => ({ ingress: { admission: "skip", reasonCode: "control_command_unauthorized" }, activationAccess: {}, commandAccess: { authorized: false } });
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  assert.equal(value.runs.length, 1);
+  assert.equal(value.state.get("m1")?.readPending, undefined);
+});
 test("failure after prepared handoff retains read receipt and prevents model replay", async t => {
-  const value = fixture(t); value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => { params.replyOptions.onPreparedAgentRunStart("run_1"); throw new Error("provider failed after handoff"); };
+  const value = fixture(t, { readPolicy: "on_model_dispatch" }); value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => { params.replyOptions.onPreparedAgentRunStart("run_1"); throw new Error("provider failed after handoff"); };
   assert.equal(await dispatchNativeMessage(value), "needs_review"); assert.equal(value.state.get("m1")?.readPending, true);
   assert.equal(await dispatchNativeMessage(value), "needs_review");
 });
 test("queued native reply waits for accepted without submitting a second send", async t => {
-  const value = fixture(t); let submissions = 0; let inspections = 0;
+  const value = fixture(t, { readPolicy: "on_model_dispatch" }); let submissions = 0; let inspections = 0;
   value.client.sendText = async () => { submissions++; return { id: "send_1", state: "queued" } as any; };
   value.client.send = async (_account, sendId, signal) => {
     assert.equal(sendId, "send_1"); assert.equal(signal?.aborted, false);
@@ -67,7 +127,7 @@ test("queued native reply waits for accepted without submitting a second send", 
   assert.equal(submissions, 1); assert.equal(inspections, 2); assert.equal(value.state.get("m1")?.state, "completed");
 });
 test("queued native reply ending needs_review retains uncertainty without resend", async t => {
-  const value = fixture(t); let submissions = 0; let inspections = 0;
+  const value = fixture(t, { readPolicy: "on_model_dispatch" }); let submissions = 0; let inspections = 0;
   value.client.sendText = async () => { submissions++; return { id: "send_1", state: "queued" } as any; };
   value.client.send = async () => { inspections++; return { id: "send_1", state: "needs_review" } as any; };
   value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
@@ -113,7 +173,7 @@ test("pending native media keeps dispatch custody without model or read receipt"
   assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'image pending',pending:true})}),'pending');assert.equal(value.runs.length,0);assert.equal(value.state.get('m1')?.state,'received');assert.equal(value.state.get('m1')?.readPending,undefined);
 });
 test("verified native media path is included in the correlated prepared model input",async t=>{
-  const value=fixture(t);value.message.type=3;value.message.body='<private transport XML>';
+  const value=fixture(t,{readPolicy:"on_model_dispatch"});value.message.type=3;value.message.body='<private transport XML>';
   assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'<media:image>',pending:false,mediaPath:'/managed/fixture.png',mediaMime:'image/png',attachment:{kind:'image',status:'ready',filename:'fixture.png',path:'/managed/fixture.png',mime:'image/png'},suppliedAssets:[{id:"asset",sha256:"0".repeat(64),byteLength:10,mime:"image/png",path:"/managed/fixture.png",role:"model_image",kind:"image",runtimeMedia:true,contextRole:"trigger"}]} )}),'completed');
   assert.equal(value.runs[0].ctx.MediaPath,'/managed/fixture.png');assert.equal(value.runs[0].ctx.BodyForAgent,'<media:image>');assert.equal(value.state.get('m1')?.readPending,true);assert.equal(value.state.get('m1')?.runId,'run_1');
 });

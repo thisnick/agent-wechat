@@ -25,12 +25,14 @@ Configure plugin defaults under `plugins.entries.agent-wechat.config` (or the sa
     "endpoint": "http://127.0.0.1:6174",
     "token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" },
     "consumerStateDir": "/private/openclaw-native-consumer",
-    "readPolicy": "on_model_dispatch"
+    "readPolicy": "on_inbound"
   }
 }
 ```
 
 The external service remains independently owned. Plugin stop closes its stream and never stops/logs out the daemon or cancels its sends. Remote endpoints require verified HTTPS or an encrypted tunnel terminating at loopback. Set `AGENT_WECHAT_TOKEN` in the Gateway process environment, or use a configured OpenClaw secret provider. The plugin resolves `native.token` through the pinned OpenClaw SDK; `native.tokenFile` is removed. Tokens contain 32–1024 printable ASCII bytes without spaces. An explicit unresolved reference fails startup without falling back to another token. The API token needs read/media/send/login for the selected account, plus read-state only when automatic whole-thread read marking is enabled; do not grant admin solely to run the plugin. Normal sender/DM/group/mention policy remains in `channels.agent-wechat`; defaults remain closed.
+
+`on_inbound` is the default read policy and needs no conversation-access permission. If upgrading a configuration that explicitly selected `on_model_dispatch`, change it to `on_inbound` to clear threads after normal inbound handling, including built-in commands. A newly handled message clears earlier unread messages in the same thread; changing the policy does not automatically mark unrelated historical conversations read.
 
 ## Native managed mode
 

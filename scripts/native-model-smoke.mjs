@@ -30,7 +30,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (url.pathname === '/v1/accounts/a/threads') return json({ items: [{ id: 'u1', readStateVersion: '1' }], nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
       if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
       let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 4 * 1024 * 1024); }
-      if (url.pathname === '/v1/accounts/a/threads/u1/read-state') { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending&&item.runId).map(item=>item.message.id); reads.push(triggers); return json({}); }
+      if (url.pathname === '/v1/accounts/a/threads/u1/read-state') { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending).map(item=>item.message.id); reads.push(triggers); return json({}); }
       if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'synthetic-send', state: 'accepted' });
       if (url.pathname === '/model/v1/chat/completions') {
         assert.equal(req.headers.authorization, 'Bearer synthetic-model-key');
@@ -71,28 +71,39 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
     const items = new Map(result.items.map(item => [item.id, item]));
     const hooks = (await readFile(join(temporary, 'hooks.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
     assert.ok(requests.some(request => JSON.stringify(request.messages).includes('wechat-native:a:single') && JSON.stringify(request.messages).includes('native-model-single-exact-input')));
-    assert.equal(items.get('gap').readPending, undefined); assert.equal(items.get('command').readPending, undefined);
-    assert.ok(!reads.flat().includes('gap') && !reads.flat().includes('command'));
-    if (conversationAccess) {
+    const inbound = readPolicy === undefined || readPolicy === 'on_inbound';
+    assert.equal(items.get('gap').readPending, undefined);
+    assert.ok(!reads.flat().includes('gap'));
+    if (inbound) {
+      for (const id of ['single', 'blocking', 'queued-a', 'queued-b', 'command']) {
+        assert.equal(items.get(id).runId, undefined);
+        assert.equal(items.get(id).handoffUnconfirmed, false);
+        assert.equal(items.get(id).readPending, false);
+        assert.ok(reads.flat().includes(id));
+      }
+      assert.ok(!requests.some(request => JSON.stringify(request.messages.at(-1)).includes('wechat-native:a:command')),
+        'The built-in command must gain a read without invoking a model');
+    } else if (conversationAccess) {
       const single = items.get('single'); assert.equal(single.runId, single.manifest.runId); assert.equal(single.handoffUnconfirmed, false);
       if (readPolicy === 'never') assert.equal(reads.length, 0); else assert.ok(reads.flat().includes('single'));
       if (dmScope === 'per-channel-peer') assert.equal(single.manifest.sessionKey, 'agent:main:agent-wechat:direct:u1');
       const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === single.runId); assert.ok(input); assert.equal(input.ctx.channel, 'agent-wechat'); assert.equal(input.ctx.sessionKey, single.manifest.sessionKey);
       assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === single.runId && hook.event.sessionId === input.event.sessionId));
     } else { assert.equal(reads.length, 0); assert.equal(items.get('single').handoffUnconfirmed, true); }
+    if (!inbound) { assert.equal(items.get('command').readPending, undefined); assert.ok(!reads.flat().includes('command')); }
     // The released dispatch path can serialize concurrent inputs even in
     // collect mode. Check what actually reached it rather than assuming merge.
     const merged = hooks.some(hook => hook.kind === 'llm_input' && hook.event.prompt.includes('native-model-queued-alpha') && hook.event.prompt.includes('native-model-queued-beta'));
     for (const [id, body] of [['blocking', 'native-model-blocking-input'], ['queued-a', 'native-model-queued-alpha'], ['queued-b', 'native-model-queued-beta']]) {
       const item = items.get(id);
       const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.manifest.runId);
-      if (conversationAccess && readPolicy !== 'never' && input?.event.prompt.includes(body) && !merged) {
+      if (!inbound && conversationAccess && readPolicy !== 'never' && input?.event.prompt.includes(body) && !merged) {
         assert.equal(item.runId, item.manifest.runId); assert.equal(item.handoffUnconfirmed, false); assert.ok(reads.flat().includes(id));
       }
-      if (merged && id.startsWith('queued-')) assert.ok(!reads.flat().includes(id));
+      if (!inbound && merged && id.startsWith('queued-')) assert.ok(!reads.flat().includes(id));
     }
     const inputBodies = new Map([['single', 'native-model-single-exact-input'], ['blocking', 'native-model-blocking-input'], ['queued-a', 'native-model-queued-alpha'], ['queued-b', 'native-model-queued-beta']]);
-    for (const id of reads.flat()) {
+    for (const id of inbound ? [] : reads.flat()) {
       const item = items.get(id); const body = inputBodies.get(id); assert.ok(item && body);
       const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.runId); assert.ok(input);
       assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === item.runId && hook.event.sessionId === input.event.sessionId));
@@ -101,14 +112,13 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
         return JSON.stringify(users.at(-1)).includes(`wechat-native:a:${id}`) && JSON.stringify(users.at(-2)).includes(body);
       }), `Exact current input missing at local provider for ${id}`);
     }
-    console.log(`Pinned model boundary ${name} passed: actual input/run correlation, whole-thread reads, concurrent turns, command gaps; merged=${merged}.`);
+    console.log(`Pinned inbound/model boundary ${name} passed: whole-thread reads, concurrent turns and command policy; merged=${merged}.`);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
     for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });
   }
 }
-await exercise('permitted', true, 'on_model_dispatch');
-await exercise('missing-grant', false, 'on_model_dispatch');
-await exercise('never-read', true, 'never');
-await exercise('per-peer', true, 'on_model_dispatch', 'per-channel-peer');
+const phases = [['inbound', false, undefined], ['permitted', true, 'on_model_dispatch'], ['missing-grant', false, 'on_model_dispatch'], ['never-read', true, 'never'], ['per-peer', true, 'on_model_dispatch', 'per-channel-peer']];
+assert.ok(!process.argv[2] || phases.some(phase => phase[0] === process.argv[2]), 'Unknown phase');
+for (const [name, access, policy, dmScope] of phases) if (!process.argv[2] || process.argv[2] === name) await exercise(name, access, policy, dmScope);
 console.log('No external provider, account credentials, native login or WeChat send was used.');

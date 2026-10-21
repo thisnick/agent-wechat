@@ -12,7 +12,7 @@ export const nativeConfigSchema = {
         provider: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,63}$" },
         id: { type: "string", minLength: 1 },
       } }] }, consumerStateDir: { type: "string" },
-    readPolicy: { type: "string", enum: ["never", "on_model_dispatch"] },
+    readPolicy: { type: "string", enum: ["never", "on_inbound", "on_model_dispatch"] },
     gatewayFacade: { type: "object", additionalProperties: false, required: ["enabled"], properties: { enabled: { type: "boolean" }, prefix: { type: "string" } } },
   },
 };

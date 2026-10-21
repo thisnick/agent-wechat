@@ -95,6 +95,7 @@
             "type": "string",
             "enum": [
               "never",
+              "on_inbound",
               "on_model_dispatch"
             ]
           },
@@ -274,6 +275,7 @@
                 "type": "string",
                 "enum": [
                   "never",
+                  "on_inbound",
                   "on_model_dispatch"
                 ]
               },

@@ -24,7 +24,8 @@ const plugin: {
     const selected = resolveWeChatAccount(api.config as unknown as Record<string, unknown>);
     api.registerChannel({ plugin: wechatPlugin });
     const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
-    const stopPreparedBoundary = registerNativePreparedBoundary(api);
+    const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
+      ? registerNativePreparedBoundary(api) : () => {};
     api.registerService({
       id: "agent-wechat-native",
       reload: { configPrefixes: ["plugins.entries.agent-wechat.config", "channels.agent-wechat", "secrets"] },

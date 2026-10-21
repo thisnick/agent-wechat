@@ -21,7 +21,7 @@ export type WeChatNativeConfig = {
   listen?: string;
   token: SecretInput;
   consumerStateDir: string;
-  readPolicy?: "never" | "on_model_dispatch";
+  readPolicy?: "never" | "on_inbound" | "on_model_dispatch";
   gatewayFacade?: { enabled: boolean; prefix?: string };
 };
 
