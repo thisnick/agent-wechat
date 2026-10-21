@@ -30,7 +30,10 @@ wx daemon stop
 store identity and generation, and persists a protected process record. It
 refuses occupied listeners and never adopts another daemon. `daemon stop`
 signals only that verified process, releases locks and keeps login trust/history.
-It does not submit native logout. Use either this manager, systemd, Compose or
+It does not submit native logout. `serve --token-stdin` accepts a bounded API
+token through a private pipe without creating a token file; it cannot be
+combined with `--token-file` or a configured `tokenFile`. OpenClaw managed mode
+uses this foreground-only startup option. Use either this manager, systemd, Compose or
 OpenClaw ownership for one process; do not nest owners.
 
 ```bash
@@ -66,7 +69,10 @@ wx auth login --official=/absolute/path/to/profile
 
 The path and automatic discovery refer to the **daemon host**. Discovery checks
 its HOME for a single Linux profile; missing or multiple profiles require an
-explicit path. Preparing the profile creates/selects a daemon account, binds its
+explicit path. macOS/Windows profile compatibility is unverified; an explicit
+path does not convert their formats or grant OS permissions. See the public
+[migration guide](../../docs/src/content/docs/getting-started/migration.mdx) for
+platform paths and the separate copy/import workflow. Preparing the profile creates/selects a daemon account, binds its
 stored identity and takes ownership without copying data or importing an active
 session. No separate key export or identity-binding command is required. Saved
 trust is tried when usable; QR remains available when trust is absent/rejected.

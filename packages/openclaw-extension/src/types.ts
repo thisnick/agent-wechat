@@ -1,3 +1,6 @@
+import type { SecretInput } from "openclaw/plugin-sdk/secret-input";
+import { bindNativeSecretContext } from "./native-secrets.ts";
+
 export type WeChatDmPolicy = "allowlist" | "open" | "disabled";
 export type WeChatGroupPolicy = "open" | "disabled" | "allowlist";
 
@@ -16,7 +19,7 @@ export type WeChatNativeConfig = {
   serverConfig?: string;
   dataDir?: string;
   listen?: string;
-  tokenFile: string;
+  token: SecretInput;
   consumerStateDir: string;
   readPolicy?: "never" | "on_model_dispatch";
   gatewayFacade?: { enabled: boolean; prefix?: string };
@@ -74,10 +77,12 @@ export function resolveWeChatAccount(
   const plugin = (cfg as any)?.plugins?.entries?.["agent-wechat"]?.config as Partial<WeChatConfig> | undefined;
   const requested = wechat?.backend ?? plugin?.backend;
   if ((requested && requested !== "native") || (wechat && ("serverUrl" in wechat || "token" in wechat))) {
-    throw new Error("The official-client container backend has been removed. Configure channels.agent-wechat.native with a managed or external native daemon and a tokenFile; preserve the stopped official profile for takeover.");
+    throw new Error("The official-client container backend has been removed. Configure channels.agent-wechat.native with a managed or external native daemon and a token reference; preserve the stopped official profile for takeover.");
   }
-  const native = wechat?.native ?? plugin?.native;
-  if (!native) return null;
+  const selectedNative = wechat?.native ?? plugin?.native;
+  if (!selectedNative) return null;
+  const native = bindNativeSecretContext(selectedNative, cfg, wechat?.native
+    ? "channels.agent-wechat.native" : "plugins.entries.agent-wechat.config.native");
   const serverUrl = native.mode === "external" ? native.endpoint ?? "" : `http://${native.listen ?? "127.0.0.1:6174"}`;
   if (!serverUrl) return null;
 

@@ -7,6 +7,22 @@ The previous setup required a Docker container running both the official WeChat 
 
 This is a major release. The old UI server/image, `wx-legacy`, and Wechaty puppet/gateway integrations are retired from the new distribution. Existing containers, images, volumes and published older versions are preserved. Marking the historical public puppet package deprecated in npm is a separate release-administration step.
 
+## Profile paths and platform compatibility
+
+The current daemon and writable profile integration support **Linux x64/ARM64 and the validated Linux profile family**. The CLI does not ship a macOS or Windows executable. OpenClaw on another OS can connect in external mode to a supported Linux daemon.
+
+| Official installation | Location / selection | Current takeover status |
+| --- | --- | --- |
+| Linux | Bare `--official` searches the daemon user's HOME for `xwechat_files`; an explicit path can select a complete HOME, `xwechat_files`, or its active account directory | Supported for the validated layout; account and every encrypted database must pass admission |
+| macOS | Observed location: `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/` | Path recorded; database, saved-login, encryption and write compatibility are unverified |
+| Windows | Read the configured data location in WeChat; do not assume a fixed drive or user Documents path | Discovery and profile takeover are unverified |
+
+The macOS folder's visible `all_users` and account (`wxid_…`) directories resemble Linux's shared/account split. Inside a compatible account directory, `db_storage` holds databases and separate directories hold media. This top-level resemblance is not a schema/version or saved-device compatibility check. Names such as `Backup` and `old_backup` do not establish that a directory is a complete, consistent operating profile.
+
+That macOS location is an application data directory; pointing to it does **not** request a copy. `--official` always attaches in place on the **daemon host**. A Linux container cannot resolve a macOS host path until the operator makes it available at a container mount path, and mounting or copying it does not convert the format. Protected macOS files also require the host application's OS permission; the daemon does not grant or bypass that permission.
+
+Copying a stopped, complete profile into a separate working directory is a separate, explicit choice. Existing experimental copy/import commands preserve bytes; they do not translate macOS/Windows databases, re-create saved trust, or validate cross-platform takeover. macOS-to-Linux import and writeback must be tested on a preserved copy before support can be claimed. The current migration instructions below apply to a supported **Linux** source profile, including the old official-client container.
+
 ## What changes
 
 | Existing setup | Native setup |
@@ -16,7 +32,7 @@ This is a major release. The old UI server/image, `wx-legacy`, and Wechaty puppe
 | Official HOME/profile lives in a bind mount or named volume | Keep using that stopped profile in place, or use a complete stopped copy |
 | Agent database contains old server sessions, keys and job metadata | New `dataDir` holds native registry, protected credentials, journals and jobs separately |
 | `wx up/down`, UI screenshots, chat selection and VNC | `wx serve`, `wx daemon start/status/stop`, native history and message operations |
-| OpenClaw uses `serverUrl` and inline `token` | OpenClaw uses `native` managed/external hosting and a private `tokenFile` |
+| OpenClaw uses `serverUrl` and inline `token` | OpenClaw uses `native` managed/external hosting and an environment/SecretRef token |
 | Read local history through the running official app's files | Read supported official files through native snapshots; continue supported writes directly |
 
 Linux x64 and ARM64 with glibc 2.36+ are supported distribution targets. The native image includes FFmpeg/FFprobe; direct installs need those tools for outbound audio/video preparation. See [requirements](/hosting/requirements/) and [installation](/getting-started/cli/installation/).
@@ -128,7 +144,7 @@ For OpenClaw, external hosting works with **either** the host daemon or the nati
         "mode": "external",
         "accountId": "ACCOUNT_ID",
         "endpoint": "http://127.0.0.1:6174",
-        "tokenFile": "/absolute/path/native-api-token",
+        "token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" },
         "consumerStateDir": "/absolute/openclaw-wechat-consumer",
         "readPolicy": "never"
       }
@@ -136,6 +152,8 @@ For OpenClaw, external hosting works with **either** the host daemon or the nati
   }
 }
 ```
+
+Supply the same daemon API token through the Gateway environment or a configured OpenClaw secret provider; see [token references](/integrations/openclaw/configuration/#api-token-references). The plugin creates no token file. Remove `native.tokenFile` if migrating an earlier native configuration.
 
 Remove old `serverUrl`, inline `token`, `pollIntervalMs` and `authPollIntervalMs` settings. Reapply the intended sender allowlists, group/mention policies and read policy after verification. The consumer directory holds new native custody/read receipts; do not substitute the old server database for it. If OpenClaw should own the local daemon instead, use [managed mode](/integrations/openclaw/setup/) after stopping the other native owner. It requires an independently provisioned executable and native data directory.
 

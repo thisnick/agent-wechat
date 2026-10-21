@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { TransformStream as NodeTransformStream } from "node:stream/web";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import { ensureNativeHost, readNativeToken } from "./native-host.ts";
+import { ensureNativeHost } from "./native-host.ts";
 import type { WeChatNativeConfig } from "./types.ts";
 
 const MAX_BODY = 128 * 1024 * 1024;
@@ -37,14 +37,20 @@ export function createNativeFacade(config: WeChatNativeConfig, dependencies: { e
     const abort = new AbortController(); active.add(abort); const cancel = () => abort.abort(); req.once("aborted", cancel); res.once("close", cancel);
     let tooLarge = false;
     try {
-      const endpoint = dependencies.endpoint ?? (await ensureNativeHost(config)).client.baseUrl.href;
-      const token = dependencies.token ?? await readNativeToken(config.tokenFile);
-      const headers = new Headers({ Authorization: `Bearer ${token}` });
+      const host = dependencies.endpoint ? undefined : await ensureNativeHost(config);
+      const headers = new Headers();
       for (const name of ["content-type", "accept", "range", "if-none-match", "if-range", "last-event-id", "idempotency-key"]) { const value = req.headers[name]; if (typeof value === "string") headers.set(name, value); }
       const length = req.headers["content-length"]; if (length && (!/^\d+$/.test(length) || Number(length) > MAX_BODY)) { fail(res, 413, "payload_too_large"); return true; }
       let size = 0;
       const body = ["GET", "HEAD"].includes(req.method ?? "") ? undefined : Readable.toWeb(req).pipeThrough(new NodeTransformStream({ transform(chunk, controller) { size += chunk.byteLength; if (size > MAX_BODY) { tooLarge = true; throw new Error("payload_too_large"); } controller.enqueue(chunk); } }));
-      const response = await (dependencies.fetch ?? fetch)(new URL(relative, endpoint), { method: req.method, headers, body: body as unknown as BodyInit | undefined, duplex: "half", signal: abort.signal, redirect: "error" } as RequestInit);
+      const init = { method: req.method, headers, body: body as unknown as BodyInit | undefined, duplex: "half", signal: abort.signal, redirect: "error" } as RequestInit;
+      let response: Response;
+      if (host) response = await host.forward(relative, init);
+      else {
+        // Explicit transport fixtures exercise the HTTP boundary independently.
+        headers.set("Authorization", `Bearer ${dependencies.token}`);
+        response = await (dependencies.fetch ?? fetch)(new URL(relative, dependencies.endpoint!), init);
+      }
       res.statusCode = response.status;
       for (const name of ["content-type", "content-length", "content-range", "accept-ranges", "etag", "cache-control", "content-disposition", "x-content-type-options"]) { const value = response.headers.get(name); if (value) res.setHeader(name, value); }
       res.setHeader("x-content-type-options", "nosniff");

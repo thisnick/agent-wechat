@@ -10,7 +10,7 @@ import { resolveWeChatAccount } from "./types.ts";
 function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?: string } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-model-harness-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
   const cfg: any = { channels: { "agent-wechat": { backend: "native", dmPolicy: "open", allowFrom: ["*"], groupPolicy: "open", groupAllowFrom: ["*"],
-    native: { mode: "external", endpoint: "http://127.0.0.1:6174", accountId: "a", tokenFile: "/unused", consumerStateDir: directory } } } };
+    native: { mode: "external", endpoint: "http://127.0.0.1:6174", accountId: "a", token: "synthetic-native-token-".repeat(3), consumerStateDir: directory } } } };
   const account = resolveWeChatAccount(cfg)!;
   const state = new NativeConsumerState(directory, "s", "a");
   const message: NativeMessage = { id: "m1", accountId: "a", threadId: options.group ? "r@chatroom" : "u", senderId: "u", serverId: "9007199254740999", type: 1, direction: "incoming", body: "fixture", createdAt: "2026-10-20T12:00:00Z", version: "1", media: [], mentions: { state: options.mention ? "known" : "unknown", userIds: [], self: options.mention ?? null, all: null, source: null } };

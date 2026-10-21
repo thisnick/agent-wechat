@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import type { NativeMessage, NativeWeChatClient, MediaAsset } from "@agent-wechat/shared";
 import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
 import { resolveWeChatAccount } from "./types.ts";
-const account=resolveWeChatAccount({channels:{"agent-wechat":{backend:"native",native:{mode:"external",accountId:"a",endpoint:"http://127.0.0.1:6174",tokenFile:"/unused",consumerStateDir:"/unused"}}}})!;
+const account=resolveWeChatAccount({channels:{"agent-wechat":{backend:"native",native:{mode:"external",accountId:"a",endpoint:"http://127.0.0.1:6174",token: "synthetic-native-token-".repeat(3),consumerStateDir:"/unused"}}}})!;
 const message={id:"m",accountId:"a",threadId:"u",type:3} as NativeMessage;
 const bytes=new Uint8Array([71,73,70,56,57,97,1,2,3]);
 const hash=createHash("sha256").update(bytes).digest("hex");

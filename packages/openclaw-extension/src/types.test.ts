@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { DEFAULT_MEDIA_MAX_MB, resolveWeChatAccount } from "./types.ts";
 
 function config(mediaMaxMb?: number): Record<string, unknown> {
-  return { channels: { "agent-wechat": { native: { mode: "external", accountId: "a", endpoint: "http://localhost:6174", tokenFile: "/private/token", consumerStateDir: "/private/consumer" }, mediaMaxMb } } };
+  return { channels: { "agent-wechat": { native: { mode: "external", accountId: "a", endpoint: "http://localhost:6174", token: "synthetic-native-token-".repeat(3), consumerStateDir: "/private/consumer" }, mediaMaxMb } } };
 }
 
 test("media size uses a bounded explicit account setting", () => {
@@ -18,7 +18,7 @@ test("media size defaults when omitted or invalid", () => {
 });
 
 test("native plugin defaults resolve without a legacy serverUrl and channel remains closed by default", () => {
-  const native = { mode: "external", accountId: "native-a", endpoint: "https://daemon.example.net", tokenFile: "/private/token", consumerStateDir: "/private/consumer" };
+  const native = { mode: "external", accountId: "native-a", endpoint: "https://daemon.example.net", token: "synthetic-native-token-".repeat(3), consumerStateDir: "/private/consumer" };
   const account = resolveWeChatAccount({ plugins: { entries: { "agent-wechat": { config: { backend: "native", native } } } } });
   assert.equal(account?.backend, "native"); assert.equal(account?.native?.accountId, "native-a");
   assert.equal(account?.serverUrl, "https://daemon.example.net"); assert.equal(account?.dmPolicy, "disabled");

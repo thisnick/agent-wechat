@@ -63,7 +63,11 @@ enum Command {
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
-    Serve,
+    Serve {
+        /// Read the API owner token from a private stdin pipe without creating a token file.
+        #[arg(long, conflicts_with = "token_file")]
+        token_stdin: bool,
+    },
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
@@ -341,7 +345,7 @@ enum AuthCommand {
         command: ResourceAction,
     },
     Login {
-        /// Use the stopped official Linux files in place; optional absolute path on the daemon host.
+        /// Use supported stopped Linux files in place; optional absolute path on the daemon host, not the CLI host. macOS/Windows profiles are unverified.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "")]
         official: Option<String>,
         #[arg(long)]
@@ -837,7 +841,7 @@ async fn run(cli: Cli) -> Result<()> {
     let cwd = std::env::current_dir()?;
     if matches!(
         &cli.command,
-        Command::Serve
+        Command::Serve { .. }
             | Command::Daemon { .. }
             | Command::Store { .. }
             | Command::Config {
@@ -855,7 +859,7 @@ async fn run(cli: Cli) -> Result<()> {
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve => serve(config).await,
+            Command::Serve { token_stdin } => serve(config, token_stdin).await,
             Command::Daemon { command } => daemon::run(config, command).await,
             Command::Store { command } => offline(config, cli.account.unwrap_or_default(), command),
             Command::Config {
@@ -1002,7 +1006,7 @@ async fn run(cli: Cli) -> Result<()> {
             "path": if path.is_empty() { None } else { Some(path) },
             "accountId": cli.account,
         })).await.map_err(|error| {
-            let message = format!("{error}; --official requires the official app to be closed. Use --official=/absolute/path/to/profile to select files on the daemon host.");
+            let message = format!("{error}; --official requires the official app to be closed and a supported Linux profile. Use --official=/absolute/path/to/profile on the daemon host. This uses files in place; it does not copy or convert macOS/Windows profiles.");
             error.context(message)
         })?;
         r.account = Some(
@@ -1486,7 +1490,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Version
         | Command::Licenses
         | Command::Config { .. }
-        | Command::Serve
+        | Command::Serve { .. }
         | Command::Store { .. }
         | Command::Profile { .. }
         | Command::Daemon { .. } => {
@@ -1496,9 +1500,42 @@ async fn run(cli: Cli) -> Result<()> {
     outcome::record(&result);
     output(&result)
 }
-async fn serve(config: wechat_config::ServerConfig) -> Result<()> {
+async fn stdin_token() -> Result<String> {
+    use std::io::IsTerminal;
+    use tokio::io::AsyncReadExt;
+    if std::io::stdin().is_terminal() {
+        bail!("--token-stdin requires a private pipe");
+    }
+    let mut bytes = Vec::new();
+    let mut input = tokio::io::stdin().take(1027);
+    tokio::time::timeout(Duration::from_secs(5), input.read_to_end(&mut bytes))
+        .await
+        .map_err(|_| failure(2, "invalid_api_token", "API token pipe timed out"))?
+        .context("cannot read API token pipe")?;
+    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("invalid API token pipe"))?;
+    let token = text.trim();
+    if text.len() > 1026
+        || !(32..=1024).contains(&token.len())
+        || !token.bytes().all(|b| b.is_ascii_graphic())
+    {
+        bail!("invalid API token pipe");
+    }
+    Ok(token.into())
+}
+async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result<()> {
+    let supplied = if token_stdin {
+        if config.token_explicit {
+            bail!("--token-stdin cannot be combined with a configured tokenFile");
+        }
+        Some(stdin_token().await?)
+    } else {
+        None
+    };
     let store = Arc::new(wechat_store::Store::open(&config.data_dir)?);
-    let token = wechat_api::provision_token(&config.token_file, !config.token_explicit)?;
+    let token = match supplied {
+        Some(token) => token,
+        None => wechat_api::provision_token(&config.token_file, !config.token_explicit)?,
+    };
     let core = Core::new(store.clone(), config.storage_key_file.as_deref())?;
     if let Some(path) = &config.profile_format_key_file {
         core.configure_profile_format_key(&private_input(path, 16)?)?;

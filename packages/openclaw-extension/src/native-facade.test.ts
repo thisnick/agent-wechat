@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { once } from "node:events";
 import { createNativeFacade, facadePrefix, registerNativeFacade } from "./native-facade.ts";
 import type { WeChatNativeConfig } from "./types.ts";
-const config:WeChatNativeConfig={mode:"external",accountId:"a",endpoint:"http://127.0.0.1:1",tokenFile:"/unused",consumerStateDir:"/unused",gatewayFacade:{enabled:true}};
+const config:WeChatNativeConfig={mode:"external",accountId:"a",endpoint:"http://127.0.0.1:1",token: "synthetic-native-token-".repeat(3),consumerStateDir:"/unused",gatewayFacade:{enabled:true}};
 async function server(t:any,handler:(req:IncomingMessage,res:ServerResponse)=>void|Promise<void>){const server=createServer((req,res)=>{Promise.resolve(handler(req,res)).catch(()=>{res.writeHead(500);res.end();});});server.listen(0,"127.0.0.1");await once(server,"listening");t.after(()=>{server.closeAllConnections();return new Promise<void>(resolve=>server.close(()=>resolve()));});return `http://127.0.0.1:${(server.address()as any).port}`;}
 test("optional facade registers explicit Gateway authentication and trusted operator scope",()=>{
   const routes:any[]=[];const api={registerHttpRoute:(route:any)=>routes.push(route)}as any;registerNativeFacade(api,config);assert.equal(routes[0].auth,"gateway");assert.equal(routes[0].gatewayRuntimeScopeSurface,"trusted-operator");assert.equal(routes[0].match,"prefix");registerNativeFacade(api,{...config,gatewayFacade:{enabled:false}});assert.equal(routes.length,1);assert.throws(()=>facadePrefix({...config,gatewayFacade:{enabled:true,prefix:"/"}}));

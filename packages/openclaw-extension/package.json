@@ -25,7 +25,7 @@
     "channel": {
       "id": "agent-wechat",
       "label": "WeChat",
-      "selectionLabel": "WeChat (\u5fae\u4fe1)",
+      "selectionLabel": "WeChat (微信)",
       "order": 80
     },
     "install": {
@@ -115,7 +115,7 @@
               "required": [
                 "mode",
                 "accountId",
-                "tokenFile",
+                "token",
                 "consumerStateDir"
               ],
               "properties": {
@@ -145,8 +145,41 @@
                 "listen": {
                   "type": "string"
                 },
-                "tokenFile": {
-                  "type": "string"
+                "token": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source",
+                        "provider",
+                        "id"
+                      ],
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "env",
+                            "file",
+                            "exec",
+                            "store"
+                          ]
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                        },
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "consumerStateDir": {
                   "type": "string"

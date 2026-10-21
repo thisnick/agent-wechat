@@ -8,6 +8,27 @@ with tempfile.TemporaryDirectory(prefix="native-cli-smoke-") as temporary:
     config=root/"client.toml"; data=root/"data"; token=root/"token"
     env={k:v for k,v in os.environ.items() if not k.startswith("AGENT_WECHAT_")}
     env.update(HOME=str(root),XDG_CONFIG_HOME=str(root/"config"))
+    # Invalid/incomplete credential pipes must fail before initializing a store.
+    pipe_data=root/"invalid-pipe-data"
+    pipe_args=[binary,"--json","--data-dir",str(pipe_data),"serve","--token-stdin"]
+    for supplied in [b"",b"short",b"x"*1025,b"x"*40+b"\nsecond-line",b"\xff"*40]:
+        rejected=subprocess.run(pipe_args,input=supplied,env=env,capture_output=True,timeout=10)
+        assert rejected.returncode==2,(rejected.returncode,rejected.stderr)
+        assert not pipe_data.exists(),"invalid token initialized native data"
+        assert b"second-line" not in rejected.stderr
+    blocked=subprocess.Popen(pipe_args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
+    try:
+        blocked.wait(timeout=10)
+        assert blocked.returncode==2 and b"timed out" in blocked.stderr.read()
+        assert not pipe_data.exists(),"incomplete token initialized native data"
+    finally:
+        if blocked.poll() is None: blocked.kill(); blocked.wait()
+        blocked.stdin.close()
+    conflict=root/"conflicting-server.toml"
+    conflict.write_text("schemaVersion=1\ntokenFile='missing-secret'\n")
+    rejected=subprocess.run(pipe_args+["--server-config",str(conflict)],input=b"fixture-"*8,env=env,capture_output=True,timeout=10)
+    assert rejected.returncode==2 and b"cannot be combined" in rejected.stderr
+    assert not pipe_data.exists()
     token.write_text("synthetic-cli-token-"*3); token.chmod(0o600)
     base=[binary,"--json","--config",str(config),"--data-dir",str(data),"--token-file",str(token),"--listen",f"127.0.0.1:{port}"]
     owned=False

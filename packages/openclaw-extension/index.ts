@@ -18,7 +18,7 @@ const plugin: {
   id: "agent-wechat",
   name: "WeChat",
   description: "WeChat channel for the standalone native daemon",
-  configSchema: { jsonSchema: nativePluginConfigSchema },
+  configSchema: { jsonSchema: nativePluginConfigSchema, uiHints: { "native.token": { sensitive: true } } },
   register(api: OpenClawPluginApi) {
     setWeChatRuntime(api.runtime);
     const selected = resolveWeChatAccount(api.config as unknown as Record<string, unknown>);
@@ -27,7 +27,7 @@ const plugin: {
     const stopPreparedBoundary = registerNativePreparedBoundary(api);
     api.registerService({
       id: "agent-wechat-native",
-      reload: { configPrefixes: ["plugins.entries.agent-wechat.config", "channels.agent-wechat"] },
+      reload: { configPrefixes: ["plugins.entries.agent-wechat.config", "channels.agent-wechat", "secrets"] },
       start: async context => {
         const account = resolveWeChatAccount(context.config as unknown as Record<string, unknown>);
         if (account?.native && account.enabled) await ensureNativeHost(account.native);

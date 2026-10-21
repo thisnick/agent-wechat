@@ -66,6 +66,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   reload: { configPrefixes: ["channels.agent-wechat"] },
 
   configSchema: {
+    uiHints: { "native.token": { sensitive: true } },
     schema: {
       type: "object",
       additionalProperties: false,
@@ -289,7 +290,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   setup: {
     applyAccountConfig: ({ cfg, input }: { cfg: any; accountId?: string; input: any }) => {
       const native = input.native ?? cfg.channels?.["agent-wechat"]?.native;
-      if (!native) throw new Error("Set channels.agent-wechat.native: mode, accountId, tokenFile and consumerStateDir; managed mode needs an installed wx and dataDir, external mode needs an endpoint");
+      if (!native) throw new Error("Set channels.agent-wechat.native: mode, accountId, token reference and consumerStateDir; managed mode needs an installed wx and dataDir, external mode needs an endpoint");
       return { ...cfg, channels: { ...cfg.channels, "agent-wechat": {
         ...cfg.channels?.["agent-wechat"], enabled: true, native,
       } } };

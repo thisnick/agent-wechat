@@ -13,10 +13,22 @@ Native settings may live in `plugins.entries.agent-wechat.config.native` or `cha
 | `mediaMaxMb` | Bounded attachment storage setting, default 50 MiB |
 | `native.mode` | `managed` child or `external` independently owned daemon |
 | `native.accountId` | Exact daemon account selected for the channel |
-| `native.tokenFile` | Absolute private mode-0600 API token file |
+| `native.token` | OpenClaw SecretInput: environment reference or configured env/file/exec/store SecretRef |
 | `native.consumerStateDir` | Explicit persistent private custody/read receipt directory |
 | `native.readPolicy` | `never` or `on_model_dispatch` |
 | `native.gatewayFacade` | Optional Gateway-authenticated API facade, disabled by default |
+
+## API token references
+
+Use the same daemon API token in the Gateway environment, with an explicit reference in either native configuration location:
+
+```json
+"token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" }
+```
+
+The string `"${AGENT_WECHAT_TOKEN}"` is also accepted. For another provider, configure it under OpenClaw `secrets.providers`, then use its standard `source`, `provider` and `id` object. The token itself does not belong in the config examples. `native.tokenFile` is removed; it is rejected rather than silently ignored. An explicit unavailable reference fails startup, including when another ambient token is present. Token values and provider error output are not copied into plugin errors.
+
+Managed mode passes the resolved token to `wx serve --token-stdin` through an anonymous pipe. It does not create a token file or put the token in command arguments or the child environment. A managed `serverConfig` must omit `tokenFile` to avoid conflicting credential sources. External mode authenticates the independently operated daemon and never changes its credentials or process ownership. Restart/reload the Gateway after changing credentials or provider configuration; already running streams retain their host generation until stopped. The independently operated daemon's credential must be updated separately when rotating its token.
 
 ## Native messaging lifecycle and validation limits
 

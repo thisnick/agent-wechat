@@ -21,14 +21,14 @@ Configure plugin defaults under `plugins.entries.agent-wechat.config` (or the sa
     "mode": "external",
     "accountId": "example",
     "endpoint": "http://127.0.0.1:6174",
-    "tokenFile": "/private/native-api-token",
+    "token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" },
     "consumerStateDir": "/private/openclaw-native-consumer",
     "readPolicy": "on_model_dispatch"
   }
 }
 ```
 
-The external service remains independently owned. Plugin stop closes its stream and never stops/logs out the daemon or cancels its sends. Remote endpoints require verified HTTPS or an encrypted tunnel terminating at loopback. Token files must be private regular files (0600), contain at least 32 bytes, and are references rather than inline credentials. The API token needs read/media/send/login for the selected account, plus read-state only when automatic local read projection is enabled; do not grant admin solely to run the plugin. Normal sender/DM/group/mention policy remains in `channels.agent-wechat`; defaults remain closed.
+The external service remains independently owned. Plugin stop closes its stream and never stops/logs out the daemon or cancels its sends. Remote endpoints require verified HTTPS or an encrypted tunnel terminating at loopback. Set `AGENT_WECHAT_TOKEN` in the Gateway process environment, or use a configured OpenClaw secret provider. The plugin resolves `native.token` through the pinned OpenClaw SDK; `native.tokenFile` is removed. Tokens contain 32–1024 printable ASCII bytes without spaces. An explicit unresolved reference fails startup without falling back to another token. The API token needs read/media/send/login for the selected account, plus read-state only when automatic local read projection is enabled; do not grant admin solely to run the plugin. Normal sender/DM/group/mention policy remains in `channels.agent-wechat`; defaults remain closed.
 
 ## Native managed mode
 
@@ -40,7 +40,7 @@ The external service remains independently owned. Plugin stop closes its stream 
     "executable": "/opt/agent-wechat/bin/wx",
     "listen": "127.0.0.1:6174",
     "dataDir": "/private/native-store",
-    "tokenFile": "/private/native-api-token",
+    "token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" },
     "consumerStateDir": "/private/openclaw-native-consumer",
     "readPolicy": "never"
   }
@@ -48,6 +48,8 @@ The external service remains independently owned. Plugin stop closes its stream 
 ```
 
 Provision the native executable and account registration separately. Omitting `executable` resolves `wx` once from absolute trusted PATH entries. The plugin supports the package's tested npm launcher layout by selecting its already installed checksum-verified ELF payload directly. It never invokes an installer or shell. Unknown wrappers/old container CLIs are rejected. Managed startup refuses an occupied port and requires authenticated readiness matching the owned child PID, store path, server identity and process generation; it never adopts or terminates another process. Stop sends a graceful termination to its own child with bounded escalation. An unexpected child/stream failure is reported; automatic process crash restart is not implemented in this increment.
+
+Managed startup sends the resolved token through a private stdin pipe; it creates no token file and does not put the token in arguments or the daemon environment. A managed `serverConfig` must omit `tokenFile`. Reload/restart the Gateway to change credentials or secret-provider configuration.
 
 Keep `dataDir` and `consumerStateDir` on separate explicit persistent mounts. The daemon owns official-format profile/sidecar data; the consumer directory holds private intake/deduplication/model-handoff/read receipts bound to server and account identities. Executable upgrades do not remove either. One configured OpenClaw account maps to one selected native daemon account in this increment, while the daemon itself supports independent account slots.
 
