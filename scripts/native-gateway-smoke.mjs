@@ -14,9 +14,10 @@ const sdkRoot=await realpath(join(root,'packages/openclaw-extension/node_modules
 const version=JSON.parse(await readFile(join(sdkRoot,'package.json'),'utf8')).version;
 if(version!=='2026.10.2')throw Error(`Gateway smoke is pinned to OpenClaw 2026.10.2, got ${version}`);
 const temporary=await mkdtemp(join(tmpdir(),'native-gateway-smoke-'));
-let child;let log='';let streamClosed;const closed=new Promise(resolve=>{streamClosed=resolve;});let requests=0;
+let child;let log='';let streamClosed;const closed=new Promise(resolve=>{streamClosed=resolve;});let mediaRequests=0;
 const token='synthetic-native-token-'.repeat(3), gatewayToken='synthetic-gateway-token-'.repeat(3);
-const upstream=createServer((req,res)=>{requests++;assert.equal(req.headers.authorization,`Bearer ${token}`);
+const upstream=createServer((req,res)=>{assert.equal(req.headers.authorization,`Bearer ${token}`);
+ if(req.url==='/v1/accounts/a/media/asset/content')mediaRequests++;
  if(req.url==='/v1/status'){res.setHeader('content-type','application/json');res.end(JSON.stringify({serverId:'fixture',dataDir:'/fixture',pid:process.pid,ownershipGeneration:'fixture',state:'running',version:{product:'agent-wechat',backend:'native',version:'0.16.0',apiVersion:1,capabilities:['serve','events','profile-read','text-send','native-login']}}));return;}
  if(req.url==='/v1/accounts/a/media/asset/content'){assert.equal(req.headers.range,'bytes=1-2');res.writeHead(206,{'content-type':'video/mp4','content-range':'bytes 1-2/3','etag':'fixture'});res.end(Buffer.from([2,3]));return;}
  if(req.url==='/v1/accounts/a/events/stream'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('id: 1\ndata: {"cursor":"1","kind":"fixture","data":{}}\n\n');req.once('close',streamClosed);return;}
@@ -36,7 +37,9 @@ try{
  const base=`http://127.0.0.1:${port}/plugins/agent-wechat/native/`;let ready=false;
  for(let i=0;i<300;i++){if(child.exitCode!==null||child.signalCode)throw Error(`Pinned Gateway exited during startup: ${log}`);try{const response=await fetch(base+'v1/accounts/a/media/asset/content',{signal:AbortSignal.timeout(1000)});await response.body?.cancel();if(response.status===401){ready=true;break;}}catch{}await new Promise(resolve=>setTimeout(resolve,100));}
  if(!ready)throw Error(`Pinned Gateway readiness deadline: ${log}`);
- const before=requests;assert.equal((await fetch(base+'v1/accounts/a/media/asset/content',{headers:{Authorization:'Bearer invalid'},signal:AbortSignal.timeout(2000)})).status,401);assert.equal(requests,before);
+ // The independently starting service may perform its /v1/status preflight
+ // concurrently. Rejection must prevent forwarding this protected media read.
+ const before=mediaRequests;assert.equal((await fetch(base+'v1/accounts/a/media/asset/content',{headers:{Authorization:'Bearer invalid'},signal:AbortSignal.timeout(2000)})).status,401);assert.equal(mediaRequests,before,'An invalid token reached the protected upstream media route');
  const headers={Authorization:`Bearer ${gatewayToken}`,Range:'bytes=1-2'};
  const ranged=await fetch(base+'v1/accounts/a/media/asset/content',{headers,signal:AbortSignal.timeout(3000)});assert.equal(ranged.status,206,`Gateway plugin response: ${await (ranged.status!==206?ranged.text():Promise.resolve(''))}; logs: ${log}`);assert.equal(ranged.headers.get('content-range'),'bytes 1-2/3');assert.deepEqual(new Uint8Array(await ranged.arrayBuffer()),new Uint8Array([2,3]));
  const foreign=await fetch(base+'v1/accounts/b/media/asset/content',{headers,signal:AbortSignal.timeout(3000)});assert.equal(foreign.status,403);const admin=await fetch(base+'v1/tokens',{headers,signal:AbortSignal.timeout(3000)});assert.equal(admin.status,403);

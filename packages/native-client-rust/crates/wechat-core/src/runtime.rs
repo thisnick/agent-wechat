@@ -16,6 +16,8 @@ mod identity;
 #[path = "official_profile.rs"]
 mod official_profile;
 pub use official_profile::{OfficialProfileRequest, OfficialProfileSelection};
+#[path = "profile_network.rs"]
+mod profile_network;
 #[path = "saved_login.rs"]
 mod saved_login;
 use anyhow::{bail, Context, Result};

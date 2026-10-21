@@ -1,4 +1,5 @@
 //! Explicit in-place attachment of a stopped official Linux profile.
+use super::profile_network::saved_business_hosts;
 use super::saved_login::read_saved_file;
 use super::*;
 use std::{
@@ -9,93 +10,6 @@ use std::{
 use wechat_profile::{ProfileLocation, ProfileSavedLogin, ReadOptions};
 
 const GLOBAL: &str = "xwechat_files/all_users/config/global_config";
-
-// These are persisted native host redirects, not active account credentials.
-// Read only the main business pair; unrelated service mappings may legitimately
-// contain names such as localhost and never become login destinations here.
-fn saved_business_hosts(home: &Path) -> Result<Option<(String, String)>> {
-    let host_root = home.join(".xwechat/net/host");
-    let ini = host_root.join("hostredirect.ini");
-    let mut selected_key = String::from("default");
-    match std::fs::symlink_metadata(&ini) {
-        Ok(_) => {
-            let data = read_saved_file(&ini, home, 16 * 1024)?;
-            let mut section = "";
-            let text = std::str::from_utf8(&data)?;
-            for line in text.lines().map(str::trim) {
-                if line.starts_with('[') && line.ends_with(']') {
-                    section = &line[1..line.len() - 1];
-                } else if section == "default" {
-                    if let Some(("last_key", value)) =
-                        line.split_once('=').map(|(k, v)| (k.trim(), v.trim()))
-                    {
-                        selected_key = value.to_owned();
-                    }
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    if selected_key.is_empty()
-        || selected_key.len() > 128
-        || !selected_key
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-    {
-        bail!("unsupported profile host selection");
-    }
-    // Native defaults to the root and falls back there when the selected
-    // nondefault directory is missing. Never interpret a selection as a path.
-    let selected_root = host_root.join(&selected_key);
-    let root = if selected_key != "default" && selected_root.try_exists()? {
-        selected_root
-    } else {
-        host_root
-    };
-    let xml = root.join("host-redirect.xml");
-    match std::fs::symlink_metadata(&xml) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-        Ok(_) => {}
-    }
-    let data = read_saved_file(&xml, home, 64 * 1024)?;
-    let document = roxmltree::Document::parse(std::str::from_utf8(&data)?)?;
-    if document.root_element().tag_name().name() != "hosts" || document.descendants().count() > 4096
-    {
-        bail!("unsupported profile host redirects");
-    }
-    let mut selected = std::collections::BTreeMap::new();
-    for mapping in document
-        .root_element()
-        .children()
-        .filter(|n| n.is_element())
-    {
-        if mapping.tag_name().name() != "mapping" {
-            continue;
-        }
-        let Some(source @ ("long.weixin.qq.com" | "short.weixin.qq.com")) =
-            mapping.attribute("src")
-        else {
-            continue;
-        };
-        let destination = mapping
-            .attribute("redirect")
-            .context("missing host redirect")?;
-        wechat_protocol::mmtls::validate_host(destination)?;
-        if selected.insert(source, destination.to_owned()).is_some() {
-            bail!("ambiguous profile host redirects");
-        }
-    }
-    match (
-        selected.remove("long.weixin.qq.com"),
-        selected.remove("short.weixin.qq.com"),
-    ) {
-        (Some(long), Some(short)) => Ok(Some((long, short))),
-        (None, None) => Ok(None),
-        _ => bail!("incomplete profile host redirects"),
-    }
-}
 
 #[derive(Clone, Default, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -504,64 +418,6 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn saved_routing_uses_selected_native_files_and_rejects_unsafe_or_ambiguous_pairs() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(saved_business_hosts(temp.path()).unwrap().is_none());
-        let root = temp.path().join(".xwechat/net/host");
-        std::fs::create_dir_all(&root).unwrap();
-        let valid = r#"<hosts><mapping src="localhost" redirect="localhost" type="main"/><mapping src="long.weixin.qq.com" redirect="sglong.wechat.com" type="main"/><mapping src="short.weixin.qq.com" redirect="sgshort.wechat.com"/></hosts>"#;
-        std::fs::write(root.join("host-redirect.xml"), valid).unwrap();
-        let expected = Some(("sglong.wechat.com".into(), "sgshort.wechat.com".into()));
-        assert_eq!(saved_business_hosts(temp.path()).unwrap(), expected);
-        std::fs::write(
-            root.join("hostredirect.ini"),
-            "[default]\nlast_key=missing\n",
-        )
-        .unwrap();
-        assert_eq!(saved_business_hosts(temp.path()).unwrap(), expected);
-        std::fs::create_dir(root.join("selected")).unwrap();
-        std::fs::write(
-            root.join("selected/host-redirect.xml"),
-            valid.replace("sglong", "long").replace("sgshort", "short"),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("hostredirect.ini"),
-            "[default]\nlast_key=selected\n",
-        )
-        .unwrap();
-        assert_eq!(
-            saved_business_hosts(temp.path()).unwrap(),
-            Some(("long.wechat.com".into(), "short.wechat.com".into()))
-        );
-        std::fs::write(
-            root.join("hostredirect.ini"),
-            "[default]\nlast_key=../outside\n",
-        )
-        .unwrap();
-        assert!(saved_business_hosts(temp.path()).is_err());
-        std::fs::write(
-            root.join("hostredirect.ini"),
-            "[default]\nlast_key=default\n",
-        )
-        .unwrap();
-        for invalid in [
-            valid.replace("sglong.wechat.com", "127.0.0.1"),
-            valid.replace("sgshort.wechat.com", "untrusted.invalid"),
-            valid.replace(
-                "</hosts>",
-                r#"<mapping src="long.weixin.qq.com" redirect="long.wechat.com"/></hosts>"#,
-            ),
-            r#"<hosts><mapping src="long.weixin.qq.com" redirect="sglong.wechat.com"/></hosts>"#
-                .into(),
-            format!("<!DOCTYPE hosts [<!ENTITY x 'sglong.wechat.com'>]>{valid}"),
-            "x".repeat(64 * 1024 + 1),
-        ] {
-            std::fs::write(root.join("host-redirect.xml"), invalid).unwrap();
-            assert!(saved_business_hosts(temp.path()).is_err());
-        }
-    }
     fn home(path: &Path, username: &str) -> PathBuf {
         let directory = wechat_profile::official_account_directory(username, 1).unwrap();
         std::fs::create_dir_all(

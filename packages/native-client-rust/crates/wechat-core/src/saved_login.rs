@@ -15,6 +15,8 @@ struct SavedLoginJournal {
     key_info: Vec<u8>,
     auto_login_flag: u32,
     key_info_plan: wechat_profile::SavedKeyInfoPlan,
+    #[serde(default)]
+    routing: Option<super::profile_network::RoutingPlan>,
 }
 impl Drop for SavedLoginJournal {
     fn drop(&mut self) {
@@ -38,6 +40,8 @@ fn credential_generation(state: &AccountState, epoch: Option<&[u8]>) -> Result<S
         &state.auto_auth_key,
         &state.cookie,
         &state.key_info,
+        &state.long_host,
+        &state.short_host,
         epoch,
     ))?);
     Ok(format!("{:x}", Sha256::digest(bytes.as_slice())))
@@ -160,6 +164,17 @@ impl Core {
         state: &AccountState,
         format_key: &[u8],
     ) -> Result<bool> {
+        Ok(self.saved_credentials_match(account, state, format_key)?
+            && super::profile_network::saved_business_hosts(
+                &self.store.account(account)?.profile_path,
+            )? == Some((state.long_host.clone(), state.short_host.clone())))
+    }
+    fn saved_credentials_match(
+        &self,
+        account: &str,
+        state: &AccountState,
+        format_key: &[u8],
+    ) -> Result<bool> {
         let saved = wechat_profile::read_profile_saved_login(
             self.store.account(account)?.profile_path,
             format_key,
@@ -243,6 +258,18 @@ impl Core {
             return Err(error);
         }
         published?;
+        super::profile_network::publish_routing(
+            &home,
+            journal
+                .routing
+                .as_ref()
+                .context("saved_login_routing_plan_missing")?,
+            &options,
+            || {
+                self.saved_login_guard(account, &journal.generation, journal.epoch.as_deref())
+                    .map(|_| ())
+            },
+        )?;
         let cipher =
             self.saved_login_guard(account, &journal.generation, journal.epoch.as_deref())?;
         let state: AccountState =
@@ -293,7 +320,10 @@ impl Core {
                 "saved-login-publication",
                 sealed,
             )?)?;
-            if journal.generation == generation && journal.epoch == epoch {
+            if journal.generation == generation
+                && journal.epoch == epoch
+                && journal.routing.is_some()
+            {
                 return self.publish_saved_login_journal(account, &journal, sealed);
             }
             // A newer durably accepted generation may supersede an interrupted
@@ -305,7 +335,7 @@ impl Core {
             .as_deref()
             == Some(generation.as_bytes())
         {
-            if !self.saved_login_matches(account, accepted, &binding.format_key)? {
+            if !self.saved_credentials_match(account, accepted, &binding.format_key)? {
                 self.store.put_runtime(
                     account,
                     "saved-login-projection-needed",
@@ -313,14 +343,16 @@ impl Core {
                 )?;
                 bail!("saved_login_profile_changed");
             }
-            self.store.finish_saved_login_publication(
-                account,
-                None,
-                &cipher,
-                epoch.as_deref(),
-                &generation,
-            )?;
-            return Ok(json!({"state":"complete","unchanged":true}));
+            if self.saved_login_matches(account, accepted, &binding.format_key)? {
+                self.store.finish_saved_login_publication(
+                    account,
+                    None,
+                    &cipher,
+                    epoch.as_deref(),
+                    &generation,
+                )?;
+                return Ok(json!({"state":"complete","unchanged":true}));
+            }
         }
         let home = self.store.account(account)?.profile_path;
         let path = home.join(&binding.relative);
@@ -344,6 +376,11 @@ impl Core {
                 &accepted.own_username,
                 true,
             )?,
+            routing: Some(super::profile_network::plan_routing(
+                &home,
+                &accepted.long_host,
+                &accepted.short_host,
+            )?),
         };
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(&journal)?);
         let sealed = self
@@ -402,6 +439,7 @@ impl Core {
             )?)?;
             if journal.epoch == epoch
                 && journal.generation == credential_generation(&state, epoch.as_deref())?
+                && journal.routing.is_some()
             {
                 return self.publish_saved_login_journal(account, &journal, &sealed);
             }
@@ -480,14 +518,16 @@ mod tests {
             .save_accepted_authorization("one", &cipher)
             .unwrap();
     }
-    fn snapshot(core: &Core) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    fn snapshot(core: &Core) -> [Vec<u8>; 5] {
         let home = core.store.account("one").unwrap().profile_path;
         let global = home.join("xwechat_files/all_users/config/global_config");
-        (
+        [
             std::fs::read(&global).unwrap(),
             std::fs::read(global.with_extension("crc")).unwrap(),
             std::fs::read(home.join(".xwechat/login/synthetic_self/key_info.dat")).unwrap(),
-        )
+            std::fs::read(home.join(".xwechat/net/host/host-redirect.xml")).unwrap(),
+            std::fs::read(home.join(".xwechat/net/host/hostredirect.ini")).unwrap(),
+        ]
     }
     fn events(core: &Core) -> usize {
         core.store
@@ -516,6 +556,14 @@ mod tests {
             auto_login_flag: 0,
             key_info_plan: wechat_profile::plan_saved_key_info(&home, &state.own_username, true)
                 .unwrap(),
+            routing: Some(
+                super::super::profile_network::plan_routing(
+                    &home,
+                    &state.long_host,
+                    &state.short_host,
+                )
+                .unwrap(),
+            ),
         };
         let sealed = core
             .vault
@@ -542,9 +590,15 @@ mod tests {
         let mut core = Core::new(store.clone(), None).unwrap();
         core.configure_profile_format_key(&[9; 16]).unwrap();
         let mut accepted = state();
+        accepted.long_host = "sglong.wechat.com".into();
+        accepted.short_host = "sgshort.wechat.com".into();
         core.install_login_state("one", &accepted, None).unwrap();
         core.ensure_managed_profile("one", &accepted).unwrap();
         let home = store.account("one").unwrap().profile_path;
+        assert_eq!(
+            super::super::profile_network::saved_business_hosts(&home).unwrap(),
+            Some((accepted.long_host.clone(), accepted.short_host.clone()))
+        );
         // Authoritative native key-info database, plus a distinct unrelated row.
         let folder = home.join("xwechat_files/all_users/login/synthetic_self");
         std::fs::create_dir_all(&folder).unwrap();
@@ -611,6 +665,23 @@ mod tests {
             accepted.key_info = vec![7 + phase; 180];
             accept(&core, &accepted);
             let (record, _sealed) = journal(&core, &accepted);
+            if phase == 0 {
+                // A journal from before routing publication is restaged under
+                // the same accepted proof, rather than falsely completing it.
+                let mut legacy = serde_json::to_value(&record).unwrap();
+                legacy.as_object_mut().unwrap().remove("routing");
+                let sealed = core
+                    .vault
+                    .seal(
+                        "one",
+                        "saved-login-publication",
+                        &serde_json::to_vec(&legacy).unwrap(),
+                    )
+                    .unwrap();
+                store
+                    .put_runtime("one", "saved-login-publication", &sealed)
+                    .unwrap();
+            }
             if phase > 0 {
                 wechat_profile::publish_saved_key_info(
                     &home,

@@ -170,6 +170,13 @@ wx --account test events --after 0 --watch
 
 Login is an asynchronous operation. `--detach` returns its ID; `auth operation ID`, `auth qr ID --output PATH` and `auth cancel ID` inspect/control it. QR output is an opaque PNG on white, with a quiet border. New generations use separate output files. The challenge remains stable while scanned/awaiting approval, refreshes only before a scan within a bounded overall deadline, and completes the final auth exchange immediately on approval.
 
+Saved-login writeback includes the accepted regional business hosts in the
+official routing XML and selector. Fresh profiles therefore retain their route
+when copied or reopened through `--official`. The recoverable credential journal
+also covers these files; interrupted publication remains pending until routing
+and credentials both pass readback. Existing unrelated mappings and settings
+are preserved, and changed source files are refused.
+
 An accepted active heartbeat resumes the saved session; authenticated expiry permits one renewal. Saved-device approval and explicit QR are separate paths. Transport/integrity failures do not clear credentials or establish trust expiry. Automatic reconnect never opens a QR. Saved credentials restored offline remain unvalidated until an accepted native exchange in this process.
 
 `auth disconnect` stops desired network activity while retaining trust. `auth logout` commits durable local inhibition before one optional authenticated native logout. It reports local commitment, credential retention, remote confirmation/rejection/unknown outcome and unverified saved-device revocation separately. `auth forget --yes` is a separate confirmed local action that retains history. Legacy `auth logout-local` performs only local inhibition. Native active secrets and cursors are stored in encrypted sidecars; native session persistence is not a claim that the official app can reuse them.
