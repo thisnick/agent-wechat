@@ -7,17 +7,6 @@ packages/*/src/**/*.js.map
 packages/*/src/**/*.d.ts
 packages/*/src/**/*.d.ts.map
 
-# Docker build artifacts
-docker/wechat.deb
-docker/*.partial
-docker/cache/
-docker/agent-server/
-docker/shared/
-
-# Rust build artifacts
-packages/agent-server-rust/target/
-packages/agent-server-rust/bindings/
-
 # Build caches
 .turbo
 docs/.astro

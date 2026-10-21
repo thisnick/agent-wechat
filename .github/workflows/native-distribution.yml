@@ -11,6 +11,8 @@ on:
       - '.github/workflows/native-*'
       - '.github/workflows/release.yml'
       - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.dockerignore'
   push:
     branches: [main]
     paths:
@@ -23,6 +25,8 @@ on:
       - '.github/workflows/native-*'
       - '.github/workflows/release.yml'
       - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.dockerignore'
 permissions:
   contents: read
 jobs:

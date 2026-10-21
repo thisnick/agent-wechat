@@ -45,7 +45,7 @@ async function copyLauncher(root) {
 }
 
 test('supported platform matrix accepts x64 and ARM64 and rejects macOS, old glibc and musl', () => {
-  assert.deepEqual(targetFor({ platform: 'linux', arch: 'x64', glibc: '2.36' }), supportedTarget);
+  assert.deepEqual(targetFor({ platform: 'linux', arch: 'x64', glibc: '2.36' }), supportedTargets.find(target => target.arch === 'x64'));
   assert.equal(targetFor({ platform: 'linux', arch: 'arm64', glibc: '2.36' }).rustTarget, 'aarch64-unknown-linux-gnu');
   for (const args of [{ platform: 'darwin', arch: 'x64', glibc: '2' }, { platform: 'linux', arch: 'arm64', glibc: '2' }, { platform: 'linux', arch: 'x64', glibc: null }, { platform: 'linux', arch: 'x64', glibc: '2.35' }]) {
     assert.throws(() => targetFor(args), /Linux x64 or ARM64 with glibc/);
