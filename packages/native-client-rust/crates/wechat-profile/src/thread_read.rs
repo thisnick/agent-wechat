@@ -18,6 +18,42 @@ pub struct ThreadReadProjection {
     pub whole_thread: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadExitReadOutcome {
+    Applied,
+    MissingSession,
+    HiddenSession,
+    ExcludedPeer,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadExitReadProjection {
+    pub outcome: ThreadExitReadOutcome,
+    pub projection: Option<ThreadReadProjection>,
+}
+
+// The ordinary session-exit path excludes these built-in service holders and
+// endpoints. Notification aggregate peers have a separate handler branch.
+const EXIT_READ_EXCLUDED_PEERS: &[&str] = &[
+    "brandsessionholder",
+    "brandservicesessionholder",
+    "qmessage",
+    "medianote",
+    "gh_22b87fa7cb3c",
+    "qqsync",
+    "lbsapp",
+    "shakeapp",
+    "floatbottle",
+    "masssendapp",
+    "gh_43f2581f6fd6",
+    "appbrandcustomerservicemsg",
+    "service_officialaccounts",
+    "notifymessage",
+    "notification_messages",
+];
+
 /// Clear this session through a frozen server timestamp, preserving later rows.
 /// Unlike an exact-ID projection, this reconciles an older counter/list mismatch
 /// when the entire known session is before the boundary. It performs no RPC.
@@ -28,10 +64,42 @@ pub fn mark_read_thread(
     through_time: i64,
     options: &WriteOptions,
 ) -> Result<ThreadReadProjection> {
+    project_thread_read(location, keys, thread, through_time, options, false)?
+        .projection
+        .ok_or(ProfileError::InvalidMetadata)
+}
+
+/// Project only the unread-clear component of a recognized session-exit
+/// control. Missing, hidden and excluded sessions remain unchanged. The caller
+/// must retain the full control as incomplete and journal every evaluated result.
+pub fn mark_read_thread_exit(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    thread: &str,
+    through_time: i64,
+    options: &WriteOptions,
+) -> Result<ThreadExitReadProjection> {
+    project_thread_read(location, keys, thread, through_time, options, true)
+}
+
+fn project_thread_read(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    thread: &str,
+    through_time: i64,
+    options: &WriteOptions,
+    visible_ordinary_only: bool,
+) -> Result<ThreadExitReadProjection> {
     ownership(location, keys, options)?;
     identity(thread)?;
     if !u32::try_from(through_time).is_ok_and(|time| time != 0) {
         return Err(ProfileError::InvalidQuery);
+    }
+    if visible_ordinary_only && EXIT_READ_EXCLUDED_PEERS.contains(&thread) {
+        return Ok(ThreadExitReadProjection {
+            outcome: ThreadExitReadOutcome::ExcludedPeer,
+            projection: None,
+        });
     }
     let relative = find_database(location, "session.db")?;
     let mut database = open_write(location, &relative, keys, options.allow_plaintext)?;
@@ -41,23 +109,32 @@ pub fn mark_read_thread(
     let tx = database.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let session = tx
         .query_row(
-            "SELECT COALESCE(unread_count,0),COALESCE(last_timestamp,0),COALESCE(last_clear_unread_timestamp,0) FROM SessionTable WHERE username=?1",
+            "SELECT COALESCE(unread_count,0),COALESCE(last_timestamp,0),COALESCE(last_clear_unread_timestamp,0),COALESCE(is_hidden,0) FROM SessionTable WHERE username=?1",
             [thread],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)),
         )
         .optional()?;
-    let Some((before, last_time, old_clear)) = session else {
+    let Some((before, last_time, old_clear, is_hidden)) = session else {
         // A status control can refer to a session absent from local history.
         // Do not manufacture a conversation merely to record an empty read.
-        return Ok(ThreadReadProjection {
-            session_present: false,
-            removed_unread_rows: 0,
-            unread_count_before: 0,
-            unread_count_after: 0,
-            last_clear_unread_timestamp: 0,
-            whole_thread: true,
+        return Ok(ThreadExitReadProjection {
+            outcome: ThreadExitReadOutcome::MissingSession,
+            projection: Some(ThreadReadProjection {
+                session_present: false,
+                removed_unread_rows: 0,
+                unread_count_before: 0,
+                unread_count_after: 0,
+                last_clear_unread_timestamp: 0,
+                whole_thread: true,
+            }),
         });
     };
+    if visible_ordinary_only && is_hidden != 0 {
+        return Ok(ThreadExitReadProjection {
+            outcome: ThreadExitReadOutcome::HiddenSession,
+            projection: None,
+        });
+    }
     if before < 0 || old_clear < 0 {
         return Err(ProfileError::WritesUnsupported);
     }
@@ -100,13 +177,16 @@ pub fn mark_read_thread(
         params![after, first, clear, thread],
     )?;
     tx.commit()?;
-    Ok(ThreadReadProjection {
-        session_present: true,
-        removed_unread_rows: removed,
-        unread_count_before: before,
-        unread_count_after: after,
-        last_clear_unread_timestamp: clear,
-        whole_thread: true,
+    Ok(ThreadExitReadProjection {
+        outcome: ThreadExitReadOutcome::Applied,
+        projection: Some(ThreadReadProjection {
+            session_present: true,
+            removed_unread_rows: removed,
+            unread_count_before: before,
+            unread_count_after: after,
+            last_clear_unread_timestamp: clear,
+            whole_thread: true,
+        }),
     })
 }
 
@@ -251,5 +331,77 @@ mod tests {
             .unwrap();
         drop(database);
         assert!(mark_read_thread(&location, &keys, "peer", 100, &options).is_err());
+    }
+
+    #[test]
+    fn exit_read_skips_missing_hidden_and_every_excluded_builtin() {
+        let (_directory, location, keys, options) = fixture(false);
+        assert_eq!(
+            mark_read_thread_exit(&location, &keys, "absent", 100, &options)
+                .unwrap()
+                .outcome,
+            ThreadExitReadOutcome::MissingSession
+        );
+        let database = Connection::open(location.storage.join("session/session.db")).unwrap();
+        database
+            .execute(
+                "UPDATE SessionTable SET is_hidden=1 WHERE username='peer'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            mark_read_thread_exit(&location, &keys, "peer", 100, &options)
+                .unwrap()
+                .outcome,
+            ThreadExitReadOutcome::HiddenSession
+        );
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT unread_count FROM SessionTable WHERE username='peer'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            9
+        );
+        for peer in EXIT_READ_EXCLUDED_PEERS {
+            database.execute("INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES(?1,4,0,100,20)", [peer]).unwrap();
+            assert_eq!(
+                mark_read_thread_exit(&location, &keys, peer, 100, &options)
+                    .unwrap()
+                    .outcome,
+                ThreadExitReadOutcome::ExcludedPeer
+            );
+            assert_eq!(
+                database
+                    .query_row(
+                        "SELECT unread_count FROM SessionTable WHERE username=?1",
+                        [peer],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                4
+            );
+        }
+        database
+            .execute(
+                "UPDATE SessionTable SET is_hidden=0,last_timestamp=110 WHERE username='peer'",
+                [],
+            )
+            .unwrap();
+        database.execute_batch("INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,10,3,110)").unwrap();
+        drop(database);
+        let applied = mark_read_thread_exit(&location, &keys, "peer", 100, &options).unwrap();
+        assert_eq!(applied.outcome, ThreadExitReadOutcome::Applied);
+        let projection = applied.projection.unwrap();
+        assert_eq!(
+            (
+                projection.removed_unread_rows,
+                projection.unread_count_after,
+                projection.last_clear_unread_timestamp
+            ),
+            (2, 7, 100)
+        );
     }
 }

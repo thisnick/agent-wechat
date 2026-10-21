@@ -415,6 +415,15 @@ impl Core {
                 self.store.put_runtime(account, receipt, b"1")?;
                 return Ok(());
             }
+            if let Some(read) =
+                super::read_control::parse_remote_thread_exit_read(&message, &state.own_username)
+            {
+                self.retain_control_raw(account, command, receipt)?;
+                self.apply_partial_thread_exit_read(account, &read, receipt)?;
+                // Session exit has additional observer and auto-dismiss
+                // behavior. Retain the full command as blocked below, even
+                // after its independently journaled unread component is done.
+            }
             if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
                 let blocked = message_blocker(&message);
                 if matches!(message.message_type, 51 | 10002) {
@@ -1149,6 +1158,187 @@ mod encrypted_roundtrip {
                     && event.data["origin"] == "remote_read")
                 .count(),
             1
+        );
+    }
+    #[test]
+    fn exit_control_partial_read_is_guarded_once_and_never_completes_the_full_control() {
+        use base64::Engine;
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let key_file: Value = serde_json::from_slice(
+            &std::fs::read(store.keys_file("one").unwrap().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(
+                key_file["databases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|key| key["relativePath"] == "session/session.db")
+                    .unwrap()["rawPageKeyBase64"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let hex: String = raw.iter().map(|byte| format!("{byte:02x}")).collect();
+        let (location, _) = core.profile_location_keys("one").unwrap();
+        let sessions =
+            rusqlite::Connection::open(location.root().join("db_storage/session/session.db"))
+                .unwrap();
+        sessions.execute_batch(&format!("PRAGMA key=\"x'{hex}'\";PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;")).unwrap();
+        sessions.execute_batch("INSERT INTO Name2Id(rowid,user_name)VALUES(1,'peer');
+            INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('peer',3,0,120,0),('hidden',4,1,100,0),('brandsessionholder',5,0,100,0),('uncertain',8,0,100,0);
+            INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,9,1,95),(1,2,2,120);").unwrap();
+        let peers = [
+            "peer",
+            "hidden",
+            "absent",
+            "brandsessionholder",
+            "uncertain",
+        ];
+        let commands: Vec<_> = peers.iter().enumerate().map(|(index, peer)| {
+            add(51, "synthetic_self", peer,
+                format!("<msg><op id=\"5\"><username>{peer}</username><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"90\"}}]]></arg></op></msg>").as_bytes(),
+                900 + index as u64, 100)
+        }).collect();
+        // Simulate a crash after durable admission and before its outcome was
+        // recorded. The profile may or may not have committed; never reapply.
+        store
+            .put_runtime(
+                "one",
+                "partial-thread-exit-read:projected:exit-read-fixture:4",
+                br#"{"outcome":"needs_review","completeControl":false}"#,
+            )
+            .unwrap();
+        for (index, command) in commands.iter().enumerate() {
+            let receipt = format!("projected:exit-read-fixture:{index}");
+            let error = core
+                .apply_sync_command("one", command, &receipt, "live")
+                .unwrap_err();
+            assert_eq!(
+                projection_blocker(&error).unwrap()["operationIds"],
+                json!([5])
+            );
+            assert!(store.runtime("one", &receipt).unwrap().is_none());
+            let marker = store
+                .runtime("one", &format!("partial-thread-exit-read:{receipt}"))
+                .unwrap()
+                .unwrap();
+            let marker: Value = serde_json::from_slice(&marker).unwrap();
+            assert_eq!(
+                marker["outcome"],
+                [
+                    "applied",
+                    "hidden_session",
+                    "missing_session",
+                    "excluded_peer",
+                    "needs_review"
+                ][index]
+            );
+        }
+        let row = sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username='peer'", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap();
+        assert_eq!(row, (2, 100));
+        assert_eq!(
+            sessions
+                .query_row(
+                    "SELECT COUNT(*) FROM SessionUnreadListTable_1 WHERE create_time=120",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        // Local changes after evaluation must survive recovery of this still
+        // blocked batch, including a previously missing/hidden session.
+        sessions.execute_batch("UPDATE SessionTable SET unread_count=7,last_clear_unread_timestamp=50 WHERE username='peer';
+            INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,10,3,96);
+            UPDATE SessionTable SET is_hidden=0 WHERE username='hidden';
+            INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('absent',6,0,100,0);").unwrap();
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            commands,
+            continuation: false,
+        };
+        store
+            .stage_sync(
+                "one",
+                "exit-read-fixture",
+                &core
+                    .vault
+                    .seal(
+                        "one",
+                        "apply:exit-read-fixture",
+                        &serde_json::to_vec(&batch).unwrap(),
+                    )
+                    .unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &batch.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(core);
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        let projected_before = store.runtime("one", "projected-cursor").unwrap();
+        for _ in 0..2 {
+            let result = core.recover_projection("one").unwrap();
+            assert_eq!(result["pendingCommands"], 5);
+            assert_eq!(result["projectedCommands"], 0);
+        }
+        assert_eq!(store.pending_sync_count("one").unwrap(), 1);
+        assert_eq!(
+            store.runtime("one", "projected-cursor").unwrap(),
+            projected_before
+        );
+        assert_eq!(sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username='peer'", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap(), (7, 50));
+        for (peer, count) in [
+            ("hidden", 4),
+            ("absent", 6),
+            ("brandsessionholder", 5),
+            ("uncertain", 8),
+        ] {
+            assert_eq!(
+                sessions
+                    .query_row(
+                        "SELECT unread_count FROM SessionTable WHERE username=?1",
+                        [peer],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                count
+            );
+        }
+        let events = store.events("one", 0, 100).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "thread.read-state"
+                    && event.data["origin"] == "remote_exit_read")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "message.committed")
+                .count(),
+            0
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "sync.committed")
+                .count(),
+            0
         );
     }
     #[test]

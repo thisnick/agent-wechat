@@ -27,6 +27,23 @@ pub(super) fn parse_remote_thread_read(
     message: &AddMessage,
     own_username: &str,
 ) -> Option<RemoteThreadRead> {
+    parse_thread_control(message, own_username, "1")
+}
+
+/// Opcode 5 includes a bounded unread-clear side effect, plus distinct session
+/// exit behavior. Parsing this form does not mark its complete control applied.
+pub(super) fn parse_remote_thread_exit_read(
+    message: &AddMessage,
+    own_username: &str,
+) -> Option<RemoteThreadRead> {
+    parse_thread_control(message, own_username, "5")
+}
+
+fn parse_thread_control(
+    message: &AddMessage,
+    own_username: &str,
+    operation: &str,
+) -> Option<RemoteThreadRead> {
     let parse = || -> Result<RemoteThreadRead> {
         let identity = |value: &str| {
             !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
@@ -73,7 +90,7 @@ pub(super) fn parse_remote_thread_read(
         ensure!(
             ordinary(op, "op")
                 && op.attributes().len() == 1
-                && op.attribute("id") == Some("1")
+                && op.attribute("id") == Some(operation)
                 && no_mixed_text(op),
             "unsupported_read_control"
         );
@@ -119,6 +136,51 @@ pub(super) fn parse_remote_thread_read(
     parse().ok()
 }
 
+impl Core {
+    /// Apply the supported read component once, even while the complete exit
+    /// control remains blocked. Evaluated no-ops are durable too: a later local
+    /// session change must not make an older blocked control apply anew.
+    pub(super) fn apply_partial_thread_exit_read(
+        &self,
+        account: &str,
+        read: &RemoteThreadRead,
+        receipt: &str,
+    ) -> Result<()> {
+        let partial = format!("partial-thread-exit-read:{receipt}");
+        if self.store.runtime(account, &partial)?.is_some() {
+            return Ok(());
+        }
+        let options = self.write_options(account, &partial)?;
+        let (location, keys) = self.profile_location_keys(account)?;
+        // The official profile and sidecar cannot commit atomically. Admit one
+        // attempt before touching the profile; an interrupted or failed attempt
+        // remains uncertain instead of clearing newer local state on recovery.
+        self.store.put_runtime(
+            account,
+            &partial,
+            &serde_json::to_vec(&json!({"outcome":"needs_review","completeControl":false}))?,
+        )?;
+        let result = wechat_profile::mark_read_thread_exit(
+            &location,
+            &keys,
+            &read.thread,
+            read.through_time,
+            &options,
+        )?;
+        if result.outcome == wechat_profile::ThreadExitReadOutcome::Applied {
+            self.store.append_event_once(
+                account,
+                &partial,
+                "thread.read-state",
+                &json!({"threadId":read.thread,"readScope":"thread","origin":"remote_exit_read","throughTime":read.through_time,"projection":result.projection,"completeControl":false}),
+            )?;
+        }
+        self.store
+            .put_runtime(account, &partial, &serde_json::to_vec(&result)?)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +219,25 @@ mod tests {
             parse_remote_thread_read(&group, "self").unwrap().thread,
             "group@chatroom"
         );
+    }
+
+    #[test]
+    fn exit_read_is_identified_separately_from_opcode_one() {
+        let mut value = message();
+        value.content = String::from_utf8(value.content)
+            .unwrap()
+            .replace("id=\"1\"", "id=\"5\"")
+            .into_bytes();
+        assert!(parse_remote_thread_read(&value, "self").is_none());
+        assert_eq!(
+            parse_remote_thread_exit_read(&value, "self")
+                .unwrap()
+                .through_time,
+            100
+        );
+        assert!(parse_remote_thread_exit_read(&message(), "self").is_none());
+        value.from = "foreign".into();
+        assert!(parse_remote_thread_exit_read(&value, "self").is_none());
     }
 
     #[test]
