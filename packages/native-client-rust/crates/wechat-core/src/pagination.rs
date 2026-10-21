@@ -128,19 +128,17 @@ impl Core {
                 .map(|cursor| {
                     let (_, view, _, start) =
                         self.pagination_continuation(account, &query, cursor)?;
-                    Ok::<_, anyhow::Error>(
-                        view.ids
-                            .iter()
-                            .skip(start)
-                            .take(limit)
-                            .map(|id| {
-                                let peer = subject
-                                    .or_else(|| view.message_threads.get(id).map(String::as_str))
-                                    .context("invalid_cursor")?;
-                                Ok((id.clone(), peer.to_owned()))
-                            })
-                            .collect::<Result<Vec<_>>>()?,
-                    )
+                    view.ids
+                        .iter()
+                        .skip(start)
+                        .take(limit)
+                        .map(|id| {
+                            let peer = subject
+                                .or_else(|| view.message_threads.get(id).map(String::as_str))
+                                .context("invalid_cursor")?;
+                            Ok((id.clone(), peer.to_owned()))
+                        })
+                        .collect::<Result<Vec<_>>>()
                 })
                 .transpose()?
         } else {
