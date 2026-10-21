@@ -32,6 +32,127 @@ fn options() -> WriteOptions {
     }
 }
 #[test]
+fn named_writes_preserve_meaning_when_contact_session_and_message_columns_move() {
+    use md5::{Digest, Md5};
+    let d = fixture();
+    for (database, table, before, after) in [
+        (
+            "contact/contact.db",
+            "contact",
+            "id INTEGER PRIMARY KEY, username TEXT",
+            "username TEXT, id INTEGER PRIMARY KEY",
+        ),
+        (
+            "session/session.db",
+            "SessionTable",
+            "username TEXT PRIMARY KEY, type INTEGER",
+            "type INTEGER, username TEXT PRIMARY KEY",
+        ),
+    ] {
+        let c = Connection::open(d.path().join("account/db_storage").join(database)).unwrap();
+        let sql: String = c
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let indexes: Vec<String> = c.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL").unwrap().query_map([table], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        assert!(sql.contains(before));
+        c.execute_batch(&format!(
+            "DROP TABLE {table};{};",
+            sql.replace(before, after)
+        ))
+        .unwrap();
+        for index in indexes {
+            c.execute_batch(&index).unwrap();
+        }
+    }
+    let c = Connection::open(d.path().join("account/db_storage/message/message_0.db")).unwrap();
+    let table = format!("Msg_{:x}", Md5::digest(b"peer"));
+    c.execute_batch(
+        &include_str!("../src/layout/conversation.sql")
+            .replace("__MESSAGE_TABLE__", &table)
+            .replace("local_id INTEGER PRIMARY KEY AUTOINCREMENT, ", "")
+            .replace(
+                "WCDB_CT_source INTEGER DEFAULT NULL)",
+                "WCDB_CT_source INTEGER DEFAULT NULL, local_id INTEGER PRIMARY KEY AUTOINCREMENT)",
+            ),
+    )
+    .unwrap();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    apply_contact_patch(
+        &loc,
+        &keys,
+        &ContactProjection {
+            username: "peer".into(),
+            fields: RawFields::new(),
+        },
+        &o,
+    )
+    .unwrap();
+    let applied =
+        apply_message_projection(&loc, &keys, &message("peer", "peer", "7", 100), &o).unwrap();
+    apply_message_session_projection(
+        &loc,
+        &keys,
+        &MessageSessionProjection {
+            source: applied.source_id.clone(),
+            peer: "peer".into(),
+            summary: "Synthetic".into(),
+            outgoing: false,
+            unread: true,
+            sender: Some("peer".into()),
+            sender_display: None,
+            created_by_this_intent: true,
+        },
+        &o,
+    )
+    .unwrap();
+    apply_incoming_text(
+        &loc,
+        &keys,
+        &IncomingText {
+            peer: "peer".into(),
+            own_username: "self".into(),
+            server_message_id: "8".into(),
+            server_sequence: 9,
+            create_time: 101,
+            content: "Synthetic narrow text".into(),
+            source_xml: "<msgsource/>".into(),
+            unread: true,
+        },
+        &o,
+    )
+    .unwrap();
+    let read = mark_read_messages(&loc, &keys, "peer", &[applied.source_id], &o).unwrap();
+    assert_eq!(read.removed_unread_rows, 1);
+    assert_eq!(read.unread_count_after, 1);
+    let reader = ProfileReader::open(
+        loc,
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rows = reader
+        .messages(&MessageQuery {
+            own_username: Some("self".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.items.len(), 2);
+    assert!(rows
+        .items
+        .iter()
+        .all(|message| message.peer.as_deref() == Some("peer")));
+}
+#[test]
 fn unread_column_reordering_does_not_admit_other_schema_changes() {
     for change in [
         "ALTER TABLE SessionUnreadListTable_1 ADD COLUMN unsupported INTEGER;",
