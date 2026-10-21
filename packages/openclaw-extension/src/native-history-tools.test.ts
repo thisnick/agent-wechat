@@ -6,16 +6,20 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeApiError } from "@agent-wechat/shared";
-import { createNativeHistoryTools, registerNativeHistoryTools } from "./native-history-tools.ts";
+import { createNativeHistoryTools, createNativeArchiveTools, registerNativeHistoryTools } from "./native-history-tools.ts";
 
 const toolNames = ["wechat_history", "wechat_search", "wechat_message", "wechat_media"];
-function fixture(context: Record<string, unknown> = {}, directory?: string) {
+const archiveNames = ["wechat_archive_threads", "wechat_archive_search", "wechat_archive_history", "wechat_archive_message", "wechat_archive_media"];
+function fixture(context: Record<string, unknown> = {}, directory?: string, archive = false) {
   let cfg: any = { channels: { "agent-wechat": { dmPolicy: "allowlist", allowFrom: ["u1"], groupPolicy: "allowlist", groupAllowFrom: ["u1"],
     native: { mode: "external", endpoint: "http://127.0.0.1:6174", accountId: "a", token: "synthetic-native-token-".repeat(3), consumerStateDir: "/private/fixture" } } } };
   const calls: any[] = [];
   let messages: any[] = [{ id: "stored-before-buffer", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 1, body: "older searchable text", serverId: "9007199254740999" }];
   let assets: any[] = [], content: Buffer = Buffer.from("Synthetic attachment"), contentType = "text/plain", guards = 0;
+  let threads: any[] = [{ id: "private-peer", accountId: "a", peerId: "private-peer", kind: "direct", displayName: "Private peer", unreadCount: 3 }];
   const client: any = {
+    threads: async (...args: any[]) => { calls.push(["threads", ...args]); return { items: threads, nextCursor: "thread-continuation", sourceGeneration: "g", coverage: { history: "partial" } }; },
+    searchMessages: async (...args: any[]) => { calls.push(["searchMessages", ...args]); return { items: messages, nextCursor: "archive-continuation", sourceGeneration: "g", coverage: { history: "partial" } }; },
     messages: async (...args: any[]) => { calls.push(["messages", ...args]); return { items: messages, nextCursor: "opaque-continuation", sourceGeneration: "g", coverage: { history: "partial" } }; },
     message: async (...args: any[]) => { calls.push(["message", ...args]); return messages[0]; },
     mediaAssets: async (...args: any[]) => { calls.push(["mediaAssets", ...args]); return { items: assets }; },
@@ -27,10 +31,10 @@ function fixture(context: Record<string, unknown> = {}, directory?: string) {
     assert.ok(directory, "Only media tests may save a file"); const path = join(directory, filename); calls.push(["saveMedia", mime]); await writeFile(path, bytes); return { path };
   } } } };
   const toolContext: any = { getRuntimeConfig: () => cfg, messageChannel: "agent-wechat", nativeChannelId: "room@chatroom", requesterSenderId: "u1", assertInvocationCurrent: () => { guards++; }, ...context };
-  const tools = createNativeHistoryTools(toolContext, { host: async () => ({ client }) as any, core });
+  const tools = (archive ? createNativeArchiveTools : createNativeHistoryTools)(toolContext, { host: async () => ({ client }) as any, core });
   const run = async (name: string, input: any, signal?: AbortSignal) => { const tool = tools.find(tool => tool.name === name); assert.ok(tool); return tool.execute("tool-call", input, signal); };
   return { tools, calls, client, run, toolContext, guards: () => guards, config: () => cfg, setConfig: (value: any) => { cfg = value; }, setMessages: (value: any[]) => { messages = value; },
-    setAssets: (value: any[]) => { assets = value; }, setContent: (bytes: Buffer, mime: string) => { content = bytes; contentType = mime; } };
+    setThreads: (value: any[]) => { threads = value; }, setAssets: (value: any[]) => { assets = value; }, setContent: (bytes: Buffer, mime: string) => { content = bytes; contentType = mime; } };
 }
 test("history/search query only the current profile/thread, preserving cursors and string IDs", async () => {
   const value = fixture();
@@ -113,11 +117,14 @@ test("tool bounds and unsupported arguments are checked before API requests", as
   for (const args of [{}, { messageId: " " }, { messageId: "m", download: "yes" }, { messageId: "m", quality: "full" }, { messageId: "m", assetId: "foreign-asset" }, { messageId: "m", path: "/private/file" }, { messageId: "m", jobId: "foreign-job" }]) await assert.rejects(value.run("wechat_media", args));
   assert.equal(value.calls.length, 0);
 });
-test("registration and manifest expose only current-thread lookup/retrieval without target selectors", () => {
-  let registration: any[] = []; registerNativeHistoryTools({ registerTool: (...args: any[]) => { registration = args; } } as any);
-  assert.equal(registration[0].contextVersion, 2); assert.deepEqual(registration[1].names, toolNames);
+test("registration separates default current-thread tools from optional account-wide tools", () => {
+  const registrations: any[] = []; registerNativeHistoryTools({ registerTool: (...args: any[]) => { registrations.push(args); } } as any);
+  assert.equal(registrations.length, 2);
+  assert.equal(registrations[0][0].contextVersion, 2); assert.deepEqual(registrations[0][1], { names: toolNames });
+  assert.equal(registrations[1][0].contextVersion, 2); assert.deepEqual(registrations[1][1], { names: archiveNames, optional: true });
   const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.contracts.tools, toolNames);
+  assert.deepEqual(manifest.contracts.tools, [...toolNames, ...archiveNames]);
+  for (const name of archiveNames) assert.equal(manifest.toolMetadata[name].optional, true);
   for (const tool of fixture().tools) {
     const schema = tool.parameters as any; assert.equal(schema.additionalProperties, false);
     for (const key of ["threadId", "accountId", "assetId", "path", "jobId"]) assert.equal(schema.properties[key], undefined);
@@ -125,9 +132,9 @@ test("registration and manifest expose only current-thread lookup/retrieval with
   }
 });
 
-async function mediaFixture(t: any, type = 3, context: Record<string, unknown> = {}) {
+async function mediaFixture(t: any, type = 3, context: Record<string, unknown> = {}, archive = false) {
   const directory = await mkdtemp(join(tmpdir(), "wechat-media-tool-")); t.after(() => rm(directory, { recursive: true, force: true }));
-  const value = fixture(context, directory);
+  const value = fixture(context, directory, archive);
   const bytes = type === 3 ? await readFile(new URL("../test/fixtures/native-model.png", import.meta.url)) : Buffer.from("Synthetic non-image attachment");
   const mime = type === 3 ? "image/png" : type === 43 ? "video/mp4" : type === 34 ? "audio/wav" : "text/plain";
   const asset = { id: "asset", accountId: "a", messageId: "media-message", kind: type === 3 ? "image" : type === 43 ? "video" : type === 34 ? "voice" : "file",
@@ -137,6 +144,93 @@ async function mediaFixture(t: any, type = 3, context: Record<string, unknown> =
   value.setAssets([asset]); value.setContent(bytes, mime);
   return { ...value, asset, bytes };
 }
+test("archive tools rely on host policy without requiring an owner, agent allowlist or current WeChat route", async () => {
+  for (const context of [
+    { messageChannel: "webchat", nativeChannelId: undefined, requesterSenderId: undefined },
+    { messageChannel: undefined, nativeChannelId: undefined, requesterSenderId: undefined },
+    { agentId: "main", senderIsOwner: true }, { agentId: "researcher", senderIsOwner: false, requesterSenderId: "blocked" },
+    { nativeChannelId: "current@chatroom", deliveryContext: { channel: "whatsapp", to: "other", accountId: "other" } },
+  ]) {
+    const value = fixture(context, undefined, true); assert.deepEqual(value.tools.map(tool => tool.name), archiveNames);
+    value.config().channels["agent-wechat"].dmPolicy = "disabled";
+    value.config().channels["agent-wechat"].groupPolicy = "disabled";
+    value.setMessages(["private-peer", "another@chatroom"].map((threadId, i) => ({ id: `m${i}`, accountId: "a", threadId, senderId: "blocked", direction: "incoming", type: 1, body: "searchable" })));
+    const result: any = await value.run("wechat_archive_search", { query: "searchable", limit: 2, cursor: "earlier" });
+    assert.equal(result.details.items.length, 2); assert.equal(result.details.nextCursor, "archive-continuation");
+    assert.deepEqual(value.calls, [["searchMessages", "a", { query: "searchable", limit: 2, cursor: "earlier" }]]);
+  }
+});
+test("archive thread discovery and selected-thread history retain pagination without sender filtering", async () => {
+  const value = fixture({}, undefined, true);
+  value.setThreads([{ id: "gone", deleted: true, version: "v" }, { id: "private-peer", peerId: "private-peer", accountId: "a", displayName: "Private peer", kind: "direct", unreadCount: 3, extra: "must not be returned" }]);
+  const threads: any = await value.run("wechat_archive_threads", { query: "Private", limit: 1, cursor: "previous" });
+  assert.deepEqual(value.calls[0], ["threads", "a", { query: "Private", limit: 1, cursor: "previous" }]);
+  assert.equal(threads.details.nextCursor, "thread-continuation"); assert.equal(threads.details.items.length, 1); assert.equal(threads.details.items[0].extra, undefined);
+  value.setMessages([{ id: "private-file", accountId: "a", threadId: "private-peer", senderId: "blocked", direction: "incoming", type: 49, body: "<private signed transport XML>" }]);
+  for (const name of ["wechat_archive_history", "wechat_archive_search"]) {
+    const result: any = await value.run(name, { threadId: "wechat:private-peer", limit: 1, cursor: "older", ...(name.endsWith("search") ? { query: "file" } : {}) });
+    assert.equal(result.details.items.length, 1); assert.equal(result.details.items[0].threadId, "private-peer");
+    assert.equal(result.details.items[0].attachment.retrievalTool, "wechat_archive_media"); assert.ok(!JSON.stringify(result).includes("XML"));
+  }
+  const exact: any = await value.run("wechat_archive_message", { messageId: "private-file" });
+  assert.equal(exact.details.attachment.retrievalTool, "wechat_archive_media");
+  assert.ok(value.calls.every(call => ["threads", "messages", "message"].includes(call[0])));
+});
+test("archive arguments and account/message identities are still validated before returning data", async () => {
+  const value = fixture({}, undefined, true);
+  for (const [name, args] of [
+    ["wechat_archive_search", {}], ["wechat_archive_search", { query: "中".repeat(100) }],
+    ["wechat_archive_search", { query: "x", accountId: "other" }], ["wechat_archive_search", { query: "x", limit: 51 }],
+    ["wechat_archive_history", {}], ["wechat_archive_history", { threadId: " " }],
+    ["wechat_archive_threads", { cursor: "x".repeat(8193) }], ["wechat_archive_threads", { query: " " }],
+    ["wechat_archive_media", { messageId: "m", assetId: "a" }], ["wechat_archive_media", { messageId: "m", path: "/etc/passwd" }],
+  ] as const) await assert.rejects(value.run(name, args));
+  assert.equal(value.calls.length, 0);
+  value.setThreads([{ id: "t", accountId: "other" }]); await assert.rejects(value.run("wechat_archive_threads", {}), /account boundary/);
+  value.setMessages([{ id: "m", accountId: "other", threadId: "t", direction: "outgoing", type: 1 }]);
+  for (const name of ["wechat_archive_search", "wechat_archive_message", "wechat_archive_media"]) await assert.rejects(value.run(name, name.endsWith("search") ? { query: "x" } : { messageId: "m" }));
+  value.setMessages([{ id: "m", accountId: "a", threadId: "t", direction: "outgoing", type: 1 }]);
+  await assert.rejects(value.run("wechat_archive_history", { threadId: "different" }), /conversation boundary/);
+  await assert.rejects(value.run("wechat_archive_message", { messageId: "different" }), /outside the permitted/);
+});
+test("archive tools fence cancelled/stale invocations and changed or disabled accounts", async () => {
+  const value = fixture({}, undefined, true), abort = new AbortController(); abort.abort();
+  await assert.rejects(value.run("wechat_archive_search", { query: "x" }, abort.signal));
+  value.toolContext.assertInvocationCurrent = () => { throw Error("stale turn"); };
+  await assert.rejects(value.run("wechat_archive_threads", {}), /stale turn/);
+  value.toolContext.assertInvocationCurrent = () => {};
+  value.config().channels["agent-wechat"].native.accountId = "changed";
+  await assert.rejects(value.run("wechat_archive_search", { query: "x" }), /configuration changed/);
+  assert.equal(value.calls.length, 0);
+  value.config().channels["agent-wechat"].enabled = false;
+  assert.equal(createNativeArchiveTools(value.toolContext).length, 0);
+});
+test("archive media returns verified attachments across threads regardless of author admission", async t => {
+  for (const type of [3, 49, 34, 43]) {
+    const value = await mediaFixture(t, type, { messageChannel: "webchat", nativeChannelId: undefined, requesterSenderId: undefined }, true);
+    value.setMessages([{ id: "media-message", accountId: "a", threadId: "private-peer", senderId: "blocked", direction: "incoming", type, body: "<private signed transport XML>" }]);
+    const result: any = await value.run("wechat_archive_media", { messageId: "media-message", download: false });
+    assert.equal(result.details.status, "ready"); assert.equal(result.details.threadId, "private-peer");
+    assert.deepEqual(await readFile(result.details.attachment.path), value.bytes);
+    assert.equal(result.content.some((part: any) => part.type === "image"), type === 3);
+    assert.equal((value.tools.find(tool => tool.name === "wechat_archive_media") as any).catalogMode, "direct-only");
+    assert.equal(value.calls.some(call => call[0] === "transferMedia"), false);
+  }
+});
+test("archive download keeps media identity checks and terminal transfer outcomes", async t => {
+  const value = await mediaFixture(t, 3, {}, true);
+  value.setMessages([{ id: "media-message", accountId: "a", threadId: "private-peer", senderId: "blocked", direction: "incoming", type: 3 }]);
+  value.setAssets([{ ...value.asset, state: "pending" }]);
+  value.client.transferMedia = async (...args: any[]) => { value.calls.push(["transferMedia", ...args]); value.setAssets([value.asset]); return { id: "job", state: "available", retryable: false }; };
+  const ready: any = await value.run("wechat_archive_media", { messageId: "media-message", quality: "original" }); assert.equal(ready.details.status, "ready");
+  assert.deepEqual(value.calls.find(call => call[0] === "transferMedia"), ["transferMedia", "a", { messageId: "media-message", assetId: null, quality: "original" }]);
+  value.setAssets([{ ...value.asset, state: "pending", jobId: "job" }]);
+  value.client.job = async () => ({ id: "job", accountId: "a", assetId: "asset", kind: "download", state: "failed", retryable: false, error: { code: "media_service_rejected" } });
+  const before = value.calls.filter(call => call[0] === "transferMedia").length;
+  const failed: any = await value.run("wechat_archive_media", { messageId: "media-message" });
+  assert.equal(failed.details.retryable, false); assert.equal(value.calls.filter(call => call[0] === "transferMedia").length, before);
+  value.setAssets([{ ...value.asset, accountId: "other" }]); await assert.rejects(value.run("wechat_archive_media", { messageId: "media-message" }), /identity|account|mismatch/);
+});
 test("cached image retrieval returns original path and verified vision bytes even after CDN expiry", async t => {
   const value = await mediaFixture(t);
   const result: any = await value.run("wechat_media", { messageId: "media-message" });

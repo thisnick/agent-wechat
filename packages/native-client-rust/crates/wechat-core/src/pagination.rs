@@ -28,6 +28,10 @@ struct Cursor {
 struct View {
     ids: Vec<String>,
     metadata: Value,
+    // Account-wide message continuations retain each peer even when mutable
+    // contact/name tables no longer identify it. Older scoped views omit this.
+    #[serde(default)]
+    message_threads: BTreeMap<String, String>,
 }
 const MAX_ITEMS: usize = 100_000;
 // Large history exports need a bounded window longer than an interactive read.
@@ -126,10 +130,16 @@ impl Core {
                         self.pagination_continuation(account, &query, cursor)?;
                     Ok::<_, anyhow::Error>(
                         view.ids
-                            .into_iter()
+                            .iter()
                             .skip(start)
                             .take(limit)
-                            .collect::<Vec<_>>(),
+                            .map(|id| {
+                                let peer = subject
+                                    .or_else(|| view.message_threads.get(id).map(String::as_str))
+                                    .context("invalid_cursor")?;
+                                Ok((id.clone(), peer.to_owned()))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
                     )
                 })
                 .transpose()?
@@ -141,10 +151,10 @@ impl Core {
         // A continuation resolves retained IDs against the current generation.
         // New arrivals and renames cannot change the original view membership.
         let rows = if let Some(ids) = selected {
-            let peer = subject.context("thread required")?;
-            let table = format!("Msg_{:x}", md5::Md5::digest(peer.as_bytes()));
+            let mut peers = BTreeMap::new();
             let mut sources = Vec::with_capacity(ids.len());
-            for id in ids {
+            for (id, peer) in ids {
+                let table = format!("Msg_{:x}", md5::Md5::digest(peer.as_bytes()));
                 let source = crate::source_message_id(&id)?;
                 if !source.table.eq_ignore_ascii_case(&table) {
                     bail!("invalid_cursor");
@@ -166,6 +176,7 @@ impl Core {
                 {
                     continue;
                 }
+                peers.insert(id, peer);
                 sources.push(source);
             }
             let mut rows = Vec::with_capacity(sources.len());
@@ -173,7 +184,8 @@ impl Core {
             for mut message in reader.messages_by_ids(&sources, own.as_deref())? {
                 // The retained query and table hash establish the peer even
                 // after contact/name metadata changes after page one.
-                message.peer = Some(peer.into());
+                let id = crate::message_id(&message.id)?;
+                message.peer = Some(peers.get(&id).context("invalid_cursor")?.clone());
                 let value =
                     normalized_message(account, message, own.as_deref(), reader.generation())?;
                 encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&value)?.len());
@@ -257,6 +269,16 @@ impl Core {
                 .context("invalid page metadata")?
                 .remove("order");
             let view = View {
+                message_threads: ids
+                    .iter()
+                    .filter_map(|id| {
+                        current
+                            .get(id)?
+                            .get("threadId")?
+                            .as_str()
+                            .map(|peer| (id.clone(), peer.to_owned()))
+                    })
+                    .collect(),
                 ids,
                 metadata: clean_metadata,
             };
@@ -343,7 +365,7 @@ impl Core {
                 }
                 "messages" => {
                     let page = reader.messages(&MessageQuery {
-                        chat: Some(subject.context("thread required")?.into()),
+                        chat: subject.map(str::to_owned),
                         own_username: own.map(str::to_owned),
                         limit: Some(200),
                         cursor: cursor.clone(),
@@ -453,6 +475,110 @@ mod tests {
             .to_string()
             .contains("invalid_cursor"));
     }
+    #[test]
+    fn account_message_search_retains_cross_thread_membership_and_peers() {
+        use md5::Digest;
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let profile = temp.path().join("fixture");
+        let password = [42u8; 32];
+        let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
+        let database = profile.join("db_storage/message/message_0.db");
+        let db = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+            0
+        );
+        db.execute_batch(
+            "PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;",
+        )
+        .unwrap();
+        for (index, peer) in [(1, "first-peer"), (2, "second@chatroom")] {
+            let table = format!("Msg_{:x}", md5::Md5::digest(peer.as_bytes()));
+            db.execute(
+                "INSERT INTO Name2Id(rowid,user_name,is_session)VALUES(?1,?2,1)",
+                rusqlite::params![index, peer],
+            )
+            .unwrap();
+            db.execute_batch(&format!("CREATE TABLE {table}(local_id INTEGER PRIMARY KEY,server_id INTEGER,local_type INTEGER,create_time INTEGER,real_sender_id INTEGER,message_content TEXT,source TEXT,WCDB_CT_message_content INTEGER,WCDB_CT_source INTEGER);")).unwrap();
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(1,?1,1,?1,1,'match original','',0,0)"),
+                [index * 2],
+            )
+            .unwrap();
+        }
+        let first_table = format!("Msg_{:x}", md5::Md5::digest(b"first-peer"));
+        db.execute_batch(&format!(
+            "INSERT INTO {first_table} VALUES(2,3,1,3,1,'match middle','',0,0);"
+        ))
+        .unwrap();
+        let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
+        store.attach("a", &profile, true).unwrap();
+        let key_path = temp.path().join("keys.json");
+        keys.write_new(&key_path).unwrap();
+        store.set_keys_file("a", &key_path).unwrap();
+        let core = Core::new(store, None).unwrap();
+        core.create_account("b").unwrap();
+        let first = core
+            .catalog_page(
+                "a",
+                "messages",
+                None,
+                &CatalogQuery {
+                    limit: Some(1),
+                    search: Some("match".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(first["items"][0]["threadId"], "second@chatroom");
+        assert!(first.get("message_threads").is_none());
+        let cursor = first["nextCursor"].as_str().unwrap().to_owned();
+        // Retained peers survive name-map removal and a search-matching edit.
+        db.execute_batch(&format!("UPDATE {first_table} SET message_content='edited' WHERE local_id=2;DELETE FROM {first_table} WHERE local_id=1;DELETE FROM Name2Id;INSERT INTO {first_table} VALUES(3,99,NULL,99,1,'late malformed row','',0,0);")).unwrap();
+        let next = core
+            .catalog_page(
+                "a",
+                "messages",
+                None,
+                &CatalogQuery {
+                    limit: Some(2),
+                    search: Some("match".into()),
+                    cursor: Some(cursor.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(next["items"][0]["threadId"], "first-peer");
+        assert_eq!(next["items"][0]["body"], "edited");
+        assert_eq!(next["items"][1]["deleted"], true);
+        assert!(next["nextCursor"].is_null());
+        for (account, subject, search) in [
+            ("a", Some("first-peer"), "match"),
+            ("a", None, "changed"),
+            ("b", None, "match"),
+        ] {
+            assert!(core
+                .catalog_page(
+                    account,
+                    "messages",
+                    subject,
+                    &CatalogQuery {
+                        cursor: Some(cursor.clone()),
+                        search: Some(search.into()),
+                        ..Default::default()
+                    }
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("invalid_cursor"));
+        }
+    }
+
     #[test]
     fn message_continuation_only_resolves_retained_page_rows() {
         use md5::Digest;

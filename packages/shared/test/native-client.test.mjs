@@ -22,6 +22,21 @@ test('unsafe numeric server IDs and cross-account message resources are rejected
     await assert.rejects(client.messages('a', 't'), /identity/);
   }
 });
+test('account-wide search preserves cross-thread results, query and cursor with bearer authentication', async () => {
+  const requests = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    requests.push(new URL(url)); assert.equal(init.headers.get('Authorization'), 'Bearer fixture-secret');
+    return Response.json({ items: ['peer', 'group@chatroom'].map((threadId, index) => ({ id: `m${index}`, accountId: 'a', threadId, serverId: '9007199254740999' })), nextCursor: 'opaque' });
+  } });
+  const page = await client.searchMessages('a', { query: 'project note', limit: 2, cursor: 'earlier' });
+  assert.deepEqual(page.items.map(item => item.threadId), ['peer', 'group@chatroom']);
+  assert.equal(requests[0].pathname, '/v1/accounts/a/messages');
+  assert.deepEqual(Object.fromEntries(requests[0].searchParams), { query: 'project note', limit: '2', cursor: 'earlier' });
+  for (const message of [{ id: 'm', accountId: 'other', threadId: 't' }, { id: 'm', accountId: 'a', threadId: '' }, { id: 'm', accountId: 'a', threadId: 't', serverId: 9007199254740992 }]) {
+    const foreign = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ items: [message] }) });
+    await assert.rejects(foreign.searchMessages('a', { query: 'note' }), /archive message identity/);
+  }
+});
 test('send uses caller idempotency key and read marks the whole thread', async () => {
   const requests = [];
   const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => { requests.push({ url: String(url), init }); return Response.json({ state: 'accepted' }); } });

@@ -1,7 +1,14 @@
 {
   "id": "agent-wechat",
   "contracts": {
-    "tools": ["wechat_history", "wechat_search", "wechat_message", "wechat_media"]
+    "tools": ["wechat_history", "wechat_search", "wechat_message", "wechat_media", "wechat_archive_threads", "wechat_archive_search", "wechat_archive_history", "wechat_archive_message", "wechat_archive_media"]
+  },
+  "toolMetadata": {
+    "wechat_archive_threads": { "optional": true },
+    "wechat_archive_search": { "optional": true },
+    "wechat_archive_history": { "optional": true },
+    "wechat_archive_message": { "optional": true },
+    "wechat_archive_media": { "optional": true }
   },
   "legacyPluginIds": [
     "wechat"

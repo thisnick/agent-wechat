@@ -2,7 +2,7 @@
 "@agent-wechat/agent-wechat": minor
 ---
 
-Add read-only stored message history, keyword search and exact message lookup tools, restricted to the trusted current WeChat conversation for every requester, including owners. The agent cannot select another thread or enumerate chats. History reads do not mark messages read or download media.
+Add default stored message history, keyword search and exact message lookup tools, restricted to the trusted current WeChat conversation for every requester, including owners. These default tools cannot select another thread or enumerate chats. History reads do not mark messages read or download media.
 
 Add current-thread attachment retrieval using verified cached bytes or bounded, server-owned downloads. Return managed file paths and prepared image content, with cache-only and strict quality options and explicit pending, expired and unavailable outcomes.
 

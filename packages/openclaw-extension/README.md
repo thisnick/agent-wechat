@@ -81,7 +81,7 @@ A stored message includes `id`, `threadId`, nullable `serverId`, `senderId`, `di
 
 A media result includes `messageId`, `threadId`, `status` and `retryable`, with optional `attachment`, actual `variant`, `jobId`, `reason` and display `body`. A ready attachment has `kind`, `filename`, verified local `path` and `mime`; image quality may be `full`, `standard` or `thumbnail`. Unavailable results never claim a local path. OpenClaw wraps structured outputs in `details` and text `content`; a ready image additionally supplies an image content block.
 
-For example, the agent can call `wechat_search` with `{"query":"project notes"}` in the current conversation. Every tool is restricted to the current WeChat account and thread derived from trusted OpenClaw context. Owners have the same restriction in direct and group conversations. Tools accept no thread/account selector, and the plugin rejects messages or assets from another conversation or account. Requester and historical sender policy are rechecked. Missing or conflicting trusted conversation context hides the tools; webchat and other channels cannot use them. Broader operator lookup remains available through the CLI and authenticated daemon API.
+For example, the agent can call `wechat_search` with `{"query":"project notes"}` in the current conversation. These four default tools are restricted to the current WeChat account and thread derived from trusted OpenClaw context. Owners and agents with archive access have the same restriction when invoking a default tool. Default tools accept no thread/account selector, and the plugin rejects messages or assets from another conversation or account. Requester and historical sender policy are rechecked. Missing or conflicting trusted conversation context hides the default tools; webchat and other channels cannot use them.
 
 History/search return opaque string message IDs, a bounded text preview, coverage metadata and `nextCursor`. Pass the cursor back with the same tool, query and thread to continue; the page limit is 1–50 (default 20). Search queries are limited to 256 UTF-8 bytes. Long message bodies are labeled as truncated. A sender-filtered page may be empty and still have a continuation. Search covers locally stored history and does not fetch missing remote history or maintain an official FTS index. Media messages receive a type/status description; these tools do not return raw transport XML or download attachments. History, search and exact-message lookup are read-only. Their attachment descriptions name `wechat_media` and the exact message ID without automatically retrieving media. None of these tools mark a conversation read, send messages or modify the inbound consumer cursor. Lookup requires the selected account's API `read` scope and remains subject to normal OpenClaw tool policy. With OpenClaw's compact tool catalog, the agent discovers history/search/message lookup through `tool_search` and invokes the returned tool with `tool_call`. The media tool stays directly callable as `wechat_media`: the pinned host's generic wrapper serializes nested image blocks as JSON text, while direct invocation preserves image content for vision.
 
@@ -92,6 +92,46 @@ Missing media requests a durable daemon transfer by default, with a two-second b
 `node scripts/native-history-model-smoke.mjs` exercises the pinned Gateway with local account/media/model fixtures: durable group context, original file paths, one preview with a verified hash, a PNG sent as a file remaining a reference, direct image delivery, actual tool discovery, two paginated search calls, rejection of another thread's attachment before media access, one requested image download whose exact image bytes reach vision, and a cached file path reaching the provider. CI runs this check on both Linux architectures.
 
 When asset metadata identifies an existing download job, retrieval polls that scoped job instead of submitting another transfer. A terminal job's reason and retryability are preserved, including in cache-only mode; this tool does not automatically retry failed jobs. A service rejection alone is not classified as expiry.
+
+### Privileged archive tools
+
+Five optional tools read across every thread in the configured native WeChat account:
+
+| Tool | Inputs (`?` means optional) | Output |
+| --- | --- | --- |
+| `wechat_archive_threads` | `{ query?, limit?, cursor? }` | Thread page: `id`, `peerId`, `kind`, `displayName`, `unreadCount`, plus pagination and coverage |
+| `wechat_archive_search` | `{ query, threadId?, limit?, cursor? }` | Message page across all threads; optional `threadId` narrows it |
+| `wechat_archive_history` | `{ threadId, limit?, cursor? }` | Message page for any selected thread, newest first |
+| `wechat_archive_message` | `{ messageId }` | One message from any thread |
+| `wechat_archive_media` | `{ messageId, download?, quality? }` | Verified attachment status/path and image content from any thread |
+
+Message/page/media output shapes, bounds and download behavior match the default tools above. Archive attachment descriptors name `wechat_archive_media` as their retrieval tool. Thread queries match locally stored IDs and display names. Search uses the daemon's account-wide `GET /v1/accounts/{accountId}/messages?query=...` endpoint; its opaque cursor binds the account, query and thread selection and retains membership/order across local edits, deletions and new arrivals. Search reads the local profile with bounded snapshot capacity; it does not backfill remote history. An older daemon without that endpoint must be upgraded for account-wide search.
+
+Configure access in OpenClaw's `~/.openclaw/openclaw.json`, merging into your existing named agent entries:
+
+```json
+{
+  "agents": {
+    "ownership": "explicit",
+    "entries": {
+      "main": {
+        "tools": { "alsoAllow": ["wechat_archive_*"] }
+      },
+      "group-bot": {
+        "tools": { "deny": ["wechat_archive_*"] }
+      }
+    }
+  }
+}
+```
+
+OpenClaw enforces these policies for tool execution and catalog discovery. The `main` name has no implicit privilege. Use individual tool names to grant a subset. If an agent already has `tools.allow`, add the archive names to that list instead of combining `allow` and `alsoAllow`. A global deny still wins over a per-agent allow. Optional tools are absent without a selecting policy, but `profile: "full"`, `*`, `group:plugins`, or an allow for the entire `agent-wechat` plugin also selects them; add an explicit per-agent deny for agents that should retain only current-thread access.
+
+There is no plugin permission list, owner exception or archive sender/thread filter. A host-authorized archive invocation can read the configured account from any channel, including a group invocation. Use OpenClaw's sender policies or route group traffic to an agent without archive tools when those runs should have narrower access. Archive tools stay bound to the configured account and verify message/asset identities, hashes and sizes. They never accept arbitrary file paths or another account selector. Normal account/token scope checks and invocation cancellation fences still apply.
+
+History/search/message/thread reads never send messages, mark threads read or change the inbound cursor. Archive media can submit the same bounded, deduplicated download jobs as `wechat_media`; it stays directly callable so actual image blocks reach vision.
+
+Run `node scripts/native-archive-tools-smoke.mjs` to check the pinned Gateway with three separately routed agents: no optional-tool grant, a full profile with an explicit deny, and an archive grant. It checks discovery and guessed-name invocation denial, cross-thread search pagination, other-sender history/media, unchanged default-tool scope, verified image bytes in provider input and a cached file path. All messages, account data and model responses in this test are synthetic. CI runs it on Linux x64 and ARM64.
 
 Run `node scripts/native-model-smoke.mjs` and `node scripts/native-media-model-smoke.mjs` after installing workspace dependencies. They use the actual pinned Gateway, a local model and synthetic daemon/files. Checks cover default inbound reads without conversation permission, commands without a model call, current provider input, image hashes and prepared previews, reference/transcription delivery, whole-thread read requests, lost-response/reopen recovery, duplicate prevention, omitted images on a text-only model, explicit model-handoff permission, never-read policy and group routing behavior. Transcription uses the real SDK with an explicitly configured local deterministic CLI; it does not test speech recognition accuracy. Concurrent text inputs were serialized into distinct model turns; merged-input refusal has unit coverage for the explicit model policy. These checks establish local runtime behavior, not external provider acceptance, semantic analysis or consumption.
 

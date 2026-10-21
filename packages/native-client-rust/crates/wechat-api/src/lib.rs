@@ -659,6 +659,23 @@ async fn messages(
         .await?,
     )?))
 }
+async fn archive_messages(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "read")?;
+    let q = q.catalog()?;
+    let guard = app.core.lock_account(&a).await?;
+    checked::<contracts::NativePage<contracts::NativeMessage>>(
+        work(move || {
+            let _guard = guard;
+            app.core.catalog_page(&a, "messages", None, &q)
+        })
+        .await?,
+    )
+}
 async fn message(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -993,6 +1010,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .route("/v1/accounts/{a}/groups", get(groups))
         .route("/v1/accounts/{a}/groups/{room}/members", get(members))
         .route("/v1/accounts/{a}/threads/{thread}/messages", get(messages))
+        .route("/v1/accounts/{a}/messages", get(archive_messages))
         .route("/v1/accounts/{a}/messages/{id}", get(message))
         .route("/v1/accounts/{a}/avatars/{id}", get(avatar))
         .route("/v1/accounts/{a}/messages/{id}/image", get(image))
@@ -1117,6 +1135,43 @@ mod tests {
         let core = Core::new(store, None).unwrap();
         let app = router(core.clone(), OWNER);
         (t, core, app)
+    }
+    #[tokio::test]
+    async fn account_message_search_requires_account_read_scope_and_bounded_query() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let media = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(read, "read"), (media, "media")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        for (account, token, expected) in [
+            ("one", None, StatusCode::UNAUTHORIZED),
+            ("one", Some(media), StatusCode::FORBIDDEN),
+            ("two", Some(read), StatusCode::FORBIDDEN),
+            ("one", Some(read), StatusCode::BAD_REQUEST),
+            ("one", Some(OWNER), StatusCode::BAD_REQUEST),
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "GET",
+                    &format!("/v1/accounts/{account}/messages?query=match&limit=0"),
+                    token,
+                    None
+                )
+                .await
+                .0,
+                expected
+            );
+        }
     }
     #[tokio::test]
     async fn official_profile_preparation_requires_global_admin_before_reading_files() {

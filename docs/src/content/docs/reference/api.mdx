@@ -11,7 +11,7 @@ The native API is versioned under `/v1`. Except the minimal `/health` liveness e
 | Official profile selection | `POST /v1/profiles/official`; prepares in-place identity-bound ownership before login |
 | Login | Account `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
 | Lifecycle | Account `POST /connect`, `/disconnect`, `/logout`, `/forget-credentials`; persistent logout/forget fences |
-| Catalog/history | Account `GET /threads`, `/contacts`, `/groups`, `/groups/{id}/members`, `/threads/{id}/messages`, `/messages/{id}` |
+| Catalog/history | Account `GET /threads`, `/contacts`, `/groups`, `/groups/{id}/members`, `/threads/{id}/messages`, `/messages`, `/messages/{id}` |
 | Exact metadata | Account `POST /contacts/lookup`, `GET /groups/{id}/lookup`; refresh/sync operations retain their own checkpoints |
 | Sends | Account `POST /sends`, `GET /sends/{id}`, `GET /sends/by-idempotency-key`, `POST /sends/{id}/cancel` |
 | Media | Account `POST /uploads`, message `GET /media`, `POST /media-transfers`, asset `GET /media/{id}/content` |
@@ -25,5 +25,7 @@ Paths containing placeholders must be URL encoded. A send/upload/login response 
 Media separates advertised variants from verified cached bytes and returns pending/expired/unsupported states explicitly. Cached content supports bounded byte ranges and integrity/length checks. Cached bytes can outlive remote expiry. HTTP cancellation closes streaming without cancelling already submitted jobs.
 
 Resource cursors bind the account, query and retained view; an expired cursor requires an explicit new view. Tombstones preserve deleted positions. SSE supports journal replay, bounded retention and gap reporting. Persist custody before acknowledgement. Consumer acknowledgements never change unread state; whole-thread marking reports a native cross-device read boundary.
+
+`GET /v1/accounts/{account}/messages?query=project&limit=20` searches locally stored messages across all threads with account `read` permission. `query` (also accepted as `search`) is a case-insensitive substring, at most 256 UTF-8 bytes. `limit` is 1–200 (default 50); pass the returned opaque `nextCursor` with the same query to continue. The response is a message page with `items`, `nextCursor`, `sourceGeneration` and `coverage`. Retained views keep message order and thread identity across edits, name-map changes, deletion tombstones and new arrivals. Views expire after 30 minutes and are bounded to 100,000 source messages and 32 MiB of normalized source rows; exceeding capacity returns an explicit error. This read neither downloads media nor changes unread state and does not fetch remote history. Use the existing `/threads/{id}/messages` route to restrict a query to one thread.
 
 See the [CLI workflows](/getting-started/cli/commands/) and public source contracts in [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api). The old container `/api` and UI operations are removed.

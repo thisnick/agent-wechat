@@ -152,6 +152,16 @@ export class NativeWeChatClient {
     if (message.id !== messageId || message.accountId !== accountId || (message.serverId != null && (typeof message.serverId !== "string" || !/^\d+$/.test(message.serverId)))) throw new Error("Invalid native message identity");
     return message;
   }
+  /** Account-wide local search, with the daemon's query-bound opaque cursor. */
+  async searchMessages(accountId: string, options: NativeListOptions): Promise<NativePage<NativeMessage>> {
+    const result = await this.request<NativePage<NativeMessage>>(`v1/accounts/${id(accountId)}/messages${listQuery(options)}`);
+    for (const message of result.items) {
+      if (isNativeTombstone(message)) continue;
+      if (typeof message.id !== "string" || message.accountId !== accountId || typeof message.threadId !== "string" || !message.threadId
+        || (message.serverId != null && (typeof message.serverId !== "string" || !/^\d+$/.test(message.serverId)))) throw new Error("Invalid native archive message identity");
+    }
+    return result;
+  }
   sendText(accountId: string, threadId: string, text: string, idempotencyKey: string): Promise<NativeSendIntent> {
     if (!idempotencyKey || /[\r\n]/.test(idempotencyKey)) throw new Error("An idempotency key is required");
     return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ threadId, text }) });
