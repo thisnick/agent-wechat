@@ -13,4 +13,6 @@ An authenticated persistent connection receives native WeChat push notifications
 
 Durable message commits produce account events and replayable SSE. An event acknowledgement confirms consumer custody, not message read state. HTTP disconnects do not undo submitted durable jobs. Sending uses idempotency keys and preserves uncertain outcomes so a lost response does not cause an automatic duplicate.
 
+The TypeScript client bounds an SSE connection attempt and each idle read. Server keepalive comments reset the 45-second idle window; time spent processing a delivered event does not consume it. A stalled connection closes so OpenClaw can reconnect from its durable consumer cursor and replay missed events.
+
 OpenClaw either owns a native child or connects to an external daemon. It stores event custody before acknowledgement, applies access/mention policy before media retrieval, and confirms exact prepared model input before whole-thread read marking and a native cross-device notification. It never downloads a runtime at plugin startup.

@@ -7,7 +7,7 @@ export type NativeListOptions = { cursor?: string; limit?: number; query?: strin
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 function listQuery(input?: string | NativeListOptions): string { const options = typeof input === "string" ? { cursor: input } : input; if (!options) return ""; if (options.limit != null && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200)) throw new Error("Invalid native page limit"); const query = new URLSearchParams(); for (const [key, value] of Object.entries(options)) if (value != null) query.set(key, String(value)); return query.size ? `?${query}` : ""; }
 export type NativeLoginOptions = Partial<Omit<LoginRequest, "qrRefresh">> & { qrRefresh?: Partial<QrRefresh> };
-export type NativeClientOptions = { baseUrl: string; token: string; fetch?: typeof fetch; timeoutMs?: number };
+export type NativeClientOptions = { baseUrl: string; token: string; fetch?: typeof fetch; timeoutMs?: number; streamIdleTimeoutMs?: number };
 export class NativeApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -38,12 +38,15 @@ export class NativeWeChatClient {
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly streamIdleTimeoutMs: number;
   constructor(options: NativeClientOptions) {
     this.baseUrl = validateNativeBaseUrl(options.baseUrl);
     const nodeEnvironment = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
     if (this.baseUrl.protocol === "https:" && nodeEnvironment?.NODE_TLS_REJECT_UNAUTHORIZED === "0") throw new Error("Native API refuses HTTPS with TLS verification disabled");
     if (typeof options.token !== "string" || !options.token || /[\r\n]/.test(options.token)) throw new Error("Native API bearer token is required");
     this.token = options.token; this.fetchImpl = options.fetch ?? fetch; this.timeoutMs = options.timeoutMs ?? 30000;
+    this.streamIdleTimeoutMs = options.streamIdleTimeoutMs ?? 45000;
+    if (!Number.isInteger(this.streamIdleTimeoutMs) || this.streamIdleTimeoutMs < 1 || this.streamIdleTimeoutMs > 300000) throw new Error("Invalid native stream idle timeout");
   }
   private async response(path: string, init: RequestInit = {}, stream = false): Promise<Response> {
     const headers = new Headers(init.headers); headers.set("Authorization", `Bearer ${this.token}`);
@@ -192,13 +195,31 @@ export class NativeWeChatClient {
     return this.request(`v1/accounts/${id(accountId)}/consumers/${id(consumerId)}/ack`, { method: "POST", body: JSON.stringify({ cursor: decimal(cursor) }) });
   }
   async *watch(accountId: string, after = "0", signal?: AbortSignal): AsyncGenerator<NativeEvent> {
-    const response = await this.response(`v1/accounts/${id(accountId)}/events/stream?after=${decimal(after)}`, { signal, headers: { Accept: "text/event-stream" } }, true);
-    if (!response.headers.get("content-type")?.startsWith("text/event-stream")) throw new Error("Expected native SSE response");
-    const reader = response.body?.getReader(); if (!reader) throw new Error("Native SSE has no body");
+    const connection = new AbortController();
+    const streamSignal = signal ? AbortSignal.any([signal, connection.signal]) : connection.signal;
+    const bounded = async <T>(work: () => Promise<T>, milliseconds: number, reason: string): Promise<T> => {
+      if (streamSignal.aborted) throw streamSignal.reason;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: () => void = () => {};
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(streamSignal.reason ?? new Error("Native SSE cancelled"));
+        streamSignal.addEventListener("abort", onAbort, { once: true });
+        timer = setTimeout(() => connection.abort(new Error(reason)), milliseconds);
+      });
+      try { return await Promise.race([work(), interrupted]); }
+      finally { clearTimeout(timer); streamSignal.removeEventListener("abort", onAbort); }
+    };
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const decoder = new TextDecoder(); let buffer = ""; let data: string[] = []; let dataBytes = 0; let eventCursor = ""; let eventType = "";
     try {
+      const response = await bounded(() => this.response(`v1/accounts/${id(accountId)}/events/stream?after=${decimal(after)}`, { signal: streamSignal, headers: { Accept: "text/event-stream" } }, true), this.timeoutMs, "Native SSE connection timeout");
+      if (!response.headers.get("content-type")?.startsWith("text/event-stream")) { await response.body?.cancel(); throw new Error("Expected native SSE response"); }
+      reader = response.body?.getReader(); if (!reader) throw new Error("Native SSE has no body");
       while (true) {
-        const { value, done } = await reader.read(); if (done) break;
+        // Server keepalive comments arrive every 15 seconds. Bound only the
+        // awaited read, not time spent yielding an event to a slow consumer.
+        const activeReader = reader;
+        const { value, done } = await bounded(() => activeReader.read(), this.streamIdleTimeoutMs, "Native SSE idle timeout"); if (done) break;
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > 1024 * 1024) throw new Error("Native SSE frame exceeds its bound");
         let newline: number;
@@ -223,6 +244,6 @@ export class NativeWeChatClient {
           if (dataBytes > 1024 * 1024) throw new Error("Native SSE event exceeds its bound");
         }
       }
-    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    } finally { connection.abort(); if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); } }
   }
 }

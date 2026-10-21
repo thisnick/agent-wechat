@@ -51,6 +51,36 @@ test('SSE accepts UTF-8 chunk boundaries, heartbeat comments and decimal cursors
   const values = []; for await (const value of client.watch('a')) values.push(value);
   assert.equal(values.length, 1); assert.equal(values[0].cursor, '9007199254740999'); assert.equal(values[0].data.text, '测试');
 });
+test('stalled SSE is aborted and a later watch replays from the last durable cursor', async () => {
+  const encode = cursor => new TextEncoder().encode(`id: ${cursor}\ndata: ${JSON.stringify({cursor,kind:'message.committed',data:{messageId:'fixture-'+cursor},createdAt:1})}\n\n`);
+  const requests=[];let cancelled=false;
+  const client=new NativeWeChatClient({...options,streamIdleTimeoutMs:20,fetch:async(url,init)=>{
+    requests.push({url:new URL(url),signal:init.signal});
+    if(requests.length===1)return new Response(new ReadableStream({start(c){c.enqueue(encode('1'));},cancel(){cancelled=true;}}),{headers:{'content-type':'text/event-stream'}});
+    return new Response(encode('2'),{headers:{'content-type':'text/event-stream'}});
+  }});
+  const first=client.watch('a','0');assert.equal((await first.next()).value.cursor,'1');
+  await assert.rejects(first.next(),/idle timeout/);assert.equal(cancelled,true);assert.equal(requests[0].signal.aborted,true);
+  const replay=[];for await(const event of client.watch('a','1'))replay.push(event.cursor);
+  assert.deepEqual(replay,['2']);assert.equal(requests[1].url.searchParams.get('after'),'1');
+});
+test('SSE keepalive comments reset idle waits and slow consumers do not expire the connection', async () => {
+  let timer;let cancelled=false;
+  const encode=cursor=>new TextEncoder().encode(`data: ${JSON.stringify({cursor,kind:'fixture',data:{},createdAt:1})}\n\n`);
+  const body=new ReadableStream({start(c){let ticks=0;timer=setInterval(()=>{ticks++;c.enqueue(new TextEncoder().encode(': keepalive\n\n'));if(ticks===7)c.enqueue(encode('1'));if(ticks===15)c.enqueue(encode('2'));},10);},cancel(){clearInterval(timer);cancelled=true;}});
+  const client=new NativeWeChatClient({...options,streamIdleTimeoutMs:40,fetch:async()=>new Response(body,{headers:{'content-type':'text/event-stream'}})});
+  const iterator=client.watch('a');
+  try{assert.equal((await iterator.next()).value.cursor,'1');await new Promise(resolve=>setTimeout(resolve,85));assert.equal((await iterator.next()).value.cursor,'2');}
+  finally{await iterator.return();clearInterval(timer);}
+  assert.equal(cancelled,true);
+});
+test('SSE connection waits and caller cancellation are bounded before headers arrive', async () => {
+  let requestSignal;
+  const client=new NativeWeChatClient({...options,timeoutMs:20,fetch:async(_url,init)=>{requestSignal=init.signal;return new Promise(()=>{});}});
+  await assert.rejects(client.watch('a').next(),/connection timeout/);assert.equal(requestSignal.aborted,true);
+  const caller=new AbortController();const waiting=client.watch('a','0',caller.signal).next();caller.abort();await assert.rejects(waiting,error=>error.name==='AbortError');
+  for(const streamIdleTimeoutMs of [0,-1,NaN,Infinity,300001])assert.throws(()=>new NativeWeChatClient({...options,streamIdleTimeoutMs}),/idle timeout/);
+});
 test('invalid event cursors and oversized unterminated SSE frames fail closed', async () => {
   const client = new NativeWeChatClient({ ...options, fetch: async () => new Response('x'.repeat(1024 * 1024 + 1), { headers: { 'Content-Type': 'text/event-stream' } }) });
   await assert.rejects(async () => { for await (const _ of client.watch('a')) {} }, /bound/);
