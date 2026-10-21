@@ -615,6 +615,60 @@ impl ProfileReader {
         if !message_table(&id.table) || !shard(&id.database) {
             return Err(ProfileError::InvalidQuery);
         }
+        let c = self.snapshot.open(&id.database)?;
+        let names = name_map(&c)?;
+        let labels = self.labels()?;
+        self.message_from_connection(&c, id, own_username, &labels, &names)
+    }
+
+    /// Resolve at most one page without decoding unrelated history. Missing rows
+    /// are omitted; unreadable databases and incompatible records remain errors.
+    /// Source-qualified IDs preserve each shard's own sender namespace.
+    pub fn messages_by_ids(
+        &self,
+        ids: &[SourceMessageId],
+        own_username: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        if ids.len() > 200 {
+            return Err(ProfileError::InvalidQuery);
+        }
+        if let Some(own) = own_username {
+            validate_name(own)?;
+        }
+        let mut groups: BTreeMap<&str, Vec<&SourceMessageId>> = BTreeMap::new();
+        for id in ids {
+            if !message_table(&id.table) || !shard(&id.database) {
+                return Err(ProfileError::InvalidQuery);
+            }
+            groups.entry(&id.database).or_default().push(id);
+        }
+        let labels = self.labels()?;
+        let mut result = Vec::with_capacity(ids.len());
+        for (database, group) in groups {
+            let c = self.snapshot.open(database)?;
+            let names = name_map(&c)?;
+            for id in group {
+                match self.message_from_connection(&c, id, own_username, &labels, &names) {
+                    Ok(message) => result.push(message),
+                    Err(ProfileError::NotCached) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn message_from_connection(
+        &self,
+        c: &Connection,
+        id: &SourceMessageId,
+        own_username: Option<&str>,
+        labels: &BTreeMap<String, String>,
+        names: &BTreeMap<i64, String>,
+    ) -> Result<Message> {
+        if !message_table(&id.table) || !shard(&id.database) {
+            return Err(ProfileError::InvalidQuery);
+        }
         if let Some(own) = own_username {
             validate_name(own)?;
         }
@@ -625,7 +679,6 @@ impl ProfileReader {
         if local <= 0 || local.to_string() != id.local_id {
             return Err(ProfileError::InvalidQuery);
         }
-        let c = self.snapshot.open(&id.database)?;
         let table = self
             .schemas
             .iter()
@@ -659,10 +712,9 @@ impl ProfileReader {
             )
             .optional()?
             .ok_or(ProfileError::NotCached)?;
-        let names = name_map(&c)?;
-        let mut candidates = self
-            .labels()?
-            .into_keys()
+        let mut candidates = labels
+            .keys()
+            .cloned()
             .chain(names.values().cloned())
             .filter(|name| {
                 format!("{:x}", Md5::digest(name.as_bytes())).eq_ignore_ascii_case(&id.table[4..])

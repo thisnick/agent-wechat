@@ -143,7 +143,7 @@ impl Core {
         let rows = if let Some(ids) = selected {
             let peer = subject.context("thread required")?;
             let table = format!("Msg_{:x}", md5::Md5::digest(peer.as_bytes()));
-            let mut rows = Vec::with_capacity(ids.len());
+            let mut sources = Vec::with_capacity(ids.len());
             for id in ids {
                 let source = crate::source_message_id(&id)?;
                 if !source.table.eq_ignore_ascii_case(&table) {
@@ -166,21 +166,19 @@ impl Core {
                 {
                     continue;
                 }
-                match reader.message(&source, own.as_deref()) {
-                    Ok(mut message) => {
-                        // The retained query and table hash establish the peer
-                        // even if contact/name metadata changed after page one.
-                        message.peer = Some(peer.into());
-                        rows.push(normalized_message(
-                            account,
-                            message,
-                            own.as_deref(),
-                            reader.generation(),
-                        )?);
-                    }
-                    Err(wechat_profile::ProfileError::NotCached) => {}
-                    Err(error) => return Err(error.into()),
-                }
+                sources.push(source);
+            }
+            let mut rows = Vec::with_capacity(sources.len());
+            for mut message in reader.messages_by_ids(&sources, own.as_deref())? {
+                // The retained query and table hash establish the peer even
+                // after contact/name metadata changes after page one.
+                message.peer = Some(peer.into());
+                rows.push(normalized_message(
+                    account,
+                    message,
+                    own.as_deref(),
+                    reader.generation(),
+                )?);
             }
             rows
         } else {

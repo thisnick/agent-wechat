@@ -904,3 +904,23 @@ fn voice_payload_uses_media_shard_names_and_avatar_requires_no_dat_key() {
     assert_eq!(avatar.bytes, png);
     assert_eq!(avatar.media_type, "image/png");
 }
+
+#[test]
+fn selected_message_ids_keep_shard_namespaces_and_skip_only_missing_rows() {
+    let d = fixture();
+    let r = reader(d.path());
+    let messages = r.messages(&MessageQuery::default()).unwrap().items;
+    let selected: Vec<_> = messages.iter().filter(|m| m.id.local_id == "2").map(|m| m.id.clone()).collect();
+    assert_eq!(selected.len(), 2);
+    let mut missing = selected[0].clone();
+    missing.local_id = "999".into();
+    let mut ids = selected.clone();
+    ids.push(missing);
+    let got = r.messages_by_ids(&ids, Some("self")).unwrap();
+    assert_eq!(got.len(), 2);
+    for message in got {
+        let expected = r.message(&message.id, Some("self")).unwrap();
+        assert_eq!(serde_json::to_value(message).unwrap(), serde_json::to_value(expected).unwrap());
+    }
+    assert!(matches!(r.messages_by_ids(&vec![selected[0].clone(); 201], None), Err(ProfileError::InvalidQuery)));
+}
