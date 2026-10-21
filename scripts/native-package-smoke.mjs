@@ -28,7 +28,9 @@ try {
   assert.ok(!names.some(name => name.startsWith('src/') || name.startsWith('test/') || name.startsWith('native/')));
   const unpacked = join(temporary, 'unpacked');
   await mkdir(unpacked);
-  await exec('tar', ['-xzf', join(temporary, packed.filename), '-C', unpacked]);
+  // Git Bash's GNU tar interprets a Windows drive prefix as a remote host.
+  // Relative paths work with both that tar and Windows' built-in bsdtar.
+  await exec('tar', ['-xzf', packed.filename, '-C', 'unpacked'], { cwd: temporary });
   const root = join(unpacked, 'package');
   const launcher = join(root, 'scripts/native-launcher.mjs');
   await assert.rejects(exec(process.execPath, [launcher, '--json', 'version']), /not installed/);

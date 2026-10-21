@@ -166,14 +166,12 @@ pub fn wxgf_preview(bytes: &[u8]) -> Result<DecodedImage> {
 }
 
 fn private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)?.write_all(bytes)?;
+    wechat_platform::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
     Ok(())
 }
 
@@ -229,6 +227,7 @@ fn wait_for_preview(child: &mut Child, output: &Path, timeout: Duration) -> Resu
 
 fn decode_hevc(bytes: &[u8], program: &Path) -> Result<Vec<u8>> {
     let directory = tempfile::Builder::new().prefix("wechat-wxgf-").tempdir()?;
+    wechat_platform::protect_path(directory.path(), true)?;
     let input = directory.path().join("frame.hevc");
     let output = directory.path().join("preview.jpg");
     private_file(&input, bytes)?;
@@ -303,6 +302,18 @@ fn decode_hevc(bytes: &[u8], program: &Path) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/static.wxgf");
+
+    #[test]
+    fn decoder_files_are_private_and_never_overwrite_existing_input() {
+        let directory = tempfile::tempdir().unwrap();
+        wechat_platform::protect_path(directory.path(), true).unwrap();
+        assert!(wechat_platform::private_path(directory.path()).unwrap());
+        let input = directory.path().join("frame.hevc");
+        private_file(&input, FIXTURE).unwrap();
+        assert!(wechat_platform::private_path(&input).unwrap());
+        assert!(private_file(&input, b"replacement").is_err());
+        assert_eq!(std::fs::read(input).unwrap(), FIXTURE);
+    }
 
     #[test]
     fn synthetic_partition_selects_complete_hevc_and_preserves_all_source_bytes() {

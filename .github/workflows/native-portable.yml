@@ -55,16 +55,16 @@ jobs:
           echo 'C:\Strawberry\perl\bin' >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/agent-wechat... build
-      - name: Test Unix platform primitives
+      - name: Test Unix platform primitives and media
         if: runner.os != 'Windows'
-        run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
       # Git Bash prepends its coreutils link.exe ahead of the MSVC linker.
-      - name: Test Windows platform primitives
+      - name: Test Windows platform primitives and media
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+        run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
       - name: Build Unix release executable
         if: runner.os != 'Windows'
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}

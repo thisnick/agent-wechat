@@ -47,6 +47,17 @@ scratch directory, never an existing official profile or deployed daemon.
 CI covers the automated offline checks. Keep native-machine results attached to
 the PR before promotion; a successful cross-target compile alone is insufficient.
 
+## Media decoder checks
+
+WXGF still previews require FFmpeg on the daemon's PATH. Without it, decoding
+reports `wxgf_decoder_unavailable`; retained original bytes are preserved. Check
+the synthetic WXGF fixture with `cargo test -p wechat-media --locked` both with
+and without FFmpeg installed on each target. Temporary decoder directories and
+files use the shared private filesystem protections, including Windows ACLs.
+All targets enforce the decoder deadline, output bounds and FFmpeg allocation/
+thread limits. Unix additionally applies process resource limits; Windows does
+not currently provide equivalent kernel-enforced memory/CPU limits.
+
 ## Isolated account acceptance
 
 Use a dedicated test account and a disposable supported-format profile. Confirm

@@ -2318,6 +2318,7 @@ fn run_ffmpeg(
         process::{Command, Stdio},
     };
     let dir = tempfile::tempdir()?;
+    wechat_platform::protect_path(dir.path(), true)?;
     let input_path = dir.path().join("input.bin");
     let output_path = dir.path().join(output);
     let mut f = wechat_platform::OpenOptions::new()
@@ -2468,6 +2469,7 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
         process::{Command, Stdio},
     };
     let dir = tempfile::tempdir()?;
+    wechat_platform::protect_path(dir.path(), true)?;
     let input_path = dir.path().join("input.bin");
     let result_path = dir.path().join("probe.json");
     let mut source = wechat_platform::OpenOptions::new()
