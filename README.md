@@ -21,6 +21,8 @@ wx config show
 wx serve
 ```
 
+For the native beta series, select a published `1.0.0-beta.N` version explicitly or install `@agent-wechat/cli@beta`. The stable `latest` channel retains the old container CLI until stable promotion. Beta preparation uses a CI-generated version PR and separately approved publication; no native beta is implied to be published by this source change.
+
 `serve` runs the authenticated daemon in the foreground. It creates private API-token and storage-key files under the configured durable root. It does not start Docker or automatically display a login QR. Other clients connect over the versioned HTTP/SSE API.
 
 In another terminal:

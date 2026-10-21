@@ -4,10 +4,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { publicPackages as packages } from './native-release-policy.mjs';
 
 const start = '<!-- agent-wechat:changesets:start -->';
 const end = '<!-- agent-wechat:changesets:end -->';
-const packages = [['packages/cli', '@agent-wechat/cli'], ['packages/openclaw-extension', '@agent-wechat/agent-wechat']];
 
 export function changelogEntry(markdown, version) {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');

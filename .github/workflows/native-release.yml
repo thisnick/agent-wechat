@@ -42,6 +42,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          node --test scripts/native-release-policy.test.mjs
+          node scripts/native-release-policy.mjs --check-registry
           node --test scripts/native-release-notes.test.mjs
           node scripts/native-release-notes.mjs --output artifacts/release-notes.md
       - run: pnpm install --frozen-lockfile
@@ -77,10 +79,13 @@ jobs:
         run: |
           node --test scripts/native-merge-release.test.mjs
           node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-x64 artifacts/fragments/native-release-arm64
-      - name: Render release notes from versioned package changelogs
+      - name: Validate release channel and render versioned Changesets notes
+        id: release_policy
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-        run: node scripts/native-release-notes.mjs --output artifacts/release-notes.md
+        run: |
+          node scripts/native-release-policy.mjs --check-registry --github-output
+          node scripts/native-release-notes.mjs --output artifacts/release-notes.md
       - uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-path: artifacts/native/*
@@ -88,17 +93,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_IS_PRERELEASE: ${{ steps.release_policy.outputs.prerelease }}
         run: |
           node scripts/native-release-preflight.mjs
           TAG="v$RELEASE_VERSION"
+          RELEASE_FLAGS=(--prerelease=false)
+          if [ "$RELEASE_IS_PRERELEASE" = true ]; then
+            RELEASE_FLAGS=(--prerelease --latest=false)
+          fi
           if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
           fi
           node scripts/native-release-preflight.mjs
           if gh release view "$TAG" --json body --jq .body > artifacts/existing-release-notes.md; then
             node scripts/native-release-notes.mjs --existing artifacts/existing-release-notes.md --output artifacts/release-notes.md
-            gh release edit "$TAG" --notes-file artifacts/release-notes.md
+            gh release edit "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           else
-            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes-file artifacts/release-notes.md
+            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           fi
           gh release upload "$TAG" artifacts/native/*

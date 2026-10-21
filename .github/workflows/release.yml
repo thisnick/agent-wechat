@@ -57,6 +57,10 @@ jobs:
 
       # Native assets must be prepared from this exact commit first. This gate
       # fails closed until the operator approves the native-release workflow.
+      - name: Validate npm stable or prerelease channel
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: node scripts/native-release-policy.mjs --check-registry
+
       - name: Verify native assets and embed npm checksum manifest
         if: steps.changesets.outputs.hasChangesets == 'false'
         run: node scripts/native-prepare-package.mjs --if-unpublished

@@ -14,6 +14,8 @@ on:
       - '.github/workflows/release.yml'
       - '.github/workflows/native-release.yml'
       - 'scripts/native-release-notes*.mjs'
+      - 'scripts/native-release-policy*.mjs'
+      - '.changeset/**'
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
 
@@ -34,6 +36,8 @@ jobs:
               - '.github/workflows/release.yml'
               - '.github/workflows/native-release.yml'
               - 'scripts/native-release-notes*.mjs'
+              - 'scripts/native-release-policy*.mjs'
+              - '.changeset/**'
               - 'scripts/install-ci-npm.sh'
               - 'scripts/verify-ci-publisher*.mjs'
             ts:
@@ -68,6 +72,7 @@ jobs:
           test "$(npm --version)" = "11.12.1"
           node --test scripts/verify-ci-publisher.test.mjs
           node --test scripts/native-release-notes.test.mjs
+          node --test scripts/native-release-policy.test.mjs
           node scripts/verify-ci-publisher.mjs
 
   ts:

@@ -11,6 +11,8 @@ npm install -g @agent-wechat/cli@VERSION
 wx --json version
 ```
 
+During the native beta series, use a published exact version such as `1.0.0-beta.0`, or `@agent-wechat/cli@beta`. The stable `latest` channel retains the old container CLI until promotion. See the beta release instructions before assuming a beta has been published.
+
 The explicit npm installation downloads one exact-version asset over verified HTTPS. Its size and SHA-256 must match `native-release.json` inside the npm package, then a bounded local identity check must report the same version, native backend, Rust target and serve capability before atomic installation. Normal command invocation never downloads a missing runtime. A missing manifest, unsupported platform, corrupt asset or wrong backend is an error.
 
 Installers that disable lifecycle scripts are supported:

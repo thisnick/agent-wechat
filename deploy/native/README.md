@@ -39,6 +39,12 @@ The build script requires Linux x64 or ARM64 and tests/runs its own native archi
 
 The runtime includes FFmpeg/FFprobe and independently compiled public SILK code. Direct binary operators must provision FFmpeg/FFprobe for audio/video source preparation. `wx licenses` and release notices preserve attribution. The Dockerfile-specific ignore file sends only reviewed build inputs. A `--platform` argument alone does not establish cross-architecture correctness; CI uses separate native workers.
 
+## Beta channel
+
+The committed Changesets prerelease state selects `beta`; the pending major changeset plans `1.0.0-beta.0` for the public CLI/OpenClaw packages and the private bundled SDK. This implementation PR keeps current package versions; after its merge, CI generates the separate Version Packages PR with beta versions, changelogs and the Rust lockfile update. Beta publication does not require a local compiler.
+
+`native-release-policy.mjs` requires matching package/prerelease state, protects the existing public stable npm channels, and supplies GitHub prerelease metadata. Native beta releases are not marked Latest; npm uses Changesets beta mode. `latest` remains on the stable container packages until stable promotion. Entering beta mode is configuration, not publication. Exit it through a reviewed `changeset pre exit` and stable version PR. The existing release workflows target main; stable maintenance on another branch requires an explicit workflow setup.
+
 ## Release preparation, before npm publication
 
 This is an operator sequence for a future approved release, not an instruction to publish during implementation:
