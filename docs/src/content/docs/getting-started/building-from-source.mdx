@@ -25,15 +25,15 @@ Changesets generates package versions and changelogs in the version PR. The appr
 
 ## Beta release process
 
-The native rewrite starts with **`1.0.0-beta.0`**. Both public packages share the version; the private bundled SDK is versioned with its own changeset. `beta` is an explicit npm opt-in, while `latest` stays on the existing stable container implementation. GitHub beta releases are marked prerelease and are not marked Latest. Image tags include the exact prerelease version.
+The first installable native beta is **`1.0.0-beta.1`**. Both public packages share the version; the private bundled SDK is versioned with its own changeset. `beta` is an explicit npm opt-in, while `latest` stays on the existing stable container implementation. GitHub beta releases are marked prerelease and are not marked Latest. Image tags include the exact prerelease version.
 
 No local build or publication is required:
 
-1. Merge the reviewed implementation PR, which includes the major changeset and Changesets beta-mode state.
-2. CI opens a separate **Version Packages** PR containing `1.0.0-beta.0`, package changelogs and matching Rust workspace/lockfile versions. Review and merge that version PR.
+1. Merge reviewed changes with their changeset while Changesets beta mode is active.
+2. CI opens a separate **Version Packages** PR containing the next prerelease version, package changelogs and matching Rust workspace/lockfile versions. Review and merge that version PR.
 3. Approve **Prepare native release assets** for that exact main commit and version. CI builds both architectures, validates notes/channel/source and publishes the native GitHub assets behind the release environment approval.
 4. Rerun the normal **Release** workflow for the same version commit after those assets exist. Changesets publishes to npm's `beta` dist-tag. Native image publication has its own explicit approval; deployment remains separate.
 
 Until native assets are prepared, the npm workflow deliberately stops at its asset gate. It does not publish a launcher without its matching executables. The channel guard rejects prerelease versions without matching beta-mode state and checks that both existing public packages retain a stable npm `latest` line before beta publication.
 
-New changesets produce later `-beta.1`, `-beta.2` versions through subsequent version PRs. To promote, prepare a reviewed change using `pnpm changeset pre exit`, let the version workflow produce stable `1.0.0` and repeat the approved artifact/publication sequence. The stable publication updates `latest`. The current workflows operate on `main`; maintaining stable fixes during the beta series requires a separately configured maintenance/release branch.
+New changesets increment the prerelease counter through subsequent version PRs. To promote, prepare a reviewed change using `pnpm changeset pre exit`, let the version workflow produce stable `1.0.0` and repeat the approved artifact/publication sequence. The stable publication updates `latest`. The current workflows operate on `main`; maintaining stable fixes during the beta series requires a separately configured maintenance/release branch.
