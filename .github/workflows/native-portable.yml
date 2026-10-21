@@ -20,12 +20,20 @@ jobs:
         include:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            cargo_shell: bash
+            rustflags: ""
           - runner: macos-15
             target: aarch64-apple-darwin
+            cargo_shell: bash
+            rustflags: ""
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
+            cargo_shell: pwsh
+            rustflags: "-C target-feature=+crt-static"
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+            cargo_shell: pwsh
+            rustflags: "-C target-feature=+crt-static"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     defaults:
@@ -59,13 +67,13 @@ jobs:
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       # Git Bash prepends its coreutils link.exe ahead of the MSVC linker.
       - run: cargo test -p wechat-platform --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
-        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+        shell: ${{ matrix.cargo_shell }}
         env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
       - run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
-        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+        shell: ${{ matrix.cargo_shell }}
         env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Check Windows standalone runtime dependencies
         if: runner.os == 'Windows'
         shell: pwsh
