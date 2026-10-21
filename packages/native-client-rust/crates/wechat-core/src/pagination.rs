@@ -45,7 +45,9 @@ impl Core {
         }
         let decode = || -> Result<Cursor> {
             let bytes = URL_SAFE_NO_PAD.decode(encoded)?;
-            let plain = self.cursor_vault.open_record(account, "pagination-cursor", &bytes)?;
+            let plain = self
+                .cursor_vault
+                .open_record(account, "pagination-cursor", &bytes)?;
             Ok(serde_json::from_slice(&plain)?)
         };
         let cursor = decode().map_err(|_| anyhow::anyhow!("invalid_cursor"))?;
@@ -59,9 +61,18 @@ impl Core {
         if retained.query_hash != query || retained.expires_at != cursor.expires {
             bail!("invalid_cursor");
         }
-        let plain = self.vault.open_record(account, &format!("pagination-view:{}", cursor.view), &retained.payload)?;
+        let plain = self.vault.open_record(
+            account,
+            &format!("pagination-view:{}", cursor.view),
+            &retained.payload,
+        )?;
         let view: View = serde_json::from_slice(&plain)?;
-        let start = view.ids.iter().position(|id| id == &cursor.last).context("invalid_cursor")? + 1;
+        let start = view
+            .ids
+            .iter()
+            .position(|id| id == &cursor.last)
+            .context("invalid_cursor")?
+            + 1;
         Ok((cursor, view, retained.event_cursor, start))
     }
 
@@ -108,10 +119,20 @@ impl Core {
             bail!("invalid_request");
         }
         let selected = if kind == "messages" {
-            q.cursor.as_deref().map(|cursor| {
-                let (_, view, _, start) = self.pagination_continuation(account, &query, cursor)?;
-                Ok::<_, anyhow::Error>(view.ids.into_iter().skip(start).take(limit).collect::<Vec<_>>())
-            }).transpose()?
+            q.cursor
+                .as_deref()
+                .map(|cursor| {
+                    let (_, view, _, start) =
+                        self.pagination_continuation(account, &query, cursor)?;
+                    Ok::<_, anyhow::Error>(
+                        view.ids
+                            .into_iter()
+                            .skip(start)
+                            .take(limit)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .transpose()?
         } else {
             None
         };
@@ -130,18 +151,32 @@ impl Core {
                 }
                 // A removed database/table/row is a tombstone. A present but
                 // unreadable or incompatible source remains an explicit error.
-                let Some(database) = reader.inventory().iter().find(|d| d.relative_path == source.database) else {
+                let Some(database) = reader
+                    .inventory()
+                    .iter()
+                    .find(|d| d.relative_path == source.database)
+                else {
                     continue;
                 };
                 if database.state == wechat_profile::DatabaseState::Readable
-                    && !reader.schemas().iter().any(|s| s.database == source.database && s.tables.iter().any(|t| t.name == source.table))
-                { continue; }
+                    && !reader.schemas().iter().any(|s| {
+                        s.database == source.database
+                            && s.tables.iter().any(|t| t.name == source.table)
+                    })
+                {
+                    continue;
+                }
                 match reader.message(&source, own.as_deref()) {
                     Ok(mut message) => {
                         // The retained query and table hash establish the peer
                         // even if contact/name metadata changed after page one.
                         message.peer = Some(peer.into());
-                        rows.push(normalized_message(account, message, own.as_deref(), reader.generation())?);
+                        rows.push(normalized_message(
+                            account,
+                            message,
+                            own.as_deref(),
+                            reader.generation(),
+                        )?);
                     }
                     Err(wechat_profile::ProfileError::NotCached) => {}
                     Err(error) => return Err(error.into()),
@@ -179,14 +214,9 @@ impl Core {
             })
             .collect::<Result<_>>()?;
         let (view_id, view, boundary, expires, start) = if let Some(encoded) = &q.cursor {
-            let (cursor, view, boundary, start) = self.pagination_continuation(account, query, encoded)?;
-            (
-                cursor.view,
-                view,
-                boundary,
-                cursor.expires,
-                start,
-            )
+            let (cursor, view, boundary, start) =
+                self.pagination_continuation(account, query, encoded)?;
+            (cursor.view, view, boundary, cursor.expires, start)
         } else {
             // Preserve the source ordering explicitly; the current resource map
             // is used only for field resolution, never as the ordering contract.
@@ -433,34 +463,92 @@ mod tests {
         let table = format!("Msg_{:x}", md5::Md5::digest(b"peer"));
         let database = profile.join("db_storage/message/message_0.db");
         let mut db = rusqlite::Connection::open(&database).unwrap();
-        assert_eq!(unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) }, 0);
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+            0
+        );
         db.execute_batch(&format!("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;INSERT INTO Name2Id(user_name,is_session)VALUES('peer',1);CREATE TABLE {table}(local_id INTEGER PRIMARY KEY,server_id INTEGER,local_type INTEGER,create_time INTEGER,real_sender_id INTEGER,message_content TEXT,source TEXT,WCDB_CT_message_content INTEGER,WCDB_CT_source INTEGER);")).unwrap();
         let tx = db.transaction().unwrap();
         for local in 1..=2048 {
-            tx.execute(&format!("INSERT INTO {table} VALUES(?1,?1,1,?1,1,'original','',0,0)"), [local]).unwrap();
+            tx.execute(
+                &format!("INSERT INTO {table} VALUES(?1,?1,1,?1,1,'original','',0,0)"),
+                [local],
+            )
+            .unwrap();
         }
         tx.commit().unwrap();
-        let store = std::sync::Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
+        let store =
+            std::sync::Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
         store.attach("a", &profile, true).unwrap();
         let key_path = temp.path().join("keys.json");
         keys.write_new(&key_path).unwrap();
         store.set_keys_file("a", &key_path).unwrap();
         let core = Core::new(store, None).unwrap();
-        let first = core.catalog_page("a", "messages", Some("peer"), &CatalogQuery { limit: Some(1), ..Default::default() }).unwrap();
+        let first = core
+            .catalog_page(
+                "a",
+                "messages",
+                Some("peer"),
+                &CatalogQuery {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let cursor = first["nextCursor"].as_str().unwrap().to_owned();
         // Edits and deletions in the original membership must be reflected;
         // unrelated late rows must never be decoded for this continuation.
         db.execute_batch(&format!("UPDATE {table} SET message_content='edited' WHERE local_id=2047;DELETE FROM {table} WHERE local_id=2046;INSERT INTO {table} VALUES(3000,3000,NULL,0,1,'late malformed row','',0,0);")).unwrap();
-        let next = core.catalog_page("a", "messages", Some("peer"), &CatalogQuery { limit: Some(2), cursor: Some(cursor.clone()), ..Default::default() }).unwrap();
+        let next = core
+            .catalog_page(
+                "a",
+                "messages",
+                Some("peer"),
+                &CatalogQuery {
+                    limit: Some(2),
+                    cursor: Some(cursor.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(next["items"][0]["body"], "edited");
         assert_eq!(next["items"][0]["threadId"], "peer");
         assert_eq!(next["items"][1]["deleted"], true);
-        let missing = crate::message_id(&wechat_profile::SourceMessageId { database: "message/message_0.db".into(), table: table.clone(), local_id: "2046".into() }).unwrap();
+        let missing = crate::message_id(&wechat_profile::SourceMessageId {
+            database: "message/message_0.db".into(),
+            table: table.clone(),
+            local_id: "2046".into(),
+        })
+        .unwrap();
         assert_eq!(next["items"][1]["id"], missing);
         assert_eq!(next["items"].as_array().unwrap().len(), 2);
-        assert!(core.catalog_page("a", "messages", Some("another_peer"), &CatalogQuery { cursor: Some(cursor), ..Default::default() }).unwrap_err().to_string().contains("invalid_cursor"));
-        db.execute("DELETE FROM Name2Id WHERE user_name='peer'", []).unwrap();
-        let later = core.catalog_page("a", "messages", Some("peer"), &CatalogQuery { limit: Some(1), cursor: Some(next["nextCursor"].as_str().unwrap().into()), ..Default::default() }).unwrap();
+        assert!(core
+            .catalog_page(
+                "a",
+                "messages",
+                Some("another_peer"),
+                &CatalogQuery {
+                    cursor: Some(cursor),
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid_cursor"));
+        db.execute("DELETE FROM Name2Id WHERE user_name='peer'", [])
+            .unwrap();
+        let later = core
+            .catalog_page(
+                "a",
+                "messages",
+                Some("peer"),
+                &CatalogQuery {
+                    limit: Some(1),
+                    cursor: Some(next["nextCursor"].as_str().unwrap().into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(later["items"][0]["threadId"], "peer");
     }
 
