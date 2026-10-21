@@ -224,3 +224,11 @@ test("sender policy revoked during asset lookup prevents download submission and
   await assert.rejects(value.run("wechat_media", { messageId: "media-message" }), /no longer allowed/);
   assert.deepEqual(value.calls.map(call => call[0]), ["message", "mediaAssets"]);
 });
+test("unsupported historical media and transient catalog errors return bounded statuses without raw details", async t => {
+  for (const [code, retryable, status] of [["unsupported_profile", false, "unsupported"], ["unavailable", true, "pending"]] as const) {
+    const value = await mediaFixture(t); value.client.mediaAssets = async () => { throw new NativeApiError(retryable ? 503 : 409, code, retryable); };
+    const result: any = await value.run("wechat_media", { messageId: "media-message", download: false });
+    assert.equal(result.details.status, status); assert.equal(result.details.retryable, retryable); assert.equal(result.details.reason, code);
+    assert.equal(result.details.attachment, undefined); assert.equal(value.calls.some(call => ["transferMedia", "mediaContent", "saveMedia"].includes(call[0])), false);
+  }
+});

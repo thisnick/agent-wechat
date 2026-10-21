@@ -2,7 +2,7 @@ import type { ChannelAgentTool } from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { imageResultFromFile } from "openclaw/plugin-sdk/channel-actions";
-import { isNativeTombstone, type NativeMessage } from "@agent-wechat/shared";
+import { isNativeTombstone, NativeApiError, type NativeMessage } from "@agent-wechat/shared";
 import { resolveWeChatIngress, resolveWeChatPolicyContext } from "./access-control.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { prepareNativeAttachment } from "./native-media.ts";
@@ -110,11 +110,20 @@ export function createNativeHistoryTools(context: OpenClawPluginToolContext, dep
         if (message.id !== messageId || message.accountId !== accountId || message.threadId !== conversation || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("Message is outside the permitted conversation or sender policy");
         result = messageResult(message);
         if (name === "wechat_media") {
-          const prepared = await prepareNativeAttachment({ client, account, message, core, cfg,
+          let prepared: Awaited<ReturnType<typeof prepareNativeAttachment>>;
+          try { prepared = await prepareNativeAttachment({ client, account, message, core, cfg,
             quality: quality as typeof qualities[number], download: args.download !== false, waitMs: 2000, signal, assertCurrent: guard,
             beforeMediaAccess: async () => {
               if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
-            } });
+            } }); }
+          catch (error) {
+            guard();
+            if (!(error instanceof NativeApiError)) throw error;
+            const details = { messageId: message.id, threadId: conversation,
+              status: error.retryable ? "pending" : ["unsupported_profile", "unsupported_media", "unsupported_media_variant"].includes(error.code) ? "unsupported" : "unavailable",
+              retryable: error.retryable, reason: error.code };
+            return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
+          }
           guard();
           if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
           const details = { messageId: message.id, threadId: conversation, status: prepared.pending ? "pending" : prepared.attachment?.status ?? "unsupported",

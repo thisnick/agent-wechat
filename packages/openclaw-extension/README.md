@@ -70,12 +70,16 @@ Images exceeding the host's bounded representation, or formats requiring convers
 
 The agent can look beyond the recent inbound buffer using the selected native account's local profile:
 
-| Tool | Purpose |
-| --- | --- |
-| `wechat_history` | Read the current thread's stored messages, newest first |
-| `wechat_search` | Search the current thread's stored message text by a case-insensitive substring |
-| `wechat_message` | Look up one exact message ID in the current thread |
-| `wechat_media` | Retrieve that message's cached attachment or request its download |
+| Tool | Inputs (`?` means optional) | Output |
+| --- | --- | --- |
+| `wechat_history` | `{ limit?, cursor? }` | Stored messages, newest first, with `nextCursor`, `sourceGeneration` and `coverage` |
+| `wechat_search` | `{ query, limit?, cursor? }` | Same page shape, filtered by case-insensitive substring |
+| `wechat_message` | `{ messageId }` | One stored message |
+| `wechat_media` | `{ messageId, download?, quality? }` | Media status, optional verified file path and image content |
+
+A stored message includes `id`, `threadId`, nullable `serverId`, `senderId`, `direction` and `createdAt`, numeric `type`, bounded `body`, and `bodyTruncated`. Its optional `attachment` descriptor contains `kind`, `messageId` and `retrievalTool: "wechat_media"`. Message IDs and server IDs remain strings; use the opaque `id` for exact lookup and media retrieval.
+
+A media result includes `messageId`, `threadId`, `status` and `retryable`, with optional `attachment`, actual `variant`, `jobId`, `reason` and display `body`. A ready attachment has `kind`, `filename`, verified local `path` and `mime`; image quality may be `full`, `standard` or `thumbnail`. Unavailable results never claim a local path. OpenClaw wraps structured outputs in `details` and text `content`; a ready image additionally supplies an image content block.
 
 For example, the agent can call `wechat_search` with `{"query":"project notes"}` in the current conversation. Every tool is restricted to the current WeChat account and thread derived from trusted OpenClaw context. Owners have the same restriction in direct and group conversations. Tools accept no thread/account selector, and the plugin rejects messages or assets from another conversation or account. Requester and historical sender policy are rechecked. Missing or conflicting trusted conversation context hides the tools; webchat and other channels cannot use them. Broader operator lookup remains available through the CLI and authenticated daemon API.
 
