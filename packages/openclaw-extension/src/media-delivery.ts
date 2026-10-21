@@ -129,7 +129,11 @@ export function renderAttachmentBody(
       return appendReference(originalBody || "<media:video>", `[Video file: ${attachment.path}]`);
     }
   }
-  const body = originalBody || (attachment.kind === "image" ? "<media:image>" : originalBody);
+  let body = originalBody || (attachment.kind === "image" ? "<media:image>" : originalBody);
+  // OpenClaw scans bare local image paths for automatic vision hydration.
+  // Angle brackets keep this original as a file reference; MediaPath selects
+  // the separately verified representation actually attached to this turn.
+  if (attachment.kind === "image") body = appendReference(body, `[Image file: <${attachment.path}>]`);
   if (attachment.kind === "image" && attachment.quality === "thumbnail") {
     return appendReference(body, "[Image preview only: thumbnail quality]");
   }
@@ -178,7 +182,7 @@ export function applyCatchupAttachmentPolicy<T extends MessageWithAttachment>(me
     } else if (!selectImage && attachment.status === "ready" && attachment.path) {
       const label = attachment.kind === "image" ? "Image file" :
         attachment.kind === "audio" ? "Voice message file" : "Video file";
-      const reference = `[${label}: ${attachment.path}]`;
+      const reference = attachment.kind === "image" ? `[${label}: <${attachment.path}>]` : `[${label}: ${attachment.path}]`;
       rawBody = message.rawBody.includes(reference)
         ? message.rawBody
         : appendReference(message.rawBody, reference);

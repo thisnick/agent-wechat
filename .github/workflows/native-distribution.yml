@@ -49,6 +49,7 @@ jobs:
       - run: node scripts/native-gateway-smoke.mjs
       - run: node scripts/native-model-smoke.mjs
       - run: node scripts/native-media-model-smoke.mjs
+      - run: node scripts/native-history-model-smoke.mjs
 
   package:
     strategy:

@@ -1,5 +1,8 @@
 {
   "id": "agent-wechat",
+  "contracts": {
+    "tools": ["wechat_chats", "wechat_history", "wechat_search", "wechat_message"]
+  },
   "legacyPluginIds": [
     "wechat"
   ],

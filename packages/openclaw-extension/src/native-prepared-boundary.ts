@@ -16,14 +16,18 @@ function prune(): void { for (const [id, item] of pending) if (item.expires < Da
 export function nativeDispatchManifest(params: {
   message: NativeMessage; inputBody: string; sessionKey: string; agentId: string; channelAccountId: string;
   policy?: unknown; assets?: readonly NativeSuppliedAsset[];
+  history?: readonly NativeMessage[];
 }): NativeDispatchManifest {
+  const history = params.history ?? [];
+  if (history.length > 200 || history.some(message => message.accountId !== params.message.accountId || message.threadId !== params.message.threadId || message.id === params.message.id)) throw Error("Invalid native history manifest");
   const assets = Object.freeze((params.assets ?? []).map(asset => {
     if (typeof asset.id !== "string" || !asset.id || asset.id.length > 2048 || !/^[a-f0-9]{64}$/.test(asset.sha256) || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
       || asset.byteLength > 128 * 1024 * 1024 || typeof asset.path !== "string" || !isAbsolute(asset.path) || asset.path.length > 4096
       || typeof asset.mime !== "string" || asset.mime.length > 128 || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(asset.mime)
       || !["image", "audio", "video", "file"].includes(asset.kind) || !["model_image", "file_reference"].includes(asset.role)
       || (asset.role === "model_image" && (asset.kind !== "image" || !asset.mime.startsWith("image/") || !asset.runtimeMedia))
-      || asset.contextRole !== "trigger") throw Error("Invalid native supplied asset manifest");
+      || !["trigger", "history"].includes(asset.contextRole)
+      || (asset.contextRole === "history" && !history.some(message => message.id === asset.messageId))) throw Error("Invalid native supplied asset manifest");
     return Object.freeze({ ...asset });
   }));
   const messageSid = `wechat-native:${params.message.accountId}:${params.message.id}`;
@@ -34,6 +38,8 @@ export function nativeDispatchManifest(params: {
     newInputs: Object.freeze([Object.freeze({ id: params.message.id, version: params.message.version ?? "",
       contentSha256: digest(JSON.stringify([params.message.id, params.message.version, params.message.senderId, params.message.type,
         params.message.body, params.message.mentions, params.message.serverId])), role: "trigger" as const })]),
+    ...(history.length ? { historyInputs: Object.freeze(history.map(message => Object.freeze({ id: message.id, version: message.version ?? "",
+      contentSha256: digest(JSON.stringify([message.id, message.version, message.senderId, message.type, message.body, message.mentions, message.serverId])), role: "history" as const }))) } : {}),
     assets, policySha256: digest(JSON.stringify(params.policy ?? null)),
     // Exact released 2026.10.2 source-turn identity. Requiring it in the later
     // snapshot prevents an identical older image/body from proving this input.

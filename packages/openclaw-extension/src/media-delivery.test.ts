@@ -40,7 +40,7 @@ test("catch-up retains all file paths and selects only the latest image", () => 
 
   assert.match(result[0].rawBody, /\/managed\/brief\.pdf/);
   assert.match(result[2].rawBody, /\/managed\/sheet\.xlsx/);
-  assert.match(result[1].rawBody, /Image file: \/managed\/a\.png/);
+  assert.match(result[1].rawBody, /Image file: <\/managed\/a\.png>/);
   assert.equal(result[1].mediaPath, undefined);
   assert.equal(result[3].mediaPath, "/managed/b.png");
   assert.equal(result.filter((item) => item.mediaPath).length, 1);
@@ -100,6 +100,6 @@ test("a delivered thumbnail is labeled as a preview for the model", () => {
     ...ready("image", "photo.jpg", "/managed/photo.jpg"),
     quality: "thumbnail",
   };
-  assert.equal(renderAttachmentBody("", preview), "<media:image>\n[Image preview only: thumbnail quality]");
-  assert.equal(renderAttachmentBody("", { ...preview, quality: "standard" }), "<media:image>");
+  assert.equal(renderAttachmentBody("", preview), "<media:image>\n[Image file: </managed/photo.jpg>]\n[Image preview only: thumbnail quality]");
+  assert.equal(renderAttachmentBody("", { ...preview, quality: "standard" }), "<media:image>\n[Image file: </managed/photo.jpg>]");
 });

@@ -8,6 +8,7 @@ import { NativeConsumerState } from "./native-consumer-state.ts";
 import { nativeDispatchManifest, trackNativePreparedInput } from "./native-prepared-boundary.ts";
 import { submitNativeText } from "./native-send.ts";
 import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
+import { buildNativeContext, nativeGroupHistoryLimit, prepareNativeHistory, transcribeNativeAttachment } from "./native-history.ts";
 import { getWeChatRuntime } from "./runtime.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
 import type { WeChatMonitorOptions } from "./types.js";
@@ -62,26 +63,41 @@ export async function dispatchNativeMessage(params: {
   const policy = resolveWeChatPolicyContext({ account, cfg, chatId: message.threadId });
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({ cfg, surface: "agent-wechat" });
   const commandBody = normalizeWeChatCommandBody(message.type === 1 ? message.body ?? "" : "", { isGroup, wasMentioned });
+  const hasControlCommand = allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg);
+  const resolve = core.channel.inbound?.ingress?.resolveStable ?? resolveStableChannelMessageIngress;
+  const senderAdmission = (senderId: string) => resolveWeChatIngress({ resolve, cfg, accountId: account.accountId,
+    policy, isGroup, chatId: message.threadId, senderId,
+    readStoreAllowFrom: async () => core.channel.pairing.readAllowFromStore({ channel: "agent-wechat", accountId: account.accountId, env: process.env }).catch(() => []) });
   const ingress = await resolveWeChatIngress({
-    resolve: core.channel.inbound?.ingress?.resolveStable ?? resolveStableChannelMessageIngress,
+    resolve,
     cfg, accountId: account.accountId, policy, isGroup, chatId: message.threadId, senderId: message.senderId,
     readStoreAllowFrom: async () => core.channel.pairing.readAllowFromStore({ channel: "agent-wechat", accountId: account.accountId, env: process.env }).catch(() => []),
-    command: { allowTextCommands, hasControlCommand: allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg) },
+    command: { allowTextCommands, hasControlCommand },
     mention: { wasMentioned, allowTextCommands },
   });
   const unauthorizedDirectCommand = !isGroup && ingress.ingress.reasonCode === "control_command_unauthorized";
   if (ingress.ingress.admission !== "dispatch" && !unauthorizedDirectCommand) {
+    if (isGroup && policy.requireMention && !wasMentioned && !hasControlCommand
+      && (await senderAdmission(message.senderId)).ingress.admission === "dispatch") {
+      state.bufferGroupMessage(message.id, nativeGroupHistoryLimit(cfg)); return "ignored";
+    }
     state.update(message.id, { state: "ignored" }); return "ignored";
   }
   let preparedMedia;
   try { preparedMedia = await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message, core, cfg }); }
   catch { state.update(message.id, { state: "needs_review" }); return "needs_review"; }
   if (preparedMedia.pending) return "pending";
-  let inputBody = preparedMedia.body;
-  if (preparedMedia.attachment?.kind === "audio" && preparedMedia.attachment.status === "ready" && preparedMedia.attachment.path) {
-    try { const transcript = await core.mediaUnderstanding.transcribeAudioFile({ filePath: preparedMedia.attachment.path, cfg, mime: preparedMedia.attachment.mime }); if (transcript.text?.trim()) inputBody += `\n[Voice transcript: ${transcript.text.trim().slice(0, 10000)}]`; else inputBody += "\n[Voice transcription unavailable]"; }
-    catch { inputBody += "\n[Voice transcription unavailable]"; }
+  preparedMedia = await transcribeNativeAttachment(preparedMedia, core, cfg);
+  const buffered = isGroup && !hasControlCommand ? state.groupHistory(message.threadId, message.id, nativeGroupHistoryLimit(cfg)) : [];
+  const admitted: NativeMessage[] = [];
+  for (const item of buffered) {
+    // A sender removed since intake must not return through history/media.
+    if (item.message.senderId && (await senderAdmission(item.message.senderId)).ingress.admission === "dispatch") admitted.push(item.message);
   }
+  const history = await prepareNativeHistory(admitted, async historical => transcribeNativeAttachment(
+    await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message: historical, core, cfg }), core, cfg));
+  const context = buildNativeContext(history, message, preparedMedia);
+  const inputBody = context.inputBody;
   const route = core.channel.routing.resolveAgentRoute({ cfg, channel: "agent-wechat", accountId: account.accountId,
     peer: { kind: isGroup ? "group" : "direct", id: isGroup ? message.threadId : message.senderId } });
   const storePath = core.channel.session.resolveStorePath(cfg.session?.store, { agentId: route.agentId });
@@ -92,9 +108,10 @@ export async function dispatchNativeMessage(params: {
     To: `wechat:${message.threadId}`, SessionKey: route.sessionKey, AccountId: account.accountId,
     ChatType: isGroup ? "group" : "direct", SenderId: message.senderId, Provider: "agent-wechat", Surface: "agent-wechat",
     MessageSid: `wechat-native:${account.native!.accountId}:${message.id}`, WasMentioned: isGroup ? wasMentioned : undefined,
+    Attachments: context.attachments, InboundHistory: context.history,
     CommandAuthorized: core.channel.commands.shouldComputeCommandAuthorized(commandBody, cfg) ? ingress.commandAccess.authorized : undefined,
     OriginatingChannel: "agent-wechat", OriginatingTo: `wechat:${message.threadId}`,
-    ...(preparedMedia.mediaPath ? { MediaPath: preparedMedia.mediaPath, MediaUrl: preparedMedia.mediaPath, MediaType: preparedMedia.mediaMime } : {}),
+    ...(context.mediaPath ? { MediaPath: context.mediaPath, MediaUrl: context.mediaPath, MediaType: context.mediaMime } : {}),
   });
   await core.channel.session.recordInboundSession({ storePath, sessionKey: route.sessionKey, ctx });
   const pipeline = (params.createPipeline ?? createChannelMessageReplyPipeline)({ cfg, agentId: route.agentId, channel: "agent-wechat", accountId: account.accountId });
@@ -102,8 +119,8 @@ export async function dispatchNativeMessage(params: {
   // Persist before making a model-side effect. A crash in this window is uncertain,
   // and reopening holds this item for review rather than duplicating a model turn.
   const dispatchManifest = nativeDispatchManifest({ message, inputBody, sessionKey: route.sessionKey,
-    agentId: route.agentId, channelAccountId: account.accountId, policy, assets: preparedMedia.suppliedAssets ?? [] });
-  state.update(message.id, { state: "dispatching", dispatchManifest });
+    agentId: route.agentId, channelAccountId: account.accountId, policy, assets: context.assets, history: admitted });
+  state.beginDispatch(message.id, dispatchManifest, buffered.map(item => item.message.id));
   const callback = readPolicy !== "on_inbound"
     && (message.type === 1 || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length))
     ? state.preparedCallback([message.id], readPolicy) : undefined;

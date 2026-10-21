@@ -29,3 +29,26 @@ test("failed durable custody write does not advance the in-memory cursor or admi
   finally { chmodSync(directory, 0o700); }
   const reopened = new NativeConsumerState(directory, "server", "a"); assert.equal(reopened.cursor, "1"); assert.equal(reopened.get("second"), undefined);
 });
+test("group context survives restart in ingress order with a per-thread bound", t => {
+  const state = fixture(t);
+  for (let i = 1; i <= 4; i++) { state.accept(String(i), { ...message(`m${i}`, "r@chatroom"), serverId: String(5 - i) }, "live"); state.bufferGroupMessage(`m${i}`, 2); }
+  state.accept("5", message("trigger", "r@chatroom"), "live");
+  const reopened = new NativeConsumerState(join(state.file, ".."), "server", "a");
+  assert.deepEqual(reopened.groupHistory("r@chatroom", "trigger", 50).map(item => item.message.id), ["m3", "m4"]);
+  assert.equal(reopened.get("m1")?.groupContext, false); assert.equal(reopened.get("m4")?.readPending, undefined);
+  reopened.accept("6", message("later", "r@chatroom"), "live"); reopened.bufferGroupMessage("later", 2);
+  assert.deepEqual(reopened.groupHistory("r@chatroom", "trigger", 50).map(item => item.message.id), ["m4"]);
+});
+test("context offered to an uncertain turn is not replayed or attached to the next turn", t => {
+  const state = fixture(t); state.accept("1", message("context", "r@chatroom"), "live"); state.bufferGroupMessage("context", 50);
+  state.accept("2", message("trigger", "r@chatroom"), "live");
+  state.beginDispatch("trigger", {} as any, ["context"]);
+  const reopened = new NativeConsumerState(join(state.file, ".."), "server", "a");
+  assert.equal(reopened.get("trigger")?.state, "needs_review"); assert.equal(reopened.get("context")?.groupContext, false);
+  reopened.accept("3", message("next", "r@chatroom"), "live"); assert.deepEqual(reopened.groupHistory("r@chatroom", "next", 50), []);
+});
+test("disabled history does not retain group context or create read receipts", t => {
+  const state = fixture(t); state.accept("1", message("context", "r@chatroom"), "live"); state.bufferGroupMessage("context", 0);
+  state.accept("2", message("trigger", "r@chatroom"), "live"); assert.deepEqual(state.groupHistory("r@chatroom", "trigger", 50), []);
+  assert.equal(state.get("context")?.readPending, undefined);
+});

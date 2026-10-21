@@ -195,3 +195,61 @@ test("late media receipt retries its whole-thread read during quiet SSE without 
   assert.equal(requests, 2); assert.equal(failures, 1); assert.equal(value.state.get("m1")?.readPending, false); assert.equal(value.runs.length, 0);
   stop(); const before = requests; await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(requests, before);
 });
+
+test("group attachments buffered before a mention survive restart and retain original mention facts", async t => {
+  const value = fixture(t, { group: true });
+  value.core.mediaUnderstanding = { transcribeAudioFile: async () => ({ text: "Historical voice transcript" }) };
+  const prepared: string[] = [];
+  const prepareAttachment: any = async ({ message }: any) => {
+    prepared.push(message.id);
+    if (message.type === 1) return { body: message.body, pending: false };
+    const kind = message.type === 3 ? "image" : message.type === 34 ? "audio" : message.type === 43 ? "video" : "file";
+    const path = `/managed/${message.id}.original`, preview = kind === "image" ? `/managed/${message.id}.preview.jpg` : path;
+    return { body: `[${kind} file: ${path}]`, pending: false, attachment: { kind, status: "ready", filename: message.id, path, mime: kind === "image" ? "image/jpeg" : "application/octet-stream" },
+      mediaPath: ["image", "video"].includes(kind) ? preview : undefined, mediaMime: "image/jpeg",
+      suppliedAssets: [{ id: message.id, sha256: "0".repeat(64), byteLength: 10, mime: "image/jpeg", path: preview,
+        sourcePath: path, sourceSha256: "1".repeat(64), sourceByteLength: 20, sourceMime: "image/png", role: kind === "image" ? "model_image" : "file_reference", kind, runtimeMedia: ["image", "video"].includes(kind), contextRole: "trigger" }] };
+  };
+  for (const [index, type] of [3, 3, 49, 43, 34].entries()) {
+    const message = index === 0 ? value.message : { ...value.message, id: `history-${index}` };
+    message.type = type; message.body = "<private transport XML>";
+    if (index) value.state.accept(String(index + 1), message, "live");
+    assert.equal(await dispatchNativeMessage({ ...value, message, prepareAttachment }), "ignored");
+  }
+  assert.deepEqual(prepared, []); assert.equal(value.runs.length, 0);
+  const state = new NativeConsumerState(dirname(value.state.file), "s", "a");
+  const trigger = { ...value.message, id: "trigger", type: 1, body: "What did we share?", mentions: { ...value.message.mentions, state: "known" as const, self: true } };
+  state.accept("6", trigger, "live");
+  assert.equal(await dispatchNativeMessage({ ...value, state, message: trigger, prepareAttachment }), "completed");
+  const ctx = value.runs[0].ctx; assert.equal(ctx.WasMentioned, true); assert.equal(ctx.Attachments.length, 5); assert.equal(ctx.InboundHistory.length, 5);
+  for (const attachment of ctx.Attachments) assert.ok(ctx.BodyForAgent.includes(attachment.path));
+  assert.match(ctx.BodyForAgent, /Historical voice transcript/); assert.ok(!ctx.BodyForAgent.includes("private transport XML"));
+  assert.equal(ctx.MediaPath, "/managed/history-1.preview.jpg");
+  const manifest = state.get("trigger")!.dispatchManifest!;
+  assert.deepEqual(manifest.newInputs.map(input => input.id), ["trigger"]); assert.equal(manifest.historyInputs?.length, 5);
+  assert.equal(manifest.assets.filter(asset => asset.runtimeMedia).length, 1); assert.equal(manifest.assets.filter(asset => asset.role === "model_image").length, 1);
+  assert.equal(manifest.assets.find(asset => asset.runtimeMedia)?.contextRole, "history");
+  assert.equal(state.get("m1")?.message.mentions?.self, null); assert.equal(state.get("m1")?.readPending, undefined);
+  assert.equal(state.get("trigger")?.readPending, true); assert.deepEqual(state.groupHistory(trigger.threadId, trigger.id, 50), []);
+});
+test("historical sender revocation excludes media before retrieval and commands do not consume context", async t => {
+  const value = fixture(t, { group: true }); value.message.type = 3;
+  await dispatchNativeMessage(value); assert.equal(value.state.get("m1")?.groupContext, true);
+  const command = { ...value.message, id: "command", type: 1, body: "/status", mentions: { ...value.message.mentions, state: "known" as const, self: true } };
+  value.state.accept("2", command, "live");
+  value.core.channel.commands.shouldHandleTextCommands = () => true; value.core.channel.commands.isControlCommandMessage = () => true;
+  await dispatchNativeMessage({ ...value, message: command }); assert.equal(value.state.get("m1")?.groupContext, true);
+  value.core.channel.commands.isControlCommandMessage = () => false;
+  value.core.channel.inbound.ingress.resolveStable = async (params: any) => ({ ingress: { admission: params.subject.stableId === "revoked" ? "drop" : "dispatch" }, commandAccess: {}, activationAccess: {} });
+  value.message.senderId = "revoked";
+  const trigger = { ...command, id: "trigger", senderId: "allowed", body: "mention" }; value.state.accept("3", trigger, "live");
+  const prepared: string[] = [];
+  assert.equal(await dispatchNativeMessage({ ...value, message: trigger, prepareAttachment: async ({ message }) => { prepared.push(message.id); return { body: "current", pending: false }; } }), "completed");
+  assert.deepEqual(prepared, ["trigger"]); assert.equal(value.runs[1].ctx.InboundHistory, undefined);
+});
+test("a pending historical attachment stays explicit without blocking the current mention", async t => {
+  const value = fixture(t, { group: true }); value.message.type = 3; await dispatchNativeMessage(value);
+  const trigger = { ...value.message, id: "trigger", type: 1, body: "mention", mentions: { ...value.message.mentions, state: "known" as const, self: true } }; value.state.accept("2", trigger, "live");
+  assert.equal(await dispatchNativeMessage({ ...value, message: trigger, prepareAttachment: async ({ message }) => ({ body: message.type === 3 ? "[image pending]" : "current", pending: message.type === 3 }) }), "completed");
+  assert.match(value.runs[0].ctx.BodyForAgent, /image pending/); assert.deepEqual(value.runs[0].ctx.Attachments, []); assert.equal(value.runs[0].ctx.MediaPath, undefined);
+});

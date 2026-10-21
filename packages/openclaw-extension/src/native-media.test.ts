@@ -50,7 +50,7 @@ test("large model image has a separately bound preview while original bytes rema
   const supplied = result.suppliedAssets![0]; assert.equal(supplied.sourceSha256, originalHash); assert.notEqual(supplied.sha256, originalHash);
   assert.equal(supplied.mime, "image/jpeg"); assert.equal(supplied.role, "model_image"); assert.notEqual(supplied.path, supplied.sourcePath);
   assert.equal(createHash("sha256").update(await readFile(supplied.path)).digest("hex"), supplied.sha256);
-  assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /prepared still preview/); assert.ok(!result.body.includes(supplied.sourcePath!));
+  assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /prepared still preview/); assert.ok(result.body.includes(`[Image file: <${supplied.sourcePath}>]`));
 });
 
 

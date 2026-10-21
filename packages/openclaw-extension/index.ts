@@ -7,6 +7,7 @@ import { wechatPlugin } from "./src/channel.js";
 import { setWeChatRuntime } from "./src/runtime.js";
 import { registerNativeFacade } from "./src/native-facade.js";
 import { registerNativePreparedBoundary } from "./src/native-prepared-boundary.js";
+import { registerNativeHistoryTools } from "./src/native-history-tools.js";
 
 const plugin: {
   id: string;
@@ -23,6 +24,7 @@ const plugin: {
     setWeChatRuntime(api.runtime);
     const selected = resolveWeChatAccount(api.config as unknown as Record<string, unknown>);
     api.registerChannel({ plugin: wechatPlugin });
+    registerNativeHistoryTools(api);
     const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
     const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
       ? registerNativePreparedBoundary(api) : () => {};
