@@ -15,6 +15,7 @@ wechat-protocol = { path = "../wechat-protocol" }
 uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+md-5 = "0.10"
 base64.workspace = true
 openssl.workspace = true
 roxmltree = "0.21"
@@ -27,6 +28,5 @@ ts-rs = "10"
 
 [dev-dependencies]
 rusqlite.workspace = true
-md-5 = "0.10"
 
 crc32fast = "1"
