@@ -13,8 +13,27 @@ use windows_sys::Win32::{
     Storage::FileSystem::*,
     System::Threading::*,
 };
-fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
+fn wide(path: &Path) -> io::Result<Vec<u16>> {
+    let path = std::path::absolute(path)?;
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if units.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL",
+        ));
+    }
+    let mut result: Vec<u16> = if units.starts_with(&[92, 92, 63, 92]) {
+        units
+    } else if units.starts_with(&[92, 92]) {
+        "\\\\?\\UNC\\"
+            .encode_utf16()
+            .chain(units[2..].iter().copied())
+            .collect()
+    } else {
+        "\\\\?\\".encode_utf16().chain(units).collect()
+    };
+    result.push(0);
+    Ok(result)
 }
 struct Local(*mut c_void);
 impl Drop for Local {
@@ -145,7 +164,7 @@ pub fn open(options: &super::OpenOptions, path: &Path) -> io::Result<File> {
     };
     let handle = unsafe {
         CreateFileW(
-            wide(path).as_ptr(),
+            wide(path)?.as_ptr(),
             access,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             &attributes,
@@ -293,7 +312,7 @@ pub fn create_dir(path: &Path) -> io::Result<()> {
     }
     let descriptor = descriptor()?;
     let attributes = attributes(&descriptor);
-    if unsafe { CreateDirectoryW(wide(path).as_ptr(), &attributes) } == 0
+    if unsafe { CreateDirectoryW(wide(path)?.as_ptr(), &attributes) } == 0
         && error().kind() != io::ErrorKind::AlreadyExists
     {
         return Err(error());
@@ -331,8 +350,8 @@ pub fn process_identity(pid: u32) -> Option<(String, std::path::PathBuf)> {
 pub fn publish_directory(source: &Path, destination: &Path) -> io::Result<()> {
     if unsafe {
         MoveFileExW(
-            wide(source).as_ptr(),
-            wide(destination).as_ptr(),
+            wide(source)?.as_ptr(),
+            wide(destination)?.as_ptr(),
             MOVEFILE_WRITE_THROUGH,
         )
     } == 0
@@ -359,6 +378,17 @@ pub fn same_path_file(path: &Path, file: &File) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_paths_are_lossless_extended_and_reject_embedded_nuls() {
+        use std::os::windows::ffi::OsStringExt;
+        let path =
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&[67, 58, 92, 97, 0, 98]));
+        assert_eq!(wide(&path).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            String::from_utf16_lossy(&wide(Path::new("C:\\a b")).unwrap()),
+            "\\\\?\\C:\\a b\0"
+        );
+    }
     #[test]
     fn junctions_are_rejected_before_private_directory_admission() {
         let root = tempfile::tempdir().unwrap();
