@@ -910,7 +910,11 @@ fn selected_message_ids_keep_shard_namespaces_and_skip_only_missing_rows() {
     let d = fixture();
     let r = reader(d.path());
     let messages = r.messages(&MessageQuery::default()).unwrap().items;
-    let selected: Vec<_> = messages.iter().filter(|m| m.id.local_id == "2").map(|m| m.id.clone()).collect();
+    let selected: Vec<_> = messages
+        .iter()
+        .filter(|m| m.id.local_id == "2")
+        .map(|m| m.id.clone())
+        .collect();
     assert_eq!(selected.len(), 2);
     let mut missing = selected[0].clone();
     missing.local_id = "999".into();

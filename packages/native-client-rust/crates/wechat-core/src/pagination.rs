@@ -169,16 +169,22 @@ impl Core {
                 sources.push(source);
             }
             let mut rows = Vec::with_capacity(sources.len());
+            let mut encoded_bytes = 0usize;
             for mut message in reader.messages_by_ids(&sources, own.as_deref())? {
                 // The retained query and table hash establish the peer even
                 // after contact/name metadata changes after page one.
                 message.peer = Some(peer.into());
-                rows.push(normalized_message(
+                let value = normalized_message(
                     account,
                     message,
                     own.as_deref(),
                     reader.generation(),
-                )?);
+                )?;
+                encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&value)?.len());
+                if encoded_bytes > 32 * 1024 * 1024 {
+                    bail!("pagination_capacity_exceeded");
+                }
+                rows.push(value);
             }
             rows
         } else {
@@ -548,6 +554,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(later["items"][0]["threadId"], "peer");
+        let mut unavailable = keys.clone();
+        let relative = "message/message_0.db";
+        let salt = unavailable.databases[relative].salt;
+        unavailable.databases.insert(
+            relative.into(),
+            wechat_profile::DatabaseKey::new(relative.into(), salt, [7; 32]).unwrap(),
+        );
+        let unavailable_path = temp.path().join("unavailable-keys.json");
+        unavailable.write_new(&unavailable_path).unwrap();
+        core.store.set_keys_file("a", &unavailable_path).unwrap();
+        let error = core.catalog_page(
+            "a",
+            "messages",
+            Some("peer"),
+            &CatalogQuery {
+                cursor: Some(next["nextCursor"].as_str().unwrap().into()),
+                ..Default::default()
+            },
+        ).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<wechat_profile::ProfileError>(),
+            Some(wechat_profile::ProfileError::KeyMismatch(_))
+        ));
     }
 
     #[test]

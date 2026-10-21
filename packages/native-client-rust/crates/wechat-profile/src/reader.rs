@@ -632,6 +632,9 @@ impl ProfileReader {
         if ids.len() > 200 {
             return Err(ProfileError::InvalidQuery);
         }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         if let Some(own) = own_username {
             validate_name(own)?;
         }
