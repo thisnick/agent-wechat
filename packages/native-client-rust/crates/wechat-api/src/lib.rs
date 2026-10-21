@@ -56,6 +56,7 @@ pub fn version() -> Version {
             "profile-copy",
             "profile-read",
             "native-login",
+            "official-profile-login",
             "native-sync",
             "text-send",
             "events",
@@ -120,6 +121,25 @@ impl From<anyhow::Error> for ApiError {
             };
         }
         let message = error.to_string();
+        for code in [
+            "official_profile_not_found",
+            "official_profile_ambiguous",
+            "official_profile_in_use",
+            "official_profile_overlaps_store",
+            "official_profile_inventory_limit",
+            "account_profile_mismatch",
+            "profile_database_password_required",
+        ] {
+            if message == code {
+                return Self(StatusCode::CONFLICT, code);
+            }
+        }
+        if message == "official_profile_path_must_be_absolute" {
+            return Self(
+                StatusCode::BAD_REQUEST,
+                "official_profile_path_must_be_absolute",
+            );
+        }
         for (needle, status, code) in [
             (
                 "unsupported_media_variant",
@@ -357,6 +377,20 @@ async fn create_account(
         StatusCode::CREATED,
         Json(serde_json::to_value(account).map_err(anyhow::Error::from)?),
     ))
+}
+async fn prepare_official_profile(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Json(input): Json<wechat_core::OfficialProfileRequest>,
+) -> ApiResult<Json<wechat_core::OfficialProfileSelection>> {
+    c.require(None, "admin")?;
+    if c.grant
+        .as_ref()
+        .is_some_and(|g| !g.accounts.iter().any(|s| s == "*"))
+    {
+        return Err(ApiError(StatusCode::FORBIDDEN, "forbidden"));
+    }
+    Ok(Json(app.core.prepare_official_profile(input).await?))
 }
 async fn account(
     State(app): State<App>,
@@ -929,6 +963,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
             axum::routing::delete(revoke_token),
         )
         .route("/v1/accounts", get(accounts).post(create_account))
+        .route("/v1/profiles/official", post(prepare_official_profile))
         .route(
             "/v1/accounts/{a}",
             get(account).patch(actions::update_account),
@@ -1049,6 +1084,56 @@ mod tests {
         let core = Core::new(store, None).unwrap();
         let app = router(core.clone(), OWNER);
         (t, core, app)
+    }
+    #[tokio::test]
+    async fn official_profile_preparation_requires_global_admin_before_reading_files() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let admin = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(read, "read"), (admin, "admin")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        for token in [None, Some(read), Some(admin)] {
+            let expected = if token.is_none() {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "POST",
+                    "/v1/profiles/official",
+                    token,
+                    Some(json!({"path":"relative","accountId":null}))
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+        let (status, error) = call(
+            app.clone(),
+            "POST",
+            "/v1/profiles/official",
+            Some(OWNER),
+            Some(json!({"path":"relative","accountId":null})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"]["code"],
+            "official_profile_path_must_be_absolute"
+        );
+        assert_eq!(core.store.accounts().unwrap().len(), 2);
     }
     #[tokio::test]
     async fn cached_media_writeback_repair_is_bounded_durable_and_media_scoped() {

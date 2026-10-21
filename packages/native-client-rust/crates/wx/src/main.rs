@@ -341,6 +341,9 @@ enum AuthCommand {
         command: ResourceAction,
     },
     Login {
+        /// Use the stopped official Linux files in place; optional absolute path on the daemon host.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "")]
+        official: Option<String>,
         #[arg(long)]
         idempotency_key: Option<String>,
         #[arg(long,value_parser=["auto","saved-device","qr"],default_value="auto")]
@@ -971,8 +974,8 @@ async fn run(cli: Cli) -> Result<()> {
     if let Some(path) = &cli.token_file {
         client.token_file = path.clone();
     }
-    if let Some(account) = cli.account {
-        client.account = Some(account);
+    if let Some(account) = &cli.account {
+        client.account = Some(account.clone());
     }
     if matches!(
         cli.command,
@@ -988,6 +991,30 @@ async fn run(cli: Cli) -> Result<()> {
         None
     };
     let mut r = Remote::with_token(client, env_token)?;
+    if let Command::Auth {
+        command: AuthCommand::Login {
+            official: Some(path),
+            ..
+        },
+    } = &cli.command
+    {
+        let selected = r.post("v1/profiles/official", json!({
+            "path": if path.is_empty() { None } else { Some(path) },
+            "accountId": cli.account,
+        })).await.map_err(|error| {
+            let message = format!("{error}; --official requires the official app to be closed. Use --official=/absolute/path/to/profile to select files on the daemon host.");
+            error.context(message)
+        })?;
+        r.account = Some(
+            selected["accountId"]
+                .as_str()
+                .context("invalid official profile selection")?
+                .into(),
+        );
+        if !cli.json {
+            eprintln!("Using official files in place (account {}).", r.account()?);
+        }
+    }
     let requires_account = !matches!(
         &cli.command,
         Command::Status
@@ -1142,6 +1169,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
             AuthCommand::Status => r.get(r.path("")?.trim_end_matches('/')).await?,
             AuthCommand::Login {
+                official: _,
                 idempotency_key,
                 force_qr,
                 no_qr,

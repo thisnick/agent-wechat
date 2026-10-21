@@ -32,12 +32,26 @@ pub struct Manifest {
 }
 
 pub fn inventory(root: &Path) -> Result<Manifest> {
-    fn walk(root: &Path, relative: &Path, entries: &mut Vec<Entry>, total: &mut u64) -> Result<()> {
+    inventory_inner(root, false)
+}
+fn inventory_inner(root: &Path, official_home: bool) -> Result<Manifest> {
+    fn walk(
+        root: &Path,
+        relative: &Path,
+        entries: &mut Vec<Entry>,
+        total: &mut u64,
+        official_home: bool,
+    ) -> Result<()> {
         if relative.components().count() > 128 {
             bail!("profile directory-depth limit exceeded");
         }
         let mut children =
             fs::read_dir(root.join(relative))?.collect::<std::io::Result<Vec<_>>>()?;
+        if official_home && relative.as_os_str().is_empty() {
+            children.retain(|child| {
+                child.file_name() == "xwechat_files" || child.file_name() == ".xwechat"
+            });
+        }
         children.sort_by_key(|e| e.file_name());
         for child in children {
             if entries.len() >= 100_000 {
@@ -112,7 +126,7 @@ pub fn inventory(root: &Path) -> Result<Manifest> {
             }
             entries.push(entry);
             if m.is_dir() {
-                walk(root, &rel, entries, total)?;
+                walk(root, &rel, entries, total, official_home)?;
             }
         }
         Ok(())
@@ -122,7 +136,7 @@ pub fn inventory(root: &Path) -> Result<Manifest> {
         bail!("profile must be a directory");
     }
     let mut entries = Vec::new();
-    walk(&root, Path::new(""), &mut entries, &mut 0)?;
+    walk(&root, Path::new(""), &mut entries, &mut 0, official_home)?;
     Ok(Manifest {
         schema_version: 1,
         entries,
@@ -162,6 +176,21 @@ pub fn publish(stage: &Path, destination: &Path) -> Result<()> {
 
 /// Byte-preserving snapshot copy. This does not decode or migrate official databases.
 pub fn copy_profile(source: &Path, destination: &Path, source_stopped: bool) -> Result<Manifest> {
+    copy_inner(source, destination, source_stopped, false)
+}
+pub(crate) fn copy_official_home(
+    source: &Path,
+    destination: &Path,
+    source_stopped: bool,
+) -> Result<Manifest> {
+    copy_inner(source, destination, source_stopped, true)
+}
+fn copy_inner(
+    source: &Path,
+    destination: &Path,
+    source_stopped: bool,
+    official_home: bool,
+) -> Result<Manifest> {
     if !source_stopped {
         bail!("a stopped source or consistent snapshot must be explicitly confirmed");
     }
@@ -171,14 +200,22 @@ pub fn copy_profile(source: &Path, destination: &Path, source_stopped: bool) -> 
         .file_name()
         .context("destination needs a name")?;
     let destination = parent.join(name);
-    if parent.starts_with(&source) || source.starts_with(&destination) {
+    let overlap = if official_home {
+        ["xwechat_files", ".xwechat"].iter().any(|name| {
+            let root = source.join(name);
+            parent.starts_with(&root) || root.starts_with(&destination)
+        })
+    } else {
+        parent.starts_with(&source) || source.starts_with(&destination)
+    };
+    if overlap {
         bail!("source and destination overlap");
     }
     if fs::symlink_metadata(&destination).is_ok() {
         bail!("destination already exists");
     }
     let _lease = crate::profile_lease(&source)?;
-    let before = inventory(&source)?;
+    let before = inventory_inner(&source, official_home)?;
     let stage = tempfile::Builder::new()
         .prefix(".wx-copy-")
         .tempdir_in(&parent)?;
@@ -240,7 +277,7 @@ pub fn copy_profile(source: &Path, destination: &Path, source_stopped: bool) -> 
             File::open(&target)?.sync_all()?;
         }
     }
-    if inventory(stage.path())? != before || inventory(&source)? != before {
+    if inventory(stage.path())? != before || inventory_inner(&source, official_home)? != before {
         bail!("profile changed or copied bytes/metadata did not verify");
     }
     File::open(stage.path())?.sync_all()?;

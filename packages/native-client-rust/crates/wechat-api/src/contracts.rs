@@ -219,6 +219,8 @@ pub fn typescript() -> String {
         NativeReadRequest::decl(),
         NativeForgetRequest::decl(),
         NativeMediaWritebackRequest::decl(),
+        wechat_core::OfficialProfileRequest::decl(),
+        wechat_core::OfficialProfileSelection::decl(),
         wechat_core::LoginStrategy::decl(),
         wechat_core::QrRefreshMode::decl(),
         wechat_core::QrRefresh::decl(),

@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 binary=str(pathlib.Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     root=pathlib.Path(temporary);token=root/"token";token.write_text("fixture-token-"*4);token.chmod(0o600)
-    config=root/"client.toml"; state={"posts":0,"login_posts":0,"cancelled":0,"mode":"accepted","media_transfers":0}
+    config=root/"client.toml"; state={"posts":0,"login_posts":0,"cancelled":0,"mode":"accepted","media_transfers":0,"official_posts":[],"official_first":False}
     content={"thumbnail":b"synthetic-thumbnail","original":b"synthetic-original"}
     def asset(name):return {"id":name,"state":"available","variant":name,"actualVariant":name,"sha256":hashlib.sha256(content[name]).hexdigest(),"byteLength":len(content[name])}
     class Fixture(BaseHTTPRequestHandler):
@@ -16,7 +16,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         def authenticated(self):assert self.headers.get("Authorization")==f"Bearer {token.read_text()}"
         def do_GET(self):
             self.authenticated();path=urlsplit(self.path).path
-            if path=="/v1/accounts":return self.reply({"items":[{"id":"a"}]})
+            if path=="/v1/accounts":
+                assert not state["official_first"],"catalog queried before official preparation"
+                return self.reply({"items":[{"id":"a"}]})
             if path.endswith("/sends/by-idempotency-key") or path.endswith("/sends/send-fixture"):return self.reply({"id":"send-fixture","state":state["mode"]})
             if path.endswith("/operations/login-fixture/qr"):
                 assert "generation=1" in self.path
@@ -28,6 +30,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             self.reply({"error":{"code":"fixture_not_found"}},404)
         def do_POST(self):
             self.authenticated();body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or b"{}");path=urlsplit(self.path).path
+            if path=="/v1/profiles/official":
+                state["official_posts"].append(body);state["official_first"]=False
+                return self.reply({"accountId":"a","profilePath":"/daemon-home","storageMode":"official","savedDeviceLoginAvailable":False})
             if path.endswith("/sends"):
                 receipts=list((root/"receipts").glob("*.json"));assert receipts,"receipt was not durable before first request"
                 assert any(json.loads(p.read_text())["idempotencyKey"]==self.headers.get("Idempotency-Key") for p in receipts)
@@ -69,11 +74,16 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             result=json.loads(output);assert result["id"]=="login-fixture" and result["cancellationConfirmed"] and state["cancelled"]==1
         finally:
             if login.poll() is None: login.kill();login.wait()
+        for flag, path in [("--official", None), ("--official=/daemon/profile", "/daemon/profile")]:
+            state["official_first"]=True
+            result=run("auth","login",flag,"--strategy","qr","--qr-refresh","manual","--detach","--idempotency-key", "fixture-official-"+str(len(state["official_posts"])))
+            assert json.loads(pathlib.Path(result["receiptPath"]).read_text())["accountId"]=="a"
+            assert state["official_posts"][-1]=={"path":path,"accountId":None}
         stopped=root/"stopped-home";storage=stopped/"xwechat_files"/"synthetic_account"/"db_storage";storage.mkdir(parents=True);(storage/"contact.db").write_bytes(b"synthetic-inventory-only")
         run("profile","add","archive","--path",str(stopped),"--account-dir","synthetic_account","--keys-file",str(root/"not-yet-exported.keys.json"))
         renamed=token.with_name("token-offline");token.rename(renamed)
         try:
             inspected=run("--local-profile","archive","profile","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
         finally:renamed.rename(token)
-        print("Native CLI fixture passed: pre-request send/login receipts, same-key lookup/conflict, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation and token-free offline inspection. No WeChat request.")
+        print("Native CLI fixture passed: pre-request send/login receipts, same-key lookup/conflict, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation, official-file login discovery/explicit server paths, and token-free offline inspection. No WeChat request.")
     finally:server.shutdown();server.server_close()

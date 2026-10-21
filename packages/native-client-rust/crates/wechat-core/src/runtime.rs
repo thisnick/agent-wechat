@@ -13,6 +13,9 @@ mod actions;
 mod bootstrap;
 #[path = "identity.rs"]
 mod identity;
+#[path = "official_profile.rs"]
+mod official_profile;
+pub use official_profile::{OfficialProfileRequest, OfficialProfileSelection};
 #[path = "saved_login.rs"]
 mod saved_login;
 use anyhow::{bail, Context, Result};
@@ -44,6 +47,7 @@ pub struct Core {
     gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     workers: Mutex<std::collections::BTreeSet<String>>,
+    official_profiles: AsyncMutex<()>,
     pub stopping: AtomicBool,
 }
 #[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -163,6 +167,16 @@ fn auth_rejected(error: &anyhow::Error) -> bool {
         })
     })
 }
+fn saved_trust_rejected(error: &anyhow::Error) -> bool {
+    auth_rejected(error)
+        || error.chain().any(|cause| {
+            cause
+                .to_string()
+                .strip_prefix("Saved-device login returned ")
+                .and_then(|v| v.parse::<i32>().ok())
+                == Some(-2017)
+        })
+}
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f)
         .await
@@ -204,6 +218,7 @@ impl Core {
             gates: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(std::collections::BTreeSet::new()),
+            official_profiles: AsyncMutex::new(()),
             stopping: AtomicBool::new(false),
         });
         for account in core.store.accounts()? {
@@ -308,6 +323,7 @@ impl Core {
         operation: Option<&str>,
     ) -> Result<()> {
         state.validate()?;
+        self.prepare_official_profile_keys(account, state)?;
         self.check_state_profile(account, state)?;
         if let Ok(prior) = self.state_unfenced(account) {
             if prior.uin != state.uin || prior.own_username != state.own_username {
@@ -644,8 +660,32 @@ impl Core {
             let name = request.computer_name.clone();
             match blocking(move || client()?.start_saved_device_login(&state, &name)).await {
                 Ok(attempt) => Some(attempt),
-                Err(error) if auth_rejected(&error) => None,
+                Err(error) if saved_trust_rejected(&error) => None,
                 Err(error) => return Err(error),
+            }
+        } else if request.strategy != LoginStrategy::Qr {
+            if let Some(saved) = self.official_saved_login(&account)? {
+                self.progress(&op, "resuming", json!({"method":"official_saved_device"}))?;
+                let mut device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
+                device.device_id = saved.identity.device_id.clone();
+                let name = request.computer_name.clone();
+                match blocking(move || {
+                    client()?.start_profile_saved_device_login(
+                        &device,
+                        &saved.identity.username,
+                        &saved.auto_auth_key,
+                        &saved.cookie,
+                        &name,
+                    )
+                })
+                .await
+                {
+                    Ok(attempt) => Some(attempt),
+                    Err(error) if saved_trust_rejected(&error) => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
             }
         } else {
             None
@@ -694,6 +734,7 @@ impl Core {
         };
         let mut generation = 1;
         let mut scanned = false;
+        let mut poll_failures = 0u32;
         loop {
             if cancel.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) {
                 self.progress(&op, "cancelled", json!({}))?;
@@ -711,12 +752,39 @@ impl Core {
             }
             self.progress(&op,if scanned||attempt.qr_png.is_empty(){"awaiting_approval"}else{"awaiting_scan"},json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty()}))?;
             let result = blocking(move || {
-                let status = client()?.poll_login(&mut attempt)?;
+                // Return the issued challenge even on a failed read. Never lose
+                // its cookie/notify state or create a replacement QR on timeout.
+                let status = client().and_then(|native| native.poll_login(&mut attempt));
                 Ok((attempt, status))
             })
             .await?;
             attempt = result.0;
-            match result.1 {
+            let status = match result.1 {
+                Ok(status) => {
+                    poll_failures = 0;
+                    status
+                }
+                Err(error) if wechat_protocol::is_retryable_login_poll_error(&error) => {
+                    poll_failures = poll_failures.saturating_add(1);
+                    self.progress(&op, if scanned || attempt.qr_png.is_empty() { "awaiting_approval" } else { "awaiting_scan" },
+                        json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty(),"connection":"retrying","reason":"temporary_transport_failure","pollFailures":poll_failures}))?;
+                    // Both the issued challenge expiry and the overall operation
+                    // deadline still bound retries. Cancellation keeps its fence.
+                    tokio::time::sleep(Duration::from_secs(u64::from(poll_failures.min(5)))).await;
+                    continue;
+                }
+                Err(error) => {
+                    let service_code = error.chain().find_map(|cause| {
+                        cause
+                            .to_string()
+                            .strip_prefix("Login poll returned ")
+                            .and_then(|s| s.parse::<i32>().ok())
+                    });
+                    self.progress(&op, "failed", json!({"code":"login_poll_failed","serviceCode":service_code,"retryable":false}))?;
+                    return Ok(());
+                }
+            };
+            match status {
                 LoginStatus::Approved => {
                     self.progress(&op, "authenticating", json!({}))?;
                     let state = blocking(move || client()?.complete_login(&mut attempt)).await?;
@@ -1408,7 +1476,7 @@ fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn state() -> AccountState {
+    pub(super) fn state() -> AccountState {
         AccountState {
             schema: 1,
             device: DeviceProfile {
@@ -1429,6 +1497,25 @@ mod tests {
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
         }
+    }
+    #[test]
+    fn only_authenticated_saved_trust_rejections_permit_qr_fallback() {
+        for code in [-13, -2017] {
+            assert!(saved_trust_rejected(&anyhow::anyhow!(
+                "Saved-device login returned {code}"
+            )));
+        }
+        for message in [
+            "Saved-device login returned -20170",
+            "Saved-device login returned -2017 trailing",
+            "transport error -2017",
+            "record authentication failed",
+        ] {
+            assert!(!saved_trust_rejected(&anyhow::anyhow!("{message}")));
+        }
+        assert!(!auth_rejected(&anyhow::anyhow!(
+            "Saved-device login returned -2017"
+        )));
     }
     #[test]
     fn auth_fallback_requires_a_whole_rejection_from_a_known_protocol_boundary() {

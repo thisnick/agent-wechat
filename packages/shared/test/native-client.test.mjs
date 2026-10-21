@@ -115,3 +115,14 @@ test('local media writeback repair is bounded and does not submit a send or tran
   for (const limit of [0,101,1.5,NaN]) assert.throws(() => client.repairMediaWriteback('a', limit), /limit/);
   assert.equal(calls,0); assert.equal((await client.repairMediaWriteback('a')).id,'repair'); assert.equal(calls,1);
 });
+
+
+test('official profile preparation uses daemon-host paths and a global admin resource', async () => {
+  const client = new NativeWeChatClient({ baseUrl: 'http://127.0.0.1:6174', token: 'synthetic-token', fetch: async (url, init) => {
+    assert.equal(String(url), 'http://127.0.0.1:6174/v1/profiles/official');
+    assert.equal(init.method, 'POST');
+    assert.deepEqual(JSON.parse(init.body), { path: '/server/official-home' });
+    return new Response(JSON.stringify({ accountId: 'official-fixture', profilePath: '/server/official-home', storageMode: 'official', savedDeviceLoginAvailable: true }));
+  }});
+  assert.equal((await client.prepareOfficialProfile({ path: '/server/official-home' })).accountId, 'official-fixture');
+});

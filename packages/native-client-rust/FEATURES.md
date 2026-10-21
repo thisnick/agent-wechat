@@ -21,6 +21,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Foreground `serve`, background start/status/stop/logs | Implemented | Actual ELF background start/status/stop/restart with PID/store generation and occupied-owner checks |
 | Protected active/saved credentials and independent API token rotation | Implemented | Restart, permission, redaction and cryptographic integrity tests |
 | Active authorization validation, bounded renewal and saved-device recovery | Implemented | Verified native exchanges are separate from universal lifetime/expiry claims |
+| Single-switch official-file login and scoped HOME exports | Implemented | Account selection, identity/password admission, file-preservation and scoped-copy fixtures; live one-command takeover validation remains separate |
 | Explicit QR login, white PNG, scan/approval, cancellation, bounded refresh | Implemented | Pixel-grid white renderer test; actual CLI generation/PNG/interrupt fixture; controlled native account validation remains distinct |
 | Admission-bound auth epochs and persistent logout inhibition | Implemented | Late authorization cannot cross a committed logout epoch |
 | One-attempt native logout and explicit local forgetting | Implemented | Controlled native logout returned success; the same old authorization passed a heartbeat before logout and was rejected with -13 afterward, without renewal. Idempotent replay did not resubmit. Saved-device trust revocation remains unverified |

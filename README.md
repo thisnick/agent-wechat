@@ -33,6 +33,8 @@ wx --account test threads
 wx --account test messages list filehelper
 ```
 
+To continue an existing official Linux profile, close the official app and run `wx auth login --official`. It selects the files on the daemon host and prepares identity/key setup automatically. Use `--official=/absolute/path/to/profile` to select a specific profile. The files are used in place; no import is required.
+
 An approved native login now creates a fresh official-format profile with seven encrypted databases and saved-login storage; an existing official profile is optional. Native history, text/media sends, contact/group lookup, rosters, avatars and downloads use that profile. Unsupported sync controls remain staged. Supported image/voice/file/video caches and resource joins pass local repair checks; FTS/index maintenance and stock-client takeover remain under validation. See the [capability checklist](packages/native-client-rust/FEATURES.md) for the tested scope.
 
 Server configuration defaults to `~/.config/agent-wechat/server/config.toml`; data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. Existing stopped profiles can be attached directly or copied through import/export. Daemon state stays in sidecars.

@@ -42,7 +42,11 @@ fn credential_generation(state: &AccountState, epoch: Option<&[u8]>) -> Result<S
     ))?);
     Ok(format!("{:x}", Sha256::digest(bytes.as_slice())))
 }
-fn read_saved_file(path: &std::path::Path, root: &std::path::Path, max: u64) -> Result<Vec<u8>> {
+pub(super) fn read_saved_file(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    max: u64,
+) -> Result<Vec<u8>> {
     use std::{io::Read, os::unix::fs::OpenOptionsExt};
     if std::fs::canonicalize(path)? != path || !path.starts_with(root) {
         bail!("invalid saved-login path");

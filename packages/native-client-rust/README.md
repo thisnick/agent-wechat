@@ -99,7 +99,24 @@ wx --data-dir /private/native-data store attach --account test \
 wx --data-dir /private/native-data store list
 ```
 
-Direct mode can select a complete official home containing `xwechat_files/<account>/db_storage`, or an existing account directory containing `db_storage`. Managed copy/import should preserve the complete official home and original account directory name:
+For a stopped official Linux installation, the simpler path is:
+
+```bash
+wx auth login --official
+# Explicit path on the daemon host (HOME, xwechat_files, or active account root):
+wx auth login --official=/absolute/path/to/profile
+```
+
+This discovers or selects the operating files, registers the account, binds its
+identity, attempts usable saved-device trust and conditionally presents a QR.
+After account/device/password validation, it derives local keys and enables
+supported writeback automatically. `--official` keeps data in place; the official
+app must stay closed. Discovery refuses multiple profiles. The persisted
+`official` storage mode scopes exports to `xwechat_files` and `.xwechat`, excluding
+unrelated HOME files and native sidecars. Other profiles are never silently
+replaced. See [login workflows](CLI.md#login-and-logout).
+
+The lower-level direct mode can select a complete official home containing `xwechat_files/<account>/db_storage`, or an existing account directory containing `db_storage`. Managed copy/import should preserve the complete official home and original account directory name:
 
 ```bash
 wx --data-dir /private/native-data store import --account copied \

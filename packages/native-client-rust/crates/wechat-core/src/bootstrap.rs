@@ -69,6 +69,7 @@ impl Core {
         let record = self.store.account(account)?;
         let pending = self.store.runtime(account, "profile-bootstrap")?.is_some();
         if !pending && self.populated_profile(account)? {
+            self.finish_official_profile_login(account, state)?;
             return Ok(json!({"state":"existing"}));
         }
         if record.storage_mode != "managed" {

@@ -188,3 +188,42 @@ fn full_home_and_direct_account_bindings_share_database_ownership() {
         b"synthetic opaque bytes"
     );
 }
+
+#[test]
+fn official_home_exports_only_wechat_trees_with_sidecars_elsewhere_in_home() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    fixture(&home);
+    fs::write(home.join("unrelated-private-file"), b"must not export").unwrap();
+    let before = inventory(&home.join("xwechat_files")).unwrap();
+    let store = Store::open(&home.join(".local/share/agent-wechat")).unwrap();
+    let (account, lease) = store.attach_official_home("one", &home).unwrap();
+    assert_eq!(account.storage_mode, "official");
+    assert!(store.attach_official_home("two", &home).is_err());
+    drop(lease);
+    let destination = home.join("wechat-export");
+    let manifest = store.export("one", &destination, true).unwrap();
+    assert!(manifest
+        .entries
+        .iter()
+        .all(|e| e.path.starts_with("xwechat_files") || e.path.starts_with(".xwechat")));
+    assert_eq!(
+        inventory(&destination.join("xwechat_files")).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read(destination.join(".xwechat/unknown.bin")).unwrap(),
+        [0, 255, 0, 9]
+    );
+    assert!(!destination.join(".local").exists());
+    assert!(!destination.join("unrelated-private-file").exists());
+    assert!(store
+        .export("one", &home.join("xwechat_files/nested-export"), true)
+        .is_err());
+    drop(store);
+    let store = Store::open_existing(&home.join(".local/share/agent-wechat")).unwrap();
+    assert_eq!(store.accounts().unwrap()[0].storage_mode, "official");
+    let overlapping = Store::open(&home.join("xwechat_files/native-sidecars")).unwrap();
+    assert!(overlapping.attach_official_home("invalid", &home).is_err());
+    assert!(overlapping.accounts().unwrap().is_empty());
+}

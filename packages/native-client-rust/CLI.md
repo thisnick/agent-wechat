@@ -56,6 +56,31 @@ exists. Aliases resolve to canonical daemon account IDs.
 
 ## Login and logout
 
+For existing official files, close the official app and use one switch:
+
+```bash
+wx auth login --official
+# Or select a full HOME, xwechat_files directory, or its active account directory:
+wx auth login --official=/absolute/path/to/profile
+```
+
+The path and automatic discovery refer to the **daemon host**. Discovery checks
+its HOME for a single Linux profile; missing or multiple profiles require an
+explicit path. Preparing the profile creates/selects a daemon account, binds its
+stored identity and takes ownership without copying data or importing an active
+session. No separate key export or identity-binding command is required. Saved
+trust is tried when usable; QR remains available when trust is absent/rejected.
+Successful authentication must match username, UIN, device and every encrypted
+database before writes are enabled. An explicit `--account` must already refer
+to that profile; an unrelated configured default cannot redirect attachment.
+
+This selection is persisted as storage mode `official`, an in-place HOME binding
+whose export includes only `xwechat_files` and `.xwechat`. Unrelated HOME files
+and native sidecars are excluded. The official app must remain closed while the
+daemon owns these files. Open-file detection and native ownership leases help
+catch conflicts; they cannot prevent the official app being reopened. Login
+without this flag continues using the selected managed/attached account.
+
 ```bash
 wx --account home auth login
 wx --account home auth login --saved-only
@@ -73,7 +98,9 @@ connect never creates one. `--strategy saved-device` deliberately exercises the
 saved-device path rather than merely confirming an already active session.
 QR refresh is bounded to at most three replacements and the operation deadline;
 manual mode stops on expiry. A scanned/approval challenge is not replaced on a
-local image timer.
+local image timer. Transient polling timeouts/disconnections retain the same
+challenge, cookie and QR generation until its expiry or the operation deadline;
+protocol/integrity failures and final credential exchanges are not retried this way.
 
 Attached login displays the issued PNG's module grid on white in a terminal.
 Without a terminal it writes a private PNG and returns its path. `--json` emits
@@ -238,8 +265,8 @@ Message observation IDs are bound to profile and source generation; they cannot
 be reused after the view changes. Output derivatives/keys must remain outside
 the source tree, and no output is overwritten.
 
-For an existing populated daemon operating profile, bind its independent stored
-identity before login using offline `store bind-identity --mmkv-store PATH
+For manual low-level attachment of an existing populated daemon profile, bind
+its independent stored identity before login using offline `store bind-identity --mmkv-store PATH
 --format-key-file PATH --official-client-stopped`. This is distinct from consent
 to enable writers. Copy-only `store attach|import|export` and fresh-profile
 configuration are covered in [README](README.md).

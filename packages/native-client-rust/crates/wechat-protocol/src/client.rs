@@ -403,6 +403,36 @@ impl Default for NativeOptions {
 pub struct NativeClient {
     options: NativeOptions,
 }
+/// Polling an issued login challenge is repeatable. This does not authorize
+/// retrying QR creation, credential exchange, sends or rejected authentication.
+pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
+            return http.is_timeout() || http.is_connect();
+        }
+        let message = cause.to_string();
+        matches!(
+            message.as_str(),
+            "MMTLS deadline exceeded" | "MMTLS connection closed"
+        ) || message
+            .strip_prefix("Native shortlink HTTP status ")
+            .and_then(|s| s.parse::<u16>().ok())
+            .is_some_and(|status| matches!(status, 408 | 429 | 500 | 502 | 503 | 504))
+    })
+}
 impl NativeClient {
     pub fn new(options: NativeOptions) -> Result<Self> {
         mmtls::validate_host(&options.long_host)?;
@@ -507,21 +537,66 @@ impl NativeClient {
         computer_name: &str,
     ) -> Result<LoginAttempt> {
         state.validate()?;
-        let rsa = Rsa::generate(1024)?;
-        let public = PKey::from_rsa(rsa)?.public_key_to_pem()?;
-        let request = wire::push_login(
+        self.start_saved_login(
             &state.device,
             &state.own_username,
             &state.auto_auth_key,
-            &public,
-        )?;
-        let (reply, cookie, key_version) = self.prelogin_rpc(
+            &state.cookie,
             &state.long_host,
             &state.short_host,
+            computer_name,
+        )
+    }
+    /// Use remembered official-profile trust without inventing active session keys.
+    pub fn start_profile_saved_device_login(
+        &self,
+        device: &DeviceProfile,
+        username: &str,
+        auto_auth_key: &[u8],
+        cookie: &[u8],
+        computer_name: &str,
+    ) -> Result<LoginAttempt> {
+        self.start_saved_login(
+            device,
+            username,
+            auto_auth_key,
+            cookie,
+            &self.options.long_host,
+            &self.options.short_host,
+            computer_name,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn start_saved_login(
+        &self,
+        device: &DeviceProfile,
+        username: &str,
+        auto_auth_key: &[u8],
+        cookie: &[u8],
+        long_host: &str,
+        short_host: &str,
+        computer_name: &str,
+    ) -> Result<LoginAttempt> {
+        device.validate()?;
+        ensure!(
+            !username.is_empty()
+                && username.len() <= 256
+                && !username.contains('\0')
+                && !auto_auth_key.is_empty()
+                && auto_auth_key.len() <= 1024 * 1024
+                && cookie.len() <= 15,
+            "Invalid saved-device credentials"
+        );
+        let rsa = Rsa::generate(1024)?;
+        let public = PKey::from_rsa(rsa)?.public_key_to_pem()?;
+        let request = wire::push_login(device, username, auto_auth_key, &public)?;
+        let (reply, cookie, key_version) = self.prelogin_rpc(
+            long_host,
+            short_host,
             654,
             "/cgi-bin/micromsg-bin/pushloginurl",
             &request,
-            &state.cookie,
+            cookie,
             &[],
             None,
         )?;
@@ -529,7 +604,7 @@ impl NativeClient {
         let now = wire::unix_time()?;
         Ok(LoginAttempt {
             schema: 1,
-            device: state.device.clone(),
+            device: device.clone(),
             computer_name: computer_name.to_string(),
             qr_png: vec![],
             width: 0,
@@ -540,8 +615,8 @@ impl NativeClient {
             notify_key,
             cookie,
             key_version,
-            long_host: state.long_host.clone(),
-            short_host: state.short_host.clone(),
+            long_host: long_host.into(),
+            short_host: short_host.into(),
             status: LoginStatus::Pending,
             credential3: None,
             credential4: None,
@@ -1069,6 +1144,43 @@ mod tests {
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
         }
+    }
+    #[test]
+    fn challenge_poll_retries_only_transport_availability_failures() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::WouldBlock,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(is_retryable_login_poll_error(
+                &anyhow::Error::new(Error::from(kind)).context("polling challenge")
+            ));
+        }
+        for message in [
+            "MMTLS deadline exceeded",
+            "MMTLS connection closed",
+            "Native shortlink HTTP status 503",
+        ] {
+            assert!(is_retryable_login_poll_error(&anyhow::anyhow!("{message}")));
+        }
+        for message in [
+            "Login poll returned -13",
+            "Native envelope returned -13",
+            "Native shortlink HTTP status 403",
+            "Native shortlink HTTP status 5030",
+            "Missing authentication tag",
+            "Unexpected MMTLS header",
+            "Truncated structure",
+        ] {
+            assert!(!is_retryable_login_poll_error(&anyhow::anyhow!(
+                "{message}"
+            )));
+        }
+        assert!(!is_retryable_login_poll_error(
+            &Error::from(ErrorKind::PermissionDenied).into()
+        ));
     }
     #[test]
     fn secrets_not_debugged() {

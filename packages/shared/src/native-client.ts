@@ -1,5 +1,5 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -95,6 +95,10 @@ export class NativeWeChatClient {
   capabilities(accountId: string): Promise<Record<string, unknown>> { return this.request(`v1/accounts/${id(accountId)}/capabilities`); }
   connect(accountId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/connect`, { method: "POST", body: "{}" }); }
   sync(accountId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/sync`, { method: "POST", body: "{}" }); }
+  /** Attach stopped official files on the daemon host; requires global admin. */
+  prepareOfficialProfile(options: Partial<OfficialProfileRequest> = {}): Promise<OfficialProfileSelection> {
+    return this.request("v1/profiles/official", { method: "POST", body: JSON.stringify(options) });
+  }
   login(accountId: string, options: NativeLoginOptions = {}, key?: string): Promise<NativeOperation> {
     if (key != null && (!key || key.length > 200 || /[\r\n]/.test(key))) throw new Error("Invalid login idempotency key");
     return this.request(`v1/accounts/${id(accountId)}/auth/login`, { method: "POST", headers: key ? { "Idempotency-Key": key } : undefined, body: JSON.stringify(options) });

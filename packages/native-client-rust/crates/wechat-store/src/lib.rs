@@ -248,6 +248,16 @@ impl Store {
         Ok(self.root.join("accounts").join(id))
     }
     pub fn attach(&self, id: &str, profile: &Path, source_stopped: bool) -> Result<Account> {
+        self.attach_with_lease(id, profile, source_stopped)
+            .map(|(account, _)| account)
+    }
+    /// Retain ownership continuously when attaching to a running daemon.
+    pub fn attach_with_lease(
+        &self,
+        id: &str,
+        profile: &Path,
+        source_stopped: bool,
+    ) -> Result<(Account, Lease)> {
         if !source_stopped {
             bail!("confirm that the source is stopped or a consistent snapshot");
         }
@@ -255,9 +265,26 @@ impl Store {
         if !profile.is_dir() || profile.starts_with(&self.root) || self.root.starts_with(&profile) {
             bail!("direct profile must be a separate directory");
         }
-        let _profile_lease = profile_lease(&profile)?;
+        let lease = profile_lease(&profile)?;
         // Registration never opens SQLCipher, changes a source, or asserts write compatibility.
-        self.register(id, "direct", &profile, None, None)
+        Ok((self.register(id, "direct", &profile, None, None)?, lease))
+    }
+    /// Bound operating files under a normal user HOME. Sidecars may be elsewhere
+    /// in HOME, but must never overlap either official data subtree. The mode is
+    /// committed with registration so even interrupted setup exports only WeChat.
+    pub fn attach_official_home(&self, id: &str, home: &Path) -> Result<(Account, Lease)> {
+        let home = fs::canonicalize(home)?;
+        if !home.join("xwechat_files").is_dir() || home.starts_with(&self.root) {
+            bail!("official_profile_overlaps_store");
+        }
+        for name in ["xwechat_files", ".xwechat"] {
+            let path = home.join(name);
+            if self.root.starts_with(&path) || path.starts_with(&self.root) {
+                bail!("official_profile_overlaps_store");
+            }
+        }
+        let lease = profile_lease(&home)?;
+        Ok((self.register(id, "official", &home, None, None)?, lease))
     }
     pub fn import(&self, id: &str, source: &Path, source_stopped: bool) -> Result<Account> {
         validate_source_placement(&self.root, source)?;
@@ -381,7 +408,11 @@ impl Store {
             .into_iter()
             .find(|a| a.id == id)
             .context("account is not registered")?;
-        copy::copy_profile(&account.profile_path, destination, source_stopped)
+        if account.storage_mode == "official" {
+            copy::copy_official_home(&account.profile_path, destination, source_stopped)
+        } else {
+            copy::copy_profile(&account.profile_path, destination, source_stopped)
+        }
     }
     pub fn profile_leases(&self) -> Result<Vec<Lease>> {
         self.accounts()?
