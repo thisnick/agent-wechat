@@ -16,7 +16,7 @@ The native API is versioned under `/v1`. Except the minimal `/health` liveness e
 | Sends | Account `POST /sends`, `GET /sends/{id}`, `GET /sends/by-idempotency-key`, `POST /sends/{id}/cancel` |
 | Media | Account `POST /uploads`, message `GET /media`, `POST /media-transfers`, asset `GET /media/{id}/content` |
 | Durable jobs | Account `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `/retry`, `POST /media-writeback/repair` |
-| Local reads | Account `POST /threads/{id}/read-state`; expected-version checking and exact sparse IDs or explicit human through-boundary |
+| Thread reads | Account `POST /threads/{id}/read-state` with only `expectedVersion`; clears the whole thread through a frozen boundary and reports its native cross-device notification outcome |
 | Events | Account `GET /events`, `GET /events/stream`, `POST /consumers/{consumer}/ack` |
 | Access tokens | `GET/POST /v1/access-tokens`, `DELETE /v1/access-tokens/{id}`; owner/admin permissions |
 
@@ -24,6 +24,6 @@ Paths containing placeholders must be URL encoded. A send/upload/login response 
 
 Media separates advertised variants from verified cached bytes and returns pending/expired/unsupported states explicitly. Cached content supports bounded byte ranges and integrity/length checks. Cached bytes can outlive remote expiry. HTTP cancellation closes streaming without cancelling already submitted jobs.
 
-Resource cursors bind the account, query and retained view; an expired cursor requires an explicit new view. Tombstones preserve deleted positions. SSE supports journal replay, bounded retention and gap reporting. Persist custody before acknowledgement. Consumer acknowledgements never change unread state; desktop read state also does not synchronize the phone's read state.
+Resource cursors bind the account, query and retained view; an expired cursor requires an explicit new view. Tombstones preserve deleted positions. SSE supports journal replay, bounded retention and gap reporting. Persist custody before acknowledgement. Consumer acknowledgements never change unread state; whole-thread marking reports a native cross-device read boundary.
 
 See the [CLI workflows](/getting-started/cli/commands/) and public source contracts in [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api). The old container `/api` and UI operations are removed.

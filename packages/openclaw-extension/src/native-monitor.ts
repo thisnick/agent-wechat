@@ -16,21 +16,26 @@ export function nativeWasMentioned(message: NativeMessage): boolean {
   return message.mentions?.state === "known" && message.mentions.self === true;
 }
 export async function projectNativeRead(client: NativeWeChatClient, accountId: string, state: NativeConsumerState): Promise<void> {
-  for (const item of state.items().filter(value => value.readPending && value.runId)) {
+  const pending = state.items().filter(value => value.readPending && value.runId);
+  const threads = [...new Set(pending.map(item => item.message.threadId))];
+  for (const threadId of threads) {
     for (let attempt = 0; attempt < 2; attempt++) {
       let cursor: string | undefined; let thread;
       const seen = new Set<string>();
       for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
         const page = await client.threads(accountId, cursor);
-        thread = page.items.find((value): value is import("@agent-wechat/shared").NativeThread => !isNativeTombstone(value) && value.id === item.message.threadId);
+        thread = page.items.find((value): value is import("@agent-wechat/shared").NativeThread => !isNativeTombstone(value) && value.id === threadId);
         if (thread || !page.nextCursor) break;
         if (seen.has(page.nextCursor)) throw new Error("Native thread pagination did not advance");
         seen.add(page.nextCursor); cursor = page.nextCursor;
       }
       if (!thread) break;
       try {
-        await client.markRead(accountId, thread.id, [item.message.id], thread.readStateVersion);
-        state.update(item.message.id, { readPending: false }); break;
+        const receipt = await client.markRead(accountId, thread.id, thread.readStateVersion);
+        const notification = (receipt as { phoneNotification?: { state?: string } })?.phoneNotification?.state;
+        const phoneReadState = notification === "accepted" || notification === "rejected" || notification === "needs_review" ? notification : undefined;
+        for (const item of pending.filter(item => item.message.threadId === threadId)) state.update(item.message.id, { readPending: false, phoneReadState });
+        break;
       } catch (error) {
         if (error instanceof NativeApiError && error.status === 409 && attempt === 0) continue;
         throw error;
@@ -43,6 +48,7 @@ export async function dispatchNativeMessage(params: {
   message: NativeMessage; cfg: any; core: any;
   createPipeline?: typeof createChannelMessageReplyPipeline;
   prepareAttachment?: typeof prepareNativeAttachment;
+  onDelivered?: () => void;
 }): Promise<"ignored" | "completed" | "needs_review" | "pending"> {
   const { client, state, account, message, cfg, core } = params;
   const custody = state.get(message.id);
@@ -110,6 +116,7 @@ export async function dispatchNativeMessage(params: {
           if (payload.audioAsVoice && !urls.length) throw new Error("Native voice reply requires an audio attachment");
           for (const url of urls) { const key = createHash("sha256").update(`${account.native!.accountId}\0${message.id}\0${delivery++}`).digest("hex"); await sendNativeAttachment(client, account, message.threadId, url, payload.audioAsVoice === true, key); }
           if (payload.text) { const key = createHash("sha256").update(`${account.native!.accountId}\0${message.id}\0${delivery++}`).digest("hex"); await submitNativeText(client, account.native!.accountId, message.threadId, payload.text, key); }
+          if (urls.length || payload.text) params.onDelivered?.();
         }, onError: () => { failed = true; } },
       // This hook is intentionally separate from onModelSelected and old
       // onAgentRunStart (which can also report direct-tool execution). Released
@@ -150,11 +157,12 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
     const account = resolveWeChatAccount(cfg as Record<string, unknown>, opts.account.accountId) ?? opts.account;
     if (account.backend !== "native" || JSON.stringify(account.native) !== JSON.stringify(native)) throw new Error("Native service configuration changed; restart required before processing");
     for (const item of state.items().filter(value => value.state === "received")) {
-      await dispatchNativeMessage({ client: host.client, state, account, message: item.message, cfg, core });
+      await dispatchNativeMessage({ client: host.client, state, account, message: item.message, cfg, core,
+        onDelivered: () => opts.setStatus({ accountId: account.accountId, lastOutboundAt: Date.now() }) });
     }
     try { await flushRead(); }
-    catch { opts.log?.error?.("Native read projection is pending; exact input IDs retained for retry"); }
-    const needsReview = state.items().filter(value => value.state === "needs_review").length;
+    catch { opts.log?.error?.("Native read projection is pending; prepared thread receipt retained for retry"); }
+    const needsReview = state.items().filter(value => value.state === "needs_review" || value.phoneReadState === "needs_review" || value.phoneReadState === "rejected").length;
     const handoffUnconfirmed = native.readPolicy !== "never" && state.items().some(value => value.handoffUnconfirmed);
     const accountStatus = await host.client.account(native.accountId);
     opts.setStatus({ accountId: account.accountId, running: true, connected: true,
@@ -162,12 +170,12 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
   };
   await process();
   // Media confirmation can arrive after the dispatcher settles. Retry only
-  // durable exact-ID reads while an otherwise quiet SSE stream remains open.
+  // durable whole-thread reads while an otherwise quiet SSE stream remains open.
   const stopReadPump = startNativeReadPump(async () => {
     await flushRead();
     if (!opts.abortSignal.aborted) opts.setStatus({ accountId: opts.account.accountId,
       handoffUnconfirmed: native.readPolicy !== "never" && state.items().some(value => value.handoffUnconfirmed) });
-  }, () => opts.log?.error?.("Native read projection remains pending; exact input IDs retained"));
+  }, () => opts.log?.error?.("Native read projection remains pending; prepared thread receipts retained"));
   try { while (!opts.abortSignal.aborted) {
     try {
       // A prior ACK failure must not leave durable received items idle while an
@@ -182,6 +190,7 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
           if (message.threadId !== event.data.threadId) throw new Error("Native committed message thread identity mismatch");
         }
         state.accept(event.cursor, message, typeof event.data.origin === "string" ? event.data.origin : "unknown");
+        if (message?.direction === "incoming" && event.data.origin === "live") opts.setStatus({ accountId: opts.account.accountId, lastInboundAt: Date.now() });
         await host.client.ack(native.accountId, "openclaw", state.cursor);
         await process(); backoff = 250;
       }

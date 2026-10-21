@@ -17,6 +17,7 @@ mod projection;
 mod reader;
 mod schema;
 mod snapshot;
+mod thread_read;
 mod writer;
 
 pub use dat::*;
@@ -30,6 +31,7 @@ pub use projection::*;
 pub use reader::*;
 pub use schema::*;
 pub use snapshot::{keys_from_agent_cache, keys_from_password, ProfileLocation, ReadOptions};
+pub use thread_read::*;
 pub use writer::*;
 
 #[derive(Debug, thiserror::Error)]

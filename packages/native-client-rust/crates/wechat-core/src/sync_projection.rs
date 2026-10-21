@@ -393,6 +393,28 @@ impl Core {
         let parsed = if command.id == 5 {
             let message =
                 wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)?;
+            if let Some(read) =
+                super::read_control::parse_remote_thread_read(&message, &state.own_username)
+            {
+                let options = self.write_options(account, receipt)?;
+                let (location, keys) = self.profile_location_keys(account)?;
+                self.retain_control_raw(account, command, receipt)?;
+                let projection = wechat_profile::mark_read_thread(
+                    &location,
+                    &keys,
+                    &read.thread,
+                    read.through_time,
+                    &options,
+                )?;
+                self.store.append_event_once(
+                    account,
+                    &format!("remote-thread-read:{receipt}"),
+                    "thread.read-state",
+                    &json!({"threadId":read.thread,"readScope":"thread","origin":"remote_read","throughTime":read.through_time,"projection":projection}),
+                )?;
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
+            }
             if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
                 let blocked = message_blocker(&message);
                 if matches!(message.message_type, 51 | 10002) {
@@ -1047,7 +1069,7 @@ mod encrypted_roundtrip {
         let threads = core.threads("one", &Default::default()).unwrap();
         let version = threads["items"][0]["readStateVersion"].as_str().unwrap();
         let id = committed[0].data["messageId"].as_str().unwrap().to_string();
-        core.mark_read("one", "peer", vec![id], version)
+        core.mark_read_set("one", "peer", vec![id], version)
             .await
             .unwrap();
         let kept: (i64, String) = sessions
@@ -1065,6 +1087,68 @@ mod encrypted_roundtrip {
                 })
                 .unwrap(),
             0
+        );
+        // Finish a whole-thread profile commit whose sidecar completion was
+        // interrupted. Recovery must remain local and reconcile stale counters.
+        let threads = core.threads("one", &Default::default()).unwrap();
+        let expected = threads["items"][0]["readStateVersion"].as_str().unwrap();
+        let intent = json!({"threadReadTime":100,"expectedVersion":expected});
+        store
+            .begin_read(
+                "one",
+                "peer",
+                &store.read_version("one", "peer").unwrap(),
+                &intent,
+            )
+            .unwrap();
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        let options = core
+            .write_options("one", "interrupted-thread-read")
+            .unwrap();
+        wechat_profile::mark_read_thread(&location, &keys, "peer", 100, &options).unwrap();
+        assert_eq!(store.pending_reads("one").unwrap(), 1);
+        assert_eq!(core.recover_read_projections("one").await.unwrap(), 1);
+        assert_eq!(store.pending_reads("one").unwrap(), 0);
+        assert_eq!(
+            sessions
+                .query_row(
+                    "SELECT unread_count FROM SessionTable WHERE username='peer'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        let control = add(51, "synthetic_self", "peer", br#"<msg><op id="1"><username>peer</username><name>lastMessage</name><arg><![CDATA[{"messageSvrId":"77","MsgCreateTime":"100"}]]></arg></op></msg>"#, 900, 101);
+        for _ in 0..2 {
+            core.apply_sync_command("one", &control, "remote-read-fixture", "live")
+                .unwrap();
+        }
+        assert_eq!(
+            sessions
+                .query_row(
+                    "SELECT last_clear_unread_timestamp FROM SessionTable WHERE username='peer'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            101
+        );
+        let events = store.events("one", 0, 100).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "message.committed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "thread.read-state"
+                    && event.data["origin"] == "remote_read")
+                .count(),
+            1
         );
     }
     #[test]

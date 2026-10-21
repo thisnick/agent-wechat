@@ -164,9 +164,28 @@ recovery state or promise a completed saved-login generation.
 `mark_read_messages` removes only selected source-qualified unread observations
 in one session transaction. It decrements by actual removed rows and preserves
 pre-existing counter/list exceptions, unrelated arrivals and unrelated fields.
-Retries are idempotent. Read state remains desktop-local and separate from phone
-state, native synchronization and consumer acknowledgements. The caller owns
-its model-handoff policy, receipt persistence and concurrency/version checks.
+Retries are idempotent. This bounded writer remains an internal recovery
+primitive for older durable intents.
+
+`mark_read_thread` clears a whole conversation through a frozen server timestamp,
+advances `last_clear_unread_timestamp`, and preserves unread rows after that
+timestamp. When the session has no newer history, it also clears legacy unread
+counter contributions absent from the list. When newer history exists, unknown
+counter contributions are preserved. Drafts, session options and other peers
+are preserved; a missing session is a no-op. It requires the same explicit
+ownership, account binding, supported schema and durable intent as other writes.
+The stored cutoff has whole-second precision. A later arrival with the same
+timestamp shares that boundary; its separate ordering needs live validation.
+Server message IDs are never numerically sorted to infer chronology.
+
+The daemon's public read operation freezes its latest valid server identity and
+time in local profile order, checks the expected version, applies this local
+projection and separately journals a cross-device read notification. That
+deliberately includes earlier messages in the same thread, including ones that
+were not supplied to a model. The profile crate performs no network requests;
+the daemon also uses this writer for strictly recognized incoming read controls.
+Consumer acknowledgements remain a separate operation. The caller owns its
+model-handoff policy, receipt persistence and concurrency/version checks.
 
 ## Validation
 

@@ -13,6 +13,6 @@ wx tokens list
 wx tokens revoke TOKEN_ID
 ```
 
-Available scopes are `read`, `media`, `send`, `read-state`, `login` and `admin`. Grant only the selected accounts/scopes. OpenClaw uses read/media/send/login, plus read-state when automatic local reads are wanted; normal operation does not need admin. The optional Gateway facade uses the Gateway's own authentication and a separate daemon token reference.
+Available scopes are `read`, `media`, `send`, `read-state`, `login` and `admin`. Grant only the selected accounts/scopes. OpenClaw uses read/media/send/login, plus read-state when automatic whole-thread reads are wanted; normal operation does not need admin. The optional Gateway facade uses the Gateway's own authentication and a separate daemon token reference.
 
 Stopping/disconnecting keeps reusable WeChat trust. Explicit native logout commits a persistent local fence and makes at most one authenticated logout exchange without renewing merely to log out. Saved-device trust revocation is not established. Explicit local forgetting is separately confirmed and retains history/media; neither action deletes backups or proves removal from the phone's device list.

@@ -179,11 +179,11 @@ export class NativeWeChatClient {
     const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native media response exceeds its bound"); }
     return { bytes: await this.readBounded(response, max), contentType: response.headers.get("content-type") ?? "application/octet-stream", etag: response.headers.get("etag"), contentRange: response.headers.get("content-range"), status: response.status };
   }
-  markRead(accountId: string, threadId: string, messageIds: string[], expectedVersion: string): Promise<unknown> {
-    if (!messageIds.length || messageIds.length > 200 || messageIds.some(value => typeof value !== "string" || !value) || typeof expectedVersion !== "string") throw new Error("Invalid exact-ID read projection");
-    return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}/read-state`, { method: "POST", body: JSON.stringify({ messageIds: [...new Set(messageIds)], expectedVersion }) });
+  markRead(accountId: string, threadId: string, expectedVersion: string): Promise<unknown> {
+    if (typeof expectedVersion !== "string" || !expectedVersion || expectedVersion.length > 128) throw new Error("Read version is required");
+    return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}/read-state`, { method: "POST", body: JSON.stringify({ expectedVersion }) });
   }
-  markReadThrough(accountId: string, threadId: string, throughMessageId: string, expectedVersion: string): Promise<unknown> { id(throughMessageId); if (typeof expectedVersion !== "string" || !expectedVersion) throw new Error("Read version is required"); return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}/read-state`, { method: "POST", body: JSON.stringify({ throughMessageId, expectedVersion }) }); }
+
   events(accountId: string, after = "0", limit = 100): Promise<{ items: NativeEvent[]; nextCursor: string }> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("Invalid event page limit");
     return this.request(`v1/accounts/${id(accountId)}/events?after=${decimal(after)}&limit=${limit}`);

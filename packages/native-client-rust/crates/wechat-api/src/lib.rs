@@ -812,33 +812,18 @@ async fn send_status(
     };
     Ok(Json(value.map_err(anyhow::Error::from)?))
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReadState {
-    message_ids: Option<Vec<String>>,
-    through_message_id: Option<String>,
-    expected_version: String,
-}
+
 async fn read_state(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, thread)): Path<(String, String)>,
-    Json(input): Json<ReadState>,
+    Json(input): Json<contracts::NativeReadRequest>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read-state")?;
-    let result = match (input.message_ids, input.through_message_id) {
-        (Some(ids), None) => {
-            app.core
-                .mark_read(&a, &thread, ids, &input.expected_version)
-                .await?
-        }
-        (None, Some(id)) => {
-            app.core
-                .mark_through(&a, &thread, &id, &input.expected_version)
-                .await?
-        }
-        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_read_set")),
-    };
+    let result = app
+        .core
+        .mark_thread_read(&a, &thread, &input.expected_version)
+        .await?;
     Ok(Json(result))
 }
 #[derive(Deserialize)]

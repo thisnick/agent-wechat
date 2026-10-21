@@ -11,4 +11,4 @@ The official profile contains history, metadata, desktop read state and supporte
 
 Heartbeat/NewSync polling detects incoming work. Durable message commits produce account events and replayable SSE. An event acknowledgement confirms consumer custody, not message read state. HTTP disconnects do not undo submitted durable jobs. Sending uses idempotency keys and preserves uncertain outcomes so a lost response does not cause an automatic duplicate.
 
-OpenClaw either owns a native child or connects to an external daemon. It stores event custody before acknowledgement, applies access/mention policy before media retrieval, and confirms exact prepared model input before sparse local read projection. It never downloads a runtime at plugin startup.
+OpenClaw either owns a native child or connects to an external daemon. It stores event custody before acknowledgement, applies access/mention policy before media retrieval, and confirms exact prepared model input before whole-thread read marking and a native cross-device notification. It never downloads a runtime at plugin startup.

@@ -3,6 +3,8 @@ mod group_inventory;
 pub use group_inventory::*;
 #[path = "logout.rs"]
 mod logout;
+#[path = "status_notify.rs"]
+mod status_notify;
 pub use crate::wire::{
     AddMessage, AvatarBytes, ContactLookup, ContactRecord, Heartbeat, InitContactPage, RoomMember,
     RoomRoster, SyncBatch, SyncCommand, TextSendResult, VoiceChunk,
@@ -17,6 +19,7 @@ use anyhow::{bail, ensure, Result};
 pub use logout::*;
 use openssl::{nid::Nid, pkey::PKey, rsa::Rsa};
 use serde::{Deserialize, Serialize};
+pub use status_notify::*;
 use std::{fmt, time::Duration};
 use zeroize::Zeroize;
 

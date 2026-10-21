@@ -44,7 +44,7 @@ node scripts/native-model-smoke.mjs
 node scripts/native-media-model-smoke.mjs
 ```
 
-The public smoke tests use synthetic data, loopback HTTP and owned child processes. They make no WeChat requests; model-boundary tests use a local stub provider and a deterministic local transcription fixture. Unit tests cover authenticated crypto vectors, malformed/cross-account data, unsigned 64-bit IDs, real SQLCipher databases, schema drift, copy preservation, projection retries, exact read sets, token scope/revocation, event custody and uncertain-send recovery. Native packaging and deployment preparation are described in [deploy/native](../../deploy/native/README.md). No test command deploys production services.
+The public smoke tests use synthetic data, loopback HTTP and owned child processes. They make no WeChat requests; model-boundary tests use a local stub provider and a deterministic local transcription fixture. Unit tests cover authenticated crypto vectors, malformed/cross-account data, unsigned 64-bit IDs, real SQLCipher databases, schema drift, copy preservation, projection retries, whole-thread reads, token scope/revocation, event custody and uncertain-send recovery. Native packaging and deployment preparation are described in [deploy/native](../../deploy/native/README.md). No test command deploys production services.
 
 Private test-account validation additionally exercised native expiry/renewal, heartbeat/sync, copied official history through the assembled daemon, and a stopped encrypted-profile clone. Original source/checkpoint hashes were preserved. Private credentials, profiles, captures and messages are excluded from this repository. These checks do not establish compatibility with arbitrary accounts or official builds.
 
@@ -212,13 +212,12 @@ The explicit offline binding commands require a private 16-byte MMKV format-key 
 wx --account test messages send filehelper --text "A clearly labeled test" \
   --idempotency-key unique-logical-send-id
 wx --account test messages send-status SEND_ID
-wx --account test messages read THREAD_ID --message-id msg_OPAQUE_ID \
-  --expected-version OBSERVED_READ_STATE_VERSION
+wx --account test messages read THREAD_ID --expected-version OBSERVED_READ_STATE_VERSION
 ```
 
 Reuse an idempotency key only for the same destination and payload. A queued send is persisted before submission. Accepted results require matching destination/client identity and a full server ID. Restart during submission becomes `needs_review`; no automatic resend follows an uncertain result. The same logical key returns the same intent, or a conflict for a changed payload. Supported accepted-send rows and media caches use durable projection receipts; unsupported bindings remain explicit gaps.
 
-Read-state changes remove only the exact source-qualified incoming IDs. They preserve other arrivals and existing unread counter/list discrepancies. The compare-and-swap version includes the observed profile generation, so an intervening source change causes a conflict. Event delivery ACKs never change read state, and desktop read state does not send a phone read receipt. A prepared-model handoff needs a positively correlated callback; accepted/enqueued tool execution is not evidence of that handoff.
+Read-state changes mark the whole thread through its latest observed message and send one native cross-device notification. This can clear earlier unread messages the model did not consume. The compare-and-swap version includes the observed profile generation, so an intervening source change causes a conflict. Event delivery ACKs never change read state. An uncertain native notification remains recorded without automatic resubmission. A prepared-model handoff needs a positively correlated callback; accepted/enqueued tool execution is not evidence of that handoff.
 
 The API requires Bearer headers. Main resources are under `/v1/accounts/{account}`: `threads`, `contacts`, `groups`, `groups/{room}/members`, `threads/{thread}/messages`, `messages/{id}`, cached `avatars/{id}` and `messages/{id}/image?quality=best|original|standard|thumbnail`. Native lookup observations use `contacts/lookup` and `groups/{room}/lookup`. `auth/login`, operation/QR/cancel routes, `sends`, `threads/{thread}/read-state`, `events`, `events/stream` and `consumers/{consumer}/ack` are separate operations. Cursor/ID fields are strings; message XML, CDN secrets and raw database fields are not returned as public message bodies.
 

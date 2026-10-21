@@ -33,6 +33,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if path=="/v1/profiles/official":
                 state["official_posts"].append(body);state["official_first"]=False
                 return self.reply({"accountId":"a","profilePath":"/daemon-home","storageMode":"official","savedDeviceLoginAvailable":False})
+            if path.endswith("/read-state"):
+                assert body == {"expectedVersion":"fixture-version"}
+                return self.reply({"readScope":"thread","phoneNotification":{"state":"accepted"}})
             if path.endswith("/sends"):
                 receipts=list((root/"receipts").glob("*.json"));assert receipts,"receipt was not durable before first request"
                 assert any(json.loads(p.read_text())["idempotencyKey"]==self.headers.get("Idempotency-Key") for p in receipts)
@@ -52,6 +55,11 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     def run(*command,code=0):
         result=subprocess.run(args+list(command),env=env,capture_output=True,text=True,timeout=10);assert result.returncode==code,(command,result.returncode,result.stdout,result.stderr);return json.loads(result.stdout or result.stderr)
     try:
+        for group in ["chats", "messages"]:
+            result=run(group,"read","filehelper","--expected-version","fixture-version")
+            assert result["readScope"]=="thread" and result["phoneNotification"]["state"]=="accepted"
+            retired=subprocess.run(args+[group,"read","filehelper","--expected-version","fixture-version","--message-id","m"],env=env,capture_output=True,timeout=10)
+            assert retired.returncode==2,"retired exact-read flag must not become a whole-thread read"
         run("config","server","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
         result=run("messages","send","filehelper","--text","synthetic-text","--idempotency-key","fixture-send")
         assert result["state"]=="accepted" and state["posts"]==1

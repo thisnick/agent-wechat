@@ -176,10 +176,9 @@ pub struct NativeTextSendRequest {
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeReadRequest {
-    pub message_ids: Option<Vec<String>>,
-    pub through_message_id: Option<String>,
     pub expected_version: String,
 }
+
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeForgetRequest {
@@ -264,5 +263,22 @@ mod tests {
         assert!(generated.contains("serverId: string | null"));
         assert!(generated.contains("unreadCount: number | null"));
         assert!(generated.contains("type NativePage<T>"));
+    }
+}
+
+#[cfg(test)]
+mod read_contract_tests {
+    use super::*;
+    #[test]
+    fn thread_read_rejects_retired_message_selection_instead_of_broadening_it() {
+        assert!(serde_json::from_value::<NativeReadRequest>(
+            serde_json::json!({"expectedVersion":"v"})
+        )
+        .is_ok());
+        for field in ["messageIds", "throughMessageId"] {
+            let mut value = serde_json::json!({"expectedVersion":"v"});
+            value[field] = serde_json::json!("retired-boundary");
+            assert!(serde_json::from_value::<NativeReadRequest>(value).is_err());
+        }
     }
 }

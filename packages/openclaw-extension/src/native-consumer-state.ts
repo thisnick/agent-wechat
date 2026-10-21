@@ -21,6 +21,7 @@ export type NativeCustodyItem = {
   runId?: string;
   manifestHash?: string;
   readPending?: boolean;
+  phoneReadState?: "accepted" | "rejected" | "needs_review";
   handoffUnconfirmed?: boolean;
   dispatchManifest?: NativeDispatchManifest;
 };
@@ -72,7 +73,9 @@ export class NativeConsumerState {
     if (message && (!message.id || message.accountId !== this.value.accountId)) throw new Error("Native journal message crosses account boundary");
     this.mutate(() => {
     if (message && !this.value.items[message.id]) {
-      const completed = Object.entries(this.value.items).filter(([, item]) => !item.readPending && ["completed", "ignored"].includes(item.state));
+      const completed = Object.entries(this.value.items).filter(([, item]) => !item.readPending
+        && item.phoneReadState !== "needs_review" && item.phoneReadState !== "rejected"
+        && ["completed", "ignored"].includes(item.state));
       for (const [key] of completed.slice(0, Math.max(0, completed.length - 1000))) delete this.value.items[key];
       if (Object.keys(this.value.items).length >= 5000) throw new Error("Native custody queue is full; operator review required");
       this.value.items[message.id] = { message, origin, state: "received" };

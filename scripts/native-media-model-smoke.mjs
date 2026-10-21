@@ -44,7 +44,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (content) { const value = assets.get(content[1]); res.setHeader('content-type', value.asset.contentType); res.end(content[1] === 'corrupt-image' ? Buffer.from('wrong') : value.bytes); return; }
       let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 4 * 1024 * 1024); }
       if (url.pathname.endsWith('/media-transfers')) return json({ id: 'pending-job', state: 'queued' });
-      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/read-state`) { const body = JSON.parse(raw); assert.ok(Array.isArray(body.messageIds)); assert.equal(body.throughMessageId, undefined); reads.push(body.messageIds); if (body.messageIds.includes('file') && reads.filter(ids => ids.includes('file')).length === 1) { res.statusCode = 503; return json({error:{code:'fixture_lost_response'}}); } return json({}); }
+      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/read-state`) { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending&&item.runId).map(item=>item.message.id); reads.push(triggers); if (triggers.includes('file') && reads.filter(ids => ids.includes('file')).length === 1) { res.statusCode = 503; return json({error:{code:'fixture_lost_response'}}); } return json({}); }
       if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'synthetic-send', state: 'accepted' });
       if (url.pathname === '/model/v1/chat/completions') {
         assert.equal(req.headers.authorization, 'Bearer synthetic-model-key');
@@ -126,7 +126,7 @@ console.log('Synthetic local transcript');
     if (items.has('file')) { assert.equal(result.outcomes['duplicate-file'],'needs_review'); assert.equal(requests.filter(request=>JSON.stringify(request.messages.at(-1)).includes('wechat-native:a:file')).length,1); }
     if (!eligible) assert.equal(reads.length,0);
     if (eligible) assert.equal(reads.filter(ids=>ids.includes('file')).length,2);
-    console.log(`Pinned media model ${name} passed: exact image bytes/reference manifests, omitted/failed/pending guards, transcription status and durable sparse receipts.`);
+    console.log(`Pinned media model ${name} passed: exact image bytes/reference manifests, omitted/failed/pending guards, transcription status and durable thread receipts.`);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
     for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });

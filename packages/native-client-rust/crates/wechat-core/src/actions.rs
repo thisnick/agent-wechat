@@ -6,6 +6,18 @@ impl Core {
             let Some(expected) = intent["expectedVersion"].as_str() else {
                 continue;
             };
+            if let Some(cutoff) = intent["threadReadTime"].as_i64() {
+                if self
+                    .recover_thread_read_projection(account, &thread, cutoff, expected)
+                    .await
+                    .is_ok()
+                {
+                    completed += 1;
+                }
+                continue;
+            }
+            // Finish already-durable read intents from older daemon versions.
+            // New callers can only request whole-thread marking.
             let Ok(ids) = serde_json::from_value::<Vec<String>>(intent["messageIds"].clone())
             else {
                 continue;

@@ -77,14 +77,32 @@ test("queued native reply ending needs_review retains uncertainty without resend
   assert.equal(await dispatchNativeMessage(value), "needs_review");
   assert.equal(submissions, 1); assert.equal(inspections, 1); assert.equal(value.state.get("m1")?.readPending, true);
 });
-test("read CAS retries same sparse IDs without marking concurrent arrival or gap", async t => {
+test("whole-thread read CAS refreshes version without sending message IDs", async t => {
   const value = fixture(t); value.state.accept("2", { ...value.message, id: "gap" }, "live"); await dispatchNativeMessage(value);
   const requests: any[] = []; let attempt = 0;
   value.client.threads = async () => ({ items: [{ id: "u", readStateVersion: String(attempt) } as any], nextCursor: null, sourceGeneration: "g", coverage: {} });
-  value.client.markRead = async (_account, _thread, ids, expectedVersion) => { requests.push({ ids, expectedVersion }); if (attempt++ === 0) throw new NativeApiError(409, "conflict"); return {}; };
+  value.client.markRead = async (_account, threadId, expectedVersion) => { requests.push({ threadId, expectedVersion }); if (attempt++ === 0) throw new NativeApiError(409, "conflict"); return {}; };
   await projectNativeRead(value.client, "a", value.state);
-  assert.deepEqual(requests, [{ ids: ["m1"], expectedVersion: "0" }, { ids: ["m1"], expectedVersion: "1" }]);
+  assert.deepEqual(requests, [{ threadId: "u", expectedVersion: "0" }, { threadId: "u", expectedVersion: "1" }]);
   assert.equal(value.state.get("gap")?.readPending, undefined); assert.equal(value.state.get("m1")?.readPending, false);
+});
+test("one thread read settles prepared receipts and retains remote uncertainty without retry", async t => {
+  const value = fixture(t); await dispatchNativeMessage(value);
+  value.state.accept("2", { ...value.message, id: "m2" }, "live");
+  value.state.update("m2", { state: "handed_off", runId: "second-run", readPending: true });
+  let requests = 0;
+  value.client.threads = async () => ({ items: [{ id: "u", readStateVersion: "v" } as any], nextCursor: null, sourceGeneration: "g", coverage: {} });
+  value.client.markRead = async (_account, threadId, expectedVersion) => {
+    requests++; assert.equal(threadId, "u"); assert.equal(expectedVersion, "v");
+    return { phoneReceiptSent: false, phoneNotification: { state: "needs_review", retryable: false } };
+  };
+  await projectNativeRead(value.client, "a", value.state);
+  await projectNativeRead(value.client, "a", value.state);
+  assert.equal(requests, 1);
+  for (const id of ["m1", "m2"]) {
+    assert.equal(value.state.get(id)?.readPending, false);
+    assert.equal(value.state.get(id)?.phoneReadState, "needs_review");
+  }
 });
 test("rejected group media never reaches retrieval, transcription or the model", async t => {
   const value=fixture(t,{group:true});value.message.type=34;value.message.body=null;let preparations=0;
@@ -105,11 +123,11 @@ test("media preparation failure cannot record a prepared input or mark read",asy
 });
 
 
-test("late media receipt retries its exact reads during quiet SSE without another model turn", async t => {
+test("late media receipt retries its whole-thread read during quiet SSE without another model turn", async t => {
   const value = fixture(t); value.state.update("m1", { state: "dispatching" });
   let requests = 0, failures = 0;
   value.client.threads = async () => ({ items: [{ id: "u", readStateVersion: "1" } as any], nextCursor: null, sourceGeneration: "g", coverage: {} });
-  value.client.markRead = async (_account, _thread, ids) => { assert.deepEqual(ids, ["m1"]); if (++requests === 1) throw Error("lost response"); return {}; };
+  value.client.markRead = async (_account, threadId, expectedVersion) => { assert.equal(threadId, "u"); assert.equal(expectedVersion, "1"); if (++requests === 1) throw Error("lost response"); return {}; };
   const stop = startNativeReadPump(() => projectNativeRead(value.client, "a", value.state), () => { failures++; }, 5); t.after(stop);
   await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(requests, 0);
   value.state.preparedCallback(["m1"], "on_model_dispatch")("late-media-run");

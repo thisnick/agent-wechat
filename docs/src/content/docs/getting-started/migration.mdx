@@ -159,7 +159,7 @@ Remove old `serverUrl`, inline `token`, `pollIntervalMs` and `authPollIntervalMs
 
 ## Verify and retain a recovery path
 
-Check native account status, existing history, contact/group lookup and cached media before changing the old setup. Reading history does not send messages or mark them read. Local desktop read state remains separate from the phone's read state, and server sync does not fetch every historical thread.
+Check native account status, existing history, contact/group lookup and cached media before changing the old setup. Reading history does not send messages or mark them read. Whole-thread marking reports its read boundary across devices. Server sync does not fetch every historical thread.
 
 The supported workflow continues official-format database/media writes in place and preserves unknown files. FTS/search-index maintenance, arbitrary official-schema migration and universal reverse handoff are not promised. Unknown sync commands remain staged instead of advancing a falsely complete official checkpoint. Inspect uncertain sends by their retained key/job; do not replay them as new messages during migration.
 

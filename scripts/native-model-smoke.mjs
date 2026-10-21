@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Real pinned Gateway/model runtime; both native API and model are local fixtures.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
@@ -29,7 +30,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (url.pathname === '/v1/accounts/a/threads') return json({ items: [{ id: 'u1', readStateVersion: '1' }], nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
       if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
       let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 4 * 1024 * 1024); }
-      if (url.pathname === '/v1/accounts/a/threads/u1/read-state') { const body = JSON.parse(raw); assert.ok(Array.isArray(body.messageIds)); assert.equal(body.throughMessageId, undefined); reads.push(body.messageIds); return json({}); }
+      if (url.pathname === '/v1/accounts/a/threads/u1/read-state') { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending&&item.runId).map(item=>item.message.id); reads.push(triggers); return json({}); }
       if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'synthetic-send', state: 'accepted' });
       if (url.pathname === '/model/v1/chat/completions') {
         assert.equal(req.headers.authorization, 'Bearer synthetic-model-key');
@@ -100,7 +101,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
         return JSON.stringify(users.at(-1)).includes(`wechat-native:a:${id}`) && JSON.stringify(users.at(-2)).includes(body);
       }), `Exact current input missing at local provider for ${id}`);
     }
-    console.log(`Pinned model boundary ${name} passed: actual input/run correlation, sparse reads, concurrent turns, command gaps; merged=${merged}.`);
+    console.log(`Pinned model boundary ${name} passed: actual input/run correlation, whole-thread reads, concurrent turns, command gaps; merged=${merged}.`);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
     for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });

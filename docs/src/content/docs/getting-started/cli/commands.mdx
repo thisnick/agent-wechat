@@ -234,16 +234,17 @@ image includes FFmpeg/FFprobe; direct installs must provision these tools for
 source normalization. Large-file branches and sticker sending are unavailable.
 
 ```bash
-wx --account home chats read filehelper --through MESSAGE_ID --expected-version VERSION
-wx --account home messages read filehelper --message-id MESSAGE_A \
-  --message-id MESSAGE_B --expected-version VERSION
+wx --account home chats read filehelper --expected-version VERSION
+wx --account home messages read filehelper --expected-version VERSION
 wx --account home events watch --cursor-file /private/events.cursor.json
 wx --account home events ack --consumer deliberate-consumer --through CURSOR
 ```
 
-Human mark-through uses a local ordering boundary. Exact-ID reads affect only
-the selected records, preserving gaps and concurrent arrivals. These are local
-desktop reads and do not synchronize phone unread state. Watch emits NDJSON;
+Read marks the whole thread through the latest observed local message. The
+expected version prevents clearing a different snapshot, and rows with newer timestamps stay
+unread. The native cutoff has one-second precision. The result distinguishes local projection from accepted, rejected or
+uncertain cross-device notification. Uncertain notifications are not resent.
+Watch emits NDJSON;
 its cursor file records successful local emission, not model consumption.
 Consumer ACK is a separate explicit operation. Interrupting a send watcher
 leaves daemon work running; only attached login explicitly requests cancel.

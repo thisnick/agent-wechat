@@ -18,6 +18,10 @@ mod official_profile;
 pub use official_profile::{OfficialProfileRequest, OfficialProfileSelection};
 #[path = "profile_network.rs"]
 mod profile_network;
+#[path = "read_control.rs"]
+mod read_control;
+#[path = "read_sync.rs"]
+mod read_sync;
 #[path = "saved_login.rs"]
 mod saved_login;
 use anyhow::{bail, Context, Result};
@@ -1193,19 +1197,8 @@ impl Core {
             durable_intent_id: intent.into(),
         })
     }
-    pub async fn mark_read(
-        self: &Arc<Self>,
-        account: &str,
-        thread: &str,
-        ids: Vec<String>,
-        expected: &str,
-    ) -> Result<Value> {
-        if ids.len() > 200 {
-            bail!("invalid read set");
-        }
-        self.mark_read_set(account, thread, ids, expected).await
-    }
-    pub async fn mark_through(
+    #[cfg(test)]
+    async fn mark_through(
         self: &Arc<Self>,
         account: &str,
         thread: &str,
@@ -1943,11 +1936,11 @@ mod tests {
         let threads = core.threads("one", &Default::default()).unwrap();
         let version = threads["items"][0]["readStateVersion"].as_str().unwrap();
         assert!(core
-            .mark_read("one", "peer", vec![id.clone()], "stale")
+            .mark_read_set("one", "peer", vec![id.clone()], "stale")
             .await
             .is_err());
         let read = core
-            .mark_read("one", "peer", vec![id.clone()], version)
+            .mark_read_set("one", "peer", vec![id.clone()], version)
             .await
             .unwrap();
         assert_eq!(read["projection"]["removedUnreadRows"], 1);
@@ -1956,7 +1949,7 @@ mod tests {
             0
         );
         assert!(core
-            .mark_read("one", "peer", vec![id], version)
+            .mark_read_set("one", "peer", vec![id], version)
             .await
             .is_err());
         assert_eq!(
@@ -2027,7 +2020,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(all["items"][0]["serverId"], "1004");
         let current = core.threads("one", &Default::default()).unwrap();
-        core.mark_read(
+        core.mark_read_set(
             "one",
             "peer",
             vec![ids[0].clone()],

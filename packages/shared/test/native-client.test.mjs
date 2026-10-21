@@ -22,25 +22,23 @@ test('unsafe numeric server IDs and cross-account message resources are rejected
     await assert.rejects(client.messages('a', 't'), /identity/);
   }
 });
-test('send uses caller idempotency key and sparse read updates never widen a boundary', async () => {
+test('send uses caller idempotency key and read marks the whole thread', async () => {
   const requests = [];
   const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => { requests.push({ url: String(url), init }); return Response.json({ state: 'accepted' }); } });
   await client.sendText('a', 't', 'fixture', 'send-key');
-  await client.markRead('a', 't', ['m1', 'm3', 'm1'], '7');
+  await client.markRead('a', 't', '7');
   assert.equal(requests[0].init.headers.get('Idempotency-Key'), 'send-key');
   assert.deepEqual(JSON.parse(requests[0].init.body), { threadId: 't', text: 'fixture' });
-  assert.deepEqual(JSON.parse(requests[1].init.body), { messageIds: ['m1', 'm3'], expectedVersion: '7' });
-  assert.throws(() => client.markRead('a', 't', [], '7'));
+  assert.deepEqual(JSON.parse(requests[1].init.body), { expectedVersion: '7' });
+  assert.throws(() => client.markRead('a', 't', []));
 });
 test('structured failures expose safe error codes but never raw server messages', async () => {
   const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ error: { code: 'read_state_conflict', message: 'private source content', retryable: false } }, { status: 409 }) });
-  await assert.rejects(client.markRead('a', 't', ['m'], '7'), error => error instanceof NativeApiError && error.status === 409 && error.code === 'read_state_conflict' && !error.message.includes('private'));
+  await assert.rejects(client.markRead('a', 't', '7'), error => error instanceof NativeApiError && error.status === 409 && error.code === 'read_state_conflict' && !error.message.includes('private'));
 });
-test('read projections and event pages enforce the server maximum of 200', async () => {
+test('event pages enforce the server maximum of 200', async () => {
   const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({}) });
-  await client.markRead('a', 't', Array.from({ length: 200 }, (_, index) => `m${index}`), '7');
   await client.events('a', '0', 200);
-  assert.throws(() => client.markRead('a', 't', Array.from({ length: 201 }, (_, index) => `m${index}`), '7'));
   assert.throws(() => client.events('a', '0', 201));
 });
 test('SSE accepts UTF-8 chunk boundaries, heartbeat comments and decimal cursors', async () => {
@@ -97,8 +95,9 @@ test('native resource pagination retains tombstones and binds continuation query
   const page=await client.messages('a','t',{cursor:'cursor+/=',limit:17});assert.ok(isNativeTombstone(page.items[0]));assert.equal(requested.searchParams.get('cursor'),'cursor+/=');assert.equal(requested.searchParams.get('limit'),'17');assert.equal(page.items[0].id,'deleted-message');
   await assert.rejects(async()=>client.contacts('a',{limit:201}));assert.equal(isNativeTombstone({id:'x',deleted:false,version:'1'}),false);
 });
-test('explicit human read-through stays distinct from exact model input IDs', async () => {
- const client=new NativeWeChatClient({...options,fetch:async(_url,init)=>{assert.deepEqual(JSON.parse(init.body),{throughMessageId:'m_boundary',expectedVersion:'7'});return Response.json({version:'8'});}});await client.markReadThrough('a','t','m_boundary','7');
+test('whole-thread reads require a bounded optimistic version', async () => {
+ const client=new NativeWeChatClient({...options,fetch:async(_url,init)=>{assert.deepEqual(JSON.parse(init.body),{expectedVersion:'7'});return Response.json({version:'8'});}});await client.markRead('a','t','7');
+ for(const invalid of ['', 'x'.repeat(129), ['old-message-selection']]) assert.throws(()=>client.markRead('a','t',invalid));
 });
 test('media upload native limit is generated from the daemon contract and refuses before transport', async () => {
  let calls=0;const client=new NativeWeChatClient({...options,fetch:async()=>{calls++;throw Error('unexpected transport');}});assert.equal(NATIVE_MAX_SOURCE_BYTES,25*1024*1024-17);await assert.rejects(client.upload('a',new Uint8Array(NATIVE_MAX_SOURCE_BYTES+1),'fixture.bin'));assert.equal(calls,0);

@@ -306,10 +306,6 @@ enum ChatCommand {
     Read {
         id: String,
         #[arg(long)]
-        through: Option<String>,
-        #[arg(long, conflicts_with = "through")]
-        message_id: Vec<String>,
-        #[arg(long)]
         expected_version: String,
     },
     Open {
@@ -460,8 +456,6 @@ enum MessageCommand {
     },
     Read {
         thread: String,
-        #[arg(long, required = true)]
-        message_id: Vec<String>,
         #[arg(long)]
         expected_version: String,
     },
@@ -1291,19 +1285,9 @@ async fn run(cli: Cli) -> Result<()> {
             }
             ChatCommand::Read {
                 id,
-                through,
-                message_id,
                 expected_version,
             } => {
-                if through.is_none() && message_id.is_empty() {
-                    bail!("choose --through or --message-id");
-                }
-                let mut body = json!({"expectedVersion":expected_version});
-                if let Some(through) = through {
-                    body["throughMessageId"] = json!(through);
-                } else {
-                    body["messageIds"] = json!(message_id);
-                }
+                let body = json!({"expectedVersion":expected_version});
                 r.post(
                     &r.path(&format!("threads/{}/read-state", encode(&id)))?,
                     body,
@@ -1419,12 +1403,11 @@ async fn run(cli: Cli) -> Result<()> {
             }
             MessageCommand::Read {
                 thread,
-                message_id,
                 expected_version,
             } => {
                 r.post(
                     &r.path(&format!("threads/{}/read-state", encode(&thread)))?,
-                    json!({"messageIds":message_id,"expectedVersion":expected_version}),
+                    json!({"expectedVersion":expected_version}),
                 )
                 .await?
             }
