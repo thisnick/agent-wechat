@@ -9,6 +9,7 @@
   },
   "changesets": [
     "native-client-cutover",
+    "native-inbound-unread-column-order",
     "native-large-history-pages",
     "native-release-clean-checkout"
   ]

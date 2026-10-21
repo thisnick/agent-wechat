@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.3
+
+### Patch Changes
+
+- [#222](https://github.com/thisnick/agent-wechat/pull/222) [`dad905d`](https://github.com/thisnick/agent-wechat/commit/dad905dad01bc6b1c7237604244592be54e2c6a2) Thanks [@thisnick](https://github.com/thisnick)! - Validate supported official table columns by name instead of physical order. Previously, an unread table with `create_time` before `local_id` could let a new message reach history but fail the thread update, preventing OpenClaw from receiving its committed event. Preserve strict column attributes, keys and indexes, and recover retained messages without another network send or duplicate event.
+
 ## 1.0.0-beta.2
 
 ### Patch Changes
