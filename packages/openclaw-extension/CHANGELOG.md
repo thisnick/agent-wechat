@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 1.0.0-beta.5
+
+### Patch Changes
+
+- [#230](https://github.com/thisnick/agent-wechat/pull/230) [`54c884c`](https://github.com/thisnick/agent-wechat/commit/54c884c70c3e41d9fa2dd0c99d74f1d16d41f415) Thanks [@thisnick](https://github.com/thisnick)! - Mark whole WeChat threads read after successful inbound handling by default, including commands handled without a model call. The new `native.readPolicy: "on_inbound"` does not require conversation access or model-input confirmation. Retain pending reads across restarts without replaying the message. Ignored messages, pending media and failed handling do not initiate a read. Explicit `never` and `on_model_dispatch` policies remain available.
+
 ## 1.0.0-beta.4
 
 ### Patch Changes
