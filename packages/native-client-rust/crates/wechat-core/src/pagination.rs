@@ -457,6 +457,11 @@ mod tests {
     fn message_continuation_only_resolves_retained_page_rows() {
         use md5::Digest;
         let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let profile = temp.path().join("fixture");
         let password = [42u8; 32];
         let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
