@@ -141,7 +141,8 @@ try {
   assert.equal(images(requests[5]).length,2);const retrieved=/^data:([^;]+);base64,(.+)$/.exec(images(requests[5])[1].image_url.url);assert.ok(retrieved);assert.equal(createHash('sha256').update(Buffer.from(retrieved[2],'base64')).digest('hex'),assets.get('history-image').asset.sha256);
   for(let index=0;index<quoteScenarios.length;index++) {
     const scenario=quoteScenarios[index],request=requests[8+index];
-    assert.ok(JSON.stringify(request.messages).includes(scenario.body),'Quote comment or forwarded bundle missing from provider');
+    const providerText=request.messages.flatMap(message=>typeof message.content==='string'?[message.content]:Array.isArray(message.content)?message.content.filter(block=>block.type==='text').map(block=>block.text):[]).join('\n');
+    assert.ok(providerText.includes(scenario.body),'Quote comment or forwarded bundle missing from provider');
     if(scenario.id==='quote-text')assert.ok(JSON.stringify(request.messages).includes('Quoted original stored text'));
     if(scenario.id==='quote-embedded-text')assert.ok(JSON.stringify(request.messages).includes('Quoted embedded text with no original row'));
     const isImage=['quote-image','quote-embedded-image'].includes(scenario.id);
