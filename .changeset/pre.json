@@ -9,6 +9,7 @@
   },
   "changesets": [
     "native-client-cutover",
+    "native-large-history-pages",
     "native-release-clean-checkout"
   ]
 }

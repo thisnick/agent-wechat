@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.2
+
+### Patch Changes
+
+- [#220](https://github.com/thisnick/agent-wechat/pull/220) [`afbeddc`](https://github.com/thisnick/agent-wechat/commit/afbeddcfe83f5812f28581c66a08821bbc5f28a1) Thanks [@thisnick](https://github.com/thisnick)! - Resolve continued native message pages from their retained message IDs instead of decoding the entire thread again for every page. Preserve stable membership, current edits, deletion tombstones and account/query checks. Allow a bounded thirty-minute history view so large downloads can finish without the former five-minute cursor expiry.
+
 ## 1.0.0-beta.1
 
 ### Patch Changes
