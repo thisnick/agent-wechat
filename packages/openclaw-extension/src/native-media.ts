@@ -70,7 +70,15 @@ export async function prepareNativeAttachment(params: { client: NativeWeChatClie
   }
   let job: MediaJob | undefined;
   let transferError: NativeApiError | undefined;
-  if (!asset && params.download !== false && !["expired", "unsupported"].includes(transferCandidate()?.state ?? "")) {
+  if (!asset && initialCandidate?.jobId) {
+    await authorize();
+    job = await client.job(accountId, initialCandidate.jobId, params.signal);
+    guard();
+    if (job.accountId !== accountId || job.kind !== "download" || (job.assetId != null && job.assetId !== initialCandidate.id)) throw Error("Native download job identity does not match its attachment");
+    assets = await scopedAssets(); asset = select(assets, message.type, quality);
+    if (!asset && ["queued", "running"].includes(job.state)) return { body: `[${attachmentKind} pending]`, pending: true, jobId: job.id, retryable: true };
+  }
+  if (!asset && !job && params.download !== false && !["expired", "unsupported"].includes(transferCandidate()?.state ?? "")) {
     try {
       await authorize();
       job = await client.transferMedia(accountId, { messageId: message.id, assetId: null, quality: transferQuality });

@@ -232,3 +232,14 @@ test("unsupported historical media and transient catalog errors return bounded s
     assert.equal(result.details.attachment, undefined); assert.equal(value.calls.some(call => ["transferMedia", "mediaContent", "saveMedia"].includes(call[0])), false);
   }
 });
+test("existing download jobs are polled and terminal failures never resubmit, even in download mode", async t => {
+  for (const download of [false, true]) for (const state of ["queued", "failed"]) {
+    const value = await mediaFixture(t); value.setAssets([{ ...value.asset, state: "pending", jobId: "existing-job" }]);
+    value.client.job = async (...args: any[]) => { value.calls.push(["job", args[0], args[1]]); return { id: "existing-job", accountId: "a", assetId: "asset", kind: "download", state, retryable: false, reason: state === "failed" ? "media_service_rejected" : null }; };
+    const result: any = await value.run("wechat_media", { messageId: "media-message", download });
+    assert.equal(result.details.jobId, "existing-job"); assert.equal(result.details.status, state === "queued" ? "pending" : "unavailable");
+    assert.equal(result.details.retryable, state === "queued");
+    if (state === "failed") assert.equal(result.details.reason, "media_service_rejected");
+    assert.equal(value.calls.some(call => call[0] === "transferMedia" || call[0] === "mediaContent"), false);
+  }
+});
