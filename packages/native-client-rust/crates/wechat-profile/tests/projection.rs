@@ -57,7 +57,7 @@ fn named_writes_preserve_meaning_when_contact_session_and_message_columns_move()
                 |row| row.get(0),
             )
             .unwrap();
-        let indexes: Vec<String> = c.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL").unwrap().query_map([table], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        let indexes: Vec<String> = c.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND sql IS NOT NULL").unwrap().query_map([table], |row| row.get(0)).unwrap().map(|row| row.unwrap()).collect();
         assert!(sql.contains(before));
         c.execute_batch(&format!(
             "DROP TABLE {table};{};",
