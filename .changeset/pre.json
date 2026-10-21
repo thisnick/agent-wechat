@@ -7,5 +7,7 @@
     "@agent-wechat/agent-wechat": "0.16.0",
     "@agent-wechat/shared": "0.3.1"
   },
-  "changesets": []
+  "changesets": [
+    "native-client-cutover"
+  ]
 }
