@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.6
+
+### Minor Changes
+
+- [#232](https://github.com/thisnick/agent-wechat/pull/232) [`b281c4c`](https://github.com/thisnick/agent-wechat/commit/b281c4cbc9e0d874bfb852bddf9668b8159249b6) Thanks [@thisnick](https://github.com/thisnick)! - Add optional account-wide archive tools for thread discovery, cross-thread search, selected-thread history, exact message lookup and attachment retrieval. OpenClaw tool policies control access without a second plugin permission list; default tools remain restricted to the current thread. Archive tools preserve verified media paths, image content and bounded download status handling.
+
+  Add the account-scoped local message search endpoint with retained, query-bound pagination across threads, preserving peer identities, edits and deletion tombstones during continuation.
+
 ## 1.0.0-beta.5
 
 ## 1.0.0-beta.4
