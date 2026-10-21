@@ -1159,6 +1159,22 @@ fn classify_error(error: &anyhow::Error) -> String {
         }
         return "media_service_rejected".into();
     }
+    for cause in error.chain() {
+        let message = cause.to_string();
+        if [
+            "image_size_limit",
+            "image_decode_limit",
+            "image_decode_failed",
+            "image_no_frames",
+            "jpeg_trailer_missing",
+            "gif_trailer_missing",
+            "webp_length_invalid",
+        ]
+        .contains(&message.as_str())
+        {
+            return message;
+        }
+    }
     let message = error
         .chain()
         .map(|cause| cause.to_string())
@@ -2860,6 +2876,23 @@ mod tests {
         let nested = anyhow::anyhow!("connection closed before message completed")
             .context("opaque request wrapper");
         assert_eq!(classify_error(&nested), "transport_unavailable");
+    }
+    #[test]
+    fn image_validation_errors_expose_only_exact_fixed_codes() {
+        for code in [
+            "image_decode_failed",
+            "image_decode_limit",
+            "jpeg_trailer_missing",
+        ] {
+            let error = anyhow::anyhow!("{code}").context("opaque validation wrapper");
+            assert_eq!(classify_error(&error), code);
+        }
+        assert_eq!(
+            classify_error(&anyhow::anyhow!(
+                "image_decode_failed https://private.invalid/image"
+            )),
+            "media_processing_failed"
+        );
     }
     #[test]
     fn fresh_audio_uses_independent_codec() {

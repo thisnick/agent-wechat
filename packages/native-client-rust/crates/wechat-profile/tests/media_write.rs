@@ -406,6 +406,63 @@ fn native_md5_hash_matches_public_synthetic_vectors() {
     assert!(hardlink_md5_hash("short").is_err());
 }
 #[test]
+fn jpeg_trailers_survive_official_image_writeback_and_readback() {
+    let d = fixture();
+    let location = ProfileLocation::new(d.path().join("account")).unwrap();
+    let mut keys = KeyFile::empty("account");
+    keys.image_dat = Some(ImageDatKey::new([7; 16], 19));
+    let o = options();
+    let pixels = image::RgbImage::from_fn(64, 48, |x, y| {
+        image::Rgb([(x * 37 + y * 19) as u8, (x * 13) as u8, (y * 31) as u8])
+    });
+    let mut output = Cursor::new(vec![]);
+    image::DynamicImage::ImageRgb8(pixels)
+        .write_to(&mut output, image::ImageFormat::Jpeg)
+        .unwrap();
+    let mut bytes = output.into_inner();
+    bytes.extend_from_slice(b"synthetic-photo-trailer!");
+    let mut message = row(3);
+    message.fields.insert(
+        "message_content".into(),
+        SqlValue::Text(format!(
+            "<msg><img md5=\"{:x}\"/></msg>",
+            Md5::digest(&bytes)
+        )),
+    );
+    let source = apply_message_projection(&location, &keys, &message, &o)
+        .unwrap()
+        .source_id;
+    for quality in [
+        ImageQuality::Original,
+        ImageQuality::Standard,
+        ImageQuality::Thumbnail,
+    ] {
+        let applied =
+            cache_image_projection(&location, &keys, &source, "peer", quality, &bytes, &o).unwrap();
+        let encoded = fs::read(d.path().join("account").join(&applied.relative_path)).unwrap();
+        let (decoded, layout) = decode_dat_v2(&encoded, keys.image_dat.as_ref().unwrap()).unwrap();
+        assert_eq!(decoded, bytes);
+        assert_eq!(
+            encode_dat_v2(&decoded, keys.image_dat.as_ref().unwrap(), Some(layout)).unwrap(),
+            encoded
+        );
+        assert_eq!(
+            reader(location.clone(), keys.clone())
+                .cached_image(&source, quality)
+                .unwrap()
+                .media
+                .bytes,
+            bytes
+        );
+        assert!(
+            !cache_image_projection(&location, &keys, &source, "peer", quality, &bytes, &o)
+                .unwrap()
+                .changed
+        );
+    }
+}
+
+#[test]
 fn generic_image_variants_and_hardlink_bytes_roundtrip_without_fixture_metadata() {
     let d = fixture();
     let location = ProfileLocation::new(d.path().join("account")).unwrap();
