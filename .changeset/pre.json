@@ -8,6 +8,7 @@
     "@agent-wechat/shared": "0.3.1"
   },
   "changesets": [
-    "native-client-cutover"
+    "native-client-cutover",
+    "native-release-clean-checkout"
   ]
 }

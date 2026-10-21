@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.1
+
+### Patch Changes
+
+- [#217](https://github.com/thisnick/agent-wechat/pull/217) [`cc5a217`](https://github.com/thisnick/agent-wechat/commit/cc5a2175ad7fd5ae972f2126aaa1e2498575faf9) Thanks [@thisnick](https://github.com/thisnick)! - Keep generated release notes outside the build checkout so native release manifests correctly identify clean source. Reject dirty architecture fragments before publishing release assets, rather than waiting for the npm and image publication gates.
+
 ## 1.0.0-beta.0
 
 ### Major Changes
