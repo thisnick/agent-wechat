@@ -5,7 +5,7 @@ description: API access and native WeChat authorization have separate lifetimes.
 
 The API bearer token controls access to the daemon; WeChat active/saved credentials authorize native protocol exchanges. Rotating one does not refresh or revoke the other. Default daemon initialization creates owner-only token/key files under `dataDir`; a `tokenFile` setting can instead reference an explicitly provisioned private file. Keep tokens out of URLs and source control.
 
-The CLI accepts `--token-file` and endpoint-scoped configuration. OpenClaw requires an absolute regular mode-0600 token file with at least 32 bytes on one line. Remote API access requires verified HTTPS or an authenticated encrypted tunnel to loopback.
+The CLI accepts `--token-file` and endpoint-scoped configuration. OpenClaw uses `native.token` with an environment reference or a standard SecretRef; see [API token references](/integrations/openclaw/configuration/#api-token-references). The plugin does not accept `native.tokenFile` or create a token file. Managed daemon startup passes the resolved token through a private stdin pipe. Remote API access requires verified HTTPS or an authenticated encrypted tunnel to loopback.
 
 ```bash
 wx tokens create integration --accounts ACCOUNT_ID --scopes read
