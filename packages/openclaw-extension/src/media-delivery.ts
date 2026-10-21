@@ -119,14 +119,14 @@ export function renderAttachmentBody(
   }
   if (attachment.kind === "file") {
     const prefix = originalBody.trim() === name ? "" : originalBody;
-    return appendReference(prefix, `[File: ${name}]\n[Local file: ${attachment.path}]`);
+    return appendReference(prefix, `[File: ${name}]\n[Local file: <${attachment.path}>]`);
   }
   if (exposeNonVisualPath) {
     if (attachment.kind === "audio") {
-      return appendReference(originalBody || "<media:audio>", `[Voice message file: ${attachment.path}]`);
+      return appendReference(originalBody || "<media:audio>", `[Voice message file: <${attachment.path}>]`);
     }
     if (attachment.kind === "video") {
-      return appendReference(originalBody || "<media:video>", `[Video file: ${attachment.path}]`);
+      return appendReference(originalBody || "<media:video>", `[Video file: <${attachment.path}>]`);
     }
   }
   let body = originalBody || (attachment.kind === "image" ? "<media:image>" : originalBody);
@@ -182,7 +182,7 @@ export function applyCatchupAttachmentPolicy<T extends MessageWithAttachment>(me
     } else if (!selectImage && attachment.status === "ready" && attachment.path) {
       const label = attachment.kind === "image" ? "Image file" :
         attachment.kind === "audio" ? "Voice message file" : "Video file";
-      const reference = attachment.kind === "image" ? `[${label}: <${attachment.path}>]` : `[${label}: ${attachment.path}]`;
+      const reference = `[${label}: <${attachment.path}>]`;
       rawBody = message.rawBody.includes(reference)
         ? message.rawBody
         : appendReference(message.rawBody, reference);
