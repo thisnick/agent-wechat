@@ -977,7 +977,7 @@ mod encrypted_roundtrip {
             CREATE TABLE SessionUnreadListTable_1(username_id INTEGER,server_id INTEGER,create_time INTEGER,local_id INTEGER,CONSTRAINT _NameId_ServerId PRIMARY KEY(username_id,server_id));
             CREATE INDEX SessionUnreadListTable_1_NameId_CreateTime ON SessionUnreadListTable_1(username_id ASC,create_time ASC);
             CREATE INDEX unsupported_fixture_index ON SessionUnreadListTable_1(local_id);
-            INSERT INTO SessionTable(username,unread_count,draft,last_timestamp,last_clear_unread_timestamp)VALUES('peer',5,'preserved draft',50,0);").unwrap();
+            INSERT INTO SessionTable(username,unread_count,unread_first_msg_srv_id,draft,last_timestamp,last_clear_unread_timestamp)VALUES('peer',5,99,'preserved draft',50,0);").unwrap();
         let batch = wechat_protocol::wire::SyncBatch {
             code: 0,
             flags: 0,
