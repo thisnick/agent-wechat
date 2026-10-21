@@ -47,6 +47,7 @@ jobs:
       - run: pnpm --filter @agent-wechat/agent-wechat test
       - run: node scripts/native-gateway-smoke.mjs
       - run: node scripts/native-model-smoke.mjs
+      - run: node scripts/native-media-model-smoke.mjs
       - run: node --test scripts/pending-release-packages.test.mjs scripts/native-release-preflight.test.mjs
       - run: bash scripts/native-build-release.sh
       - run: node scripts/native-package-smoke.mjs artifacts/native

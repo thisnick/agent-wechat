@@ -639,20 +639,22 @@ impl Core {
                 Err(_) => {}
             }
         }
-        let saved_attempt = if let Some(state) = previous
-            .as_ref()
-            .filter(|s| request.strategy != LoginStrategy::Qr && !s.auto_auth_key.is_empty())
-        {
-            self.progress(&op, "resuming", json!({"method":"saved_device"}))?;
-            let state = state.clone();
-            let name = request.computer_name.clone();
-            match blocking(move || client()?.start_saved_device_login(&state, &name)).await {
-                Ok(attempt) => Some(attempt),
-                Err(error) if saved_trust_rejected(&error) => None,
-                Err(error) => return Err(error),
-            }
-        } else if request.strategy != LoginStrategy::Qr {
-            if let Some(saved) = self.official_saved_login(&account)? {
+        let saved_source = if request.strategy == LoginStrategy::Qr {
+            None
+        } else {
+            self.saved_device_source(&account, previous.as_ref())?
+        };
+        let saved_attempt =
+            if let Some(official_profile::SavedDeviceSource::State(state)) = &saved_source {
+                self.progress(&op, "resuming", json!({"method":"saved_device"}))?;
+                let state = state.clone();
+                let name = request.computer_name.clone();
+                match blocking(move || client()?.start_saved_device_login(&state, &name)).await {
+                    Ok(attempt) => Some(attempt),
+                    Err(error) if saved_trust_rejected(&error) => None,
+                    Err(error) => return Err(error),
+                }
+            } else if let Some(official_profile::SavedDeviceSource::Profile(saved)) = saved_source {
                 self.progress(&op, "resuming", json!({"method":"official_saved_device"}))?;
                 let mut device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
                 device.device_id = saved.identity.request_device_id()?.to_vec();
@@ -676,10 +678,7 @@ impl Core {
                 }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
         let mut attempt = if let Some(attempt) = saved_attempt {
             attempt
         } else {
@@ -718,12 +717,17 @@ impl Core {
                 }
             }
             let name = request.computer_name.clone();
-            let key_info = zeroize::Zeroizing::new(match &previous {
-                Some(state) => state.key_info.clone(),
-                None => self.official_login_key_info(&account)?,
+            let prefer_files = self.prefer_profile_login_files(&account, previous.is_some())?;
+            let key_info = zeroize::Zeroizing::new(if prefer_files {
+                self.official_login_key_info(&account)?
+            } else {
+                previous
+                    .as_ref()
+                    .map(|s| s.key_info.clone())
+                    .unwrap_or_default()
             });
             let mut options = self.official_login_options(&account)?;
-            if let Some(state) = &previous {
+            if let Some(state) = previous.as_ref().filter(|_| !prefer_files) {
                 options.long_host = state.long_host.clone();
                 options.short_host = state.short_host.clone();
             }

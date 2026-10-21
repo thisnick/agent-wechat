@@ -2,7 +2,10 @@
 
 This checklist tracks implementation and validation separately. A command or
 route appearing in help is not evidence of a successful native exchange. The
-runtime remains experimental until the required integration gates below pass.
+runtime remains experimental. The initial scope is taking over an existing
+stopped official profile, using its saved identity and continuing supported
+database/media writes in place. Fresh-profile creation, export and returning the
+store to the official app are outside this scope.
 No deployment or package publication is part of this implementation task.
 
 Legend: **Implemented** means executable code and focused tests exist;
@@ -16,19 +19,18 @@ from fixture tests. Capability responses must reflect these limits.
 | Versioned configuration, XDG paths, protected registry/sidecars | Implemented | Precedence and unsupported-version tests |
 | Separate server configuration and endpoint-scoped client defaults | Implemented | Actual CLI scoped endpoint/default smoke and ambiguity fixtures |
 | Canonical daemon account aliases | Implemented | Actual daemon creation, rename, default selection and ambiguous selection checks |
-| Simultaneous independent account actors | Implemented | Synthetic isolation; two independent live accounts remain a separate gate |
+| Simultaneous independent account actors | Implemented | Synthetic isolation passes. Only one isolated test account is available; live multi-account validation is explicitly unverified and deferred by the operator |
 | Exclusive process/account/profile ownership | Implemented | Canonical database-root overlap regression; unmanaged official client must still be stopped explicitly |
 | Foreground `serve`, background start/status/stop/logs | Implemented | Actual ELF background start/status/stop/restart with PID/store generation and occupied-owner checks |
-| Protected active/saved credentials and independent API token rotation | Implemented | Restart, permission, redaction and cryptographic integrity tests; regional routing is journaled with saved credentials, with interruption/replay, source-conflict and unknown-setting preservation coverage |
+| Protected active/saved credentials and independent API token rotation | Implemented | Restart, permission, redaction and cryptographic integrity tests; regional routing is journaled with saved credentials, with interruption/replay, source-conflict and unknown-setting preservation coverage. Full MMKV files grow by bounded pages without dropping unknown records; the live 4096→8192-byte credential recovery passed |
 | Active authorization validation, bounded renewal and saved-device recovery | Implemented | Verified native exchanges are separate from universal lifetime/expiry claims |
-| Single-switch official-file login and scoped HOME exports | Implemented | Account selection, full stored-device/prefix handling, restored key-info, distinct key/open-error admission, file-preservation and scoped-copy fixtures. Controlled original-profile QR approval with restored key-info unlocked all 20 existing encrypted databases; API/CLI history reads and a cold restart passed. All 1,438 original source files stayed unchanged. A fresh credential store then restored trust, key-info and saved regional routing from these files and logged in without a QR or additional phone approval; all 20 databases and history remained readable |
+| Single-switch in-place official-file login | Implemented | Account selection, full stored-device/prefix handling, restored key-info, distinct key/open-error admission, file-preservation and scoped-copy fixtures. Controlled original-profile QR approval with restored key-info unlocked all 20 existing encrypted databases; API/CLI history reads and a cold restart passed. All 1,438 original source files stayed unchanged. A fresh credential store then restored trust, key-info and saved regional routing from these files and logged in without a QR or additional phone approval; all 20 databases and history remained readable. A newer recorded official saved grant also beat a stale sidecar without QR; continued sync produced 43 File Transfer rows. All four media kinds downloaded with complete in-place writeback, cold hashes and Range206 readback |
 | Explicit QR login, white PNG, scan/approval, cancellation, bounded refresh | Implemented | Pixel-grid white renderer test; actual CLI generation/PNG/interrupt fixture; controlled native account validation remains distinct |
 | Admission-bound auth epochs and persistent logout inhibition | Implemented | Late authorization cannot cross a committed logout epoch |
 | One-attempt native logout and explicit local forgetting | Implemented | Controlled native logout returned success; the same old authorization passed a heartbeat before logout and was rejected with -13 afterward, without renewal. Idempotent replay did not resubmit. Saved-device trust revocation remains unverified |
 | Heartbeat/NewSync incoming detection | Implemented | Native polling is distinct from unresolved fast push association |
 | Durable original sync staging and official-file projection barrier | Implemented | Fault/retry fixtures; unsupported commands remain staged |
-| Fresh official-format profile initialization | Implemented | Native saved-device approval without QR supplied the accepted database password and created seven encrypted databases plus login storage. A separate fresh daemon restored active authorization, created seven databases with saved routing, synchronized history and downloaded all four media kinds. The exact official build accepted its saved login with the same database password; first-time initialization and rendering remain gates |
-| Text, metadata, media and local read-state official writeback | Partial | Supported encrypted-family fixtures, accepted outgoing history rows and image/voice/file/video cache/resource joins pass, including cold reads; FTS/index maintenance and stock-client rendering remain gates |
+| Text, metadata, media and local read-state official writeback | Implemented for supported schemas | Supported encrypted-family fixtures, accepted outgoing history rows and image/voice/file/video cache/resource joins pass, including cold reads. FTS/search-index maintenance, unknown packed resources and arbitrary official schemas are outside the supported writers; existing unknown files are retained |
 | Independent local image keys, DAT encoding and hardlink hashes | Implemented | Identity-derived image keys decrypt all 185 retained image files; native hash rule matches 84 hardlink records; fresh image cache projection also checked |
 | Cursor-bound online resource pagination | Implemented | Persisted signed views, independent key, expiry/mutation tests and typed tombstone contracts |
 | Durable event replay/SSE and independent consumer acknowledgements | Implemented | Cursor gap/account scope/restart tests, actual CLI emission checkpoint, real pinned Gateway SSE cancellation |
@@ -40,8 +42,8 @@ from fixture tests. Capability responses must reflect these limits.
 | Incoming image qualities, normal/original video, file, short voice | Implemented | Three distinct JPEG qualities passed native download/hash/HTTP range checks. Normal H.264 video (720×960, 882,298 bytes) and original HEVC (1440×1080, 10,034,538 bytes) downloaded and decoded. Broader media/playback coverage remains separate |
 | Eligible incoming original sticker bytes, animation/integrity bounds | Implemented | Restricted pinned source, size/integrity and complete-frame fixtures; no sticker-send substitution or pack support |
 | Durable outgoing text with idempotency and uncertain outcome | Implemented | Controlled File Transfer acceptance and lost-response/restart fixtures |
-| Outgoing image/file/video/independently encoded voice | Implemented | Fresh native File Transfer submissions accepted all four kinds and committed history rows; all four supported official caches/resource joins complete after local repair. CDN readback checked before final CGI; phone playback confirmation remains pending |
-| Voice splitting and per-note partial/uncertain receipts | Implemented | Independent codec,10-second chunks, per-note IDs/status and stop after uncertainty; live note playback remains required |
+| Outgoing image/file/video/independently encoded voice | Implemented | Fresh native File Transfer submissions accepted all four kinds and committed history rows; all four supported official caches/resource joins complete after local repair. CDN readback checked before final CGI; the account owner confirmed the latest file/image open and video/voice playback |
+| Voice splitting and per-note partial/uncertain receipts | Implemented | Independent codec,10-second chunks, per-note IDs/status and stop after uncertainty; single-note phone playback confirmed; multi-chunk playback remains unverified |
 | Bounded local media writeback repair | Implemented | Actual CLI repaired nine retained candidates with zero blocked; all four accepted media sends now report complete. Uses owned bytes/receipts without a transfer or resend |
 | Local source staging, upload bounds, media cancellation/retry | Implemented | Encrypted immutable sources, claim CAS, bounded retry/cancel/restart and atomic event rollback fixtures |
 | CLI submission receipt before first request, lookup by key | Implemented | Actual ELF fixture inspects durable receipt before HTTP submission and proves same-key lookup/conflict |
@@ -49,25 +51,31 @@ from fixture tests. Capability responses must reflect these limits.
 | Offline profile registration, inspection, catalog/history/media commands | Implemented | Direct library fixtures, source-view handles/redaction and CLI keyless inspection without an API token |
 | Offline key export from explicit authorized cache/password material | Implemented | No process acquisition, password discovery or implicit native login |
 | Source-preserving read snapshots and source-qualified IDs | Implemented | Main/WAL/SHM unchanged, source-generation cursors and namespace tests |
-| Copy-only stopped-profile attach/import/export | Implemented | Actual CLI fixtures preserve opaque bytes, require stopped-source assertion, exclude another native owner across roots, refuse all pending projection categories and report explicit incomplete/checkpoint receipts |
-| Official client forward/backward handoff | Partial | Offline structure tests do not replace exact-build controlled runtime checks |
 | Authoritative Rust contracts and generated TypeScript types | Implemented | Actual Rust media/source types, server response checks, stale-generation CI check, lossless IDs and tombstone fixtures |
 | Native SDK bearer transport, bounded JSON/SSE and lossless IDs | Implemented | Redirect, account binding, large IDs, expiry and certificate checks |
 | OpenClaw preinstalled executable preflight and managed/external modes | Implemented | Actual owned ELF/npm launcher smoke; no installer or Docker fallback |
 | OpenClaw durable custody, replay dedup and access/mention gates | Implemented | Recorded model harness; catch-up/import events do not create new turns |
-| Exact prepared-model read receipts | Partial | Actual pinned OpenClaw2026.10.2 Gateway/local-model text proof passes with explicit host conversation permission, exact run/input facts and model-call correlation; missing permission and never-read behavior checked. Media on that host remains unconfirmed; merged-input rejection has unit coverage |
+| Exact prepared-model read receipts | Implemented for pinned host boundary | Actual OpenClaw2026.10.2 Gateway/local-model checks pass for four text scenarios and five media scenarios, including direct/group turns, exact image bytes, bounded labeled previews, file/video/voice references, SDK transcription, missing permission, never-read policy, late/lost read recovery and duplicate prevention. Manifests bind message versions, policy, source/representation hashes and roles; unsupported/ambiguous inputs remain unread. Reference delivery does not prove semantic media analysis |
 | OpenClaw native attachment paths, voice and outbound media | Implemented | Integrity/pending/expired fixtures and correlated model harness; gates precede retrieval/transcription, ordinary audio remains a file |
 | Optional authenticated Gateway HTTP facade | Implemented | Actual pinned OpenClaw2026.10.2 Gateway plugin load/auth, separate tokens, account restriction, Range206 and SSE/cancellation; default disabled |
 | Verified exact-version npm/native artifacts and offline provisioning | Implemented | Linux x64/glibc2.36 package/image/owned-host smoke |
 | Fail-closed release gates and source/tag/version integrity | Implemented | Mock registry/tag tests; existing published versions cannot be repurposed |
 | Standalone Docker, systemd and Compose assets | Implemented | Private persistent data/scratch, no official runtime; examples never deployed |
 
-The metadata and projection surfaces still require their
-controlled account/stock-client acceptance gates before their rows can move from
-Partial. A public fixture result is never substituted for recipient playback.
-Unknown packed resource subtypes, arbitrary avatar replacement and FTS/index
-maintenance remain compatibility gaps. Copying a profile does not repair those
-gaps; incomplete media writeback requires an explicit incomplete export.
+A public fixture result is never substituted for recipient playback. Unknown
+sync commands stay staged and block publication of a complete official cursor;
+native receipt of a page does not mean every official file has caught up.
+Unknown packed resource subtypes, arbitrary avatar replacement and FTS/search
+index maintenance remain compatibility gaps. Copying a profile does not repair
+those gaps.
+
+## Experimental extras outside the initial scope
+
+| Extra | Current evidence / limits |
+| --- | --- |
+| Fresh official-format profile initialization | Native login created seven encrypted databases, MMKV identity and saved login; native sync and all four media downloads passed. The exact official build accepted saved login with matching identity/password, but complete first-time initialization and rendering were not established |
+| Copy-only stopped-profile import/export | CLI fixtures preserve opaque bytes, require a stopped source, exclude cooperating owners, refuse pending projections and report explicit incomplete/checkpoint receipts. This is not a schema converter or a guarantee the official app can continue |
+| Returning a native-written profile to the official app | Controlled official saved-login and subsequent native encrypted-history readback passed. Official UI rendering and FTS/search compatibility remain unverified; not a v1 acceptance requirement |
 
 ## Explicit follow-ups outside the initial capability claim
 

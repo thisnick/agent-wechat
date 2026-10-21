@@ -315,8 +315,9 @@ impl StagedMmkv {
         &self.metadata
     }
 }
-/// Append only within current capacity, preserving IV/sequence/flags and the
-/// complete old ciphertext prefix. Reapplying identical values is byte-idempotent.
+/// Append while preserving IV/sequence/flags and the complete old ciphertext
+/// prefix. A full data file grows to the next 4096-byte page, at most 4 MiB;
+/// records are never compacted or discarded. Identical values are byte-idempotent.
 /// Values are already MMKV-encoded; None is a tombstone. Unknown keys survive.
 pub fn stage_mmkv_values(
     data: &[u8],
@@ -347,11 +348,20 @@ pub fn stage_mmkv_values(
         }
         append_span(name.as_bytes(), &mut plain);
         append_span(value.as_deref().unwrap_or_default(), &mut plain);
+        if plain.len() + 4 > data.len().max(4 * 1024 * 1024) {
+            return Err(ProfileError::ResourceLimit);
+        }
         changed.push(name.clone());
     }
-    if plain.len() > data.len() - 4 {
-        return Err(ProfileError::ResourceLimit);
-    }
+    let capacity = if plain.len() > data.len() - 4 {
+        let rounded = (plain.len() + 4).div_ceil(4096) * 4096;
+        if rounded > 4 * 1024 * 1024 {
+            return Err(ProfileError::ResourceLimit);
+        }
+        rounded
+    } else {
+        data.len()
+    };
     let cipher = Zeroizing::new(
         openssl::symm::encrypt(
             openssl::symm::Cipher::aes_128_cfb128(),
@@ -366,6 +376,7 @@ pub fn stage_mmkv_values(
         return Err(ProfileError::InvalidMetadata);
     }
     let mut output = Zeroizing::new(data.to_vec());
+    output.resize(capacity, 0);
     output[4..4 + cipher.len()].copy_from_slice(&cipher);
     let mut meta = metadata.to_vec();
     meta[..4].copy_from_slice(&crc32fast::hash(&cipher).to_le_bytes());

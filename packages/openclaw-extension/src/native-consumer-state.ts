@@ -2,9 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { NativeMessage } from "@agent-wechat/shared";
+export type NativeSuppliedAsset = Readonly<{
+  id: string; sha256: string; byteLength: number; mime: string; path: string;
+  role: "model_image" | "file_reference"; kind: "image" | "audio" | "video" | "file";
+  runtimeMedia: boolean; contextRole: "trigger";
+  sourceSha256?: string; sourceByteLength?: number; sourceMime?: string; sourcePath?: string;
+}>;
 export type NativeDispatchManifest = Readonly<{
-  schemaVersion: 1; runId: string; accountId: string; messageIds: readonly string[]; messageSid: string;
-  threadId: string; sessionKey: string; agentId: string; channelAccountId: string; inputBodySha256: string;
+  schemaVersion: 2; runId: string; accountId: string; messageIds: readonly string[]; messageSid: string;
+  threadId: string; senderId: string; sessionKey: string; agentId: string; channelAccountId: string; inputBodySha256: string;
+  newInputs: readonly Readonly<{ id: string; version: string; contentSha256: string; role: "trigger" }>[];
+  assets: readonly NativeSuppliedAsset[]; policySha256: string; manifestSha256: string; hostSourceTurnId: string;
 }>;
 export type NativeCustodyItem = {
   message: NativeMessage;

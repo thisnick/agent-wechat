@@ -41,7 +41,17 @@ wx serve --server-config /absolute/server/config.toml
 
 The default server configuration is `$XDG_CONFIG_HOME/agent-wechat/server/config.toml`, or `~/.config/agent-wechat/server/config.toml`. The durable root defaults to `$XDG_DATA_HOME/agent-wechat`, or `~/.local/share/agent-wechat`. `wx serve --data-dir PATH` and `AGENT_WECHAT_DATA_DIR` override it. Server config can select `listen`, `dataDir` and `tokenFile`; relative references resolve against the config file. Paths are not credentials.
 
-Official-format profiles can be registered directly or copied into managed storage:
+The initial workflow takes over an existing official profile in place. Close the official app, start `wx serve`, then use a second terminal:
+
+```bash
+wx auth login --official
+# Or choose a specific path on the daemon host:
+wx auth login --official=/absolute/official-profile
+```
+
+The daemon binds the stored identity, attempts saved-device login and derives verified database keys after authentication. The official app stays closed while this daemon owns the files.
+
+Lower-level registration and experimental profile copies are also available:
 
 ```bash
 # Only use an explicitly stopped/quiescent profile; never share a writer.
@@ -50,7 +60,7 @@ wx store import --account copied --source /absolute/stopped-profile --source-sto
 wx store export --account copied --destination /absolute/new-export --source-stopped
 ```
 
-Direct mode keeps official profile bytes at the selected path and daemon-only state under `dataDir`. Import/export copy the same format; they do not convert schema or refresh login trust. Use `--help` for the implemented command surface. Never copy or attach a running production profile implicitly.
+Direct mode keeps official profile bytes at the selected path and daemon-only state under `dataDir`. Fresh creation, export and returning files to the official app are outside the initial supported takeover scope. Import/export copy the same format; they do not convert schema or refresh login trust. Use `--help` for the implemented command surface. Never copy or attach a running production profile implicitly.
 
 ## Build and validate without deployment
 

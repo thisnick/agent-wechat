@@ -52,6 +52,36 @@ fn reader(d: &Path) -> ProfileReader {
     .unwrap()
 }
 #[test]
+fn empty_next_ordinal_does_not_hide_history_but_missing_message_namespace_is_explicit() {
+    let d = fixture();
+    let path = d.path().join("account/db_storage/message/message_2.db");
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("CREATE TABLE db_info(Key TEXT PRIMARY KEY,ValueInt64 INTEGER,ValueDouble REAL,ValueStdStr TEXT,ValueBlob BLOB)").unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let p = r
+        .messages(&MessageQuery {
+            chat: Some("peer".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(p.items.len(), 6);
+    assert!(r
+        .schemas()
+        .iter()
+        .any(|s| s.database == "message/message_2.db"));
+    drop(r);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("CREATE TABLE Msg_0123456789abcdef0123456789abcdef(local_id INTEGER)")
+        .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    assert!(matches!(
+        r.messages(&MessageQuery::default()),
+        Err(ProfileError::UnsupportedSchema(_))
+    ));
+}
+#[test]
 fn discovers_all_shards_and_uses_each_name_map() {
     let d = fixture();
     let r = reader(d.path());

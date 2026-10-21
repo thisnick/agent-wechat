@@ -65,9 +65,20 @@ fn wrong_version_corruption_expiration_bounds_and_duplicate_updates_fail() {
         seed.data(),
         seed.metadata(),
         &k,
-        &[("a".into(), Some(vec![1; 4096]))]
+        &[("a".into(), Some(vec![1; 1024 * 1024 + 1]))]
     )
     .is_err());
+    assert!(matches!(
+        stage_mmkv_values(
+            seed.data(),
+            seed.metadata(),
+            &k,
+            &(0..4)
+                .map(|i| (format!("large-{i}"), Some(vec![1; 1024 * 1024])))
+                .collect::<Vec<_>>()
+        ),
+        Err(ProfileError::ResourceLimit)
+    ));
     assert!(stage_mmkv_values(
         seed.data(),
         seed.metadata(),
@@ -76,6 +87,83 @@ fn wrong_version_corruption_expiration_bounds_and_duplicate_updates_fail() {
     )
     .is_err());
     assert!(stage_mmkv_sync_key(seed.data(), seed.metadata(), &k, b"").is_err());
+}
+#[test]
+fn full_store_grows_without_losing_unknown_records_and_recovers_data_first() {
+    let key = [9; 16];
+    let seed = create_mmkv_v4(&key, [7; 16], 4096).unwrap();
+    let old = stage_mmkv_values(
+        seed.data(),
+        seed.metadata(),
+        &key,
+        &[("unknown-native-record".into(), Some(vec![6; 3800]))],
+    )
+    .unwrap();
+    let value = vec![8; 600];
+    let next = stage_mmkv_values(
+        old.data(),
+        old.metadata(),
+        &key,
+        &[("saved-login-refresh".into(), Some(value.clone()))],
+    )
+    .unwrap();
+    assert_eq!(next.data().len(), 8192);
+    let old_length = u32::from_le_bytes(old.metadata()[28..32].try_into().unwrap()) as usize;
+    assert_eq!(
+        &next.data()[..4 + old_length],
+        &old.data()[..4 + old_length]
+    );
+    assert_eq!(&next.metadata()[4..28], &old.metadata()[4..28]);
+    assert_eq!(&next.metadata()[32..], &old.metadata()[32..]);
+    let old_view = decode_mmkv_records(next.data(), old.metadata(), &key).unwrap();
+    assert_eq!(
+        old_view.raw_value("unknown-native-record"),
+        Some(&[6; 3800][..])
+    );
+    assert!(!old_view.contains("saved-login-refresh"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("global_config");
+    std::fs::write(&path, old.data()).unwrap();
+    std::fs::write(path.with_extension("crc"), old.metadata()).unwrap();
+    let options = WriteOptions {
+        exclusive_ownership_confirmed: true,
+        allow_plaintext: false,
+        durable_intent_id: "journaled-growth".into(),
+    };
+    let mut checks = 0;
+    assert!(matches!(
+        publish_mmkv_append_guarded(&path, &next, &options, || {
+            checks += 1;
+            checks == 1
+        }),
+        Err(ProfileError::SourceChanged)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap().len(), 8192);
+    assert_eq!(
+        std::fs::read(path.with_extension("crc")).unwrap(),
+        old.metadata()
+    );
+    let replay = publish_mmkv_append(&path, &next, &options).unwrap();
+    assert!(!replay.data_replaced && replay.metadata_replaced);
+    let current = decode_mmkv_records(next.data(), next.metadata(), &key).unwrap();
+    assert_eq!(
+        current.raw_value("unknown-native-record"),
+        Some(&[6; 3800][..])
+    );
+    assert_eq!(
+        current.raw_value("saved-login-refresh"),
+        Some(value.as_slice())
+    );
+    let repeated = stage_mmkv_values(
+        next.data(),
+        next.metadata(),
+        &key,
+        &[("saved-login-refresh".into(), Some(value))],
+    )
+    .unwrap();
+    assert!(repeated.changed_keys.is_empty());
+    assert_eq!(repeated.data(), next.data());
+    assert_eq!(repeated.metadata(), next.metadata());
 }
 #[test]
 fn publish_recovers_data_first_interruption_and_rejects_unexpected_generation() {

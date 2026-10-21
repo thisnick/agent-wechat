@@ -5,7 +5,7 @@ import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-
 import { normalizeWeChatCommandBody, resolveWeChatIngress, resolveWeChatPolicyContext } from "./access-control.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { NativeConsumerState } from "./native-consumer-state.ts";
-import { nativeDispatchManifest, trackNativePreparedText } from "./native-prepared-boundary.ts";
+import { nativeDispatchManifest, trackNativePreparedInput } from "./native-prepared-boundary.ts";
 import { submitNativeText } from "./native-send.ts";
 import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
 import { getWeChatRuntime } from "./runtime.ts";
@@ -67,13 +67,13 @@ export async function dispatchNativeMessage(params: {
     state.update(message.id, { state: "ignored" }); return "ignored";
   }
   let preparedMedia;
-  try { preparedMedia = await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message, core }); }
+  try { preparedMedia = await (params.prepareAttachment ?? prepareNativeAttachment)({ client, account, message, core, cfg }); }
   catch { state.update(message.id, { state: "needs_review" }); return "needs_review"; }
   if (preparedMedia.pending) return "pending";
   let inputBody = preparedMedia.body;
   if (preparedMedia.attachment?.kind === "audio" && preparedMedia.attachment.status === "ready" && preparedMedia.attachment.path) {
-    try { const transcript = await core.mediaUnderstanding.transcribeAudioFile({ filePath: preparedMedia.attachment.path, cfg, mime: preparedMedia.attachment.mime }); if (transcript.text?.trim()) inputBody += `\n[Voice transcript: ${transcript.text.trim().slice(0, 10000)}]`; }
-    catch { /* The verified audio path and explicit status remain available. */ }
+    try { const transcript = await core.mediaUnderstanding.transcribeAudioFile({ filePath: preparedMedia.attachment.path, cfg, mime: preparedMedia.attachment.mime }); if (transcript.text?.trim()) inputBody += `\n[Voice transcript: ${transcript.text.trim().slice(0, 10000)}]`; else inputBody += "\n[Voice transcription unavailable]"; }
+    catch { inputBody += "\n[Voice transcription unavailable]"; }
   }
   const route = core.channel.routing.resolveAgentRoute({ cfg, channel: "agent-wechat", accountId: account.accountId,
     peer: { kind: isGroup ? "group" : "direct", id: isGroup ? message.threadId : message.senderId } });
@@ -95,11 +95,11 @@ export async function dispatchNativeMessage(params: {
   // Persist before making a model-side effect. A crash in this window is uncertain,
   // and reopening holds this item for review rather than duplicating a model turn.
   const dispatchManifest = nativeDispatchManifest({ message, inputBody, sessionKey: route.sessionKey,
-    agentId: route.agentId, channelAccountId: account.accountId });
+    agentId: route.agentId, channelAccountId: account.accountId, policy, assets: preparedMedia.suppliedAssets ?? [] });
   state.update(message.id, { state: "dispatching", dispatchManifest });
-  const callback = message.type === 1 || preparedMedia.attachment?.status === "ready"
+  const callback = message.type === 1 || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length)
     ? state.preparedCallback([message.id], account.native?.readPolicy ?? "on_model_dispatch") : undefined;
-  if (message.type === 1 && callback) trackNativePreparedText(dispatchManifest, callback);
+  if (callback) trackNativePreparedInput(dispatchManifest, callback);
   let failed = false; let delivery = 0;
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg,
@@ -114,7 +114,7 @@ export async function dispatchNativeMessage(params: {
       // This hook is intentionally separate from onModelSelected and old
       // onAgentRunStart (which can also report direct-tool execution). Released
       // hosts without it need the separately verified text input/model-call
-      // bridge; unsupported or ambiguous handoffs leave read state unchanged.
+      // and media-snapshot bridge; unsupported or ambiguous handoffs leave reads unchanged.
       replyOptions: { runId: dispatchManifest.runId, onModelSelected, onPreparedAgentRunStart: callback },
     });
     const prepared = Boolean(state.get(message.id)?.runId);
@@ -124,6 +124,17 @@ export async function dispatchNativeMessage(params: {
     state.update(message.id, { state: "needs_review" }); return "needs_review";
   }
 }
+/** Read recovery is independent of incoming SSE traffic and model execution. */
+export function startNativeReadPump(task: () => Promise<void>, failed: () => void, intervalMs = 5000): () => void {
+  let active = false, stopped = false;
+  const timer = setInterval(() => {
+    if (active || stopped) return;
+    active = true;
+    void task().catch(() => { if (!stopped) failed(); }).finally(() => { active = false; });
+  }, intervalMs);
+  timer.unref();
+  return () => { stopped = true; clearInterval(timer); };
+}
 export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<void> {
   const native = opts.account.native; if (!native) throw new Error("Native configuration is missing");
   const host = await ensureNativeHost(native);
@@ -132,6 +143,8 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
   const state = new NativeConsumerState(native.consumerStateDir, status.serverId, native.accountId);
   const core = getWeChatRuntime();
   let backoff = 250;
+  let readTask: Promise<void> | undefined;
+  const flushRead = () => readTask ??= projectNativeRead(host.client, native.accountId, state).finally(() => { readTask = undefined; });
   const process = async () => {
     const cfg = core.config.current();
     const account = resolveWeChatAccount(cfg as Record<string, unknown>, opts.account.accountId) ?? opts.account;
@@ -139,7 +152,7 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
     for (const item of state.items().filter(value => value.state === "received")) {
       await dispatchNativeMessage({ client: host.client, state, account, message: item.message, cfg, core });
     }
-    try { await projectNativeRead(host.client, native.accountId, state); }
+    try { await flushRead(); }
     catch { opts.log?.error?.("Native read projection is pending; exact input IDs retained for retry"); }
     const needsReview = state.items().filter(value => value.state === "needs_review").length;
     const handoffUnconfirmed = native.readPolicy !== "never" && state.items().some(value => value.handoffUnconfirmed);
@@ -148,7 +161,14 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
       linked: accountStatus.authenticated === true && accountStatus.connection === "online", needsReview, handoffUnconfirmed });
   };
   await process();
-  while (!opts.abortSignal.aborted) {
+  // Media confirmation can arrive after the dispatcher settles. Retry only
+  // durable exact-ID reads while an otherwise quiet SSE stream remains open.
+  const stopReadPump = startNativeReadPump(async () => {
+    await flushRead();
+    if (!opts.abortSignal.aborted) opts.setStatus({ accountId: opts.account.accountId,
+      handoffUnconfirmed: native.readPolicy !== "never" && state.items().some(value => value.handoffUnconfirmed) });
+  }, () => opts.log?.error?.("Native read projection remains pending; exact input IDs retained"));
+  try { while (!opts.abortSignal.aborted) {
     try {
       // A prior ACK failure must not leave durable received items idle while an
       // otherwise quiet SSE connection waits for another message.
@@ -181,5 +201,6 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
       backoff = Math.min(backoff * 2, 30000);
     }
   }
+  } finally { stopReadPump(); }
   opts.setStatus({ accountId: opts.account.accountId, running: false, connected: false });
 }

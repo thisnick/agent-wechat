@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeApiError, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
 import { NativeConsumerState } from "./native-consumer-state.ts";
-import { dispatchNativeMessage, nativeWasMentioned, projectNativeRead } from "./native-monitor.ts";
+import { dispatchNativeMessage, nativeWasMentioned, projectNativeRead, startNativeReadPump } from "./native-monitor.ts";
 import { resolveWeChatAccount } from "./types.ts";
 function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?: string } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-model-harness-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -96,10 +96,24 @@ test("pending native media keeps dispatch custody without model or read receipt"
 });
 test("verified native media path is included in the correlated prepared model input",async t=>{
   const value=fixture(t);value.message.type=3;value.message.body='<private transport XML>';
-  assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'<media:image>',pending:false,mediaPath:'/managed/fixture.png',mediaMime:'image/png',attachment:{kind:'image',status:'ready',filename:'fixture.png',path:'/managed/fixture.png',mime:'image/png'}})}),'completed');
+  assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'<media:image>',pending:false,mediaPath:'/managed/fixture.png',mediaMime:'image/png',attachment:{kind:'image',status:'ready',filename:'fixture.png',path:'/managed/fixture.png',mime:'image/png'},suppliedAssets:[{id:"asset",sha256:"0".repeat(64),byteLength:10,mime:"image/png",path:"/managed/fixture.png",role:"model_image",kind:"image",runtimeMedia:true,contextRole:"trigger"}]} )}),'completed');
   assert.equal(value.runs[0].ctx.MediaPath,'/managed/fixture.png');assert.equal(value.runs[0].ctx.BodyForAgent,'<media:image>');assert.equal(value.state.get('m1')?.readPending,true);assert.equal(value.state.get('m1')?.runId,'run_1');
 });
 test("media preparation failure cannot record a prepared input or mark read",async t=>{
   const value=fixture(t);value.message.type=3;
   assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>{throw Error('integrity failure');}}),'needs_review');assert.equal(value.runs.length,0);assert.equal(value.state.get('m1')?.readPending,undefined);
+});
+
+
+test("late media receipt retries its exact reads during quiet SSE without another model turn", async t => {
+  const value = fixture(t); value.state.update("m1", { state: "dispatching" });
+  let requests = 0, failures = 0;
+  value.client.threads = async () => ({ items: [{ id: "u", readStateVersion: "1" } as any], nextCursor: null, sourceGeneration: "g", coverage: {} });
+  value.client.markRead = async (_account, _thread, ids) => { assert.deepEqual(ids, ["m1"]); if (++requests === 1) throw Error("lost response"); return {}; };
+  const stop = startNativeReadPump(() => projectNativeRead(value.client, "a", value.state), () => { failures++; }, 5); t.after(stop);
+  await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(requests, 0);
+  value.state.preparedCallback(["m1"], "on_model_dispatch")("late-media-run");
+  for (let attempt = 0; attempt < 50 && value.state.get("m1")?.readPending; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(requests, 2); assert.equal(failures, 1); assert.equal(value.state.get("m1")?.readPending, false); assert.equal(value.runs.length, 0);
+  stop(); const before = requests; await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(requests, before);
 });

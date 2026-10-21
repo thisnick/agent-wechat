@@ -206,6 +206,26 @@ pub(crate) fn decode(r: &RawFields, column: &str, flag: &str, max: usize) -> Res
     }
 }
 fn name_map(c: &Connection) -> Result<BTreeMap<i64, String>> {
+    let present: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='Name2Id')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        // The stock client can create an empty next-ordinal database before
+        // initializing its message tables. It has no sender namespace yet.
+        let messages: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name GLOB 'Msg_*')",
+            [],
+            |r| r.get(0),
+        )?;
+        if messages {
+            return Err(ProfileError::UnsupportedSchema(
+                "message sender namespace".into(),
+            ));
+        }
+        return Ok(BTreeMap::new());
+    }
     let mut s = c.prepare("SELECT rowid,user_name FROM Name2Id")?;
     let map = s
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?

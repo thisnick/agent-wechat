@@ -197,8 +197,11 @@ private input data and keys are never shipped with the crate.
 
 `read_mmkv_identity` decodes only the inspected v4 framing with a caller-supplied 16-byte format key. It bounds sizes/records, verifies ciphertext CRC, applies overwrite/tombstone semantics and reads the exact username/UIN/device fields. Unknown versions and nonzero expiration/flags metadata are rejected. CRC is not authentication; the daemon compares stored identity against its independently authenticated account before enabling writers and rechecks it before each write. The global format key must be explicitly supplied; it is not discovered here.
 Account `login_configv2` uses the separately derived account key. MMKV append
-publication preserves unrelated records, verifies CRC/metadata generations and
-supports replay after data-first interruption. New-pair publication never
+publication preserves unrelated records and the old ciphertext prefix, verifies
+CRC/metadata generations and supports replay after data-first interruption. A
+full data file grows to the next 4096-byte page, bounded at 4 MiB; unknown records
+are never compacted or discarded. Exhausting that bound returns a resource error
+and leaves the accepted generation pending for recovery. New-pair publication never
 overwrites existing/partial foreign pairs. CRC is corruption detection, not
 cryptographic authentication.
 

@@ -195,6 +195,27 @@ impl Core {
             bail!("account_device_mismatch");
         }
         if !state.database_password.is_empty() {
+            // A stock-client handoff may add empty subsystem/ordinal databases.
+            // Extend only an already accepted matching password generation; an
+            // imported, unvalidated credential does not authorize cache repair.
+            if let Some(cipher) = self.store.runtime(account, "account-state")? {
+                let accepted = format!("{:x}", Sha256::digest(&cipher));
+                if self
+                    .store
+                    .runtime(account, "saved-login-accepted-state-generation")?
+                    .as_deref()
+                    == Some(accepted.as_bytes())
+                {
+                    let known = self.state_unfenced(account)?;
+                    if known.uin == state.uin
+                        && known.own_username == state.own_username
+                        && known.device.device_id == state.device.device_id
+                        && known.database_password == state.database_password
+                    {
+                        self.prepare_official_profile_keys(account, state)?;
+                    }
+                }
+            }
             let (location, keys) = self.profile_location_keys(account)?;
             let mut stamp = Sha256::new();
             stamp.update(&state.database_password);
@@ -252,7 +273,12 @@ impl Core {
     }
 }
 
-fn database_files(root: &Path, path: &Path, output: &mut Vec<String>, depth: usize) -> Result<()> {
+pub(super) fn database_files(
+    root: &Path,
+    path: &Path,
+    output: &mut Vec<String>,
+    depth: usize,
+) -> Result<()> {
     if depth > 16 || output.len() > 4096 {
         bail!("invalid database inventory");
     }

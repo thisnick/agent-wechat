@@ -13,8 +13,9 @@ Server settings and client selections are independent:
   `~/.config/agent-wechat/server/config.toml`.
 - Client: `$XDG_CONFIG_HOME/agent-wechat/client.toml`, falling back to
   `~/.config/agent-wechat/client.toml`. `--config PATH` selects an explicit file.
-- Official profiles and encrypted sidecars: server `dataDir`, defaulting to
-  `$XDG_DATA_HOME/agent-wechat` or `~/.local/share/agent-wechat`.
+- Registry and encrypted sidecars: server `dataDir`, defaulting to
+  `$XDG_DATA_HOME/agent-wechat` or `~/.local/share/agent-wechat`. An official
+  operating profile stays at the path selected with `auth login --official`.
 
 ```bash
 wx config show
@@ -38,10 +39,9 @@ wx config server add local --url http://127.0.0.1:6174 \
   --token-file /private/api-token
 wx config server use local
 wx config server list
-wx accounts create --alias personal
 wx accounts list
-wx accounts default personal
-wx accounts alias personal home
+wx accounts default ACCOUNT_ID
+wx accounts alias ACCOUNT_ID home
 wx --account home account status
 ```
 
@@ -56,7 +56,8 @@ exists. Aliases resolve to canonical daemon account IDs.
 
 ## Login and logout
 
-For existing official files, close the official app and use one switch:
+V1 takes over existing official files and continues supported writes in place.
+Close the official app and use one switch:
 
 ```bash
 wx auth login --official
@@ -84,6 +85,11 @@ and native sidecars are excluded. The official app must remain closed while the
 daemon owns these files. Open-file detection and native ownership leases help
 catch conflicts; they cannot prevent the official app being reopened. Login
 without this flag continues using the selected managed/attached account.
+
+After an exclusive handoff, refreshed official saved-login files take precedence
+over an older sidecar grant. An unpublished accepted native generation remains
+authoritative until its projection completes. No credential source can bypass
+account/device/database validation or the explicit logout fence.
 
 ```bash
 wx --account home auth login
@@ -272,8 +278,9 @@ the source tree, and no output is overwritten.
 For manual low-level attachment of an existing populated daemon profile, bind
 its independent stored identity before login using offline `store bind-identity --mmkv-store PATH
 --format-key-file PATH --official-client-stopped`. This is distinct from consent
-to enable writers. Copy-only `store attach|import|export` and fresh-profile
-configuration are covered in [README](README.md).
+to enable writers. Copy-only `store attach|import|export` and experimental fresh-profile
+configuration are covered in [README](README.md). Fresh creation, export and
+returning files to the official app are outside the v1 acceptance scope.
 
 `store export` requires a stopped/consistent source and refuses pending sync,
 cursor, saved-login, read, metadata and accepted-send projections, including cached media

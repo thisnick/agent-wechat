@@ -34,3 +34,30 @@ test("native outbound ordinary audio stays file and explicit voice stays voice",
   const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return{id:"job",state:"accepted"};}}as unknown as NativeWeChatClient;
   await sendNativeAttachment(client,account,"filehelper",path,false,"stable-key");await sendNativeAttachment(client,account,"filehelper",path,true,"stable-key");assert.deepEqual(kinds,["file","voice"]);assert.equal(submissions,2);
 });
+
+test("large model image has a separately bound preview while original bytes remain intact", async t => {
+  const { readFile } = await import("node:fs/promises");
+  const large = await readFile(new URL("../test/fixtures/native-model-large.png", import.meta.url));
+  const originalHash = createHash("sha256").update(large).digest("hex");
+  const directory = await mkdtemp(join(tmpdir(), "native-model-preview-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const cached = asset({ filename: "large.png", contentType: "image/png", byteLength: large.length, sha256: originalHash });
+  const client = { mediaAssets: async () => ({ items: [cached] }), mediaContent: async () => ({ bytes: large, contentType: "image/png" }) } as unknown as NativeWeChatClient;
+  const saved: Buffer[] = [];
+  const result = await prepareNativeAttachment({ client, account, message, cfg: {}, core: { channel: { media: { saveMediaBuffer: async (buffer: Buffer, _mime: string, _subdir: string, _max: number, filename: string) => {
+    const path = join(directory, filename); saved.push(buffer); await writeFile(path, buffer); return { path };
+  } } } } });
+  assert.equal(saved.length, 2); assert.deepEqual(saved[0], large); assert.equal(result.attachment?.quality, "full");
+  const supplied = result.suppliedAssets![0]; assert.equal(supplied.sourceSha256, originalHash); assert.notEqual(supplied.sha256, originalHash);
+  assert.equal(supplied.mime, "image/jpeg"); assert.equal(supplied.role, "model_image"); assert.notEqual(supplied.path, supplied.sourcePath);
+  assert.equal(createHash("sha256").update(await readFile(supplied.path)).digest("hex"), supplied.sha256);
+  assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /prepared still preview/); assert.ok(!result.body.includes(supplied.sourcePath!));
+});
+
+
+test("foreign account or message asset metadata never reaches content retrieval", async () => {
+  for (const metadata of [asset({ accountId: "other" }), asset({ messageId: "other" })]) {
+    let reads = 0;
+    const client = { mediaAssets: async () => ({ items: [metadata] }), mediaContent: async () => { reads++; throw Error("must not read"); } } as unknown as NativeWeChatClient;
+    await assert.rejects(prepareNativeAttachment({ client, account, message, core: {} }), /identity/); assert.equal(reads, 0);
+  }
+});

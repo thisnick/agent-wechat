@@ -27,17 +27,18 @@ wx serve
 In another terminal:
 
 ```bash
-wx accounts create test
-wx --account test auth login --qr-output /absolute/new-login.png
-wx --account test threads
-wx --account test messages list filehelper
+# Close the official Linux app before taking over its files.
+wx auth login --official
+wx accounts list
+wx threads
+wx messages list filehelper
 ```
 
-To continue an existing official Linux profile, close the official app and run `wx auth login --official`. It selects the files on the daemon host and prepares identity/key setup automatically. Use `--official=/absolute/path/to/profile` to select a specific profile. The files are used in place; no import is required.
+`--official` selects the existing files on the daemon host and prepares identity/key setup automatically. Use `--official=/absolute/path/to/profile` to select a specific profile. Saved-device login is attempted when usable; a white-background QR is available when approval is needed. The files are used in place; no import is required. With multiple accounts, select one explicitly with `--account`.
 
-An approved native login now creates a fresh official-format profile with seven encrypted databases and saved-login storage; an existing official profile is optional. Native history, text/media sends, contact/group lookup, rosters, avatars and downloads use that profile. Unsupported sync controls remain staged. Supported image/voice/file/video caches and resource joins pass local repair checks; FTS/index maintenance and stock-client takeover remain under validation. See the [capability checklist](packages/native-client-rust/FEATURES.md) for the tested scope.
+The initial scope is taking over an existing official profile and continuing supported database and media writes in place. Native history, text/media sends, contact/group lookup, rosters, avatars and downloads use that profile. Unsupported sync controls remain staged. Fresh-profile creation, copy export and returning a profile to the official app are experimental extras outside this scope. FTS/search-index maintenance is not supported. See the [capability checklist](packages/native-client-rust/FEATURES.md) for the tested scope.
 
-Server configuration defaults to `~/.config/agent-wechat/server/config.toml`; data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. Existing stopped profiles can be attached directly or copied through import/export. Daemon state stays in sidecars.
+Server configuration defaults to `~/.config/agent-wechat/server/config.toml`; daemon data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. The operating official profile stays at its selected path; daemon state stays in sidecars.
 
 See the [native guide](packages/native-client-rust/README.md) for configuration, profile ownership, recovery, API commands and current limits. [Deployment templates](deploy/native/README.md) include a user service and an official-binary-free image. Building these assets does not deploy them.
 

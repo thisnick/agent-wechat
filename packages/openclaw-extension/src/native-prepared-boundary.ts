@@ -1,38 +1,76 @@
 import { createHash, randomUUID } from "node:crypto";
+import { basename, isAbsolute } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import type { NativeMessage } from "@agent-wechat/shared";
-import type { NativeDispatchManifest } from "./native-consumer-state.ts";
+import type { NativeDispatchManifest, NativeSuppliedAsset } from "./native-consumer-state.ts";
 
 type Proof = { sessionId: string; provider: string; model: string };
-type Pending = { manifest: NativeDispatchManifest; record: (runId: string) => unknown; expires: number; proof?: Proof };
+type Pending = { manifest: NativeDispatchManifest; record: (runId: string) => unknown; expires: number; proof?: Proof; started?: boolean };
 const pending = new Map<string, Pending>();
 let enabled = false;
-const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function prune(): void { for (const [id, item] of pending) if (item.expires < Date.now()) pending.delete(id); }
 
-/** The caller supplies this immutable manifest before entering the SDK. */
+/** Persist this immutable selection before entering the SDK. Content stays in
+ * the private custody store; this record binds versions, roles and representations. */
 export function nativeDispatchManifest(params: {
   message: NativeMessage; inputBody: string; sessionKey: string; agentId: string; channelAccountId: string;
+  policy?: unknown; assets?: readonly NativeSuppliedAsset[];
 }): NativeDispatchManifest {
-  return Object.freeze({ schemaVersion: 1, runId: randomUUID(), accountId: params.message.accountId,
-    messageIds: Object.freeze([params.message.id]), messageSid: `wechat-native:${params.message.accountId}:${params.message.id}`,
-    threadId: params.message.threadId, sessionKey: params.sessionKey, agentId: params.agentId,
-    channelAccountId: params.channelAccountId, inputBodySha256: digest(params.inputBody) });
+  const assets = Object.freeze((params.assets ?? []).map(asset => {
+    if (typeof asset.id !== "string" || !asset.id || asset.id.length > 2048 || !/^[a-f0-9]{64}$/.test(asset.sha256) || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
+      || asset.byteLength > 128 * 1024 * 1024 || typeof asset.path !== "string" || !isAbsolute(asset.path) || asset.path.length > 4096
+      || typeof asset.mime !== "string" || asset.mime.length > 128 || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(asset.mime)
+      || !["image", "audio", "video", "file"].includes(asset.kind) || !["model_image", "file_reference"].includes(asset.role)
+      || (asset.role === "model_image" && (asset.kind !== "image" || !asset.mime.startsWith("image/") || !asset.runtimeMedia))
+      || asset.contextRole !== "trigger") throw Error("Invalid native supplied asset manifest");
+    return Object.freeze({ ...asset });
+  }));
+  const messageSid = `wechat-native:${params.message.accountId}:${params.message.id}`;
+  const manifest = { schemaVersion: 2 as const, runId: randomUUID(), accountId: params.message.accountId,
+    messageIds: Object.freeze([params.message.id]), messageSid,
+    threadId: params.message.threadId, senderId: params.message.senderId ?? "", sessionKey: params.sessionKey, agentId: params.agentId,
+    channelAccountId: params.channelAccountId, inputBodySha256: digest(params.inputBody),
+    newInputs: Object.freeze([Object.freeze({ id: params.message.id, version: params.message.version ?? "",
+      contentSha256: digest(JSON.stringify([params.message.id, params.message.version, params.message.senderId, params.message.type,
+        params.message.body, params.message.mentions, params.message.serverId])), role: "trigger" as const })]),
+    assets, policySha256: digest(JSON.stringify(params.policy ?? null)),
+    // Exact released 2026.10.2 source-turn identity. Requiring it in the later
+    // snapshot prevents an identical older image/body from proving this input.
+    hostSourceTurnId: `channel-user:v1:${digest(JSON.stringify(["agent-wechat", params.channelAccountId, `wechat:${params.message.threadId}`, messageSid]))}` };
+  return Object.freeze({ ...manifest, manifestSha256: digest(JSON.stringify(manifest)) });
 }
 
-/** Older released hosts can only prove the text boundary below. Media requires
- * the per-dispatch prepared hook until its exact model representation is proven. */
-export function trackNativePreparedText(manifest: NativeDispatchManifest, record: (runId: string) => unknown): void {
-  prune();
-  if (!enabled || pending.size >= 1024) return;
+export function trackNativePreparedInput(manifest: NativeDispatchManifest, record: (runId: string) => unknown): void {
+  prune(); if (!enabled || pending.size >= 1024) return;
   pending.set(manifest.runId, { manifest, record, expires: Date.now() + 15 * 60 * 1000 });
 }
+export const trackNativePreparedText = trackNativePreparedInput;
 
-function promptMatches(prompt: unknown, expected: string): boolean {
+function promptMatches(prompt: unknown, manifest: NativeDispatchManifest): boolean {
   if (typeof prompt !== "string" || Buffer.byteLength(prompt) > 1024 * 1024) return false;
-  // The pinned host may prepend one current-turn timestamp. No substring match
-  // is accepted: merged, omitted or rewritten inputs remain unconfirmed.
-  return digest(prompt) === expected || digest(prompt.replace(/^\[[^\]\r\n]{1,96}\] /, "")) === expected;
+  const text = prompt.replace(/^\[[^\]\r\n]{1,96}\] /, "");
+  const candidates = [text];
+  // The pinned group llm_input prepends host-generated sender context; the
+  // final current-user snapshot omits it. Only this exact sender may be stripped.
+  const sender = `Conversation info: ⟦openclaw:ctx⟧\n\`\`\`json\n${JSON.stringify({ sender: { id: manifest.senderId } })}\n\`\`\`\n\n`;
+  if (manifest.threadId.endsWith("@chatroom") && text.startsWith(sender)) candidates.push(text.slice(sender.length));
+  return candidates.some(text => normalizedPromptMatches(text, manifest));
+}
+function normalizedPromptMatches(text: string, manifest: NativeDispatchManifest): boolean {
+  const runtimeAssets = manifest.assets.filter(asset => asset.runtimeMedia);
+  if (runtimeAssets.length) {
+    if (runtimeAssets.length !== 1) return false;
+    const asset = runtimeAssets[0];
+    const header = /^\[media attached: ([^\r\n]+) \(([^)\r\n]+)\) \| (media:\/\/inbound\/[^\]\r\n]+)\]\n/.exec(text);
+    if (!header || !isAbsolute(header[1]) || basename(header[1]) !== `input-${basename(asset.path)}`
+      || header[2] !== asset.mime || header[3] !== `media://inbound/${basename(asset.path)}`) return false;
+    text = text.slice(header[0].length);
+    // This pinned, explicit status is supplemental host context. Arbitrary
+    // descriptions, transformed/merged input and unknown additions fail closed.
+    if (asset.kind === "video") text = text.replace(/\n\n\[Video attachment not analyzed: video understanding is disabled\]$/, "");
+  }
+  return digest(text) === manifest.inputBodySha256;
 }
 function currentMessageFacts(messages: unknown): Array<{ messageId: string; chatId: string }> {
   if (!Array.isArray(messages) || messages.length > 1000) return [];
@@ -51,37 +89,63 @@ function currentMessageFacts(messages: unknown): Array<{ messageId: string; chat
   }
   return facts;
 }
-
+function matchingContext(ctx: any, manifest: NativeDispatchManifest): boolean {
+  return ctx?.runId === manifest.runId && ctx?.sessionKey === manifest.sessionKey && ctx?.agentId === manifest.agentId;
+}
 export function observeNativePreparedInput(event: any, ctx: any): void {
-  prune();
-  const item = pending.get(event?.runId); if (!item) return;
-  item.proof = undefined;
-  const m = item.manifest;
-  if (ctx?.runId !== m.runId || ctx?.sessionKey !== m.sessionKey || ctx?.agentId !== m.agentId
-    || ctx?.channel !== "agent-wechat" || ctx?.accountId !== m.channelAccountId
-    || ctx?.chatId !== `wechat:${m.threadId}` || ctx?.sessionId !== event.sessionId
+  prune(); const item = pending.get(event?.runId); if (!item) return;
+  item.proof = undefined; item.started = false; const m = item.manifest;
+  if (!matchingContext(ctx, m) || ctx?.channel !== "agent-wechat" || ctx?.accountId !== m.channelAccountId
+    || ctx?.chatId !== (m.threadId.endsWith("@chatroom") ? m.threadId : `wechat:${m.threadId}`) || ctx?.sessionId !== event.sessionId
     || typeof event.sessionId !== "string" || !event.sessionId || typeof event.provider !== "string" || typeof event.model !== "string"
-    || !promptMatches(event.prompt, m.inputBodySha256)) return;
+    || !promptMatches(event.prompt, m)) return;
   const facts = currentMessageFacts(event.historyMessages);
   if (facts.length !== 1 || facts[0].messageId !== m.messageSid || facts[0].chatId !== `wechat:${m.threadId}`) return;
+  if (m.assets.length && event.imagesCount !== m.assets.filter(asset => asset.role === "model_image").length) return;
   item.proof = { sessionId: event.sessionId, provider: event.provider, model: event.model };
 }
-
 export function observeNativeModelCall(event: any, ctx: any): void {
-  prune();
-  const item = pending.get(event?.runId); if (!item?.proof) return;
+  prune(); const item = pending.get(event?.runId); if (!item?.proof) return;
   const m = item.manifest, proof = item.proof;
-  if (ctx?.runId !== m.runId || ctx?.agentId !== m.agentId || ctx?.sessionKey !== m.sessionKey
-    || event.sessionKey !== m.sessionKey || event.sessionId !== proof.sessionId || ctx?.sessionId !== proof.sessionId
+  if (!matchingContext(ctx, m) || event.sessionKey !== m.sessionKey || event.sessionId !== proof.sessionId || ctx?.sessionId !== proof.sessionId
     || event.provider !== proof.provider || event.model !== proof.model || typeof event.callId !== "string" || !event.callId) return;
-  item.record(m.runId);
-  pending.delete(m.runId);
+  item.started = true;
+  // The input hook is before current images are prepared. A later exact asset
+  // snapshot is mandatory for media; a count never establishes identity.
+  if (!m.assets.length) { item.record(m.runId); pending.delete(m.runId); }
+}
+export function observeNativeAgentEnd(event: any, ctx: any): void {
+  prune(); const item = pending.get(event?.runId); if (!item?.proof || !item.started || !item.manifest.assets.length) return;
+  const m = item.manifest, proof = item.proof;
+  if (!matchingContext(ctx, m) || ctx?.sessionId !== proof.sessionId || ctx?.channel !== "agent-wechat" || ctx?.accountId !== m.channelAccountId
+    || ctx?.chatId !== (m.threadId.endsWith("@chatroom") ? m.threadId : `wechat:${m.threadId}`) || ctx?.modelProviderId !== proof.provider || ctx?.modelId !== proof.model
+    || !Array.isArray(event.messages) || event.messages.length > 1000) return;
+  const user = event.messages.findLast((message: any) => message?.role === "user");
+  if (user?.idempotencyKey !== m.hostSourceTurnId) return;
+  const blocks = typeof user.content === "string" ? [{ type: "text", text: user.content }] : user.content;
+  if (!Array.isArray(blocks) || blocks.length > 32) return;
+  if (blocks.some((block: any) => !["text", "image"].includes(block?.type) || (block.type === "text" && typeof block.text !== "string"))) return;
+  const text = blocks.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n");
+  if (!promptMatches(text, m)) return;
+  const images = blocks.filter((block: any) => block?.type === "image");
+  const expectedImages = m.assets.filter(asset => asset.role === "model_image");
+  if (images.length !== expectedImages.length) return;
+  for (const [index, asset] of expectedImages.entries()) {
+    const image = images[index];
+    if (image.mimeType !== asset.mime || typeof image.data !== "string" || image.data.length > 8 * 1024 * 1024
+      || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) return;
+    const bytes = Buffer.from(image.data, "base64");
+    if (bytes.length !== asset.byteLength || digest(bytes) !== asset.sha256) return;
+  }
+  if (m.assets.some(asset => asset.role === "file_reference" && !text.includes(asset.path))) return;
+  item.record(m.runId); pending.delete(m.runId);
 }
 
-/** Explicit host conversation access is required. The adapter never grants it. */
+/** Explicit host conversation access is required. No permission is enabled by
+ * the plugin, and no private/internal diagnostic payload is acquired. */
 export function registerNativePreparedBoundary(api: OpenClawPluginApi): () => void {
   const access = (api.config as any)?.plugins?.entries?.["agent-wechat"]?.hooks?.allowConversationAccess === true;
   enabled = access;
-  if (access) { api.on("llm_input", observeNativePreparedInput); api.on("model_call_started", observeNativeModelCall); }
+  if (access) { api.on("llm_input", observeNativePreparedInput); api.on("model_call_started", observeNativeModelCall); api.on("agent_end", observeNativeAgentEnd); }
   return () => { enabled = false; pending.clear(); };
 }

@@ -4,12 +4,18 @@ use super::saved_login::read_saved_file;
 use super::*;
 use std::{
     collections::BTreeSet,
+    io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use wechat_profile::{ProfileLocation, ProfileSavedLogin, ReadOptions};
 
 const GLOBAL: &str = "xwechat_files/all_users/config/global_config";
+
+pub(super) enum SavedDeviceSource {
+    Profile(ProfileSavedLogin),
+    State(Box<AccountState>),
+}
 
 #[derive(Clone, Default, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -132,6 +138,40 @@ fn reject_open_profile(home: &Path) -> Result<()> {
 }
 
 impl Core {
+    pub(super) fn prefer_profile_login_files(
+        &self,
+        account: &str,
+        has_previous: bool,
+    ) -> Result<bool> {
+        Ok(self
+            .store
+            .runtime(account, "official-profile-selected")?
+            .is_some()
+            && (!has_previous
+                || (self
+                    .store
+                    .runtime(account, "saved-login-publication")?
+                    .is_none()
+                    && self
+                        .store
+                        .runtime(account, "saved-login-projection-needed")?
+                        .is_none())))
+    }
+    pub(super) fn saved_device_source(
+        &self,
+        account: &str,
+        previous: Option<&AccountState>,
+    ) -> Result<Option<SavedDeviceSource>> {
+        if self.prefer_profile_login_files(account, previous.is_some())? {
+            return Ok(self
+                .official_saved_login(account)?
+                .map(SavedDeviceSource::Profile));
+        }
+        Ok(previous
+            .filter(|s| !s.auto_auth_key.is_empty())
+            .cloned()
+            .map(|state| SavedDeviceSource::State(Box::new(state))))
+    }
     pub(super) fn official_login_options(&self, account: &str) -> Result<NativeOptions> {
         let mut options = NativeOptions::default();
         if self
@@ -340,7 +380,6 @@ impl Core {
             .store
             .runtime(account, "official-profile-selected")?
             .is_none()
-            || self.store.keys_file(account)?.is_some()
         {
             return Ok(());
         }
@@ -361,6 +400,33 @@ impl Core {
         let directory =
             wechat_profile::official_account_directory(&identity.username, identity.uin)?;
         let location = ProfileLocation::new(home.join("xwechat_files").join(directory))?;
+        if let Some(path) = self.store.keys_file(account)? {
+            let cached = wechat_profile::KeyFile::load(path)?;
+            let storage = location.root().join("db_storage");
+            let mut actual = Vec::new();
+            super::identity::database_files(&storage, &storage, &mut actual, 0)?;
+            let mut missing = false;
+            for relative in actual {
+                if let Some(key) = cached.databases.get(&relative) {
+                    let path = storage.join(&relative);
+                    if std::fs::canonicalize(&path)? != path {
+                        bail!("invalid database path");
+                    }
+                    let mut salt = [0; 16];
+                    std::fs::File::open(path)?.read_exact(&mut salt)?;
+                    if salt != key.salt {
+                        return Err(super::identity::password_admission_error(
+                            wechat_profile::ProfileError::KeyMismatch(relative),
+                        ));
+                    }
+                } else {
+                    missing = true;
+                }
+            }
+            if !missing {
+                return Ok(());
+            }
+        }
         let mut keys = wechat_profile::keys_from_password(
             location,
             &state.database_password,
@@ -534,6 +600,125 @@ mod tests {
             "synthetic_self"
         );
         assert_eq!(before, wechat_store::copy::inventory(&official).unwrap());
+        let prior_keys = store.keys_file(&selected.account_id).unwrap().unwrap();
+        // A stopped stock client can add another encrypted database. Its keys
+        // are admitted from the same already accepted password, without changing
+        // either the original files or the prior protected key cache.
+        std::fs::create_dir_all(account_root.join("db_storage/message")).unwrap();
+        std::fs::copy(
+            &database,
+            account_root.join("db_storage/message/message_1.db"),
+        )
+        .unwrap();
+        let expanded = wechat_store::copy::inventory(&official).unwrap();
+        assert!(core.account_state(&selected.account_id).is_ok());
+        assert_eq!(
+            core.profile_location_keys(&selected.account_id)
+                .unwrap()
+                .1
+                .databases
+                .len(),
+            2
+        );
+        assert_ne!(
+            store.keys_file(&selected.account_id).unwrap().unwrap(),
+            prior_keys
+        );
+        assert!(prior_keys.is_file());
+        assert_eq!(expanded, wechat_store::copy::inventory(&official).unwrap());
+    }
+    #[tokio::test]
+    async fn saved_files_override_stale_sidecar_but_not_an_unpublished_native_generation() {
+        use wechat_protocol::protobuf as p;
+        let temp = tempfile::tempdir().unwrap();
+        let official = temp.path().join("home");
+        home(&official, "synthetic_self");
+        let global = official.join(GLOBAL);
+        let token = p::message(&[
+            p::bytes(1, &p::buffer(&[1; 32])),
+            p::bytes(2, &p::buffer(&[2; 16])),
+        ])
+        .unwrap();
+        let project = wechat_profile::SavedLoginProjection {
+            auto_auth_key: &token,
+            cookie: &[3; 15],
+            key_info: &[4; 180],
+            auto_login_flag: 3,
+            pc_account_name: None,
+            local_device_id64: None,
+        };
+        let staged = wechat_profile::stage_saved_login_projection(
+            &std::fs::read(&global).unwrap(),
+            &std::fs::read(global.with_extension("crc")).unwrap(),
+            &[9; 16],
+            "synthetic_self",
+            &project,
+        )
+        .unwrap();
+        let options = wechat_profile::WriteOptions {
+            exclusive_ownership_confirmed: true,
+            allow_plaintext: false,
+            durable_intent_id: "synthetic-official-refresh".into(),
+        };
+        wechat_profile::publish_mmkv_append(&global, &staged, &options).unwrap();
+        std::fs::create_dir_all(official.join(".xwechat/login/synthetic_self")).unwrap();
+        std::fs::write(
+            official.join(".xwechat/login/synthetic_self/key_info.dat"),
+            [4; 180],
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        let selected = core
+            .prepare_official_profile(OfficialProfileRequest {
+                path: Some(official.to_str().unwrap().into()),
+                account_id: None,
+            })
+            .await
+            .unwrap();
+        let mut previous = super::super::tests::state();
+        previous.device.device_id = vec![4; 16];
+        previous.auto_auth_key = p::message(&[
+            p::bytes(1, &p::buffer(&[5; 32])),
+            p::bytes(2, &p::buffer(&[6; 16])),
+        ])
+        .unwrap();
+        assert_ne!(previous.auto_auth_key, token);
+        match core
+            .saved_device_source(&selected.account_id, Some(&previous))
+            .unwrap()
+            .unwrap()
+        {
+            SavedDeviceSource::Profile(saved) => {
+                assert_eq!(saved.auto_auth_key.as_slice(), token);
+                assert_eq!(saved.key_info.as_slice(), [4; 180]);
+            }
+            _ => panic!("the official refreshed generation must take precedence"),
+        }
+        store
+            .put_runtime(&selected.account_id, "saved-login-projection-needed", b"1")
+            .unwrap();
+        assert!(matches!(
+            core.saved_device_source(&selected.account_id, Some(&previous))
+                .unwrap(),
+            Some(SavedDeviceSource::State(_))
+        ));
+        store
+            .clear_runtime(&selected.account_id, "saved-login-projection-needed")
+            .unwrap();
+        let staged = wechat_profile::stage_mmkv_values(
+            &std::fs::read(&global).unwrap(),
+            &std::fs::read(global.with_extension("crc")).unwrap(),
+            &[9; 16],
+            &[("mmkv_key_logout_locked_flag".into(), Some(vec![1]))],
+        )
+        .unwrap();
+        wechat_profile::publish_mmkv_append(&global, &staged, &options).unwrap();
+        assert!(core
+            .saved_device_source(&selected.account_id, Some(&previous))
+            .unwrap()
+            .is_none());
     }
     #[tokio::test]
     async fn selection_is_idempotent_exclusive_and_never_imports_active_authorization() {

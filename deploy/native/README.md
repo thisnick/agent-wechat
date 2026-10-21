@@ -44,6 +44,22 @@ The current package version may have earlier legacy-only releases. The new insta
 
 If publication fails after npm succeeds, preserve the exact assets/manifest and recover the remaining legacy artifact jobs from the same commit. Do not rebuild and overwrite a published native asset to make its checksum agree. Release reruns that find existing asset names fail explicitly so the operator can compare retained artifacts rather than replace them.
 
+## Existing-profile operating store
+
+V1 uses an existing stopped official Linux profile. The default image starts a daemon with empty sidecars; it does not supply a usable account. Mount the complete selected official HOME separately, give the service user legitimate write permission, then select its container-visible path with `wx auth login --official=/profiles/official`. Keep the official app stopped. The account identity, device and every encrypted database must match accepted native login before writes begin.
+
+For Compose, add an explicit bind to the `volumes` list (the source must already exist):
+
+```yaml
+- type: bind
+  source: /absolute/stopped-official-home
+  target: /profiles/official
+  bind:
+    create_host_path: false
+```
+
+Preserve the profile's ownership and backups when preparing permissions. For the user service, add its actual profile path to `ReadWritePaths`; daemon sidecars remain under the separate configured `dataDir`. Fresh-profile creation, copy export and official-app takeover are experimental extras outside this initial workflow.
+
 ## Configuration and durable data
 
 `server.user.toml` follows the Linux default `~/.config/agent-wechat/server/config.toml`. `server.toml` selects the explicit container locations:
@@ -54,7 +70,7 @@ If publication fails after npm succeeds, preserve the exact assets/manifest and 
 | `/var/lib/agent-wechat` | Persistent registry, managed official-format profiles and account sidecars |
 | `/var/cache/agent-wechat` | Private disk-backed scratch snapshots, selected by TMPDIR; never an official profile |
 | `/run/secrets/wechat-api-token` | Read-only API bearer token, independently provisioned |
-| Explicit additional profile mount | Optional direct existing official-format operating store |
+| Explicit additional profile mount | Existing official-format operating store for the v1 workflow |
 
 An account in managed-copy mode keeps its official tree under `accounts/<id>/profile/` and additional state under `accounts/<id>/agent/`. A directly attached profile stays at its registered external path; its sidecar still lives under the durable root. Installing/upgrading the executable must not remove these directories. A full backup includes durable sidecars and separately attached profile trees; a profile-only export omits consumer receipts and pending operations. Keys/native credentials are separate from the API bearer token; protect every secret reference and do not assume an ordinary sidecar is encrypted.
 
