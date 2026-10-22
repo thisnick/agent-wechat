@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-api"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-config"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-core"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-media"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "image",
@@ -2303,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-platform"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "libc",
  "tempfile",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-profile"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-protocol"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2360,7 +2360,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-store"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2574,7 +2574,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wx-native"
-version = "1.0.0-beta.8"
+version = "1.0.0-beta.9"
 dependencies = [
  "anyhow",
  "axum",

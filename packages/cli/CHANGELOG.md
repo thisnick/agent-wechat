@@ -1,5 +1,25 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.9
+
+### Minor Changes
+
+- [#241](https://github.com/thisnick/agent-wechat/pull/241) [`6c16321`](https://github.com/thisnick/agent-wechat/commit/6c16321abd7a8554a291bac0b2f65e95a39e89db) Thanks [@thisnick](https://github.com/thisnick)! - Add durable own-message recalls through the native daemon and `wx messages recall`, using exact message/server identities and private submission receipts. Preserve uncertain outcomes without automatic resubmission, handle incoming recall controls with durable account-scoped markers and events, suppress recalled message/quote/media content, and report pending recall work in profile-copy completeness checks.
+
+  Preserve existing native registry and control database families when admission or migration fails, including their WAL, shared-memory and rollback-journal companions.
+
+- [#237](https://github.com/thisnick/agent-wechat/pull/237) [`4f82fd9`](https://github.com/thisnick/agent-wechat/commit/4f82fd96ffa30e87258df178feffb127e7a05393) Thanks [@thisnick](https://github.com/thisnick)! - Add macOS ARM64 and native Windows x64/ARM64 release targets, portable private-file and daemon ownership handling, and ownership-bound graceful shutdown. Extend verified npm provisioning and OpenClaw managed hosting to these targets. Build candidate artifacts on native CI workers; live account and official-app profile compatibility require separate platform acceptance and are not established by the offline smoke tests.
+
+  Apply the same private directory/file protections to WXGF decoder and media encoder scratch data, including owner-only Windows ACLs.
+
+  Create scratch files and directories with an explicit current-user owner and private permissions from the start, including when Windows runs with an elevated administrator token.
+
+- [#243](https://github.com/thisnick/agent-wechat/pull/243) [`d123c6e`](https://github.com/thisnick/agent-wechat/commit/d123c6e12829ed64ad74ceca971b38952d8ba012) Thanks [@thisnick](https://github.com/thisnick)! - Restore received link/music/video share titles, descriptions and URLs with optional verified thumbnail previews. Add a durable `share` send type, CLI `--share` payload and current-conversation `wechat_send_share` tool. Share submission and thumbnail interoperability still require verification with live official installs.
+
+### Patch Changes
+
+- [#244](https://github.com/thisnick/agent-wechat/pull/244) [`c49f335`](https://github.com/thisnick/agent-wechat/commit/c49f335362a145b18fb10e876b5c240868af4c7f) Thanks [@thisnick](https://github.com/thisnick)! - Add experimental handling for the server-directed LAN challenge during desktop phone/QR login. Advertise local IPv4 addresses through the native login service and answer the phone's temporary TCP token exchange, with cancellation, expiry and one upload per attempt. Live challenge acceptance remains unverified.
+
 ## 1.0.0-beta.8
 
 ### Patch Changes

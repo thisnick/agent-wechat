@@ -14,10 +14,15 @@
     "native-history-tools-and-attachment-paths",
     "native-inbound-thread-read",
     "native-inbound-unread-column-order",
+    "native-lan-login-challenge",
     "native-large-history-pages",
+    "native-message-recall-cli",
+    "native-openclaw-message-recalls",
+    "native-platform-candidates",
     "native-quotes-and-forwarded-history",
     "native-release-clean-checkout",
     "native-thread-read-sync",
-    "native-upstream-push"
+    "native-upstream-push",
+    "native-url-shares-and-previews"
   ]
 }
