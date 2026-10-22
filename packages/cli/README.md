@@ -51,6 +51,21 @@ wx auth login --official=/absolute/official-profile
 
 The daemon binds the stored identity, attempts saved-device login and derives verified database keys after authentication. The official app stays closed while this daemon owns the files.
 
+Recall an own message using its opaque message ID and exact decimal-string
+server ID from history or a verified send receipt:
+
+```bash
+wx --account example messages recall MESSAGE_ID --server-id SERVER_ID
+wx --account example operations get OPERATION_ID
+```
+
+Use `--detach` to return the durable operation immediately. A private receipt is
+written before submission; the same target uses a stable default idempotency
+key. An uncertain result exits8 and must be inspected rather than automatically
+resubmitted. WeChat decides eligibility, and stopping the watcher does not cancel
+the recall. Recalled messages remain as placeholders; their media is unavailable
+through the daemon. Raw journals, cached files and backups are retained.
+
 Lower-level registration and experimental profile copies are also available:
 
 ```bash

@@ -37,7 +37,14 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (url.pathname === '/v1/status') return json({ serverId: 'fixture', dataDir: '/fixture', pid: process.pid, ownershipGeneration: 'fixture', state: 'running', version: { product: 'agent-wechat', backend: 'native', version: '0.16.0', apiVersion: 1, capabilities: ['serve', 'events', 'profile-read', 'text-send', 'native-login'] } });
       if (url.pathname === '/v1/accounts/a') return json({ id: 'a', authenticated: true, connection: 'online' });
       if (url.pathname === '/v1/accounts/a/threads') return json({ items: [{ id: threadId, readStateVersion: '1' }], nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
+      if (url.pathname === '/v1/accounts/a/events') return json({ items: [], nextCursor: '0' });
       if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
+      const lookup = /^\/v1\/accounts\/a\/messages\/([^/]+)$/.exec(url.pathname);
+      if (lookup) {
+        const custody = JSON.parse(await readFile(join(temporary, 'probe-consumer', createHash('sha256').update('fixture\0a').digest('hex') + '.json'), 'utf8'));
+        const message = custody.items[decodeURIComponent(lookup[1])]?.message;
+        if (message) return json(message);
+      }
       const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
       if (media) return json({ items: [assets.get(media[1]).asset] });
       const content = /^\/v1\/accounts\/a\/media\/asset-([^/]+)\/content$/.exec(url.pathname);

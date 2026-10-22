@@ -10,6 +10,10 @@ const pending = new Map<string, Pending>();
 let enabled = false;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function prune(): void { for (const [id, item] of pending) if (item.expires < Date.now()) pending.delete(id); }
+/** Source-local IDs can be reused; host input deduplication needs the exact target. */
+export function nativeSourceMessageSid(message: NativeMessage): string {
+  return `wechat-native:${message.accountId}:${message.id}:${digest(JSON.stringify([message.threadId, message.serverId ?? null]))}`;
+}
 
 /** Persist this immutable selection before entering the SDK. Content stays in
  * the private custody store; this record binds versions, roles and representations. */
@@ -32,7 +36,7 @@ export function nativeDispatchManifest(params: {
       || (asset.contextRole === "history" && !history.some(message => message.id === asset.messageId))) throw Error("Invalid native supplied asset manifest");
     return Object.freeze({ ...asset });
   }));
-  const messageSid = `wechat-native:${params.message.accountId}:${params.message.id}`;
+  const messageSid = nativeSourceMessageSid(params.message);
   const manifest = { schemaVersion: 2 as const, runId: randomUUID(), accountId: params.message.accountId,
     messageIds: Object.freeze([params.message.id]), messageSid,
     threadId: params.message.threadId, senderId: params.message.senderId ?? "", sessionKey: params.sessionKey, agentId: params.agentId,
@@ -54,6 +58,15 @@ export function trackNativePreparedInput(manifest: NativeDispatchManifest, recor
   pending.set(manifest.runId, { manifest, record, expires: Date.now() + 15 * 60 * 1000 });
 }
 export const trackNativePreparedText = trackNativePreparedInput;
+/** Forget pending proofs after custody invalidation, including quoted assets. */
+export function invalidateNativePreparedInputs(accountId: string, messageIds: readonly string[]): void {
+  const ids = new Set(messageIds);
+  for (const [runId, item] of pending) {
+    if (item.manifest.accountId === accountId && [...item.manifest.messageIds,
+      ...(item.manifest.historyInputs ?? []).map(input => input.id),
+      ...item.manifest.assets.flatMap(asset => asset.sourceMessageId ? [asset.sourceMessageId] : [])].some(id => ids.has(id))) pending.delete(runId);
+  }
+}
 
 function promptMatches(prompt: unknown, manifest: NativeDispatchManifest): boolean {
   if (typeof prompt !== "string" || Buffer.byteLength(prompt) > 1024 * 1024) return false;

@@ -1,6 +1,10 @@
 use super::*;
 pub(super) fn routes() -> Router<App> {
     Router::new()
+        .route(
+            "/v1/accounts/{a}/messages/{id}/recall",
+            post(recall_message),
+        )
         .route("/v1/accounts/{a}/capabilities", get(capabilities))
         .route("/v1/accounts/{a}/connect", post(connect))
         .route("/v1/accounts/{a}/disconnect", post(disconnect))
@@ -36,6 +40,38 @@ pub(super) fn routes() -> Router<App> {
         )
         .route("/v1/accounts/{a}/contact-sync", post(sync_contacts))
         .route("/v1/accounts/{a}/group-sync", post(sync_groups))
+}
+async fn recall_message(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<contracts::NativeRecallRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "send")?;
+    let key = idempotency_key(&headers)?;
+    if input
+        .server_id
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .is_none_or(|value| value.to_string() != input.server_id)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid_recall_server_id",
+        ));
+    }
+    let operation = app
+        .core
+        .recall_message(&a, &id, &input.server_id, key)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        checked::<contracts::NativeOperation>(
+            serde_json::to_value(operation).map_err(anyhow::Error::from)?,
+        )?,
+    ))
 }
 pub(super) async fn update_account(
     State(app): State<App>,

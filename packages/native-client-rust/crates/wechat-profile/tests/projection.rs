@@ -32,6 +32,151 @@ fn options() -> WriteOptions {
     }
 }
 #[test]
+fn recall_projection_preserves_identity_ordering_other_resources_and_opaque_files() {
+    let d = fixture();
+    let resources_path = d
+        .path()
+        .join("account/db_storage/message/message_resource.db");
+    let resources = Connection::open(&resources_path).unwrap();
+    resources
+        .execute_batch(include_str!("../src/layout/message_resource.db.sql"))
+        .unwrap();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    let original = message("peer", "peer", "18446744073709551614", 100);
+    let applied = apply_message_projection(&loc, &keys, &original, &o).unwrap();
+    apply_message_session_projection(
+        &loc,
+        &keys,
+        &MessageSessionProjection {
+            source: applied.source_id.clone(),
+            peer: "peer".into(),
+            summary: "Original summary".into(),
+            outgoing: false,
+            unread: true,
+            sender: Some("peer".into()),
+            sender_display: None,
+            created_by_this_intent: true,
+        },
+        &o,
+    )
+    .unwrap();
+    let local = applied.source_id.local_id.parse::<i64>().unwrap();
+    resources
+        .execute_batch("INSERT INTO ChatName2Id(rowid,user_name) VALUES(1,'peer'),(2,'other');")
+        .unwrap();
+    for (id, chat, server, local_id, time) in [
+        (1, 1, -2, local, 100),
+        (2, 2, -2, local, 100),
+        (3, 1, -3, local, 100),
+        (4, 1, -2, local + 1, 100),
+        (5, 1, -2, local, 101),
+    ] {
+        resources.execute("INSERT INTO MessageResourceInfo(message_id,chat_id,message_svr_id,message_local_id,message_create_time)VALUES(?1,?2,?3,?4,?5)",rusqlite::params![id,chat,server,local_id,time]).unwrap();
+        resources.execute("INSERT INTO MessageResourceDetail(message_id,type,packed_info)VALUES(?1,6,x'010203')",[id]).unwrap();
+    }
+    let opaque = d.path().join("account/db_storage/message/unknown.fts");
+    let media = d.path().join("account/media/synthetic.bin");
+    fs::create_dir_all(media.parent().unwrap()).unwrap();
+    fs::write(&opaque, b"Opaque retained index").unwrap();
+    fs::write(&media, b"Retained shared media bytes").unwrap();
+    let db = Connection::open(
+        d.path()
+            .join("account/db_storage")
+            .join(&applied.source_id.database),
+    )
+    .unwrap();
+    let table = &applied.source_id.table;
+    let before: (i64, i64, i64, i64) = db
+        .query_row(
+            &format!(
+                "SELECT server_id,sort_seq,create_time,server_seq FROM {table} WHERE local_id=?1"
+            ),
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    let sessions =
+        Connection::open(d.path().join("account/db_storage/session/session.db")).unwrap();
+    sessions
+        .execute(
+            "UPDATE SessionTable SET draft='Keep draft' WHERE username='peer'",
+            [],
+        )
+        .unwrap();
+    let unread: i64 = sessions
+        .query_row(
+            "SELECT unread_count FROM SessionTable WHERE username='peer'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            apply_recall_projection(&loc, &keys, "peer", "18446744073709551614", None, &o).unwrap(),
+            Some(applied.source_id.clone())
+        );
+    }
+    let after: (i64, i64, i64, i64) = db
+        .query_row(
+            &format!(
+                "SELECT server_id,sort_seq,create_time,server_seq FROM {table} WHERE local_id=?1"
+            ),
+            [local],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+    let (kind,status,content,compressed):(i64,i64,String,Option<Vec<u8>>)=db.query_row(&format!("SELECT local_type,status,message_content,compress_content FROM {table} WHERE local_id=?1"),[local],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!((kind, status), (10000, 4));
+    assert!(content.contains("[Message recalled]"));
+    assert!(!content.contains("Synthetic only"));
+    assert!(compressed.is_none());
+    for table in ["MessageResourceInfo", "MessageResourceDetail"] {
+        let ids = resources
+            .prepare(&format!(
+                "SELECT message_id FROM {table} ORDER BY message_id"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec![2, 3, 4, 5]);
+    }
+    let summary:(String,i64,i64,String)=sessions.query_row("SELECT summary,last_msg_type,unread_count,draft FROM SessionTable WHERE username='peer'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(
+        summary,
+        (
+            "[Message recalled]".into(),
+            10000,
+            unread,
+            "Keep draft".into()
+        )
+    );
+    assert_eq!(fs::read(opaque).unwrap(), b"Opaque retained index");
+    assert_eq!(fs::read(media).unwrap(), b"Retained shared media bytes");
+    // An older recall must not replace the current preview after another row arrives.
+    sessions.execute("UPDATE SessionTable SET last_msg_locald_id=?1,last_timestamp=101,summary='Newer message',last_msg_type=1",[local+1]).unwrap();
+    apply_recall_projection(&loc, &keys, "peer", "18446744073709551614", None, &o).unwrap();
+    assert_eq!(
+        sessions
+            .query_row(
+                "SELECT summary FROM SessionTable WHERE username='peer'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "Newer message"
+    );
+    assert!(
+        apply_recall_projection(&loc, &keys, "peer", "999", None, &o)
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
 fn named_writes_preserve_meaning_when_contact_session_and_message_columns_move() {
     use md5::{Digest, Md5};
     let d = fixture();

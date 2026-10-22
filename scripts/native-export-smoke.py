@@ -56,15 +56,23 @@ with tempfile.TemporaryDirectory(prefix="native-export-smoke-") as temporary:
 
     def seed(statements):
         with sqlite3.connect(control) as db:
-            for table in ["runtime", "apply_intents", "outbox", "media_jobs", "media_assets"]:
+            for table in ["runtime", "apply_intents", "outbox", "media_jobs", "media_assets", "recall_keys", "outgoing_recalls", "message_recalls", "operations"]:
                 db.execute(f"DELETE FROM {table}")
             for statement, parameters in statements:
                 db.execute(statement, parameters)
 
     put = "INSERT INTO runtime VALUES(?,?)"
+    recall_marker = ("INSERT INTO message_recalls(thread_id,server_id,observed_at,origin,projection_state) VALUES(?,?,?,?,?)", ("peer", "18446744073709551615", "fixture", "live", "pending"))
+    def outgoing_recall(phase):
+        return [
+            ("INSERT INTO operations VALUES(?,?,?,?,?,?)", ("recall", "message_recall", "needs_review" if phase == "needs_review" else "running", "{}", "fixture", "fixture")),
+            ("INSERT INTO outgoing_recalls VALUES(?,?,?,?,?)", ("recall", "a" * 64, "b" * 64, phase, b"sealed-request")),
+        ]
     cases = [
         ("sync", "pendingProjectionBatches", [("INSERT INTO apply_intents VALUES(?,?,?,?)", ("sync", b"sealed", "pending", "fixture"))]),
         ("read", "pendingReadProjections", [(put, ("read-pending:thread", b"{}"))]),
+        ("recall-projection", "pendingRecallProjections", [recall_marker]),
+        *[("recall-" + phase, "pendingMessageRecalls", outgoing_recall(phase)) for phase in ["queued", "submitting", "accepted", "needs_review"]],
         ("cursor-needed", "pendingCursorProjection", [(put, ("cursor-projection-needed", b"1"))]),
         ("cursor-publication", "pendingCursorProjection", [(put, ("cursor-publication", b"sealed"))]),
         ("saved-login-needed", "pendingSavedLoginProjection", [(put, ("saved-login-projection-needed", b"1"))]),
@@ -95,6 +103,11 @@ with tempfile.TemporaryDirectory(prefix="native-export-smoke-") as temporary:
     seed(receipt)
     completed = export("recorded-checkpoint", "--source-stopped")
     assert completed["syncCheckpointProjected"] and completed["syncCheckpointEvidence"] == "durable_projection_receipt"
+    for name, extra in [("marker", [recall_marker]), ("uncertain", outgoing_recall("needs_review")), ("accepted", outgoing_recall("accepted"))]:
+        seed(receipt + extra)
+        export("recall-checkpoint-refused-" + name, "--source-stopped", code=9)
+        copied = export("recall-checkpoint-partial-" + name, "--source-stopped", "--allow-incomplete")
+        assert not copied["syncCheckpointProjected"] and copied["syncCheckpointEvidence"] == "pending"
     seed(receipt[:-1])
     export("missing-generation", "--source-stopped", code=9)
     seed(receipt[:-1] + [(put, ("projected-received-generation", b"b" * 64))])

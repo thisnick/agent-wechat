@@ -24,6 +24,43 @@ tokenFile = "/private/native-api-token"
 
 An official profile can be the active operating store directly; import is unnecessary. The native daemon writes supported official databases/media there and keeps extra state separately. It checks schema fingerprints and identity before writing. A newer official build is not permission to migrate unknown schemas; stop and preserve a snapshot when the layout is unsupported.
 
+Existing native registry/control databases are validated on private copies before
+SQLite opens their source families. Failed integrity checks or migrations preserve
+the original database, WAL, shared-memory and journal files. When supported crash
+recovery consumes a rollback journal or an uninitialized index, the daemon first
+retains a private, content-addressed recovery family beside the database. Repeated
+admission reuses that recovery copy. Preserve these backups for explicit recovery.
+
 The database contains conversation and unread state; native sidecars retain model-handoff receipts, pending work and projection progress. Official clients can synchronize read state across devices. Whole-thread marking clears local unread state and reports a frozen latest-message boundary to WeChat; uncertain notification outcomes are retained without automatic retries. The local cutoff has one-second precision; arrivals in the same second can be included in the thread read. Recognized own-account `lastMessage` opcode-1 controls update local unread state. Recognized opcode-5 controls can apply their unread-clear component once for an existing visible ordinary session; interrupted attempts remain uncertain, and the remaining session-exit behavior stays blocked. Server sync tokens, original received commands and the official projected cursor serve different purposes; unknown or incomplete controls cannot be skipped when publishing a complete official cursor.
 
 Back up both the stopped official profile and native durable root, including protected keys. A profile-only copy excludes pending native jobs and consumer receipts. Experimental `store import/export` copy official-format files rather than convert schemas; they require exclusive ownership and report incomplete projection. Upgrading an executable never authorizes removing account data.
+
+Recalls have an account-local sidecar marker keyed by conversation and exact
+server message ID. It records observation/recall times, the known source identity
+and projection state, without copying the original body or attachment. The
+marker commits before supported official rows are changed, so interrupted
+projection can be repaired locally and older sync replay cannot restore the
+message. The official message keeps its ID and ordering while its content becomes
+a recall notice. Pending recall work prevents a complete profile checkpoint or
+ordinary export; `--allow-incomplete` reports the remaining work explicitly.
+
+Normal message/history/search reads suppress recalled bodies, mentions, quotes
+and attachment access. Known quotes of recalled messages cannot recover their
+embedded originals. Cached media bytes, original encrypted sync journals,
+unknown official files and existing backups are preserved; a recall is not a
+secure erasure request. Existing FTS indexes are outside the supported native
+writers. Preserve both profile and sidecars in backups so recall markers remain
+available when restoring. An exported official profile does not include the
+daemon's recall ledger.
+
+Attachment handles and transfer plans bind the exact message source and remote
+identity. A recalled handle stays unavailable if a local row ID is reused.
+Legacy handles without that binding report terminal `media_identity_unavailable`;
+changed sources report `media_source_changed`. Discover the message's media again
+to obtain a current handle. This uses retained cached bytes when available and
+does not resend the message.
+
+OpenClaw invalidates pending delivery, stored quote text and prepared attachment
+references when it consumes a recall event. It checks recall state again after
+asynchronous media preparation. Content already delivered to a model or copied
+by a consumer cannot be withdrawn by a later recall.

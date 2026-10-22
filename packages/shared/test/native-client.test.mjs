@@ -47,6 +47,26 @@ test('send uses caller idempotency key and read marks the whole thread', async (
   assert.deepEqual(JSON.parse(requests[1].init.body), { expectedVersion: '7' });
   assert.throws(() => client.markRead('a', 't', []));
 });
+
+test('recall sends an exact decimal identity and caller key once without cancelling its operation', async () => {
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{requests.push({url:String(url),init});return Response.json({id:'recall_operation',accountId:'a',kind:'message_recall',state:'queued',result:{}});}});
+  await client.recallMessage('a','msg/source?=','18446744073709551614','stable-recall-key');
+  assert.equal(requests.length,1);assert.match(requests[0].url,/messages\/msg%2Fsource%3F%3D\/recall$/);
+  assert.equal(requests[0].init.headers.get('Idempotency-Key'),'stable-recall-key');
+  assert.deepEqual(JSON.parse(requests[0].init.body),{serverId:'18446744073709551614'});
+  for(const serverId of ['0','01','9007199254740993.0',9007199254740992,'18446744073709551616'])await assert.rejects(client.recallMessage('a','m',serverId,'key'));
+  for(const key of ['', 'x'.repeat(201), 'bad\r\nkey'])await assert.rejects(client.recallMessage('a','m','3',key));
+  assert.equal(requests.length,1);
+});
+test('recall transport rejects foreign operation identities and does not retry a lost response', async () => {
+  for(const operation of [{id:'o',accountId:'other',kind:'message_recall',state:'queued'},{id:'o',accountId:'a',kind:'login',state:'queued'}]){
+    const client=new NativeWeChatClient({...options,fetch:async()=>Response.json(operation)});
+    await assert.rejects(client.recallMessage('a','m','3','key'),/operation identity/);
+  }
+  let attempts=0;const client=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('lost response');}});
+  await assert.rejects(client.recallMessage('a','m','3','key'),/lost response/);assert.equal(attempts,1);
+});
 test('structured failures expose safe error codes but never raw server messages', async () => {
   const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ error: { code: 'read_state_conflict', message: 'private source content', retryable: false } }, { status: 409 }) });
   await assert.rejects(client.markRead('a', 't', '7'), error => error instanceof NativeApiError && error.status === 409 && error.code === 'read_state_conflict' && !error.message.includes('private'));

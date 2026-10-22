@@ -93,6 +93,15 @@ test("account replacement, aborted calls and stale invocation fail before retrie
   value.config().channels["agent-wechat"].native.accountId = "different";
   await assert.rejects(value.run("wechat_history", {}), /configuration changed/);
 });
+test("daemon replacement during a media lookup cannot return old data into a newly configured account scope", async t => {
+  const value = await mediaFixture(t);
+  value.client.message = async () => {
+    value.config().channels["agent-wechat"].native.endpoint = "http://127.0.0.1:6175";
+    return { id: "media-message", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 3 };
+  };
+  await assert.rejects(value.run("wechat_media", { messageId: "media-message" }), /configuration changed/);
+  assert.equal(value.calls.some(call => ["mediaAssets", "mediaContent", "transferMedia", "saveMedia"].includes(call[0])), false);
+});
 test("foreign history/search responses and exact message IDs cannot cross account/thread boundaries", async () => {
   for (const senderIsOwner of [false, true]) for (const foreign of [{ threadId: "elsewhere" }, { accountId: "other" }]) {
     const value = fixture({ senderIsOwner });
@@ -123,7 +132,7 @@ test("registration separates default current-thread tools from optional account-
   assert.equal(registrations[0][0].contextVersion, 2); assert.deepEqual(registrations[0][1], { names: toolNames });
   assert.equal(registrations[1][0].contextVersion, 2); assert.deepEqual(registrations[1][1], { names: archiveNames, optional: true });
   const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.contracts.tools, [...toolNames, ...archiveNames]);
+  assert.deepEqual(manifest.contracts.tools, [...toolNames, ...archiveNames, "wechat_recall"]);
   for (const name of archiveNames) assert.equal(manifest.toolMetadata[name].optional, true);
   for (const tool of fixture().tools) {
     const schema = tool.parameters as any; assert.equal(schema.additionalProperties, false);
@@ -266,14 +275,14 @@ test("cache-only and strict quality never download or silently substitute a lowe
   const value = await mediaFixture(t); value.setAssets([{ ...value.asset, variant: "thumbnail", actualVariant: "thumbnail" }]);
   const result: any = await value.run("wechat_media", { messageId: "media-message", quality: "original", download: false });
   assert.equal(result.details.status, "unavailable"); assert.equal(result.details.retryable, true); assert.equal(result.details.attachment?.path, undefined);
-  assert.ok(value.calls.every(call => ["message", "mediaAssets"].includes(call[0])));
+  assert.ok(value.calls.every(call => ["message", "message", "mediaAssets"].includes(call[0])));
 });
 test("expired/unsupported media never requests a transfer; terminal failures remain explicit", async t => {
   for (const state of ["expired", "unsupported"]) {
     const value = await mediaFixture(t); value.setAssets([{ ...value.asset, state }]);
     const result: any = await value.run("wechat_media", { messageId: "media-message" });
     assert.equal(result.details.status, state); assert.equal(result.details.retryable, false); assert.equal(result.details.attachment?.path, undefined);
-    assert.ok(value.calls.every(call => ["message", "mediaAssets"].includes(call[0])));
+    assert.ok(value.calls.every(call => ["message", "message", "mediaAssets"].includes(call[0])));
   }
   const value = await mediaFixture(t); value.setAssets([{ ...value.asset, state: "pending" }]); value.client.transferMedia = async () => { throw new NativeApiError(400, "unsupported_media_variant", false); };
   const result: any = await value.run("wechat_media", { messageId: "media-message" }); assert.equal(result.details.status, "unavailable"); assert.equal(result.details.retryable, false); assert.equal(result.details.reason, "unsupported_media_variant");
@@ -304,7 +313,7 @@ test("abort during transfer submission stops local work while leaving the durabl
   const value = await mediaFixture(t); const abort = new AbortController(); value.setAssets([{ ...value.asset, state: "pending" }]);
   value.client.transferMedia = async (...args: any[]) => { value.calls.push(["transferMedia", ...args]); abort.abort(); return { id: "durable-job", state: "queued" }; };
   await assert.rejects(value.run("wechat_media", { messageId: "media-message" }, abort.signal));
-  assert.deepEqual(value.calls.map(call => call[0]), ["message", "mediaAssets", "transferMedia"]);
+  assert.deepEqual(value.calls.map(call => call[0]), ["message", "message", "mediaAssets", "message", "transferMedia"]);
 });
 test("an expired thumbnail does not prevent downloading an advertised original", async t => {
   const value = await mediaFixture(t); value.setAssets([{ ...value.asset, state: "pending" }, { ...value.asset, id: "thumb", variant: "thumbnail", actualVariant: "thumbnail", state: "expired" }]);
@@ -316,7 +325,7 @@ test("sender policy revoked during asset lookup prevents download submission and
   const assets = value.client.mediaAssets;
   value.client.mediaAssets = async (...args: any[]) => { const result = await assets(...args); value.config().channels["agent-wechat"].groupAllowFrom = ["other"]; return result; };
   await assert.rejects(value.run("wechat_media", { messageId: "media-message" }), /no longer allowed/);
-  assert.deepEqual(value.calls.map(call => call[0]), ["message", "mediaAssets"]);
+  assert.deepEqual(value.calls.map(call => call[0]), ["message", "message", "mediaAssets"]);
 });
 test("unsupported historical media and transient catalog errors return bounded statuses without raw details", async t => {
   for (const [code, retryable, status] of [["unsupported_profile", false, "unsupported"], ["unavailable", true, "pending"]] as const) {
@@ -360,4 +369,71 @@ test("archive quote recall keeps account/chat identity while allowing cross-auth
   assert.match(result.details.body,/Quoted stored text/); assert.equal(result.details.status,"resolved");
   value.client.quotedMessage=async()=>({accountId:"a",messageId:"quote",threadId:"foreign",state:"embedded",message:null,embeddedText:"foreign"});
   await assert.rejects(value.run("wechat_archive_media",{messageId:"quote"}),/identity/);
+});
+
+test("recalled history and cached attachments expose a terminal placeholder without paths or bytes", async t => {
+  for (const archive of [false, true]) {
+    const value = await mediaFixture(t, 3, {}, archive);
+    value.setMessages([{ id: "media-message", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 3,
+      body: "Original content must not escape", recall: { observedAt: "2026-10-21T12:00:00Z" } }]);
+    const history: any = await value.run(archive ? "wechat_archive_history" : "wechat_history", archive ? { threadId: "room@chatroom" } : {});
+    assert.equal(history.details.items[0].status, "recalled"); assert.equal(history.details.items[0].body, "[Message recalled]");
+    assert.equal(history.details.items[0].attachment, undefined);
+    const result: any = await value.run(archive ? "wechat_archive_media" : "wechat_media", { messageId: "media-message" });
+    assert.equal(result.details.status, "recalled"); assert.equal(result.details.retryable, false);
+    assert.equal(result.details.attachment, undefined); assert.equal(result.content.some((part: any) => part.type === "image"), false);
+    assert.ok(!JSON.stringify(result).includes("Original content"));
+    assert.equal(value.calls.some(call => ["mediaAssets", "transferMedia", "mediaContent", "saveMedia"].includes(call[0])), false);
+  }
+});
+test("recall arriving during cached content retrieval prevents saving or returning the late image", async t => {
+  const value = await mediaFixture(t);
+  let contentStarted!: () => void, releaseContent!: () => void;
+  const started = new Promise<void>(resolve => { contentStarted = resolve; });
+  const released = new Promise<void>(resolve => { releaseContent = resolve; });
+  value.client.mediaContent = async () => { value.calls.push(["mediaContent"]); contentStarted(); await released; return { bytes: value.bytes, contentType: "image/png" }; };
+  const work = value.run("wechat_media", { messageId: "media-message" }); await started;
+  value.setMessages([{ id: "media-message", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 10000,
+    body: "[Message recalled]", recall: { observedAt: "2026-10-21T12:00:00Z" } }]);
+  releaseContent(); const result: any = await work;
+  assert.equal(result.details.status, "recalled"); assert.equal(result.details.retryable, false);
+  assert.equal(result.details.attachment, undefined); assert.equal(result.content.length, 1);
+  assert.equal(value.calls.some(call => call[0] === "saveMedia" || call[0] === "transferMedia"), false);
+});
+test("a recall after managed saving removes all attachment output while retained bytes follow host policy", async t => {
+  const value = await mediaFixture(t); const lookup = value.client.message;
+  value.client.message = async (...args: any[]) => {
+    const message = await lookup(...args);
+    return value.calls.some(call => call[0] === "saveMedia") ? { ...message, recall: { observedAt: "2026-10-21T12:00:00Z" } } : message;
+  };
+  const result: any = await value.run("wechat_media", { messageId: "media-message" });
+  assert.equal(result.details.status, "recalled"); assert.equal(result.details.retryable, false);
+  assert.equal(value.calls.filter(call => call[0] === "saveMedia").length, 1);
+  assert.equal(result.content.some((part: any) => part.type === "image"), false);
+  assert.equal(result.details.attachment, undefined); assert.equal(result.details.body, undefined);
+  assert.ok(!JSON.stringify(result).includes("original.png"));
+});
+test("terminal recall responses and recalled media catalogs never request another transfer", async t => {
+  for (const source of ["catalog", "response"]) {
+    const value = await mediaFixture(t);
+    if (source === "catalog") value.setAssets([{ ...value.asset, state: "recalled" }]);
+    else value.client.mediaAssets = async () => { throw new NativeApiError(410, "message_recalled", false); };
+    const result: any = await value.run("wechat_media", { messageId: "media-message" });
+    assert.equal(result.details.status, "recalled"); assert.equal(result.details.retryable, false);
+    assert.equal(result.details.reason, "message_recalled"); assert.equal(result.details.attachment, undefined);
+    assert.equal(value.calls.some(call => ["transferMedia", "mediaContent", "saveMedia"].includes(call[0])), false);
+  }
+});
+test("history media identity failures remain terminal unavailable without stale attachment paths", async t => {
+  for (const code of ["media_identity_unavailable", "media_source_changed"]) for (const stage of ["catalog", "content", "transfer"]) {
+    const value = await mediaFixture(t);
+    if (stage === "catalog") value.client.mediaAssets = async () => { throw new NativeApiError(409, code, false); };
+    if (stage === "content") value.client.mediaContent = async () => { throw new NativeApiError(409, code, false); };
+    if (stage === "transfer") { value.setAssets([{ ...value.asset, state: "pending" }]); value.client.transferMedia = async () => { value.calls.push(["transferMedia"]); throw new NativeApiError(409, code, false); }; }
+    const result: any = await value.run("wechat_media", { messageId: "media-message" });
+    assert.equal(result.details.status, "unavailable"); assert.equal(result.details.retryable, false); assert.equal(result.details.reason, code);
+    assert.equal(result.details.attachment?.path, undefined); assert.equal(result.content.some((part: any) => part.type === "image"), false);
+    assert.equal(value.calls.some(call => call[0] === "saveMedia"), false);
+    assert.equal(value.calls.filter(call => call[0] === "transferMedia").length, stage === "transfer" ? 1 : 0);
+  }
 });

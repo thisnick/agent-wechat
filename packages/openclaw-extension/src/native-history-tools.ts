@@ -8,6 +8,8 @@ import { ensureNativeHost } from "./native-host.ts";
 import { prepareNativeAttachment } from "./native-media.ts";
 import { getWeChatRuntime } from "./runtime.ts";
 import { resolveWeChatAccount } from "./types.ts";
+import { nativeRecallInfo } from "./native-recall-state.ts";
+import { nativeConfigurationKey } from "./native-secrets.ts";
 
 const pageSchema = { limit: { type: "integer", minimum: 1, maximum: 50, default: 20 }, cursor: { type: "string", maxLength: 8192, description: "Opaque nextCursor from the same tool and query; do not invent one." } };
 const names = ["wechat_history", "wechat_search", "wechat_message", "wechat_media"];
@@ -26,6 +28,8 @@ function threadId(value: unknown): string {
   return string(string(value, "thread ID").replace(/^(?:agent-)?wechat:(?:group:)?/i, ""), "thread ID");
 }
 function messageResult(message: NativeMessage, retrievalTool = "wechat_media") {
+  if (nativeRecallInfo(message)) return { id: message.id, threadId: message.threadId, serverId: message.serverId,
+    direction: message.direction, type: 10000, body: "[Message recalled]", status: "recalled", recall: nativeRecallInfo(message) };
   const isQuote = message.type === 49 && message.appMessageType === 57;
   const isForward = message.type === 49 && message.appMessageType === 19;
   const kind = isQuote ? "quote" : isForward ? "forwarded_history" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
@@ -55,6 +59,7 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
   if (!currentConfig()) return [];
   const selected = resolveWeChatAccount(currentConfig() as Record<string, unknown>);
   if (!selected?.native || !selected.enabled) return [];
+  const configurationKey = nativeConfigurationKey(selected.native);
   if (!archive && context.messageChannel !== "agent-wechat") return [];
   if (!archive && context.agentAccountId && context.agentAccountId !== selected.accountId) return [];
   if (!archive && context.deliveryContext?.channel === "agent-wechat" && context.deliveryContext.accountId && context.deliveryContext.accountId !== selected.accountId) return [];
@@ -88,7 +93,8 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
       const guard = () => {
         signal?.throwIfAborted(); context.assertInvocationCurrent?.();
         const cfg = currentConfig(); const account = resolveWeChatAccount(cfg as Record<string, unknown>);
-        if (!account?.enabled || !account.native || account.native.accountId !== selectedId || account.accountId !== selected.accountId) throw Error("WeChat account configuration changed; start a new turn");
+        if (!account?.enabled || !account.native || account.native.accountId !== selectedId || account.accountId !== selected.accountId
+          || nativeConfigurationKey(account.native) !== configurationKey) throw Error("WeChat account configuration changed; start a new turn");
         return { cfg: cfg!, account, native: account.native };
       };
       const { cfg, account, native } = guard();
@@ -137,29 +143,44 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
         if (message.id !== messageId || message.accountId !== accountId || (!archive && message.threadId !== conversation) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("Message is outside the permitted conversation or sender policy");
         result = messageResult(message, archive ? "wechat_archive_media" : "wechat_media");
         if (action === "media") {
+          const checkRecall = async () => {
+            guard(); const latest = await client.message(accountId, messageId!); guard();
+            if (latest.id !== message.id || latest.accountId !== accountId || latest.threadId !== message.threadId || latest.serverId !== message.serverId) throw Error("Native media message identity changed");
+            if (nativeRecallInfo(latest)) throw new NativeApiError(410, "message_recalled", false);
+            if (message.quote) {
+              const quote = await client.quotedMessage(accountId, message.id); guard();
+              if (quote.state === "recalled" || quote.message && nativeRecallInfo(quote.message)) throw new NativeApiError(410, "message_recalled", false);
+            }
+          };
           let prepared: Awaited<ReturnType<typeof prepareNativeAttachment>>;
           try { prepared = await prepareNativeAttachment({ client, account, message, core, cfg,
             quality: quality as typeof qualities[number], download: args.download !== false, waitMs: 2000, signal, assertCurrent: guard,
             allowQuotedMessage: async original => original.direction === "outgoing" || await allowed(original.senderId ?? undefined),
             beforeMediaAccess: async () => {
               if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
+              await checkRecall();
             } }); }
           catch (error) {
             guard();
             if (!(error instanceof NativeApiError)) throw error;
             const details = { messageId: message.id, threadId: message.threadId,
-              status: error.retryable ? "pending" : ["unsupported_profile", "unsupported_media", "unsupported_media_variant"].includes(error.code) ? "unsupported" : "unavailable",
+              status: error.code === "message_recalled" ? "recalled" : error.retryable ? "pending" : ["unsupported_profile", "unsupported_media", "unsupported_media_variant"].includes(error.code) ? "unsupported" : "unavailable",
               retryable: error.retryable, reason: error.code };
             return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
           }
           guard();
           if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
-          const details = { messageId: message.id, threadId: message.threadId, status: prepared.pending ? "pending" : prepared.attachment?.status ?? prepared.quote?.state ?? "unsupported",
+          const details = { messageId: message.id, threadId: message.threadId, status: prepared.reason === "message_recalled" ? "recalled" : prepared.pending ? "pending" : prepared.attachment?.status ?? prepared.quote?.state ?? "unsupported",
             attachment: prepared.attachment, quote: prepared.quote, variant: prepared.variant, jobId: prepared.jobId, retryable: prepared.retryable ?? false, reason: prepared.reason, body: prepared.body };
           const image = prepared.suppliedAssets?.find(asset => asset.role === "model_image");
           const output = image ? await imageResultFromFile({ label: "WeChat attachment", path: image.path, extraText: JSON.stringify(details), details })
             : { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
           guard();
+          try { await checkRecall(); } catch (error) {
+            if (!(error instanceof NativeApiError) || error.code !== "message_recalled") throw error;
+            const details = { messageId: message.id, threadId: message.threadId, status: "recalled", reason: "message_recalled", retryable: false };
+            return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
+          }
           return output;
         }
       } else {

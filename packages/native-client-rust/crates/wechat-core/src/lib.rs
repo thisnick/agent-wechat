@@ -6,6 +6,7 @@ pub mod media_types;
 mod pagination;
 mod profile;
 mod quotes;
+mod recalls;
 pub use media_types::*;
 mod runtime;
 pub use pagination::*;

@@ -1,5 +1,5 @@
 //! Online views retain membership/order independently of mutable official files.
-use crate::{profile::normalized_message, Core};
+use crate::Core;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -185,7 +185,7 @@ impl Core {
                 let id = crate::message_id(&message.id)?;
                 message.peer = Some(peers.get(&id).context("invalid_cursor")?.clone());
                 let value =
-                    normalized_message(account, message, own.as_deref(), reader.generation())?;
+                    self.normalize_recalled(account, message, own.as_deref(), reader.generation())?;
                 encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&value)?.len());
                 if encoded_bytes > 32 * 1024 * 1024 {
                     bail!("pagination_capacity_exceeded");
@@ -372,7 +372,7 @@ impl Core {
                     (
                         page.items
                             .into_iter()
-                            .map(|m| normalized_message(account, m, own, reader.generation()))
+                            .map(|m| self.normalize_recalled(account, m, own, reader.generation()))
                             .collect::<Result<Vec<_>>>()?,
                         page.next_cursor,
                     )

@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 pub struct ProjectionState {
     pub pending_projection_batches: usize,
     pub pending_read_projections: usize,
+    pub pending_recall_projections: usize,
+    pub pending_message_recalls: usize,
     pub pending_cursor_projection: bool,
     pub pending_saved_login_projection: bool,
     pub pending_metadata_projections: bool,
@@ -34,12 +36,17 @@ impl ProjectionState {
             .is_some_and(|bytes| bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit));
         let recorded = received.is_some() && same_generation && projected && hash;
         let pending_projection_batches = store.pending_sync_count(account)?;
+        let pending_recall_projections = store.pending_recall_projections(account)?;
+        let pending_message_recalls = store.pending_message_recalls(account)?;
         // An older received cursor without a publication receipt cannot prove
         // that its ordinary files and official cursor reached the same barrier.
         let pending_cursor_projection =
             store.pending_cursor_projection(account)? || (received.is_some() && !recorded);
-        let sync_checkpoint_projected =
-            recorded && !pending_cursor_projection && pending_projection_batches == 0;
+        let sync_checkpoint_projected = recorded
+            && !pending_cursor_projection
+            && pending_projection_batches == 0
+            && pending_recall_projections == 0
+            && pending_message_recalls == 0;
         let accepted_state = store.runtime(account, "saved-login-accepted-state-generation")?;
         let projected_state = store.runtime(account, "saved-login-projected-state-generation")?;
         let actual_state = store.runtime(account, "account-state")?;
@@ -57,6 +64,8 @@ impl ProjectionState {
         Ok(Self {
             pending_projection_batches,
             pending_read_projections: store.pending_reads(account)?,
+            pending_recall_projections,
+            pending_message_recalls,
             pending_cursor_projection,
             pending_saved_login_projection,
             pending_metadata_projections: !store.pending_metadata(account)?.is_empty(),
@@ -66,7 +75,11 @@ impl ProjectionState {
             sync_checkpoint_projected,
             sync_checkpoint_evidence: if sync_checkpoint_projected {
                 "durable_projection_receipt"
-            } else if pending_cursor_projection || pending_projection_batches != 0 {
+            } else if pending_cursor_projection
+                || pending_projection_batches != 0
+                || pending_recall_projections != 0
+                || pending_message_recalls != 0
+            {
                 "pending"
             } else {
                 "unverified"
@@ -76,6 +89,8 @@ impl ProjectionState {
     pub fn pending(&self) -> bool {
         self.pending_projection_batches != 0
             || self.pending_read_projections != 0
+            || self.pending_recall_projections != 0
+            || self.pending_message_recalls != 0
             || self.pending_cursor_projection
             || self.pending_saved_login_projection
             || self.pending_metadata_projections

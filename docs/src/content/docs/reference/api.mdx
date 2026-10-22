@@ -15,6 +15,7 @@ The native API is versioned under `/v1`. Except the minimal `/health` liveness e
 | Quote resolution | Account `GET /messages/{id}/quote`; parent-bound local original lookup and embedded-content fallback |
 | Exact metadata | Account `POST /contacts/lookup`, `GET /groups/{id}/lookup`; refresh/sync operations retain their own checkpoints |
 | Sends | Account `POST /sends`, `GET /sends/{id}`, `GET /sends/by-idempotency-key`, `POST /sends/{id}/cancel` |
+| Message recalls | Account `POST /messages/{id}/recall`; durable own-message operation, inspected with `GET /operations/{id}` |
 | Media | Account `POST /uploads`, message `GET /media`, `POST /media-transfers`, asset `GET /media/{id}/content` |
 | Durable jobs | Account `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `/retry`, `POST /media-writeback/repair` |
 | Thread reads | Account `POST /threads/{id}/read-state` with only `expectedVersion`; clears the whole thread through a frozen boundary and reports its native cross-device notification outcome |
@@ -42,5 +43,49 @@ Resource cursors bind the account, query and retained view; an expired cursor re
 `GET /v1/accounts/{account}/messages/{id}/quote` requires account `read` scope. The stored parent determines the conversation; there is no caller-selected thread/server ID. It returns `{ accountId, messageId, threadId, state, message, embeddedText?, embeddedImage?, senderId? }`. States are `resolved` (a normalized original text/image), `embedded` (original absent, quote carries text or image metadata), `missing`, `ambiguous`, `invalid` or `unsupported`. `message` is null except when resolved. Embedded image metadata itself is never returned; `embeddedImage` signals that the parent quote has an image descriptor. Retrieve/download it through the existing parent message `/media` and `/media-transfers` routes. Quote-owned media has `officialWriteback: "unsupported"`; its verified bytes stay in the daemon sidecar.
 
 Normalized messages add optional `appMessageType` and `quote: { serverId, type }`. A quote's `body` is the current sender's comment. Forwarded bundles expose bounded rendered history in `body`. Message lists/search do not resolve quotes or download media; follow the parent quote endpoint explicitly.
+
+## Message recalls
+
+`POST /v1/accounts/{account}/messages/{id}/recall` requires account `send` scope,
+an `Idempotency-Key` header and `{ "serverId": "18446744073709551615" }`.
+Use the original message's opaque `id` and exact decimal-string `serverId` from
+history or a verified send receipt. The daemon resolves the conversation and
+checks that the stored message was sent by the account. A numeric JSON server
+ID, missing identity, provisional send or mismatched target cannot authorize a
+recall.
+
+The response is HTTP 202 with an operation of kind `message_recall`. Inspect
+`GET /v1/accounts/{account}/operations/{operationId}` with the same account's
+`send` scope. Successful results have state `succeeded` and status `recalled` or
+`already_recalled`. Definitive refusal is `failed`; an uncertain remote outcome
+is `needs_review`. Results retain the target IDs, `remoteOutcome`, `serviceCode`
+and `profileProjection`. An accepted remote reply with pending local repair
+does not authorize another network request. Reusing the same key/target returns
+the retained operation; another key cannot bypass its target claim. Operations
+cannot be cancelled after submission; DELETE returns HTTP 409
+`operation_cannot_cancel`. Closing the request or stopping a watcher leaves
+server-owned work running. WeChat determines whether a message remains eligible.
+Target claims belong to one canonical registered account; independent profile
+copies and separate daemons do not share them.
+
+Recalls observed from another party or another device use the same durable
+marker as confirmed outgoing recalls. Reads preserve the target's IDs and order,
+return `type: 10000`, `body: "[Message recalled]"`, empty media/mentions and
+optional `recall: { observedAt, recalledAt? }`. A zero or unknown native recall
+time is omitted. Each account/thread/server identity emits one
+`message.recalled` event with `threadId`, `serverId`, `observedAt`, optional
+`messageId`/`recalledAt`, and `origin`; the target may arrive after its recall.
+This control does not create a new ordinary incoming message.
+
+Recalled media returns HTTP 410 `message_recalled`, including previously cached
+assets. Quote resolution returns state `recalled` with `message: null` when the
+parent or quoted target is recalled; it does not fall back to embedded original
+content. These results are terminal. Storage retention and backup boundaries are
+described in [Data and Storage](../../operations/data/).
+
+An old unbound attachment handle returns HTTP 409 `media_identity_unavailable`;
+a handle whose nonrecalled source changed returns HTTP 409 `media_source_changed`.
+Both are terminal for that handle. Rediscover the message's media to obtain its
+current source-bound handle; do not retry the old transfer indefinitely.
 
 See the [CLI workflows](/getting-started/cli/commands/) and public source contracts in [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api). The old container `/api` and UI operations are removed.

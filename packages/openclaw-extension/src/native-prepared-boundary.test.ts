@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { NativeMessage } from "@agent-wechat/shared";
 import { NativeConsumerState } from "./native-consumer-state.ts";
-import { nativeDispatchManifest, observeNativeModelCall, observeNativePreparedInput, registerNativePreparedBoundary, trackNativePreparedText } from "./native-prepared-boundary.ts";
+import { invalidateNativePreparedInputs, nativeDispatchManifest, observeNativeModelCall, observeNativePreparedInput, registerNativePreparedBoundary, trackNativePreparedText } from "./native-prepared-boundary.ts";
 
 function fixture(t: any, options: { access?: boolean; policy?: "never" | "on_model_dispatch" } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-boundary-"));
@@ -50,4 +50,13 @@ test("missing host grant and shutdown cannot produce a read receipt", t => {
 test("never read policy retains the exact model receipt without local read projection", t => {
   const f = fixture(t, { policy: "never" }); observeNativePreparedInput(f.input, f.context); observeNativeModelCall(f.model, f.context);
   assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.state.get("m")?.readPending, false);
+});
+test("recall removes a pending model proof only for the matching account and selected input", t => {
+  const f = fixture(t); observeNativePreparedInput(f.input, f.context);
+  invalidateNativePreparedInputs("other-account", ["m"]); invalidateNativePreparedInputs("a", ["unrelated"]);
+  observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, f.manifest.runId);
+  const second = fixture(t); observeNativePreparedInput(second.input, second.context);
+  invalidateNativePreparedInputs("a", ["m"]);
+  observeNativeModelCall(second.model, second.context); assert.equal(second.state.get("m")?.runId, undefined);
+  assert.equal(second.state.get("m")?.readPending, undefined);
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { NativeOperation, NativeWeChatClient } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
-import { submitNativeText } from "./native-send.ts";
+import { nativeOutboundDelivery, submitNativeText, type NativeOutboundDelivery } from "./native-send.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
 const operations = new Map<string, { client: NativeWeChatClient; accountId: string; operation: NativeOperation }>();
 const terminal = new Set(["succeeded", "failed", "cancelled", "expired", "rejected", "needs_login"]);
@@ -35,10 +35,11 @@ export async function nativeLoginWait(accountId: string, timeoutMs = 30000, stop
   }
   return { connected: false, message: "Native login remains pending; wait on the same operation rather than starting a replacement" };
 }
-export async function sendNativeText(account: ResolvedWeChatAccount, threadId: string, text: string, key = randomUUID()): Promise<string> {
+export async function sendNativeText(account: ResolvedWeChatAccount, threadId: string, text: string, key = randomUUID()): Promise<NativeOutboundDelivery> {
   const native = account.native!; const { client } = await ensureNativeHost(native);
   const send = await submitNativeText(client, native.accountId, threadId, text, key);
-  return `agent-wechat-native:${native.accountId}:${send.id}`;
+  return nativeOutboundDelivery(client, native.accountId, threadId, send.localMessageId ? [send.localMessageId] : [],
+    { sendId: send.id, state: send.state, serverIds: send.serverId ? [send.serverId] : undefined });
 }
 
 export function createNativeLoginTool(account: ResolvedWeChatAccount) {

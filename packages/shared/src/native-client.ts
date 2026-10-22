@@ -106,7 +106,17 @@ export class NativeWeChatClient {
     if (key != null && (!key || key.length > 200 || /[\r\n]/.test(key))) throw new Error("Invalid login idempotency key");
     return this.request(`v1/accounts/${id(accountId)}/auth/login`, { method: "POST", headers: key ? { "Idempotency-Key": key } : undefined, body: JSON.stringify(options) });
   }
-  operation(accountId: string, operationId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/operations/${id(operationId)}`); }
+  operation(accountId: string, operationId: string, signal?: AbortSignal): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/operations/${id(operationId)}`, { signal }); }
+  /** Submit once with a stable key; inspect the returned operation after uncertainty. */
+  async recallMessage(accountId: string, messageId: string, serverId: string, idempotencyKey: string, signal?: AbortSignal): Promise<NativeOperation> {
+    if (typeof serverId !== "string" || !/^[1-9]\d{0,19}$/.test(serverId) || BigInt(serverId) > 18446744073709551615n) throw new Error("Invalid exact recall server ID");
+    if (typeof idempotencyKey !== "string" || !idempotencyKey || idempotencyKey.length > 200 || /[\r\n]/.test(idempotencyKey)) throw new Error("Invalid recall idempotency key");
+    const operation = await this.request<NativeOperation>(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/recall`, {
+      method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ serverId }), signal,
+    });
+    if (!operation || operation.accountId !== accountId || operation.kind !== "message_recall" || typeof operation.id !== "string" || !operation.id || typeof operation.state !== "string") throw new Error("Native recall operation identity is invalid");
+    return operation;
+  }
   cancelOperation(accountId: string, operationId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/operations/${id(operationId)}`, { method: "DELETE" }); }
   async qr(accountId: string, operationId: string, generation?: number): Promise<Uint8Array> {
     if (generation != null && (!Number.isSafeInteger(generation) || generation < 1)) throw new Error("Invalid QR generation");

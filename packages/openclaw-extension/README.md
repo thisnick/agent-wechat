@@ -66,6 +66,28 @@ The model-handoff compatibility path requires the operator's explicit host permi
 
 Images exceeding the host's bounded representation, or formats requiring conversion, receive a separately stored JPEG still preview using the public SDK image processor. The original stays intact; both hashes are recorded and the model input labels the preview. Prepared images fit within 5 MiB and at most 1200 pixels per side (or a smaller configured limit). Files and videos can be supplied as available local references; this does not claim their contents were analyzed. Voice retains its verified file and includes configured transcription output or an explicit unavailable status. A placeholder does not confirm a model handoff under `on_model_dispatch`; default `on_inbound` can mark a thread after successfully handling an explicit expired/unsupported status.
 
+## Message recalls
+
+`wechat_recall` recalls a message sent by the configured WeChat account in the current conversation. Pass `{"messageId":"<opaque stored ID>","serverId":"<exact decimal server ID>"}` using both values from the same verified send receipt or `wechat_history` entry. The server ID stays a string, including values larger than JavaScript's safe integer range. A local opaque ID can be reused, so an old reference with a different server ID is rejected. Send/job/operation IDs cannot replace a stored message ID.
+
+The tool uses OpenClaw's trusted account, conversation and requester context. It accepts no account or thread selector, rechecks normal requester policy, and requires an own outgoing message; owner status and archive access do not widen recall permission. The daemon makes the final eligibility decision. The account token requires `read` and `send` permission. Normal OpenClaw tool policy can disable `wechat_recall`.
+
+An exact recalled placeholder may lose its original sender attribution in the official profile. Repeating the tool with that placeholder inspects its retained recalled state through the daemon and cannot start another native recall; the result labels this `action: "inspect_recalled"`.
+
+Every target gets a stable idempotency key and a durable operation. Only an exact successful receipt reports `recalled` or `already_recalled`. Rejections, `pending` and `needs_review` remain explicit. A lost response or cancellation does not cause another automatic POST or cancel the daemon's action. Retain the reported operation ID and key for inspection; do not submit a replacement action to resolve uncertainty.
+
+Native text, image, file, video and voice delivery results return actual stored message IDs after account/thread/server-identity verification. `meta.messageIds` preserves each verified receipt for split voice notes, alongside the durable send/job ID. Accepted media jobs may publish their stored receipts slightly later; the adapter inspects the same job for up to ten seconds and requires every accepted voice chunk's receipt. If stored receipts remain unavailable, the result leaves `messageId` empty and reports `receiptState: "needs_review"` with `retryable: false`; acceptance is not a reason to resend. Failed, partial and uncertain jobs do not enter that receipt wait.
+
+Incoming `message.recalled` events are consumed independently of slow media and model work, including recalls of own or unmentioned messages. The consumer persists the event cursor together with a tombstone, removes recalled body/quote content and attachment references from its custody records, and invalidates pending model proofs. Tombstones survive restart and suppress a late original. Attachment retrieval, transcription, model dispatch and later automatic reply delivery recheck the selected messages so late work cannot reinsert recalled input. A quote's unrelated comment remains available after its recalled original is removed.
+
+If a source-local message ID later names a different exact thread/server target, the consumer admits that new message with a separate host turn and reply key. Completion callbacks, media results and read receipts captured for the old target cannot overwrite the new custody record.
+
+Stored-history tools return a recalled placeholder; media tools return terminal `status: "recalled"`, `reason: "message_recalled"`, `retryable: false` without attachment paths or image blocks. Recall does not erase an already submitted model input, an existing OpenClaw transcript, a completed action, or attachment bytes retained by OpenClaw's storage policy. An affected in-flight turn is held for review and its later automatic reply is suppressed; the plugin does not claim retroactive transcript correction.
+
+Old media handles whose stored source changed, or whose source identity cannot be verified, return terminal `unavailable` with `media_source_changed` or `media_identity_unavailable`. They expose no cached path and are not retried automatically. Fresh stored-message discovery can select the intended current message and its bound cached asset without resending a WeChat message.
+
+`node scripts/native-recall-model-smoke.mjs` builds the actual plugin and runs the pinned Gateway against synthetic native HTTP/SSE and a local provider. It checks registered tool discovery and exact-target execution, stable repeated keys, another thread's rejection, recall intake while provider/media requests are blocked, late-output suppression, out-of-order recall custody and one dispatch for a new exact occupant of a reused source ID. It makes no real account or native protocol exchange.
+
 ## Stored-history tools
 
 The agent can look beyond the recent inbound buffer using the selected native account's local profile:

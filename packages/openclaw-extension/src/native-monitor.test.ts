@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeApiError, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
 import { NativeConsumerState } from "./native-consumer-state.ts";
-import { dispatchNativeMessage, nativeWasMentioned, projectNativeRead, startNativeReadPump } from "./native-monitor.ts";
+import { acceptNativeEvent, dispatchNativeMessage, nativeWasMentioned, projectNativeRead, startNativeReadPump, synchronizeNativeEvents } from "./native-monitor.ts";
 import { resolveWeChatAccount, type WeChatNativeConfig } from "./types.ts";
 function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?: string; readPolicy?: WeChatNativeConfig["readPolicy"] } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-model-harness-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -25,7 +25,8 @@ function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?:
     reply: { resolveEnvelopeFormatOptions: () => ({}), formatAgentEnvelope: ({ body }: any) => body, finalizeInboundContext: (ctx: any) => ctx,
       dispatchReplyWithBufferedBlockDispatcher: async (params: any) => { runs.push(params); params.replyOptions.onPreparedAgentRunStart?.("run_1"); } },
   } };
-  const client = { sendText: async () => ({ id: "send_1", state: "accepted" }) } as unknown as NativeWeChatClient;
+  const client = { sendText: async () => ({ id: "send_1", state: "accepted" }),
+    message: async (_account: string, id: string) => state.get(id)!.message } as unknown as NativeWeChatClient;
   return { cfg, account, state, message, core, client, runs, createPipeline: (() => ({ onModelSelected: () => {} })) as any };
 }
 test("structured self mentions use exact facts, unknown and display text do not activate", t => {
@@ -39,7 +40,7 @@ test("group mention gate runs before model dispatch and leaves ignored messages 
 test("prepared model harness records exact input custody and read projection separately", async t => {
   const value = fixture(t, { readPolicy: "on_model_dispatch" }); assert.equal(await dispatchNativeMessage(value), "completed");
   assert.equal(value.runs.length, 1); assert.equal(value.state.get("m1")?.runId, "run_1"); assert.equal(value.state.get("m1")?.readPending, true);
-  assert.equal(value.runs[0].ctx.MessageSid, "wechat-native:a:m1");
+  assert.match(value.runs[0].ctx.MessageSid, /^wechat-native:a:m1:[a-f0-9]{64}$/);
 });
 test("catchup/import messages are not new automatic model turns or read projections", async t => {
   for (const origin of ["catchup", "import", "unknown"]) { const value = fixture(t, { origin }); assert.equal(await dispatchNativeMessage(value), "ignored"); assert.equal(value.runs.length, 0); }
@@ -218,6 +219,7 @@ test("group attachments buffered before a mention survive restart and retain ori
   }
   assert.deepEqual(prepared, []); assert.equal(value.runs.length, 0);
   const state = new NativeConsumerState(dirname(value.state.file), "s", "a");
+  value.client.message = async (_account, id) => state.get(id)!.message;
   const trigger = { ...value.message, id: "trigger", type: 1, body: "What did we share?", mentions: { ...value.message.mentions, state: "known" as const, self: true } };
   state.accept("6", trigger, "live");
   assert.equal(await dispatchNativeMessage({ ...value, state, message: trigger, prepareAttachment }), "completed");
@@ -252,4 +254,168 @@ test("a pending historical attachment stays explicit without blocking the curren
   const trigger = { ...value.message, id: "trigger", type: 1, body: "mention", mentions: { ...value.message.mentions, state: "known" as const, self: true } }; value.state.accept("2", trigger, "live");
   assert.equal(await dispatchNativeMessage({ ...value, message: trigger, prepareAttachment: async ({ message }) => ({ body: message.type === 3 ? "[image pending]" : "current", pending: message.type === 3 }) }), "completed");
   assert.match(value.runs[0].ctx.BodyForAgent, /image pending/); assert.deepEqual(value.runs[0].ctx.Attachments, []); assert.equal(value.runs[0].ctx.MediaPath, undefined);
+});
+
+function deferred<T>() { let resolve!: (value: T) => void, reject!: (reason?: unknown) => void; const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; }
+const recallEvent = (message: NativeMessage, cursor = "2") => ({ cursor, kind: "message.recalled", createdAt: "2026-10-21T12:00:00Z",
+  data: { threadId: message.threadId, serverId: message.serverId!, observedAt: "2026-10-21T12:00:00Z", origin: "live" } });
+test("incoming recalls bypass self and group mention gates and invalidate custody before ACK", async t => {
+  for (const own of [true, false]) {
+    const value = fixture(t, { group: true }); value.message.direction = own ? "outgoing" : "incoming";
+    await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message));
+    assert.equal(value.state.cursor, "2"); assert.equal(value.state.get(value.message.id)?.message.body, "[Message recalled]");
+    assert.equal(await dispatchNativeMessage(value), "ignored"); assert.equal(value.runs.length, 0);
+  }
+  const value = fixture(t); await assert.rejects(acceptNativeEvent(value.client, "other-account", value.state, recallEvent(value.message)), /account boundary/);
+  assert.equal(value.state.cursor, "1");
+});
+test("a recall during attachment preparation cannot deliver a late file or start a model", async t => {
+  const value = fixture(t); value.message.type = 3;
+  const started = deferred<void>(), pending = deferred<any>();
+  const work = dispatchNativeMessage({ ...value, prepareAttachment: async () => { started.resolve(); return pending.promise; } });
+  await started.promise;
+  await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message));
+  pending.resolve({ body: "[Local file: /private/late.png]", mediaPath: "/private/late.png", pending: false });
+  assert.equal(await work, "ignored"); assert.equal(value.runs.length, 0); assert.equal(value.state.get(value.message.id)?.dispatchManifest, undefined);
+});
+test("a recall during voice transcription discards the late transcript", async t => {
+  const value = fixture(t); value.message.type = 34;
+  const started = deferred<void>(), pending = deferred<any>();
+  value.core.mediaUnderstanding = { transcribeAudioFile: async () => { started.resolve(); return pending.promise; } };
+  const work = dispatchNativeMessage({ ...value, prepareAttachment: async () => ({ body: "voice", pending: false,
+    attachment: { kind: "audio", status: "ready", filename: "voice.wav", path: "/private/late-voice.wav" } }) });
+  await started.promise; await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message));
+  pending.resolve({ text: "late private transcript" });
+  assert.equal(await work, "ignored"); assert.equal(value.runs.length, 0); assert.equal(value.state.get(value.message.id)?.message.body, "[Message recalled]");
+});
+test("a historical recall during media work lets the triggering mention retry with sanitized context", async t => {
+  const value = fixture(t, { group: true }); value.message.type = 3;
+  assert.equal(await dispatchNativeMessage(value), "ignored");
+  const trigger: NativeMessage = { ...value.message, id: "mention", serverId: "9007199254741000", type: 1, body: "current mention",
+    mentions: { ...value.message.mentions, state: "known", self: true } };
+  value.state.accept("2", trigger, "live");
+  const started = deferred<void>(), pending = deferred<any>();
+  const prepareAttachment: any = async ({ message }: any) => message.id === trigger.id ? { body: message.body, pending: false }
+    : (started.resolve(), pending.promise);
+  const work = dispatchNativeMessage({ ...value, message: trigger, prepareAttachment });
+  await started.promise; await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message, "3"));
+  pending.resolve({ body: "[Local file: /private/recalled-history.png]", pending: false });
+  assert.equal(await work, "pending"); assert.equal(value.runs.length, 0);
+  assert.equal(await dispatchNativeMessage({ ...value, message: trigger, prepareAttachment }), "completed");
+  assert.equal(value.runs.length, 1); assert.equal(value.runs[0].ctx.InboundHistory, undefined);
+  assert.ok(!value.runs[0].ctx.BodyForAgent.includes("recalled-history"));
+});
+test("recall intake can invalidate an in-flight model turn and suppress its later reply", async t => {
+  const value = fixture(t, { readPolicy: "on_model_dispatch" });
+  const started = deferred<any>(), finished = deferred<void>(); let sends = 0;
+  value.client.sendText = async () => { sends++; return { id: "must-not-send", state: "accepted" } as any; };
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+    value.runs.push(params); params.replyOptions.onPreparedAgentRunStart("run-before-recall"); started.resolve(params); await finished.promise;
+  };
+  const work = dispatchNativeMessage(value); const turn = await started.promise;
+  await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message));
+  await turn.dispatcherOptions.deliver({ text: "late automatic reply" });
+  assert.throws(() => turn.replyOptions.onPreparedAgentRunStart("late-run"), /invalidated/);
+  finished.resolve(); assert.equal(await work, "ignored"); assert.equal(sends, 0);
+  assert.equal(value.state.get(value.message.id)?.readPending, false);
+  assert.equal(value.state.get(value.message.id)?.dispatchManifest, undefined);
+});
+test("cancellation during a late reply's point-read cannot submit after the recheck returns", async t => {
+  const value = fixture(t); const abort = new AbortController(); let sends = 0;
+  value.client.sendText = async () => { sends++; return { id: "must-not-send", state: "accepted" } as any; };
+  value.client.message = async (_account, id) => { if (value.runs.length) abort.abort(); return value.state.get(id)!.message; };
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+    value.runs.push(params); await params.dispatcherOptions.deliver({ text: "late reply" });
+  };
+  assert.equal(await dispatchNativeMessage({ ...value, signal: abort.signal }), "needs_review"); assert.equal(sends, 0);
+  assert.equal(value.state.get(value.message.id)?.readPending, undefined);
+});
+test("cancellation during voice transcription cannot start a late model turn", async t => {
+  const value = fixture(t); const abort = new AbortController(); value.message.type = 34;
+  value.core.mediaUnderstanding = { transcribeAudioFile: async () => { abort.abort(); return { text: "Late transcript" }; } };
+  const prepareAttachment: any = async () => ({ pending: false, body: "Voice", attachment: { kind: "audio", status: "ready", path: "/synthetic/voice.wav", mime: "audio/wav" } });
+  assert.equal(await dispatchNativeMessage({ ...value, signal: abort.signal, prepareAttachment }), "needs_review");
+  assert.equal(value.runs.length, 0); assert.equal(value.state.get(value.message.id)?.readPending, undefined);
+});
+test("reconnect drains durable recall events before dispatching previously received originals", async t => {
+  const value = fixture(t); const acknowledgements: string[] = [];
+  value.client.events = async () => ({ items: [recallEvent(value.message)], nextCursor: "2" });
+  value.client.ack = async (_account, _consumer, cursor) => { acknowledgements.push(cursor); };
+  await synchronizeNativeEvents(value.client, "a", value.state);
+  assert.deepEqual(acknowledgements, ["2"]); assert.equal(await dispatchNativeMessage(value), "ignored"); assert.equal(value.runs.length, 0);
+});
+test("a delayed recalled attachment cannot discard a new exact message reusing its source ID", async t => {
+  const value = fixture(t, { readPolicy: "on_model_dispatch" }); value.message.type = 3;
+  const started = deferred<void>(), lateMedia = deferred<any>();
+  const prepareAttachment: any = async () => { started.resolve(); return lateMedia.promise; };
+  const workA = dispatchNativeMessage({ ...value, prepareAttachment }); await started.promise;
+  await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message, "2"));
+  const b: NativeMessage = { ...value.message, serverId: "9007199254741000", type: 1, body: "New exact message" };
+  value.client.message = async () => b;
+  await acceptNativeEvent(value.client, "a", value.state, { cursor: "3", kind: "message.committed", data: { messageId: b.id, threadId: b.threadId, origin: "live" }, createdAt: "2026-10-21T12:00:00Z" });
+  lateMedia.resolve({ body: "[Local file: /private/old-source.png]", pending: false }); assert.equal(await workA, "ignored");
+  assert.equal(value.state.get(b.id)?.state, "received"); assert.equal(value.state.get(b.id)?.message.body, b.body);
+  assert.equal(await dispatchNativeMessage({ ...value, message: b }), "completed");
+  value.state.accept("4", b, "live"); assert.equal(await dispatchNativeMessage({ ...value, message: b }), "needs_review");
+  assert.equal(value.runs.length, 1); assert.equal(value.runs[0].ctx.BodyForAgent, b.body);
+  assert.ok(!JSON.stringify(value.runs).includes("old-source"));
+});
+test("a delayed old media failure cannot overwrite a replacement already dispatched once", async t => {
+  const value = fixture(t); value.message.type = 3;
+  const started = deferred<void>(), lateMedia = deferred<any>();
+  const workA = dispatchNativeMessage({ ...value, prepareAttachment: async () => { started.resolve(); return lateMedia.promise; } }); await started.promise;
+  const b: NativeMessage = { ...value.message, serverId: "9007199254741000", type: 1, body: "Replacement after media failure" };
+  value.state.accept("2", b, "live"); value.client.message = async () => b;
+  assert.equal(await dispatchNativeMessage({ ...value, message: b }), "completed"); const revisionB = value.state.get(b.id)?.revision;
+  lateMedia.reject(Error("Old download failed")); assert.equal(await workA, "needs_review");
+  assert.equal(value.state.get(b.id)?.state, "completed"); assert.equal(value.state.get(b.id)?.revision, revisionB);
+  assert.equal(value.state.get(b.id)?.readPending, true); assert.equal(value.runs.length, 1);
+});
+test("late old model completion or failure cannot assign its receipt or state to a new occupant", async t => {
+  for (const fails of [false, true]) {
+    const value = fixture(t, { readPolicy: "on_model_dispatch" });
+    const started = deferred<any>(), finishA = deferred<void>();
+    value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+      value.runs.push(params);
+      if (params.ctx.BodyForAgent === value.message.body) { started.resolve(params); await finishA.promise; if (fails) throw Error("Old model failed"); }
+      else params.replyOptions.onPreparedAgentRunStart("replacement-run");
+    };
+    const workA = dispatchNativeMessage(value); const oldTurn = await started.promise;
+    if (!fails) await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message, "2"));
+    const b: NativeMessage = { ...value.message, serverId: "9007199254741000", body: "New model occupant" };
+    value.state.accept(fails ? "2" : "3", b, "live"); value.client.message = async () => b;
+    assert.equal(await dispatchNativeMessage({ ...value, message: b }), "completed"); const revisionB = value.state.get(b.id)?.revision;
+    assert.throws(() => oldTurn.replyOptions.onPreparedAgentRunStart("old-run"), /source identity changed/);
+    await assert.rejects(oldTurn.dispatcherOptions.deliver({ text: "Old reply must not send" }));
+    finishA.resolve(); assert.equal(await workA, fails ? "needs_review" : "ignored");
+    assert.equal(value.state.get(b.id)?.state, "completed"); assert.equal(value.state.get(b.id)?.revision, revisionB);
+    assert.equal(value.state.get(b.id)?.runId, "replacement-run"); assert.equal(value.state.get(b.id)?.readPending, true);
+    assert.equal(await dispatchNativeMessage({ ...value, message: b }), "needs_review"); assert.equal(value.runs.length, 2);
+  }
+});
+test("an old read completion cannot clear a replacement's new read receipt", async t => {
+  const value = fixture(t); value.state.update(value.message.id, { state: "completed", readPending: true });
+  const started = deferred<void>(), threads = deferred<any>(); let reads = 0;
+  value.client.threads = async () => { started.resolve(); return threads.promise; };
+  value.client.markRead = async () => { reads++; return { phoneNotification: { state: "accepted" } }; };
+  const reading = projectNativeRead(value.client, "a", value.state); await started.promise;
+  const b = { ...value.message, serverId: "9007199254741000", body: "New read owner" };
+  value.state.accept("2", b, "live"); value.state.update(b.id, { state: "completed", readPending: true });
+  threads.resolve({ items: [{ id: b.threadId, readStateVersion: "1" }], nextCursor: null, coverage: {}, sourceGeneration: "fixture" }); await reading;
+  assert.equal(value.state.get(b.id)?.readPending, true);
+  await projectNativeRead(value.client, "a", value.state); assert.equal(value.state.get(b.id)?.readPending, false); assert.equal(reads, 2);
+});
+test("a fresh exact occupant has a distinct host turn and reply key while duplicate custody stays stable", async t => {
+  const value = fixture(t); const keys: string[] = [];
+  value.client.sendText = async (_account, _thread, _text, key) => { keys.push(key); return { id: "reply", state: "accepted" } as any; };
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => { value.runs.push(params); await params.dispatcherOptions.deliver({ text: "Synthetic reply" }); };
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message, "2"));
+  const b = { ...value.message, serverId: "9007199254741000", body: "Fresh reply owner" };
+  value.state.accept("3", b, "live"); value.client.message = async () => b;
+  assert.equal(await dispatchNativeMessage({ ...value, message: b }), "completed");
+  assert.notEqual(value.runs[0].ctx.MessageSid, value.runs[1].ctx.MessageSid); assert.equal(new Set(keys).size, 2);
+  const manifestB = value.state.get(b.id)?.dispatchManifest;
+  value.state.accept("4", { ...b }, "live"); assert.equal(await dispatchNativeMessage({ ...value, message: b }), "needs_review");
+  assert.equal(value.state.get(b.id)?.dispatchManifest, manifestB); assert.equal(keys.length, 2);
 });

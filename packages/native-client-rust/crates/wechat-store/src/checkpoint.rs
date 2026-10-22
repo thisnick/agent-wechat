@@ -39,7 +39,7 @@ impl Store {
         self.control(account, |db| {
             let tx = db.transaction()?;
             let pending: i64 = tx.query_row(
-                "SELECT count(*) FROM apply_intents WHERE state!='projected'",
+                "SELECT (SELECT count(*) FROM apply_intents WHERE state!='projected')+(SELECT count(*) FROM message_recalls WHERE projection_state='pending')+(SELECT count(*) FROM outgoing_recalls WHERE phase IN ('queued','submitting','accepted'))",
                 [],
                 |r| r.get(0),
             )?;
@@ -93,7 +93,7 @@ impl Store {
                 if journal.is_none() && prior.as_deref()==Some(hash.as_bytes()) { return Ok(false); }
                 bail!("cursor publication generation changed");
             }
-            let pending:i64 = tx.query_row("SELECT count(*) FROM apply_intents WHERE state!='projected'", [], |r| r.get(0))?;
+            let pending:i64 = tx.query_row("SELECT (SELECT count(*) FROM apply_intents WHERE state!='projected')+(SELECT count(*) FROM message_recalls WHERE projection_state='pending')+(SELECT count(*) FROM outgoing_recalls WHERE phase IN ('queued','submitting','accepted'))", [], |r| r.get(0))?;
             if pending != 0 { bail!("cursor publication has unapplied commands"); }
             let received:Option<Vec<u8>> = tx.query_row("SELECT value FROM runtime WHERE key='received-cursor'", [], |r| r.get(0)).optional()?;
             let current = received.as_deref()==Some(expected_received);
@@ -125,6 +125,67 @@ mod tests {
     }
     fn hash() -> String {
         "ab".repeat(32)
+    }
+    #[test]
+    fn recall_obligations_block_both_cursor_admission_and_retirement() {
+        let (_dir, store) = fixture();
+        store.restore_received_cursor("one", b"received").unwrap();
+        store
+            .record_recall("one", "peer", "1", None, None, None, "live")
+            .unwrap();
+        assert!(!store
+            .stage_cursor_projection("one", b"received", b"journal")
+            .unwrap());
+        store
+            .finish_recall_projection("one", "peer", "1", "target_absent")
+            .unwrap();
+        assert!(store
+            .stage_cursor_projection("one", b"received", b"journal")
+            .unwrap());
+        store.begin_recall_projection("one", "peer", "1").unwrap();
+        assert!(store
+            .finish_cursor_projection("one", &hash(), b"projected", b"journal", b"received")
+            .is_err());
+        store
+            .finish_recall_projection("one", "peer", "1", "applied")
+            .unwrap();
+        store.control("one", |db| {
+            db.execute_batch("INSERT INTO operations VALUES('recall','message_recall','queued','{}','now','now'); INSERT INTO outgoing_recalls VALUES('recall','target','source','queued',x'01');")?;
+            Ok(())
+        }).unwrap();
+        for phase in ["queued", "submitting", "accepted"] {
+            store
+                .control("one", |db| {
+                    db.execute("UPDATE outgoing_recalls SET phase=?1", [phase])?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(store.pending_message_recalls("one").unwrap(), 1);
+            assert!(store
+                .finish_cursor_projection("one", &hash(), b"projected", b"journal", b"received")
+                .is_err());
+            assert_eq!(events(&store), 0);
+        }
+        store
+            .control("one", |db| {
+                db.execute("UPDATE outgoing_recalls SET phase='failed'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store
+            .finish_cursor_projection("one", &hash(), b"projected", b"journal", b"received")
+            .unwrap());
+        assert_eq!(events(&store), 1);
+        // A new publication is also refused before it creates a journal.
+        store
+            .control("one", |db| {
+                db.execute("UPDATE outgoing_recalls SET phase='accepted'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!store
+            .stage_cursor_projection("one", b"received", b"next journal")
+            .unwrap());
     }
     fn events(store: &Store) -> usize {
         store

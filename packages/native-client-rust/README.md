@@ -141,7 +141,7 @@ wx --data-dir /private/native-data store export --account copied \
 
 The destination must not exist and its parent must exist. Copies retain opaque regular-file bytes, WAL/SHM, unknown files, empty directories, modes, mtimes and safe internal relative symlinks. Before/after manifests detect observed source changes; they cannot prove an uncontrolled writer was absent. Unsupported links/special files, oversized copies and overlaps fail. Ownership/ACLs/xattrs and physical hardlink sharing are not preserved. No database conversion or trust refresh occurs.
 
-Exports refuse pending sync batches, cursor/saved-login publication, read updates, metadata receipts and accepted text/media projections. Saved-login receipts must match the exact accepted encrypted authorization generation. Available cached media whose ordinary-file writeback is partial, unsupported or unknown also requires an override, even when its history row is complete. `--allow-incomplete` explicitly copies only the current official files and reports each pending category with `incompleteCopy: true`; media cache gaps appear as `incompleteMediaWriteback`. A received cursor lacking a publication receipt for its exact sealed generation also requires this override. `syncCheckpointProjected: true` records that matching native publication receipt with no pending sync/cursor work; it does not prove stock-client acceptance or the state of separate metadata/read projections. Without that evidence the field is false and `syncCheckpointEvidence` distinguishes pending from unverified. Copying does not restore queued jobs, consumer receipts or the active coordinator. Use `jobs repair-writeback --limit 25` to reconcile already accepted/cached media into supported ordinary files without network transfers or resending; inspect blocked results before export. Keep the whole native durable root for recovery. A failure between import publication and registry commit can leave an unregistered directory; preserve it for inspection rather than deleting it or retrying over it.
+Exports refuse pending sync batches, cursor/saved-login publication, read updates, metadata receipts and accepted text/media projections. Saved-login receipts must match the exact accepted encrypted authorization generation. Available cached media whose ordinary-file writeback is partial, unsupported or unknown also requires an override, even when its history row is complete. `--allow-incomplete` explicitly copies only the current official files and reports each pending category with `incompleteCopy: true`; media cache gaps appear as `incompleteMediaWriteback`. A received cursor lacking a publication receipt for its exact sealed generation also requires this override. `syncCheckpointProjected: true` records that matching native publication receipt with no pending sync/cursor/recall work; it does not prove stock-client acceptance or the state of separate metadata/read projections. Without that evidence the field is false and `syncCheckpointEvidence` distinguishes pending from unverified. Copying does not restore queued jobs, consumer receipts or the active coordinator. Use `jobs repair-writeback --limit 25` to reconcile already accepted/cached media into supported ordinary files without network transfers or resending; inspect blocked results before export. Keep the whole native durable root for recovery. A failure between import publication and registry commit can leave an unregistered directory; preserve it for inspection rather than deleting it or retrying over it.
 
 Our profile leases exclude cooperating native operations across data roots. The unmanaged official app does not honor those leases. `--source-stopped` is an operator assertion, not automatic official-process detection.
 
@@ -212,10 +212,23 @@ The explicit offline binding commands require a private 16-byte MMKV format-key 
 wx --account test messages send filehelper --text "A clearly labeled test" \
   --idempotency-key unique-logical-send-id
 wx --account test messages send-status SEND_ID
+wx --account test messages recall msg_OPAQUE_ID --server-id EXACT_SERVER_ID
+wx --account test operations get OPERATION_ID
 wx --account test messages read THREAD_ID --expected-version OBSERVED_READ_STATE_VERSION
 ```
 
 Reuse an idempotency key only for the same destination and payload. A queued send is persisted before submission. Accepted results require matching destination/client identity and a full server ID. Restart during submission becomes `needs_review`; no automatic resend follows an uncertain result. The same logical key returns the same intent, or a conflict for a changed payload. Supported accepted-send rows and media caches use durable projection receipts; unsupported bindings remain explicit gaps.
+
+Recalls require the exact opaque message ID and decimal-string server ID from
+history or a verified send receipt. The daemon admits one own-message attempt,
+returns a durable `message_recall` operation and lets WeChat decide eligibility.
+The CLI persists the target IDs and key before submission. An uncertain result
+exits with code 8; another key cannot bypass its target claim. Incoming recalls commit an
+account/thread/server marker before official projection, keep IDs/order and
+emit one `message.recalled` event. Recalled message/quote/media reads suppress
+original content, while encrypted journals, retained files and backups remain
+available for explicit recovery. Pending or uncertain recall work blocks a
+complete profile checkpoint/export. See the [API and storage contract](../../docs/src/content/docs/reference/api.mdx#message-recalls).
 
 Read-state changes mark the whole thread through its latest observed message and send one native cross-device notification. This can clear earlier unread messages the model did not consume. The compare-and-swap version includes the observed profile generation, so an intervening source change causes a conflict. Event delivery ACKs never change read state. An uncertain native notification remains recorded without automatic resubmission. A prepared-model handoff needs a positively correlated callback; accepted/enqueued tool execution is not evidence of that handoff.
 

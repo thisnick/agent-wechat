@@ -50,6 +50,7 @@ jobs:
       - run: node scripts/native-model-smoke.mjs
       - run: node scripts/native-media-model-smoke.mjs
       - run: node scripts/native-history-model-smoke.mjs
+      - run: node scripts/native-recall-model-smoke.mjs
       - run: node scripts/native-archive-tools-smoke.mjs
 
   package:

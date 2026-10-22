@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 binary=str(pathlib.Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     root=pathlib.Path(temporary);token=root/"token";token.write_text("fixture-token-"*4);token.chmod(0o600)
-    config=root/"client.toml"; state={"posts":0,"login_posts":0,"cancelled":0,"mode":"accepted","media_transfers":0,"official_posts":[],"official_first":False}
+    config=root/"client.toml"; state={"posts":0,"login_posts":0,"cancelled":0,"mode":"accepted","media_transfers":0,"official_posts":[],"official_first":False,"recall_posts":0,"recall_mode":"succeeded","recall_operations":{},"recall_drop":False,"recall_wrong_post":False,"recall_wrong_get":False}
     content={"thumbnail":b"synthetic-thumbnail","original":b"synthetic-original"}
     def asset(name):return {"id":name,"state":"available","variant":name,"actualVariant":name,"sha256":hashlib.sha256(content[name]).hexdigest(),"byteLength":len(content[name])}
     class Fixture(BaseHTTPRequestHandler):
@@ -24,6 +24,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
                 assert "generation=1" in self.path
                 return self.reply(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII="),kind="image/png")
             if path.endswith("/operations/login-fixture"):return self.reply({"id":"login-fixture","state":"awaiting_scan","result":{"qrAvailable":True,"qrGeneration":1}})
+            if "/operations/recall-" in path:
+                operation=state["recall_operations"][path.split("/")[-1]]
+                return self.reply({**operation,"id":"wrong-operation"} if state["recall_wrong_get"] else operation)
             if path.endswith("/messages/m"):return self.reply({"id":"m","threadId":"filehelper"})
             if path.endswith("/messages/m/media"):return self.reply({"items":[asset("thumbnail"),asset("original")]})
             if "/media/" in path and path.endswith("/content"):return self.reply(content[path.split("/")[-2]],kind="image/png")
@@ -36,6 +39,19 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if path.endswith("/read-state"):
                 assert body == {"expectedVersion":"fixture-version"}
                 return self.reply({"readScope":"thread","phoneNotification":{"state":"accepted"}})
+            if path.endswith("/recall"):
+                assert set(body)=={"serverId"} and isinstance(body["serverId"],str)
+                key=self.headers.get("Idempotency-Key");assert key
+                receipts=[json.loads(p.read_text()) for p in (root/"receipts").glob("*.json")]
+                assert any(r["kind"]=="message_recall" and r["idempotencyKey"]==key and r["state"]=="submitting" for r in receipts),"recall receipt was not durable before submission"
+                state["recall_posts"]+=1
+                operation_id="recall-"+hashlib.sha256(key.encode()).hexdigest()[:16]
+                operation=state["recall_operations"].setdefault(operation_id,{"id":operation_id,"accountId":"a","kind":"message_recall","state":state["recall_mode"],"result":{"messageId":path.split("/")[-2],"serverId":body["serverId"],"status":"needs_review" if state["recall_mode"]=="needs_review" else "recalled"}})
+                if state["recall_drop"]:
+                    state["recall_drop"]=False;self.close_connection=True;return
+                reply={**operation,"state":"queued"}
+                if state["recall_wrong_post"]:reply["result"]={**operation["result"],"serverId":"24"}
+                return self.reply(reply,202)
             if path.endswith("/sends"):
                 receipts=list((root/"receipts").glob("*.json"));assert receipts,"receipt was not durable before first request"
                 assert any(json.loads(p.read_text())["idempotencyKey"]==self.headers.get("Idempotency-Key") for p in receipts)
@@ -53,7 +69,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     env={k:v for k,v in os.environ.items() if not k.startswith("AGENT_WECHAT_")};env.update(HOME=str(root),XDG_CONFIG_HOME=str(root/"config"))
     args=[binary,"--json","--config",str(config),"--server",f"http://127.0.0.1:{server.server_port}","--token-file",str(token)]
     def run(*command,code=0):
-        result=subprocess.run(args+list(command),env=env,capture_output=True,text=True,timeout=10);assert result.returncode==code,(command,result.returncode,result.stdout,result.stderr);return json.loads(result.stdout or result.stderr)
+        result=subprocess.run(args+list(command),env=env,capture_output=True,text=True,timeout=10);assert result.returncode==code,(command,result.returncode,result.stdout,result.stderr)
+        structured=result.stdout or next((line for line in reversed(result.stderr.splitlines()) if line.startswith("{")), "")
+        return json.loads(structured)
     try:
         run("config","server","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
         for group in ["chats", "messages"]:
@@ -67,6 +85,27 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         run("messages","send","filehelper","--text","synthetic-text","--idempotency-key","fixture-send");assert state["posts"]==1
         run("messages","send","filehelper","--text","different","--idempotency-key","fixture-send",code=2);assert state["posts"]==1
         state["mode"]="needs_review";run("messages","send","filehelper","--text","uncertain","--idempotency-key","fixture-uncertain",code=8);assert state["posts"]==2
+        recalled=run("messages","recall","m","--server-id","18446744073709551615","--idempotency-key","fixture-recall")
+        assert recalled["state"]=="succeeded" and state["recall_posts"]==1
+        recall_receipt=json.loads(pathlib.Path(recalled["receiptPath"]).read_text());assert recall_receipt["operationId"]==recalled["id"] and recall_receipt["kind"]=="message_recall" and recall_receipt["messageId"]=="m" and recall_receipt["serverId"]=="18446744073709551615" and "threadId" not in recall_receipt
+        run("messages","recall","m","--server-id","18446744073709551615","--idempotency-key","fixture-recall");assert state["recall_posts"]==1
+        run("messages","recall","m","--server-id","9007199254740993","--idempotency-key","fixture-recall",code=2);assert state["recall_posts"]==1
+        for server_id in ["0","01","18446744073709551616"]:
+            run("messages","recall","m","--server-id",server_id,code=2)
+        assert state["recall_posts"]==1
+        missing_server=subprocess.run(args+["messages","recall","m"],env=env,capture_output=True,timeout=10);assert missing_server.returncode==2 and state["recall_posts"]==1
+        state["recall_mode"]="needs_review"
+        run("messages","recall","m2","--server-id","9007199254740993","--idempotency-key","fixture-recall-uncertain",code=8);assert state["recall_posts"]==2
+        run("messages","recall","m2","--server-id","9007199254740993","--idempotency-key","fixture-recall-uncertain",code=8);assert state["recall_posts"]==2
+        state["recall_mode"]="succeeded";state["recall_drop"]=True
+        run("messages","recall","m3","--server-id","23","--idempotency-key","fixture-recall-lost",code=3);assert state["recall_posts"]==3,"lost response must not cause automatic resubmission"
+        run("messages","recall","m3","--server-id","23","--idempotency-key","fixture-recall-lost");assert state["recall_posts"]==4
+        state["recall_wrong_post"]=True
+        run("messages","recall","m4","--server-id","23","--idempotency-key","fixture-recall-wrong-target",code=8);assert state["recall_posts"]==5
+        state["recall_wrong_post"]=False;state["recall_wrong_get"]=True
+        run("messages","recall","m5","--server-id","23","--idempotency-key","fixture-recall-wrong-poll",code=8);assert state["recall_posts"]==6
+        run("messages","recall","m","--server-id","18446744073709551615","--idempotency-key","fixture-recall",code=8);assert state["recall_posts"]==6
+        state["recall_wrong_get"]=False
         image=root/"image";result=run("messages","media","filehelper","m","--quality","best","--output",str(image));assert result["actualVariant"]=="original" and image.read_bytes()==content["original"]
         assert run("messages","media","filehelper","m","--quality","standard","--cached-only",code=9)["state"]=="not_cached"
         result=run("auth","login","--strategy","qr","--qr-refresh","manual","--detach","--idempotency-key","fixture-login")
@@ -93,5 +132,5 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         try:
             inspected=run("--local-profile","archive","profile","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
         finally:renamed.rename(token)
-        print("Native CLI fixture passed: pre-request send/login receipts, same-key lookup/conflict, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation, official-file login discovery/explicit server paths, and token-free offline inspection. No WeChat request.")
+        print("Native CLI fixture passed: pre-request send/recall/login receipts, same-key lookup/conflict, exact recall IDs, recall uncertainty/lost-response recovery without automatic resubmission, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation, official-file login discovery/explicit server paths, and token-free offline inspection. No WeChat request.")
     finally:server.shutdown();server.server_close()

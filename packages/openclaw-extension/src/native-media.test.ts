@@ -4,14 +4,17 @@ import { createHash } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { NativeMessage, NativeWeChatClient, MediaAsset } from "@agent-wechat/shared";
-import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
+import { NativeApiError, type NativeMessage, type NativeWeChatClient, type MediaAsset, type MediaJob } from "@agent-wechat/shared";
+import { prepareNativeAttachment, sendNativeAttachment, waitNativeMediaSendReceipts } from "./native-media.ts";
 import { resolveWeChatAccount } from "./types.ts";
 const account=resolveWeChatAccount({channels:{"agent-wechat":{backend:"native",native:{mode:"external",accountId:"a",endpoint:"http://127.0.0.1:6174",token: "synthetic-native-token-".repeat(3),consumerStateDir:"/unused"}}}})!;
 const message={id:"m",accountId:"a",threadId:"u",type:3} as NativeMessage;
 const bytes=new Uint8Array([71,73,70,56,57,97,1,2,3]);
 const hash=createHash("sha256").update(bytes).digest("hex");
 function asset(overrides:Partial<MediaAsset>={}):MediaAsset{return {id:"asset",accountId:"a",messageId:"m",kind:"image",variant:"original",actualVariant:"original",state:"available",contentType:"image/gif",byteLength:bytes.length,sha256:hash,filename:"animated.gif",expiresAt:null,reason:null,retryable:false,jobId:null,contentUrl:null,animationFrames:4,officialWriteback:"pending",...overrides};}
+function sendJob(overrides: Partial<MediaJob> = {}): MediaJob { return { id: "job", accountId: "a", kind: "send", state: "accepted", phase: "completed", attempts: 1,
+  cancelRequested: false, retryable: false, reason: null, assetId: null, sourceId: "upload", threadId: "filehelper", serverMessageId: "18446744073709551614",
+  completedBytes: bytes.length, totalBytes: bytes.length, result: {}, createdAt: "2026-10-21T12:00:00Z", updatedAt: "2026-10-21T12:00:01Z", ...overrides }; }
 test("native original media preserves exact bytes, managed path and explicit quality",async()=>{
   let saved=0;const client={mediaAssets:async()=>({items:[asset()]}),mediaContent:async()=>({bytes,contentType:"image/gif"})}as unknown as NativeWeChatClient;
   const result=await prepareNativeAttachment({client,account,message,core:{channel:{media:{saveMediaBuffer:async(buffer:Buffer,mime:string,_subdir:string,max:number,name:string)=>{saved++;assert.deepEqual(new Uint8Array(buffer),bytes);assert.equal(mime,"image/gif");assert.equal(name,"animated.gif");assert.equal(max,50*1024*1024);return{path:"/managed/animated.gif"};}}}}});
@@ -75,8 +78,109 @@ test("native attachment hash failure occurs before OpenClaw managed storage",asy
 });
 test("native outbound ordinary audio stays file and explicit voice stays voice",async t=>{
   const directory=await mkdtemp(join(tmpdir(),"native-audio-fixture-"));t.after(()=>rm(directory,{recursive:true,force:true}));const path=join(directory,"fixture.wav");await writeFile(path,bytes);
-  const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return{id:"job",state:"accepted"};}}as unknown as NativeWeChatClient;
+  const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return sendJob({result:{messageIds:["msg"],chunks:[{state:"accepted",serverMessageId:"18446744073709551614"}]}});}}as unknown as NativeWeChatClient;
   await sendNativeAttachment(client,account,"filehelper",path,false,"stable-key");await sendNativeAttachment(client,account,"filehelper",path,true,"stable-key");assert.deepEqual(kinds,["file","voice"]);assert.equal(submissions,2);
+});
+test("outbound media returns verified stored receipts and a recall during upload prevents submission", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-send-receipt-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "fixture.wav"); await writeFile(path, bytes);
+  let sent = 0, invalidated = false;
+  const client = { upload: async () => { invalidated = true; return { id: "upload" }; },
+    sendMedia: async () => { sent++; return sendJob({ result: { messageIds: ["msg_voice"] } }); },
+    message: async () => ({ id: "msg_voice", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
+  } as unknown as NativeWeChatClient;
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "stable", async () => {
+    if (invalidated) throw Error("input recalled during upload");
+  }), /input recalled/);
+  assert.equal(sent, 0);
+  const result = await sendNativeAttachment(client, account, "filehelper", path, false, "another-target");
+  assert.equal(sent, 1); assert.equal(result.messageId, "msg_voice"); assert.equal(result.meta.receiptState, "verified");
+  assert.equal(result.meta.serverId, "18446744073709551614"); assert.equal(result.meta.jobId, "job");
+});
+test("accepted media and split voice wait for complete stored receipts using only the same job reads", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-delayed-send-receipt-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "fixture.wav"); await writeFile(path, bytes);
+  for (const voice of [false, true]) {
+    let uploads = 0, sends = 0, polls = 0, reads = 0;
+    const chunks = voice ? [{ state: "accepted", serverMessageId: "9007199254740999" }, { state: "accepted", serverMessageId: "18446744073709551614" }] : undefined;
+    const initial = sendJob({ result: { nativeReceipt: { status: "server_accepted" }, uploadReadbackVerified: true, verifiedSha256: hash, ...(chunks ? { chunks } : {}) } });
+    const client = { upload: async () => { uploads++; return { id: "upload" }; }, sendMedia: async () => { sends++; return initial; },
+      job: async (a: string, id: string, signal: AbortSignal) => {
+        assert.equal(a, "a"); assert.equal(id, initial.id); assert.equal(signal.aborted, false); polls++;
+        return { ...initial, result: { ...initial.result as object, messageIds: polls === 1 ? voice ? ["msg_1"] : undefined : voice ? ["msg_1", "msg_2"] : ["msg_1"], profileProjection: polls === 1 ? "pending" : "complete" } };
+      }, message: async (a: string, id: string) => { reads++; assert.equal(polls, 2); assert.equal(a, "a");
+        return { id, accountId: a, threadId: "filehelper", direction: "outgoing", serverId: voice && id === "msg_1" ? "9007199254740999" : "18446744073709551614" }; },
+      retryJob: async () => assert.fail("Receipt waiting cannot retry a send"), transferMedia: async () => assert.fail("Receipt waiting cannot transfer media"),
+    } as unknown as NativeWeChatClient;
+    const result = await sendNativeAttachment(client, account, "filehelper", path, voice, "stable-delayed-receipt");
+    assert.equal(result.messageId, "msg_1"); assert.equal(result.meta.receiptState, "verified"); assert.equal(result.meta.jobId, initial.id);
+    assert.equal((result.meta.messageIds as unknown[]).length, voice ? 2 : 1);
+    assert.equal(uploads, 1); assert.equal(sends, 1); assert.equal(polls, 2); assert.equal(reads, voice ? 2 : 1);
+  }
+});
+test("missing or foreign receipt job reads remain explicit uncertainty without another send", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-missing-send-receipt-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "fixture.wav"); await writeFile(path, bytes);
+  for (const mismatch of ["unavailable", "id", "accountId", "threadId", "kind", "sourceId", "serverMessageId"]) {
+    let sends = 0, polls = 0;
+    const initial = sendJob(), client = { upload: async () => ({ id: "upload" }), sendMedia: async () => { sends++; return initial; },
+      job: async () => { polls++; if (mismatch === "unavailable") throw Error("Job read unavailable");
+        return { ...initial, [mismatch]: "another-target", result: { messageIds: ["foreign_message"], profileProjection: "complete" } }; },
+      message: async () => assert.fail("Unbound job receipts cannot be verified as this send"),
+    } as unknown as NativeWeChatClient;
+    const result = await sendNativeAttachment(client, account, "filehelper", path, false, "stable-missing-receipt");
+    assert.equal(result.messageId, ""); assert.equal(result.meta.receiptState, "needs_review"); assert.equal(result.meta.retryable, false);
+    assert.equal(result.meta.jobId, initial.id); assert.deepEqual(result.meta.messageIds, []); assert.match(String(result.meta.note), /do not resend/);
+    assert.equal(sends, 1); assert.equal(polls, 1);
+  }
+  const initial = sendJob(); let polls = 0;
+  assert.equal(await waitNativeMediaSendReceipts({ job: async () => { polls++; return initial; } } as unknown as NativeWeChatClient, "a", "filehelper", initial, false, 0), initial);
+  assert.equal(polls, 0, "A bounded receipt wait must preserve the incomplete job at its deadline");
+});
+test("failed partial and uncertain media jobs stop without polling or resubmission", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-terminal-send-receipt-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "fixture.wav"); await writeFile(path, bytes);
+  for (const state of ["failed", "partial", "needs_review"]) {
+    let sends = 0, polls = 0;
+    const client = { upload: async () => ({ id: "upload" }), sendMedia: async () => { sends++; return sendJob({ state, result: { messageIds: ["partial"] } }); },
+      job: async () => { polls++; assert.fail("A terminal send cannot be polled for more receipts"); },
+    } as unknown as NativeWeChatClient;
+    await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, true, "stable-terminal-receipt"), /requires inspection/);
+    assert.equal(sends, 1); assert.equal(polls, 0);
+  }
+  let polls = 0;
+  const client = { upload: async () => ({ id: "upload" }), sendMedia: async () => sendJob({ result: { messageIds: ["partial"],
+    chunks: [{ state: "accepted", serverMessageId: "9007199254740999" }, { state: "needs_review" }] } }),
+    job: async () => { polls++; assert.fail("Partial chunks cannot become another send attempt"); }, message: async () => assert.fail("Partial voice cannot be a full verified delivery"),
+  } as unknown as NativeWeChatClient;
+  const result = await sendNativeAttachment(client, account, "filehelper", path, true, "stable-partial-chunks");
+  assert.equal(result.meta.receiptState, "needs_review"); assert.equal(result.messageId, ""); assert.equal(polls, 0);
+});
+test("recalled media and a recalled download refresh remain terminal without another transfer", async () => {
+  for (const queued of [false, true]) {
+    let catalogs = 0, polls = 0, transfers = 0;
+    const client = { mediaAssets: async () => ({ items: [asset({ state: queued && catalogs++ === 0 ? "pending" : "recalled", jobId: "old-job" })] }),
+      job: async () => { polls++; return { id: "old-job", accountId: "a", assetId: "asset", kind: "download", state: "queued" }; },
+      transferMedia: async () => { transfers++; throw Error("must not transfer"); },
+    } as unknown as NativeWeChatClient;
+    const result = await prepareNativeAttachment({ client, account, message, core: {} });
+    assert.equal(result.reason, "message_recalled"); assert.equal(result.pending, false); assert.equal(result.retryable, false);
+    assert.equal(result.attachment, undefined); assert.equal(result.mediaPath, undefined); assert.equal(transfers, 0); assert.equal(polls, queued ? 1 : 0);
+  }
+});
+test("unbound or replaced media identities are terminal before saving and never refresh after transfer rejection", async () => {
+  for (const code of ["media_identity_unavailable", "media_source_changed"]) for (const stage of ["catalog", "content", "transfer"]) {
+    let catalogs = 0, downloads = 0, reads = 0;
+    const client = {
+      mediaAssets: async () => { catalogs++; if (stage === "catalog") throw new NativeApiError(409, code, false); return { items: [asset({ state: stage === "transfer" ? "pending" : "available" })] }; },
+      mediaContent: async () => { reads++; throw new NativeApiError(409, code, false); },
+      transferMedia: async () => { downloads++; throw new NativeApiError(409, code, false); },
+    } as unknown as NativeWeChatClient;
+    const result = await prepareNativeAttachment({ client, account, message, core: { channel: { media: { saveMediaBuffer: async () => assert.fail("Unverified media must not be saved") } } } });
+    assert.equal(result.attachment?.status, "unavailable"); assert.equal(result.attachment?.path, undefined);
+    assert.equal(result.pending, false); assert.equal(result.retryable, false); assert.equal(result.reason, code); assert.equal(result.mediaPath, undefined);
+    assert.equal(catalogs, 1); assert.equal(downloads, stage === "transfer" ? 1 : 0); assert.equal(reads, stage === "content" ? 1 : 0);
+  }
 });
 
 test("large model image has a separately bound preview while original bytes remain intact", async t => {
@@ -194,6 +298,27 @@ test("missing, invalid, unsupported and ambiguous quotes keep current text witho
     const result = await prepareNativeAttachment({client:f.client,account,message:quoteMessage,core:{}});
     assert.match(result.body,/Please explain this/); assert.ok(result.body.includes(state)); assert.equal(result.pending,false);
     assert.deepEqual(f.calls,["quote"]);
+  }
+});
+test("a terminal quoted recall keeps the parent comment while omitting recalled text and assets", async () => {
+  const client = { quotedMessage: async () => { throw new NativeApiError(410, "message_recalled", false); } } as unknown as NativeWeChatClient;
+  const result = await prepareNativeAttachment({ client, account, message: quoteMessage, core: {} });
+  assert.match(result.body, /Please explain this/); assert.match(result.body, /recalled/);
+  assert.equal(result.quote?.state, "recalled"); assert.equal(result.reason, "message_recalled"); assert.equal(result.retryable, false);
+  assert.equal(result.attachment, undefined); assert.equal(result.suppliedAssets, undefined);
+});
+test("a normalized quote with its reference removed still reports recalled without losing the parent comment", async () => {
+  const f = quoteClient(null, "recalled");
+  const result = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: undefined }, core: {} });
+  assert.equal(result.reason, "message_recalled"); assert.equal(result.quote?.state, "recalled"); assert.equal(result.retryable, false);
+  assert.match(result.body, /Please explain this/); assert.equal(result.suppliedAssets, undefined); assert.deepEqual(f.calls, ["quote"]);
+});
+test("unavailable quote identity errors keep the parent comment and never suggest another lookup", async () => {
+  for (const code of ["media_identity_unavailable", "media_source_changed"]) {
+    const client = { quotedMessage: async () => { throw new NativeApiError(409, code, false); } } as unknown as NativeWeChatClient;
+    const result = await prepareNativeAttachment({ client, account, message: quoteMessage, core: {} });
+    assert.match(result.body, /Please explain this/); assert.equal(result.quote?.state, "unavailable");
+    assert.equal(result.retryable, false); assert.equal(result.reason, code); assert.equal(result.attachment, undefined);
   }
 });
 test("blocked quoted authors cannot supply text or image assets", async () => {

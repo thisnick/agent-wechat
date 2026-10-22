@@ -180,6 +180,47 @@ impl From<anyhow::Error> for ApiError {
         }
         for (needle, status, code) in [
             (
+                "media_identity_unavailable",
+                StatusCode::CONFLICT,
+                "media_identity_unavailable",
+            ),
+            (
+                "media_source_changed",
+                StatusCode::CONFLICT,
+                "media_source_changed",
+            ),
+            ("message_recalled", StatusCode::GONE, "message_recalled"),
+            (
+                "recall_identity_mismatch",
+                StatusCode::CONFLICT,
+                "recall_identity_mismatch",
+            ),
+            (
+                "invalid_recall_server_id",
+                StatusCode::BAD_REQUEST,
+                "invalid_recall_server_id",
+            ),
+            (
+                "operation_cannot_cancel",
+                StatusCode::CONFLICT,
+                "operation_cannot_cancel",
+            ),
+            (
+                "recall_target_changed",
+                StatusCode::CONFLICT,
+                "recall_target_changed",
+            ),
+            (
+                "recall_target_unavailable",
+                StatusCode::CONFLICT,
+                "recall_target_unavailable",
+            ),
+            (
+                "invalid_recall_request",
+                StatusCode::BAD_REQUEST,
+                "invalid_recall_request",
+            ),
+            (
                 "unsupported_media_variant",
                 StatusCode::CONFLICT,
                 "media_variant_unavailable",
@@ -488,6 +529,7 @@ fn require_operation_scope(claims: &Claims, account: &str, kind: &str) -> ApiRes
         match kind {
             "login" | "logout" | "forget_credentials" => "login",
             "media-writeback" => "media",
+            "message_recall" => "send",
             "sync" | "metadata" => "read",
             _ => "admin",
         },
@@ -500,7 +542,8 @@ async fn operation(
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")
         .or_else(|_| c.require(Some(&a), "login"))
-        .or_else(|_| c.require(Some(&a), "media"))?;
+        .or_else(|_| c.require(Some(&a), "media"))
+        .or_else(|_| c.require(Some(&a), "send"))?;
     let op = app.core.store.operation(&a, &id)?;
     require_operation_scope(&c, &a, &op.kind)?;
     checked::<contracts::NativeOperation>(serde_json::to_value(op).map_err(anyhow::Error::from)?)
@@ -512,7 +555,8 @@ async fn cancel(
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")
         .or_else(|_| c.require(Some(&a), "login"))
-        .or_else(|_| c.require(Some(&a), "media"))?;
+        .or_else(|_| c.require(Some(&a), "media"))
+        .or_else(|_| c.require(Some(&a), "send"))?;
     let current = app.core.store.operation(&a, &id)?;
     require_operation_scope(&c, &a, &current.kind)?;
     checked::<contracts::NativeOperation>(
@@ -1265,6 +1309,167 @@ mod tests {
         let core = Core::new(store, None).unwrap();
         let app = router(core.clone(), OWNER);
         (t, core, app)
+    }
+    #[tokio::test]
+    async fn recall_requires_account_send_scope_and_an_exact_string_server_id() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let send = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(read, "read"), (send, "send")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        for (account, token, expected) in [
+            ("one", None, StatusCode::UNAUTHORIZED),
+            ("one", Some(read), StatusCode::FORBIDDEN),
+            ("two", Some(send), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/accounts/{account}/messages/opaque/recall"),
+                    token,
+                    Some(json!({"serverId":"18446744073709551615"}))
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+        let missing_key = call(
+            app.clone(),
+            "POST",
+            "/v1/accounts/one/messages/opaque/recall",
+            Some(send),
+            Some(json!({"serverId":"18446744073709551615"})),
+        )
+        .await;
+        assert_eq!(missing_key.0, StatusCode::BAD_REQUEST);
+        for value in [
+            "0",
+            "-1",
+            "01",
+            "18446744073709551616",
+            " 23",
+            "23 ",
+            "2.3",
+            "",
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/one/messages/opaque/recall")
+                .header("authorization", format!("Bearer {send}"))
+                .header("content-type", "application/json")
+                .header("idempotency-key", "synthetic-recall")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"serverId":value})).unwrap(),
+                ))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{value:?}");
+            let body: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(body["error"]["code"], "invalid_recall_server_id");
+        }
+        for body in [
+            json!({}),
+            json!({"serverId":9007199254740993u64}),
+            json!({"serverId":"23", "threadId":"caller-selected"}),
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "POST",
+                    "/v1/accounts/one/messages/opaque/recall",
+                    Some(send),
+                    Some(body)
+                )
+                .await
+                .0,
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+    }
+    #[tokio::test]
+    async fn recall_operation_inspection_requires_send_scope_in_the_same_account() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let send = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(read, "read"), (send, "send")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        core.store
+            .save_operation(&wechat_store::Operation {
+                id: "recall-fixture".into(),
+                account_id: "one".into(),
+                kind: "message_recall".into(),
+                state: "needs_review".into(),
+                result: json!({"status":"needs_review"}),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        for (account, token, expected) in [
+            ("one", Some(read), StatusCode::FORBIDDEN),
+            ("two", Some(send), StatusCode::FORBIDDEN),
+            ("one", Some(send), StatusCode::OK),
+            ("one", Some(OWNER), StatusCode::OK),
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "GET",
+                    &format!("/v1/accounts/{account}/operations/recall-fixture"),
+                    token,
+                    None
+                )
+                .await
+                .0,
+                expected
+            );
+        }
+        let cancelled = call(
+            app.clone(),
+            "DELETE",
+            "/v1/accounts/one/operations/recall-fixture",
+            Some(send),
+            None,
+        )
+        .await;
+        assert_eq!(cancelled.0, StatusCode::CONFLICT);
+        assert_eq!(cancelled.1["error"]["code"], "operation_cannot_cancel");
+        assert_eq!(
+            core.store.operation("one", "recall-fixture").unwrap().state,
+            "needs_review"
+        );
+    }
+    #[test]
+    fn recalled_media_has_a_terminal_public_error() {
+        let ApiError(status, code) = ApiError::from(anyhow::anyhow!("message_recalled"));
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(code, "message_recalled");
+        for expected in ["media_identity_unavailable", "media_source_changed"] {
+            let ApiError(status, code) = ApiError::from(anyhow::anyhow!(expected));
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(code, expected);
+        }
     }
     #[tokio::test]
     async fn account_message_search_requires_account_read_scope_and_bounded_query() {

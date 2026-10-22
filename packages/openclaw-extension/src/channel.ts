@@ -15,7 +15,7 @@ import { ensureNativeHost } from "./native-host.js";
 import { startNativeMonitor } from "./native-monitor.js";
 import { nativeLoginStart, nativeLoginWait, sendNativeText, createNativeLoginTool } from "./native-login.js";
 
-async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<string> {
+async function sendWeChatText(cfg: unknown, to: string, text: string) {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.serverUrl) throw new Error("No native daemon configured");
   return sendNativeText(account, to, text);
@@ -31,11 +31,11 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
   outbound: {
     sendText: async ({ cfg, to, text }) => ({
       channel: "agent-wechat",
-      messageId: await sendWeChatText(cfg, to, text),
+      ...await sendWeChatText(cfg, to, text),
     }),
     sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
       channel: "agent-wechat",
-      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
+      ...await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
     }),
   },
 });
@@ -192,11 +192,11 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     deliveryMode: "direct",
     sendText: async ({ cfg, to, text }) => ({
       channel: "agent-wechat" as const,
-      messageId: await sendWeChatText(cfg, to, text),
+      ...await sendWeChatText(cfg, to, text),
     }),
     sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
       channel: "agent-wechat" as const,
-      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
+      ...await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
     }),
   },
 

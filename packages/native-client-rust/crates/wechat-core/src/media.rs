@@ -17,6 +17,8 @@ use wechat_protocol::{
     NativeClient, NativeOptions,
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
+#[path = "media_identity.rs"]
+mod identity;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -158,22 +160,25 @@ impl Core {
     }
     pub fn media_asset(&self, account: &str, id: &str) -> Result<MediaAsset> {
         let row = self.store.media_asset(account, id)?;
+        self.authorize_media_record(account, &row)?;
         Ok(serde_json::from_value(row.metadata)?)
     }
     pub fn media_content(&self, account: &str, id: &str) -> Result<MediaContent> {
         let row = self.store.media_asset(account, id)?;
-        let asset: MediaAsset = serde_json::from_value(row.metadata)?;
+        self.authorize_media_record(account, &row)?;
+        let asset: MediaAsset = serde_json::from_value(row.metadata.clone())?;
         ensure!(asset.state == "available", "media_not_available");
-        let sealed = row.payload.context("media_not_cached")?;
+        let sealed = row.payload.as_deref().context("media_not_cached")?;
         let bytes = self
             .vault
-            .open_record(account, &format!("asset:{id}"), &sealed)?
+            .open_record(account, &format!("asset:{id}"), sealed)?
             .to_vec();
         ensure!(
             asset.byte_length == Some(bytes.len() as u64)
                 && asset.sha256.as_deref() == Some(&digest(&bytes)),
             "media_integrity_failed"
         );
+        self.authorize_media_record(account, &row)?;
         Ok(MediaContent {
             bytes,
             content_type: asset
@@ -201,6 +206,7 @@ impl Core {
                 && source.media_type == preview.content_type,
             "media_integrity_failed"
         );
+        self.media_asset(account, id)?;
         Ok(MediaContent {
             bytes,
             content_type: preview.content_type,
@@ -267,12 +273,14 @@ impl Core {
         });
     }
     pub fn media_assets(&self, account: &str, message_id: &str) -> Result<Vec<MediaAsset>> {
+        self.ensure_message_not_recalled(account, message_id)?;
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
         let msg = reader.message(&source_message_id(message_id)?, own.as_deref())?;
         if !matches!(msg.message_type, 3 | 34 | 43 | 47 | 49) {
             return Ok(vec![]);
         }
+        let binding = identity::capture(&msg)?;
         let content = msg
             .content
             .text
@@ -323,7 +331,11 @@ impl Core {
         let mut out = vec![];
         for (kind, variant, plan, filename) in plans {
             let identity = digest(&serde_json::to_vec(&(
-                account, message_id, variant, content,
+                "bound-source-v1",
+                account,
+                &binding,
+                variant,
+                content,
             ))?);
             let id = format!("asset_{}", &identity[..40]);
             let expires = match &plan {
@@ -367,9 +379,14 @@ impl Core {
                     }
                     .into(),
                 };
-                let sealed =
-                    self.vault
-                        .seal(account, &format!("plan:{id}"), &serde_json::to_vec(&plan)?)?;
+                let sealed = self.vault.seal(
+                    account,
+                    &format!("plan:{id}"),
+                    &serde_json::to_vec(&identity::AuthorizedPlan {
+                        identity: Some(binding.clone()),
+                        plan: plan.clone(),
+                    })?,
+                )?;
                 self.store.put_media_asset(
                     account,
                     &MediaAssetRecord {
@@ -451,6 +468,7 @@ impl Core {
             if asset.state == "available" && asset.official_writeback != "complete" {
                 asset = self.repair_cached_asset(account, asset)?;
             }
+            self.authorize_media_record(account, &self.store.media_asset(account, &id)?)?;
             out.push(asset);
         }
         Ok(out)
@@ -496,6 +514,13 @@ impl Core {
         account: &str,
         request: MediaTransferRequest,
     ) -> Result<MediaJob> {
+        if let Some(id) = &request.asset_id {
+            let captured = self.media_asset(account, id)?;
+            ensure!(
+                captured.message_id.as_deref() == Some(request.message_id.as_str()),
+                "media_source_changed"
+            );
+        }
         let assets = self.media_assets(account, &request.message_id)?;
         let asset = if let Some(id) = &request.asset_id {
             assets
@@ -659,6 +684,7 @@ impl Core {
             asset.filename = Some(format!("{id}.wxgf"));
         }
         let sealed = self.vault.seal(account, &format!("asset:{id}"), &bytes)?;
+        self.authorize_media_record(account, &self.store.media_asset(account, id)?)?;
         self.store
             .save_media_asset(account, id, &serde_json::to_value(&asset)?, Some(&sealed))?;
         Ok(asset)
@@ -844,21 +870,19 @@ impl Core {
         row.phase = phase.into();
         self.store.save_media_job(account, &row)
     }
-    fn perform_download(&self, account: &str, id: &str) -> Result<()> {
-        let row = self.phase_media(account, id, "downloading")?;
+    pub(crate) fn perform_download(&self, account: &str, id: &str) -> Result<()> {
+        let row = self.store.media_job(account, id)?;
         let asset_id = row.data["assetId"]
             .as_str()
             .context("media_asset_not_found")?;
         let stored = self.store.media_asset(account, asset_id)?;
-        let asset: MediaAsset = serde_json::from_value(stored.metadata)?;
+        self.authorize_media_record(account, &stored)?;
+        self.phase_media(account, id, "downloading")?;
+        let asset: MediaAsset = serde_json::from_value(stored.metadata.clone())?;
         if asset.state == "available" {
             return self.complete_download(account, id, &asset);
         }
-        let plan: DownloadPlan = serde_json::from_slice(&self.vault.open_record(
-            account,
-            &format!("plan:{asset_id}"),
-            &stored.plan,
-        )?)?;
+        let plan = self.asset_plan(account, &stored)?.plan;
         let progress = |n, t| self.progress_media(account, id, n, t);
         let mut official_writeback = None;
         let (bytes, mime, actual, frames) = match plan {
@@ -1011,6 +1035,7 @@ impl Core {
         )
     }
     fn repair_cached_asset(&self, account: &str, mut asset: MediaAsset) -> Result<MediaAsset> {
+        self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
         if asset.state != "available"
             || ["complete", "unsupported"].contains(&asset.official_writeback.as_str())
         {
@@ -1097,6 +1122,7 @@ impl Core {
         bytes: &[u8],
     ) -> &'static str {
         let attempt = || -> Result<()> {
+            self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
             let source = source_message_id(
                 asset
                     .message_id
@@ -1144,6 +1170,7 @@ impl Core {
         bytes: &[u8],
     ) -> &'static str {
         let attempt = || -> Result<()> {
+            self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
             let source = source_message_id(
                 asset
                     .message_id
@@ -1181,6 +1208,7 @@ impl Core {
         encoded: &[u8],
     ) -> &'static str {
         let attempt = || -> Result<()> {
+            self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
             let source = source_message_id(
                 asset
                     .message_id
@@ -1205,6 +1233,7 @@ impl Core {
         }
     }
     fn complete_download(&self, account: &str, id: &str, asset: &MediaAsset) -> Result<()> {
+        self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
         let mut row = self.store.media_job(account, id)?;
         row.state = "available".into();
         row.phase = "completed".into();
@@ -1291,6 +1320,9 @@ fn classify_error(error: &anyhow::Error) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     for code in [
+        "message_recalled",
+        "media_identity_unavailable",
+        "media_source_changed",
         "media_cancelled",
         "media_disconnected",
         "auth_required",

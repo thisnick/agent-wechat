@@ -169,7 +169,7 @@ impl Core {
         let items = page
             .items
             .into_iter()
-            .map(|msg| normalized_message(account, msg, own.as_deref(), reader.generation()))
+            .map(|msg| self.normalize_recalled(account, msg, own.as_deref(), reader.generation()))
             .collect::<Result<Vec<_>>>()?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
@@ -178,7 +178,7 @@ impl Core {
     pub fn message(&self, account: &str, id: &str) -> Result<Value> {
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
-        normalized_message(
+        self.normalize_recalled(
             account,
             reader.message(&source_message_id(id)?, own.as_deref())?,
             own.as_deref(),
@@ -191,9 +191,12 @@ impl Core {
         id: &str,
         quality: wechat_profile::ImageQuality,
     ) -> Result<wechat_profile::CachedImage> {
-        Ok(self
+        self.ensure_message_not_recalled(account, id)?;
+        let result = self
             .profile_reader(account)?
-            .cached_image(&source_message_id(id)?, quality)?)
+            .cached_image(&source_message_id(id)?, quality)?;
+        self.ensure_message_not_recalled(account, id)?;
+        Ok(result)
     }
     pub fn avatar(&self, account: &str, username: &str) -> Result<wechat_profile::CachedBytes> {
         Ok(self.profile_reader(account)?.avatar(username)?)

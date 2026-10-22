@@ -174,10 +174,11 @@ pub(super) fn write_replace(path: &Path, value: &Value) -> Result<()> {
 fn receipt(
     config: &settings::File,
     r: &Remote,
-    thread: &str,
+    target: &str,
     kind: &str,
     hash: &str,
     key: &str,
+    server_id: Option<&str>,
 ) -> Result<(PathBuf, Value)> {
     if key.is_empty() || key.len() > 200 || key.chars().any(char::is_control) {
         bail!("invalid idempotency key");
@@ -197,16 +198,26 @@ fn receipt(
         "{:x}.json",
         Sha256::digest(format!("{}\0{}\0{key}", r.base, r.account()?).as_bytes())
     ));
-    let value = json!({"schemaVersion":1,"endpoint":r.base.as_str(),"accountId":r.account()?,"threadId":thread,"kind":kind,"sourceSha256":hash,"idempotencyKey":key,"state":"prepared"});
+    let target_field = if kind == "message_recall" {
+        "messageId"
+    } else {
+        "threadId"
+    };
+    let mut value = json!({"schemaVersion":1,"endpoint":r.base.as_str(),"accountId":r.account()?,"kind":kind,"sourceSha256":hash,"idempotencyKey":key,"state":"prepared"});
+    value[target_field] = json!(target);
+    if let Some(server_id) = server_id {
+        value["serverId"] = json!(server_id);
+    }
     if path.exists() {
         let existing: Value = serde_json::from_slice(&private_input(&path, 65536)?)?;
         for field in [
             "endpoint",
             "accountId",
-            "threadId",
+            target_field,
             "kind",
             "sourceSha256",
             "idempotencyKey",
+            "serverId",
         ] {
             if existing[field] != value[field] {
                 bail!("idempotency_conflict: receipt input changed");
@@ -217,6 +228,90 @@ fn receipt(
     private_output(&path, &serde_json::to_vec(&value)?)?;
     Ok((path, value))
 }
+pub async fn recall(
+    r: &Remote,
+    config: &settings::File,
+    message: String,
+    server: String,
+    key: Option<String>,
+    detach: bool,
+    wait: u64,
+) -> Result<Value> {
+    if message.is_empty()
+        || message.len() > 8192
+        || server
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .is_none_or(|value| value.to_string() != server)
+    {
+        bail!("invalid recall message or exact server ID");
+    }
+    if wait > 900 {
+        bail!("wait must be at most900seconds");
+    }
+    let hash = format!("{:x}", Sha256::digest(server.as_bytes()));
+    let key = key.unwrap_or_else(|| {
+        format!(
+            "recall-{:x}",
+            Sha256::digest(format!("{message}\0{server}").as_bytes())
+        )
+    });
+    let (path, mut saved) = receipt(
+        config,
+        r,
+        &message,
+        "message_recall",
+        &hash,
+        &key,
+        Some(&server),
+    )?;
+    eprintln!("Recall receipt: {}", path.display());
+    let op = if let Some(id) = saved["operationId"].as_str() {
+        r.get(&r.path(&format!("operations/{}", encode(id)))?)
+            .await?
+    } else {
+        saved["state"] = json!("submitting");
+        write_replace(&path, &saved)?;
+        let op = r.request(reqwest::Method::POST,
+            &r.path(&format!("messages/{}/recall", encode(&message)))?,
+            Some(json!({"serverId":server})), Some(&key)).await
+            .with_context(|| format!("recall response unavailable; keep the same target and key from receipt {} and inspect the daemon before another action", path.display()))?;
+        validate_recall_operation(r, &op, &message, &server, None)?;
+        saved["operationId"] = op["id"].clone();
+        saved["state"] = json!("accepted_by_daemon");
+        write_replace(&path, &saved)?;
+        op
+    };
+    let operation_id = saved["operationId"]
+        .as_str()
+        .context("invalid recall operation receipt")?;
+    let mut result = wait_operation_checked(r, op, if detach { 0 } else { wait }, |value| {
+        validate_recall_operation(r, value, &message, &server, Some(operation_id))
+    })
+    .await?;
+    result["receiptPath"] = json!(path);
+    Ok(result)
+}
+fn validate_recall_operation(
+    r: &Remote,
+    operation: &Value,
+    message: &str,
+    server: &str,
+    expected_id: Option<&str>,
+) -> Result<()> {
+    if operation["accountId"].as_str() != Some(r.account()?)
+        || operation["kind"] != "message_recall"
+        || operation["id"].as_str().is_none_or(str::is_empty)
+        || expected_id.is_some_and(|id| operation["id"].as_str() != Some(id))
+        || operation["result"]["messageId"].as_str() != Some(message)
+        || operation["result"]["serverId"].as_str() != Some(server)
+    {
+        return Err(failure(8, "recall_result_unverified", "Recall operation identity could not be verified; inspect the retained receipt before another action"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)] // Mirrors one command's mutually exclusive payload flags.
 pub async fn send(
     r: &Remote,
@@ -281,7 +376,7 @@ pub async fn send(
     };
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let key = key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let (path, mut receipt) = receipt(config, r, &thread, kind, &hash, &key)?;
+    let (path, mut receipt) = receipt(config, r, &thread, kind, &hash, &key, None)?;
     eprintln!("Submission receipt: {}", path.display());
     if receipt["resourceId"].is_string() {
         let value = r

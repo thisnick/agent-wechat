@@ -8,11 +8,46 @@ import { saveManagedAttachment } from "./attachment-store.ts";
 import { renderAttachmentBody, type WeChatAttachment } from "./media-delivery.ts";
 import type { NativeSuppliedAsset } from "./native-consumer-state.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
+import { nativeOutboundDelivery, type NativeOutboundDelivery } from "./native-send.ts";
+import { nativeRecallInfo } from "./native-recall-state.ts";
 
 function kind(type: number): WeChatAttachment["kind"] | undefined {
   return type === 3 || type === 47 ? "image" : type === 34 ? "audio" : type === 43 ? "video" : type === 49 ? "file" : undefined;
 }
-const terminalJobs = new Set(["accepted", "completed", "succeeded", "available", "failed", "cancelled", "expired", "needs_review"]);
+const terminalJobs = new Set(["accepted", "completed", "succeeded", "available", "failed", "partial", "cancelled", "expired", "needs_review"]);
+const successfulSendJobs = new Set(["accepted", "completed", "succeeded"]);
+const terminalIdentityErrors = new Set(["media_identity_unavailable", "media_source_changed"]);
+function mediaSendResult(job: MediaJob): Record<string, unknown> { return job.result && typeof job.result === "object" && !Array.isArray(job.result) ? job.result as Record<string, unknown> : {}; }
+function mediaSendReceiptIds(job: MediaJob, audioAsVoice: boolean): string[] | undefined {
+  const result = mediaSendResult(job), ids = result.messageIds;
+  if (!successfulSendJobs.has(job.state) || result.profileProjection === "unknown" || !Array.isArray(ids) || !ids.length || ids.length > 256
+    || ids.some(id => typeof id !== "string" || !id || id.length > 4096) || new Set(ids).size !== ids.length) return undefined;
+  if (audioAsVoice) {
+    const chunks = result.chunks;
+    if (!Array.isArray(chunks) || !chunks.length || chunks.length !== ids.length
+      || chunks.some(chunk => !chunk || chunk.state !== "accepted" || typeof chunk.serverMessageId !== "string")) return undefined;
+  } else if (ids.length !== 1) return undefined;
+  return ids;
+}
+/** Acceptance precedes local receipt projection. Inspect the submitted job only. */
+export async function waitNativeMediaSendReceipts(client: NativeWeChatClient, accountId: string, threadId: string, initial: MediaJob, audioAsVoice: boolean, timeoutMs = 10000): Promise<MediaJob> {
+  if (initial.accountId !== accountId || initial.threadId !== threadId || initial.kind !== "send") throw Error("Native media receipt job identity mismatch; inspect the submitted job and do not resend");
+  const deadline = Date.now() + Math.max(0, Math.min(timeoutMs, 10000)); let job = initial, delay = 100;
+  while (successfulSendJobs.has(job.state) && !mediaSendReceiptIds(job, audioAsVoice) && Date.now() < deadline) {
+    const result = mediaSendResult(job);
+    if (["unknown", "not_applicable"].includes(String(result.profileProjection))
+      || audioAsVoice && Array.isArray(result.chunks) && result.chunks.some(chunk => !chunk || chunk.state !== "accepted")) break;
+    await new Promise(resolve => setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now()))));
+    const remaining = deadline - Date.now(); if (remaining <= 0) break;
+    let next: MediaJob;
+    try { next = await client.job(accountId, initial.id, AbortSignal.timeout(remaining)); }
+    catch { break; }
+    if (next.id !== initial.id || next.accountId !== accountId || next.threadId !== threadId || next.kind !== "send"
+      || next.sourceId !== initial.sourceId || initial.serverMessageId != null && next.serverMessageId !== initial.serverMessageId) break;
+    job = next; delay = Math.min(delay * 2, 1000);
+  }
+  return job;
+}
 export async function waitNativeMediaJob(client: NativeWeChatClient, accountId: string, initial: MediaJob, timeoutMs = 65000, signal?: AbortSignal, assertCurrent?: () => void): Promise<MediaJob> {
   const deadline = Date.now() + timeoutMs; let job = initial; let delay = 250;
   while (!terminalJobs.has(job.state) && Date.now() < deadline) {
@@ -49,13 +84,18 @@ async function prepareNativeQuote(params: NativePrepareMediaParams): Promise<Nat
   const guard = () => { params.signal?.throwIfAborted(); params.assertCurrent?.(); }; guard();
   const comment = (message.body ?? "").slice(0, 16384);
   const unavailable = (state: string): NativePreparedMedia => ({ body: `${comment}${comment ? "\n\n" : ""}[Quoted message ${state}; original lookup is confined to this chat]`, pending: false, retryable: state === "unavailable", quote: { state } });
-  if (!message.quote) return unavailable("invalid");
   await params.beforeMediaAccess?.(); guard();
   let resolution;
   try { resolution = await client.quotedMessage(account.native!.accountId, message.id); }
-  catch (error) { guard(); if (!(error instanceof NativeApiError)) throw error; return unavailable("unavailable"); }
+  catch (error) {
+    guard(); if (!(error instanceof NativeApiError)) throw error;
+    if (error.code === "message_recalled") return { ...unavailable("recalled"), retryable: false, reason: "message_recalled" };
+    return terminalIdentityErrors.has(error.code) ? { ...unavailable("unavailable"), retryable: false, reason: error.code } : unavailable("unavailable");
+  }
   guard();
   if (resolution.accountId !== message.accountId || resolution.messageId !== message.id || resolution.threadId !== message.threadId) throw Error("Native quote identity does not match its message");
+  if (resolution.state === "recalled" || resolution.message && nativeRecallInfo(resolution.message)) return { ...unavailable("recalled"), retryable: false, reason: "message_recalled" };
+  if (!message.quote) return unavailable("invalid");
   if (resolution.state === "embedded") {
     if (resolution.message != null || (message.quote.type === 1 ? typeof resolution.embeddedText !== "string" || resolution.embeddedText.length > 16384
       : message.quote.type !== 3 || resolution.embeddedImage !== true)) throw Error("Invalid embedded quote resolution");
@@ -101,8 +141,22 @@ async function prepareNativeQuote(params: NativePrepareMediaParams): Promise<Nat
     suppliedAssets: prepared.suppliedAssets?.map(asset => ({ ...asset, sourceMessageId: original.id })) };
 }
 export async function prepareNativeAttachment(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
+  try { return await prepareNativeAttachmentInput(params); }
+  catch (error) {
+    params.signal?.throwIfAborted(); params.assertCurrent?.();
+    if (!(error instanceof NativeApiError) || !terminalIdentityErrors.has(error.code)) throw error;
+    if (params.message.type === 49 && params.message.appMessageType === 57) return {
+      body: `${(params.message.body ?? "").slice(0, 16384)}\n[Quoted message unavailable: stored source identity could not be verified]`,
+      quote: { state: "unavailable" }, pending: false, retryable: false, reason: error.code,
+    };
+    const attachment: WeChatAttachment = { kind: kind(params.message.type) ?? "file", filename: "attachment", status: "unavailable" };
+    return { body: renderAttachmentBody("", attachment), attachment, pending: false, retryable: false, reason: error.code };
+  }
+}
+async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
   const { client, account, message, core } = params; const attachmentKind = kind(message.type);
   const guard = () => { params.signal?.throwIfAborted(); params.assertCurrent?.(); }; guard();
+  if (nativeRecallInfo(message)) return { body: "[Message recalled]", pending: false, retryable: false, reason: "message_recalled" };
   const authorize = async () => { guard(); await params.beforeMediaAccess?.(); guard(); };
   if (message.type === 49 && message.appMessageType === 57) return prepareNativeQuote(params);
   if (message.type === 49 && message.appMessageType === 19) return { body: message.body?.slice(0, 65536) || "[Forwarded chat history unavailable]", pending: false };
@@ -131,15 +185,16 @@ export async function prepareNativeAttachment(params: NativePrepareMediaParams):
   }
   let job: MediaJob | undefined;
   let transferError: NativeApiError | undefined;
-  if (!asset && initialCandidate?.jobId) {
+  if (!asset && initialCandidate?.jobId && initialCandidate.state !== "recalled") {
     await authorize();
     job = await client.job(accountId, initialCandidate.jobId, params.signal);
     guard();
     if (job.accountId !== accountId || job.kind !== "download" || (job.assetId != null && job.assetId !== initialCandidate.id)) throw Error("Native download job identity does not match its attachment");
     assets = await scopedAssets(); asset = select(assets, message.type, quality);
+    if (!asset && transferCandidate()?.state === "recalled") return { body: "[Message recalled]", pending: false, retryable: false, reason: "message_recalled" };
     if (!asset && ["queued", "running"].includes(job.state)) return { body: `[${attachmentKind} pending]`, pending: true, jobId: job.id, retryable: true };
   }
-  if (!asset && !job && params.download !== false && !["expired", "unsupported"].includes(transferCandidate()?.state ?? "")) {
+  if (!asset && !job && params.download !== false && !["expired", "unsupported", "recalled"].includes(transferCandidate()?.state ?? "")) {
     try {
       await authorize();
       job = await client.transferMedia(accountId, { messageId: message.id, assetId: null, quality: transferQuality });
@@ -148,17 +203,20 @@ export async function prepareNativeAttachment(params: NativePrepareMediaParams):
       guard();
     } catch (error) {
       guard();
+      if (error instanceof NativeApiError && terminalIdentityErrors.has(error.code)) throw error;
       if (!(error instanceof NativeApiError) || error.retryable) return { body: `[${attachmentKind} pending: retrieval is unavailable]`, pending: true, jobId: job?.id, retryable: true };
       transferError = error;
     }
     // Refresh even while queued: a cached copy may have arrived during the wait.
     // Identity/integrity errors must propagate rather than becoming pending.
     assets = await scopedAssets(); asset = select(assets, message.type, quality);
+    if (!asset && transferCandidate()?.state === "recalled") return { body: "[Message recalled]", pending: false, retryable: false, reason: "message_recalled" };
     if (!asset && job && ["queued", "running"].includes(job.state)) return { body: `[${attachmentKind} pending]`, pending: true, jobId: job.id, retryable: true };
   }
   const candidate = transferCandidate();
   const filename = basename(asset?.filename ?? candidate?.filename ?? `message-${createHash("sha256").update(message.id).digest("hex").slice(0, 12)}.bin`).replace(/[\r\n\0]/g, "_");
   if (!asset) {
+    if (candidate?.state === "recalled" || transferError?.code === "message_recalled") return { body: "[Message recalled]", pending: false, retryable: false, reason: "message_recalled" };
     const state = candidate?.state === "expired" ? "expired" : candidate?.state === "unsupported" ? "unsupported" : "unavailable";
     const attachment: WeChatAttachment = { kind: attachmentKind, filename, status: state, expiresAt: candidate?.expiresAt ?? undefined };
     return { body: renderAttachmentBody("", attachment), attachment, pending: false, jobId: job?.id,
@@ -213,7 +271,7 @@ export async function prepareNativeAttachment(params: NativePrepareMediaParams):
     mediaPath: attachmentKind === "image" || attachmentKind === "video" ? suppliedPath : undefined, mediaMime: suppliedMime, pending: false };
 }
 
-export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID()): Promise<string> {
+export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>): Promise<NativeOutboundDelivery> {
   const max = Math.min(account.mediaMaxMb * 1024 * 1024, NATIVE_MAX_SOURCE_BYTES); let bytes: Uint8Array; let filename: string; let mime: string;
   if (/^https?:/.test(mediaUrl)) {
     const response = await fetch(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(30000) }); if (!response.ok) throw new Error(`Native outbound source unavailable (${response.status})`);
@@ -228,9 +286,15 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
     filename = basename(path instanceof URL ? path.pathname : path); const extension = extname(filename).toLowerCase(); mime = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension) ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}` : extension === ".mp4" ? "video/mp4" : [".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac"].includes(extension) ? `audio/${extension.slice(1)}` : "application/octet-stream";
   }
   if (audioAsVoice && !mime.startsWith("audio/")) throw new Error("Voice sending requires an explicit audio attachment");
+  await beforeSend?.();
   const accountId = account.native!.accountId; const source = await client.upload(accountId, bytes, filename, mime);
   const input: MediaSendRequest = { threadId, kind: audioAsVoice ? "voice" : mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "file", sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null };
-  const job = await waitNativeMediaJob(client, accountId, await client.sendMedia(accountId, input, key), audioAsVoice ? 25 * 60000 : 65000);
-  if (!["accepted", "completed", "succeeded"].includes(job.state)) throw new Error(`Native media job ${job.id} requires inspection (${job.state}); retain completed items and do not automatically resend`);
-  return `agent-wechat-native:${accountId}:${job.id}`;
+  await beforeSend?.();
+  let job = await waitNativeMediaJob(client, accountId, await client.sendMedia(accountId, input, key), audioAsVoice ? 25 * 60000 : 65000);
+  if (successfulSendJobs.has(job.state)) job = await waitNativeMediaSendReceipts(client, accountId, threadId, job, audioAsVoice);
+  if (!successfulSendJobs.has(job.state)) throw new Error(`Native media job ${job.id} requires inspection (${job.state}); retain completed items and do not automatically resend`);
+  const result = mediaSendResult(job);
+  const chunks = Array.isArray(result.chunks) ? result.chunks.filter(chunk => chunk && typeof chunk === "object") as Array<{ state?: string; serverMessageId?: string }> : [];
+  const serverIds = audioAsVoice ? chunks.filter(chunk => chunk.state === "accepted" && typeof chunk.serverMessageId === "string").map(chunk => chunk.serverMessageId!) : job.serverMessageId ? [job.serverMessageId] : undefined;
+  return nativeOutboundDelivery(client, accountId, threadId, mediaSendReceiptIds(job, audioAsVoice), { jobId: job.id, state: job.state, serverIds });
 }

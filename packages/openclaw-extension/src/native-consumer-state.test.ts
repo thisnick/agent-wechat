@@ -52,3 +52,92 @@ test("disabled history does not retain group context or create read receipts", t
   state.accept("2", message("trigger", "r@chatroom"), "live"); assert.deepEqual(state.groupHistory("r@chatroom", "trigger", 50), []);
   assert.equal(state.get("context")?.readPending, undefined);
 });
+
+test("recalls invalidate buffered targets, quoted references and prepared paths before persisting the cursor", t => {
+  const state = fixture(t); const target = { ...message("target", "r@chatroom"), body: "original private body" };
+  state.accept("1", target, "live"); state.bufferGroupMessage(target.id, 50);
+  const quote = { ...message("quote", "r@chatroom"), serverId: "9007199254741000", type: 49, appMessageType: 57,
+    body: "unrelated comment", quote: { serverId: target.serverId!, type: 1 } };
+  state.accept("2", quote, "live");
+  const trigger = { ...message("trigger", "r@chatroom"), serverId: "9007199254741001" }; state.accept("3", trigger, "live");
+  state.beginDispatch(trigger.id, { messageIds: [trigger.id], historyInputs: [{ id: target.id }], assets: [{ path: "/private/original-file", sourceMessageId: target.id }] } as any, [target.id]);
+  const prepared = state.preparedCallback([trigger.id], "on_model_dispatch");
+  const affected = state.acceptRecall("4", { threadId: target.threadId, serverId: target.serverId!, observedAt: "2026-10-21T12:00:00Z" });
+  assert.deepEqual(new Set(affected), new Set([target.id, quote.id, trigger.id]));
+  assert.equal(state.get(target.id)?.message.body, "[Message recalled]"); assert.equal(state.get(target.id)?.groupContext, false);
+  assert.equal(state.get(quote.id)?.message.body, "unrelated comment"); assert.equal(state.get(quote.id)?.message.quote, undefined);
+  assert.equal(state.get(trigger.id)?.state, "needs_review"); assert.equal(state.get(trigger.id)?.dispatchManifest, undefined);
+  assert.throws(() => prepared("late-run"), /invalidated/);
+  const bytes = readFileSync(state.file, "utf8"); assert.ok(!bytes.includes("original private body")); assert.ok(!bytes.includes("/private/original-file"));
+  const reopened = new NativeConsumerState(join(state.file, ".."), "server", "a");
+  assert.equal(reopened.cursor, "4"); assert.equal(reopened.isRecalled(target), true);
+});
+test("out-of-order recalls survive restart and suppress a later original without requiring its opaque ID", t => {
+  const state = fixture(t); const target = message("late-original");
+  state.acceptRecall("1", { threadId: target.threadId, serverId: target.serverId!, observedAt: "2026-10-21T12:00:00Z" });
+  const reopened = new NativeConsumerState(join(state.file, ".."), "server", "a");
+  reopened.accept("2", target, "live");
+  assert.equal(reopened.get(target.id)?.state, "ignored"); assert.equal(reopened.get(target.id)?.message.body, "[Message recalled]");
+  assert.equal(reopened.isCurrent(target), false);
+  const unrelated = { ...target, id: "other-thread", threadId: "other" }; reopened.accept("3", unrelated, "live");
+  assert.equal(reopened.get(unrelated.id)?.state, "received"); assert.equal(reopened.get(unrelated.id)?.message.body, "fixture");
+});
+test("recalling a quoted original retains the unrelated buffered comment with its quote removed", t => {
+  const state = fixture(t); const original = message("original", "r@chatroom");
+  const parent = { ...message("parent", "r@chatroom"), serverId: "9007199254741000", type: 49, appMessageType: 57,
+    body: "Unrelated comment to keep", quote: { serverId: original.serverId!, type: 1 } };
+  state.accept("1", parent, "live"); state.bufferGroupMessage(parent.id, 50);
+  state.acceptRecall("2", { threadId: original.threadId, serverId: original.serverId!, observedAt: "2026-10-21T12:00:00Z" });
+  const trigger = { ...message("trigger", "r@chatroom"), serverId: "9007199254741001" }; state.accept("3", trigger, "live");
+  const history = state.groupHistory(original.threadId, trigger.id, 50);
+  assert.equal(history.length, 1); assert.equal(history[0].message.body, "Unrelated comment to keep");
+  assert.equal(history[0].message.quote, undefined); assert.equal(history[0].message.id, parent.id);
+  assert.equal(state.isCurrent(parent), false);
+});
+test("invalid recall identities cannot advance durable custody", t => {
+  const state = fixture(t); const target = message("m"); state.accept("1", target, "live");
+  for (const data of [{ threadId: "t", serverId: "0", observedAt: "2026-10-21T12:00:00Z" },
+    { messageId: "m", threadId: "t", serverId: "3", observedAt: "invalid" }]) {
+    assert.throws(() => state.acceptRecall("2", data)); assert.equal(state.cursor, "1"); assert.equal(state.get("m")?.message.body, "fixture");
+  }
+});
+test("a stale local-ID recall hint advances its exact tombstone while preserving the new occupant", t => {
+  const state = fixture(t); const current = message("reused-id"); state.accept("1", current, "live");
+  state.update(current.id, { state: "dispatching", dispatchManifest: { messageIds: [current.id], assets: [] } as any });
+  const old = { ...current, serverId: "9007199254740998", body: "Old recalled body" };
+  assert.deepEqual(state.acceptRecall("2", { messageId: current.id, threadId: current.threadId, serverId: old.serverId, observedAt: "2026-10-21T12:00:00Z" }), []);
+  assert.equal(state.cursor, "2"); assert.equal(state.isRecalled(current), false); assert.equal(state.isRecalled(old), true);
+  assert.equal(state.get(current.id)?.message.body, "fixture"); assert.equal(state.get(current.id)?.state, "dispatching");
+  assert.ok(state.get(current.id)?.dispatchManifest); assert.equal(state.get(current.id)?.invalidatedByRecall, undefined);
+  const late = { ...old, id: "old-source-row" }; state.accept("3", late, "live");
+  assert.equal(state.get(late.id)?.state, "ignored"); assert.equal(state.get(late.id)?.message.body, "[Message recalled]");
+});
+test("a recalled source ID admits its new exact occupant and fences the old callback and updates", t => {
+  const state = fixture(t); const a = message("reused"); state.accept("1", a, "live");
+  const revisionA = state.get(a.id)!.revision;
+  state.beginDispatch(a.id, { messageIds: [a.id], assets: [] } as any);
+  const preparedA = state.preparedCallback([a.id], "on_model_dispatch");
+  state.acceptRecall("2", { threadId: a.threadId, serverId: a.serverId!, observedAt: "2026-10-21T12:00:00Z" });
+  const b = { ...a, serverId: "9007199254741000", body: "New occupant" };
+  assert.equal(state.accept("3", b, "live"), true);
+  const revisionB = state.get(b.id)!.revision; assert.notEqual(revisionB, revisionA);
+  assert.equal(state.get(b.id)?.state, "received"); assert.equal(state.get(b.id)?.invalidatedByRecall, undefined);
+  assert.equal(state.update(a.id, { state: "needs_review", readPending: true }, revisionA), false);
+  assert.throws(() => preparedA("old-run"), /source identity changed/);
+  assert.equal(state.accept("4", { ...b }, "live"), false); assert.equal(state.get(b.id)?.revision, revisionB);
+  assert.equal(state.accept("5", a, "live"), false); assert.equal(state.get(b.id)?.revision, revisionB);
+  assert.equal(state.get(b.id)?.message.body, "New occupant"); assert.equal(state.cursor, "5");
+  const reopened = new NativeConsumerState(join(state.file, ".."), "server", "a");
+  assert.equal(reopened.get(b.id)?.message.body, "New occupant"); assert.equal(reopened.get(b.id)?.revision, revisionB);
+  assert.equal(reopened.get(b.id)?.readPending, undefined); assert.equal(reopened.isRecalled(a), true); assert.equal(reopened.isRecalled(b), false);
+});
+test("replacing historical custody revokes its old manifest without disturbing the fresh occupant", t => {
+  const state = fixture(t); const a = message("history", "r@chatroom"); state.accept("1", a, "live"); state.bufferGroupMessage(a.id, 50);
+  const trigger = { ...message("trigger", "r@chatroom"), serverId: "9007199254741001" }; state.accept("2", trigger, "live");
+  state.beginDispatch(trigger.id, { messageIds: [trigger.id], historyInputs: [{ id: a.id }], assets: [] } as any, [a.id]);
+  const prepared = state.preparedCallback([trigger.id], "on_model_dispatch");
+  const b = { ...a, serverId: "9007199254741000", body: "New historical occupant" }; state.accept("3", b, "live");
+  assert.throws(() => prepared("old-history-run"), /source identity changed/);
+  assert.equal(state.get(trigger.id)?.state, "needs_review"); assert.equal(state.get(trigger.id)?.dispatchManifest, undefined);
+  assert.equal(state.get(b.id)?.state, "received"); assert.equal(state.get(b.id)?.message.body, "New historical occupant");
+});

@@ -393,6 +393,19 @@ impl Core {
         let parsed = if command.id == 5 {
             let message =
                 wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)?;
+            if let Some(recall) = crate::recalls::incoming_recall(&message, &state.own_username)? {
+                self.retain_control_raw(account, command, receipt)?;
+                self.apply_confirmed_recall(
+                    account,
+                    &recall.thread,
+                    &recall.server,
+                    recall.recalled_at,
+                    origin,
+                    receipt,
+                )?;
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
+            }
             if let Some(read) =
                 super::read_control::parse_remote_thread_read(&message, &state.own_username)
             {
@@ -483,6 +496,22 @@ impl Core {
             .server_message_id
             .as_deref()
             .context("missing_message_server_identity")?;
+        let recall = self.store.recall_marker(account, &message.peer, sid)?;
+        if let Some(marker) = recall.as_ref() {
+            if wechat_profile::find_projected_message(
+                &location,
+                &keys,
+                &message.peer,
+                sid,
+                &options,
+            )?
+            .is_some()
+            {
+                self.project_recall_marker(account, marker, receipt)?;
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
+            }
+        }
         let planned_sort = wechat_profile::choose_message_sort_sequence(
             &location,
             &keys,
@@ -549,6 +578,28 @@ impl Core {
             )?;
             (applied.source_id, true)
         };
+        if let Some(marker) = recall.as_ref() {
+            self.project_recall_marker(account, marker, receipt)?;
+            wechat_profile::apply_message_session_projection(
+                &location,
+                &keys,
+                &MessageSessionProjection {
+                    source: source.clone(),
+                    peer: message.peer.clone(),
+                    summary: crate::recalls::RECALLED_BODY.into(),
+                    outgoing: message.outgoing,
+                    unread: false,
+                    sender: None,
+                    sender_display: None,
+                    created_by_this_intent: created_by_intent,
+                },
+                &options,
+            )?;
+            let id = crate::message_id(&source)?;
+            self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
+            self.store.put_runtime(account, receipt, b"1")?;
+            return Ok(());
+        }
         if message.message_type == 34 && !message.inline_data.is_empty() {
             wechat_profile::cache_voice_projection(
                 &location,
@@ -840,7 +891,12 @@ impl Core {
             let existing = self
                 .profile_reader(account)?
                 .message(&source, Some(&state.own_username))?;
-            if existing.message_type != 1
+            if let Some(marker) =
+                self.store
+                    .recall_marker(account, destination, server_message_id)?
+            {
+                self.project_recall_marker(account, &marker, receipt)?;
+            } else if existing.message_type != 1
                 || existing.sender.as_deref() != Some(&state.own_username)
                 || existing.content.text.as_deref() != Some(text)
             {
@@ -899,7 +955,15 @@ impl Core {
             &MessageSessionProjection {
                 source: source.clone(),
                 peer: destination.into(),
-                summary: text.into(),
+                summary: if let Some(marker) =
+                    self.store
+                        .recall_marker(account, destination, server_message_id)?
+                {
+                    self.project_recall_marker(account, &marker, receipt)?;
+                    crate::recalls::RECALLED_BODY.into()
+                } else {
+                    text.into()
+                },
                 outgoing: true,
                 unread: false,
                 sender: Some(state.own_username.clone()),
@@ -919,7 +983,7 @@ impl Core {
 mod encrypted_roundtrip {
     use super::*;
     use wechat_protocol::protobuf as p;
-    fn state() -> AccountState {
+    pub(super) fn state() -> AccountState {
         AccountState {
             schema: 1,
             device: DeviceProfile {
@@ -945,7 +1009,14 @@ mod encrypted_roundtrip {
             short_host: "short.weixin.qq.com".into(),
         }
     }
-    fn add(kind: u32, from: &str, to: &str, body: &[u8], sid: u64, time: u32) -> SyncCommand {
+    pub(super) fn add(
+        kind: u32,
+        from: &str,
+        to: &str,
+        body: &[u8],
+        sid: u64,
+        time: u32,
+    ) -> SyncCommand {
         let inline = if kind == 34 {
             b"\x02#!SILK_V3\x02\x00xy".as_slice()
         } else {
@@ -1725,7 +1796,12 @@ impl Core {
             let existing = self
                 .profile_reader(account)?
                 .message(&source, Some(&state.own_username))?;
-            if existing.local_type != local_type.to_string()
+            if let Some(marker) =
+                self.store
+                    .recall_marker(account, destination, server_message_id)?
+            {
+                self.project_recall_marker(account, &marker, receipt)?;
+            } else if existing.local_type != local_type.to_string()
                 || existing.sender.as_deref() != Some(&state.own_username)
                 || existing.content.text.as_deref() != Some(content)
             {
@@ -1793,7 +1869,15 @@ impl Core {
             &MessageSessionProjection {
                 source: source.clone(),
                 peer: destination.into(),
-                summary: summary.into(),
+                summary: if let Some(marker) =
+                    self.store
+                        .recall_marker(account, destination, server_message_id)?
+                {
+                    self.project_recall_marker(account, &marker, receipt)?;
+                    crate::recalls::RECALLED_BODY.into()
+                } else {
+                    summary.into()
+                },
                 outgoing: true,
                 unread: false,
                 sender: Some(state.own_username.clone()),
@@ -1808,3 +1892,7 @@ impl Core {
         Ok(source)
     }
 }
+
+#[cfg(test)]
+#[path = "incoming_recall_tests.rs"]
+mod recall_tests;

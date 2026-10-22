@@ -29,6 +29,9 @@ pub struct NativeMessage {
     #[serde(default)]
     #[ts(optional)]
     pub quote: Option<NativeQuoteReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recall: Option<NativeRecallInfo>,
     pub direction: Option<String>,
     pub body: Option<String>,
     pub created_at: Option<String>,
@@ -36,6 +39,14 @@ pub struct NativeMessage {
     pub version: String,
     #[ts(type = "unknown[]")]
     pub media: Vec<Value>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeRecallInfo {
+    pub observed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recalled_at: Option<String>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -206,6 +217,12 @@ pub struct NativeTextSendRequest {
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeRecallRequest {
+    // Exact expected remote identity; an opaque source ID can be reused locally.
+    pub server_id: String,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeReadRequest {
     pub expected_version: String,
 }
@@ -233,6 +250,7 @@ pub fn typescript() -> String {
     let declarations = [
         NativeMentions::decl(),
         NativeQuoteReference::decl(),
+        NativeRecallInfo::decl(),
         NativeMessage::decl(),
         NativeQuoteResolution::decl(),
         NativeThread::decl(),
@@ -248,6 +266,7 @@ pub fn typescript() -> String {
         NativeIdentity::decl(),
         NativeStatus::decl(),
         NativeTextSendRequest::decl(),
+        NativeRecallRequest::decl(),
         NativeReadRequest::decl(),
         NativeForgetRequest::decl(),
         NativeMediaWritebackRequest::decl(),

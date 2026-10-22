@@ -1,4 +1,5 @@
 //! Official-format profiles remain opaque here; only our sidecar schema is migrated.
+mod admission;
 mod authorization;
 mod checkpoint;
 pub mod copy;
@@ -6,14 +7,18 @@ mod media;
 mod metadata;
 mod operations;
 mod outbox;
+mod outgoing_recall;
 mod pagination;
+mod recalls;
 mod settings;
 pub mod vault;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 pub use media::*;
 pub use operations::*;
+pub use outgoing_recall::*;
 pub use pagination::*;
+pub use recalls::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -134,6 +139,7 @@ pub struct Store {
     pub root: PathBuf,
     pub server_id: String,
     db: Mutex<Connection>,
+    admitted: Mutex<admission::AdmissionCache>,
     _lease: Lease,
 }
 
@@ -164,7 +170,17 @@ impl Store {
         if !m.is_file() || !wechat_platform::private_path(&db_path)? {
             bail!("registry must be an owner-only regular file");
         }
-        let mut db = Connection::open(&db_path)?;
+        let (db, server_id) =
+            admission::open_prepared(&db_path, None, |db| Self::prepare_registry(db, initialize))?;
+        Ok(Self {
+            root,
+            server_id,
+            db: Mutex::new(db),
+            admitted: Mutex::new(Default::default()),
+            _lease: lease,
+        })
+    }
+    fn prepare_registry(db: &mut Connection, initialize: bool) -> Result<String> {
         db.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !(0..=2).contains(&version) {
@@ -191,19 +207,14 @@ impl Store {
             tx.commit()?;
         }
         if version < 2 {
-            operations::migrate(&mut db)?;
+            operations::migrate(db)?;
         }
         let server_id = db.query_row(
             "SELECT value FROM metadata WHERE key='server_id'",
             [],
             |r| r.get(0),
         )?;
-        Ok(Self {
-            root,
-            server_id,
-            db: Mutex::new(db),
-            _lease: lease,
-        })
+        Ok(server_id)
     }
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let db = self

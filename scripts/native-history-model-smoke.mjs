@@ -69,6 +69,7 @@ const upstream = createServer(async (req, res) => {
     if (url.pathname === '/v1/status') return json({ serverId: 'fixture', dataDir: '/fixture', pid: process.pid, ownershipGeneration: 'fixture', state: 'running', version: { product: 'agent-wechat', backend: 'native', version: '1.0.0', apiVersion: 1, capabilities: ['serve','events','profile-read','text-send','native-login'] } });
     if (url.pathname === '/v1/accounts/a') return json({ id: 'a', authenticated: true, connection: 'online' });
     if (url.pathname === '/v1/accounts/a/threads') return json({ items: ['room@chatroom','u1'].map(id => ({ id, readStateVersion: '1' })), nextCursor: null, coverage: {} });
+    if (url.pathname === '/v1/accounts/a/events') return json({ items: [], nextCursor: '0' });
     if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
     if (url.pathname === '/v1/accounts/a/threads/room%40chatroom/messages') {
       assert.equal(url.searchParams.get('query'), 'earlier-project-note'); queries.push(Object.fromEntries(url.searchParams));
@@ -79,6 +80,12 @@ const upstream = createServer(async (req, res) => {
     }
     const lookup = /^\/v1\/accounts\/a\/messages\/(history-image|history-file|foreign-image)$/.exec(url.pathname);
     if (lookup) { lookups.push(lookup[1]); return json({id:lookup[1],accountId:'a',threadId:lookup[1]==='foreign-image'?'private-peer':'room@chatroom',senderId:'u1',direction:'incoming',type:lookup[1]==='history-file'?49:3,body:'<private transport XML>',version:'v1',media:[]}); }
+    const current = /^\/v1\/accounts\/a\/messages\/([^/]+)$/.exec(url.pathname);
+    if (current) {
+      const custody = JSON.parse(await readFile(join(temporary, 'probe-consumer', createHash('sha256').update('fixture\0a').digest('hex') + '.json'), 'utf8'));
+      const message = custody.items[decodeURIComponent(current[1])]?.message;
+      if (message) return json(message);
+    }
     const quoteLookup = /^\/v1\/accounts\/a\/messages\/([^/]+)\/quote$/.exec(url.pathname);
     if(quoteLookup){const scenario=quoteScenarios.find(value=>value.id===quoteLookup[1]);assert.ok(scenario);return json({accountId:'a',messageId:scenario.id,threadId:scenario.threadId??'room@chatroom',...quoteResolutions[scenario.id]});}
     const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
@@ -142,8 +149,10 @@ try {
   assert.ifError(fixtureError); assert.ok(result,`Gateway deadline: ${log}`); assert.equal(result.error,undefined,`${result.error}; ${log}`);
   for(const scenario of scenarios)assert.equal(result.outcomes[scenario.id],['trigger','dm-image',...quoteScenarios.map(value=>value.id)].includes(scenario.id)?'completed':'ignored');
   assert.equal(requests.length,13); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,7);
-  assert.deepEqual(lookups,['foreign-image','history-image','history-file']);assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
-  const group=result.contexts.find(ctx=>ctx.MessageSid==='wechat-native:a:trigger'),direct=result.contexts.find(ctx=>ctx.MessageSid==='wechat-native:a:dm-image');
+  assert.deepEqual([...new Set(lookups)],['foreign-image','history-image','history-file']);
+  assert.ok(lookups.filter(id=>id==='history-image').length>1,'Media must recheck its exact message after asynchronous retrieval');
+  assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
+  const group=result.contexts.find(ctx=>ctx.MessageSid.startsWith('wechat-native:a:trigger:')),direct=result.contexts.find(ctx=>ctx.MessageSid.startsWith('wechat-native:a:dm-image:'));
   assert.equal(group.Attachments.length,6);assert.equal(group.InboundHistory.length,8);assert.match(group.BodyForAgent,/pending/);assert.match(group.BodyForAgent,/historical voice transcript/);assert.equal(group.WasMentioned,true);
   for(const attachment of group.Attachments)assert.ok(JSON.stringify(requests[0].messages).includes(attachment.path),`Missing group ${attachment.kind} path`);
   const trigger=result.items.find(item=>item.message.id==='trigger'),selected=trigger.dispatchManifest.assets.find(asset=>asset.role==='model_image');assert.equal(selected.messageId,'image-b');assert.equal(selected.contextRole,'history');assert.notEqual(selected.sha256,selected.sourceSha256);assert.equal(group.MediaPath,selected.path);
@@ -158,7 +167,7 @@ try {
     if(scenario.id==='quote-text')assert.ok(JSON.stringify(request.messages).includes('Quoted original stored text'));
     if(scenario.id==='quote-embedded-text')assert.ok(JSON.stringify(request.messages).includes('Quoted embedded text with no original row'));
     const isImage=['quote-image','quote-embedded-image'].includes(scenario.id);
-    const context=result.contexts.find(ctx=>ctx.MessageSid===`wechat-native:a:${scenario.id}`);
+    const context=result.contexts.find(ctx=>ctx.MessageSid.startsWith(`wechat-native:a:${scenario.id}:`));
     assert.equal(!!context.MediaPath,isImage);
     if(isImage) {
       const sourceAsset=assets.get(scenario.id==='quote-image'?'quoted-original-image':scenario.id).asset;

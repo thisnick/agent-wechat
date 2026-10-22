@@ -2,7 +2,8 @@
 export const NATIVE_MAX_SOURCE_BYTES = 26214383 as const;
 export type NativeMentions = { state: string, userIds: Array<string>, self: boolean | null, all: boolean | null, source: string | null, };
 export type NativeQuoteReference = { serverId: string, type: number, };
-export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
+export type NativeRecallInfo = { observedAt: string, recalledAt?: string, };
+export type NativeMessage = { id: string, accountId: string, threadId: string, serverId: string | null, senderId: string | null, type: number, appMessageType?: number, quote?: NativeQuoteReference, recall?: NativeRecallInfo, direction: string | null, body: string | null, createdAt: string | null, mentions: NativeMentions, version: string, media: unknown[], };
 export type NativeQuoteResolution = { accountId: string, messageId: string, threadId: string, state: string, message: NativeMessage | null, embeddedText?: string, embeddedImage?: boolean, senderId?: string, };
 export type NativeThread = { id: string, accountId: string, peerId: string, kind: string, displayName: string | null, unreadCount: number | null, readStateVersion: string, history: unknown, };
 export type NativeContact = { id: string, username: string, displayName: string | null, nickname: string | null, remark: string | null, alias: string | null, relation: string, };
@@ -17,6 +18,7 @@ export type NativeEvent = { cursor: string, kind: string, data: Record<string, u
 export type NativeIdentity = { product: string, backend: string, version: string, apiVersion: number, target?: string, capabilities: Array<string>, };
 export type NativeStatus = { serverId: string, dataDir: string, pid: number, ownershipGeneration: string, version: NativeIdentity, state: string, };
 export type NativeTextSendRequest = { threadId: string, text: string, };
+export type NativeRecallRequest = { serverId: string, };
 export type NativeReadRequest = { expectedVersion: string, };
 export type NativeForgetRequest = { confirm: boolean, };
 export type NativeMediaWritebackRequest = { limit: number, };

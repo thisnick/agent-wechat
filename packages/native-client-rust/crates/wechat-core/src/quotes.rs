@@ -1,6 +1,6 @@
 //! Quote references never grant lookup in another conversation. Embedded image
 //! metadata uses the same validated, server-owned transfer path as ordinary media.
-use crate::{profile::normalized_message, source_message_id, Core};
+use crate::{source_message_id, Core};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
@@ -193,12 +193,18 @@ impl Core {
         let parent = reader.message(&source_message_id(id)?, own.as_deref())?;
         let thread = parent.peer.as_deref().context("quote_thread_unavailable")?;
         let response = |state: &str, message: Value| json!({"accountId":account,"messageId":id,"threadId":thread,"state":state,"message":message});
+        if self.observe_profile_recall(account, &parent)?.is_some() {
+            return Ok(response("recalled", Value::Null));
+        }
         let Some(app) = message_app(&parent).filter(|a| a.subtype == 57) else {
             return Ok(response("invalid", Value::Null));
         };
         let Some((server, kind)) = app.reference else {
             return Ok(response("invalid", Value::Null));
         };
+        if self.quote_is_recalled(account, thread, &server, &reader, own.as_deref())? {
+            return Ok(response("recalled", Value::Null));
+        }
         if ![1, 3].contains(&kind) {
             return Ok(response("unsupported", Value::Null));
         }
@@ -226,7 +232,7 @@ impl Core {
         }
         Ok(response(
             "resolved",
-            normalized_message(account, original, own.as_deref(), reader.generation())?,
+            self.normalize_recalled(account, original, own.as_deref(), reader.generation())?,
         ))
     }
 }

@@ -4,6 +4,8 @@ mod checkpoint;
 mod logout;
 #[path = "metadata.rs"]
 mod metadata;
+#[path = "outgoing_recall.rs"]
+mod outgoing_recall;
 #[path = "sync_projection.rs"]
 mod sync_projection;
 pub use metadata::MetadataAction;
@@ -237,10 +239,12 @@ impl Core {
             }
             core.store.recover_uncertain_sends(&account.id)?;
             core.store.recover_media_jobs(&account.id)?;
+            core.store.recover_message_recalls(&account.id)?;
             core.recover_logout(&account.id)?;
             core.store.recover_interrupted_operations(&account.id)?;
             let _ = core.recover_metadata(&account.id)?;
             let _ = core.recover_saved_login(&account.id);
+            let _ = core.recover_outgoing_recall_projections(&account.id);
         }
         Ok(core)
     }
@@ -406,7 +410,7 @@ impl Core {
             "disconnected"
         };
         Ok(
-            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
+            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingRecallProjections":self.store.pending_recall_projections(account)?,"pendingMessageRecalls":self.store.pending_message_recalls(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
@@ -444,6 +448,9 @@ impl Core {
     }
     pub fn cancel_operation(&self, account: &str, id: &str) -> Result<Operation> {
         let mut op = self.store.operation(account, id)?;
+        if op.kind == "message_recall" {
+            bail!("operation_cannot_cancel");
+        }
         if let Some(cancel) = self
             .cancels
             .lock()
@@ -1106,6 +1113,7 @@ impl Core {
         let mut projected = 0;
         let mut unsupported = 0;
         self.account_state(account)?;
+        self.reconcile_recall_markers(account)?;
         let sent = self.recover_text_projections(account)?;
         for (batch_id, encrypted) in self.store.pending_sync(account)? {
             let plain =

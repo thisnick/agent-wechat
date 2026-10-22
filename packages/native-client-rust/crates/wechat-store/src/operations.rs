@@ -223,10 +223,23 @@ impl Store {
         if !m.is_file() || !wechat_platform::private_path(&path)? {
             bail!("invalid account sidecar permissions");
         }
-        let mut db = Connection::open(path)?;
+        let mut admitted = self
+            .admitted
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database admission lock poisoned"))?;
+        let (mut db, ()) =
+            crate::admission::open_prepared(&path, Some(&admitted), Self::prepare_account)?;
+        let result = f(&mut db);
+        db.close().map_err(|(_, error)| error)?;
+        if result.is_ok() {
+            crate::admission::remember(&mut admitted, &path)?;
+        }
+        result
+    }
+    fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=4).contains(&version) {
+        if !(1..=6).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -246,11 +259,25 @@ impl Store {
             ))?;
             tx.commit()?;
         }
-        f(&mut db)
+        if version < 5 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V005__message_recalls.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 6 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V006__outgoing_recalls.sql"
+            ))?;
+            tx.commit()?;
+        }
+        Ok(())
     }
     pub fn protected_state_exists(&self) -> Result<bool> {
         for account in self.accounts()? {
-            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
+            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)+(SELECT count(*) FROM message_recalls)+(SELECT count(*) FROM outgoing_recalls)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
         }
         Ok(false)
     }

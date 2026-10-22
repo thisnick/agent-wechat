@@ -394,6 +394,18 @@ enum AuthCommand {
 }
 #[derive(Subcommand)]
 enum MessageCommand {
+    /// Recall an own message using its opaque local ID and exact remote ID.
+    Recall {
+        id: String,
+        #[arg(long)]
+        server_id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
     Watch {
         #[arg(long, default_value = "0")]
         after: String,
@@ -1307,6 +1319,16 @@ async fn run(cli: Cli) -> Result<()> {
             client_actions::resource(&r, "operations", command).await?
         }
         Command::Messages { command } => match command {
+            MessageCommand::Recall {
+                id,
+                server_id,
+                idempotency_key,
+                detach,
+                wait,
+            } => {
+                client_actions::recall(&r, &settings, id, server_id, idempotency_key, detach, wait)
+                    .await?
+            }
             MessageCommand::Watch { after, cursor_file } => {
                 return events::watch(&r, after, cursor_file, true).await
             }
@@ -1538,7 +1560,16 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result
         .await?;
     Ok(())
 }
-async fn wait_operation(r: &Remote, mut op: Value, wait: u64) -> Result<Value> {
+async fn wait_operation(r: &Remote, op: Value, wait: u64) -> Result<Value> {
+    wait_operation_checked(r, op, wait, |_| Ok(())).await
+}
+async fn wait_operation_checked(
+    r: &Remote,
+    mut op: Value,
+    wait: u64,
+    validate: impl Fn(&Value) -> Result<()>,
+) -> Result<Value> {
+    validate(&op)?;
     if wait == 0 {
         return Ok(op);
     }
@@ -1573,7 +1604,8 @@ async fn wait_operation(r: &Remote, mut op: Value, wait: u64) -> Result<Value> {
             Ok(result) => {
                 op = result.with_context(|| {
                     format!("operation {id} remains owned by the daemon; inspect its status")
-                })?
+                })?;
+                validate(&op)?;
             }
             Err(_) => {
                 op["clientWaitExpired"] = json!(true);

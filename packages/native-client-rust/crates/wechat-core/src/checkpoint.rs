@@ -46,7 +46,10 @@ fn read_cursor_file(path: &std::path::Path, root: &std::path::Path, max: u64) ->
 }
 impl Core {
     pub(super) fn publish_profile_checkpoint(&self, account: &str) -> Result<()> {
-        if self.store.pending_sync_count(account)? != 0 {
+        if self.store.pending_sync_count(account)? != 0
+            || self.store.pending_recall_projections(account)? != 0
+            || self.store.pending_message_recalls(account)? != 0
+        {
             return Ok(());
         }
         let Some(binding) = self.identity_binding(account)? else {
@@ -61,7 +64,10 @@ impl Core {
         // two iterations. A concurrent change may use the remaining bounded retry;
         // its journal/needed marker remains durable if more work arrives.
         for _ in 0..3 {
-            if self.store.pending_sync_count(account)? != 0 {
+            if self.store.pending_sync_count(account)? != 0
+                || self.store.pending_recall_projections(account)? != 0
+                || self.store.pending_message_recalls(account)? != 0
+            {
                 return Ok(());
             }
             let (mut journal, sealed_journal) =

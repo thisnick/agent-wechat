@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { resolveWeChatAccount } from "./types.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { sendNativeAttachment } from "./native-media.ts";
-import { submitNativeText } from "./native-send.ts";
+import { nativeOutboundDelivery, submitNativeText, type NativeOutboundDelivery } from "./native-send.ts";
 
 export async function sendWeChatMedia(
   cfg: unknown,
@@ -12,7 +12,7 @@ export async function sendWeChatMedia(
   mediaUrl: string | undefined,
   audioAsVoice = false,
   idempotencyKey?: string,
-): Promise<string> {
+): Promise<NativeOutboundDelivery> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.native) throw new Error("No native daemon configured");
   const { client } = await ensureNativeHost(account.native);
@@ -20,7 +20,8 @@ export async function sendWeChatMedia(
   if (!mediaUrl) {
     if (audioAsVoice) throw new Error("Voice sending requires an audio attachment");
     const send = await submitNativeText(client, account.native.accountId, to, text, key);
-    return `agent-wechat-native:${account.native.accountId}:${send.id}`;
+    return nativeOutboundDelivery(client, account.native.accountId, to, send.localMessageId ? [send.localMessageId] : [],
+      { sendId: send.id, state: send.state, serverIds: send.serverId ? [send.serverId] : undefined });
   }
   const result = await sendNativeAttachment(client, account, to, mediaUrl, audioAsVoice, key);
   if (text) await submitNativeText(client, account.native.accountId, to, text, createHash("sha256").update(`${key}\0caption`).digest("hex"));

@@ -233,6 +233,24 @@ requires supported MP4 input and server-side FFmpeg preparation. The runtime
 image includes FFmpeg/FFprobe; direct installs must provision these tools for
 source normalization. Large-file branches and sticker sending are unavailable.
 
+Recall a message sent by the selected account using its opaque message ID and
+exact server ID from history or a verified send receipt:
+
+```bash
+wx --account home messages recall MESSAGE_ID --server-id SERVER_ID
+wx --account home messages recall MESSAGE_ID --server-id SERVER_ID --detach
+wx --account home operations get OPERATION_ID
+```
+
+The CLI writes a private receipt before submission and uses a stable default
+idempotency key for the target. `--idempotency-key` can specify one explicitly.
+Reusing a saved receipt inspects its operation; changed input with the same key
+fails. After a lost response, retain the receipt and inspect the original intent;
+there is no automatic resubmission. Exit8 means `needs_review`, including an
+uncertain recall. WeChat can refuse an ineligible or old message. A confirmed
+remote recall and pending local profile repair remain distinct. Interrupting the
+watcher does not cancel the recall.
+
 ```bash
 wx --account home chats read filehelper --expected-version VERSION
 wx --account home messages read filehelper --expected-version VERSION
@@ -286,7 +304,7 @@ configuration are covered in [README](README.md). Fresh creation, export and
 returning files to the official app are outside the v1 acceptance scope.
 
 `store export` requires a stopped/consistent source and refuses pending sync,
-cursor, saved-login, read, metadata and accepted-send projections, including cached media
+cursor, saved-login, read, recall, metadata and accepted-send projections, including cached media
 whose official-file writeback is incomplete. `--allow-incomplete`
 preserves the current official bytes and reports the remaining categories; it
 does not drain or discard native work. Its checkpoint field reports a durable
