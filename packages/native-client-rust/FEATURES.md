@@ -98,8 +98,7 @@ those gaps.
   during normal live use and remain staged as `unsupported_sync_control`. As a result
   `pendingProjectionBatches` grows and `pendingCursorProjection` stays true. New messages
   still commit as `live`. Each needs its official handler established, then applying or an
-  explicit no-local-effect classification; see
-  [sync control gaps](../../dev-notes/sync-control-gaps.md).
+  explicit no-local-effect classification.
 - WXGF encoding/sending, source animation timing and faithful alpha rendering
   require separate evidence. Current incoming support preserves the container
   and supplies a representative still preview.
