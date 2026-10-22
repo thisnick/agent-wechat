@@ -55,7 +55,20 @@ Before changing a protobuf serializer or parser, cross-check field numbers, wire
 
 Maintainers with access to the private protocol documentation can set `WECHAT_PROTOCOL_REFERENCE_DIR` outside this checkout to an authorized local clone. Start with its `native-client-spec/protobuf/README.md` and `native-client-spec/protobuf/comparison/crosswalk.json`, then follow the relevant artifact evidence. Check the recorded source commit and package version: Android/Mac counterparts are comparison evidence, not interchangeable Linux schemas. Distinguish retained original names from inferred aliases; a literal value alone does not establish a field's meaning.
 
-Private access is optional. Public clones must build and test without that checkout or variable. When it is unavailable, use checked-in codec fixtures, public documentation and independently available matching artifacts, and record verification gaps in the PR. Maintainers can perform the private cross-check during review. Do not automatically fetch private material or make it a CI dependency.
+If the variable is unset, check `git config --local --get wechat.protocolReferenceDir`, then nearby workspace documentation checkouts. Identify a reference checkout by the two files above, not by its directory name. If several exist, check their branch/source snapshot before choosing one. The variable must point to the checkout root, not its `protobuf/` subdirectory.
+
+If only remote access is available, use an already authenticated GitHub connector or CLI to find an accessible protocol-documentation repository containing those same paths; a code-search query is `path:native-client-spec/protobuf filename:README.md`. Read it through the connector, or clone it outside this public checkout for local review. Remote reads do not require the environment variable. Do not guess private URLs or require a new login merely to run public checks.
+
+After verifying a local checkout, configure the current shell and optionally remember its path in this clone's untracked Git configuration:
+
+```bash
+export WECHAT_PROTOCOL_REFERENCE_DIR="/absolute/path/to/reference-checkout"
+git config --local wechat.protocolReferenceDir "$WECHAT_PROTOCOL_REFERENCE_DIR"
+# In a later shell, restore the value if the saved checkout is still valid:
+export WECHAT_PROTOCOL_REFERENCE_DIR="$(git config --local --get wechat.protocolReferenceDir)"
+```
+
+Private access is optional. Public clones must build and test without that checkout or variable. When it is unavailable, use checked-in codec fixtures, public documentation and independently available matching artifacts, and record verification gaps in the PR. Maintainers can perform the private cross-check during review. Build/test scripts and CI must not automatically fetch private material or depend on it.
 
 Keep private repository URLs, local reference paths, extracted schema catalogs, raw captures and account data out of public code, docs and PRs. Public regression tests should use synthetic values and describe the behavior they verify without requiring access to private evidence.
 
