@@ -101,7 +101,16 @@ jobs:
         run: |
           if [ ! -x /c/Strawberry/perl/bin/perl.exe ]; then choco install strawberryperl --no-progress -y; fi
           echo 'C:\Strawberry\perl\bin' >> "$GITHUB_PATH"
+      - name: Restore an executable built from identical Windows inputs
+        if: runner.os == 'Windows'
+        id: native-executable
+        uses: actions/cache@v4
+        with:
+          path: packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe
+          # No fallback keys: all native inputs and the build driver must match.
+          key: native-executable-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**', '!packages/native-client-rust/**/target/**', '.cargo/config*', '.gitattributes', 'scripts/native-ci-build.py', '.github/workflows/native-portable.yml') }}
       - uses: Swatinem/rust-cache@v2
+        if: steps.native-executable.outputs.cache-hit != 'true'
         with:
           workspaces: packages/native-client-rust -> target
           # Preinstalled unused Rust toolchains vary between runner images.
@@ -112,7 +121,7 @@ jobs:
         if: runner.os != 'Windows'
         run: python scripts/native-ci-build.py start ${{ matrix.target }}
       - name: Start Windows release compiler
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.native-executable.outputs.cache-hit != 'true'
         shell: pwsh
         run: python scripts/native-ci-build.py start ${{ matrix.target }}
       # Dependency setup is independent of Cargo and can overlap compilation.
@@ -136,6 +145,7 @@ jobs:
       - run: pnpm install --frozen-lockfile --prefer-offline --filter @agent-wechat/agent-wechat...
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - name: Require a successful release build
+        if: steps.native-executable.outputs.cache-hit != 'true'
         run: python scripts/native-ci-build.py wait
       - name: Check Windows standalone runtime dependencies
         if: runner.os == 'Windows'
