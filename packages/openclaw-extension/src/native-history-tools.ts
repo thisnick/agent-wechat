@@ -32,10 +32,11 @@ function messageResult(message: NativeMessage, retrievalTool = "wechat_media") {
     direction: message.direction, type: 10000, body: "[Message recalled]", status: "recalled", recall: nativeRecallInfo(message) };
   const isQuote = message.type === 49 && message.appMessageType === 57;
   const isForward = message.type === 49 && message.appMessageType === 19;
-  const kind = isQuote ? "quote" : isForward ? "forwarded_history" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
-  const body = message.type === 1 || isForward ? message.body ?? "" : isQuote ? `${message.body ?? ""}\n[Quoted original not retrieved; use ${retrievalTool} with this message ID]` : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
+  const isLink = message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && !!message.link;
+  const kind = isQuote ? "quote" : isForward ? "forwarded_history" : isLink ? "link_preview" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
+  const body = message.type === 1 || isForward || isLink ? message.body ?? "" : isQuote ? `${message.body ?? ""}\n[Quoted original not retrieved; use ${retrievalTool} with this message ID]` : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
   return { id: message.id, threadId: message.threadId, serverId: message.serverId, senderId: message.senderId,
-    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote: message.quote, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
+    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote: message.quote, link: isLink ? message.link : undefined, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
     attachment: message.type !== 1 && !isForward && kind !== "unsupported" ? { kind, retrievalTool, messageId: message.id } : undefined };
 }
 
@@ -171,7 +172,8 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
           guard();
           if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
           const details = { messageId: message.id, threadId: message.threadId, status: prepared.reason === "message_recalled" ? "recalled" : prepared.pending ? "pending" : prepared.attachment?.status ?? prepared.quote?.state ?? "unsupported",
-            attachment: prepared.attachment, quote: prepared.quote, variant: prepared.variant, jobId: prepared.jobId, retryable: prepared.retryable ?? false, reason: prepared.reason, body: prepared.body };
+            attachment: prepared.attachment, quote: prepared.quote, link: ["message_recalled", "media_identity_unavailable", "media_source_changed"].includes(prepared.reason ?? "") ? undefined : message.link,
+            variant: prepared.variant, jobId: prepared.jobId, retryable: prepared.retryable ?? false, reason: prepared.reason, body: prepared.body };
           const image = prepared.suppliedAssets?.find(asset => asset.role === "model_image");
           const output = image ? await imageResultFromFile({ label: "WeChat attachment", path: image.path, extraText: JSON.stringify(details), details })
             : { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };

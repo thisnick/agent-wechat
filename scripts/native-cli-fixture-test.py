@@ -55,6 +55,7 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if path.endswith("/sends"):
                 receipts=list((root/"receipts").glob("*.json"));assert receipts,"receipt was not durable before first request"
                 assert any(json.loads(p.read_text())["idempotencyKey"]==self.headers.get("Idempotency-Key") for p in receipts)
+                if body.get("kind")=="share":state["share"]=body
                 state["posts"]+=1;return self.reply({"id":"send-fixture","state":"queued"},202)
             if path.endswith("/auth/login"):
                 assert body["strategy"]=="qr" and body["qrRefresh"]=={"mode":"manual","maxRefreshes":3}
@@ -85,6 +86,16 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         run("messages","send","filehelper","--text","synthetic-text","--idempotency-key","fixture-send");assert state["posts"]==1
         run("messages","send","filehelper","--text","different","--idempotency-key","fixture-send",code=2);assert state["posts"]==1
         state["mode"]="needs_review";run("messages","send","filehelper","--text","uncertain","--idempotency-key","fixture-uncertain",code=8);assert state["posts"]==2
+        state["mode"]="accepted";before_share=state["posts"]
+        share=["messages","send","filehelper","--share","https://example.invalid/article?a=1&b=2","--title","Shared & title","--description","Explicit description","--thumbnail-url","https://example.invalid/preview.jpg","--idempotency-key","fixture-share"]
+        result=run(*share);assert result["state"]=="accepted" and state["posts"]==before_share+1
+        assert state["share"]=={"kind":"share","threadId":"filehelper","title":"Shared & title","url":"https://example.invalid/article?a=1&b=2","description":"Explicit description","thumbnailUrl":"https://example.invalid/preview.jpg"}
+        receipt=json.loads(pathlib.Path(result["receiptPath"]).read_text());assert receipt["kind"]=="share" and "Shared & title" not in json.dumps(receipt) and "article?a=1" not in json.dumps(receipt)
+        run(*share);assert state["posts"]==before_share+1
+        changed=share.copy();changed[changed.index("Shared & title")]="Changed title"
+        run(*changed,code=2);assert state["posts"]==before_share+1
+        missing_title=subprocess.run(args+["messages","send","filehelper","--share","https://example.invalid/article"],env=env,capture_output=True,timeout=10)
+        assert missing_title.returncode==2 and state["posts"]==before_share+1
         recalled=run("messages","recall","m","--server-id","18446744073709551615","--idempotency-key","fixture-recall")
         assert recalled["state"]=="succeeded" and state["recall_posts"]==1
         recall_receipt=json.loads(pathlib.Path(recalled["receiptPath"]).read_text());assert recall_receipt["operationId"]==recalled["id"] and recall_receipt["kind"]=="message_recall" and recall_receipt["messageId"]=="m" and recall_receipt["serverId"]=="18446744073709551615" and "threadId" not in recall_receipt

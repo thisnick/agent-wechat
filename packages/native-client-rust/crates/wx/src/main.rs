@@ -447,6 +447,14 @@ enum MessageCommand {
     },
     Send {
         thread: String,
+        #[arg(long, group = "payload", requires = "title")]
+        share: Option<String>,
+        #[arg(long, requires = "share")]
+        title: Option<String>,
+        #[arg(long, requires = "share")]
+        description: Option<String>,
+        #[arg(long, requires = "share")]
+        thumbnail_url: Option<String>,
         #[arg(long, group = "payload")]
         text: Option<String>,
         #[arg(long, group = "payload")]
@@ -1400,6 +1408,10 @@ async fn run(cli: Cli) -> Result<()> {
             }
             MessageCommand::Send {
                 thread,
+                share,
+                title,
+                description,
+                thumbnail_url,
                 text,
                 image,
                 file,
@@ -1413,6 +1425,10 @@ async fn run(cli: Cli) -> Result<()> {
                     &r,
                     &settings,
                     thread,
+                    share,
+                    title,
+                    description,
+                    thumbnail_url,
                     text,
                     image,
                     file,

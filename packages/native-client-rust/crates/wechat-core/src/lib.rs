@@ -1,6 +1,8 @@
 //! Account coordination, durable intents and profile application barriers.
 mod format;
 mod forwarded;
+mod links;
+pub use links::{LinkCard, ShareSendRequest};
 mod media;
 pub mod media_types;
 mod pagination;

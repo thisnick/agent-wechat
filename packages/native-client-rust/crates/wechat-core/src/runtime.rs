@@ -139,6 +139,14 @@ struct SendPayload {
     text: String,
     created_at: u32,
     client_id: u32,
+    // Missing in existing encrypted text intents.
+    #[serde(default)]
+    share: Option<crate::ShareSendRequest>,
+}
+struct SendReceipt {
+    accepted: bool,
+    correlated: bool,
+    server_message_id: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct IdentityBinding {
@@ -931,6 +939,28 @@ impl Core {
         destination: &str,
         text: &str,
     ) -> Result<SendIntent> {
+        self.queue_message_send(account, key, destination, text, None).await
+    }
+    pub async fn send_share(
+        self: &Arc<Self>,
+        account: &str,
+        key: &str,
+        request: crate::ShareSendRequest,
+    ) -> Result<SendIntent> {
+        request.validate()?;
+        let state = self.account_state(account)?;
+        request.xml(&state.own_username)?;
+        let destination = request.destination().to_owned();
+        self.queue_message_send(account, key, &destination, "", Some(request)).await
+    }
+    async fn queue_message_send(
+        self: &Arc<Self>,
+        account: &str,
+        key: &str,
+        destination: &str,
+        text: &str,
+        share: Option<crate::ShareSendRequest>,
+    ) -> Result<SendIntent> {
         self.account_state(account)?;
         if self.media_job_by_key(account, key).is_ok() {
             bail!("idempotency_conflict");
@@ -938,7 +968,7 @@ impl Core {
         if self.account_status(account)?["authenticated"] != true {
             bail!("auth_required");
         }
-        if text.is_empty()
+        if (share.is_none() && text.is_empty())
             || text.len() > 64 * 1024
             || destination.is_empty()
             || destination.len() > 256
@@ -952,12 +982,14 @@ impl Core {
             text: text.into(),
             created_at: wechat_protocol::wire::unix_time()?,
             client_id,
+            share,
         };
         let hash = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(
-                &json!({"threadId":destination,"text":text})
-            )?)
+            Sha256::digest(match &payload.share {
+                Some(share) => serde_json::to_vec(share)?,
+                None => serde_json::to_vec(&json!({"threadId":destination,"text":text}))?,
+            })
         );
         let encrypted = self
             .vault
@@ -1021,13 +1053,20 @@ impl Core {
             if !core.store.claim_send(&account, &id)? {
                 return Ok(());
             }
-            let result = native.send_text(
-                &mut state,
-                &payload.thread_id,
-                &payload.text,
-                payload.created_at,
-                payload.client_id,
-            );
+            let result = if let Some(share) = &payload.share {
+                let xml = share.xml(&state.own_username)?;
+                native.send_share(&mut state, &payload.thread_id, &payload.client_id.to_string(), payload.created_at, &xml)
+                    .map(|result| SendReceipt {
+                        accepted: result.status == wechat_protocol::media_send::SendStatus::ServerAccepted,
+                        correlated: result.client_id_matches == Some(true),
+                        server_message_id: result.server_message_id,
+                    })
+            } else {
+                native.send_text(&mut state, &payload.thread_id, &payload.text, payload.created_at, payload.client_id)
+                    .map(|result| SendReceipt { accepted: result.accepted,
+                        correlated: result.returned_destination_matches && result.returned_client_id_matches,
+                        server_message_id: result.server_message_id })
+            };
             // A logout may suppress credential installation during this RPC,
             // but cannot erase an authenticated, accepted send receipt.
             let authorization_saved = core.save_state(&account, &state).is_ok();
@@ -1037,9 +1076,7 @@ impl Core {
             }
             let updated = match result {
                 Ok(result)
-                    if result.accepted
-                        && result.returned_destination_matches
-                        && result.returned_client_id_matches =>
+                    if result.accepted && result.correlated =>
                 {
                     core.store.update_send(
                         &account,
@@ -1065,39 +1102,39 @@ impl Core {
                 )?,
             };
             if updated.state == "accepted" {
-                let _ = core.project_text_send(&account, &id);
+                let _ = core.project_message_send(&account, &id);
             }
             Ok(())
         })
         .await
     }
-    fn project_text_send(&self, account: &str, id: &str) -> Result<()> {
+    fn project_message_send(&self, account: &str, id: &str) -> Result<()> {
         let intent = self.store.send(account, id)?;
         let server = intent
             .server_id
             .as_deref()
-            .context("missing accepted text identity")?;
+            .context("missing accepted message identity")?;
         if intent.state != "accepted" {
-            bail!("invalid text projection receipt");
+            bail!("invalid message projection receipt");
         }
         let sealed = self.store.send_payload(account, id)?;
         let payload: SendPayload =
             serde_json::from_slice(&self.vault.open_record(account, "send-payload", &sealed)?)?;
-        let source = self.project_accepted_text(
-            account,
-            &payload.thread_id,
-            &payload.text,
-            u64::from(payload.created_at),
-            server,
-            &format!("send-projection:{id}"),
-        )?;
+        let receipt = format!("send-projection:{id}");
+        let source = if let Some(share) = &payload.share {
+            let state = self.account_state(account)?;
+            let content = format!("<msg>{}</msg>", share.xml(&state.own_username)?);
+            self.project_accepted_media(account, &payload.thread_id, 49, &content, "[Link]", u64::from(payload.created_at), server, &receipt)?
+        } else {
+            self.project_accepted_text(account, &payload.thread_id, &payload.text, u64::from(payload.created_at), server, &receipt)?
+        };
         self.store
             .finish_text_projection(account, id, &crate::message_id(&source)?)
     }
     fn recover_text_projections(&self, account: &str) -> Result<usize> {
         let mut done = 0;
         for id in self.store.pending_text_projections(account)? {
-            if self.project_text_send(account, &id).is_ok() {
+            if self.project_message_send(account, &id).is_ok() {
                 done += 1;
             }
         }
@@ -1655,6 +1692,57 @@ mod tests {
         assert!(!auth_rejected(&anyhow::anyhow!(
             "Saved-device login returned -2017"
         )));
+    }
+    #[tokio::test]
+    async fn share_intents_are_encrypted_idempotent_and_never_requeued_after_uncertain_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let store = Arc::new(Store::open(&root).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.restore_credentials("one", &serde_json::to_vec(&state()).unwrap()).unwrap();
+        // Keep workers offline while exercising the real durable admission path.
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store.mark_validated_if_active("one", &core.ownership_generation).unwrap();
+        core.stopping.store(true, Ordering::SeqCst);
+        let request = crate::ShareSendRequest::Share { thread_id: "peer".into(), title: "Private share title".into(),
+            url: "https://example.invalid/private-article".into(), description: Some("Description".into()), thumbnail_url: None };
+        let first = core.send_share("one", "share-key", request.clone()).await.unwrap();
+        let repeated = core.send_share("one", "share-key", request.clone()).await.unwrap();
+        assert_eq!(first.id, repeated.id);
+        assert_eq!(first.state, "queued");
+        let sealed = store.send_payload("one", &first.id).unwrap();
+        assert!(!sealed.windows(13).any(|v| v == b"Private share"));
+        let payload: SendPayload = serde_json::from_slice(&core.vault.open_record("one", "send-payload", &sealed).unwrap()).unwrap();
+        assert!(payload.share.is_some());
+        assert_eq!(payload.thread_id, "peer");
+        let mut changed = serde_json::to_value(&request).unwrap();
+        changed["title"] = "Changed title".into();
+        assert!(core.send_share("one", "share-key", serde_json::from_value(changed).unwrap()).await.unwrap_err().to_string().contains("idempotency_conflict"));
+        assert!(core.send_text("one", "share-key", "peer", "text instead").await.unwrap_err().to_string().contains("idempotency_conflict"));
+        core.perform_send("one", &first.id).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(store.send("one", &first.id).unwrap().state, "queued");
+        assert!(store.claim_send("one", &first.id).unwrap());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&core) > 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        drop(core);
+        drop(store);
+        let store = Arc::new(Store::open_existing(&root).unwrap());
+        let core = Core::new(store.clone(), None).unwrap();
+        let recovered = store.send("one", &first.id).unwrap();
+        assert_eq!(recovered.state, "needs_review");
+        assert_eq!(recovered.error_code.as_deref(), Some("restart_after_submission"));
+        assert!(store.queued_sends("one").unwrap().is_empty());
+        assert!(!store.claim_send("one", &first.id).unwrap());
+        // Legacy encrypted text payloads continue to decode without a kind field.
+        let old: SendPayload = serde_json::from_value(json!({"thread_id":"peer","text":"old text","created_at":1,"client_id":2})).unwrap();
+        assert!(old.share.is_none());
+        core.logout_local("one").unwrap();
+        assert!(core.send_share("one", "new-key", request).await.is_err());
     }
     #[test]
     fn auth_fallback_requires_a_whole_rejection_from_a_known_protocol_boundary() {

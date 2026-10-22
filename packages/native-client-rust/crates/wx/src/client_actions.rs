@@ -317,6 +317,10 @@ pub async fn send(
     r: &Remote,
     config: &settings::File,
     thread: String,
+    share: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    thumbnail_url: Option<String>,
     text: Option<String>,
     image: Option<PathBuf>,
     file: Option<PathBuf>,
@@ -335,10 +339,17 @@ pub async fn send(
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    if inputs.len() + usize::from(text.is_some()) != 1 {
-        bail!("choose exactly one of --text/--image/--file/--video/--voice");
+    if inputs.len() + usize::from(text.is_some()) + usize::from(share.is_some()) != 1 {
+        bail!("choose exactly one of --text/--share/--image/--file/--video/--voice");
     }
-    let (kind, bytes, name) = if let Some(text) = text {
+    let (kind, bytes, name) = if let Some(url) = share {
+        let request = wechat_core::ShareSendRequest::Share {
+            thread_id: thread.clone(), title: title.context("--share requires --title")?,
+            url, description, thumbnail_url,
+        };
+        request.validate()?;
+        ("share", serde_json::to_vec(&request)?, None)
+    } else if let Some(text) = text {
         if text.is_empty() {
             bail!("message text cannot be empty");
         }
@@ -389,12 +400,13 @@ pub async fn send(
         value["receiptPath"] = json!(path);
         return Ok(value);
     }
-    let (mut result, resource) = if kind == "text" {
+    let (mut result, resource) = if kind == "text" || kind == "share" {
         (
             r.request(
                 reqwest::Method::POST,
                 &r.path("sends")?,
-                Some(json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?})),
+                Some(if kind == "share" { serde_json::from_slice(&bytes)? }
+                    else { json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?}) }),
                 Some(&key),
             )
             .await

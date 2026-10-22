@@ -1,0 +1,16 @@
+<msg>
+  <appmsg appid="synthetic-app">
+    <title><![CDATA[Title & preview]]></title>
+    <des>Description &lt;kept as text&gt;</des>
+    <type>5</type>
+    <url>https://example.invalid/article?a=1&amp;b=2</url>
+    <thumburl>https://example.invalid/preview.jpg?signature=private-signature</thumburl>
+    <sourcedisplayname>Example publisher</sourcedisplayname>
+    <appattach>
+      <cdnthumburl>synthetic-cdn-id</cdnthumburl>
+      <cdnthumbaeskey>01010101010101010101010101010101</cdnthumbaeskey>
+      <cdnthumblength>123</cdnthumblength>
+      <cdnthumbmd5>11111111111111111111111111111111</cdnthumbmd5>
+    </appattach>
+  </appmsg>
+</msg>

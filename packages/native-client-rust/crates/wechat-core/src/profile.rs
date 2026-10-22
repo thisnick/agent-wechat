@@ -242,14 +242,18 @@ pub(crate) fn normalized_message(
         .filter(|a| a.subtype == 57)
         .and_then(|a| a.reference.as_ref())
         .map(|(id, kind)| json!({"serverId":id,"type":kind}));
-    if let Some(app) = app.filter(|a| a.subtype == 57) {
-        text = app.title;
+    let link = app.as_ref().and_then(|a| a.link.as_ref()).map(|l| &l.card);
+    if let Some(link) = link {
+        text = Some(link.body());
+    }
+    if let Some(app) = app.as_ref().filter(|a| a.subtype == 57) {
+        text = app.title.clone();
     }
     if forwarded.is_some() {
         text = forwarded;
     }
     Ok(
-        json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":msg.sender,"direction":msg.outgoing.map(|out|if out{"outgoing"}else{"incoming"}),"type":msg.message_type,"appMessageType":app_type,"quote":quote,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"}),
+        json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":msg.sender,"direction":msg.outgoing.map(|out|if out{"outgoing"}else{"incoming"}),"type":msg.message_type,"appMessageType":app_type,"quote":quote,"link":link,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"}),
     )
 }
 

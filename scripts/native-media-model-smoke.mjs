@@ -29,6 +29,12 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
     else bytes = await readFile(join(root, 'packages/openclaw-extension/test/fixtures', name));
     assets.set(id, { bytes, asset: { id: `asset-${id}`, accountId: 'a', messageId: id, kind, variant: kind === 'image' ? 'original' : 'normal', actualVariant: kind === 'image' ? 'original' : 'normal', state: id === 'pending-image' ? 'pending' : id === 'expired-image' ? 'expired' : 'available', contentType, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), filename: name, officialWriteback: 'complete', retryable: false } });
   }
+  for (const id of ['link-preview', 'pending-link-preview']) {
+    const source = assets.get('image');
+    assets.set(id, { bytes: source.bytes, asset: { ...source.asset, id: `asset-${id}`, messageId: id,
+      variant: 'thumbnail', actualVariant: id.startsWith('pending-') ? null : 'thumbnail',
+      state: id.startsWith('pending-') ? 'pending' : 'available', officialWriteback: 'unsupported' } });
+  }
   const upstream = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://fixture');
@@ -86,7 +92,9 @@ console.log('Synthetic local transcript');
       tools: { media: { models: [{type:'cli',command:process.execPath,args:[transcriber,'{{MediaPath}}',join(temporary,'transcriptions.jsonl')],capabilities:['audio']}], audio: { enabled: true }, image: { enabled: false }, video: { enabled: false } } }, agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } } },
       plugins: { allow: ['agent-wechat'], load: { paths: [join(temporary, 'plugin')] }, entries: { 'agent-wechat': { enabled: true, hooks: { allowConversationAccess: conversationAccess }, config: { backend: 'native', native: { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${nativePort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy } } } } },
       logging: { file: join(temporary, 'gateway.log') }, channels: { 'agent-wechat': { enabled: true, dmPolicy: 'open', allowFrom: ['*'], groupPolicy: 'open', groupAllowFrom: ['*'] } } };
-    const scenarios = (name === 'text-only' ? [{id:'image',type:3},{id:'image-large',type:3}] : [...assets.keys()].map(id => ({id,type:id.includes('image')?3:id==='file'?49:id==='video'?43:34}))).map(item=>({...item,threadId}));
+    const scenarios = (name === 'text-only' ? [{id:'image',type:3},{id:'image-large',type:3}] : [...assets.keys()].map(id => ({id,type:id.includes('link-preview')?49:id.includes('image')?3:id==='file'?49:id==='video'?43:34}))).map(item=>({...item,threadId,
+      ...(item.id.includes('link-preview') ? { appMessageType: 5, body: '[Link] Synthetic shared title\nExplicit description\nhttps://example.invalid/article',
+        link: { title: 'Synthetic shared title', description: 'Explicit description', url: 'https://example.invalid/article', sourceName: null } } : {}) }));
     await writeFile(join(temporary,'scenarios.json'),JSON.stringify(scenarios));
     const path = join(temporary, 'config.json'); await writeFile(path, JSON.stringify(config), { mode: 0o600 });
     // Channel startup must remain enabled: the pinned host intentionally removes
@@ -118,6 +126,16 @@ console.log('Synthetic local transcript');
         assert.equal(reads.flat().includes(id), inbound && id === 'expired-image');
         continue;
       }
+      if (id === 'pending-link-preview') {
+        assert.equal(result.outcomes[id], 'completed');
+        assert.equal(item.manifest.assets.length, 0);
+        const request = requests.find(request => JSON.stringify(request.messages.at(-1)).includes(`wechat-native:a:${id}`)); assert.ok(request);
+        const current = request.messages.filter(message=>message.role==='user').at(-2);
+        assert.match(JSON.stringify(current), /Synthetic shared title/); assert.match(JSON.stringify(current), /https:\/\/example.invalid\/article/);
+        assert.match(JSON.stringify(current), /image pending/);
+        assert.equal(reads.flat().includes(id), eligible);
+        continue;
+      }
       const asset = item.manifest.assets[0]; assert.ok(asset); assert.equal(item.manifest.newInputs[0].version,'v1');
       assert.equal(item.manifest.newInputs[0].role,'trigger'); assert.equal(item.manifest.manifestSha256.length,64);
       assert.equal(createHash('sha256').update(await readFile(asset.path)).digest('hex'),asset.sha256);
@@ -132,6 +150,7 @@ console.log('Synthetic local transcript');
         if (name === 'text-only') assert.equal(images.length,0);
         else { assert.equal(images.length,1); const image=/^data:([^;]+);base64,(.+)$/.exec(images[0].image_url.url); assert.ok(image); assert.equal(image[1],asset.mime); assert.equal(createHash('sha256').update(Buffer.from(image[2],'base64')).digest('hex'),asset.sha256); }
         if(id==='image-large') { assert.notEqual(asset.sourceSha256,asset.sha256); assert.match(JSON.stringify(current),/prepared still preview/); }
+        if(id==='link-preview') { assert.match(JSON.stringify(current),/Synthetic shared title/); assert.match(JSON.stringify(current),/https:\/\/example.invalid\/article/); }
       } else assert.ok(JSON.stringify(current).includes(asset.path));
       if(id==='voice') assert.match(JSON.stringify(current),/Synthetic local transcript/);
       if(id==='voice-failed') assert.match(JSON.stringify(current),/Voice transcription unavailable/);

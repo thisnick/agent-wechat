@@ -30,5 +30,6 @@ ts-rs = "10"
 
 [dev-dependencies]
 rusqlite.workspace = true
+zstd = "0.13"
 
 crc32fast = "1"

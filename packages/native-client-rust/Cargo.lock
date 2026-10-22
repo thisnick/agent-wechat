@@ -2285,6 +2285,7 @@ dependencies = [
  "wechat-protocol",
  "wechat-store",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]

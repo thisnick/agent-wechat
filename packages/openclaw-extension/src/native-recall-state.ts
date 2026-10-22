@@ -10,7 +10,7 @@ export function validateNativeRecall(value: NativeRecallObservation): void {
     || (value.messageId !== undefined && (typeof value.messageId !== "string" || !value.messageId || value.messageId.length > 4096))) throw Error("Invalid native recall observation; cursor retained");
 }
 export function recalledNativeMessage(message: NativeMessage, recall: NativeRecallObservation): NativeMessage {
-  return { ...message, type: 10000, body: "[Message recalled]", quote: undefined, media: [],
+  return { ...message, type: 10000, body: "[Message recalled]", quote: undefined, link: undefined, media: [],
     mentions: { state: "unknown", userIds: [], self: null, all: null, source: null },
     recall: { observedAt: recall.observedAt, ...(recall.recalledAt ? { recalledAt: recall.recalledAt } : {}) },
   } as NativeMessage;

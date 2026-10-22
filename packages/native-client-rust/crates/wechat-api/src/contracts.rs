@@ -29,6 +29,9 @@ pub struct NativeMessage {
     #[serde(default)]
     #[ts(optional)]
     pub quote: Option<NativeQuoteReference>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub link: Option<wechat_core::LinkCard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recall: Option<NativeRecallInfo>,
@@ -250,6 +253,7 @@ pub fn typescript() -> String {
     let declarations = [
         NativeMentions::decl(),
         NativeQuoteReference::decl(),
+        wechat_core::LinkCard::decl(),
         NativeRecallInfo::decl(),
         NativeMessage::decl(),
         NativeQuoteResolution::decl(),
@@ -266,6 +270,7 @@ pub fn typescript() -> String {
         NativeIdentity::decl(),
         NativeStatus::decl(),
         NativeTextSendRequest::decl(),
+        wechat_core::ShareSendRequest::decl(),
         NativeRecallRequest::decl(),
         NativeReadRequest::decl(),
         NativeForgetRequest::decl(),

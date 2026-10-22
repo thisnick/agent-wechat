@@ -1509,6 +1509,26 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn share_send_validates_scope_and_metadata_before_account_or_network_access() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        core.store.issue_token("read", &format!("{:x}", Sha256::digest(read.as_bytes())), &["one".into()], &["read".into()], None).unwrap();
+        let share = json!({"kind":"share","threadId":"peer","title":"Shared title","url":"https://example.invalid/article"});
+        for (token, expected) in [(None, StatusCode::UNAUTHORIZED), (Some(read), StatusCode::FORBIDDEN)] {
+            assert_eq!(call(app.clone(), "POST", "/v1/accounts/one/sends", token, Some(share.clone())).await.0, expected);
+        }
+        for update in [json!({"title":""}), json!({"url":"file:///private"}), json!({"thumbnailUrl":"http://127.0.0.1/private"}), json!({"sourceId":"must-not-be-a-file"}), json!({"description":12})] {
+            let mut body = share.clone();
+            body.as_object_mut().unwrap().extend(update.as_object().unwrap().clone());
+            let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/accounts/one/sends")
+                .header("authorization", format!("Bearer {OWNER}"))
+                .header("content-type", "application/json").header("idempotency-key", "share-fixture")
+                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(core.store.queued_sends("one").unwrap().is_empty());
+    }
+    #[tokio::test]
     async fn quote_lookup_checks_account_read_scope_before_profile_io() {
         let (_temp, core, app) = setup();
         let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

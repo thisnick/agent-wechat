@@ -985,6 +985,22 @@ impl NativeClient {
             self.authenticated_rpc(state, 379, "/cgi-bin/micromsg-bin/getcdndns", &request)?;
         crate::media::decode_cdn_config(&reply, state)
     }
+    /// Submit a URL card once through the app-message carrier. The caller owns
+    /// the durable intent and must inspect an uncertain submission outcome.
+    pub fn send_share(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        client_id: &str,
+        created_at: u32,
+        content: &str,
+    ) -> Result<crate::media_send::MediaSendResult> {
+        let request = crate::media_send::share_send_request(state, destination, client_id, created_at, content)?;
+        crate::media_send::decode_file_send(
+            &self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?,
+            client_id,
+        )
+    }
     pub fn send_file(
         &self,
         state: &mut AccountState,

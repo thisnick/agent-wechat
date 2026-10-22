@@ -1,5 +1,5 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -185,6 +185,10 @@ export class NativeWeChatClient {
     return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ threadId, text }) });
   }
   send(accountId: string, sendId: string, signal?: AbortSignal): Promise<NativeSendIntent> { return this.request(`v1/accounts/${id(accountId)}/sends/${id(sendId)}`, { signal }); }
+  sendShare(accountId: string, input: ShareSendRequest, key: string, signal?: AbortSignal): Promise<NativeSendIntent> {
+    if (!key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) throw new Error("An idempotency key is required");
+    return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(input), signal });
+  }
   sendByKey(accountId: string, key: string): Promise<NativeSendIntent | MediaJob> { if (!key || key.length > 200) throw new Error("Invalid idempotency key"); return this.request(`v1/accounts/${id(accountId)}/sends/by-idempotency-key?key=${encodeURIComponent(key)}`); }
   cancelSend(accountId: string, sendId: string): Promise<NativeSendIntent | MediaJob> { return this.request(`v1/accounts/${id(accountId)}/sends/${id(sendId)}/cancel`, { method: "POST", body: "{}" }); }
   async upload(accountId: string, bytes: Uint8Array, name: string, contentType = "application/octet-stream", signal?: AbortSignal): Promise<OwnedMediaSource> {

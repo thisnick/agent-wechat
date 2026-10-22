@@ -17,6 +17,9 @@ pub const MAX_NATIVE_UPLOAD_BYTES: usize = 25 * 1024 * 1024 - 17;
 #[path = "avatar.rs"]
 mod avatar;
 pub use avatar::*;
+#[path = "link_thumbnail.rs"]
+mod link_thumbnail;
+pub use link_thumbnail::*;
 #[path = "sticker.rs"]
 mod sticker;
 pub use sticker::*;

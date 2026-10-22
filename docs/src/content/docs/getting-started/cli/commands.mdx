@@ -214,6 +214,9 @@ wx --account home messages send filehelper --image /private/photo.png --detach
 wx --account home messages send filehelper --file /private/report.pdf
 wx --account home messages send filehelper --video /private/clip.mp4
 wx --account home messages send filehelper --voice /private/audio.wav
+wx --account home messages send RECIPIENT_ID --share https://example.com/article \
+  --title "An explicit title" --description "Optional description" \
+  --thumbnail-url https://example.com/preview.jpg --idempotency-key one-share-intent
 wx --account home messages sends lookup --idempotency-key one-logical-intent
 wx --account home messages voice status JOB_ID
 wx --account home jobs cancel JOB_ID
@@ -226,6 +229,12 @@ excluded. Retain that receipt after a lost response. Reusing its key/input
 returns the same resource; changed input is a conflict. Accepted means native
 server acceptance, not recipient delivery. `needs_review`/partial voice outcomes
 retain completed note IDs and must not automatically resend.
+
+`--share` composes a type-5 URL card from explicit metadata; `--title` is required.
+Description and public HTTP(S) thumbnail URL are optional. It does not scrape the
+page or upload an image. The share uses the same receipt, lookup, cancellation
+and uncertain-outcome handling as text. Actual server acceptance and recipient
+card/thumbnail rendering still require live verification.
 
 The current native source cap is25MiB−17bytes, below the separate128MiB cached
 HTTP bound. Voice uses independent SILK encoding and splits at10seconds; video

@@ -79,6 +79,33 @@ async function prepareImageRepresentation(bytes: Buffer, mime: string, cfg: any)
 }
 export type NativePreparedMedia = { body: string; attachment?: WeChatAttachment; mediaPath?: string; mediaMime?: string; suppliedAssets?: NativeSuppliedAsset[]; pending: boolean; jobId?: string; retryable?: boolean; reason?: string; variant?: MediaVariant; quote?: { state: string; messageId?: string; senderId?: string; type?: number } };
 export type NativePrepareMediaParams = { client: NativeWeChatClient; account: ResolvedWeChatAccount; message: NativeMessage; core: any; cfg?: any; waitMs?: number; download?: boolean; quality?: MediaVariant; signal?: AbortSignal; assertCurrent?: () => void; beforeMediaAccess?: () => Promise<void>; allowQuotedMessage?: (message: Pick<NativeMessage, "senderId" | "direction">) => Promise<boolean> };
+async function prepareNativeLink(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
+  const { message } = params;
+  const link = message.link!;
+  const body = [`[Link]${link.title ? ` ${link.title}` : ""}`, link.description, link.url].filter(Boolean).join("\n").slice(0, 65536);
+  const unavailable = (status: "unsupported" | "unavailable", reason?: string): NativePreparedMedia => ({
+    body: `${body}\n[Link preview ${status}]`, pending: false, retryable: false, reason,
+    attachment: { kind: "image", status, filename: "link-preview" },
+  });
+  if (params.quality && !["best", "thumbnail"].includes(params.quality)) return unavailable("unsupported", "unsupported_media_variant");
+  let prepared: NativePreparedMedia;
+  try {
+    // Only the renderer changes. The daemon re-parses the stored card using
+    // this parent message ID and owns its thumbnail transfer plan.
+    prepared = await prepareNativeAttachment({ ...params, quality: "thumbnail",
+      message: { ...message, type: 3, appMessageType: undefined, quote: undefined, link: undefined } });
+  } catch (error) {
+    params.signal?.throwIfAborted(); params.assertCurrent?.();
+    if (!(error instanceof NativeApiError)) throw error;
+    if (terminalIdentityErrors.has(error.code) || error.code === "message_recalled") throw error;
+    return { ...unavailable("unavailable", error.code), retryable: error.retryable };
+  }
+  if (prepared.reason === "message_recalled" || terminalIdentityErrors.has(prepared.reason ?? "")) return prepared;
+  // A thumbnail is optional: a queued or failed preview must not hold the
+  // card's title, description and URL behind media retries.
+  return { ...prepared, body: `${body}\n[Link preview]\n${prepared.body}`, pending: false,
+    ...(prepared.pending ? { attachment: { kind: "image" as const, status: "pending" as const, filename: "link-preview" } } : {}) };
+}
 async function prepareNativeQuote(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
   const { client, account, message } = params;
   const guard = () => { params.signal?.throwIfAborted(); params.assertCurrent?.(); }; guard();
@@ -160,6 +187,7 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   const authorize = async () => { guard(); await params.beforeMediaAccess?.(); guard(); };
   if (message.type === 49 && message.appMessageType === 57) return prepareNativeQuote(params);
   if (message.type === 49 && message.appMessageType === 19) return { body: message.body?.slice(0, 65536) || "[Forwarded chat history unavailable]", pending: false };
+  if (message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && message.link) return prepareNativeLink(params);
   if (message.type === 49 && message.appMessageType != null && message.appMessageType !== 6) return { body: `[Unsupported WeChat app message subtype ${message.appMessageType}]`, pending: false, retryable: false };
   if (!attachmentKind) return { body: message.type === 1 ? message.body ?? "" : `[Unsupported WeChat message type ${message.type}]`, pending: false };
   const accountId = account.native!.accountId; const maxBytes = Math.min(account.mediaMaxMb * 1024 * 1024, 128 * 1024 * 1024);
@@ -195,16 +223,16 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
     if (!asset && ["queued", "running"].includes(job.state)) return { body: `[${attachmentKind} pending]`, pending: true, jobId: job.id, retryable: true };
   }
   if (!asset && !job && params.download !== false && !["expired", "unsupported", "recalled"].includes(transferCandidate()?.state ?? "")) {
+    await authorize();
     try {
-      await authorize();
       job = await client.transferMedia(accountId, { messageId: message.id, assetId: null, quality: transferQuality });
       guard();
       job = await waitNativeMediaJob(client, accountId, job, params.waitMs ?? 20000, params.signal, guard);
       guard();
     } catch (error) {
       guard();
-      if (error instanceof NativeApiError && terminalIdentityErrors.has(error.code)) throw error;
-      if (!(error instanceof NativeApiError) || error.retryable) return { body: `[${attachmentKind} pending: retrieval is unavailable]`, pending: true, jobId: job?.id, retryable: true };
+      if (!(error instanceof NativeApiError) || terminalIdentityErrors.has(error.code)) throw error;
+      if (error.retryable) return { body: `[${attachmentKind} pending: retrieval is unavailable]`, pending: true, jobId: job?.id, retryable: true };
       transferError = error;
     }
     // Refresh even while queued: a cached copy may have arrived during the wait.

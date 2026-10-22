@@ -52,6 +52,62 @@ fn escape(s: &str) -> String {
 fn tag(name: &str, value: impl ToString) -> String {
     format!("<{name}>{}</{name}>", escape(&value.to_string()))
 }
+/// Generic URL shares use app subtype 5. Metadata is supplied by the caller;
+/// composing or sending a card never fetches the target page or thumbnail.
+pub fn share_xml(
+    sender: &str,
+    title: &str,
+    url: &str,
+    description: Option<&str>,
+    thumbnail_url: Option<&str>,
+) -> Result<String> {
+    clean(sender, 256)?;
+    ensure!(!title.trim().is_empty() && title.len() <= 16384
+        && !title.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')), "invalid_share_request");
+    crate::media::validate_shared_link_url(url)?;
+    let description = description.unwrap_or("");
+    ensure!(description.len() <= 16384
+        && !description.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')), "invalid_share_request");
+    if let Some(url) = thumbnail_url { crate::media::validate_link_thumbnail_url(url)?; }
+    let xml = format!("<appmsg appid=\"\" sdkver=\"0\">{}{}{}{}{}{}{}{}{}{}</appmsg>{}",
+        tag("title", title), tag("des", description), tag("action", "view"), tag("type", 5),
+        tag("showtype", 0), tag("url", url), tag("lowurl", ""), tag("thumburl", thumbnail_url.unwrap_or("")),
+        tag("sourceusername", ""), tag("sourcedisplayname", ""), tag("fromusername", sender));
+    ensure!(xml.len() <= 256 * 1024, "invalid_share_request");
+    Ok(xml)
+}
+pub fn share_send_request(
+    state: &AccountState,
+    destination: &str,
+    client_id: &str,
+    created_at: u32,
+    content: &str,
+) -> Result<Vec<u8>> {
+    clean(destination, 256)?;
+    clean(client_id, 1024)?;
+    ensure!(created_at > 0 && !content.is_empty() && content.len() <= 256 * 1024, "invalid_share_request");
+    let app = p::message(&[
+        p::bytes(1, state.own_username.as_bytes()),
+        p::bytes(2, &[]),
+        p::uint(3, 0),
+        p::bytes(4, destination.as_bytes()),
+        p::uint(5, 5),
+        p::bytes(6, content.as_bytes()),
+        p::uint(7, created_at as u64),
+        p::bytes(8, client_id.as_bytes()),
+        p::int32(10, 1),
+        p::bytes(13, &[]),
+        p::bytes(14, &[]),
+        p::bytes(15, &[]),
+    ])?;
+    p::message(&[
+        p::bytes(1, &base_request(&state.device, state.uin, 0)?),
+        p::bytes(2, &app),
+        p::uint(9, 0),
+        p::uint(10, 0),
+        p::uint(11, 2),
+    ])
+}
 pub fn file_xml(sender: &str, upload: &UploadedMedia) -> Result<String> {
     clean(sender, 1024)?;
     descriptor(upload, MediaQuality::File)?;
@@ -602,6 +658,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hex::encode(file), expected["fileHex"]);
+        let share_xml = share_xml("synthetic-user", "A <title> & preview", "https://example.invalid/a?x=1&y=2", Some("Description <as text>"), Some("https://example.invalid/preview.jpg")).unwrap();
+        assert!(share_xml.starts_with("<appmsg "));
+        assert!(share_xml.contains("<title>A &lt;title&gt; &amp; preview</title>"));
+        assert!(share_xml.contains("<type>5</type>"));
+        assert!(share_xml.contains("<url>https://example.invalid/a?x=1&amp;y=2</url>"));
+        assert!(share_xml.ends_with("<fromusername>synthetic-user</fromusername>"));
+        assert!(!share_xml.contains("<msg>"));
+        let share = share_send_request(&state, "room@chatroom", "share-client", 1234567, &share_xml).unwrap();
+        let outer = p::decode(&share).unwrap();
+        let app = p::decode(p::data(&outer, 2).unwrap()).unwrap();
+        assert_eq!(p::scalar(&app, 5).unwrap(), 5);
+        assert_eq!(p::data(&app, 4).unwrap(), b"room@chatroom");
+        assert_eq!(p::data(&app, 6).unwrap(), share_xml.as_bytes());
+        assert_eq!(p::scalar(&app, 7).unwrap(), 1234567);
+        assert_eq!(p::data(&app, 8).unwrap(), b"share-client");
+        assert!(p::optional_data(&outer, 5).unwrap().is_none()); // No file MD5 for a URL share.
         let image = UploadedImage {
             original: descriptor(MediaQuality::Original, "image.jpg"),
             standard: descriptor(MediaQuality::Standard, "image.jpg"),

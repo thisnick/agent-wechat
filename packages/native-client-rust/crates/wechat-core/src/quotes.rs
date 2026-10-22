@@ -10,9 +10,10 @@ pub(crate) struct AppMessage {
     pub reference: Option<(String, i32)>,
     pub embedded: Option<String>,
     pub sender_id: Option<String>,
+    pub link: Option<crate::links::ParsedLink>,
 }
 
-fn child<'a, 'input>(
+pub(crate) fn child<'a, 'input>(
     node: roxmltree::Node<'a, 'input>,
     name: &str,
 ) -> Option<roxmltree::Node<'a, 'input>> {
@@ -22,7 +23,7 @@ fn child<'a, 'input>(
     let first = matches.next()?;
     (matches.next().is_none() && first.tag_name().namespace().is_none()).then_some(first)
 }
-fn leaf(node: roxmltree::Node<'_, '_>) -> Option<String> {
+pub(crate) fn leaf(node: roxmltree::Node<'_, '_>) -> Option<String> {
     if node.children().any(|n| n.is_element()) {
         return None;
     }
@@ -87,6 +88,7 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
     })();
     Some(AppMessage {
         subtype,
+        link: crate::links::parse(app, subtype),
         title,
         reference,
         embedded: child(app, "refermsg")

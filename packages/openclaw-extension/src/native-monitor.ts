@@ -189,6 +189,7 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
   assertCurrent(); state.beginDispatch(message.id, dispatchManifest, buffered.map(item => item.message.id));
   const callback = readPolicy !== "on_inbound"
     && (message.type === 1 || (message.type === 49 && message.appMessageType === 19 && !!message.body)
+      || (message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && !!message.link)
       || (preparedMedia.quote?.type === 1 && ["resolved", "embedded"].includes(preparedMedia.quote.state))
       || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length))
     ? state.preparedCallback([message.id], readPolicy) : undefined;

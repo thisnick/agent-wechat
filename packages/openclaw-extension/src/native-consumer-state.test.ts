@@ -54,7 +54,8 @@ test("disabled history does not retain group context or create read receipts", t
 });
 
 test("recalls invalidate buffered targets, quoted references and prepared paths before persisting the cursor", t => {
-  const state = fixture(t); const target = { ...message("target", "r@chatroom"), body: "original private body" };
+  const state = fixture(t); const target = { ...message("target", "r@chatroom"), body: "original private body",
+    link: { title: "Private shared title", description: null, url: "https://example.invalid/private-share", sourceName: null } };
   state.accept("1", target, "live"); state.bufferGroupMessage(target.id, 50);
   const quote = { ...message("quote", "r@chatroom"), serverId: "9007199254741000", type: 49, appMessageType: 57,
     body: "unrelated comment", quote: { serverId: target.serverId!, type: 1 } };
@@ -65,10 +66,12 @@ test("recalls invalidate buffered targets, quoted references and prepared paths 
   const affected = state.acceptRecall("4", { threadId: target.threadId, serverId: target.serverId!, observedAt: "2026-10-21T12:00:00Z" });
   assert.deepEqual(new Set(affected), new Set([target.id, quote.id, trigger.id]));
   assert.equal(state.get(target.id)?.message.body, "[Message recalled]"); assert.equal(state.get(target.id)?.groupContext, false);
+  assert.equal(state.get(target.id)?.message.link, undefined);
   assert.equal(state.get(quote.id)?.message.body, "unrelated comment"); assert.equal(state.get(quote.id)?.message.quote, undefined);
   assert.equal(state.get(trigger.id)?.state, "needs_review"); assert.equal(state.get(trigger.id)?.dispatchManifest, undefined);
   assert.throws(() => prepared("late-run"), /invalidated/);
   const bytes = readFileSync(state.file, "utf8"); assert.ok(!bytes.includes("original private body")); assert.ok(!bytes.includes("/private/original-file"));
+  assert.ok(!bytes.includes("private-share")); assert.ok(!bytes.includes("Private shared title"));
   const reopened = new NativeConsumerState(join(state.file, ".."), "server", "a");
   assert.equal(reopened.cursor, "4"); assert.equal(reopened.isRecalled(target), true);
 });

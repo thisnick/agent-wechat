@@ -120,6 +120,21 @@ test("search describes attachments and points to retrieval without returning tra
   assert.match(result.details.items[0].body, /file message/); assert.ok(!JSON.stringify(result).includes("XML")); assert.ok(!JSON.stringify(result).includes("private-url"));
   assert.equal(value.calls.length, 1); assert.equal(value.calls[0][0], "messages");
 });
+test("link metadata and text survive history/search/exact lookup with preview retrieval hints", async () => {
+  for (const archive of [false, true]) for (const subtype of [3, 4, 5]) {
+    const f = fixture({}, undefined, archive), prefix = archive ? "wechat_archive_" : "wechat_";
+    const link = { title: "Shared title", description: "Shared description", url: "https://example.invalid/article", sourceName: "Publisher" };
+    f.setMessages([{ id: "link", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 49, appMessageType: subtype,
+      body: "[Link] Shared title\nShared description\nhttps://example.invalid/article", link }]);
+    for (const [name, input] of [["history", archive ? { threadId: "room@chatroom" } : {}], ["search", { query: "Shared title" }], ["message", { messageId: "link" }]] as const) {
+      const result: any = await f.run(`${prefix}${name}`, input);
+      const item = name === "message" ? result.details : result.details.items[0];
+      assert.deepEqual(item.link, link); assert.match(item.body, /Shared title\nShared description\nhttps:/);
+      assert.deepEqual(item.attachment, { kind: "link_preview", retrievalTool: `${prefix}media`, messageId: "link" });
+    }
+    assert.ok(f.calls.every(call => ["message", "messages", "searchMessages"].includes(call[0])));
+  }
+});
 test("tool bounds and unsupported arguments are checked before API requests", async () => {
   const value = fixture();
   for (const args of [{}, { query: " " }, { query: "x", limit: 51 }, { query: "x", cursor: "x".repeat(8193) }, { query: "x".repeat(257) }, { query: "中".repeat(100) }, { query: "x", download: true }]) await assert.rejects(value.run("wechat_search", args));

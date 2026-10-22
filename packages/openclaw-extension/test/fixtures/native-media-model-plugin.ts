@@ -22,8 +22,8 @@ export default { ...base, register(api: any) {
       const outcomes: Record<string, string> = {};
       const core = api.runtime;
       const scenarios = JSON.parse(readFileSync(join(directory, "scenarios.json"), "utf8"));
-      for (const { id, type, threadId = "u1" } of scenarios) {
-        const message: NativeMessage = { id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body: null, direction: "incoming", createdAt: new Date().toISOString(), version: "v1", media: [], mentions: threadId.endsWith("@chatroom") ? { state: "known", userIds: ["self"], self: true, all: false, source: "msgsource.atuserlist" } : { state: "unknown", userIds: [], self: null, all: null, source: null } };
+      for (const { id, type, threadId = "u1", appMessageType, body = null, link } of scenarios) {
+        const message: NativeMessage = { id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body, appMessageType, link, direction: "incoming", createdAt: new Date().toISOString(), version: "v1", media: [], mentions: threadId.endsWith("@chatroom") ? { state: "known", userIds: ["self"], self: true, all: false, source: "msgsource.atuserlist" } : { state: "unknown", userIds: [], self: null, all: null, source: null } };
         state.accept(String(++sequence), message, "live");
         outcomes[id] = await dispatchNativeMessage({ client, state, account, message, cfg, core,
           prepareAttachment: params => prepareNativeAttachment({ ...params, waitMs: 0 }) });

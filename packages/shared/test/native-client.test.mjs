@@ -71,6 +71,15 @@ test('structured failures expose safe error codes but never raw server messages'
   const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ error: { code: 'read_state_conflict', message: 'private source content', retryable: false } }, { status: 409 }) });
   await assert.rejects(client.markRead('a', 't', '7'), error => error instanceof NativeApiError && error.status === 409 && error.code === 'read_state_conflict' && !error.message.includes('private'));
 });
+test('URL shares use the typed send route, caller key and cancellation signal exactly once', async () => {
+  const calls = [], controller = new AbortController();
+  const request = { kind: 'share', threadId: 'room@chatroom', title: 'Shared title', url: 'https://example.invalid/article', thumbnailUrl: 'https://example.invalid/p.png' };
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => { calls.push({ url: String(url), init }); return Response.json({ id: 'send-share', state: 'queued' }); } });
+  const receipt = await client.sendShare('a', request, 'stable-key', controller.signal);
+  assert.equal(receipt.id, 'send-share'); assert.equal(calls.length, 1); assert.match(calls[0].url, /\/accounts\/a\/sends$/);
+  assert.equal(calls[0].init.headers.get('Idempotency-Key'), 'stable-key'); assert.deepEqual(JSON.parse(calls[0].init.body), request);
+  for (const key of ['', 'x'.repeat(201), 'bad\nkey']) assert.throws(() => client.sendShare('a', request, key));
+});
 test('event pages enforce the server maximum of 200', async () => {
   const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({}) });
   await client.events('a', '0', 200);

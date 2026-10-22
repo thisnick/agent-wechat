@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeApiError, type NativeMessage, type NativeWeChatClient, type MediaAsset, type MediaJob } from "@agent-wechat/shared";
@@ -369,4 +369,80 @@ test("repeated quotes reuse a cached original even after CDN expiry without anot
     assert.equal(result.attachment?.status,"ready");assert.equal(result.suppliedAssets![0].sourceMessageId,"original");
   }
   assert.equal(contents,2);assert.equal(transfers,0);
+});
+
+const linkMessage = { ...message, type: 49, appMessageType: 5, body: "[Link] Shared title\nShared description\nhttps://example.invalid/article",
+  link: { title: "Shared title", description: "Shared description", url: "https://example.invalid/article", sourceName: "Publisher" } } as NativeMessage;
+test("shared link previews supply verified thumbnails under the stored parent ID", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-link-preview-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const png = await readFile(new URL("../test/fixtures/native-model.png", import.meta.url));
+  const sha256 = createHash("sha256").update(png).digest("hex");
+  for (const subtype of [3, 4, 5]) for (const cached of [false, true]) {
+    const calls: string[] = []; let ready = cached;
+    const metadata = () => asset({ variant: "thumbnail", actualVariant: ready ? "thumbnail" : null, state: ready ? "available" : "pending",
+      contentType: "image/png", filename: "preview.png", byteLength: png.length, sha256, expiresAt: cached ? 1 : null, officialWriteback: "unsupported" });
+    const client = { mediaAssets: async (a: string, id: string) => { assert.equal(a, "a"); assert.equal(id, "m"); calls.push("assets"); return { items: [metadata()] }; },
+      transferMedia: async (a: string, request: any) => { assert.equal(a, "a"); assert.deepEqual(request, { messageId: "m", assetId: null, quality: "thumbnail" }); calls.push("transfer"); ready = true; return { id: "job", state: "available" }; },
+      mediaContent: async () => { calls.push("bytes"); return { bytes: png, contentType: "image/png" }; },
+    } as unknown as NativeWeChatClient;
+    const result = await prepareNativeAttachment({ client, account, message: { ...linkMessage, appMessageType: subtype }, cfg: {}, core: { channel: { media: {
+      saveMediaBuffer: async (buffer: Buffer) => { const path = join(directory, `${subtype}-${cached}.png`); await writeFile(path, buffer); return { path }; },
+    } } } });
+    assert.equal(result.pending, false); assert.equal(result.attachment?.status, "ready"); assert.equal(result.attachment.kind, "image");
+    assert.equal(result.variant, "thumbnail"); assert.match(result.body, /Shared title\nShared description\nhttps:\/\/example.invalid\/article/);
+    assert.equal(result.suppliedAssets![0].role, "model_image"); assert.equal(result.suppliedAssets![0].sha256, sha256);
+    assert.deepEqual(await readFile(result.mediaPath!), png); assert.equal(calls.includes("transfer"), !cached);
+    const { buildNativeContext } = await import("./native-history.ts");
+    const { nativeDispatchManifest } = await import("./native-prepared-boundary.ts");
+    const context = buildNativeContext([], linkMessage, result);
+    const manifest = nativeDispatchManifest({ message: linkMessage, inputBody: context.inputBody, assets: context.assets, sessionKey: "s", agentId: "agent", channelAccountId: "default" });
+    assert.equal(manifest.assets[0].messageId, "m"); assert.equal(manifest.assets[0].sourceMessageId, undefined);
+    const changed = nativeDispatchManifest({ message: { ...linkMessage, link: { ...linkMessage.link!, title: "Changed" } }, inputBody: context.inputBody, sessionKey: "s", agentId: "agent", channelAccountId: "default" });
+    assert.notEqual(manifest.newInputs[0].contentSha256, changed.newInputs[0].contentSha256);
+  }
+});
+test("optional absent, pending, expired and failed link previews preserve card text", async () => {
+  for (const state of ["absent", "pending", "expired", "unsupported", "failed", "api-error"]) {
+    let transfers = 0;
+    const client = { mediaAssets: async () => {
+      if (state === "api-error") throw new NativeApiError(503, "transport_unavailable", true);
+      return { items: state === "absent" ? [] : [asset({ variant: "thumbnail", actualVariant: null, state: state === "failed" ? "pending" : state })] };
+    }, transferMedia: async () => { transfers++; return { id: "job", state: state === "failed" ? "failed" : "queued", retryable: false, reason: "media_integrity_failed" }; },
+    } as unknown as NativeWeChatClient;
+    const result = await prepareNativeAttachment({ client, account, message: linkMessage, core: {}, waitMs: 0, download: state !== "absent" });
+    assert.equal(result.pending, false); assert.equal(result.mediaPath, undefined); assert.equal(result.suppliedAssets, undefined);
+    assert.match(result.body, /Shared title\nShared description\nhttps:\/\/example.invalid\/article/);
+    assert.equal(result.attachment?.status, state === "pending" ? "pending" : ["expired", "unsupported"].includes(state) ? state : "unavailable");
+    assert.equal(transfers, ["pending", "failed"].includes(state) ? 1 : 0);
+  }
+  const unsupported = await prepareNativeAttachment({ client: {} as NativeWeChatClient, account, message: linkMessage, core: {}, quality: "original" });
+  assert.equal(unsupported.attachment?.status, "unsupported"); assert.match(unsupported.body, /Shared title/);
+});
+test("link previews cannot hide identity, integrity, cancellation or access failures", async () => {
+  for (const change of [{ accountId: "foreign" }, { messageId: "foreign" }, { sha256: "0".repeat(64) }]) {
+    const client = { mediaAssets: async () => ({ items: [asset({ variant: "thumbnail", actualVariant: "thumbnail", ...change })] }),
+      mediaContent: async () => ({ bytes, contentType: "image/gif" }),
+    } as unknown as NativeWeChatClient;
+    await assert.rejects(prepareNativeAttachment({ client, account, message: linkMessage, core: {} }), /identity|integrity/);
+  }
+  let guards = 0, transfers = 0;
+  const client = { mediaAssets: async () => ({ items: [] }), transferMedia: async () => { transfers++; throw Error("must not transfer"); } } as unknown as NativeWeChatClient;
+  await assert.rejects(prepareNativeAttachment({ client, account, message: linkMessage, core: {}, beforeMediaAccess: async () => { if (++guards > 1) throw Error("access revoked"); } }), /access revoked/);
+  assert.equal(transfers, 0);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(prepareNativeAttachment({ client, account, message: linkMessage, core: {}, signal: controller.signal }));
+});
+test("recalled or replaced link sources never restore their original metadata through preview fallback", async () => {
+  for (const code of ["message_recalled", "media_identity_unavailable", "media_source_changed"]) {
+    const client = { mediaAssets: async () => { throw new NativeApiError(410, code); } } as unknown as NativeWeChatClient;
+    if (code === "message_recalled") {
+      await assert.rejects(prepareNativeAttachment({ client, account, message: linkMessage, core: {} }), /message_recalled/);
+    } else {
+      const result = await prepareNativeAttachment({ client, account, message: linkMessage, core: {} });
+      assert.equal(result.reason, code); assert.ok(!result.body.includes("Shared title")); assert.ok(!result.body.includes("example.invalid/article"));
+    }
+  }
+  const client = { mediaAssets: async () => ({ items: [asset({ state: "recalled", variant: "thumbnail", actualVariant: null })] }) } as unknown as NativeWeChatClient;
+  const result = await prepareNativeAttachment({ client, account, message: linkMessage, core: {} });
+  assert.equal(result.body, "[Message recalled]"); assert.equal(result.reason, "message_recalled");
 });
