@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { NativeApiError } from "@agent-wechat/shared";
 import { createNativeShareTools, registerNativeShareTools } from "./native-share-tool.ts";
 
@@ -77,4 +78,7 @@ test("foreign share receipts fail without another submission and registration us
   }
   const registrations: any[] = []; registerNativeShareTools({ registerTool: (...values: any[]) => registrations.push(values) } as any);
   assert.equal(registrations[0][0].contextVersion, 2); assert.deepEqual(registrations[0][1].names, ["wechat_send_share"]);
+  // OpenClaw drops registered tools that the manifest does not declare.
+  const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  assert.ok(manifest.contracts.tools.includes("wechat_send_share"));
 });
