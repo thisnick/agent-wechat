@@ -24,7 +24,7 @@ function ogTemplate(title, description, isRoot = false) {
         padding: '0',
       },
       children: [
-        // Green accent bar
+        // Accent bar
         {
           type: 'div',
           props: {
@@ -34,7 +34,7 @@ function ogTemplate(title, description, isRoot = false) {
               top: 0,
               width: '5px',
               height: '100%',
-              backgroundColor: '#07C160',
+              backgroundColor: '#bd5721',
             },
           },
         },
@@ -134,7 +134,7 @@ function ogTemplate(title, description, isRoot = false) {
                 props: {
                   style: {
                     fontSize: '16px',
-                    color: '#07C160',
+                    color: '#bd5721',
                     fontFamily: 'DejaVu Sans Mono',
                   },
                   children: 'docs',

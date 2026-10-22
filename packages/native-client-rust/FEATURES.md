@@ -88,7 +88,16 @@ those gaps.
   separately approved destination/member experiment and uncertainty handling.
 - A web application follows stabilization of the API, events and media surface.
 - Large-file variants, sticker sending/packs, official macOS/Windows profile compatibility and
-  arbitrary official-build migration require independent evidence and testing.
+  arbitrary official-build migration require independent evidence and testing. A controlled
+  live check on 2026-10-22 sent 40 MiB file and 40 MB video sources through the existing
+  upload path: the CDN returned HTTP 400 on the first piece, nothing was sent, and the jobs
+  ended `needs_review` with `serviceStage: http`. Sources above 25 MiB need the separate
+  large-file upload branch.
+- Incoming status notifications (message type 51) with operation IDs 2 and 11 arrive on
+  most pushes during live use and remain staged as `unsupported_sync_control`, so
+  `pendingProjectionBatches` grows and `pendingCursorProjection` stays true. New messages
+  still commit as `live`. Mapping these to read state, or classifying them as safe to skip,
+  is pending.
 - WXGF encoding/sending, source animation timing and faithful alpha rendering
   require separate evidence. Current incoming support preserves the container
   and supplies a representative still preview.

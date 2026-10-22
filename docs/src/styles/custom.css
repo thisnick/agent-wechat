@@ -1,15 +1,15 @@
-/* Starlight defaults with a WeChat-green accent. Text greens meet WCAG AA. */
+/* Starlight defaults with a #bd5721 accent. Text colors meet WCAG AA. */
 
 :root {
-  --sl-color-accent-low: #0b3320;
-  --sl-color-accent: #07c160;
-  --sl-color-accent-high: #5ee39a;
+  --sl-color-accent-low: #3a1a0b;
+  --sl-color-accent: #bd5721;
+  --sl-color-accent-high: #f0a27c;
 }
 
 :root[data-theme='light'] {
-  --sl-color-accent-low: #d3f4e1;
-  --sl-color-accent: #057a3f;
-  --sl-color-accent-high: #04512b;
+  --sl-color-accent-low: #fbe6dc;
+  --sl-color-accent: #bd5721;
+  --sl-color-accent-high: #7a3510;
 }
 
 /* Mermaid diagrams rendered at build time by remark-mermaid.mjs. */

@@ -71,6 +71,8 @@ Clients only see the HTTP API and events. Each decides what to do with a message
 
 <Aside title="Good to know">
 - **Changes the daemon doesn't understand are kept, not skipped.** They stay saved and hold back the sync checkpoint, so nothing is silently lost.
+- **Some status updates aren't handled yet.** When you open or read a chat on your phone, WeChat sends a status notification. The daemon saves it and emits `projection.blocked`. New messages still arrive normally.
+- **Messages you send from your phone arrive too,** as `outgoing` messages from your own WeChat ID. Clients that reply to messages should skip them.
 - **Recalls arrive as changes too.** The stored message becomes "[Message recalled]" and a `message.recalled` event goes out.
 - **Your phone stays in charge.** The daemon is one more logged-in device; messages it sends show up on your phone like any other device's.
 </Aside>

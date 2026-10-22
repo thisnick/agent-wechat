@@ -69,6 +69,6 @@ wx config server use box
 <Aside title="Good to know">
 - **A lost response doesn't mean a lost send.** Before sending, `wx` saves a receipt with an idempotency key. If the network drops, check with `wx messages sends lookup --idempotency-key KEY` instead of sending again. See [Sends and recovery](/how-it-works/sends/).
 - **Voice** is encoded by `wx` itself and split into 10-second notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
-- **Files** can be up to about 25 MB. Stickers can't be sent.
+- **Files and videos** can be up to about 25 MB, the limit of WeChat's normal upload. Stickers can't be sent.
 - **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
 </Aside>
