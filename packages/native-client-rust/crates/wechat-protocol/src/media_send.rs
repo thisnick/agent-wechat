@@ -524,9 +524,12 @@ impl<'a> VoiceUpload<'a> {
             p::uint(15, 0),
             p::uint(16, 0),
             p::uint(17, self.created_at.into()),
-            p::bytes(18, &p::buffer(client)),
-            p::bytes(21, &[]),
         ]);
+        // Only the first range carries this buffer; field 5 identifies every range.
+        if range.start == 0 {
+            parts.push(p::bytes(18, &p::buffer(client)));
+        }
+        parts.push(p::bytes(21, &[]));
         p::message(&parts)
     }
     /// Apply the reply for the request built last. Returns the note's result
@@ -911,6 +914,17 @@ mod tests {
             assert_eq!(p::scalar(&f, 7).unwrap(), 60_000);
             assert_eq!(p::scalar(&f, 9).unwrap(), u64::from(index == 2));
             assert_eq!(p::scalar(&f, 11).unwrap(), 4);
+            if index == 0 {
+                assert_eq!(
+                    p::unbuffer(p::data(&f, 18).unwrap()).unwrap(),
+                    client.as_bytes()
+                );
+            } else {
+                assert!(
+                    p::optional_data(&f, 18).unwrap().is_none(),
+                    "continuation range {index} repeats first-range metadata"
+                );
+            }
             // Later ranges continue the server message ID returned by the first.
             assert_eq!(
                 p::optional(&f, 6).unwrap().is_some(),
