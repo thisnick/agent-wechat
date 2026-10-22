@@ -31,6 +31,11 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
+      - name: Verify dependency cache identities
+        run: python scripts/native-ci-cache-key.test.py
+      - name: Identify native build dependencies
+        id: cache-key
+        run: python scripts/native-ci-cache-key.py rust --github-output
       - uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
@@ -45,7 +50,7 @@ jobs:
         with:
           workspaces: packages/native-client-rust -> target
           add-rust-environment-hash-key: false
-          key: portable-tests-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.RUSTFLAGS }}-debug${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
+          key: portable-tests-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.RUSTFLAGS }}-debug${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ steps.cache-key.outputs.rust }}
       - name: Test Unix platform primitives and media
         if: runner.os != 'Windows'
         run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
@@ -76,6 +81,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Identify installed and native build dependencies
+        id: cache-key
+        run: python scripts/native-ci-cache-key.py all --github-output
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         id: node
@@ -89,7 +97,7 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-          key: portable-pnpm-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'package.json', 'packages/*/package.json') }}
+          key: portable-pnpm-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ steps.cache-key.outputs.pnpm }}
       - if: steps.node-modules.outputs.cache-hit != 'true'
         run: pnpm install --frozen-lockfile --filter @agent-wechat/agent-wechat...
       - run: pnpm --filter @agent-wechat/agent-wechat... build
@@ -114,7 +122,7 @@ jobs:
           # Preinstalled unused Rust toolchains vary between runner images.
           # Pin cache identity to our compiler, target, flags and MSVC version.
           add-rust-environment-hash-key: false
-          key: portable-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
+          key: portable-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.RUSTFLAGS }}-${{ steps.cache-key.outputs.rust }}
       - name: Build Unix release executable
         if: runner.os != 'Windows'
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
