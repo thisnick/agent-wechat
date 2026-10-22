@@ -13,8 +13,11 @@ pub fn local_ipv4_addresses() -> io::Result<Vec<Ipv4Addr>> {
 }
 
 fn usable(ip: Ipv4Addr) -> bool {
-    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast()
-        && !ip.is_broadcast() && ip.octets()[0] != 0
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && ip.octets()[0] != 0
 }
 
 #[cfg(unix)]
@@ -55,16 +58,35 @@ fn interfaces() -> io::Result<Vec<Ipv4Addr>> {
 
 #[cfg(windows)]
 fn interfaces() -> io::Result<Vec<Ipv4Addr>> {
-    use std::{ffi::c_void, mem::{offset_of, size_of}, net::UdpSocket, os::windows::io::AsRawSocket};
+    use std::{
+        ffi::c_void,
+        mem::{offset_of, size_of},
+        net::UdpSocket,
+        os::windows::io::AsRawSocket,
+    };
     #[repr(C)]
-    struct SocketAddress { address: *const u8, length: i32 }
+    struct SocketAddress {
+        address: *const u8,
+        length: i32,
+    }
     #[repr(C)]
-    struct AddressList { count: i32, first: SocketAddress }
+    struct AddressList {
+        count: i32,
+        first: SocketAddress,
+    }
     #[link(name = "ws2_32")]
     extern "system" {
-        fn WSAIoctl(socket: usize, code: u32, input: *const c_void, input_len: u32,
-            output: *mut c_void, output_len: u32, returned: *mut u32,
-            overlapped: *mut c_void, completion: *mut c_void) -> i32;
+        fn WSAIoctl(
+            socket: usize,
+            code: u32,
+            input: *const c_void,
+            input_len: u32,
+            output: *mut c_void,
+            output_len: u32,
+            returned: *mut u32,
+            overlapped: *mut c_void,
+            completion: *mut c_void,
+        ) -> i32;
         fn WSAGetLastError() -> i32;
     }
     // SIO_ADDRESS_LIST_QUERY on an IPv4 socket returns local bindings only.
@@ -72,9 +94,19 @@ fn interfaces() -> io::Result<Vec<Ipv4Addr>> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let mut storage = vec![0usize; 65536 / size_of::<usize>()];
     let mut returned = 0;
-    if unsafe { WSAIoctl(socket.as_raw_socket() as usize, 0x48000016,
-        std::ptr::null(), 0, storage.as_mut_ptr().cast(), 65536, &mut returned,
-        std::ptr::null_mut(), std::ptr::null_mut()) } != 0
+    if unsafe {
+        WSAIoctl(
+            socket.as_raw_socket() as usize,
+            0x48000016,
+            std::ptr::null(),
+            0,
+            storage.as_mut_ptr().cast(),
+            65536,
+            &mut returned,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } != 0
     {
         return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
     }
@@ -90,7 +122,13 @@ fn interfaces() -> io::Result<Vec<Ipv4Addr>> {
     {
         return Err(io::Error::other("Invalid local address count"));
     }
-    let first = unsafe { storage.as_ptr().cast::<u8>().add(offset).cast::<SocketAddress>() };
+    let first = unsafe {
+        storage
+            .as_ptr()
+            .cast::<u8>()
+            .add(offset)
+            .cast::<SocketAddress>()
+    };
     let mut out = Vec::new();
     for n in 0..count as usize {
         let entry = unsafe { &*first.add(n) };
@@ -111,10 +149,22 @@ mod tests {
     use super::*;
     #[test]
     fn advertised_addresses_are_unicast_interface_addresses() {
-        for ip in ["0.0.0.0", "0.1.2.3", "127.0.0.1", "224.0.0.1", "255.255.255.255"] {
+        for ip in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "127.0.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+        ] {
             assert!(!usable(ip.parse().unwrap()));
         }
-        for ip in ["192.168.1.2", "10.0.0.2", "172.20.0.2", "100.64.0.2", "169.254.1.2"] {
+        for ip in [
+            "192.168.1.2",
+            "10.0.0.2",
+            "172.20.0.2",
+            "100.64.0.2",
+            "169.254.1.2",
+        ] {
             assert!(usable(ip.parse().unwrap()));
         }
     }

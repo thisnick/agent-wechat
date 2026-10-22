@@ -7,9 +7,9 @@ use std::{
     path::Path,
     process::Command,
 };
+mod network;
 #[cfg(windows)]
 mod windows;
-mod network;
 pub use network::local_ipv4_addresses;
 
 #[cfg(unix)]

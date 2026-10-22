@@ -44,12 +44,36 @@ The extension consumes committed inbound events in `packages/openclaw-extension/
 
 ## Development and verification
 
+Rust work uses the toolchain in `rust-toolchain.toml`, currently **1.93.1**, with
+**rustfmt and clippy**. Check those components before editing Rust: a successful
+`cargo build` or `cargo test` does not establish that they are installed. A
+`minimal` rustup installation alone omits both. Provision the full development
+toolchain when preparing a workspace:
+
+```bash
+rustup toolchain install 1.93.1 --profile minimal --component rustfmt --component clippy
+cargo +1.93.1 fmt --version
+cargo +1.93.1 clippy --version
+```
+
+Before committing/pushing Rust changes, run the pinned formatter, then its check
+and CI's warning-denying Clippy command after the final Rust edit. Run the
+relevant tests as well; tests cannot substitute for these lint gates. If a
+component is missing or a proxy blocks its download, resolve it using the pinned
+installation, an existing cache or a configured remote development environment.
+Report any remaining unrun check explicitly. Do not hand-format new Rust or use
+repeated PR failures to discover formatter output. Keep the toolchain file and
+CI workflow pins aligned when changing Rust versions.
+
 ```bash
 pnpm install
 pnpm build
 pnpm typecheck
 pnpm --filter @agent-wechat/agent-wechat test
-cargo test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml
+cargo +1.93.1 fmt --all --manifest-path packages/native-client-rust/Cargo.toml
+cargo +1.93.1 fmt --all --check --manifest-path packages/native-client-rust/Cargo.toml
+cargo +1.93.1 clippy --workspace --all-targets --locked --manifest-path packages/native-client-rust/Cargo.toml -- -D warnings
+cargo +1.93.1 test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml
 bash scripts/native-generate-types.sh --check
 ```
 

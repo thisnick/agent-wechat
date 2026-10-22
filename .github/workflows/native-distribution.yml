@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'packages/native-client-rust/**'
+      - 'rust-toolchain.toml'
       - 'packages/cli/**'
       - 'packages/shared/**'
       - 'packages/openclaw-extension/**'
@@ -17,6 +18,7 @@ on:
     branches: [main]
     paths:
       - 'packages/native-client-rust/**'
+      - 'rust-toolchain.toml'
       - 'packages/cli/**'
       - 'packages/shared/**'
       - 'packages/openclaw-extension/**'

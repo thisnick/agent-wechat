@@ -3,9 +3,15 @@
 use crate::{protobuf as p, wire, DeviceProfile};
 use anyhow::{ensure, Result};
 use std::{
-    fmt, io::{self, Write}, net::{Ipv4Addr, TcpListener, TcpStream},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex},
-    thread::{self, JoinHandle}, time::{Duration, Instant},
+    fmt,
+    io::{self, Write},
+    net::{Ipv4Addr, TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
@@ -22,7 +28,9 @@ impl fmt::Display for LanError {
     }
 }
 impl std::error::Error for LanError {}
-pub(crate) fn failure(reason: &'static str) -> anyhow::Error { LanError(reason).into() }
+pub(crate) fn failure(reason: &'static str) -> anyhow::Error {
+    LanError(reason).into()
+}
 pub fn login_lan_error_reason(error: &anyhow::Error) -> Option<&'static str> {
     error.downcast_ref::<LanError>().map(|e| e.0)
 }
@@ -33,10 +41,18 @@ pub(crate) struct Scope {
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 impl Scope {
-    pub(crate) fn new(deadline: Instant, cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
-        Self { deadline, cancelled: Arc::new(cancelled) }
+    pub(crate) fn new(
+        deadline: Instant,
+        cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            deadline,
+            cancelled: Arc::new(cancelled),
+        }
     }
-    fn active(&self) -> bool { Instant::now() < self.deadline && !(self.cancelled)() }
+    fn active(&self) -> bool {
+        Instant::now() < self.deadline && !(self.cancelled)()
+    }
 }
 struct State {
     stop: AtomicBool,
@@ -45,7 +61,9 @@ struct State {
     scope: Scope,
 }
 impl State {
-    fn active(&self) -> bool { !self.stop.load(Ordering::Acquire) && self.scope.active() }
+    fn active(&self) -> bool {
+        !self.stop.load(Ordering::Acquire) && self.scope.active()
+    }
 }
 
 pub(crate) struct Challenge {
@@ -57,71 +75,116 @@ pub(crate) struct Challenge {
 }
 impl Challenge {
     pub(crate) fn bind(scope: Scope) -> Result<Self> {
-        if !scope.active() { return Err(failure("cancelled_or_expired")); }
+        if !scope.active() {
+            return Err(failure("cancelled_or_expired"));
+        }
         let addresses = wechat_platform::local_ipv4_addresses()
             .map_err(|_| failure("interface_enumeration_failed"))?;
-        if addresses.is_empty() { return Err(failure("no_ipv4_address")); }
+        if addresses.is_empty() {
+            return Err(failure("no_ipv4_address"));
+        }
         Self::from_listener(bind_ports(8050..=8100)?, addresses, scope)
     }
-    pub(crate) fn from_listener(listener: TcpListener, addresses: Vec<Ipv4Addr>, scope: Scope) -> Result<Self> {
+    pub(crate) fn from_listener(
+        listener: TcpListener,
+        addresses: Vec<Ipv4Addr>,
+        scope: Scope,
+    ) -> Result<Self> {
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
-        let state = Arc::new(State { stop: AtomicBool::new(false), sent: AtomicBool::new(false),
-            done: AtomicBool::new(false), scope });
+        let state = Arc::new(State {
+            stop: AtomicBool::new(false),
+            sent: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            scope,
+        });
         let (token, incoming) = mpsc::sync_channel::<Zeroizing<Vec<u8>>>(1);
         let shared = state.clone();
-        let worker = thread::Builder::new().name("wechat-lan-login".into()).spawn(move || {
-            // Keep early peer connections queued until the authenticated upload
-            // supplies a token. Never reply with an empty/uninitialized token.
-            let frame = loop {
-                if !shared.active() { shared.done.store(true, Ordering::Release); return; }
-                match incoming.recv_timeout(TICK) {
-                    Ok(frame) => break frame,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(_) => { shared.done.store(true, Ordering::Release); return; }
-                }
-            };
-            while shared.active() {
-                match listener.accept() {
-                    Ok((mut stream, _peer)) => {
-                        if write_frame(&mut stream, &frame, &shared).is_ok() {
-                            shared.sent.store(true, Ordering::Release);
+        let worker = thread::Builder::new()
+            .name("wechat-lan-login".into())
+            .spawn(move || {
+                // Keep early peer connections queued until the authenticated upload
+                // supplies a token. Never reply with an empty/uninitialized token.
+                let frame = loop {
+                    if !shared.active() {
+                        shared.done.store(true, Ordering::Release);
+                        return;
+                    }
+                    match incoming.recv_timeout(TICK) {
+                        Ok(frame) => break frame,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(_) => {
+                            shared.done.store(true, Ordering::Release);
+                            return;
                         }
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+                };
+                while shared.active() {
+                    match listener.accept() {
+                        Ok((mut stream, _peer)) => {
+                            if write_frame(&mut stream, &frame, &shared).is_ok() {
+                                shared.sent.store(true, Ordering::Release);
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                    thread::sleep(TICK);
                 }
-                thread::sleep(TICK);
-            }
-            shared.done.store(true, Ordering::Release);
-        })?;
-        Ok(Self { addresses, port, state, token: Mutex::new(Some(token)), worker: Some(worker) })
+                shared.done.store(true, Ordering::Release);
+            })?;
+        Ok(Self {
+            addresses,
+            port,
+            state,
+            token: Mutex::new(Some(token)),
+            worker: Some(worker),
+        })
     }
-    pub(crate) fn request(&self, device: &DeviceProfile, identifier: &[u8], random: &[u8; 16]) -> Result<Vec<u8>> {
+    pub(crate) fn request(
+        &self,
+        device: &DeviceProfile,
+        identifier: &[u8],
+        random: &[u8; 16],
+    ) -> Result<Vec<u8>> {
         request(device, identifier, &self.addresses, self.port, random)
     }
     pub(crate) fn arm(&self, token: &[u8]) -> Result<()> {
-        if !self.active() { return Err(failure("cancelled_or_expired")); }
+        if !self.active() {
+            return Err(failure("cancelled_or_expired"));
+        }
         let frame = reply_frame(token).map_err(|_| failure("invalid_token"))?;
-        self.token.lock().map_err(|_| failure("listener_unavailable"))?.take()
-            .ok_or_else(|| failure("already_armed"))?.send(frame)
+        self.token
+            .lock()
+            .map_err(|_| failure("listener_unavailable"))?
+            .take()
+            .ok_or_else(|| failure("already_armed"))?
+            .send(frame)
             .map_err(|_| failure("listener_unavailable"))
     }
     pub(crate) fn active(&self) -> bool {
         self.state.active() && !self.state.done.load(Ordering::Acquire)
     }
     pub(crate) fn status(&self) -> &'static str {
-        if !self.active() { "stopped" }
-        else if self.state.sent.load(Ordering::Acquire) { "token_sent" }
-        else { "waiting_for_phone" }
+        if !self.active() {
+            "stopped"
+        } else if self.state.sent.load(Ordering::Acquire) {
+            "token_sent"
+        } else {
+            "waiting_for_phone"
+        }
     }
-    pub(crate) fn stop(&self) { self.state.stop.store(true, Ordering::Release); }
+    pub(crate) fn stop(&self) {
+        self.state.stop.store(true, Ordering::Release);
+    }
 }
 impl Drop for Challenge {
     fn drop(&mut self) {
         self.stop();
-        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 fn bind_ports(ports: impl IntoIterator<Item = u16>) -> Result<TcpListener> {
@@ -153,18 +216,34 @@ fn write_frame(stream: &mut TcpStream, frame: &[u8], state: &State) -> io::Resul
     Ok(())
 }
 
-pub(crate) fn request(device: &DeviceProfile, identifier: &[u8], addresses: &[Ipv4Addr], port: u16, random: &[u8; 16]) -> Result<Vec<u8>> {
-    ensure!(!identifier.is_empty() && identifier.len() <= 4096, "Invalid login identifier");
-    ensure!(!addresses.is_empty() && addresses.len() <= 64 && port != 0, "Invalid LAN address list");
+pub(crate) fn request(
+    device: &DeviceProfile,
+    identifier: &[u8],
+    addresses: &[Ipv4Addr],
+    port: u16,
+    random: &[u8; 16],
+) -> Result<Vec<u8>> {
+    ensure!(
+        !identifier.is_empty() && identifier.len() <= 4096,
+        "Invalid login identifier"
+    );
+    ensure!(
+        !addresses.is_empty() && addresses.len() <= 64 && port != 0,
+        "Invalid LAN address list"
+    );
     let mut entries = Vec::new();
     for ip in addresses {
-        let entry = p::message(&[p::bytes(1, ip.to_string().as_bytes()), p::uint(2, port as u64)])?;
+        let entry = p::message(&[
+            p::bytes(1, ip.to_string().as_bytes()),
+            p::uint(2, port as u64),
+        ])?;
         entries.push(p::bytes(1, &entry));
     }
     p::message(&[
         p::bytes(1, &wire::base_request(device, 0, 0)?),
         p::bytes(2, &p::message(&entries)?),
-        p::bytes(3, identifier), p::bytes(4, &p::buffer(random)),
+        p::bytes(3, identifier),
+        p::bytes(4, &p::buffer(random)),
     ])
 }
 pub(crate) fn response(input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -172,16 +251,28 @@ pub(crate) fn response(input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let fields = p::decode(input)?;
     ensure!(p::base_code(&fields)? == 0, "LAN upload rejected");
     let token = p::data(&fields, 2)?;
-    ensure!(!token.is_empty() && token.len() <= MAX_TOKEN, "Invalid LAN token length");
+    ensure!(
+        !token.is_empty() && token.len() <= MAX_TOKEN,
+        "Invalid LAN token length"
+    );
     std::str::from_utf8(token)?;
     Ok(Zeroizing::new(token.to_vec()))
 }
 fn reply_frame(token: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    ensure!(!token.is_empty() && token.len() <= MAX_TOKEN, "Invalid LAN token length");
+    ensure!(
+        !token.is_empty() && token.len() <= MAX_TOKEN,
+        "Invalid LAN token length"
+    );
     let token = std::str::from_utf8(token)?;
     #[derive(serde::Serialize)]
-    struct Reply<'a> { scene: &'static str, token: &'a str }
-    let json = Zeroizing::new(serde_json::to_vec(&Reply { scene: "xwechat", token })?);
+    struct Reply<'a> {
+        scene: &'static str,
+        token: &'a str,
+    }
+    let json = Zeroizing::new(serde_json::to_vec(&Reply {
+        scene: "xwechat",
+        token,
+    })?);
     // mars::lan_cs default packer: big-endian u32 total size, including itself.
     let mut frame = Zeroizing::new(Vec::with_capacity(json.len() + 4));
     frame.extend_from_slice(&u32::try_from(json.len() + 4)?.to_be_bytes());

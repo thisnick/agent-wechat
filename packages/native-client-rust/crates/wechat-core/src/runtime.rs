@@ -793,10 +793,14 @@ impl Core {
             let result = blocking(move || {
                 // Return the issued challenge even on a failed read. Never lose
                 // its cookie/notify state or create a replacement QR on timeout.
-                let status = client().and_then(|native| native.poll_login_guarded(&mut attempt, poll_deadline, move || {
-                    poll_cancel.load(Ordering::SeqCst)
-                        || poll_owner.upgrade().is_none_or(|core| core.stopping.load(Ordering::SeqCst))
-                }));
+                let status = client().and_then(|native| {
+                    native.poll_login_guarded(&mut attempt, poll_deadline, move || {
+                        poll_cancel.load(Ordering::SeqCst)
+                            || poll_owner
+                                .upgrade()
+                                .is_none_or(|core| core.stopping.load(Ordering::SeqCst))
+                    })
+                });
                 Ok((attempt, status))
             })
             .await?;

@@ -298,7 +298,8 @@ pub async fn login(r: &Remote, settings: &settings::File, options: Options) -> R
             operation["clientWaitExpired"] = json!(true);
             return Ok(operation);
         }
-        if !options.json && !lan_notice_shown
+        if !options.json
+            && !lan_notice_shown
             && operation["result"]["lanChallenge"].as_str() == Some("waiting_for_phone")
         {
             eprintln!("WeChat requires a local network check. Keep your phone on a network that can reach this computer.");

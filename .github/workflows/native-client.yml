@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'packages/native-client-rust/**'
+      - 'rust-toolchain.toml'
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-ci-cache-key*.py'
@@ -12,6 +13,7 @@ on:
     branches: [main]
     paths:
       - 'packages/native-client-rust/**'
+      - 'rust-toolchain.toml'
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-ci-cache-key*.py'
