@@ -435,6 +435,18 @@ impl Store {
                 params![id, key, hash, destination, encrypted, client_id, now],
             )?;
             let intent = read_send(&tx, account, &id)?;
+            tx.execute(
+                "INSERT INTO events(kind,data_json,created_at)VALUES('send.updated',?1,?2)",
+                params![
+                    serde_json::to_string(&intent)?,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )?;
+            let seq = tx.last_insert_rowid();
+            tx.execute(
+                "DELETE FROM events WHERE sequence<=?1",
+                [seq.saturating_sub(10_000)],
+            )?;
             tx.commit()?;
             Ok((intent, true))
         })
@@ -474,7 +486,18 @@ impl Store {
         })
     }
     pub fn recover_uncertain_sends(&self, account: &str) -> Result<usize> {
-        self.control(account,|db|Ok(db.execute("UPDATE outbox SET state='needs_review',error_code='restart_after_submission' WHERE state='submitting'",[])?))
+        self.control(account,|db| {
+            let tx = db.transaction()?;
+            let ids = {
+                let mut query = tx.prepare("SELECT id FROM outbox WHERE state='submitting' ORDER BY created_at,id")?;
+                let rows = query.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            tx.execute("UPDATE outbox SET state='needs_review',error_code='restart_after_submission' WHERE state='submitting'",[])?;
+            for id in &ids {crate::outbox::event(&tx,&read_send(&tx,account,id)?)?;}
+            tx.commit()?;
+            Ok(ids.len())
+        })
     }
     /// The received checkpoint means the original commands are recoverably
     /// staged, not that every official-file projection has completed.
@@ -699,6 +722,44 @@ mod tests {
         assert_eq!(store.recover_uncertain_sends("test").unwrap(), 1);
         assert_eq!(store.send("test", &first.id).unwrap().state, "needs_review");
         assert_eq!(store.recover_uncertain_sends("test").unwrap(), 0);
+    }
+    #[test]
+    fn text_send_admission_and_restart_recovery_roll_back_when_event_commit_fails() {
+        let (_temp, store) = setup();
+        let reject = |db: &mut Connection| -> Result<()> {
+            db.execute_batch("CREATE TRIGGER reject_send_event BEFORE INSERT ON events WHEN NEW.kind='send.updated' BEGIN SELECT RAISE(ABORT,'event unavailable'); END;")?;
+            Ok(())
+        };
+        let restore = |db: &mut Connection| -> Result<()> {
+            db.execute_batch("DROP TRIGGER reject_send_event;")?;
+            Ok(())
+        };
+        store.control("test", reject).unwrap();
+        assert!(store
+            .create_send("test", "event-key", "peer", "hash", b"synthetic", "10")
+            .is_err());
+        assert!(store.send_by_key("test", "event-key").is_err());
+        store.control("test", restore).unwrap();
+        let (send, created) = store
+            .create_send("test", "event-key", "peer", "hash", b"synthetic", "10")
+            .unwrap();
+        assert!(created);
+        store.put_runtime("test", "desired", b"connected").unwrap();
+        assert!(store.claim_send("test", &send.id).unwrap());
+        store.control("test", reject).unwrap();
+        assert!(store.recover_uncertain_sends("test").is_err());
+        assert_eq!(store.send("test", &send.id).unwrap().state, "submitting");
+        store.control("test", restore).unwrap();
+        assert_eq!(store.recover_uncertain_sends("test").unwrap(), 1);
+        let events = store.events("test", 0, 200).unwrap();
+        let states = events
+            .iter()
+            .filter(|event| event.kind == "send.updated")
+            .map(|event| event.data["state"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(states, vec!["queued", "submitting", "needs_review"]);
+        assert_eq!(store.recover_uncertain_sends("test").unwrap(), 0);
+        assert_eq!(store.events("test", 0, 200).unwrap().len(), events.len());
     }
     #[test]
     fn restart_interrupts_only_unfinished_network_operations_atomically() {

@@ -119,6 +119,7 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
+        if message == "unsupported_simulator_operation" { return Self(StatusCode::NOT_IMPLEMENTED, "unsupported_simulator_operation"); }
         for code in [
             "invalid_group_identity",
             "invalid_group_text",
@@ -465,8 +466,22 @@ async fn shutdown_daemon(
 }
 async fn status(State(app): State<App>, Extension(c): Extension<Claims>) -> ApiResult<Json<Value>> {
     c.require(None, "read")?;
+    let mut identity = version();
+    if app.core.upstream_kind() == wechat_core::upstream::UpstreamKind::Simulator {
+        identity.backend = "simulator";
+        identity.native_login = false;
+        identity.capabilities = vec![
+            "serve",
+            "simulator-login",
+            "simulator-sync",
+            "simulator-push",
+            "text-send",
+            "events",
+            "scoped-tokens",
+        ];
+    }
     checked::<contracts::NativeStatus>(
-        json!({"serverId":app.core.store.server_id,"dataDir":app.core.store.root,"pid":std::process::id(),"ownershipGeneration":app.core.ownership_generation,"version":version(),"state":"ready"}),
+        json!({"serverId":app.core.store.server_id,"dataDir":app.core.store.root,"pid":std::process::id(),"ownershipGeneration":app.core.ownership_generation,"version":identity,"state":"ready"}),
     )
 }
 async fn accounts(

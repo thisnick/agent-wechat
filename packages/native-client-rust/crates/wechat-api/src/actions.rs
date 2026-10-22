@@ -103,6 +103,11 @@ async fn capabilities(
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
     app.core.store.account(&a)?;
+    if app.core.upstream_kind() == wechat_core::upstream::UpstreamKind::Simulator {
+        return Ok(Json(
+            json!({"nativeRuntime":true,"upstream":"simulator","officialBinaryRequired":false,"mediaKinds":[],"downloadQualities":[],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
+        ));
+    }
     Ok(Json(
         json!({"nativeRuntime":true,"officialBinaryRequired":false,"quotedTextSend":true,"quotedTextSendScopes":["read","send"],"quotedTextSendLiveValidated":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["group"],"incomingGroupUpdates":"partial"}),
     ))

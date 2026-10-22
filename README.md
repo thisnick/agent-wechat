@@ -65,3 +65,8 @@ python3 packages/native-client-rust/scripts/smoke.py packages/native-client-rust
 ```
 
 The native smoke check uses synthetic profiles and loopback HTTP. Native protocol/media tests use synthetic fixtures; live account validation is separate and must use an isolated test account. See [AGENTS.md](AGENTS.md) for contributor rules and the [native guide](packages/native-client-rust/README.md) for the exact test/build commands. CI builds/tests both native architectures without publishing or deploying.
+
+Start the local upstream simulator and real hub API with `pnpm native:dev`, or run
+`pnpm native:simulator:smoke` for the SDK regression journey. Both use synthetic
+accounts without connecting to WeChat. See the [simulator guide](dev-notes/simulator.md)
+for state controls, isolation and the current implementation scope.

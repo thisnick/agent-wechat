@@ -14,6 +14,8 @@
     "version-packages": "pnpm changeset version && node scripts/native-sync-version.mjs && pnpm install --lockfile-only",
     "native:build": "cargo build --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml",
     "native:test": "cargo test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml",
+    "native:dev": "cargo run --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-dev -- dev",
+    "native:simulator:smoke": "cargo build --workspace --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml && node scripts/native-simulator-smoke.mjs",
     "native:release:build": "bash scripts/native-build-release.sh",
     "build:image": "docker build -f deploy/native/Dockerfile -t agent-wechat-native:local .",
     "build:image:amd64": "docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:local .",

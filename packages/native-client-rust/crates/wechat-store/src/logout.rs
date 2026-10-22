@@ -44,7 +44,13 @@ impl Store {
                 tx.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value])?;
             }
             tx.execute("DELETE FROM runtime WHERE key='validated-generation'", [])?;
+            let queued = {
+                let mut query=tx.prepare("SELECT id FROM outbox WHERE state='queued' ORDER BY created_at,id")?;
+                let rows=query.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
             tx.execute("UPDATE outbox SET state='needs_review',error_code='logout_before_submission' WHERE state='queued'", [])?;
+            for id in queued {crate::outbox::event(&tx,&super::read_send(&tx,&op.account_id,&id)?)?;}
             crate::media::cancel_queued_media_for_logout(&tx,&op.account_id)?;
             tx.execute("INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6)", params![op.id,op.kind,op.state,serde_json::to_string(&op.result)?,op.created_at,op.updated_at])?;
             event(&tx,"account.updated",&serde_json::json!({"accountId":op.account_id,"authentication":"logged_out","autoLoginSuppressed":true}))?;
@@ -146,7 +152,21 @@ mod tests {
             .unwrap()
             .is_some());
         assert_eq!(store.send("a", &send.id).unwrap().state, "needs_review");
-        assert_eq!(store.events("a", 0, 200).unwrap().len(), 2);
+        let events = store.events("a", 0, 200).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "send.updated",
+                "send.updated",
+                "account.updated",
+                "operation.updated"
+            ]
+        );
+        assert_eq!(events[0].data["state"], "queued");
+        assert_eq!(events[1].data["state"], "needs_review");
     }
     #[test]
     fn logout_transaction_cancels_queued_media_without_changing_inflight_or_other_accounts() {

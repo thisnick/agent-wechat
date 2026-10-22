@@ -75,6 +75,16 @@ test("inline quoted recall prevents stale embedded text from reaching the model"
 test("catchup/import messages are not new automatic model turns or read projections", async t => {
   for (const origin of ["catchup", "import", "unknown"]) { const value = fixture(t, { origin }); assert.equal(await dispatchNativeMessage(value), "ignored"); assert.equal(value.runs.length, 0); }
 });
+test("self-sends from another device or this hub never start a model or mark a chat read", async t => {
+  for (const origin of ["live", "local_send"]) {
+    for (const threadId of ["u", "filehelper"]) {
+      const value = fixture(t, { origin });
+      value.message.direction = "outgoing"; value.message.senderId = "sim_self"; value.message.threadId = threadId;
+      assert.equal(await dispatchNativeMessage(value), "ignored");
+      assert.equal(value.runs.length, 0); assert.equal(value.state.get("m1")?.readPending, undefined);
+    }
+  }
+});
 test("released SDK missing prepared hook leaves read unchanged and records uncertainty", async t => {
   const value = fixture(t, { readPolicy: "on_model_dispatch" }); value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async () => {};
   assert.equal(await dispatchNativeMessage(value), "completed"); assert.equal(value.state.get("m1")?.readPending, undefined); assert.equal(value.state.get("m1")?.handoffUnconfirmed, true);

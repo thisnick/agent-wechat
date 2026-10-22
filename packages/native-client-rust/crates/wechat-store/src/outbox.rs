@@ -1,7 +1,7 @@
 //! Submission and cancellation compete in one transaction before network I/O.
 use super::*;
 use rusqlite::OptionalExtension;
-fn event(tx: &rusqlite::Transaction<'_>, intent: &SendIntent) -> Result<()> {
+pub(super) fn event(tx: &rusqlite::Transaction<'_>, intent: &SendIntent) -> Result<()> {
     tx.execute(
         "INSERT INTO events(kind,data_json,created_at)VALUES('send.updated',?1,?2)",
         params![

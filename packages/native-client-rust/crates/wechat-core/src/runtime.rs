@@ -53,7 +53,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex as AsyncMutex;
-use wechat_protocol::{AccountState, DeviceProfile, LoginStatus, NativeClient, NativeOptions};
+use wechat_protocol::{AccountState, DeviceProfile, LoginStatus, NativeOptions};
 use wechat_store::{vault::Vault, Operation, SendIntent, Store};
 
 pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
@@ -74,6 +74,7 @@ pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
 }
 
 pub struct Core {
+    pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub store: Arc<Store>,
     pub ownership_generation: String,
     leases: Mutex<Vec<wechat_store::Lease>>,
@@ -197,9 +198,6 @@ impl Drop for IdentityBinding {
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
-fn client() -> Result<NativeClient> {
-    NativeClient::new(NativeOptions::default())
-}
 fn auth_rejected(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let message = cause.to_string();
@@ -238,7 +236,23 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
 }
 
 impl Core {
+    pub fn upstream_kind(&self) -> crate::upstream::UpstreamKind {
+        self.upstream.kind()
+    }
     pub fn new(store: Arc<Store>, storage_key: Option<&std::path::Path>) -> Result<Arc<Self>> {
+        Self::with_upstream(
+            store,
+            storage_key,
+            Arc::new(crate::upstream::NativeUpstream),
+        )
+    }
+    /// Alternative upstreams still use the same account actors, vault and projection journals.
+    pub fn with_upstream(
+        store: Arc<Store>,
+        storage_key: Option<&std::path::Path>,
+        upstream: Arc<dyn crate::upstream::Upstream>,
+    ) -> Result<Arc<Self>> {
+        crate::upstream::validate_store(&store, upstream.kind())?;
         let default = store.root.join("storage-key");
         let path = storage_key.unwrap_or(&default);
         let vault = Vault::open(
@@ -260,6 +274,7 @@ impl Core {
             .map(|a| a.id)
             .collect();
         let core = Arc::new(Self {
+            upstream,
             store,
             leases: Mutex::new(leases),
             vault: Arc::new(vault),
@@ -349,7 +364,7 @@ impl Core {
             .open_record(account, "account-state", &encrypted)?;
         let state: AccountState = serde_json::from_slice(&plain)
             .map_err(|_| anyhow::anyhow!("invalid protected account state"))?;
-        state.validate()?;
+        self.upstream.validate_state(&state)?;
         Ok(state)
     }
     pub fn account_state(&self, account: &str) -> Result<AccountState> {
@@ -364,7 +379,7 @@ impl Core {
         self.persist_state(account, state, true)
     }
     fn persist_state(&self, account: &str, state: &AccountState, accepted: bool) -> Result<()> {
-        state.validate()?;
+        self.upstream.validate_state(state)?;
         self.check_state_profile(account, state)?;
         if let Ok(prior) = self.state_unfenced(account) {
             if prior.uin != state.uin || prior.own_username != state.own_username {
@@ -398,7 +413,7 @@ impl Core {
         epoch: Option<&[u8]>,
         operation: Option<&str>,
     ) -> Result<()> {
-        state.validate()?;
+        self.upstream.validate_state(state)?;
         self.prepare_official_profile_keys(account, state)?;
         self.check_state_profile(account, state)?;
         if let Ok(prior) = self.state_unfenced(account) {
@@ -419,6 +434,7 @@ impl Core {
         Ok(())
     }
     pub fn restore_credentials(&self, account: &str, input: &[u8]) -> Result<()> {
+        crate::upstream::require_native(self.upstream.kind())?;
         self.store.account(account)?;
         let state = match serde_json::from_slice::<AccountState>(input) {
             Ok(state) => state,
@@ -464,7 +480,11 @@ impl Core {
         let auto_connect = self.store.runtime(account, "auto-connect")?.as_deref() != Some(b"0");
         let incoming = if auth && desired == b"connected" {
             if self.push_connected(account) {
-                "native_push"
+                if self.upstream.kind() == crate::upstream::UpstreamKind::Simulator {
+                    "simulator_push"
+                } else {
+                    "native_push"
+                }
             } else {
                 "heartbeat_polling"
             }
@@ -686,8 +706,9 @@ impl Core {
             self.progress(&op, "resuming", json!({"method":"active"}))?;
             let mut state = saved.clone();
             let cursor = self.cursor(&account)?;
+            let upstream = self.upstream.clone();
             let validated = blocking(move || {
-                let client = client()?;
+                let client = upstream;
                 match client.heartbeat(&mut state, &cursor) {
                     Ok(_) => Ok(state),
                     Err(error) if auth_rejected(&error) => {
@@ -733,41 +754,48 @@ impl Core {
         } else {
             self.saved_device_source(&account, previous.as_ref())?
         };
-        let saved_attempt =
-            if let Some(official_profile::SavedDeviceSource::State(state)) = &saved_source {
-                self.progress(&op, "resuming", json!({"method":"saved_device"}))?;
-                let state = state.clone();
-                let name = request.computer_name.clone();
-                match blocking(move || client()?.start_saved_device_login(&state, &name)).await {
-                    Ok(attempt) => Some(attempt),
-                    Err(error) if saved_trust_rejected(&error) => None,
-                    Err(error) => return Err(error),
-                }
-            } else if let Some(official_profile::SavedDeviceSource::Profile(saved)) = saved_source {
-                self.progress(&op, "resuming", json!({"method":"official_saved_device"}))?;
-                let mut device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
-                device.device_id = saved.identity.request_device_id()?.to_vec();
-                let name = request.computer_name.clone();
-                let options = self.official_login_options(&account)?;
-                match blocking(move || {
-                    NativeClient::new(options)?.start_profile_saved_device_login(
-                        &device,
-                        &saved.identity.username,
-                        &saved.auto_auth_key,
-                        &saved.cookie,
-                        &saved.key_info,
-                        &name,
-                    )
-                })
+        let saved_attempt = if let Some(official_profile::SavedDeviceSource::State(state)) =
+            &saved_source
+        {
+            self.progress(&op, "resuming", json!({"method":"saved_device"}))?;
+            let state = state.clone();
+            let name = request.computer_name.clone();
+            let upstream = self.upstream.clone();
+            let login_account = account.clone();
+            match blocking(move || upstream.start_saved_device_login(&login_account, &state, &name))
                 .await
-                {
-                    Ok(attempt) => Some(attempt),
-                    Err(error) if saved_trust_rejected(&error) => None,
-                    Err(error) => return Err(error),
-                }
-            } else {
-                None
-            };
+            {
+                Ok(attempt) => Some(attempt),
+                Err(error) if saved_trust_rejected(&error) => None,
+                Err(error) => return Err(error),
+            }
+        } else if let Some(official_profile::SavedDeviceSource::Profile(saved)) = saved_source {
+            self.progress(&op, "resuming", json!({"method":"official_saved_device"}))?;
+            let mut device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
+            device.device_id = saved.identity.request_device_id()?.to_vec();
+            let name = request.computer_name.clone();
+            let options = self.official_login_options(&account)?;
+            let upstream = self.upstream.clone();
+            match blocking(move || {
+                upstream.start_profile_saved_device_login(
+                    options,
+                    &device,
+                    &saved.identity.username,
+                    &saved.auto_auth_key,
+                    &saved.cookie,
+                    &saved.key_info,
+                    &name,
+                )
+            })
+            .await
+            {
+                Ok(attempt) => Some(attempt),
+                Err(error) if saved_trust_rejected(&error) => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         let mut attempt = if let Some(attempt) = saved_attempt {
             attempt
         } else {
@@ -820,8 +848,10 @@ impl Core {
                 options.long_host = state.long_host.clone();
                 options.short_host = state.short_host.clone();
             }
+            let upstream = self.upstream.clone();
+            let login_account = account.clone();
             blocking(move || {
-                NativeClient::new(options)?.start_profile_qr_login(device, &name, &key_info)
+                upstream.start_qr_login(&login_account, options, device, &name, &key_info)
             })
             .await?
         };
@@ -837,27 +867,28 @@ impl Core {
                 self.progress(&op, "expired", json!({"reason":"attempt_deadline"}))?;
                 return Ok(());
             }
-            if !attempt.qr_png.is_empty() {
-                let png = white_png(&attempt.qr_png)?;
+            if !attempt.qr_png().is_empty() {
+                let png = white_png(attempt.qr_png())?;
                 let key = format!("qr:{}", op.id);
                 self.store
                     .put_runtime(&account, &key, &self.vault.seal(&account, &key, &png)?)?;
             }
-            self.progress(&op,if scanned||attempt.qr_png.is_empty(){"awaiting_approval"}else{"awaiting_scan"},json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty(),"lanChallenge":attempt.lan_login_state()}))?;
+            self.progress(&op,if scanned||attempt.qr_png().is_empty(){"awaiting_approval"}else{"awaiting_scan"},json!({"qrGeneration":generation,"expiresAt":attempt.expires_at(),"qrAvailable":!attempt.qr_png().is_empty(),"lanChallenge":attempt.lan_login_state()}))?;
             let poll_cancel = cancel.clone();
             let poll_owner = Arc::downgrade(self);
             let poll_deadline = start + Duration::from_secs(request.timeout_seconds);
             let result = blocking(move || {
                 // Return the issued challenge even on a failed read. Never lose
                 // its cookie/notify state or create a replacement QR on timeout.
-                let status = client().and_then(|native| {
-                    native.poll_login_guarded(&mut attempt, poll_deadline, move || {
+                let status = attempt.poll(
+                    poll_deadline,
+                    Box::new(move || {
                         poll_cancel.load(Ordering::SeqCst)
                             || poll_owner
                                 .upgrade()
                                 .is_none_or(|core| core.stopping.load(Ordering::SeqCst))
-                    })
-                });
+                    }),
+                );
                 Ok((attempt, status))
             })
             .await?;
@@ -877,8 +908,8 @@ impl Core {
                 }
                 Err(error) if wechat_protocol::is_retryable_login_poll_error(&error) => {
                     poll_failures = poll_failures.saturating_add(1);
-                    self.progress(&op, if scanned || attempt.qr_png.is_empty() { "awaiting_approval" } else { "awaiting_scan" },
-                        json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty(),"lanChallenge":attempt.lan_login_state(),"connection":"retrying","reason":"temporary_transport_failure","pollFailures":poll_failures}))?;
+                    self.progress(&op, if scanned || attempt.qr_png().is_empty() { "awaiting_approval" } else { "awaiting_scan" },
+                        json!({"qrGeneration":generation,"expiresAt":attempt.expires_at(),"qrAvailable":!attempt.qr_png().is_empty(),"lanChallenge":attempt.lan_login_state(),"connection":"retrying","reason":"temporary_transport_failure","pollFailures":poll_failures}))?;
                     // Both the issued challenge expiry and the overall operation
                     // deadline still bound retries. Cancellation keeps its fence.
                     tokio::time::sleep(Duration::from_secs(u64::from(poll_failures.min(5)))).await;
@@ -902,7 +933,7 @@ impl Core {
             match status {
                 LoginStatus::Approved => {
                     self.progress(&op, "authenticating", json!({}))?;
-                    let state = blocking(move || client()?.complete_login(&mut attempt)).await?;
+                    let state = blocking(move || attempt.complete()).await?;
                     if cancel.load(Ordering::SeqCst) {
                         self.progress(
                             &op,
@@ -935,13 +966,13 @@ impl Core {
                 LoginStatus::Scanned => scanned = true,
                 LoginStatus::Expired
                     if !scanned
-                        && !attempt.qr_png.is_empty()
+                        && !attempt.qr_png().is_empty()
                         && request.allow_qr
                         && request.qr_refresh.mode == QrRefreshMode::Auto
                         && generation <= request.qr_refresh.max_refreshes as u32 =>
                 {
                     generation += 1;
-                    attempt = blocking(move || client()?.refresh_qr_login(&attempt)).await?;
+                    attempt = blocking(move || attempt.refresh()).await?;
                 }
                 LoginStatus::Expired => {
                     self.progress(&op, "expired", json!({}))?;
@@ -968,7 +999,7 @@ impl Core {
         blocking(move || {
             let mut state = core.session_state(&account, &fence)?;
             let cursor = core.cursor(&account)?;
-            let native = client()?;
+            let native = &core.upstream;
             let batch = native.sync(&mut state, &cursor)?;
             core.save_state(&account, &state)?;
             core.store.put_runtime(
@@ -989,7 +1020,7 @@ impl Core {
         let _guard = gate.lock().await;
         let core = self.clone();
         let account = account.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let contacts=client()?.lookup_contacts(&mut state,&ids)?;core.save_state(&account,&state)?;
+        blocking(move||{let mut state=core.account_state(&account)?;let contacts=core.upstream.native(NativeOptions::default())?.lookup_contacts(&mut state,&ids)?;core.save_state(&account,&state)?;
             Ok(json!({"items":contacts.contacts.into_iter().map(|c|json!({"id":c.username,"displayName":c.remark.or(c.nickname).unwrap_or_else(||c.username.clone()),"alias":c.alias,"profileProjection":"pending"})).collect::<Vec<_>>(),"results":contacts.results}))
         }).await
     }
@@ -1004,7 +1035,7 @@ impl Core {
         let core = self.clone();
         let account = account.to_string();
         let room = room.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let roster=client()?.lookup_room(&mut state,&room,version)?;core.save_state(&account,&state)?;
+        blocking(move||{let mut state=core.account_state(&account)?;let roster=core.upstream.native(NativeOptions::default())?.lookup_room(&mut state,&room,version)?;core.save_state(&account,&state)?;
             Ok(json!({"id":roster.room_id,"version":roster.version,"items":roster.members.into_iter().map(|m|json!({"id":m.username,"nickname":m.nickname,"roomDisplayName":m.room_display_name})).collect::<Vec<_>>(),"profileProjection":"pending"}))
         }).await
     }
@@ -1178,7 +1209,7 @@ impl Core {
                 .open_record(&account, "send-payload", &encrypted)?;
             let payload: SendPayload = serde_json::from_slice(&plain)?;
             let mut state = core.account_state(&account)?;
-            let native = client()?;
+            let native = &core.upstream;
             if let Some(quote) = &payload.quote {
                 if core
                     .quote_target(&account, &payload.thread_id, &quote.target)
@@ -1410,6 +1441,9 @@ impl Core {
         mmkv_store: &std::path::Path,
         format_key: &[u8],
     ) -> Result<()> {
+        if self.upstream.kind() == crate::upstream::UpstreamKind::Simulator {
+            crate::upstream::validate_profile_path(&self.store.root, mmkv_store)?;
+        }
         self.bind_profile_identity(account, mmkv_store, format_key)?;
         let state = self.account_state(account)?;
         if own_username != state.own_username {
@@ -1688,7 +1722,7 @@ impl Core {
                     let _ = core.publish_profile_checkpoint(&account);
                 }
                 let cursor = core.cursor(&account)?;
-                let native = client()?;
+                let native = &core.upstream;
                 let beat = native.heartbeat(&mut state, &cursor)?;
                 core.save_state(&account, &state)?;
                 core.store.put_runtime(

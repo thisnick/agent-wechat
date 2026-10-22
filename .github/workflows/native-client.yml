@@ -7,6 +7,7 @@ on:
       - 'rust-toolchain.toml'
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
+      - 'scripts/native-simulator-smoke.mjs'
       - 'scripts/native-ci-cache-key*.py'
       - '.github/workflows/native-client.yml'
   push:
@@ -16,6 +17,7 @@ on:
       - 'rust-toolchain.toml'
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
+      - 'scripts/native-simulator-smoke.mjs'
       - 'scripts/native-ci-cache-key*.py'
       - '.github/workflows/native-client.yml'
 
@@ -118,6 +120,13 @@ jobs:
         run: cargo test --workspace --locked
       - if: matrix.suite == 'test'
         run: cargo build --workspace --profile test --locked
+      - if: matrix.suite == 'test'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - name: Exercise the real hub through the local upstream simulator
+        if: matrix.suite == 'test'
+        run: node ../../scripts/native-simulator-smoke.mjs
       - if: matrix.suite == 'test'
         run: bash ../../scripts/native-generate-types.sh --check
       - if: matrix.suite == 'test'

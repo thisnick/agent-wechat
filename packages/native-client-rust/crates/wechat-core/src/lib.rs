@@ -16,6 +16,7 @@ mod recall_evidence;
 mod recalls;
 pub use media_types::*;
 mod runtime;
+pub mod upstream;
 pub use pagination::*;
 pub use profile::*;
 pub use runtime::*;

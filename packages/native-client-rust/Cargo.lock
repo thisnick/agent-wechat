@@ -2359,6 +2359,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "wechat-simulator"
+version = "1.0.0-beta.9"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "fs2",
+ "image",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tokio",
+ "wechat-api",
+ "wechat-core",
+ "wechat-platform",
+ "wechat-protocol",
+ "wechat-store",
+]
+
+[[package]]
 name = "wechat-store"
 version = "1.0.0-beta.13"
 dependencies = [

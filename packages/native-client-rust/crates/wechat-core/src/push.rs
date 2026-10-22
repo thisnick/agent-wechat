@@ -1,8 +1,5 @@
 use super::*;
-use wechat_protocol::{
-    push::Connection,
-    wire::{Heartbeat, SyncBatch},
-};
+use wechat_protocol::wire::{Heartbeat, SyncBatch};
 
 fn heartbeat_interval(heartbeat: &Heartbeat) -> Duration {
     Duration::from_secs((heartbeat.next_interval as u64).clamp(30, 180))
@@ -120,7 +117,7 @@ impl Core {
                 .runtime(&owned, "account-state")?
                 .context("auth_required")?;
             let cursor = core.cursor(&owned)?;
-            let mut connection = client()?.push_connection(&state)?;
+            let mut connection = core.upstream.push_connection(&state)?;
             let heartbeat = connection.heartbeat(&mut state, &cursor)?;
             core.save_push_state(&owned, &state, &expected, &fence)?;
             Ok((connection, fence, heartbeat))
@@ -135,7 +132,7 @@ impl Core {
         self.store.append_event(
             account,
             "account.push",
-            &json!({"state":"connected","transport":"native_longlink"}),
+            &json!({"state":"connected","transport":if self.upstream.kind() == crate::upstream::UpstreamKind::Simulator {"simulator"} else {"native_longlink"}}),
         )?;
         let mut next_heartbeat = Instant::now() + heartbeat_interval(&heartbeat);
         loop {
@@ -185,11 +182,11 @@ impl Core {
     async fn drain_push_sync(
         self: &Arc<Self>,
         account: &str,
-        mut connection: Connection,
+        mut connection: Box<dyn crate::upstream::PushConnection>,
         fence: &SessionFence,
         scene: u32,
         trigger: &str,
-    ) -> Result<Connection> {
+    ) -> Result<Box<dyn crate::upstream::PushConnection>> {
         for _ in 0..8 {
             let guard = self.lock_account(account).await?;
             let core = self.clone();

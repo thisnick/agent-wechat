@@ -170,6 +170,13 @@ jobs:
           wait "$platform_smoke" || smoke_status=1
           wait "$package_smoke" || smoke_status=1
           exit "$smoke_status"
+      - name: Build the local upstream development runtime
+        run: cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-dev --target ${{ matrix.target }}
+      - name: Verify the simulator and real hub on this native platform
+        env:
+          WX_DEV_BINARY: packages/native-client-rust/target/${{ matrix.target }}/debug/${{ runner.os == 'Windows' && 'wx-dev.exe' || 'wx-dev' }}
+          WX_BINARY: packages/native-client-rust/target/${{ matrix.target }}/release/${{ runner.os == 'Windows' && 'wx.exe' || 'wx' }}
+        run: node scripts/native-simulator-smoke.mjs
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact_prefix || 'native-validation' }}-${{ matrix.target }}

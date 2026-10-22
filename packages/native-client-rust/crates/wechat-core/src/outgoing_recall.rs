@@ -90,7 +90,10 @@ impl Core {
                     blocking(move || {
                         let _guard = guard;
                         worker.execute_recall(&account, &operation_id, |state, request| {
-                            client()?.recall_message(state, request)
+                            worker
+                                .upstream
+                                .native(NativeOptions::default())?
+                                .recall_message(state, request)
                         })
                     })
                     .await

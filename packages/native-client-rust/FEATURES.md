@@ -87,6 +87,7 @@ those gaps.
 
 | Extra | Current evidence / limits |
 | --- | --- |
+| Local decoded upstream simulator | Real hub/API/SDK/CLI journey passes on Linux x64 in a read-only, non-root container with external networking disabled; traced connections stay on loopback. Synthetic login, text, push, two-client events, restart/catch-up, send faults and isolation are covered. Advertised media stays unavailable and unknown/status controls remain staged. Native macOS/Windows and Linux ARM64 smoke jobs are configured; their runtime results, the production frontend, Tauri shell and media fixtures remain follow-ups. See `dev-notes/simulator.md` |
 | Fresh official-format profile initialization | Native login created seven encrypted databases, MMKV identity and saved login; native sync and all four media downloads passed. The exact official build accepted saved login with matching identity/password, but complete first-time initialization and rendering were not established |
 | Copy-only stopped-profile import/export | CLI fixtures preserve opaque bytes, require a stopped source, exclude cooperating owners, refuse pending projections and report explicit incomplete/checkpoint receipts. This is not a schema converter or a guarantee the official app can continue |
 | Returning a native-written profile to the official app | Controlled official saved-login and subsequent native encrypted-history readback passed. Official UI rendering and FTS/search compatibility remain unverified; not a v1 acceptance requirement |

@@ -9,11 +9,9 @@ fn result(remote: &str, reason: &str, retained: bool, code: Option<i32>) -> Valu
 
 impl Core {
     pub async fn logout(self: &Arc<Self>, account: &str, key: &str) -> Result<Operation> {
-        self.begin_logout_operation(account, key, false, |state| {
-            let reply = client()?.logout(state)?;
-            Ok((reply.accepted, reply.service_code))
-        })
-        .await
+        let upstream = self.upstream.clone();
+        self.begin_logout_operation(account, key, false, move |state| upstream.logout(state))
+            .await
     }
     /// Explicit local forgetting does not submit a remote logout or delete history.
     pub async fn forget_credentials(
