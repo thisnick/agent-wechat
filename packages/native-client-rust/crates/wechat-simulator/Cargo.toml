@@ -26,3 +26,7 @@ wechat-api = { path = "../wechat-api" }
 wechat-store = { path = "../wechat-store" }
 wechat-protocol = { path = "../wechat-protocol" }
 wechat-platform = { path = "../wechat-platform" }
+qrcodegen = "1.8.0"
+
+[dev-dependencies]
+rqrr = { version = "0.11.0", default-features = false }

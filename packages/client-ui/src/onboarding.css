@@ -199,7 +199,8 @@ body {
   color: #f1f1ee;
   display: flex;
   flex-direction: column;
-  padding: 42px;
+  --story-inset: 42px;
+  padding: var(--story-inset);
   position: relative;
   overflow: hidden;
 }
@@ -230,9 +231,15 @@ body {
 }
 .story-content {
   margin: auto 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   padding: 46px 0 44px;
 }
 .product-description {
+  flex-shrink: 0;
   font-size: 29px;
   line-height: 1.42;
   font-weight: 430;
@@ -269,12 +276,23 @@ body {
   stroke-linejoin: round;
   color: #858783;
 }
+.illustration-viewport {
+  width: calc(100% + var(--story-inset) * 2);
+  margin-inline: calc(var(--story-inset) * -1);
+  aspect-ratio: 460 / 282;
+  min-height: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  position: relative;
+}
 .app-illustration {
   display: block;
-  width: min(100%, 460px);
+  position: absolute;
+  width: 133.333333%;
   height: auto;
   aspect-ratio: 460 / 282;
-  flex-shrink: 0;
+  top: 0;
+  right: 0;
   border-radius: 12px;
   box-shadow: 0 20px 40px #0002;
 }
@@ -688,7 +706,7 @@ body {
 }
 @media (min-width: 1600px) {
   .onboarding-story {
-    padding: 48px;
+    --story-inset: 48px;
   }
   .onboarding-main {
     padding: 38px 48px 30px;
@@ -702,7 +720,7 @@ body {
     grid-template-columns: 41% 59%;
   }
   .onboarding-story {
-    padding: 32px;
+    --story-inset: 32px;
   }
   .product-description {
     font-size: 25px;
@@ -757,7 +775,7 @@ body {
     max-width: 360px;
     margin: 19px 0 0;
   }
-  .app-illustration {
+  .illustration-viewport {
     display: none;
   }
   .project-links {

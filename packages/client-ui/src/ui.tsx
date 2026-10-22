@@ -1,10 +1,9 @@
+import { Settings } from "lucide-react";
 import type { ReactNode } from "react";
 const icons: Record<string, string> = {
   chat: "M21 11.5a8.4 8.4 0 0 1-9 8.5 10 10 0 0 1-4-.8L3 21l1.6-4.5A8.3 8.3 0 0 1 3 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5ZM8 11h.01M12 11h.01M16 11h.01",
   people:
     "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 4a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.87M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
-  settings:
-    "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM9 3l-1 3-3 1-2 3 2 2-1 3 3 2 1 3h5l1-3 3-1 2-3-2-2 1-3-3-2-1-3Z",
   search: "m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",
   plus: "M12 5v14M5 12h14",
   more: "M5 12h.01M12 12h.01M19 12h.01",
@@ -34,6 +33,8 @@ const icons: Record<string, string> = {
 };
 
 export function Icon({ name }: { name: string }) {
+  if (name === "settings")
+    return <Settings className="icon" aria-hidden="true" strokeWidth={1.7} />;
   return (
     <svg className="icon" aria-hidden="true" viewBox="0 0 24 24">
       <path d={icons[name] ?? icons.chat} />
@@ -264,7 +265,9 @@ export function Story() {
           Chat, share files and manage your WeChat accounts alongside your AI
           agents.
         </p>
-        <AppIllustration />
+        <div className="illustration-viewport">
+          <AppIllustration />
+        </div>
       </div>
       <nav className="project-links" aria-label="Project links">
         {[

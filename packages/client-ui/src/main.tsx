@@ -14,7 +14,13 @@ import {
   type NativeGroupMember,
   isNativeTombstone,
 } from "@agent-wechat/shared";
-import { bootstrap, connect, control, type Connection } from "./connection.ts";
+import {
+  bootstrap,
+  connect,
+  control,
+  simulatorClock,
+  type Connection,
+} from "./connection.ts";
 import {
   readableError,
   pause,
@@ -348,7 +354,8 @@ function Login({
   const [operation, setOperation] = useState<NativeOperation | null>(null),
     [qr, setQr] = useState(""),
     [error, setError] = useState(""),
-    [attempt, setAttempt] = useState(0);
+    [attempt, setAttempt] = useState(0),
+    [clock, setClock] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const operationId = useRef<string | null>(null);
   useEffect(() => {
@@ -362,7 +369,11 @@ function Login({
         setQr("");
         const op = await connection.session.client.login(
           account,
-          { strategy: "qr", qrRefresh: { mode: "manual", maxRefreshes: 0 } },
+          {
+            strategy: "qr",
+            timeoutSeconds: 900,
+            qrRefresh: { mode: "auto", maxRefreshes: 3 },
+          },
           key,
         );
         if (controller.signal.aborted) {
@@ -379,6 +390,11 @@ function Login({
           );
           if (controller.signal.aborted) return;
           setOperation(current);
+          if (connection.simulator) {
+            const now = await simulatorClock().catch(() => null);
+            if (controller.signal.aborted) return;
+            setClock(now);
+          }
           const result = current.result as {
             qrAvailable?: boolean;
             qrGeneration?: number;
@@ -431,10 +447,17 @@ function Login({
   const terminal = ["failed", "expired", "rejected", "cancelled"].includes(
     state ?? "",
   );
+  const expiresAt = (operation?.result as { expiresAt?: number } | null)
+    ?.expiresAt;
+  const remaining =
+    typeof expiresAt === "number"
+      ? Math.max(0, expiresAt - (clock ?? Math.floor(Date.now() / 1000)))
+      : null;
   async function simulate(status: string) {
     setBusy(true);
     try {
       await control({ op: "login", account, status });
+      if (status === "expired") setQr("");
     } catch {
       setError("Simulator control failed.");
     } finally {
@@ -458,7 +481,7 @@ function Login({
         </h1>
         <p>
           {connection.simulator
-            ? "This QR belongs to the local simulator. Use the phone controls below."
+            ? "Simulator QR only. It cannot sign in to WeChat. Use the phone controls below."
             : "In WeChat on your phone, tap +, then Scan."}
         </p>
       </div>
@@ -468,13 +491,34 @@ function Login({
             <Icon name="check" />
           </div>
         ) : qr && !terminal ? (
-          <img className="login-qr" src={qr} alt="WeChat sign-in QR code" />
+          <img
+            className="login-qr"
+            src={qr}
+            alt={
+              connection.simulator
+                ? "Simulator sign-in QR code"
+                : "WeChat sign-in QR code"
+            }
+            data-qr-generation={
+              (operation?.result as { qrGeneration?: number } | null)
+                ?.qrGeneration
+            }
+            data-expires-at={expiresAt}
+          />
         ) : (
           <p>
             {terminal ? "Get a new code to try again." : "Preparing your code…"}
           </p>
         )}
       </div>
+      {qr && !terminal && state !== "awaiting_approval" && (
+        <p className="qr-expiry" role="status">
+          Code refreshes automatically
+          {remaining !== null && (!connection.simulator || clock !== null)
+            ? ` · ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`
+            : ""}
+        </p>
+      )}
       {error && <ErrorNotice>{error}</ErrorNotice>}
       {terminal || error ? (
         <button
@@ -500,17 +544,15 @@ function Login({
               : "Simulate scan"}{" "}
             <Icon name="chevron" />
           </button>
-          <button
-            className="quiet-button"
-            disabled={busy || !qr}
-            onClick={() =>
-              void control({ op: "advance", seconds: 121 }).catch(() =>
-                setError("Simulator control failed."),
-              )
-            }
-          >
-            Expire this code
-          </button>
+          {state !== "awaiting_approval" && (
+            <button
+              className="quiet-button"
+              disabled={busy || !qr}
+              onClick={() => void simulate("expired")}
+            >
+              Expire this code
+            </button>
+          )}
         </div>
       ) : (
         <p className="field-help">

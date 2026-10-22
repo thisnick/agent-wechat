@@ -646,15 +646,19 @@ fn read_challenge(db: &Connection, id: &str) -> Result<Challenge> {
     })
 }
 fn qr_png(id: &str) -> Result<Vec<u8>> {
-    // A clearly synthetic image; it encodes no real WeChat login URL.
-    let hash = Sha256::digest(id.as_bytes());
-    let image = image::RgbImage::from_fn(100, 100, |x, y| {
-        let dark = x >= 8
-            && y >= 8
-            && x < 92
-            && y < 92
-            && hash[((x / 4 + y / 4 * 25) % 32) as usize] & (1 << (x % 8)) != 0;
-        image::Rgb(if dark { [35, 35, 35] } else { [255, 255, 255] })
+    // A valid QR with a non-network synthetic payload, never a WeChat login URL.
+    let payload = format!("agentwechat-simulator:login:{id}");
+    let qr = qrcodegen::QrCode::encode_text(&payload, qrcodegen::QrCodeEcc::Medium)
+        .map_err(|_| anyhow::anyhow!("synthetic_qr_encoding_failed"))?;
+    let scale = 6;
+    let border = 4;
+    let size = (qr.size() + border * 2) as u32 * scale;
+    let image = image::RgbImage::from_fn(size, size, |x, y| {
+        let dark = qr.get_module(
+            x as i32 / scale as i32 - border,
+            y as i32 / scale as i32 - border,
+        );
+        image::Rgb(if dark { [0, 0, 0] } else { [255, 255, 255] })
     });
     let mut bytes = Cursor::new(vec![]);
     image.write_to(&mut bytes, image::ImageFormat::Png)?;
@@ -780,6 +784,27 @@ mod tests {
             created_at: INITIAL_TIME,
             client_id,
         }
+    }
+    #[test]
+    fn synthetic_qr_png_round_trips_through_an_independent_decoder() {
+        for id in ["sim-personal-1", "sim-account-with-a-long-name-100"] {
+            let png = qr_png(id).unwrap();
+            let image = image::load_from_memory(&png).unwrap().to_luma8();
+            assert_eq!(image.width(), image.height());
+            let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
+                image.width() as usize,
+                image.height() as usize,
+                |x, y| image.get_pixel(x as u32, y as u32).0[0],
+            );
+            let grids = prepared.detect_grids();
+            assert_eq!(grids.len(), 1);
+            assert_eq!(
+                grids[0].decode().unwrap().1,
+                format!("agentwechat-simulator:login:{id}")
+            );
+            assert_eq!(image.get_pixel(0, 0).0, [255]);
+        }
+        assert_ne!(qr_png("first").unwrap(), qr_png("second").unwrap());
     }
     #[test]
     fn remote_acceptance_survives_lost_acknowledgment_and_service_restart() {

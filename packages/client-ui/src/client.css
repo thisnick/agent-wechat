@@ -193,7 +193,8 @@ input:focus-visible {
 
 @media (min-width: 721px) and (max-height: 850px) {
   .onboarding-story {
-    padding: 28px 34px;
+    --story-inset: 34px;
+    padding: 28px var(--story-inset);
   }
   .story-content {
     padding: 20px 0;
@@ -230,4 +231,11 @@ input:focus-visible {
 }
 .composer textarea:focus-visible {
   outline: none;
+}
+
+.qr-expiry {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  margin: 14px 0 0;
 }

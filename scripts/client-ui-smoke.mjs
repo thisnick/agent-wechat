@@ -209,6 +209,17 @@ async function launcherCheck() {
       /HttpOnly; SameSite=Strict/,
     );
     const configuration = await response.json();
+    const clockUrl = ready.endpoint + "/__dev/state";
+    assert.equal((await fetch(clockUrl)).status, 403);
+    const clock = (
+      await (await fetch(clockUrl, { headers: authorization })).json()
+    ).clock;
+    await wait(
+      "preview clock advances",
+      async () =>
+        (await (await fetch(clockUrl, { headers: authorization })).json())
+          .clock > clock,
+    );
     assert.equal(configuration.simulator, true);
     const api = new NativeWeChatClient({
       baseUrl: configuration.endpoint,
@@ -248,6 +259,36 @@ try {
   assert.equal((await client.status()).version.backend, "simulator");
   await login("personal");
   await login("work");
+  await client.createAccount("qr-refresh");
+  const renewing = await client.login(
+    "qr-refresh",
+    {
+      strategy: "qr",
+      timeoutSeconds: 900,
+      qrRefresh: { mode: "auto", maxRefreshes: 3 },
+    },
+    "auto-refresh-qr",
+  );
+  const firstCode = await wait("first QR generation", async () => {
+    const op = await client.operation("qr-refresh", renewing.id);
+    return op.state === "awaiting_scan" && op.result.qrGeneration === 1 && op;
+  });
+  const firstPng = await client.qr("qr-refresh", renewing.id, 1);
+  await control({ op: "advance", seconds: 121 });
+  const renewedCode = await wait("automatic QR renewal", async () => {
+    const op = await client.operation("qr-refresh", renewing.id);
+    return op.state === "awaiting_scan" && op.result.qrGeneration === 2 && op;
+  });
+  assert.ok(renewedCode.result.expiresAt > firstCode.result.expiresAt);
+  assert.notDeepEqual(await client.qr("qr-refresh", renewing.id, 2), firstPng);
+  await control({ op: "login", account: "qr-refresh", status: "expired" });
+  await wait(
+    "account-scoped QR expiry renews automatically",
+    async () =>
+      (await client.operation("qr-refresh", renewing.id)).result
+        .qrGeneration === 3,
+  );
+  await client.cancelOperation("qr-refresh", renewing.id);
   const a = session(),
     b = session();
   await Promise.all([a.activate("personal"), b.activate("personal")]);
@@ -417,6 +458,7 @@ try {
       ok: true,
       checks: [
         "real session model with two hub clients",
+        "automatic QR renewal with fresh PNG and expiration timestamp",
         "canonical incoming and outgoing content",
         "phone-originated self-send",
         "accepted/rejected/uncertain send states",

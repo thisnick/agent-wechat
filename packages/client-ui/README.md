@@ -16,7 +16,11 @@ pnpm client:dev
 The command builds `wx-dev` with the optimized test profile and prints a local
 browser URL. Add an account, select **Simulate scan**, then **Simulate phone
 approval**. The UI polls the real login operation and opens chats automatically.
-A normal QR sign-in likewise requires only the phone's approval.
+A normal QR sign-in likewise requires only the phone's approval. The hub renews
+unscanned codes automatically using its bounded refresh policy. The view reads
+the login operation's QR generation and expiry timestamp, then fetches the new
+PNG when that generation changes. The simulator PNG encodes a valid synthetic
+`agentwechat-simulator:login:…` payload, never an official login URL.
 
 Open the URL in two browser tabs and choose the same account. Use **Simulator
 controls** to inject incoming text, phone-originated self-sends, an unavailable
@@ -33,7 +37,9 @@ conversation generations fence late requests.
 The hub access key stays in memory. Pending send keys/text/receipts are retained
 in this tab's session storage, scoped to the hub's server ID and account, so a
 reload can check an uncertain send. Appearance preferences use local storage.
-History and credentials are not copied into browser storage.
+History and credentials are not copied into browser storage. The bootstrap secret
+is saved privately inside the simulator workspace so a named preview can restart
+without invalidating its preview link.
 
 Ctrl+C stops only the children created by this command and removes disposable
 state. To keep a named synthetic workspace:
@@ -47,6 +53,10 @@ selects the local Vite port. `CLIENT_UI_ORIGIN` can declare an HTTPS reverse-pro
 origin. It changes the preview's allowed host/origin and browser connection;
 it does not connect to another hub. Keep any proxy inside a trusted network.
 The launcher refuses a hub whose identity does not say `simulator`.
+
+The browser launcher advances the simulator clock once per second, so QR expiry
+and renewal occur naturally. The standalone simulator retains its controlled
+virtual clock for repeatable regression tests.
 
 ## Authentication and limits
 
@@ -85,12 +95,13 @@ first-frame connection status and cursor recovery. Browser validation uses the
 real Rust hub and simulator. Synthetic results do not establish official-client
 compatibility or live WeChat acceptance.
 
-Linux x64 verification on 2026-10-22 passed 418 native tests across the compiled
+Linux x64 verification on 2026-10-22 passed 419 native tests across the compiled
 workspace test executables in a non-root, read-only validation container with
 external networking disabled. Rust doc tests, pinned format/Clippy and generated
 contracts passed. The SDK passed 30 tests, the session model 11 and OpenClaw 211;
 TypeScript build/typecheck passed. The 18-check native simulator journey and the
-real-session client journey also passed with external networking disabled.
+11-check real-session client journey also passed with external networking disabled.
 Browser checks covered QR/phone approval, automatic chat entry, two tabs,
-self-sends, uncertainty, media availability and viewport layout. This records
+self-sends, uncertainty, media availability, automatic QR renewal, decoded QR
+payloads and viewport layout. This records
 Linux validation only.

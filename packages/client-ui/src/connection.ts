@@ -73,3 +73,12 @@ export async function control(body: Record<string, unknown>): Promise<void> {
   });
   if (!response.ok) throw new Error("Simulator control failed");
 }
+
+export async function simulatorClock(): Promise<number> {
+  const response = await fetch("/__dev/state", { cache: "no-store" });
+  if (!response.ok) throw new Error("Simulator clock unavailable");
+  const value = await response.json();
+  if (typeof value.clock !== "number")
+    throw new Error("Invalid simulator clock");
+  return value.clock;
+}

@@ -1,6 +1,6 @@
 // Local development only. Owns synthetic wx-dev processes; never discovers a wx daemon.
 import { spawn } from "node:child_process";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,8 +46,10 @@ const data =
     : await mkdtemp(join(tmpdir(), "agentwechat-ui-"));
 const temporary = dataArg < 0;
 const children = [];
-let vite, hub, upstream, hubToken, controlToken, stopping;
-const secret = randomBytes(32).toString("hex");
+let vite, hub, upstream, hubToken, controlToken, stopping, clockTimer;
+let clockWork = Promise.resolve(),
+  advancing = false;
+let secret = randomBytes(32).toString("hex");
 const equal = (value) =>
   typeof value === "string" &&
   /^[0-9a-f]{64}$/.test(value) &&
@@ -97,7 +99,11 @@ async function post(url, token, body) {
 async function stop(code = 0) {
   if (stopping) return stopping;
   stopping = (async () => {
-    await vite?.close();
+    clearInterval(clockTimer);
+    // Close Vite before yielding so its signal callback cannot exit ahead of cleanup.
+    const closing = vite?.close();
+    await clockWork;
+    await closing;
     if (hub && hubToken) {
       try {
         const status = await (
@@ -149,6 +155,28 @@ try {
   ).json();
   if (status.version?.backend !== "simulator")
     throw new Error("Development UI requires a simulator hub");
+  const previewSecretFile = join(data, "ui-preview-secret");
+  try {
+    secret = (await readFile(previewSecretFile, "utf8")).trim();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    await writeFile(previewSecretFile, secret, { mode: 0o600, flag: "wx" });
+  }
+  if (!/^[0-9a-f]{64}$/.test(secret))
+    throw new Error("Invalid preview bootstrap secret");
+  clockTimer = setInterval(() => {
+    if (advancing) return;
+    advancing = true;
+    clockWork = post(`http://${upstream.upstream}/control`, controlToken, {
+      op: "advance",
+      seconds: 1,
+    })
+      .catch(() => {})
+      .finally(() => {
+        advancing = false;
+      });
+  }, 1000);
+  clockTimer.unref();
   let allowedOrigin = process.env.CLIENT_UI_ORIGIN || undefined;
   const external = allowedOrigin ? new URL(allowedOrigin) : null;
   if (
@@ -218,6 +246,24 @@ try {
                   simulator: true,
                 }),
               );
+            }
+            if (req.url === "/__dev/state" && req.method === "GET") {
+              try {
+                const response = await fetch(
+                  `http://${upstream.upstream}/state`,
+                  {
+                    headers: { Authorization: `Bearer ${controlToken}` },
+                    signal: AbortSignal.timeout(5000),
+                    redirect: "error",
+                  },
+                );
+                if (!response.ok) throw new Error();
+                const state = await response.json();
+                return res.end(JSON.stringify({ clock: state.clock }));
+              } catch {
+                res.statusCode = 503;
+                return res.end("{}");
+              }
             }
             if (req.url === "/__dev/control" && req.method === "POST") {
               try {
