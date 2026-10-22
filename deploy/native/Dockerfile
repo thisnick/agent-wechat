@@ -15,6 +15,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /build/recipe.json recipe.json
+# Keep the exported test cache small. Assertions/checks remain enabled, and the
+# release profile already disables incremental compilation by default.
+ENV CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
 # Exportable dependency layers survive source changes and fresh CI workers.
 # Match both profiles used below; no source or host target cache is imported.
 RUN cargo chef cook --workspace --tests --profile test --locked --recipe-path recipe.json

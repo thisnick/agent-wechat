@@ -30,7 +30,7 @@ env:
   CARGO_PROFILE_DEV_OPT_LEVEL: 1
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  FFMPEG_RELEASE: autobuild-2026-10-22-13-06
+  FFMPEG_RELEASE: b6.1.1
 
 jobs:
   native:
@@ -41,11 +41,13 @@ jobs:
         suite: [lint, test]
         include:
           - runner: ubuntu-24.04
-            ffmpeg_asset: ffmpeg-n8.1.3-23-g5c4f5744cd-linux64-lgpl-8.1.tar.xz
-            ffmpeg_sha256: 309502e48756a917bafa9bf30a3d73098491750d1211637eed7d19e06c17f7c8
+            ffmpeg_arch: x64
+            ffmpeg_sha256: bfe8a8fc511530457b528c48d77b5737527b504a3797a9bc4866aeca69c2dffa
+            ffprobe_sha256: 25d9b6ccb05e3d9de9e04e31e2506d8dd7f9f0418981965ac6df12e8d3afd067
           - runner: ubuntu-24.04-arm
-            ffmpeg_asset: ffmpeg-n8.1.3-23-g5c4f5744cd-linuxarm64-lgpl-8.1.tar.xz
-            ffmpeg_sha256: 6a601112e0d032676f2048205fabe998900d44bac2a57f7ca35619c705326002
+            ffmpeg_arch: arm64
+            ffmpeg_sha256: 754a678672298bc68156adff58aa7385a592c2b30b1d0ae8750c45c915c4bac0
+            ffprobe_sha256: 2ab6aba60ee84412dff9188720703376cb4e7aaf7e0b5e43aa8249f2acae5bf8
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -80,20 +82,30 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/native-ffmpeg
-          key: native-ffmpeg-${{ runner.arch }}-${{ matrix.ffmpeg_sha256 }}
+          key: native-ffmpeg-${{ runner.arch }}-${{ env.FFMPEG_RELEASE }}-${{ matrix.ffmpeg_sha256 }}-${{ matrix.ffprobe_sha256 }}
       - name: Install verified image decoder runtime
         if: matrix.suite == 'test' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
         env:
-          FFMPEG_ASSET: ${{ matrix.ffmpeg_asset }}
+          FFMPEG_ARCH: ${{ matrix.ffmpeg_arch }}
           FFMPEG_SHA256: ${{ matrix.ffmpeg_sha256 }}
+          FFPROBE_SHA256: ${{ matrix.ffprobe_sha256 }}
         run: |
-          archive="$RUNNER_TEMP/native-ffmpeg.tar.xz"
-          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ASSET" \
-            --output "$archive"
-          printf '%s  %s\n' "$FFMPEG_SHA256" "$archive" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/native-ffmpeg"
-          tar -xJf "$archive" --strip-components=1 -C "$RUNNER_TEMP/native-ffmpeg"
+          base="https://github.com/eugeneware/ffmpeg-static/releases/download/$FFMPEG_RELEASE"
+          mkdir -p "$RUNNER_TEMP/native-ffmpeg/bin"
+          for media_tool in ffmpeg ffprobe; do
+            archive="$RUNNER_TEMP/$media_tool.gz"
+            expected_sha="$FFMPEG_SHA256"
+            if [ "$media_tool" = ffprobe ]; then expected_sha="$FFPROBE_SHA256"; fi
+            curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+              "$base/$media_tool-linux-$FFMPEG_ARCH.gz" --output "$archive"
+            printf '%s  %s\n' "$expected_sha" "$archive" | sha256sum --check
+            gzip --decompress --stdout "$archive" > "$RUNNER_TEMP/native-ffmpeg/bin/$media_tool"
+            chmod 755 "$RUNNER_TEMP/native-ffmpeg/bin/$media_tool"
+          done
+          curl --fail --location --retry 3 "$base/linux-$FFMPEG_ARCH.LICENSE" \
+            --output "$RUNNER_TEMP/native-ffmpeg/LICENSE"
+          printf '%s  %s\n' 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903 \
+            "$RUNNER_TEMP/native-ffmpeg/LICENSE" | sha256sum --check
       - name: Enable the pinned image decoder
         if: matrix.suite == 'test'
         run: |
