@@ -1,18 +1,52 @@
 ---
 title: Architecture
-description: Native protocol, official files, durable sidecars and client boundaries.
+description: How the wx daemon talks to WeChat, stores data and serves clients.
 ---
 
-`wx serve` composes independent Rust libraries: configuration, protected sidecar store, official-profile reader/writers, protocol/crypto, serialized account workers and the HTTP/SSE API. The same executable supplies the command-line client. It communicates directly with WeChat; the official app is needed only to supply an existing supported profile for the initial takeover workflow.
+import { Aside } from '@astrojs/starlight/components';
 
-Each account has its own identity, credentials, mutation guard, worker, sync state and event journal. One daemon can host independent accounts. Native ownership leases protect cooperating clients; the official app must also be stopped explicitly. Authorization must match the stored username, UIN, device and all encrypted databases.
+```mermaid
+flowchart LR
+  CLI[wx CLI]
+  OC[OpenClaw plugin]
+  App[Other agents and apps]
+  subgraph Host["Linux host"]
+    W["wx serve"]
+    P[("WeChat profile<br/>history, contacts, media")]
+    S[("Daemon data<br/>credentials, jobs, events")]
+  end
+  WS[WeChat servers]
+  CLI -- "HTTP" --> W
+  OC -- "HTTP + events" --> W
+  App -- "HTTP" --> W
+  W --> P
+  W --> S
+  W <-- "WeChat protocol" --> WS
+```
 
-The official profile contains history, metadata, desktop read state and supported media caches. Native sidecars hold protected credentials, original sync commands, projection journals, outbox/jobs and independent consumer receipts. Received sync and successful projection are separate checkpoints. Unsupported commands are retained; a complete official cursor cannot advance over them.
+`wx serve` speaks WeChat's own protocol, like the desktop app does. No WeChat app, screen or browser runs anywhere.
 
-An authenticated persistent connection receives native WeChat push notifications and immediately runs NewSync. It retains server-directed heartbeats and transport keepalives. If that connection fails, heartbeat/NewSync polling resumes while it reconnects. Account status reports `incomingTransport` as `native_push`, `heartbeat_polling` or `disconnected`; `account.push` events distinguish connection changes and notifications. A notification announces available work; it does not contain a committed message.
+**Your WeChat profile stays the main store.** History, contacts and media are read from and written to the same encrypted files WeChat for Linux uses. Messages the daemon sends or receives appear there just as if the app had handled them.
 
-Durable message commits produce account events and replayable SSE. An event acknowledgement confirms consumer custody, not message read state. HTTP disconnects do not undo submitted durable jobs. Sending uses idempotency keys and preserves uncertain outcomes so a lost response does not cause an automatic duplicate.
+**The daemon keeps its own data separately:** login credentials, queued sends and downloads, the event log, and anything the profile has no place for.
 
-The TypeScript client bounds an SSE connection attempt and each idle read. Server keepalive comments reset the 45-second idle window; time spent processing a delivered event does not consume it. A stalled connection closes so OpenClaw can reconnect from its durable consumer cursor and replay missed events.
+**Every client uses the same HTTP API.** The CLI is a thin client for it. The OpenClaw plugin follows the event stream and calls the same routes, and so can any other agent plugin or app. See [HTTP API](/use/api/).
 
-OpenClaw either owns a native child or connects to an external daemon. It stores event custody before acknowledgement, applies access/mention policy before media retrieval, and confirms exact prepared model input before whole-thread read marking and a native cross-device notification. It never downloads a runtime at plugin startup.
+## Inside the daemon
+
+| Part | Job |
+| --- | --- |
+| Account worker | One per account: holds the connection to WeChat, keeps the login alive, and runs one change at a time |
+| Sync | Receives new messages through a push connection, falling back to polling if the connection drops |
+| Profile reader/writer | Reads history from consistent snapshots; writes only the database layouts it recognizes |
+| Job queue | Runs sends, downloads, recalls and read notices, and remembers them across restarts |
+| Event log | Records every committed change so clients can replay what they missed |
+| HTTP server | Serves `/v1`, checks tokens and scopes, streams events |
+
+The Rust crates in [`packages/native-client-rust`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust) follow the same split: `wechat-protocol`, `wechat-profile`, `wechat-store`, `wechat-core`, `wechat-api` and the `wx` binary.
+
+<Aside title="Good to know">
+- **One daemon can host several accounts**, each with its own worker, login and event log.
+- **Unknown data is kept, not guessed at.** If WeChat sends something the daemon doesn't understand, it's stored and not written to the profile, so nothing is lost or corrupted.
+- **One writer per profile.** The daemon takes a lock so two daemons can't share a profile, but it can't stop the WeChat app being opened.
+</Aside>

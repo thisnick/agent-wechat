@@ -1,0 +1,57 @@
+---
+title: Install
+description: Install the wx binary with npm, as a standalone download, or as a Docker image.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+`wx` is one binary: it runs the daemon (`wx serve`) and is also the command-line client.
+
+<Tabs syncKey="install">
+<TabItem label="npm">
+
+```bash
+npm install -g @agent-wechat/cli@beta
+wx --json version
+```
+
+The package downloads the `wx` binary for your OS and CPU and checks it against hashes shipped inside the package. Works on Linux, macOS and Windows.
+
+</TabItem>
+<TabItem label="Binary">
+
+Download the file for your machine from [GitHub releases](https://github.com/thisnick/agent-wechat/releases):
+
+| Machine | File |
+| --- | --- |
+| Linux x64 / ARM64 | `wx-vVERSION-linux-x64-gnu`, `wx-vVERSION-linux-arm64-gnu` |
+| macOS, Apple Silicon | `wx-vVERSION-darwin-arm64` |
+| Windows x64 / ARM64 | `wx-vVERSION-win32-x64.exe`, `wx-vVERSION-win32-arm64.exe` |
+
+```bash
+install -m 0755 wx-v*-linux-x64-gnu ~/.local/bin/wx
+wx --json version
+```
+
+Compare the file's SHA-256 with `wx-vVERSION-checksums.json` from the same release.
+
+</TabItem>
+<TabItem label="Docker">
+
+```bash
+docker pull ghcr.io/thisnick/agent-wechat-native:vVERSION
+```
+
+One tag covers `linux/amd64` and `linux/arm64`. The image contains `wx`, FFmpeg and FFprobe, and no WeChat app. See [Keep it running](/setup/run/#docker-compose) for a Compose file.
+
+</TabItem>
+</Tabs>
+
+Next: [connect your account](/setup/connect/).
+
+<Aside title="Good to know">
+- **Use the `beta` tag.** The 1.0 betas are the native daemon. npm's `latest` tag still points to the old container-based CLI until 1.0 is released.
+- **macOS and Windows** builds start at 1.0.0-beta.9. The Docker image is Linux only.
+- **Offline or locked-down installs:** `npm install --ignore-scripts` skips the download; run `wx-native-install` later. Set `AGENT_WECHAT_NATIVE_ARTIFACT_DIR` to a folder holding the release binary and checksum file to install without network access, or `AGENT_WECHAT_NATIVE_BINARY` to use a binary you provide.
+- The npm launcher never downloads anything when you run `wx`. If the binary is missing, it reports an error.
+</Aside>

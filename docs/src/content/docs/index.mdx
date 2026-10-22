@@ -1,36 +1,56 @@
 ---
 title: agent-wechat
-description: A programmable WeChat interface for AI agents and automation.
+description: Run WeChat on a server and use it from the CLI, AI agents or your own code.
 template: splash
 hero:
-  tagline: Control WeChat from your AI agent, CLI, or custom code. Send and receive messages, list chats, download media — all via API.
+  tagline: Run your WeChat account on a server, without the WeChat app. Read chats and send messages and files from the command line, let an OpenClaw agent reply for you, or build your own integration on the HTTP API.
+  image:
+    file: ../../assets/wechat-chat.svg
+    alt: A WeChat chat where an agent replies from the owner's account with a requested file
   actions:
-    - text: Get Started
-      link: /agent-wechat/getting-started/quickstart/
+    - text: Get started
+      link: /agent-wechat/setup/requirements/
       icon: right-arrow
-      variant: primary
-    - text: View on GitHub
+    - text: GitHub
       link: https://github.com/thisnick/agent-wechat
       icon: external
+      variant: minimal
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
+```mermaid
+flowchart LR
+  CLI[wx CLI]
+  OC[OpenClaw]
+  App[Other agents and apps]
+  W["wx serve"]
+  WS[WeChat servers]
+  P[("Your WeChat profile")]
+  CLI --> W
+  OC --> W
+  App --> W
+  W <--> WS
+  W <--> P
+```
+
+`wx serve` talks to WeChat directly; no WeChat app or desktop runs. It keeps using your existing WeChat profile, so your history stays where it is. Every client goes through its HTTP API: the `wx` CLI, the OpenClaw plugin, and anything you build. A native desktop app is on the way.
+
+```bash
+npm install -g @agent-wechat/cli@beta
+wx serve                          # terminal 1
+wx auth login --official          # terminal 2: approve on your phone or scan the QR
+wx messages list filehelper
+```
+
 <CardGrid>
-  <Card title="Quick Start" icon="rocket">
-    Run the standalone native daemon and take over a stopped official profile.
-    [Get started →](/getting-started/quickstart/)
+  <Card title="Set it up" icon="rocket">
+    Install, log in, run it in the background, or move from the old container. [What you need →](/setup/requirements/)
   </Card>
-  <Card title="OpenClaw Integration" icon="puzzle">
-    Add WeChat as a channel in your OpenClaw AI agent.
-    [Set up OpenClaw →](/integrations/openclaw/setup/)
+  <Card title="Use it" icon="puzzle">
+    From the CLI, as an OpenClaw channel, or from your own agent or app. [CLI recipes →](/use/cli/)
   </Card>
-  <Card title="CLI Reference" icon="terminal">
-    Native CLI, daemon, history and media workflows.
-    [View commands →](/getting-started/cli/commands/)
-  </Card>
-  <Card title="Architecture" icon="setting">
-    How agent-wechat works under the hood.
-    [Learn more →](/how-it-works/architecture/)
+  <Card title="See how it works" icon="information">
+    The daemon, the message flow, sends and where your data lives. [Architecture →](/how-it-works/architecture/)
   </Card>
 </CardGrid>

@@ -1,0 +1,33 @@
+---
+title: API tokens
+description: Create, scope and revoke tokens for the daemon's HTTP API.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The daemon creates an owner token on first start, in `dataDir/api-token`. The CLI on the same machine uses it automatically. For anything else, create a token limited to what it needs:
+
+```bash
+wx tokens create my-script --accounts ACCOUNT_ID --scopes read --scopes send
+wx tokens list
+wx tokens revoke TOKEN_ID
+```
+
+The new token is printed once, in the `token` field.
+
+| Scope | Allows |
+| --- | --- |
+| `read` | Chats, messages, contacts, groups, events |
+| `media` | Downloading attachments |
+| `send` | Sending and recalling messages |
+| `read-state` | Marking chats read |
+| `login` | Logging in, connecting and disconnecting |
+| `admin` | Managing tokens and accounts. Only the owner token needs this. |
+
+OpenClaw needs `read`, `media`, `send` and `login`, plus `read-state` unless `readPolicy` is `never`.
+
+<Aside title="Good to know">
+- **API tokens and WeChat logins are separate.** Revoking a token doesn't log out of WeChat, and logging out doesn't revoke tokens.
+- Tokens are 32 to 1,024 printable characters. Keep them out of URLs and source control.
+- The daemon listens on localhost. For remote clients, use HTTPS or a tunnel so the token isn't sent in the clear.
+</Aside>

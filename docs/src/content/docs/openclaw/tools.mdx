@@ -1,0 +1,58 @@
+---
+title: Agent tools
+description: The WeChat tools your OpenClaw agent can call, and how to grant access to all chats.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Besides replying, the agent gets tools for the **current chat**. They can't see other chats or accounts.
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_history` | Earlier messages in this chat, newest first |
+| `wechat_search` | Messages in this chat containing some text |
+| `wechat_message` | One message by ID |
+| `wechat_media` | Downloads a message's image, file, video or voice and gives the agent the file. Images are also shown to the model. |
+| `wechat_send_share` | Sends a link card (title, URL, optional description and thumbnail) |
+| `wechat_recall` | Recalls a message your account sent in this chat |
+
+For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
+
+## Reading all chats
+
+Five optional tools work across **every** chat on the account. They're off unless you grant them to an agent:
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_archive_threads` | Lists chats, with unread counts |
+| `wechat_archive_search` | Searches all chats, or one |
+| `wechat_archive_history` | Reads any chat |
+| `wechat_archive_message` | One message from any chat |
+| `wechat_archive_media` | Downloads media from any chat |
+
+Grant them in `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "agents": {
+    "ownership": "explicit",
+    "entries": {
+      "main": { "tools": { "alsoAllow": ["wechat_archive_*"] } },
+      "group-bot": { "tools": { "deny": ["wechat_archive_*"] } }
+    }
+  }
+}
+```
+
+<Aside type="caution" title="Archive tools see everything">
+An agent with archive tools can read your whole WeChat account, whoever is talking to it, including people in a group chat. Only grant them to agents that only you talk to. `profile: "full"`, `"*"` and `group:plugins` also grant them, so add an explicit `deny` to agents that shouldn't have them.
+</Aside>
+
+<Aside title="Good to know">
+- **Search is local.** It covers what's stored in your profile and never fetches older history from WeChat.
+- **Downloads may take a moment.** If media isn't cached yet, `wechat_media` starts a download and returns `pending`; calling it again later picks up the result. Cached media still works after WeChat's copy expires.
+- **None of these tools mark chats read** or move the inbound cursor.
+- **Sends and recalls** use a stable key, so a retry after a lost response never sends twice. An uncertain result comes back as `needs_review` rather than being retried.
+- With OpenClaw's compact tool catalog, history, search and message lookup are found through `tool_search`. `wechat_media` stays directly callable so images reach the model as images.
+- Tools need the matching [token scopes](/reference/tokens/): `read` for lookups, `media` for downloads, `send` for shares and recalls.
+</Aside>

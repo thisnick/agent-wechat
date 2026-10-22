@@ -1,0 +1,73 @@
+---
+title: HTTP API
+description: Build your own agent plugin, bot or app on the daemon's /v1 API and event stream.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Everything the CLI and the OpenClaw plugin do goes through this API, so another agent framework, a bot or an app can do the same. The daemon serves JSON at `http://127.0.0.1:6174/v1`. Every request except `GET /health` needs a bearer token; create one with [`wx tokens create`](/reference/tokens/).
+
+A typical integration follows the [event stream](#receive) for new messages, fetches each one, and replies through [`/sends`](#send).
+
+```bash
+export WX=http://127.0.0.1:6174/v1 TOKEN=...   # and ACCOUNT=<id from /v1/accounts>
+curl -H "Authorization: Bearer $TOKEN" $WX/accounts
+```
+
+## Read
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/threads?limit=20"
+curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/threads/filehelper/messages?limit=50"
+curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=invoice"
+```
+
+Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the same query to get the next page.
+
+## Send
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1234-confirmation" \
+  -d '{"threadId": "filehelper", "text": "Order 1234 confirmed"}' \
+  "$WX/accounts/$ACCOUNT/sends"
+```
+
+Every send needs an `Idempotency-Key`. Sending the same key again returns the original send instead of sending twice. Check progress with `GET /sends/{id}`, or find a send by key with `GET /sends/by-idempotency-key?key=...`.
+
+## Receive
+
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/events/stream"
+```
+
+A server-sent event stream. A new message arrives as a `message.committed` event; fetch it with `GET /messages/{messageId}`. To resume after a disconnect, reconnect with `?after=CURSOR` (or the standard `Last-Event-ID` header) and the daemon replays what you missed. `POST /consumers/{name}/ack` with `{"cursor": "..."}` records how far you've processed.
+
+## Routes
+
+All account routes start with `/v1/accounts/{account}`.
+
+| Area | Routes |
+| --- | --- |
+| Accounts | `GET /v1/accounts`, `GET /`, `GET /capabilities`, `POST /connect`, `POST /disconnect`, `POST /logout` |
+| Login | `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
+| Chats and messages | `GET /threads`, `GET /threads/{id}/messages`, `GET /messages?query=`, `GET /messages/{id}`, `GET /messages/{id}/quote` |
+| Contacts and groups | `GET /contacts`, `GET /groups`, `GET /groups/{id}/members`, `POST /contacts/lookup` |
+| Sending | `POST /uploads`, `POST /sends`, `GET /sends/{id}`, `POST /sends/{id}/cancel`, `POST /messages/{id}/recall` |
+| Media | `GET /messages/{id}/media`, `POST /messages/{id}/media-transfers`, `GET /media/{id}/content` |
+| Read state | `POST /threads/{id}/read-state` with `{"expectedVersion": "..."}` |
+| Background work | `GET /jobs/{id}`, `GET /operations/{id}` |
+| Events | `GET /events`, `GET /events/stream`, `POST /consumers/{name}/ack` |
+| Tokens | `GET /v1/tokens`, `POST /v1/tokens`, `DELETE /v1/tokens/{id}` |
+
+Request and response types are generated from the Rust source into [`native.generated.ts`](https://github.com/thisnick/agent-wechat/blob/main/packages/shared/src/native.generated.ts). The [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api) crate is the source of truth.
+
+<Aside title="Good to know">
+- **IDs are strings.** Message IDs are opaque, and server IDs can exceed JavaScript's safe integer range. Don't parse them as numbers.
+- **Long work returns 202** with a job or operation ID: media sends, downloads, recalls, logins. Poll it; closing the request doesn't cancel it.
+- **`needs_review` means unknown, not failed.** WeChat may have accepted it. Look it up; don't resend.
+- **Media downloads** can return `pending`, `expired` or `unsupported`. Cached files keep working after WeChat's copy expires, and content routes support `Range` requests.
+- **Read state and acks are separate.** Acknowledging an event never marks a message read.
+- **Remote access:** the daemon listens on localhost only. Use HTTPS or a tunnel.
+- The 0.x container's `/api` is gone. `/v1` uses different routes and IDs.
+</Aside>

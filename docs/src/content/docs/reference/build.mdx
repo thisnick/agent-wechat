@@ -1,0 +1,22 @@
+---
+title: Build from source
+description: Build and test wx, the npm packages and the Docker image yourself.
+---
+
+You need Rust 1.93.1 with a C compiler, Node 24.16+ and pnpm 9.15.4. CI builds on Linux, macOS and Windows.
+
+```bash
+git clone https://github.com/thisnick/agent-wechat && cd agent-wechat
+pnpm install --frozen-lockfile
+pnpm native:build        # Rust workspace, including the wx binary
+pnpm native:test
+pnpm build               # TypeScript packages, OpenClaw plugin and these docs
+```
+
+The binary is `packages/native-client-rust/target/debug/wx`. To build the Docker image:
+
+```bash
+pnpm build:image         # tags agent-wechat-native:local
+```
+
+Release builds, CI and the publishing process are described in [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md). Contributor rules are in [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md).

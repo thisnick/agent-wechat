@@ -1,0 +1,58 @@
+---
+title: CLI reference
+description: Every wx command group, global flags and exit codes.
+---
+
+Run `wx COMMAND --help` for the full options of any command. Output is JSON.
+
+## Commands
+
+| Command | Subcommands |
+| --- | --- |
+| `wx serve` | Run the daemon in the foreground |
+| `wx daemon` | `start`, `status`, `logs [--follow]`, `stop` |
+| `wx auth` | `login [--official[=PATH]] [--qr] [--saved-only]`, `status`, `qr ID`, `attempts get/cancel ID`, `logout`, `forget --yes` |
+| `wx accounts` | `list`, `get`, `default ID`, `alias ID NAME` |
+| `wx account` | `status`, `capabilities`, `connect`, `disconnect` |
+| `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V` |
+| `wx messages` | `list CHAT`, `get CHAT ID`, `send CHAT --text/--image/--file/--video/--voice/--share`, `media CHAT ID`, `recall ID --server-id S`, `sends lookup/get/cancel` |
+| `wx contacts` | `list`, `find TEXT`, `get ID`, `refresh ID`, `sync`, `avatar ID` |
+| `wx groups` | `list`, `get ID`, `members ID`, `refresh ID`, `sync` |
+| `wx events` | `watch [--cursor-file F]`, `list`, `ack --consumer NAME --through CURSOR` |
+| `wx jobs` | `get ID`, `cancel ID`, `retry ID`, `repair-writeback` |
+| `wx operations` | `get ID` |
+| `wx sync` | Fetch new messages now |
+| `wx tokens` | `list`, `create NAME --accounts ID --scopes S`, `revoke ID` |
+| `wx config` | `show`, `server add/list/use` |
+| `wx profile` | Read a stopped profile directly, without a daemon (`add`, `inspect`, `messages`, `contacts`, `images`, …) |
+| `wx store` | Experimental: copy, import and export profiles |
+| `wx version` | Version and build target |
+
+## Global flags
+
+| Flag | Environment variable | Meaning |
+| --- | --- | --- |
+| `--account ID` | `AGENT_WECHAT_ACCOUNT` | Account ID or alias |
+| `--server-name NAME` | `AGENT_WECHAT_SERVER` | Saved server from `wx config server add` |
+| `--server URL` | `AGENT_WECHAT_URL` | Daemon URL |
+| `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | File holding the API token |
+| | `AGENT_WECHAT_TOKEN` | The token itself (prefer a file) |
+| `--config PATH` | `AGENT_WECHAT_CONFIG` | CLI config file |
+| `--json` | | Machine-readable errors and progress; no terminal QR code |
+
+Flags win over environment variables, which win over saved settings. Commands that start background work (sends, downloads, login, recall) also take `--detach` to return as soon as the work is queued.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Done, or queued with `--detach` |
+| 2 | Bad input or configuration |
+| 3 | Can't reach the daemon |
+| 4 | Token rejected or missing a scope |
+| 5 | Login needed |
+| 6 | Needs you: approve on the phone or scan the QR |
+| 7 | Still running when the wait ended; check again later |
+| 8 | Unknown outcome (`needs_review`): don't resend |
+| 9 | Failed |
+| 130 | Interrupted (the daemon keeps working) |

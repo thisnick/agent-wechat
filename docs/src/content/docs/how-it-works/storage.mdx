@@ -1,0 +1,40 @@
+---
+title: Storage and backups
+description: Where agent-wechat keeps its files, and what to back up.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+```text
+~/xwechat_files/, ~/.xwechat/     WeChat profile: history, contacts, media (used in place)
+~/.config/agent-wechat/
+├── server/config.toml           daemon settings (optional)
+└── client.toml                  CLI: saved servers and default account
+~/.local/share/agent-wechat/     daemon data: credentials, API token, jobs, event log
+$TMPDIR                          temporary read snapshots
+```
+
+The profile stays wherever it was when you ran `wx auth login --official`. Everything else the daemon needs goes in its data folder. On Windows, settings live in `%APPDATA%\agent-wechat` and data in `%LOCALAPPDATA%\agent-wechat`. macOS uses the same paths as Linux.
+
+## Back up
+
+Back up **both** the profile and the daemon's data folder, with the daemon stopped (`wx daemon stop`, `systemctl --user stop agent-wechat-native` or `docker compose stop`):
+
+```bash
+tar -czf wechat-backup.tgz -C ~ xwechat_files .xwechat .local/share/agent-wechat
+```
+
+The profile alone loses queued sends, OpenClaw's progress and recall records. The data folder alone has no history.
+
+## Change locations
+
+Set `dataDir` in `~/.config/agent-wechat/server/config.toml`, or pass `--data-dir`. See [Configuration](/reference/configuration/).
+
+<Aside title="Good to know">
+- **Snapshots need disk space.** Reads use a private copy of each database (up to 2 GiB each, 8 GiB in total), so keep `$TMPDIR` on a disk with room, and never point it at the profile.
+- **Unknown profile formats aren't touched.** The daemon checks each database's layout before writing, and stops if it doesn't recognize it. Back up and wait for an update rather than forcing it.
+- **Damaged databases are kept.** If the daemon's own database fails a check, it keeps the original files and a recovery copy alongside.
+- **Upgrading `wx` never deletes data.** Rolling back the binary doesn't undo data migrations, so keep a backup from before the upgrade.
+- **Recall markers live in the data folder.** A profile export doesn't include them.
+- OpenClaw keeps its own progress in `consumerStateDir`. Back that up too.
+</Aside>

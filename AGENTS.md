@@ -24,6 +24,17 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Use one writer per official profile. Stop the official app before takeover; a caller assertion is not proof that an unmanaged app stopped. Do not infer arbitrary official-build or live ARM64 compatibility from synthetic tests.
 - Add a changeset for user-facing behavior or package changes. Documentation-only edits do not need one.
 
+## Documentation site
+
+`docs/` is for people setting it up, people using it from the CLI, OpenClaw or their own code, and people who want to know how it works. When a change affects users, update the one page that owns the topic; don't append a paragraph to whichever page is nearest.
+
+- Start each page with the task or answer. Use numbered steps and show the command's output. Caveats and edge cases go in a "Good to know" aside at the end.
+- Write plain sentences for a reader who hasn't seen the code. Avoid "explicit", "bounded", "durable", "custody", "projection" and similar internal terms unless the page defines them.
+- Prefer a table, diagram (a `mermaid` code block, rendered at build time) or example over a paragraph.
+- Keep task pages short, roughly 600 words; split a page that grows past that.
+- Test evidence, CI scripts and release mechanics belong in `FEATURES.md`, `dev-notes/` or `deploy/native/README.md`, not in the site.
+- Moving or renaming a page needs an entry in `moved` in `docs/astro.config.mjs` so old links keep working.
+
 ## Runtime boundaries
 
 ### Standalone native backend

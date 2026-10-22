@@ -1,0 +1,68 @@
+---
+title: Connect your account
+description: Start the daemon, take over your WeChat profile and log in.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import qrLogin from '../../../assets/qr-login.svg';
+
+<Steps>
+
+1. **Quit WeChat and back up the profile.** The profile is the `xwechat_files` and `.xwechat` folders in the home directory of the user who ran WeChat.
+
+   ```bash
+   tar -czf ~/wechat-profile-backup.tgz -C ~ xwechat_files .xwechat
+   ```
+
+2. **Start the daemon** and leave it running.
+
+   ```bash
+   wx serve
+   ```
+
+3. **Log in** from a second terminal.
+
+   ```bash
+   wx auth login --official
+   ```
+
+   `--official` finds the profile in your home directory and uses it in place; nothing is copied. If the profile is somewhere else, give its path: `--official=/path/to/home`. This step needs the daemon to run on Linux.
+
+   WeChat may log you straight in using the profile's saved device. Otherwise it asks you to approve on your phone, or prints a QR code to scan with WeChat:
+
+   <img src={qrLogin.src} class="mock wide" alt="Terminal showing wx auth login printing a QR code, then confirming the login" />
+
+4. **Check it worked.**
+
+   ```bash
+   wx messages list filehelper --limit 1
+   ```
+
+   ```json
+   {
+     "items": [
+       {
+         "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRi…",
+         "threadId": "filehelper",
+         "direction": "outgoing",
+         "type": 1,
+         "body": "notes for Monday",
+         "createdAt": "2026-10-21T09:14:03+00:00"
+       }
+     ],
+     "nextCursor": "…"
+   }
+   ```
+
+</Steps>
+
+You're connected. Next: [keep it running](/setup/run/) in the background, then use it from the [CLI](/use/cli/), [OpenClaw](/openclaw/setup/) or [your own code](/use/api/).
+
+<Aside title="Good to know">
+- **Keep WeChat closed** while the daemon owns the profile. agent-wechat can't stop you reopening the app, and two writers can damage the profile.
+- **The login must match the profile.** If you log in with a different account, the daemon refuses to write to the profile.
+- **The QR code** shows in the terminal. Without a terminal, `wx` saves it as a PNG and prints the path.
+- **Some approvals need your phone to reach the daemon** over the local network, on a port between 8050 and 8100. If approval stalls, check the host firewall and Wi-Fi client isolation.
+- **Several accounts:** each login adds an account to the same daemon. Run `wx accounts list`, then pick one with `--account ID`, or name it with `wx accounts alias ID home`.
+- **Reading history doesn't mark anything read** or send anything.
+</Aside>

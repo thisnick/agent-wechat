@@ -1,0 +1,63 @@
+---
+title: Who the bot answers
+description: Control which direct messages and group messages reach your agent.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every incoming message passes these checks before the agent sees it. Nothing gets through by default.
+
+```mermaid
+flowchart LR
+  DM[Direct message] --> DC["Sender allowed?<br/>dmPolicy, allowFrom"]
+  GM[Group message] --> GC["Group enabled and<br/>sender allowed?<br/>groupPolicy, groups"]
+  GC --> MC["@mentioned?<br/>requireMention"]
+  DC -- yes --> A[Agent replies]
+  MC -- yes --> A
+  MC -- no --> C[Kept as context]
+```
+
+A message that fails a check is ignored and stays unread.
+
+## Direct messages
+
+| `dmPolicy` | Who gets a reply |
+| --- | --- |
+| `disabled` (default) | Nobody |
+| `allowlist` | Senders listed in `allowFrom` |
+| `open` | Anyone who messages you |
+
+## Groups
+
+| `groupPolicy` | Who gets a reply in groups |
+| --- | --- |
+| `disabled` (default) | Nobody |
+| `allowlist` | Senders in `groupAllowFrom`, or in `allowFrom` if that's empty |
+| `open` | Any group member |
+
+In groups, the agent only replies when someone **@mentions** you. Messages without a mention are kept, and the next mention includes them as context.
+
+Override any of this per group in `groups`, keyed by group ID, with `"*"` for all groups:
+
+```json
+"agent-wechat": {
+  "dmPolicy": "allowlist",
+  "allowFrom": ["wxid_alice", "wxid_bob"],
+  "groupPolicy": "allowlist",
+  "groups": {
+    "*": { "enabled": false },
+    "family@chatroom": { "enabled": true, "requireMention": false },
+    "project@chatroom": { "enabled": true, "allowFrom": ["wxid_carol"] }
+  }
+}
+```
+
+Here the agent answers Alice and Bob directly. In the family group it answers Alice and Bob without needing a mention. In the project group it answers only Carol, when she mentions you. Every other group is ignored.
+
+<Aside title="Good to know">
+- **Find IDs** with `wx contacts find NAME` for people and `wx groups get ID` or `wx chats list` for groups. Group IDs end in `@chatroom`.
+- **A mention means a real WeChat @mention** of your account. Typing "@yourname" as plain text doesn't count.
+- **Group context:** `messages.groupChat.historyLimit` sets how many unmentioned messages are kept per group (default 50, maximum 200, 0 turns it off). Images in that context are downloaded only when a mention triggers a reply.
+- **Recalled messages** are removed from the context, even if they were never answered.
+- **Media is checked after the sender.** Attachments from ignored messages are never downloaded or transcribed.
+</Aside>

@@ -1,0 +1,44 @@
+---
+title: Read receipts
+description: When OpenClaw marks WeChat chats as read, and how to change it.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Set `native.readPolicy` to choose when a chat is marked read:
+
+| `readPolicy` | Marks the chat read |
+| --- | --- |
+| `on_inbound` (default) | After OpenClaw has handled the message: it passed the [access checks](/openclaw/access/) and the agent ran, or a built-in command answered it |
+| `never` | Never. Chats stay unread on your phone. |
+| `on_model_dispatch` | Only after confirming the model actually received the message. Stricter, and needs extra setup (below). |
+
+Marking read covers the **whole chat**, up to the newest message. WeChat is told, so your phone and other devices can clear the unread badge too.
+
+```json
+"native": {
+  "readPolicy": "on_inbound"
+}
+```
+
+## Strict mode
+
+`on_model_dispatch` waits for proof that the exact message, and any images, reached the model. It needs this permission:
+
+```json
+"plugins": {
+  "entries": {
+    "agent-wechat": { "hooks": { "allowConversationAccess": true } }
+  }
+}
+```
+
+Without it, messages stay unread and the channel status shows `handoffUnconfirmed`. Some providers' history formats prevent confirmation even when the agent replied. For a normal bot, use `on_inbound`.
+
+<Aside title="Good to know">
+- **Ignored messages stay unread**, along with messages whose media is still downloading or whose handling failed.
+- **Earlier messages are included.** Marking a chat read also clears older unread messages the agent never saw.
+- **Read doesn't mean understood.** A chat can be marked read after the agent handled a file it couldn't open.
+- **No double notifications.** If WeChat's answer to a read notice is lost, it's marked `needs_review` and not resent. Pending reads survive a Gateway restart.
+- The token needs the `read-state` scope unless `readPolicy` is `never`.
+</Aside>

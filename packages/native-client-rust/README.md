@@ -228,7 +228,7 @@ account/thread/server marker before official projection, keep IDs/order and
 emit one `message.recalled` event. Recalled message/quote/media reads suppress
 original content, while encrypted journals, retained files and backups remain
 available for explicit recovery. Pending or uncertain recall work blocks a
-complete profile checkpoint/export. See the [API and storage contract](../../docs/src/content/docs/reference/api.mdx#message-recalls).
+complete profile checkpoint/export. See the [API and storage contract](https://thisnick.github.io/agent-wechat/how-it-works/message-types/#recalls).
 
 Read-state changes mark the whole thread through its latest observed message and send one native cross-device notification. This can clear earlier unread messages the model did not consume. The compare-and-swap version includes the observed profile generation, so an intervening source change causes a conflict. Event delivery ACKs never change read state. An uncertain native notification remains recorded without automatic resubmission. A prepared-model handoff needs a positively correlated callback; accepted/enqueued tool execution is not evidence of that handoff.
 

@@ -1,0 +1,43 @@
+---
+title: Message types
+description: How text, media, quotes, forwarded chats, link cards and recalls come through.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+| WeChat message | What you get | In OpenClaw |
+| --- | --- | --- |
+| Text | `body` | Message text |
+| Image | Downloadable image, best quality available | Shown to the model |
+| File (PDF, etc.) | Downloadable file | File path |
+| Video | Downloadable MP4 | File path |
+| Voice | Downloadable audio | File path, plus a transcript if configured |
+| Animated sticker | Original sticker bytes | Image |
+| Quote reply | Comment in `body`, plus a link to the quoted message | Comment and a labeled quote |
+| Forwarded chat | Readable list of who said what | Same text |
+| Link card (article, music, video) | Title, description, URL, source, optional thumbnail | Card text and thumbnail |
+| Recalled message | `[Message recalled]` | Removed from pending work |
+| Anything else | Marked unsupported | Not sent to the agent |
+
+## Quotes
+
+`GET /messages/{id}/quote` resolves what a reply quoted, looking only in the same chat. If the original isn't stored, you still get the text or image embedded in the quote. Only quotes of text and images are resolved; quotes of files, voice, video and cards show as unsupported.
+
+## Forwarded chats
+
+A forwarded chat bundle becomes plain text: each sender and message, with nested bundles indented. Images and files inside the bundle appear as placeholders and aren't downloaded.
+
+## Link cards
+
+You can send one with `wx messages send --share URL --title ...` or the `wechat_send_share` tool. You supply the title, description and thumbnail URL; nothing is fetched from the page.
+
+## Recalls
+
+When someone recalls a message, the daemon replaces its stored body with a recall notice, keeping its ID and position. Its media can no longer be fetched (HTTP 410), even if cached. You can recall your own messages with `wx messages recall` or the `wechat_recall` tool; WeChat decides whether a message is still recallable.
+
+<Aside title="Good to know">
+- **Some images use WeChat's WXGF format.** The original is kept, and a JPEG still is created with FFmpeg for viewing. Animation isn't preserved in the still.
+- **Raw XML is never returned** as message content or as an attachment.
+- **A recall doesn't erase everything.** Cached files, backups and anything the agent already saw are kept. It's not secure deletion.
+- Link-card sends and thumbnails are new and not yet confirmed against how recipients' phones display them.
+</Aside>

@@ -1,0 +1,71 @@
+---
+title: OpenClaw quick setup
+description: Add WeChat as an OpenClaw channel so your agent can read and reply to chats.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import chat from '../../../assets/wechat-chat.svg';
+
+The `agent-wechat` plugin connects OpenClaw to a running `wx` daemon. Your agent receives WeChat messages and replies from your account.
+
+<img src={chat.src} class="mock" alt="A WeChat chat on a phone: a friend asks for a floor plan and the agent replies from the owner's account with the PDF" />
+
+You need a daemon that is running and logged in. If you haven't set one up, see [Connect your account](/setup/connect/).
+
+<Steps>
+
+1. **Create a token for OpenClaw.**
+
+   ```bash
+   wx accounts list        # note the account "id"
+   wx tokens create openclaw --accounts ACCOUNT_ID \
+     --scopes read --scopes media --scopes send --scopes login --scopes read-state
+   ```
+
+   Copy the `token` value from the output. It isn't shown again.
+
+2. **Install the plugin.**
+
+   ```bash
+   openclaw plugins install @agent-wechat/agent-wechat@beta
+   ```
+
+3. **Add the channel** to `~/.openclaw/openclaw.json`. This example lets one friend message the agent:
+
+   ```json
+   {
+     "channels": {
+       "agent-wechat": {
+         "enabled": true,
+         "dmPolicy": "allowlist",
+         "allowFrom": ["wxid_friend"],
+         "native": {
+           "mode": "external",
+           "accountId": "ACCOUNT_ID",
+           "endpoint": "http://127.0.0.1:6174",
+           "token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" },
+           "consumerStateDir": "/home/you/.openclaw/agent-wechat"
+         }
+       }
+     }
+   }
+   ```
+
+   Find a friend's ID with `wx contacts find NAME`.
+
+4. **Give the Gateway the token** by setting `AGENT_WECHAT_TOKEN` in its environment, then restart the Gateway.
+
+5. **Test it.** Have your friend send you a message. The agent should reply in the same chat.
+
+</Steps>
+
+Next: decide [who the bot answers](/openclaw/access/), including groups, and which [tools](/openclaw/tools/) it gets.
+
+<Aside title="Good to know">
+- **Everything is off by default.** With no `dmPolicy` or `groupPolicy`, the agent answers nobody.
+- **The agent replies as you.** Replies go out from your WeChat account, and OpenClaw marks the chat read once it has handled the message. See [read receipts](/openclaw/read-receipts/).
+- **`consumerStateDir`** keeps track of which messages OpenClaw has already handled. Put it somewhere that survives restarts.
+- **If your config has a `plugins.allow` list,** add `agent-wechat` to it.
+- **Don't use npm's `latest` tag** for the plugin yet. It still installs the old 0.x plugin.
+- The token can come from any OpenClaw secret provider, not only the environment. See [Configuration](/reference/configuration/#openclaw).
+</Aside>

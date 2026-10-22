@@ -1,0 +1,74 @@
+---
+title: CLI recipes
+description: Common wx commands for reading chats, sending messages and media, and scripting.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every command prints JSON. With several accounts, add `--account ID` (or an alias) to each command.
+
+## Read
+
+```bash
+wx chats list --limit 20                  # recent chats, with unread counts
+wx chats find "Book club"                 # find a chat by name
+wx messages list CHAT_ID --limit 50       # newest first; pass --cursor to page
+wx contacts find Alice
+wx groups members 'family@chatroom'
+```
+
+`filehelper` is your File Transfer chat, handy for testing.
+
+## Send
+
+```bash
+wx messages send CHAT_ID --text "On my way"
+wx messages send CHAT_ID --image ./photo.jpg
+wx messages send CHAT_ID --file ./report.pdf
+wx messages send CHAT_ID --video ./clip.mp4
+wx messages send CHAT_ID --voice ./note.wav       # sent as a voice message
+wx messages send CHAT_ID --share https://example.com/post --title "Worth a read"
+```
+
+Sends wait up to 30 seconds for WeChat to accept them. Use `--detach` to return right away.
+
+## Download media
+
+```bash
+wx messages media CHAT_ID MESSAGE_ID --output ./photo.jpg
+wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
+```
+
+`--quality best` (the default) returns the best copy available. `--cached-only` never starts a download.
+
+## Follow new messages
+
+```bash
+wx events watch --cursor-file ~/.cache/wx-events.cursor
+```
+
+Prints one JSON event per line as messages arrive. The cursor file lets you resume where you stopped.
+
+## Mark read and recall
+
+```bash
+wx chats get CHAT_ID          # note "readStateVersion"
+wx chats read CHAT_ID --expected-version VERSION
+wx messages recall MESSAGE_ID --server-id SERVER_ID
+```
+
+Reading marks the whole chat read and tells your other devices. Recall needs the message's `id` and `serverId` from `messages list`.
+
+## Use a daemon on another machine
+
+```bash
+wx config server add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
+wx config server use box
+```
+
+<Aside title="Good to know">
+- **A lost response doesn't mean a lost send.** Before sending, `wx` saves a receipt with an idempotency key. If the network drops, check with `wx messages sends lookup --idempotency-key KEY` instead of sending again. See [Sends and recovery](/how-it-works/sends/).
+- **Voice** is encoded by `wx` itself and split into 10-second notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
+- **Files** can be up to about 25 MB. Stickers can't be sent.
+- **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
+</Aside>

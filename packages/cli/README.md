@@ -96,7 +96,7 @@ python3 scripts/native-export-smoke.py artifacts/native/wx-vVERSION-linux-x64-gn
 
 Source-workspace postinstall defers release installation; run the Rust binary from its target directory or use an explicit trusted executable override. The local release builder tests the Rust workspace, verifies executable identity and creates versioned assets; it does not publish, deploy or log an account in. The package smoke test packs/unpacks an actual npm tarball and installs from local artifacts into a temporary directory.
 
-Deployment examples and the deliberate release preparation sequence are in [deploy/native](../../deploy/native/README.md). The previous container CLI and Wechaty packages are retired; see the [migration guide](../../docs/src/content/docs/getting-started/migration.mdx).
+Deployment examples and the deliberate release preparation sequence are in [deploy/native](../../deploy/native/README.md). The previous container CLI and Wechaty packages are retired; see the [migration guide](https://thisnick.github.io/agent-wechat/setup/migrate/).
 
 ## Package helper scripts
 

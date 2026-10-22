@@ -71,7 +71,7 @@ The path and automatic discovery refer to the **daemon host**. Discovery checks
 its HOME for a single Linux profile; missing or multiple profiles require an
 explicit path. macOS/Windows profile compatibility is unverified; an explicit
 path does not convert their formats or grant OS permissions. See the public
-[migration guide](../../docs/src/content/docs/getting-started/migration.mdx) for
+[migration guide](https://thisnick.github.io/agent-wechat/setup/migrate/) for
 platform paths and the separate copy/import workflow. Preparing the profile creates/selects a daemon account, binds its
 stored identity and takes ownership without copying data or importing an active
 session. No separate key export or identity-binding command is required. Saved

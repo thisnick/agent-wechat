@@ -1,192 +1,54 @@
-/* agent-wechat docs — technical, monospace-forward theme */
-
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+/* Starlight defaults with a WeChat-green accent. Text greens meet WCAG AA. */
 
 :root {
-  /* Typography */
-  --sl-font: 'IBM Plex Sans', system-ui, sans-serif;
-  --sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
-
-  /* Tighten up spacing */
-  --sl-content-width: 52rem;
-  --sl-sidebar-width: 16rem;
+  --sl-color-accent-low: #0b3320;
+  --sl-color-accent: #07c160;
+  --sl-color-accent-high: #5ee39a;
 }
 
-/* ── Light theme ── */
 :root[data-theme='light'] {
-  --sl-color-accent-low: #e8f0fe;
-  --sl-color-accent: #1a56db;
-  --sl-color-accent-high: #0f3a8a;
-  --sl-color-white: #111827;
-  --sl-color-gray-1: #374151;
-  --sl-color-gray-2: #6b7280;
-  --sl-color-gray-3: #9ca3af;
-  --sl-color-gray-4: #d1d5db;
-  --sl-color-gray-5: #e5e7eb;
-  --sl-color-gray-6: #f3f4f6;
-  --sl-color-black: #ffffff;
-  --sl-color-bg-nav: #f8f9fb;
-  --sl-color-bg-sidebar: #f8f9fb;
+  --sl-color-accent-low: #d3f4e1;
+  --sl-color-accent: #057a3f;
+  --sl-color-accent-high: #04512b;
 }
 
-/* ── Dark theme ── */
-:root[data-theme='dark'] {
-  --sl-color-accent-low: #0c1929;
-  --sl-color-accent: #60a5fa;
-  --sl-color-accent-high: #bfdbfe;
-  --sl-color-white: #f1f5f9;
-  --sl-color-gray-1: #cbd5e1;
-  --sl-color-gray-2: #94a3b8;
-  --sl-color-gray-3: #64748b;
-  --sl-color-gray-4: #334155;
-  --sl-color-gray-5: #1e293b;
-  --sl-color-gray-6: #0f172a;
-  --sl-color-black: #020617;
-  --sl-color-bg-nav: #0a0f1a;
-  --sl-color-bg-sidebar: #0a0f1a;
-}
-
-/* ── Global ── */
-html {
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-/* ── Site title — monospace ── */
-.site-title {
-  font-family: var(--sl-font-mono) !important;
-  font-weight: 600 !important;
-  font-size: var(--sl-text-sm) !important;
-  letter-spacing: -0.02em;
-}
-
-/* ── Headings ── */
-.sl-markdown-content h1 {
-  font-weight: 700;
-  letter-spacing: -0.03em;
-}
-
-.sl-markdown-content h2 {
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  padding-block-end: 0.3rem;
-  border-bottom: 1px solid var(--sl-color-gray-5);
-}
-
-.sl-markdown-content h3,
-.sl-markdown-content h4 {
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-/* ── Code blocks — tighter, cleaner ── */
-.sl-markdown-content pre {
-  border: 1px solid var(--sl-color-gray-5);
-  border-radius: 6px;
-  font-size: 0.84rem;
-}
-
-.sl-markdown-content :not(pre) > code {
-  font-size: 0.85em;
-  padding: 0.15em 0.35em;
-  border-radius: 4px;
-  border: 1px solid var(--sl-color-gray-5);
-  background: var(--sl-color-gray-6);
-}
-
-/* ── Sidebar ── */
-nav.sidebar .top-level > li + li {
-  border-top: 1px solid var(--sl-color-gray-5);
-  padding-top: 0.5rem;
-}
-
-/* Tighter sidebar text */
-nav.sidebar a {
-  font-size: var(--sl-text-sm);
-}
-
-/* ── Hero / splash page ── */
-.hero {
-  padding-block: 3rem !important;
-}
-
-.hero .tagline {
-  font-size: var(--sl-text-lg) !important;
-  color: var(--sl-color-gray-2) !important;
-  max-width: 38rem;
-}
-
-/* ── Cards — flat, bordered ── */
-.sl-link-card,
-.card {
-  border: 1px solid var(--sl-color-gray-5) !important;
-  border-radius: 6px !important;
-  background: transparent !important;
-  transition: border-color 0.15s ease;
-}
-
-.sl-link-card:hover,
-.card:hover {
-  border-color: var(--sl-color-accent) !important;
-}
-
-/* ── Tables ── */
-.sl-markdown-content table {
-  font-size: 0.875rem;
-  border-collapse: collapse;
-  width: 100%;
-  display: table;
-}
-
-.sl-markdown-content table thead {
-  background: var(--sl-color-gray-6);
-}
-
-.sl-markdown-content th {
-  font-weight: 600;
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--sl-color-gray-2);
-  text-align: left;
-  white-space: nowrap;
-}
-
-.sl-markdown-content td,
-.sl-markdown-content th {
-  border: 1px solid var(--sl-color-gray-5);
-  padding: 0.6rem 1rem !important;
-  vertical-align: top;
-}
-
-.sl-markdown-content tr:hover td {
-  background: var(--sl-color-gray-6);
-}
-
-/* Prevent table overflow on narrow screens */
-.sl-markdown-content .table-container,
-.sl-markdown-content table {
+/* Mermaid diagrams rendered at build time by remark-mermaid.mjs. */
+.diagram {
+  margin-block: 1.5rem;
   overflow-x: auto;
+  text-align: center;
 }
 
-/* ── Pagination links ── */
-.pagination-links a {
-  border-radius: 6px;
-  border: 1px solid var(--sl-color-gray-5);
-  transition: border-color 0.15s ease;
+.diagram svg {
+  display: block;
+  margin-inline: auto;
+  max-width: 100%;
+  height: auto;
+  --_text: var(--fg);
+  --_text-sec: color-mix(in srgb, var(--fg) 70%, var(--bg));
+  --_text-muted: color-mix(in srgb, var(--fg) 55%, var(--bg));
+  --_text-faint: color-mix(in srgb, var(--fg) 35%, var(--bg));
+  --_line: color-mix(in srgb, var(--fg) 45%, var(--bg));
+  --_arrow: var(--accent, var(--fg));
+  --_node-fill: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  --_node-stroke: color-mix(in srgb, var(--fg) 25%, var(--bg));
+  --_group-fill: var(--bg);
+  --_group-hdr: color-mix(in srgb, var(--fg) 6%, var(--bg));
+  --_inner-stroke: color-mix(in srgb, var(--fg) 12%, var(--bg));
+  --_key-badge: color-mix(in srgb, var(--fg) 10%, var(--bg));
 }
 
-.pagination-links a:hover {
-  border-color: var(--sl-color-accent);
+.diagram text {
+  font-family: var(--sl-font);
 }
 
-/* ── Header ── */
-header.header {
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+/* Screenshots and mock-ups. */
+.sl-markdown-content img.mock {
+  display: block;
+  margin-inline: auto;
+  max-width: min(100%, 22rem);
 }
 
-/* ── Subtle selection color ── */
-::selection {
-  background: var(--sl-color-accent-low);
+.sl-markdown-content img.mock.wide {
+  max-width: 100%;
 }
