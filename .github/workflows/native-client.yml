@@ -18,12 +18,24 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: native-client-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep the contract generator and tests on the same dependency profile.
+  # Debug assertions remain enabled; large debug symbols only slow CI linking.
+  CARGO_PROFILE_DEV_OPT_LEVEL: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 jobs:
   native:
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        suite: [lint, test]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -42,19 +54,23 @@ jobs:
           # The automatic hash includes unused preinstalled toolchains, which
           # differ across runner images. Key the compiler we actually select.
           add-rust-environment-hash-key: false
-          key: native-${{ matrix.runner }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
-      - run: cargo fmt --all --check
+          key: native-${{ matrix.runner }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
+      - if: matrix.suite == 'lint'
+        run: cargo fmt --all --check
+      - if: matrix.suite == 'lint'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Ensure image decoder runtime
+        if: matrix.suite == 'test'
         run: |
           if ! command -v ffmpeg >/dev/null; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends ffmpeg
           fi
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-      - run: cargo build --workspace --profile test --locked
-      - run: bash ../../scripts/native-generate-types.sh --check
-        env:
-          # Reuse the optimized test dependencies for cargo run in this script.
-          CARGO_PROFILE_DEV_OPT_LEVEL: 1
-      - run: python3 scripts/smoke.py target/debug/wx
+      - if: matrix.suite == 'test'
+        run: cargo test --workspace --locked
+      - if: matrix.suite == 'test'
+        run: cargo build --workspace --profile test --locked
+      - if: matrix.suite == 'test'
+        run: bash ../../scripts/native-generate-types.sh --check
+      - if: matrix.suite == 'test'
+        run: python3 scripts/smoke.py target/debug/wx

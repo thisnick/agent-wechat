@@ -29,12 +29,16 @@ on:
       - '.dockerignore'
 permissions:
   contents: read
+concurrency:
+  group: native-distribution-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   openclaw-smoke:
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        suite: [model, media-model, tools]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -46,12 +50,20 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/agent-wechat... build
-      - run: node scripts/native-gateway-smoke.mjs
-      - run: node scripts/native-model-smoke.mjs
-      - run: node scripts/native-media-model-smoke.mjs
-      - run: node scripts/native-history-model-smoke.mjs
-      - run: node scripts/native-recall-model-smoke.mjs
-      - run: node scripts/native-archive-tools-smoke.mjs
+      - name: Validate pinned Gateway and model integration
+        env:
+          SMOKE_SUITE: ${{ matrix.suite }}
+        run: |
+          case "$SMOKE_SUITE" in
+            model|media-model) node "scripts/native-${SMOKE_SUITE}-smoke.mjs" ;;
+            tools)
+              node scripts/native-gateway-smoke.mjs
+              node scripts/native-history-model-smoke.mjs
+              node scripts/native-recall-model-smoke.mjs
+              node scripts/native-archive-tools-smoke.mjs
+              ;;
+            *) echo "Unknown smoke suite: $SMOKE_SUITE" >&2; exit 1 ;;
+          esac
 
   package:
     strategy:
