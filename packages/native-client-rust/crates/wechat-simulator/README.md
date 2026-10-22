@@ -75,6 +75,7 @@ Representative JSON control bodies:
 {"op":"revoke","account":"personal"}
 {"op":"unknown_sync","account":"personal"}
 {"op":"advertise_image","account":"personal","peer":"sim_mei"}
+{"op":"receive_media","account":"personal","peer":"sim_mei","kind":"sticker"}
 ```
 
 Account IDs contain lowercase ASCII letters, digits, underscores or hyphens, up
@@ -140,13 +141,18 @@ phone read-state synchronization for these controls is not implemented here.
 - The mock uses decoded sync batches and existing command codecs. It does not
   implement WeChat wire encryption or establish protocol compatibility.
 - Supported operations are synthetic QR/saved-session login, heartbeat, sync,
-  text sends, push hints and logout. Initial contacts are projected from sync.
-  Explicit remote metadata refresh, media transfers, shares and recalls are not
-  implemented in the simulator. Its capability response omits media support.
-- Unsupported network operations fail closed. This includes native-client
-  construction, advertised avatars, HTTP thumbnails, stickers and CDN paths.
-  An advertised image can exercise unavailable-media UI states; the simulator
-  does not provide its bytes or mark it available on notification.
+  text/media sends, push hints, read notifications, contact/avatar refresh and
+  logout. Incoming fixture kinds are image, file, video, voice and animated sticker.
+  Outgoing kinds are image, file, video and voice. Sources, preparation, jobs,
+  readback and history still use the production hub pipeline. Media objects and
+  send acceptance are account-scoped in the separate simulator database.
+- Unsupported network operations fail closed, including native-client construction,
+  HTTP link thumbnails, arbitrary CDN/URL retrieval, shares and recalls. Avatar
+  and sticker retrieval accept only exact local fixture identities. The sticker
+  URL is metadata only and is never resolved or fetched by the simulator.
+  `advertise_image` continues to exercise an unavailable image with no owned bytes;
+  `receive_media` instead supplies checked local bytes, without marking them
+  available merely because a notification arrived.
 - Build dependencies may need downloading. The running scenario uses only local
   services. The regression journey can also run in a container with networking
   disabled to verify runtime isolation.

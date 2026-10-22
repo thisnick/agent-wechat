@@ -8,10 +8,8 @@ on:
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-simulator-smoke.mjs'
-      - 'scripts/client-ui-smoke.mjs'
-      - 'packages/client-ui/src/session.ts'
-      - 'packages/client-ui/scripts/**'
-      - 'packages/client-ui/package.json'
+      - 'scripts/client-ui*-smoke.mjs'
+      - 'packages/client-ui/**'
       - 'pnpm-lock.yaml'
       - 'scripts/native-ci-cache-key*.py'
       - '.github/workflows/native-client.yml'
@@ -23,10 +21,8 @@ on:
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-simulator-smoke.mjs'
-      - 'scripts/client-ui-smoke.mjs'
-      - 'packages/client-ui/src/session.ts'
-      - 'packages/client-ui/scripts/**'
-      - 'packages/client-ui/package.json'
+      - 'scripts/client-ui*-smoke.mjs'
+      - 'packages/client-ui/**'
       - 'pnpm-lock.yaml'
       - 'scripts/native-ci-cache-key*.py'
       - '.github/workflows/native-client.yml'
@@ -147,6 +143,10 @@ jobs:
         if: matrix.suite == 'test'
         working-directory: .
         run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui...
+      - name: Check browser-client state models
+        if: matrix.suite == 'test'
+        working-directory: .
+        run: pnpm --filter @agent-wechat/client-ui test
       - name: Exercise the connected session and UI launcher with synthetic accounts
         if: matrix.suite == 'test'
         working-directory: .

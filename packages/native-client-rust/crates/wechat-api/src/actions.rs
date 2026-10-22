@@ -105,7 +105,7 @@ async fn capabilities(
     app.core.store.account(&a)?;
     if app.core.upstream_kind() == wechat_core::upstream::UpstreamKind::Simulator {
         return Ok(Json(
-            json!({"nativeRuntime":true,"upstream":"simulator","officialBinaryRequired":false,"mediaKinds":[],"downloadQualities":[],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
+            json!({"nativeRuntime":true,"upstream":"simulator","officialBinaryRequired":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
         ));
     }
     Ok(Json(

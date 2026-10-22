@@ -27,6 +27,7 @@ wechat-store = { path = "../wechat-store" }
 wechat-protocol = { path = "../wechat-protocol" }
 wechat-platform = { path = "../wechat-platform" }
 qrcodegen = "1.8.0"
+base64.workspace = true
 
 [dev-dependencies]
 rqrr = { version = "0.11.0", default-features = false }

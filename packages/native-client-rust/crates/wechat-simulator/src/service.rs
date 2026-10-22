@@ -1,5 +1,5 @@
 use crate::{
-    contract::{Control, Request as RpcRequest, MAX_BODY},
+    contract::{Control, Request as RpcRequest, MAX_BODY, MAX_MEDIA_BODY},
     engine::Engine,
 };
 use anyhow::{ensure, Result};
@@ -34,7 +34,10 @@ pub fn router(engine: Arc<Engine>, token: &str) -> Result<(Router, Arc<AtomicBoo
         stopping: stopping.clone(),
     });
     let protected = Router::new()
-        .route("/rpc", post(rpc))
+        .route(
+            "/rpc",
+            post(rpc).layer(DefaultBodyLimit::max(MAX_MEDIA_BODY)),
+        )
         .route("/control", post(control))
         .route("/state", get(snapshot))
         .route("/shutdown", post(shutdown))

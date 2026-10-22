@@ -10,6 +10,8 @@ import { NativeWeChatClient } from "../packages/shared/dist/index.js";
 import { HubSession } from "../packages/client-ui/src/session.ts";
 import { HistorySearch } from "../packages/client-ui/src/history-search.ts";
 import { LoginAttempt } from "../packages/client-ui/src/login-attempt.ts";
+import { mediaJourney } from "./client-ui-media-smoke.mjs";
+import { accountJourney } from "./client-ui-account-smoke.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary =
@@ -529,6 +531,16 @@ try {
         .state === "awaiting_approval",
   );
   await client.cancelOperation("login-resume", admittedLogin.id);
+  await mediaJourney({ client, control, wait, state, account: "personal" });
+  await login("account-controls");
+  await accountJourney({
+    client,
+    control,
+    wait,
+    account: "account-controls",
+    endpoint: hub.endpoint,
+    token,
+  });
   await launcherCheck();
   console.log(
     JSON.stringify({
@@ -545,6 +557,10 @@ try {
         "SSE reconnect and replay across hub restart",
         "conversation search beyond loaded history with paginated matches",
         "reopened QR and phone approval resume the same login operation",
+        "incoming image/file/video/voice/sticker bytes, animation, hashes, ranges and account isolation",
+        "outgoing media preparation, upload, readback and committed history",
+        "media rejection, uncertainty and receipt recovery without resubmission",
+        "account alias, read-state CAS, cached avatars and recoverable logout",
         "UI launcher authentication and origin checks",
         "UI launcher owned-child and disposable-state cleanup",
       ],

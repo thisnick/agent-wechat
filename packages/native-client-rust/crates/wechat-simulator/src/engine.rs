@@ -14,6 +14,9 @@ const INITIAL_TIME: u32 = 1_700_000_000;
 const PAGE_SIZE: usize = 32;
 const SERVER_ID_BASE: u64 = 9_007_199_254_740_993;
 
+#[path = "media_engine.rs"]
+mod media;
+
 /// This database is synthetic remote state, never the hub's registry/profile.
 pub struct Engine {
     db: Mutex<Connection>,
@@ -57,7 +60,11 @@ impl Engine {
                 command TEXT NOT NULL, PRIMARY KEY(account,sequence), UNIQUE(account,server_id));
             CREATE TABLE IF NOT EXISTS sends(
                 account TEXT NOT NULL, client_id INTEGER NOT NULL, hash TEXT NOT NULL,
-                server_id TEXT, accepted INTEGER NOT NULL, PRIMARY KEY(account,client_id));",
+                server_id TEXT, accepted INTEGER NOT NULL, PRIMARY KEY(account,client_id));
+            CREATE TABLE IF NOT EXISTS media_objects(account TEXT NOT NULL,id TEXT NOT NULL,quality INTEGER NOT NULL,metadata TEXT NOT NULL,encrypted BLOB NOT NULL,PRIMARY KEY(account,id,quality));
+            CREATE TABLE IF NOT EXISTS media_sends(account TEXT NOT NULL,client_id TEXT NOT NULL,hash TEXT NOT NULL,server_id TEXT,accepted INTEGER NOT NULL,PRIMARY KEY(account,client_id));
+            CREATE TABLE IF NOT EXISTS voice_objects(account TEXT NOT NULL,server_id TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY(account,server_id));
+            CREATE TABLE IF NOT EXISTS read_receipts(account TEXT NOT NULL,client_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,client_id));",
         )?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -67,6 +74,89 @@ impl Engine {
             .lock()
             .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?;
         match request {
+            Request::Read {
+                session,
+                notification,
+            } => {
+                check_session(&db, &session)?;
+                validate_peer(&notification.peer_username)?;
+                ensure!(
+                    notification.client_message_id.len() <= 256
+                        && !notification.client_message_id.is_empty()
+                        && notification.last_message_create_time > 0,
+                    "invalid_read_notification"
+                );
+                ensure!(
+                    db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM messages WHERE account=?1 AND server_id=?2)",
+                        params![session.account, notification.last_message_server_id],
+                        |r| r.get::<_, bool>(0)
+                    )?,
+                    "read_boundary_not_found"
+                );
+                let payload = serde_json::to_string(&notification)?;
+                let previous: Option<String> = db
+                    .query_row(
+                        "SELECT payload FROM read_receipts WHERE account=?1 AND client_id=?2",
+                        params![session.account, notification.client_message_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                ensure!(
+                    previous.as_ref().is_none_or(|value| value == &payload),
+                    "read_identity_conflict"
+                );
+                db.execute(
+                    "INSERT OR IGNORE INTO read_receipts VALUES(?1,?2,?3)",
+                    params![session.account, notification.client_message_id, payload],
+                )?;
+                Ok(json!({"accepted":true}))
+            }
+            Request::Contacts { session, ids } => {
+                check_session(&db, &session)?;
+                ensure!(!ids.is_empty() && ids.len() <= 2, "invalid_contact_batch");
+                let mut fields = vec![p::bytes(1, &p::uint(1, 0)), p::uint(2, ids.len() as u64)];
+                for username in &ids {
+                    validate_peer(username)?;
+                    let label = match username.as_str() {
+                        "sim_mei" => "Mei Chen",
+                        "sim_daniel" => "Daniel Park",
+                        "filehelper" => "File Transfer",
+                        _ => "Simulated contact",
+                    };
+                    fields.push(p::bytes(
+                        3,
+                        &p::message(&[
+                            p::bytes(1, &p::bytes(1, username.as_bytes())),
+                            p::bytes(2, &p::bytes(1, label.as_bytes())),
+                            p::uint(7, 3),
+                            p::uint(8, 1),
+                            p::bytes(
+                                40,
+                                format!("agentwechat-simulator://avatar/{username}").as_bytes(),
+                            ),
+                        ])?,
+                    ));
+                    fields.push(p::uint(4, 0));
+                }
+                Ok(serde_json::to_value(p::message(&fields)?)?)
+            }
+            Request::Avatar { session, username } => {
+                check_session(&db, &session)?;
+                validate_peer(&username)?;
+                let color = Sha256::digest(username.as_bytes());
+                let image = image::RgbImage::from_fn(64, 64, |x, y| {
+                    if (x / 12 + y / 12) % 2 == 0 {
+                        image::Rgb([color[0], color[1], color[2]])
+                    } else {
+                        image::Rgb([color[0] / 2, color[1] / 2, color[2] / 2])
+                    }
+                });
+                let mut bytes = Cursor::new(Vec::new());
+                image.write_to(&mut bytes, image::ImageFormat::Png)?;
+                Ok(serde_json::to_value(bytes.into_inner())?)
+            }
+            Request::Media { session, request } => media::request(&mut db, &session, request),
             Request::StartLogin {
                 account,
                 device,
@@ -287,6 +377,11 @@ impl Engine {
             .lock()
             .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?;
         match control {
+            Control::ReceiveMedia {
+                account,
+                peer,
+                kind,
+            } => media::receive(&mut db, &account, &peer, &kind)?,
             Control::Login { account, status } => {
                 ensure!(
                     matches!(
@@ -463,7 +558,12 @@ impl Engine {
                 [&id],
                 |r| r.get(0),
             )?;
-            accounts.push(json!({"id":id,"generation":generation,"revoked":revoked,"notifications":notification,"head":head(&db,&id)?,"acceptedSends":accepted}));
+            let media_accepted: u64 = db.query_row(
+                "SELECT count(*) FROM media_sends WHERE account=?1 AND accepted=1",
+                [&id],
+                |r| r.get(0),
+            )?;
+            accounts.push(json!({"id":id,"generation":generation,"revoked":revoked,"notifications":notification,"head":head(&db,&id)?,"acceptedSends":accepted,"acceptedMediaSends":media_accepted}));
         }
         Ok(json!({"scenario":"basic","clock":clock(&db)?,"accounts":accounts}))
     }

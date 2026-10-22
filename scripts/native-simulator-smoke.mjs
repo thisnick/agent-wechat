@@ -140,7 +140,7 @@ try {
   await login("personal", true);
   const capabilities = await a.capabilities("personal");
   assert.equal(capabilities.upstream, "simulator");
-  assert.deepEqual(capabilities.mediaKinds, []);
+  assert.deepEqual(capabilities.mediaKinds, ["image", "file", "video", "voice"]);
   await assert.rejects(a.prepareOfficialProfile({ path: "/not-a-real-profile" }), error => error.code === "unsupported_simulator_operation");
 
   let streamA = subscribe(a, "personal");

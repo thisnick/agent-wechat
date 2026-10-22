@@ -100,6 +100,36 @@ function session(t, overrides = {}) {
   return hub;
 }
 
+test("a late read-state response cannot refresh the wrong account", async (t) => {
+  const late = deferred(),
+    seen = [];
+  const hub = session(t, {
+    markRead: async (account, thread, version) => {
+      seen.push({ account, thread, version });
+      return late.promise;
+    },
+  });
+  await hub.activate("a");
+  const reading = hub.markRead("peer");
+  await hub.activate("b");
+  late.resolve({ phoneReceiptSent: true });
+  await reading;
+  assert.deepEqual(seen, [{ account: "a", thread: "peer", version: "1" }]);
+  assert.equal(hub.snapshot().account, "b");
+});
+
+test("media readiness reaches subscribers only for the active account", async (t) => {
+  const hub = session(t),
+    seen = [];
+  await hub.activate("a");
+  const unsubscribe = hub.onMediaReady((id) => seen.push(id));
+  await hub.consume({ kind: "media.ready", data: { assetId: "asset-a" } }, "a");
+  await hub.activate("b");
+  await hub.consume({ kind: "media.ready", data: { assetId: "late-a" } }, "a");
+  assert.deepEqual(seen, ["asset-a"]);
+  unsubscribe();
+});
+
 test("history sorts decimal timestamps numerically and continues using the opaque cursor", async (t) => {
   const seen = [];
   const hub = session(t, {

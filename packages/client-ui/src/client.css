@@ -296,3 +296,149 @@ input:focus-visible {
   text-align: center;
   margin: 14px 0 0;
 }
+.attachment-input {
+  display: none;
+}
+.attachment-review {
+  max-width: 430px;
+}
+.attachment-file {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.attachment-file > .icon {
+  width: 25px;
+  height: 25px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.attachment-file > span {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.attachment-file strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.attachment-file small {
+  font-size: 11px;
+  color: var(--muted);
+}
+.attachment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+.attachment-actions button {
+  padding: 10px 16px;
+  border-radius: 7px;
+}
+.attachment-review .field-help {
+  margin: 14px 0 0;
+}
+.attachment-job-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  margin-top: 9px;
+  color: var(--muted);
+}
+.attachment-job-actions button {
+  color: var(--accent-ink);
+}
+.attachment-error {
+  color: var(--accent-ink);
+  font-size: 11px;
+  display: block;
+  margin-top: 8px;
+}
+.media-card {
+  display: grid;
+  gap: 10px;
+  min-width: 190px;
+  max-width: 380px;
+}
+.media-card select {
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px;
+  font-size: 11px;
+}
+.media-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+.sticker-card .media-preview {
+  width: 144px;
+  height: 144px;
+}
+.media-audio {
+  width: min(300px, 100%);
+}
+.account-settings {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.account-settings label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.account-settings small {
+  font-size: 11px;
+  color: var(--muted);
+}
+.account-name {
+  display: flex;
+  gap: 8px;
+  margin: 9px 0;
+}
+.account-name input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 10px;
+  color: var(--ink);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.account-name button,
+.signout-button {
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.signout-button {
+  margin-top: 24px;
+}
+.signout-confirm {
+  margin-top: 24px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.account-notice {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+.detail-actions button {
+  color: var(--accent-ink);
+  font-size: 12px;
+}

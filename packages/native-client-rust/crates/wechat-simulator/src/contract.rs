@@ -3,8 +3,9 @@ use wechat_protocol::{AccountState, DeviceProfile, LoginStatus};
 
 pub const HOST: &str = "simulation.invalid.wechat.com";
 pub const MAX_BODY: usize = 1024 * 1024;
+pub const MAX_MEDIA_BODY: usize = 36 * 1024 * 1024;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub account: String,
@@ -50,6 +51,50 @@ pub enum Request {
     Poll {
         session: Session,
         after: u64,
+    },
+    Media {
+        session: Session,
+        request: MediaRequest,
+    },
+    Read {
+        session: Session,
+        notification: wechat_protocol::SessionReadNotification,
+    },
+    Contacts {
+        session: Session,
+        ids: Vec<String>,
+    },
+    Avatar {
+        session: Session,
+        username: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MediaRequest {
+    Upload {
+        metadata: wechat_protocol::media::UploadedMedia,
+        encrypted: String,
+    },
+    Download {
+        descriptor: wechat_protocol::media::MediaDescriptor,
+    },
+    Sticker {
+        descriptor: wechat_protocol::media::StickerDescriptor,
+    },
+    Submit {
+        destination: String,
+        client_id: String,
+        created_at: u32,
+        message_type: u32,
+        content: String,
+        voice: Option<String>,
+    },
+    Voice {
+        server_id: u64,
+        length: u32,
+        offset: u32,
     },
 }
 
@@ -132,6 +177,11 @@ pub enum Control {
     AdvertiseImage {
         account: String,
         peer: String,
+    },
+    ReceiveMedia {
+        account: String,
+        peer: String,
+        kind: String,
     },
 }
 fn yes() -> bool {

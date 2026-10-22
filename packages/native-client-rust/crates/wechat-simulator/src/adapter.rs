@@ -14,6 +14,9 @@ use wechat_protocol::{
     AccountState, DeviceProfile, LoginStatus, NativeOptions,
 };
 
+#[path = "media_adapter.rs"]
+mod media;
+
 #[derive(Clone)]
 pub struct SimulatorUpstream {
     address: SocketAddr,
@@ -50,8 +53,13 @@ impl SimulatorUpstream {
             .send()?;
         let status = response.status();
         let mut bytes = Vec::new();
-        response.take(MAX_BODY as u64 + 1).read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= MAX_BODY, "simulator_response_too_large");
+        response
+            .take(MAX_MEDIA_BODY as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= MAX_MEDIA_BODY,
+            "simulator_response_too_large"
+        );
         if !status.is_success() {
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
             let code = value["error"]
@@ -84,8 +92,70 @@ impl SimulatorUpstream {
     }
 }
 impl Upstream for SimulatorUpstream {
+    fn notify_read(
+        &self,
+        state: &mut AccountState,
+        notification: &wechat_protocol::SessionReadNotification,
+    ) -> Result<wechat_protocol::SessionReadReply> {
+        let _: serde_json::Value = self.rpc(&Request::Read {
+            session: self.session(state)?,
+            notification: notification.clone(),
+        })?;
+        Ok(wechat_protocol::SessionReadReply {
+            accepted: true,
+            service_code: 0,
+        })
+    }
+    fn lookup_contacts_raw(&self, state: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+        self.rpc(&Request::Contacts {
+            session: self.session(state)?,
+            ids: ids.to_vec(),
+        })
+    }
+    fn download_avatar(&self, state: &mut AccountState, source: &str) -> Result<Vec<u8>> {
+        let username = source
+            .strip_prefix("agentwechat-simulator://avatar/")
+            .context("unsupported_simulator_avatar")?;
+        self.rpc(&Request::Avatar {
+            session: self.session(state)?,
+            username: username.into(),
+        })
+    }
+    fn media_transport(
+        &self,
+        state: &mut AccountState,
+    ) -> Result<Box<dyn wechat_core::upstream::media::MediaTransport>> {
+        Ok(Box::new(media::SimulatorMedia::new(
+            self.clone(),
+            self.session(state)?,
+        )))
+    }
+    fn submit_media(
+        &self,
+        state: &mut AccountState,
+        input: wechat_core::upstream::media::MediaSubmission<'_>,
+    ) -> Result<wechat_protocol::media_send::MediaSendResult> {
+        media::submit(self, self.session(state)?, input)
+    }
+    fn download_voice(
+        &self,
+        state: &mut AccountState,
+        server_id: u64,
+        length: u32,
+        offset: u32,
+    ) -> Result<wechat_protocol::wire::VoiceChunk> {
+        media::voice(self, self.session(state)?, server_id, length, offset)
+    }
     fn kind(&self) -> UpstreamKind {
         UpstreamKind::Simulator
+    }
+    fn download_sticker(
+        &self,
+        state: &mut AccountState,
+        descriptor: &wechat_protocol::media::StickerDescriptor,
+        progress: wechat_core::upstream::media::Progress<'_>,
+    ) -> Result<(Vec<u8>, wechat_protocol::media::ImageInspection)> {
+        media::sticker(self, self.session(state)?, descriptor, progress)
     }
     fn validate_state(&self, state: &AccountState) -> Result<()> {
         state.validate()?;

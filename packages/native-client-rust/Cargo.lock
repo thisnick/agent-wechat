@@ -2426,6 +2426,7 @@ version = "1.0.0-beta.10"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "clap",
  "fs2",
  "image",

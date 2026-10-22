@@ -62,16 +62,20 @@ export function Logo() {
     </svg>
   );
 }
-export function Avatar({ name }: { name: string }) {
+export function Avatar({ name, src }: { name: string; src?: string }) {
   return (
     <span className="avatar">
-      {name
-        .replace(/^sim_/, "")
-        .split(/[ _-]+/)
-        .map((n) => n[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()}
+      {src ? (
+        <img src={src} alt="" />
+      ) : (
+        name
+          .replace(/^sim_/, "")
+          .split(/[ _-]+/)
+          .map((n) => n[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase()
+      )}
     </span>
   );
 }

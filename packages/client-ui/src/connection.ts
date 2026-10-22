@@ -1,11 +1,18 @@
-import { NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeWeChatClient, type NativeOperation } from "@agent-wechat/shared";
 import { HubSession, type PendingSend } from "./session.ts";
 import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
+import { MediaOutbox, type PendingMedia } from "./media-outbox.ts";
+import { AvatarCache } from "./avatar-cache.ts";
 export type Connection = {
   session: HubSession;
   simulator: boolean;
   endpoint: string;
   loginAttempt: (account: string) => LoginAttempt;
+  mediaOutbox: (account: string) => MediaOutbox;
+  close: () => void;
+  avatars: AvatarCache;
+  logout: (account: string) => Promise<NativeOperation>;
+  clearLogout: (account: string) => void;
 };
 export async function connect(
   endpoint: string,
@@ -50,10 +57,96 @@ export async function connect(
   });
   await session.accounts();
   const logins = new Map<string, SavedLogin>();
+  const media = new Map<string, MediaOutbox>();
+  const avatars = new AvatarCache(client);
+  const logouts = new Map<string, SavedLogin>();
+  const logoutKey = (account: string) =>
+    `agentwechat-logout:${status.serverId}:${account}`;
+  const saveLogout = (account: string, value: SavedLogin | null) => {
+    if (value) logouts.set(account, value);
+    else logouts.delete(account);
+    try {
+      if (value)
+        sessionStorage.setItem(logoutKey(account), JSON.stringify(value));
+      else sessionStorage.removeItem(logoutKey(account));
+    } catch {
+      /* Memory fallback remains available. */
+    }
+  };
   return {
     session,
     simulator,
     endpoint: client.baseUrl.origin,
+    close() {
+      session.close();
+      for (const queue of media.values()) queue.close();
+      avatars.close();
+    },
+    avatars,
+    clearLogout(account) {
+      saveLogout(account, null);
+    },
+    async logout(account) {
+      let saved = logouts.get(account);
+      try {
+        const item = JSON.parse(
+          sessionStorage.getItem(logoutKey(account)) ?? "null",
+        );
+        if (
+          item &&
+          typeof item.key === "string" &&
+          item.key.length > 0 &&
+          item.key.length <= 200 &&
+          (item.operationId === undefined ||
+            typeof item.operationId === "string")
+        )
+          saved = item;
+      } catch {
+        /* Use memory fallback. */
+      }
+      if (saved?.operationId)
+        return client.operation(account, saved.operationId);
+      const key = saved?.key ?? crypto.randomUUID();
+      saveLogout(account, { key });
+      const operation = await client.logout(account, key);
+      saveLogout(account, { key, operationId: operation.id });
+      return operation;
+    },
+    mediaOutbox(account) {
+      let outbox = media.get(account);
+      if (!outbox) {
+        const key = `agentwechat-media:${status.serverId}:${account}`;
+        outbox = new MediaOutbox(client, account, {
+          read() {
+            try {
+              const items = JSON.parse(sessionStorage.getItem(key) ?? "[]");
+              return Array.isArray(items)
+                ? items
+                    .filter(
+                      (item: PendingMedia) =>
+                        typeof item.key === "string" &&
+                        typeof item.threadId === "string" &&
+                        typeof item.name === "string" &&
+                        ["file", "image", "voice", "video"].includes(item.kind),
+                    )
+                    .slice(-50)
+                : [];
+            } catch {
+              return [];
+            }
+          },
+          write(items) {
+            try {
+              sessionStorage.setItem(key, JSON.stringify(items));
+            } catch {
+              /* Optional receipt storage. */
+            }
+          },
+        });
+        media.set(account, outbox);
+      }
+      return outbox;
+    },
     loginAttempt(account) {
       const key = `agentwechat-login:${status.serverId}:${account}`;
       return new LoginAttempt(client, account, {

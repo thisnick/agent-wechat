@@ -62,6 +62,8 @@ export function readableError(error: unknown): string {
           auth_required: "Sign in to WeChat again.",
           operation_in_progress:
             "A sign-in is already running for this account. Finish it in the original tab, or try again after it expires.",
+          read_state_conflict:
+            "The conversation changed. Refresh it and try again.",
           idempotency_conflict: "This send key is already in use.",
           unsupported_simulator_operation:
             "This action isn't available on the simulator.",
@@ -116,7 +118,7 @@ export function pause(
     signal.addEventListener("abort", done, { once: true });
   });
 }
-async function inventory<T>(
+export async function inventory<T>(
   read: (cursor?: string) => Promise<NativePage<T>>,
 ): Promise<{ items: T[]; cursor: string }> {
   const items = new Map<string, T>();
@@ -143,6 +145,13 @@ async function inventory<T>(
 export class HubSession {
   private value = initial();
   private listeners = new Set<() => void>();
+  private mediaListeners = new Set<(assetId: string) => void>();
+  onMediaReady = (listener: (assetId: string) => void): (() => void) => {
+    this.mediaListeners.add(listener);
+    return () => {
+      this.mediaListeners.delete(listener);
+    };
+  };
   private generation = 0;
   private threadGeneration = 0;
   private accountRequest = 0;
@@ -213,6 +222,7 @@ export class HubSession {
     this.stream?.abort();
     this.publish(initial());
     this.stopped = true;
+    this.mediaListeners.clear();
   }
   async activate(account: string): Promise<void> {
     this.stream?.abort();
@@ -322,6 +332,20 @@ export class HubSession {
         this.publish({ loading: false, error: readableError(error) });
     }
   }
+  async markRead(threadId: string): Promise<unknown> {
+    const account = this.value.account,
+      generation = this.generation;
+    const thread = this.value.threads.find((thread) => thread.id === threadId);
+    if (!account || !thread) throw new Error("Select a conversation first.");
+    const result = await this.client.markRead(
+      account,
+      threadId,
+      thread.readStateVersion,
+    );
+    if (this.current(account, generation))
+      await this.refresh(account, generation);
+    return result;
+  }
   async refresh(
     account = this.value.account,
     generation = this.generation,
@@ -416,6 +440,12 @@ export class HubSession {
   ): Promise<void> {
     if (!this.current(account, generation)) return;
     if (
+      event.kind === "media.ready" &&
+      typeof event.data.assetId === "string"
+    ) {
+      for (const listener of this.mediaListeners) listener(event.data.assetId);
+    }
+    if (
       (event.kind === "message.committed" ||
         event.kind === "message.recalled") &&
       typeof event.data.messageId === "string"
@@ -439,6 +469,8 @@ export class HubSession {
         "auth.updated",
         "sync.completed",
         "thread.read",
+        "thread.read-state",
+        "metadata.changed",
       ].includes(event.kind)
     ) {
       await this.refresh(account, generation);

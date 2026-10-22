@@ -37,8 +37,7 @@ login response retries the same key. A temporary lookup error does not start a
 second login; an ended challenge can start a new attempt.
 
 Open the URL in two browser tabs and choose the same account. Use **Simulator
-controls** to inject incoming text, phone-originated self-sends, an unavailable
-image, a rejection, or a lost send acknowledgment. Controls change synthetic
+controls** to inject incoming text, phone-originated self-sends, incoming image/file/video/voice or an animated sticker, an unavailable image, a rejection, or a lost send acknowledgment. Controls change synthetic
 upstream state; messages pass through the actual hub sync/store/event pipeline.
 No automatic fake replies are generated.
 
@@ -86,28 +85,60 @@ bootstrap and simulator controls. The separate simulator control token remains
 in the launcher. The fragment secret and access keys must not be checked in.
 
 Vite serves development assets and proxies the existing API. There is no second
-business backend. A production static host, bundled desktop hub, native file
-picker, outgoing files/voice, media previews, agent settings and Tauri packaging
-remain follow-ups. The connection form uses the existing bearer SDK and requires
-HTTPS or loopback HTTP; cross-origin remote hubs also need an approved browser
-CORS arrangement. This work has not connected that form to a live wx daemon.
+business backend. A production static host, bundled desktop hub, agent settings
+and Tauri packaging remain follow-ups. The connection form uses the existing
+bearer SDK and requires HTTPS or loopback HTTP; cross-origin remote hubs also
+need an approved browser CORS arrangement. This work has not connected that form
+to a live wx daemon.
 
-Incoming media displays the API's available, pending, expired or unavailable
-state. Only available bytes offer Download. No raw message XML is rendered as an
-attachment. The simulator supplies metadata rather than media bytes, so outgoing
-attachments are disabled. Phone read-state synchronization is not claimed.
+## Attachments and stickers
 
-## UI integration status
+Incoming images, files, videos and voice messages use real hub transfer jobs.
+**Load attachment** retrieves the selected quality; progress, cancellation and
+retry use the job API. Verified images render inline, videos and decoded voice
+use browser playback controls, and files can be downloaded. Other clients see
+ready assets through the hub event stream. Unsupported, pending and expired
+assets keep their actual state; raw message XML is never a retrieved attachment.
 
-| Area             | Current browser behavior                                                                                        |
-| ---------------- | --------------------------------------------------------------------------------------------------------------- |
-| Hub and accounts | Simulator bootstrap, bearer connection form, account creation/selection and switching                           |
-| Sign-in          | QR PNG, expiry countdown, automatic renewal, phone approval and automatic chat entry                            |
-| Conversations    | Contacts, thread filters, paginated history, stored-history search and group member details                     |
-| Messaging        | Text composer, stable send keys, receipt status, uncertain outcomes, self-sends and SSE replay                  |
-| Media            | Incoming availability states and download action; preview rendering, outgoing files and voice remain follow-ups |
-| Settings         | Appearance only; account logout, agent configuration and desktop settings remain follow-ups                     |
-| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                           |
+Eligible incoming stickers load automatically when their message is displayed.
+The browser renders the checked original image, including GIF animation. The
+simulator provides an account-scoped two-frame GIF through its local adapter;
+it never fetches the synthetic sticker URL. Native sticker downloads keep their
+restricted source, integrity, size and frame checks. Sticker sending, packs,
+favorites and an outgoing sticker picker are not implemented.
+
+**Attach file** opens a review with the recipient and attachment type. The hub
+accepts sources up to 25 MiB. Choose file, image, video or voice; voice preparation
+and splitting happen in the existing Rust job pipeline. The client retains only
+source IDs, filenames and job receipts across reload, never file bytes. Rejected,
+partial and uncertain outcomes remain distinct. **Check status** only reads the
+same receipt; uncertain sends are never retried automatically.
+
+The simulator now supplies checked PNG, text, MP4 and SILK fixtures, and accepts
+outgoing media through its decoded local transport. Production preparation,
+readback, idempotency, cancellation, logout fences and official-format history
+writes still run in the real hub. These checks do not establish live WeChat
+acceptance or recipient playback.
+
+## Accounts and conversation details
+
+Settings can rename the selected account and sign it out, with confirmation and
+same-operation status recovery after a lost response or reload. Sign-out keeps
+history. Conversation details provide **Mark as read** with the hub's version
+check and phone-notification receipt, plus **Refresh avatar**. Cached avatars
+replace initials; absent avatars keep initials. A successful receipt reports
+server acceptance, not observation of a real phone badge. Group details load all
+roster pages.
+
+| Area             | Current browser behavior                                                                                   |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| Hub and accounts | Simulator bootstrap, bearer connection, account creation/switching, rename and logout                      |
+| Sign-in          | QR PNG, countdown, automatic renewal, phone approval and automatic chat entry                              |
+| Conversations    | Contacts, thread filters, paginated history/search, full group roster, read-state and cached avatars       |
+| Messaging        | Text and attachment composer, progress, receipt status, uncertainty, self-sends and SSE replay             |
+| Media            | Image/video/voice previews, downloads, incoming animated stickers and outgoing file/image/video/voice jobs |
+| Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                |
+| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                      |
 
 ## Verification
 
@@ -126,12 +157,19 @@ first-frame connection status and cursor recovery. Browser validation uses the
 real Rust hub and simulator. Synthetic results do not establish official-client
 compatibility or live WeChat acceptance.
 
-Linux x64 verification on 2026-10-22 passed 419 native tests across the compiled
-workspace test executables in a non-root, read-only validation container with
-external networking disabled. Rust doc tests, pinned format/Clippy and generated
-contracts passed. The SDK passed 30 tests, the client models 19 and OpenClaw 211;
-TypeScript build/typecheck passed. The 18-check native simulator journey and the
-13-check real-session client journey also passed with external networking disabled.
-Browser checks covered QR/phone approval, automatic chat entry, two tabs,
-self-sends, uncertainty, media availability, automatic QR renewal, decoded QR
-payloads, login recovery, stored-history search and viewport layout. This records Linux validation only.
+The extended client journey runs in a non-root, read-only container with external
+networking disabled. It includes incoming media integrity/ranges/account isolation,
+animated GIF frames, outgoing preparation and readback, rejection and lost replies,
+receipt recovery, account aliases, versioned read-state, cached avatars and logout.
+Pinned Rust format/Clippy, native tests and generated contracts are required for
+changes to the decoded transport. Browser checks exercise the same Rust simulator;
+no live endpoint is used.
+
+Linux x64 validation of this pass: 422 native tests across 20 executables passed
+in a non-root, read-only container with external networking disabled. Rust doc
+tests, pinned format/Clippy and generated contracts passed. The client passed
+28 model tests, the SDK 30 and OpenClaw 211; workspace build/typecheck passed.
+The 17-check client journey passed in the isolated container. Browser checks
+confirmed automatic incoming sticker rendering, attachment review and an
+accepted outgoing file appearing in canonical history. Desktop packaging and
+live endpoint testing remain unverified.

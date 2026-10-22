@@ -521,10 +521,9 @@ impl Core {
         ids: &[String],
     ) -> Result<MetadataReply<ContactLookup>> {
         let mut state = self.account_state(account)?;
-        let native = self.upstream.native(NativeOptions::default())?;
         let capture =
             |state: &mut wechat_protocol::AccountState| -> Result<MetadataReply<ContactLookup>> {
-                let raw = native.lookup_contacts_raw(state, ids)?;
+                let raw = self.upstream.lookup_contacts_raw(state, ids)?;
                 // Persist the verified body before any schema/identity decoding. A
                 // decoder failure can be investigated offline without repeating RPC.
                 self.retain_contact_wire(account, ids, &raw)?;
@@ -535,7 +534,9 @@ impl Core {
         match capture(&mut state) {
             Ok(reply) => Ok(reply),
             Err(error) if auth_rejected(&error) => {
-                state = native.renew_session(&state, "agent-wechat metadata")?;
+                state = self
+                    .upstream
+                    .renew_session(&state, "agent-wechat metadata")?;
                 capture(&mut state)
             }
             Err(error) => Err(error),
@@ -667,8 +668,9 @@ impl Core {
                 )?;
                 self.apply_metadata_receipt(account, &id, false)?;
                 self.metadata_check(account, operation, deadline)?;
-                crate::upstream::require_native(self.upstream.kind())?;
-                let bytes = wechat_protocol::media::download_advertised_avatar(&source)?;
+                let mut state = self.account_state(account)?;
+                let bytes = self.upstream.download_avatar(&mut state, &source)?;
+                self.save_state(account, &state)?;
                 let id = self.stage_metadata_body(
                     account,
                     ReceiptBody::Avatar {

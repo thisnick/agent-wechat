@@ -10,7 +10,6 @@ import {
 import {
   type NativeMessage,
   type NativeOperation,
-  type MediaAsset,
   type NativeGroupMember,
   isNativeTombstone,
 } from "@agent-wechat/shared";
@@ -26,9 +25,13 @@ import {
   pause,
   type Account,
   type PendingSend,
+  inventory,
 } from "./session.ts";
 import { Avatar, Button, Icon, Logo, Welcome } from "./ui.tsx";
 import { HistorySearch } from "./history-search.ts";
+import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
+import { HubAvatar } from "./avatars.tsx";
+import { AccountSettings } from "./account-settings.tsx";
 import "./style.css";
 import "./onboarding.css";
 import "./client.css";
@@ -87,7 +90,7 @@ function App() {
     let cancelled = false;
     void bootstrap()
       .then((value) => {
-        if (cancelled) value?.session.close();
+        if (cancelled) value?.close();
         else setConnection(value);
       })
       .catch((e) => {
@@ -102,7 +105,7 @@ function App() {
   }, []);
   useEffect(
     () => () => {
-      connection?.session.close();
+      connection?.close();
     },
     [connection],
   );
@@ -394,6 +397,7 @@ function Login({
           } | null;
           if (current.state === "succeeded") {
             login.complete(op.id);
+            connection.clearLogout(account);
             operationId.current = null;
             await signedIn();
             return;
@@ -726,7 +730,12 @@ function Chats({
                   className={`chat-row ${state.selected === t.id ? "selected" : ""}`}
                   onClick={() => select(t.id)}
                 >
-                  <Avatar name={name(t.id)} />
+                  <HubAvatar
+                    connection={connection}
+                    account={state.account!}
+                    username={t.id}
+                    name={name(t.id)}
+                  />
                   <div className="chat-copy">
                     <div className="chat-top">
                       <span className="chat-name">{name(t.id)}</span>
@@ -761,7 +770,12 @@ function Chats({
                       setSection("chats");
                     }}
                   >
-                    <Avatar name={c.displayName || c.id} />
+                    <HubAvatar
+                      connection={connection}
+                      account={state.account!}
+                      username={c.id}
+                      name={c.displayName || c.id}
+                    />
                     <div className="chat-copy">
                       <strong>{c.displayName || c.id}</strong>
                       <p className="preview">{c.username}</p>
@@ -792,7 +806,14 @@ function Chats({
             className="back-btn"
             onClick={() => setMobile(false)}
           />
-          {state.selected && <Avatar name={selectedName} />}
+          {state.selected && state.account && (
+            <HubAvatar
+              connection={connection}
+              account={state.account}
+              username={state.selected}
+              name={selectedName}
+            />
+          )}
           <div className="chat-heading">
             <h2>{selectedName || "AgentWechat"}</h2>
             <p>
@@ -898,6 +919,25 @@ function Chats({
               >
                 Unavailable image
               </button>
+              {["image", "file", "video", "voice", "sticker"].map((kind) => (
+                <button
+                  key={kind}
+                  disabled={
+                    kind !== "sticker" &&
+                    (!Array.isArray(state.capabilities.mediaKinds) ||
+                      !state.capabilities.mediaKinds.includes(kind))
+                  }
+                  onClick={() =>
+                    void simulate({
+                      op: "receive_media",
+                      peer: state.selected || "sim_mei",
+                      kind,
+                    })
+                  }
+                >
+                  Receive {kind}
+                </button>
+              ))}
               <button
                 onClick={() =>
                   void simulate({ op: "send_fault", fault: "reject" })
@@ -983,6 +1023,15 @@ function Chats({
                         check={() => void session.checkSend(s.key)}
                       />
                     ))}
+                  {state.account && (
+                    <PendingAttachments
+                      key={state.account}
+                      connection={connection}
+                      account={state.account}
+                      threadId={state.selected}
+                      messages={state.messages}
+                    />
+                  )}
                   {!state.loading &&
                     state.selected &&
                     state.messages.length === 0 && (
@@ -994,15 +1043,23 @@ function Chats({
             <div className="composer-wrap">
               <div className="composer">
                 <div className="composer-tools">
-                  <Button
-                    icon="attach"
-                    label="Attachments unavailable in this preview"
-                    disabled
-                    onClick={() => {}}
-                  />
+                  {state.account && (
+                    <AttachmentPicker
+                      key={state.account}
+                      connection={connection}
+                      account={state.account}
+                      threadId={state.selected}
+                      recipient={selectedName}
+                      enabled={
+                        active &&
+                        Array.isArray(state.capabilities.mediaKinds) &&
+                        state.capabilities.mediaKinds.length > 0
+                      }
+                    />
+                  )}
                   {simulator && (
                     <span className="field-help">
-                      Text sends are available in the simulator.
+                      Messages and files stay in the simulator.
                     </span>
                   )}
                 </div>
@@ -1131,6 +1188,17 @@ function Chats({
               <button className="secondary" onClick={switchAccount}>
                 Manage accounts
               </button>
+              {account && (
+                <AccountSettings
+                  key={account.id}
+                  connection={connection}
+                  account={account}
+                  signedOut={() => {
+                    setSettings(false);
+                    switchAccount();
+                  }}
+                />
+              )}
             </div>
           </section>
         </div>
@@ -1263,7 +1331,12 @@ function Message({
       data-message-id={m.id}
       data-direction={m.direction}
     >
-      <Avatar name={own ? "You" : name(m.senderId || m.threadId)} />
+      <HubAvatar
+        connection={connection}
+        account={m.accountId}
+        username={m.senderId || (!own ? m.threadId : null)}
+        name={own ? "You" : name(m.senderId || m.threadId)}
+      />
       <div className="message-body">
         <div className="message-meta">
           <b>{own ? "You" : name(m.senderId || m.threadId)}</b>
@@ -1288,91 +1361,10 @@ function Message({
             )}
           </div>
         ) : (
-          <Media message={m} connection={connection} />
+          <MediaCard message={m} connection={connection} />
         )}
       </div>
     </article>
-  );
-}
-function Media({
-  message,
-  connection,
-}: {
-  message: NativeMessage;
-  connection: Connection;
-}) {
-  const [assets, setAssets] = useState<MediaAsset[]>([]),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void connection.session.client
-      .mediaAssets(message.accountId, message.id)
-      .then((r) => {
-        if (active) setAssets(r.items);
-      })
-      .catch((e) => {
-        if (active) setError(readableError(e));
-      });
-    return () => {
-      active = false;
-    };
-  }, [message.accountId, message.id]);
-  async function download(asset: MediaAsset) {
-    setBusy(true);
-    setError("");
-    try {
-      const content = await connection.session.client.mediaContent(
-        message.accountId,
-        asset.id,
-      );
-      const url = URL.createObjectURL(
-        new Blob([new Uint8Array(content.bytes).buffer], {
-          type: content.contentType,
-        }),
-      );
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = asset.filename || "attachment";
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 30000);
-    } catch (e) {
-      setError(readableError(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="bubble media-status">
-      <Icon name="file" />
-      <strong>
-        {assets[0]?.filename || (message.type === 3 ? "Image" : "Attachment")}
-      </strong>
-      {assets.length ? (
-        assets.map((asset) => (
-          <div key={asset.id}>
-            <span>
-              {asset.state === "available"
-                ? "Available"
-                : asset.state === "expired"
-                  ? "Expired"
-                  : asset.state === "pending"
-                    ? "Pending"
-                    : "Unavailable"}
-              {asset.variant ? ` · ${asset.variant}` : ""}
-            </span>
-            {asset.state === "available" && (
-              <button disabled={busy} onClick={() => void download(asset)}>
-                Download
-              </button>
-            )}
-          </div>
-        ))
-      ) : (
-        <p>{error || "Attachment unavailable"}</p>
-      )}
-      {error && assets.length > 0 && <small>{error}</small>}
-    </div>
   );
 }
 function Details({
@@ -1386,13 +1378,19 @@ function Details({
 }) {
   const [members, setMembers] = useState<NativeGroupMember[]>([]),
     [error, setError] = useState("");
+  const [busy, setBusy] = useState(false),
+    [notice, setNotice] = useState("");
   const state = connection.session.snapshot();
   useEffect(() => {
     let active = true;
     const account = state.account;
     if (account && threadId.endsWith("@chatroom"))
-      void connection.session.client
-        .groupMembers(account, threadId, { limit: 200 })
+      void inventory((cursor) =>
+        connection.session.client.groupMembers(account, threadId, {
+          limit: 200,
+          cursor,
+        }),
+      )
         .then((r) => {
           if (active)
             setMembers(
@@ -1411,7 +1409,12 @@ function Details({
   return (
     <aside className="detail-panel" aria-label="Conversation details">
       <div className="detail-profile">
-        <Avatar name={name} />
+        <HubAvatar
+          connection={connection}
+          account={state.account!}
+          username={threadId}
+          name={name}
+        />
         <h3>{name}</h3>
         <p>
           {threadId === "filehelper"
@@ -1427,13 +1430,64 @@ function Details({
         <p className="field-help">
           History contains the messages available on this hub.
         </p>
+        <div className="detail-actions">
+          <button
+            disabled={
+              busy ||
+              !state.threads.find((thread) => thread.id === threadId)
+                ?.unreadCount
+            }
+            onClick={() => {
+              setBusy(true);
+              setError("");
+              void connection.session
+                .markRead(threadId)
+                .then((result) => {
+                  setNotice(
+                    (result as { phoneReceiptSent?: boolean }).phoneReceiptSent
+                      ? "Marked as read."
+                      : "Marked read on this hub. Phone confirmation is unavailable.",
+                  );
+                })
+                .catch((error) => setError(readableError(error)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            Mark as read
+          </button>
+          <button
+            disabled={busy}
+            onClick={() => {
+              if (!state.account) return;
+              setBusy(true);
+              setError("");
+              void connection.avatars
+                .refresh(state.account, threadId)
+                .then(() => setNotice("Avatar refreshed."))
+                .catch((error) => setError(readableError(error)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            Refresh avatar
+          </button>
+        </div>
+        {notice && (
+          <p className="account-notice" role="status">
+            {notice}
+          </p>
+        )}
       </div>
       {members.length > 0 && (
         <div className="detail-section">
           <div className="section-head">Members</div>
           {members.map((m) => (
             <div key={m.id} className="member">
-              <Avatar name={m.displayName || m.id} />
+              <HubAvatar
+                connection={connection}
+                account={state.account!}
+                username={m.username || m.id}
+                name={m.displayName || m.id}
+              />
               <span>{m.roomDisplayName || m.displayName || m.username}</span>
             </div>
           ))}

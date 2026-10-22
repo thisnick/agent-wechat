@@ -161,11 +161,7 @@ impl Core {
                 through,
                 epoch,
                 local,
-                |state, request| {
-                    core.upstream
-                        .native(NativeOptions::default())?
-                        .notify_read_session(state, request)
-                },
+                |state, request| core.upstream.notify_read(state, request),
             )
         })
         .await

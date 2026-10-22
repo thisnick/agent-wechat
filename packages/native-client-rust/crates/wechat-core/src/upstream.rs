@@ -14,6 +14,9 @@ use wechat_protocol::{
 pub const SIMULATOR_MARKER: &str = ".agent-wechat-simulator";
 pub const SIMULATOR_MARKER_CONTENT: &str = "agent-wechat-simulator-v1\n";
 
+#[path = "upstream_media.rs"]
+pub mod media;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamKind {
     Native,
@@ -143,6 +146,89 @@ pub trait Upstream: Send + Sync {
             created_at,
             content,
         )
+    }
+    fn media_transport(&self, state: &mut AccountState) -> Result<Box<dyn media::MediaTransport>> {
+        let native = self.native(NativeOptions::default())?;
+        let conf = match native.cdn_config(state) {
+            Ok(conf) => conf,
+            Err(error) if crate::media::is_media_auth_rejected(&error) => {
+                *state = native.renew_session(state, "agent-wechat media")?;
+                native.cdn_config(state)?
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Box::new(wechat_protocol::media::CdnClient::new(
+            conf,
+            Duration::from_secs(25),
+        )?))
+    }
+    fn submit_media(
+        &self,
+        state: &mut AccountState,
+        input: media::MediaSubmission<'_>,
+    ) -> Result<MediaSendResult> {
+        let native = self.native(NativeOptions::default())?;
+        match input.body {
+            media::MediaBody::File(upload) => native.send_file(
+                state,
+                input.destination,
+                input.client_id,
+                input.created_at,
+                upload,
+            ),
+            media::MediaBody::Image(upload) => {
+                native.send_image(state, input.destination, input.client_id, upload)
+            }
+            media::MediaBody::Video { upload, seconds } => {
+                native.send_video(state, input.destination, input.client_id, upload, seconds)
+            }
+            media::MediaBody::Voice {
+                encoded,
+                duration_ms,
+            } => native.send_voice(
+                state,
+                input.destination,
+                input.client_id,
+                input.created_at,
+                duration_ms,
+                encoded,
+            ),
+        }
+    }
+    fn download_voice(
+        &self,
+        state: &mut AccountState,
+        server_id: u64,
+        length: u32,
+        offset: u32,
+    ) -> Result<wechat_protocol::wire::VoiceChunk> {
+        self.native(NativeOptions::default())?
+            .download_voice_chunk(state, server_id, length, offset)
+    }
+    fn notify_read(
+        &self,
+        state: &mut AccountState,
+        notification: &wechat_protocol::SessionReadNotification,
+    ) -> Result<wechat_protocol::SessionReadReply> {
+        self.native(NativeOptions::default())?
+            .notify_read_session(state, notification)
+    }
+    fn lookup_contacts_raw(&self, state: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+        self.native(NativeOptions::default())?
+            .lookup_contacts_raw(state, ids)
+    }
+    fn download_avatar(&self, _state: &mut AccountState, source: &str) -> Result<Vec<u8>> {
+        require_native(self.kind())?;
+        wechat_protocol::media::download_advertised_avatar(source)
+    }
+    fn download_sticker(
+        &self,
+        _state: &mut AccountState,
+        descriptor: &wechat_protocol::media::StickerDescriptor,
+        progress: media::Progress<'_>,
+    ) -> Result<(Vec<u8>, wechat_protocol::media::ImageInspection)> {
+        require_native(self.kind())?;
+        wechat_protocol::media::fetch_sticker(descriptor, progress)
     }
     fn push_connection(&self, state: &AccountState) -> Result<Box<dyn PushConnection>> {
         Ok(Box::new(
