@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 60
     env:
       # Include the actual Windows flags in cache identity, not just build steps.
-      RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
       CARGO_PROFILE_TEST_DEBUG: 0
     defaults:
       run:
