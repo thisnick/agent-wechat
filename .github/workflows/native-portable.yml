@@ -13,6 +13,48 @@ on:
 permissions:
   contents: read
 jobs:
+  platform-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+      - name: Select native Windows compiler
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          add-rust-environment-hash-key: false
+          key: portable-tests-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.RUSTFLAGS }}-debug${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
+      - name: Test Unix platform primitives and media
+        if: runner.os != 'Windows'
+        run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+      # Git Bash prepends its coreutils link.exe ahead of the MSVC linker.
+      - name: Test Windows platform primitives and media
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+
   build:
     strategy:
       fail-fast: false
@@ -29,7 +71,6 @@ jobs:
     env:
       # Include the actual Windows flags in cache identity, not just build steps.
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
-      CARGO_PROFILE_TEST_DEBUG: 0
     defaults:
       run:
         shell: bash
@@ -37,9 +78,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
+        id: node
         with:
           node-version: 24
-          cache: pnpm
+      # Restoring the installed tree also avoids Windows' expensive creation of
+      # thousands of OpenClaw files and links on every run.
+      - uses: actions/cache@v4
+        id: node-modules
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: portable-pnpm-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'package.json', 'packages/*/package.json') }}
+      - if: steps.node-modules.outputs.cache-hit != 'true'
+        run: pnpm install --frozen-lockfile --filter @agent-wechat/agent-wechat...
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
       - uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
@@ -61,17 +114,7 @@ jobs:
           # Preinstalled unused Rust toolchains vary between runner images.
           # Pin cache identity to our compiler, target, flags and MSVC version.
           add-rust-environment-hash-key: false
-          key: portable-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @agent-wechat/agent-wechat... build
-      - name: Test Unix platform primitives and media
-        if: runner.os != 'Windows'
-        run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
-      # Git Bash prepends its coreutils link.exe ahead of the MSVC linker.
-      - name: Test Windows platform primitives and media
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: cargo test -p wechat-platform -p wechat-media --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}
+          key: portable-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**/Cargo.toml', 'packages/native-client-rust/Cargo.lock', 'packages/native-client-rust/**/.cargo/config*', '.cargo/config*') }}
       - name: Build Unix release executable
         if: runner.os != 'Windows'
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }}

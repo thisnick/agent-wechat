@@ -19,6 +19,10 @@ on:
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   changes:
     runs-on: ubuntu-latest
