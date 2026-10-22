@@ -82,6 +82,9 @@ def wait_build(state: Path, timeout=3300, output=None):
         if complete:
             return int((state / "exit-code").read_text(encoding="ascii"))
         if not process_alive(int((state / "pid").read_text(encoding="ascii"))):
+            # Completion can land between the first status read and this query.
+            if (state / "exit-code").is_file():
+                return int((state / "exit-code").read_text(encoding="ascii"))
             raise RuntimeError("Native compiler exited without recording its result")
         if time.monotonic() >= deadline:
             raise TimeoutError("Native compiler did not finish before the CI deadline")

@@ -131,8 +131,9 @@ jobs:
           restore-keys: |
             portable-pnpm-${{ runner.os }}-${{ runner.arch }}-node24-
             portable-pnpm-${{ runner.os }}-${{ runner.arch }}-v24.
-      - if: steps.node-modules.outputs.cache-hit != 'true'
-        run: pnpm install --frozen-lockfile --filter @agent-wechat/agent-wechat...
+      # Recreate junctions after restore: Windows archives may point at another
+      # runner's workspace. Existing package bytes still avoid a full install.
+      - run: pnpm install --frozen-lockfile --prefer-offline --filter @agent-wechat/agent-wechat...
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - name: Require a successful release build
         run: python scripts/native-ci-build.py wait
