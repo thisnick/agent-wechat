@@ -3,11 +3,11 @@
 > **Package renamed (2026-08-31):** the OpenClaw extension moved from `@agent-wechat/wechat` to `@agent-wechat/agent-wechat` so the unscoped package basename matches the plugin id `agent-wechat` (OpenClaw validates plugin ids against the npm basename and hard-fails updates on mismatch; the official catalog also reserves the `wechat` id). The first version (0.11.15) was published manually with a one-off granular token — OIDC trusted publishing only covers packages that already exist — and the token was revoked afterward. The trusted publisher for the new package is configured at https://www.npmjs.com/package/@agent-wechat/agent-wechat/access (GitHub Actions: thisnick/agent-wechat, workflow release.yml), so CI publishes via OIDC as before. Once rollout is done, deprecate the old `@agent-wechat/wechat`: `npm deprecate @agent-wechat/wechat "Renamed to @agent-wechat/agent-wechat (plugin id agent-wechat); openclaw >=2026.8 reserves the wechat id for the official Tencent plugin."`
 
 
-This repo releases three artifacts together:
+The native/npm release process publishes three artifacts:
 
 1. npm CLI package: `@agent-wechat/cli`
 2. npm OpenClaw extension: `@agent-wechat/agent-wechat`
-3. Docker image: `ghcr.io/thisnick/agent-wechat`
+3. Native executables and a checksum manifest on the matching GitHub release
 
 ## Prepare A Release
 
@@ -21,20 +21,42 @@ pnpm changeset
 
 3. Merge to main. The changesets GitHub Action opens a "Version Packages" PR with bumped versions and changelogs.
 
-4. Merge the Version Packages PR to publish.
+4. Merge the Version Packages PR. The Release workflow checks the npm channel and
+   reports **Waiting for native release assets** if the matching artifacts have
+   not been published. This is an expected waiting state, not a failed build.
+
+5. While main still points to that version commit, run **Prepare native release
+   assets** (`native-release.yml`) on main with the exact CLI version and
+   `confirm_publish=true`. This explicit approval builds and tests the configured
+   native targets, verifies their shared source commit and checksums, and publishes
+   the GitHub release assets. It does not deploy anything.
+
+6. Successful completion automatically retries the original Release push run for
+   the same source commit. That run verifies the native assets, embeds their
+   manifest in the CLI package, and publishes both npm packages with provenance.
+   Prereleases use their Changesets channel (such as `beta`); stable releases use
+   `latest`.
 
 ## What CI/CD Does
 
-On merge of the Version Packages PR:
+The npm workflow waits until every configured native target, checksum manifest,
+and third-party notice is uploaded. Registry/API errors, mismatched source
+commits and invalid checksums remain failures. A published CLI version permits
+extension-only recovery without requiring another native artifact set.
 
-- Publishes `@agent-wechat/cli` and `@agent-wechat/agent-wechat` to npm with provenance.
-- Builds and pushes `amd64` and `arm64` Docker images.
-- Publishes a multi-arch manifest tag.
+The native completion handler only retries the original main-branch push run
+from this repository. It does not publish npm directly from a `workflow_run`
+event: that event's default-branch SHA may have advanced since the artifacts
+were built. Retrying the original run preserves both its source SHA and its npm
+OIDC/provenance context.
 
-Docker tags:
+If automatic recovery fails, rerun the original Release push run for the native
+manifest's exact source commit. Do not push an unrelated commit to retry
+publication or replace existing release assets. If main advanced before native
+assets were prepared, reconcile the version/source tag before starting another
+native release; the preflight refuses conflicting tags or published npm versions.
 
-- `<version>` (e.g., `0.2.0`)
-- `latest`
+Docker image publication and deployment remain separate from these workflows.
 
 ## Trusted Publishing (OIDC)
 
@@ -51,5 +73,3 @@ npm trusted publishing lets GitHub Actions publish without a long-lived token. S
 Once configured, delete the `NPM_TOKEN` secret from GitHub repo settings. The workflow uses OIDC automatically (requires npm >= 11.5.1, installed in CI).
 
 **Note**: Trusted publishing can only be configured for packages that already exist on npm. For brand-new packages, the first publish must use a token.
-
-If you need a different GHCR path, update the image name in `.github/workflows/release.yml`.

@@ -3,7 +3,12 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_run:
+    workflows: [Prepare native release assets]
+    types: [completed]
+    branches: [main]
 
+# Serialize the completion handoff after the original push run has finished.
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
@@ -15,6 +20,7 @@ permissions:
 jobs:
   release:
     name: Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,20 +61,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Native assets must be prepared from this exact commit first. This gate
-      # fails closed until the operator approves the native-release workflow.
+      # Native assets are published separately with explicit operator approval.
+      # Missing assets are expected until that workflow completes.
       - name: Validate npm stable or prerelease channel
         if: steps.changesets.outputs.hasChangesets == 'false'
         run: node scripts/native-release-policy.mjs --check-registry
 
-      - name: Verify native assets and embed npm checksum manifest
+      - name: Check whether native assets are ready
+        id: native_release
         if: steps.changesets.outputs.hasChangesets == 'false'
+        run: node scripts/native-release-orchestration.mjs ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Verify native assets and embed npm checksum manifest
+        if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
         run: node scripts/native-prepare-package.mjs --if-unpublished
 
       # Publish separately so npm can use OIDC (no NODE_AUTH_TOKEN needed)
       - name: Publish to npm
         id: publish
-        if: steps.changesets.outputs.hasChangesets == 'false'
+        if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
         run: |
           if ! OUTPUT=$(pnpm changeset publish 2>&1); then
             echo "$OUTPUT"
@@ -79,3 +92,26 @@ jobs:
         env:
           NPM_CONFIG_PROVENANCE: true
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  resume:
+    name: Resume npm release after native publication
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    steps:
+      # Use trusted default-branch orchestration code. This job only retries the
+      # original push run; it never builds or publishes npm from workflow_run.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/native-release-orchestration.mjs resume
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}

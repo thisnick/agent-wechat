@@ -15,6 +15,7 @@ on:
       - '.github/workflows/native-release.yml'
       - 'scripts/native-release-notes*.mjs'
       - 'scripts/native-release-policy*.mjs'
+      - 'scripts/native-release-orchestration*.mjs'
       - '.changeset/**'
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
@@ -41,6 +42,7 @@ jobs:
               - '.github/workflows/native-release.yml'
               - 'scripts/native-release-notes*.mjs'
               - 'scripts/native-release-policy*.mjs'
+              - 'scripts/native-release-orchestration*.mjs'
               - '.changeset/**'
               - 'scripts/install-ci-npm.sh'
               - 'scripts/verify-ci-publisher*.mjs'
@@ -77,6 +79,7 @@ jobs:
           node --test scripts/verify-ci-publisher.test.mjs
           node --test scripts/native-release-notes.test.mjs
           node --test scripts/native-release-policy.test.mjs
+          node --test scripts/native-release-orchestration.test.mjs
           node scripts/verify-ci-publisher.mjs
 
   ts:
