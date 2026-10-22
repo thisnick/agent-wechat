@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.10
+
+### Patch Changes
+
+- [#251](https://github.com/thisnick/agent-wechat/pull/251) [`7f85e93`](https://github.com/thisnick/agent-wechat/commit/7f85e93689fb94feb09adcc97ddad94cb018a523) Thanks [@thisnick](https://github.com/thisnick)! - Complete verified self-to-self `HandOffMaster` notifications with an empty argument or an empty handoff list using inner opcode 4 and the supported attributes, plus peer-directed `packagesUpdated`/`newPackage` notifications. These forms have no local profile effect in the Linux x64 4.1.13.26 client. Retain their original bytes and projection receipts so supported batches can finish, while handoff items, other inner opcodes, extra handoff attributes and unsupported controls continue to block the official profile checkpoint.
+
+- [#248](https://github.com/thisnick/agent-wechat/pull/248) [`112ad51`](https://github.com/thisnick/agent-wechat/commit/112ad51a96491a060495bac661a77783ec16597c) Thanks [@thisnick](https://github.com/thisnick)! - Send outgoing voice as notes of up to 60 seconds, WeChat's single-message limit, instead of 10-second notes. Longer audio splits into the fewest equal-length notes and keeps per-note IDs, partial results and `needs_review` on uncertainty. Notes above 32 KiB of SILK (about 15 seconds) are uploaded as consecutive offset ranges of one voice message; that upload path has offline fixtures only and still requires live verification.
+
 ## 1.0.0-beta.9
 
 ### Minor Changes

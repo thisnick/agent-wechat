@@ -21,8 +21,10 @@
     "native-platform-candidates",
     "native-quotes-and-forwarded-history",
     "native-release-clean-checkout",
+    "native-status-control-projection",
     "native-thread-read-sync",
     "native-upstream-push",
-    "native-url-shares-and-previews"
+    "native-url-shares-and-previews",
+    "native-voice-60-second-notes"
   ]
 }
