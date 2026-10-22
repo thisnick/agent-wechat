@@ -22,6 +22,20 @@ the login operation's QR generation and expiry timestamp, then fetches the new
 PNG when that generation changes. The simulator PNG encodes a valid synthetic
 `agentwechat-simulator:login:…` payload, never an official login URL.
 
+The simulator gives each QR 120 seconds. The native protocol currently sets a
+local 240-second QR expiry; this is not an expiry timestamp decoded from the
+service response. The UI uses the hub's `expiresAt` for **Code refresh in …** and
+requests up to three automatic renewals within a nine-minute login operation.
+After scanning, the phone approval challenge keeps its own deadline. **Simulate
+code expiry**, under **Simulator test controls**, exercises renewal early; normal
+expiry requires no button press.
+
+Reopening the same account after a page reload resumes its saved login operation,
+including a QR already scanned on the phone. The tab stores only the login
+request key and operation ID, scoped to the hub's server ID and account. A lost
+login response retries the same key. A temporary lookup error does not start a
+second login; an ended challenge can start a new attempt.
+
 Open the URL in two browser tabs and choose the same account. Use **Simulator
 controls** to inject incoming text, phone-originated self-sends, an unavailable
 image, a rejection, or a lost send acknowledgment. Controls change synthetic
@@ -33,6 +47,11 @@ receipts remain distinct. **Check status** reads the receipt and never resends.
 Accepted history is fetched from the hub. The event stream resumes from the last
 processed cursor; expired cursors rebuild views before continuing. Account and
 conversation generations fence late requests.
+
+**Find in conversation** searches that conversation's stored history on the hub,
+including messages outside the browser's loaded page. **Load more matches**
+continues the same query using the hub's cursor. Clearing the query restores the
+chat; switching accounts or conversations discards any late search response.
 
 The hub access key stays in memory. Pending send keys/text/receipts are retained
 in this tab's session storage, scoped to the hub's server ID and account, so a
@@ -78,6 +97,18 @@ state. Only available bytes offer Download. No raw message XML is rendered as an
 attachment. The simulator supplies metadata rather than media bytes, so outgoing
 attachments are disabled. Phone read-state synchronization is not claimed.
 
+## UI integration status
+
+| Area             | Current browser behavior                                                                                        |
+| ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| Hub and accounts | Simulator bootstrap, bearer connection form, account creation/selection and switching                           |
+| Sign-in          | QR PNG, expiry countdown, automatic renewal, phone approval and automatic chat entry                            |
+| Conversations    | Contacts, thread filters, paginated history, stored-history search and group member details                     |
+| Messaging        | Text composer, stable send keys, receipt status, uncertain outcomes, self-sends and SSE replay                  |
+| Media            | Incoming availability states and download action; preview rendering, outgoing files and voice remain follow-ups |
+| Settings         | Appearance only; account logout, agent configuration and desktop settings remain follow-ups                     |
+| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                           |
+
 ## Verification
 
 ```sh
@@ -98,10 +129,9 @@ compatibility or live WeChat acceptance.
 Linux x64 verification on 2026-10-22 passed 419 native tests across the compiled
 workspace test executables in a non-root, read-only validation container with
 external networking disabled. Rust doc tests, pinned format/Clippy and generated
-contracts passed. The SDK passed 30 tests, the session model 11 and OpenClaw 211;
+contracts passed. The SDK passed 30 tests, the client models 19 and OpenClaw 211;
 TypeScript build/typecheck passed. The 18-check native simulator journey and the
-11-check real-session client journey also passed with external networking disabled.
+13-check real-session client journey also passed with external networking disabled.
 Browser checks covered QR/phone approval, automatic chat entry, two tabs,
 self-sends, uncertainty, media availability, automatic QR renewal, decoded QR
-payloads and viewport layout. This records
-Linux validation only.
+payloads, login recovery, stored-history search and viewport layout. This records Linux validation only.

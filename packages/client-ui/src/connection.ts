@@ -1,9 +1,11 @@
 import { NativeWeChatClient } from "@agent-wechat/shared";
 import { HubSession, type PendingSend } from "./session.ts";
+import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
 export type Connection = {
   session: HubSession;
   simulator: boolean;
   endpoint: string;
+  loginAttempt: (account: string) => LoginAttempt;
 };
 export async function connect(
   endpoint: string,
@@ -47,7 +49,47 @@ export async function connect(
     },
   });
   await session.accounts();
-  return { session, simulator, endpoint: client.baseUrl.origin };
+  const logins = new Map<string, SavedLogin>();
+  return {
+    session,
+    simulator,
+    endpoint: client.baseUrl.origin,
+    loginAttempt(account) {
+      const key = `agentwechat-login:${status.serverId}:${account}`;
+      return new LoginAttempt(client, account, {
+        read() {
+          try {
+            const saved = JSON.parse(sessionStorage.getItem(key) ?? "null");
+            if (
+              saved &&
+              typeof saved.key === "string" &&
+              saved.key.length > 0 &&
+              saved.key.length <= 200 &&
+              !/[\r\n]/.test(saved.key) &&
+              (saved.operationId === undefined ||
+                (typeof saved.operationId === "string" &&
+                  saved.operationId.length > 0 &&
+                  saved.operationId.length <= 200))
+            )
+              return saved;
+          } catch {
+            /* Use the in-memory fallback when browser storage is unavailable. */
+          }
+          return logins.get(account) ?? null;
+        },
+        write(value) {
+          if (value) logins.set(account, value);
+          else logins.delete(account);
+          try {
+            if (value) sessionStorage.setItem(key, JSON.stringify(value));
+            else sessionStorage.removeItem(key);
+          } catch {
+            /* The in-memory fallback still supports this page session. */
+          }
+        },
+      });
+    },
+  };
 }
 export async function bootstrap(): Promise<Connection | null> {
   const key = new URLSearchParams(location.hash.slice(1)).get("dev");

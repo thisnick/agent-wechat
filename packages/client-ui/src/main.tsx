@@ -28,6 +28,7 @@ import {
   type PendingSend,
 } from "./session.ts";
 import { Avatar, Button, Icon, Logo, Welcome } from "./ui.tsx";
+import { HistorySearch } from "./history-search.ts";
 import "./style.css";
 import "./onboarding.css";
 import "./client.css";
@@ -361,21 +362,13 @@ function Login({
   useEffect(() => {
     const controller = new AbortController();
     let url = "";
-    const key = crypto.randomUUID();
+    const login = connection.loginAttempt(account);
     void (async () => {
       try {
         setError("");
         setOperation(null);
         setQr("");
-        const op = await connection.session.client.login(
-          account,
-          {
-            strategy: "qr",
-            timeoutSeconds: 900,
-            qrRefresh: { mode: "auto", maxRefreshes: 3 },
-          },
-          key,
-        );
+        const op = await login.open();
         if (controller.signal.aborted) {
           await connection.session.client.cancelOperation(account, op.id);
           return;
@@ -400,6 +393,7 @@ function Login({
             qrGeneration?: number;
           } | null;
           if (current.state === "succeeded") {
+            login.complete(op.id);
             operationId.current = null;
             await signedIn();
             return;
@@ -409,6 +403,7 @@ function Login({
               current.state,
             )
           ) {
+            login.complete(op.id);
             operationId.current = null;
             return;
           }
@@ -513,10 +508,12 @@ function Login({
       </div>
       {qr && !terminal && state !== "awaiting_approval" && (
         <p className="qr-expiry" role="status">
-          Code refreshes automatically
+          {remaining === 0 ? "Refreshing code…" : "Code refresh in"}
           {remaining !== null && (!connection.simulator || clock !== null)
-            ? ` · ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`
-            : ""}
+            ? remaining > 0
+              ? ` ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`
+              : ""
+            : " a moment"}
         </p>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}
@@ -545,13 +542,16 @@ function Login({
             <Icon name="chevron" />
           </button>
           {state !== "awaiting_approval" && (
-            <button
-              className="quiet-button"
-              disabled={busy || !qr}
-              onClick={() => void simulate("expired")}
-            >
-              Expire this code
-            </button>
+            <details className="sim-login-tools">
+              <summary>Simulator test controls</summary>
+              <button
+                className="quiet-button"
+                disabled={busy || !qr}
+                onClick={() => void simulate("expired")}
+              >
+                Simulate code expiry
+              </button>
+            </details>
           )}
         </div>
       ) : (
@@ -589,6 +589,10 @@ function Chats({
     [simStatus, setSimStatus] = useState("");
   const [find, setFind] = useState(false),
     [inChat, setInChat] = useState("");
+  useEffect(() => {
+    setInChat("");
+    setFind(false);
+  }, [state.account, state.selected]);
   const messages = useRef<HTMLDivElement>(null);
   const account = state.accounts.find((a) => a.id === state.account);
   const name = (id: string) =>
@@ -803,7 +807,10 @@ function Chats({
             <Button
               icon="search"
               label="Find in conversation"
-              onClick={() => setFind(!find)}
+              onClick={() => {
+                setFind(!find);
+                setInChat("");
+              }}
             />
             <Button
               icon="panel"
@@ -816,8 +823,16 @@ function Chats({
               <input
                 aria-label="Find in this chat"
                 placeholder="Find in this chat…"
+                autoFocus
+                maxLength={64}
                 value={inChat}
                 onChange={(e) => setInChat(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setInChat("");
+                    setFind(false);
+                  }
+                }}
               />
             </label>
           )}
@@ -915,57 +930,66 @@ function Chats({
               role="log"
               aria-label="Messages"
             >
-              {state.nextMessages && (
-                <button
-                  className="load-history"
-                  disabled={state.loading}
-                  onClick={() => void session.older()}
-                >
-                  Load older messages
-                </button>
-              )}
-              {state.loading && <p className="date-label">Loading messages…</p>}
-              {state.messages.map((m, index) => (
-                <div
-                  key={m.id}
-                  style={{
-                    opacity:
-                      inChat &&
-                      !m.body
-                        ?.toLowerCase()
-                        .includes(inChat.toLowerCase())
-                        ?.valueOf()
-                        ? 0.25
-                        : 1,
-                  }}
-                >
-                  {index === 0 ||
-                  date(state.messages[index - 1].createdAt).toDateString() !==
-                    date(m.createdAt).toDateString() ? (
-                    <div className="date-label">
-                      {date(m.createdAt).toLocaleDateString([], {
-                        month: "long",
-                        day: "numeric",
-                      })}
+              {find && inChat.trim() && state.account && state.selected ? (
+                <SearchResults
+                  key={`${state.account}:${state.selected}`}
+                  connection={connection}
+                  account={state.account}
+                  thread={state.selected}
+                  query={inChat}
+                  name={name}
+                  close={() => setInChat("")}
+                />
+              ) : (
+                <>
+                  {state.nextMessages && (
+                    <button
+                      className="load-history"
+                      disabled={state.loading}
+                      onClick={() => void session.older()}
+                    >
+                      Load older messages
+                    </button>
+                  )}
+                  {state.loading && (
+                    <p className="date-label">Loading messages…</p>
+                  )}
+                  {state.messages.map((m, index) => (
+                    <div key={m.id}>
+                      {index === 0 ||
+                      date(
+                        state.messages[index - 1].createdAt,
+                      ).toDateString() !== date(m.createdAt).toDateString() ? (
+                        <div className="date-label">
+                          {date(m.createdAt).toLocaleDateString([], {
+                            month: "long",
+                            day: "numeric",
+                          })}
+                        </div>
+                      ) : null}
+                      <Message
+                        message={m}
+                        connection={connection}
+                        name={name}
+                      />
                     </div>
-                  ) : null}
-                  <Message message={m} connection={connection} name={name} />
-                </div>
-              ))}
-              {state.sends
-                .filter((s) => s.threadId === state.selected)
-                .map((s) => (
-                  <Pending
-                    key={s.key}
-                    send={s}
-                    check={() => void session.checkSend(s.key)}
-                  />
-                ))}
-              {!state.loading &&
-                state.selected &&
-                state.messages.length === 0 && (
-                  <p className="empty-chat">Start the conversation.</p>
-                )}
+                  ))}
+                  {state.sends
+                    .filter((s) => s.threadId === state.selected)
+                    .map((s) => (
+                      <Pending
+                        key={s.key}
+                        send={s}
+                        check={() => void session.checkSend(s.key)}
+                      />
+                    ))}
+                  {!state.loading &&
+                    state.selected &&
+                    state.messages.length === 0 && (
+                      <p className="empty-chat">Start the conversation.</p>
+                    )}
+                </>
+              )}
             </div>
             <div className="composer-wrap">
               <div className="composer">
@@ -1112,6 +1136,78 @@ function Chats({
         </div>
       )}
     </div>
+  );
+}
+function SearchResults({
+  connection,
+  account,
+  thread,
+  query,
+  name,
+  close,
+}: {
+  connection: Connection;
+  account: string;
+  thread: string;
+  query: string;
+  name: (id: string) => string;
+  close: () => void;
+}) {
+  const [search] = useState(
+    () => new HistorySearch(connection.session.client, account, thread),
+  );
+  const state = useSyncExternalStore(search.subscribe, search.snapshot);
+  useEffect(() => {
+    const timer = setTimeout(() => void search.search(query), 250);
+    return () => clearTimeout(timer);
+  }, [search, query]);
+  useEffect(() => () => search.close(), [search]);
+  const current = state.query === query.trim();
+  return (
+    <section
+      aria-label="Conversation search results"
+      className="history-search"
+    >
+      <div className="history-search-status">
+        <span role="status">
+          {!current || state.loading
+            ? "Searching history on this hub…"
+            : `${state.items.length}${state.nextCursor ? "+" : ""} ${state.items.length === 1 && !state.nextCursor ? "match" : "matches"} in this conversation`}
+        </span>
+        <button onClick={close}>Back to chat</button>
+      </div>
+      {current && state.error && (
+        <ErrorNotice>
+          {state.error}{" "}
+          <button onClick={() => void search.search(query)}>
+            Retry search
+          </button>
+        </ErrorNotice>
+      )}
+      {current &&
+        state.items.map((message) => (
+          <Message
+            key={message.id}
+            message={message}
+            connection={connection}
+            name={name}
+          />
+        ))}
+      {current && state.nextCursor && (
+        <button
+          className="load-history"
+          disabled={state.loading}
+          onClick={() => void search.more()}
+        >
+          Load more matches
+        </button>
+      )}
+      {current && !state.loading && !state.error && !state.items.length && (
+        <p className="empty-chat">
+          No matches in the history available on this hub.
+        </p>
+      )}
+    </section>
   );
 }
 function Pending({ send, check }: { send: PendingSend; check: () => void }) {

@@ -16,10 +16,29 @@
   letter-spacing: 1px;
   color: var(--muted);
 }
-.sim-phone > span {
-  display: block;
-  text-align: center;
+.sim-phone {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin-top: 18px;
+}
+.sim-phone > span {
+  text-align: center;
+}
+.sim-phone .continue-button {
+  margin-top: 0;
+}
+.sim-login-tools {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.sim-login-tools summary {
+  cursor: pointer;
+}
+.sim-login-tools .quiet-button {
+  margin-top: 12px;
 }
 .simulator-tools {
   padding: 10px 24px;
@@ -129,6 +148,37 @@
 .conversation-search input {
   width: 100%;
 }
+.search input:focus-visible {
+  outline: none;
+}
+.search:focus-within,
+.composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.history-search-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 24px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.history-search-status button {
+  color: var(--accent-ink);
+}
 .send-explanation {
   display: block;
   max-width: 280px;
@@ -226,11 +276,18 @@ input:focus-visible {
   }
 }
 
-.composer:focus-within {
-  border-color: color-mix(in srgb, var(--muted) 55%, var(--line));
-}
 .composer textarea:focus-visible {
   outline: none;
+}
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 0;
+}
+.composer-tools .field-help {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .qr-expiry {

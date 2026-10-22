@@ -8,6 +8,8 @@ import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NativeWeChatClient } from "../packages/shared/dist/index.js";
 import { HubSession } from "../packages/client-ui/src/session.ts";
+import { HistorySearch } from "../packages/client-ui/src/history-search.ts";
+import { LoginAttempt } from "../packages/client-ui/src/login-attempt.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary =
@@ -452,6 +454,81 @@ try {
       .length,
     1,
   );
+  await control({ op: "advance", seconds: 1 });
+  for (let index = 0; index < 110; index++)
+    await control({
+      op: "inbound",
+      account: "personal",
+      peer: "sim_mei",
+      body: `History pagination fixture ${index}`,
+      notify: false,
+    });
+  const searchSync = await client.sync("personal");
+  await wait(
+    "search history synchronized",
+    async () =>
+      (await client.operation("personal", searchSync.id)).state === "succeeded",
+  );
+  await wait(
+    "all search fixtures committed",
+    async () =>
+      (
+        await client.messages("personal", "sim_mei", {
+          query: "History pagination fixture",
+          limit: 200,
+        })
+      ).items.length === 110,
+  );
+  const recent = await client.messages("personal", "sim_mei", { limit: 100 });
+  assert.ok(
+    !recent.items.some((message) => message.body === "A real incoming push"),
+  );
+  const historySearch = new HistorySearch(client, "personal", "sim_mei");
+  await historySearch.search("A real incoming push");
+  assert.equal(historySearch.snapshot().error, null);
+  assert.deepEqual(
+    historySearch.snapshot().items.map((message) => message.body),
+    ["A real incoming push"],
+  );
+  await historySearch.search("History pagination fixture");
+  assert.ok(historySearch.snapshot().nextCursor);
+  while (historySearch.snapshot().nextCursor) await historySearch.more();
+  assert.equal(historySearch.snapshot().items.length, 110);
+  historySearch.close();
+  await client.createAccount("login-resume");
+  let savedLogin = null;
+  const loginStorage = {
+    read: () => savedLogin,
+    write: (value) => {
+      savedLogin = value;
+    },
+  };
+  const admittedLogin = await new LoginAttempt(
+    client,
+    "login-resume",
+    loginStorage,
+  ).open();
+  await wait(
+    "resumable QR ready",
+    async () =>
+      (await client.operation("login-resume", admittedLogin.id)).state ===
+      "awaiting_scan",
+  );
+  const resumedLogin = await new LoginAttempt(
+    client,
+    "login-resume",
+    loginStorage,
+  ).open();
+  assert.equal(resumedLogin.id, admittedLogin.id);
+  assert.equal(resumedLogin.state, "awaiting_scan");
+  await control({ op: "login", account: "login-resume", status: "scanned" });
+  await wait(
+    "resumed phone approval",
+    async () =>
+      (await new LoginAttempt(client, "login-resume", loginStorage).open())
+        .state === "awaiting_approval",
+  );
+  await client.cancelOperation("login-resume", admittedLogin.id);
   await launcherCheck();
   console.log(
     JSON.stringify({
@@ -466,6 +543,8 @@ try {
         "advertised media unavailable",
         "late real HTTP responses across account switch",
         "SSE reconnect and replay across hub restart",
+        "conversation search beyond loaded history with paginated matches",
+        "reopened QR and phone approval resume the same login operation",
         "UI launcher authentication and origin checks",
         "UI launcher owned-child and disposable-state cleanup",
       ],

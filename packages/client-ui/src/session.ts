@@ -60,6 +60,8 @@ export function readableError(error: unknown): string {
           unauthorized: "The hub access key wasn't accepted.",
           forbidden: "This access key doesn't allow that action.",
           auth_required: "Sign in to WeChat again.",
+          operation_in_progress:
+            "A sign-in is already running for this account. Finish it in the original tab, or try again after it expires.",
           idempotency_conflict: "This send key is already in use.",
           unsupported_simulator_operation:
             "This action isn't available on the simulator.",
