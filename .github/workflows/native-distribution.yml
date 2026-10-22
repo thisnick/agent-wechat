@@ -107,7 +107,12 @@ jobs:
           load: true
           tags: native-release-builder:ci
           labels: org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
+          # Export this solve directly: the later runtime solve must not replace
+          # the executable target's cache records on a fresh builder.
+          cache-from: |
+            type=gha,scope=native-linux-artifact-${{ runner.arch }}
+            type=gha,scope=native-linux-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=native-linux-artifact-${{ runner.arch }}
       - run: bash scripts/native-build-release.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
@@ -131,7 +136,9 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: agent-wechat-native:ci
-          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
+          cache-from: |
+            type=gha,scope=native-linux-artifact-${{ runner.arch }}
+            type=gha,scope=native-linux-${{ runner.arch }}
           cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
       - name: Check image identity without touching account data
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
