@@ -1129,6 +1129,9 @@ impl NativeClient {
             client_id,
         )
     }
+    /// Submit one voice note, as consecutive byte ranges when it exceeds one
+    /// request. Each range is sent once; an error after the first submission is
+    /// an uncertain outcome that the caller must not retry automatically.
     pub fn send_voice(
         &self,
         state: &mut AccountState,
@@ -1138,18 +1141,21 @@ impl NativeClient {
         duration_ms: u32,
         encoded: &[u8],
     ) -> Result<crate::media_send::MediaSendResult> {
-        let request = crate::media_send::voice_send_request(
-            state,
+        let mut upload = crate::media_send::VoiceUpload::new(
             destination,
             client_id,
             created_at,
             duration_ms,
             encoded,
         )?;
-        crate::media_send::decode_voice_send(
-            &self.authenticated_rpc(state, 127, "/cgi-bin/micromsg-bin/uploadvoice", &request)?,
-            client_id,
-        )
+        loop {
+            let request = upload.request(state)?;
+            let reply =
+                self.authenticated_rpc(state, 127, "/cgi-bin/micromsg-bin/uploadvoice", &request)?;
+            if let Some(result) = upload.accept_reply(&reply)? {
+                return Ok(result);
+            }
+        }
     }
 }
 

@@ -64,8 +64,14 @@ reconnect supervisor remain outside the verified scope. Avatar bytes
 still need full bounded image decoding in the caller. QR images receive bounded
 PNG-header checks only; supplied JPEG upload variants are fully decoded with
 pixel/allocation limits. MP4 preparation validates container signature, not full
-audio/video decoding. Voice finalization accepts short format-4 SILK objects; the bundled encoder can
-produce those from fresh PCM. It does not record a microphone.
+audio/video decoding. Voice finalization accepts format-4 SILK notes of up to 60
+seconds and 186,010 encoded bytes, a bound derived from the bundled 16 kbit/s,
+20 ms profile with 1.5x rate headroom; the bundled encoder can produce those from
+fresh PCM. A short-link request travels in one MMTLS record, so a note above
+32 KiB is submitted as consecutive `uploadvoice` offset/length ranges of one client
+message ID, with the end flag on the last range and the server message ID from an
+earlier range carried forward. That multi-range path has offline fixtures only and
+still requires live validation. It does not record a microphone.
 
 NewSync continuation follows raw returned versus sent cursor bytes; committed
 cursors use the unsigned per-key maximum merge (or special -2006 replacement).

@@ -1802,9 +1802,12 @@ impl Core {
                     !pcm.is_empty() && pcm.len() <= 300 * 16000,
                     "voice_duration_limit"
                 );
-                for (index, chunk) in pcm.chunks(10 * 16000).enumerate() {
+                for (index, chunk) in pcm.chunks(voice_note_samples(pcm.len())).enumerate() {
                     let encoded = wechat_protocol::silk::encode(chunk)?;
-                    ensure!(encoded.len() <= 48000, "unsupported_voice_chunk");
+                    ensure!(
+                        encoded.len() <= wechat_protocol::silk::MAX_NOTE_BYTES,
+                        "unsupported_voice_chunk"
+                    );
                     plan.voice.push(VoicePart {
                         client_id: format!("{}_{}", plan.client_id, index),
                         encoded,
@@ -2518,6 +2521,13 @@ fn pcm16k_wav(bytes: &[u8]) -> Result<Option<Vec<i16>>> {
             .map(|v| i16::from_le_bytes([v[0], v[1]]))
             .collect(),
     ))
+}
+/// Samples per voice note: audio up to the official 60-second limit stays one
+/// note; longer audio uses the fewest notes of equal length, so a clip slightly
+/// over a multiple of 60 seconds does not end with a near-empty note.
+fn voice_note_samples(total: usize) -> usize {
+    let notes = total.div_ceil(wechat_protocol::silk::MAX_SAMPLES).max(1);
+    total.div_ceil(notes).max(1)
 }
 fn audio_pcm(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<i16>> {
     if wechat_protocol::silk::validate_framing(bytes).is_ok() {
@@ -3284,6 +3294,30 @@ mod tests {
             )),
             "media_processing_failed"
         );
+    }
+    #[test]
+    fn voice_notes_split_only_beyond_sixty_seconds() {
+        let max = wechat_protocol::silk::MAX_SAMPLES;
+        assert_eq!(max, 60 * 16000);
+        let notes = |total: usize| {
+            let size = voice_note_samples(total);
+            assert!(size <= max, "{total}");
+            let lengths = vec![0i16; total]
+                .chunks(size)
+                .map(<[i16]>::len)
+                .collect::<Vec<_>>();
+            assert_eq!(lengths.iter().sum::<usize>(), total);
+            lengths
+        };
+        assert_eq!(notes(1), [1]);
+        assert_eq!(notes(10 * 16000), [10 * 16000]);
+        assert_eq!(notes(30 * 16000), [30 * 16000]);
+        assert_eq!(notes(max), [max]);
+        // Just over the limit: two equal halves, not 60 s plus a sliver.
+        assert_eq!(notes(max + 320), [max / 2 + 160, max / 2 + 160]);
+        assert_eq!(notes(90 * 16000), [45 * 16000, 45 * 16000]);
+        assert_eq!(notes(300 * 16000), [max; 5]);
+        assert_eq!(notes(300 * 16000 - 1).len(), 5);
     }
     #[test]
     fn fresh_audio_uses_independent_codec() {

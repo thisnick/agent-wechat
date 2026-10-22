@@ -231,7 +231,9 @@ server acceptance, not recipient delivery. `needs_review`/partial voice outcomes
 retain completed note IDs and must not automatically resend.
 
 The current native source cap is25MiB−17bytes, below the separate128MiB cached
-HTTP bound. Voice uses independent SILK encoding and splits at10seconds; video
+HTTP bound. Voice uses independent SILK encoding; one note holds up to 60
+seconds and longer audio splits into the fewest equal-length notes. Notes above
+about 15 seconds use a multi-request upload that is not yet live-verified. Video
 requires supported MP4 input and server-side FFmpeg preparation. The runtime
 image includes FFmpeg/FFprobe; direct installs must provision these tools for
 source normalization. Large-file branches and sticker sending are unavailable.

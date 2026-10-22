@@ -4,9 +4,11 @@
 #include "SKP_Silk_SDK_API.h"
 
 /* Small explicit FFI boundary; the caller owns all buffers and validates packet
- * framing before decode. One supported profile: mono16kHz/20ms/16kbps/complexity2. */
+ * framing before decode. One supported profile: mono16kHz/20ms/16kbps/complexity2.
+ * Encoding accepts at most one 60-second note (960000 samples); keep this profile
+ * aligned with BIT_RATE, FRAME_MS and MAX_SAMPLES in silk.rs. */
 int aw_silk_encode(const int16_t *pcm,int samples,uint8_t *out,int capacity,int *length){
- if(!pcm||!out||!length||samples<1||samples>800000||capacity<10)return -1;
+ if(!pcm||!out||!length||samples<1||samples>960000||capacity<10)return -1;
  int32_t state_size=0;if(SKP_Silk_SDK_Get_Encoder_Size(&state_size)||state_size<1||state_size>1048576)return -2;
  void *state=calloc(1,state_size);if(!state)return -3;
  SKP_SILK_SDK_EncControlStruct control;

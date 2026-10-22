@@ -2,7 +2,7 @@
 //! steps; persist source bytes, generated keys and intent before either step.
 use crate::{
     media::{MediaQuality, UploadedImage, UploadedMedia, UploadedVideo},
-    protobuf as p,
+    protobuf as p, silk,
     wire::base_request,
     AccountState,
 };
@@ -262,8 +262,10 @@ pub fn local_video_xml(video: &UploadedVideo, seconds: u32) -> Result<String> {
 }
 pub fn local_voice_xml(encoded_bytes: usize, duration_ms: u32) -> Result<String> {
     ensure!(
-        encoded_bytes > 0 && encoded_bytes <= 48000 && (1..=10000).contains(&duration_ms),
-        "Invalid short voice metadata"
+        encoded_bytes > 0
+            && encoded_bytes <= silk::MAX_NOTE_BYTES
+            && (1..=silk::MAX_NOTE_MS).contains(&duration_ms),
+        "Invalid voice note metadata"
     );
     Ok(local_element(
         "voicemsg",
@@ -426,50 +428,164 @@ pub fn video_send_request(
         p::uint(38, 0),
     ])
 }
-pub fn voice_send_request(
-    state: &AccountState,
-    destination: &str,
-    client_id: &str,
+/// Encoded SILK bytes carried by one `uploadvoice` request. A short-link
+/// request travels in one MMTLS record of at most 65,519 plaintext bytes,
+/// including the route, packet header and envelope, so a 60-second note (about
+/// 126-131 KB from the bundled 16 kbit/s profile) cannot use one request. 32 KiB
+/// matches the `downloadvoice` range size and leaves room for that overhead.
+pub const VOICE_UPLOAD_CHUNK_BYTES: usize = 32 * 1024;
+
+/// One voice note submitted through `uploadvoice`. A note of at most
+/// [`VOICE_UPLOAD_CHUNK_BYTES`] uses a single request with the end flag set.
+/// A larger note is sent as consecutive byte ranges (offset/length) under the
+/// same client message ID; only the last range sets the end flag, and later
+/// ranges carry a server message ID returned for an earlier range. Each range
+/// is submitted once: an error after any submission is an uncertain outcome.
+pub struct VoiceUpload<'a> {
+    destination: &'a str,
+    client_id: &'a str,
     created_at: u32,
     duration_ms: u32,
-    encoded: &[u8],
-) -> Result<Vec<u8>> {
-    clean(destination, 512)?;
-    let client = clean(client_id, 128)?;
-    ensure!(
-        client.len() >= 16
-            && client
-                .iter()
-                .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'),
-        "Invalid voice client ID"
-    );
-    ensure!(
-        created_at > 0
-            && (1..=10000).contains(&duration_ms)
-            && encoded.len() >= 12
-            && encoded.len() <= 48000
-            && encoded[0] == 2
-            && encoded[1..10] == *b"#!SILK_V3",
-        "Unsupported bounded SILK voice profile"
-    );
-    p::message(&[
-        p::bytes(1, state.own_username.as_bytes()),
-        p::bytes(2, destination.as_bytes()),
-        p::uint(3, 0),
-        p::uint(4, encoded.len() as u64),
-        p::bytes(5, client),
-        p::uint(7, duration_ms as u64),
-        p::bytes(8, &p::buffer(encoded)),
-        p::uint(9, 1),
-        p::bytes(10, &base_request(&state.device, state.uin, 0)?),
-        p::uint(11, 4),
-        p::uint(13, 0),
-        p::uint(15, 0),
-        p::uint(16, 0),
-        p::uint(17, created_at as u64),
-        p::bytes(18, &p::buffer(client)),
-        p::bytes(21, &[]),
-    ])
+    encoded: &'a [u8],
+    offset: usize,
+    server_msg_id: Option<u32>,
+    new_msg_id: Option<u64>,
+}
+impl<'a> VoiceUpload<'a> {
+    pub fn new(
+        destination: &'a str,
+        client_id: &'a str,
+        created_at: u32,
+        duration_ms: u32,
+        encoded: &'a [u8],
+    ) -> Result<Self> {
+        clean(destination, 512)?;
+        let client = clean(client_id, 128)?;
+        ensure!(
+            client.len() >= 16
+                && client
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'),
+            "Invalid voice client ID"
+        );
+        ensure!(
+            created_at > 0
+                && (1..=silk::MAX_NOTE_MS).contains(&duration_ms)
+                && encoded.len() >= 12
+                && encoded.len() <= silk::MAX_NOTE_BYTES
+                && encoded[0] == 2
+                && encoded[1..10] == *b"#!SILK_V3",
+            "Unsupported bounded SILK voice profile"
+        );
+        Ok(Self {
+            destination,
+            client_id,
+            created_at,
+            duration_ms,
+            encoded,
+            offset: 0,
+            server_msg_id: None,
+            new_msg_id: None,
+        })
+    }
+    fn range(&self) -> std::ops::Range<usize> {
+        self.offset..(self.offset + VOICE_UPLOAD_CHUNK_BYTES).min(self.encoded.len())
+    }
+    /// Number of requests needed for the whole note.
+    pub fn request_count(&self) -> usize {
+        self.encoded.len().div_ceil(VOICE_UPLOAD_CHUNK_BYTES)
+    }
+    /// Whether the next request carries the last range and the end flag.
+    pub fn is_final(&self) -> bool {
+        self.range().end == self.encoded.len()
+    }
+    /// Build the request for the next unsent range.
+    pub fn request(&self, state: &AccountState) -> Result<Vec<u8>> {
+        let range = self.range();
+        let chunk = &self.encoded[range.clone()];
+        let client = self.client_id.as_bytes();
+        let mut parts = vec![
+            p::bytes(1, state.own_username.as_bytes()),
+            p::bytes(2, self.destination.as_bytes()),
+            p::uint(3, range.start as u64),
+            p::uint(4, chunk.len() as u64),
+            p::bytes(5, client),
+        ];
+        if let Some(id) = self.server_msg_id {
+            parts.push(p::uint(6, id.into()));
+        }
+        parts.extend([
+            p::uint(7, self.duration_ms.into()),
+            p::bytes(8, &p::buffer(chunk)),
+            p::uint(9, self.is_final().into()),
+            p::bytes(10, &base_request(&state.device, state.uin, 0)?),
+            p::uint(11, 4),
+            p::uint(13, 0),
+            p::uint(15, 0),
+            p::uint(16, 0),
+            p::uint(17, self.created_at.into()),
+            p::bytes(18, &p::buffer(client)),
+            p::bytes(21, &[]),
+        ]);
+        p::message(&parts)
+    }
+    /// Apply the reply for the request built last. Returns the note's result
+    /// after the final range, or `None` when the next range must be sent. A
+    /// rejection after an earlier range was accepted needs review, because the
+    /// server already holds part of the note under this client message ID.
+    pub fn accept_reply(&mut self, input: &[u8]) -> Result<Option<MediaSendResult>> {
+        let continued = self.offset > 0;
+        if self.is_final() {
+            let mut result = decode_voice_send(input, self.client_id)?;
+            let changed = self.new_msg_id.is_some_and(|known| {
+                result.server_message_id.as_deref() != Some(known.to_string().as_str())
+            });
+            if (continued && result.status == SendStatus::Rejected) || changed {
+                result.status = SendStatus::NeedsReview;
+            }
+            return Ok(Some(result));
+        }
+        let (f, code) = voice_reply(input)?;
+        if code != 0 {
+            let mut result = rejected(code);
+            if continued {
+                result.status = SendStatus::NeedsReview;
+            }
+            return Ok(Some(result));
+        }
+        let scalar = |n| -> Result<Option<u64>> {
+            Ok(match p::optional(&f, n)? {
+                Some(p::Value::Varint(v)) => Some(*v),
+                _ => None,
+            })
+        };
+        for n in [3, 4, 5, 7, 8, 9] {
+            if let Some(v) = scalar(n)? {
+                u32::try_from(v)?;
+            }
+        }
+        ensure!(
+            scalar(9)?.unwrap_or(0) == 0,
+            "Voice upload ended before its last range"
+        );
+        if let Some(id) = scalar(7)?.filter(|id| *id != 0) {
+            let id = u32::try_from(id)?;
+            ensure!(
+                self.server_msg_id.is_none_or(|known| known == id),
+                "Voice upload message ID changed"
+            );
+            self.server_msg_id = Some(id);
+        }
+        if let Some(id) = scalar(12)?.filter(|id| *id != 0) {
+            ensure!(
+                self.new_msg_id.is_none_or(|known| known == id),
+                "Voice upload message ID changed"
+            );
+            self.new_msg_id = Some(id);
+        }
+        self.offset = self.range().end;
+        Ok(None)
+    }
 }
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -584,7 +700,7 @@ pub fn decode_video_send(input: &[u8], client_id: &str) -> Result<MediaSendResul
         client_id_matches: matches.then_some(true),
     })
 }
-pub fn decode_voice_send(input: &[u8], client_id: &str) -> Result<MediaSendResult> {
+fn voice_reply(input: &[u8]) -> Result<(Vec<p::Field>, i32)> {
     let f = p::decode(input)?;
     for n in 1..=13 {
         let v = p::optional(&f, n)?;
@@ -601,6 +717,11 @@ pub fn decode_voice_send(input: &[u8], client_id: &str) -> Result<MediaSendResul
     }
     let base = p::decode(p::data(&f, 10)?)?;
     let code = p::scalar(&base, 1)? as u32 as i32;
+    Ok((f, code))
+}
+/// Decode the reply to the request carrying a note's end flag.
+pub fn decode_voice_send(input: &[u8], client_id: &str) -> Result<MediaSendResult> {
+    let (f, code) = voice_reply(input)?;
     if code != 0 {
         return Ok(rejected(code));
     }
@@ -633,12 +754,10 @@ pub fn decode_voice_send(input: &[u8], client_id: &str) -> Result<MediaSendResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn metadata_matches_independent_synthetic_wire_vectors() {
-        use crate::{media::MediaDescriptor, DeviceProfile};
-        let state = AccountState {
+    fn synthetic_state() -> AccountState {
+        AccountState {
             schema: 1,
-            device: DeviceProfile {
+            device: crate::DeviceProfile {
                 device_id: vec![1; 16],
                 device_type: "UnifiedPCLinux synthetic x86_64".into(),
                 client_version: -227271398,
@@ -655,7 +774,12 @@ mod tests {
             auth_snapshot: Default::default(),
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
-        };
+        }
+    }
+    #[test]
+    fn metadata_matches_independent_synthetic_wire_vectors() {
+        use crate::media::MediaDescriptor;
+        let state = synthetic_state();
         let descriptor = |quality, file_name: &str| UploadedMedia {
             descriptor: MediaDescriptor {
                 file_id: "synthetic-file-id".into(),
@@ -732,21 +856,200 @@ mod tests {
             ),
             expected["videoHex"]
         );
+        // A note that fits one request keeps the single end-flagged request shape.
         let encoded = [vec![2], b"#!SILK_V3".to_vec(), vec![0; 6]].concat();
+        let upload = VoiceUpload::new(
+            "filehelper",
+            "synthetic_client_id_0001",
+            1234567,
+            4000,
+            &encoded,
+        )
+        .unwrap();
+        assert_eq!((upload.request_count(), upload.is_final()), (1, true));
         assert_eq!(
-            hex::encode(
-                voice_send_request(
-                    &state,
-                    "filehelper",
-                    "synthetic_client_id_0001",
-                    1234567,
-                    4000,
-                    &encoded
-                )
-                .unwrap()
-            ),
+            hex::encode(upload.request(&state).unwrap()),
             expected["voiceHex"]
         );
+    }
+    fn synthetic_note(len: usize) -> Vec<u8> {
+        let mut note = [vec![2], b"#!SILK_V3".to_vec()].concat();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        note.extend((note.len()..len).map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        }));
+        note
+    }
+    fn voice_reply_bytes(code: i32, extra: &[Vec<u8>]) -> Vec<u8> {
+        let mut parts = vec![p::bytes(10, &p::int32(1, code))];
+        parts.extend_from_slice(extra);
+        p::message(&parts).unwrap()
+    }
+    #[test]
+    fn long_voice_note_uses_consecutive_ranges_of_one_client_id() {
+        let state = synthetic_state();
+        let client = "synthetic_voice_id";
+        let note = synthetic_note(2 * VOICE_UPLOAD_CHUNK_BYTES + 100);
+        let mut upload = VoiceUpload::new("filehelper", client, 1234567, 60_000, &note).unwrap();
+        assert_eq!(upload.request_count(), 3);
+        let mut sent = vec![];
+        for (index, (offset, length)) in [
+            (0, VOICE_UPLOAD_CHUNK_BYTES),
+            (VOICE_UPLOAD_CHUNK_BYTES, VOICE_UPLOAD_CHUNK_BYTES),
+            (2 * VOICE_UPLOAD_CHUNK_BYTES, 100),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let f = p::decode(&upload.request(&state).unwrap()).unwrap();
+            assert_eq!(p::data(&f, 5).unwrap(), client.as_bytes());
+            assert_eq!(p::scalar(&f, 3).unwrap(), offset as u64);
+            assert_eq!(p::scalar(&f, 4).unwrap(), length as u64);
+            assert_eq!(p::scalar(&f, 7).unwrap(), 60_000);
+            assert_eq!(p::scalar(&f, 9).unwrap(), u64::from(index == 2));
+            assert_eq!(p::scalar(&f, 11).unwrap(), 4);
+            // Later ranges continue the server message ID returned by the first.
+            assert_eq!(
+                p::optional(&f, 6).unwrap().is_some(),
+                index > 0,
+                "range {index}"
+            );
+            if index > 0 {
+                assert_eq!(p::scalar(&f, 6).unwrap(), 77);
+            }
+            let data = p::unbuffer(p::data(&f, 8).unwrap()).unwrap();
+            assert_eq!(data.len(), length);
+            sent.extend(data);
+            let reply = if index < 2 {
+                voice_reply_bytes(
+                    0,
+                    &[
+                        p::uint(3, offset as u64),
+                        p::uint(4, length as u64),
+                        p::bytes(6, client.as_bytes()),
+                        p::uint(7, 77),
+                        p::uint(9, 0),
+                    ],
+                )
+            } else {
+                let mut extra = vec![p::bytes(6, client.as_bytes()), p::uint(12, 9_000)];
+                extra.extend([3, 4, 5, 7, 8, 9].map(|n| p::uint(n, 0)));
+                voice_reply_bytes(0, &extra)
+            };
+            let result = upload.accept_reply(&reply).unwrap();
+            assert_eq!(result.is_some(), index == 2);
+            if let Some(result) = result {
+                assert_eq!(result.status, SendStatus::ServerAccepted);
+                assert_eq!(result.server_message_id.as_deref(), Some("9000"));
+            }
+        }
+        assert_eq!(sent, note);
+    }
+    #[test]
+    fn long_voice_note_partial_or_odd_replies_stop_without_acceptance() {
+        let note = synthetic_note(2 * VOICE_UPLOAD_CHUNK_BYTES + 100);
+        let start =
+            || VoiceUpload::new("filehelper", "synthetic_voice_id", 1, 60_000, &note).unwrap();
+        let progress = voice_reply_bytes(0, &[p::uint(7, 5), p::uint(9, 0)]);
+        // Rejecting the first range leaves nothing on the server.
+        let mut upload = start();
+        let result = upload
+            .accept_reply(&voice_reply_bytes(-2, &[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (result.status, result.service_code),
+            (SendStatus::Rejected, -2)
+        );
+        // A later rejection follows accepted ranges and needs review.
+        let mut upload = start();
+        assert!(upload.accept_reply(&progress).unwrap().is_none());
+        let result = upload
+            .accept_reply(&voice_reply_bytes(-2, &[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, SendStatus::NeedsReview);
+        let mut upload = start();
+        assert!(upload.accept_reply(&progress).unwrap().is_none());
+        assert!(upload.accept_reply(&progress).unwrap().is_none());
+        assert!(upload.is_final());
+        let result = upload
+            .accept_reply(&voice_reply_bytes(-2, &[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, SendStatus::NeedsReview);
+        // An early end flag or a changed server message ID is an uncertain error.
+        let mut upload = start();
+        assert!(upload
+            .accept_reply(&voice_reply_bytes(0, &[p::uint(9, 1)]))
+            .is_err());
+        let mut upload = start();
+        assert!(upload.accept_reply(&progress).unwrap().is_none());
+        assert!(upload
+            .accept_reply(&voice_reply_bytes(0, &[p::uint(7, 6)]))
+            .is_err());
+        // A final ID that differs from one announced earlier needs review.
+        let mut upload = start();
+        let early_id = voice_reply_bytes(0, &[p::uint(12, 41)]);
+        assert!(upload.accept_reply(&early_id).unwrap().is_none());
+        assert!(upload.accept_reply(&early_id).unwrap().is_none());
+        let mut extra = vec![p::bytes(6, b"synthetic_voice_id"), p::uint(12, 42)];
+        extra.extend([3, 4, 5, 7, 8, 9].map(|n| p::uint(n, 0)));
+        let result = upload
+            .accept_reply(&voice_reply_bytes(0, &extra))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, SendStatus::NeedsReview);
+    }
+    #[test]
+    fn voice_note_bounds_follow_the_sixty_second_profile() {
+        let note = synthetic_note(silk::MAX_NOTE_BYTES);
+        assert!(VoiceUpload::new("filehelper", "synthetic_voice_id", 1, 60_000, &note).is_ok());
+        assert!(VoiceUpload::new("filehelper", "synthetic_voice_id", 1, 60_001, &note).is_err());
+        let oversized = synthetic_note(silk::MAX_NOTE_BYTES + 1);
+        assert!(
+            VoiceUpload::new("filehelper", "synthetic_voice_id", 1, 60_000, &oversized).is_err()
+        );
+        assert!(local_voice_xml(silk::MAX_NOTE_BYTES, 60_000).is_ok());
+        assert!(local_voice_xml(silk::MAX_NOTE_BYTES + 1, 60_000).is_err());
+        assert!(local_voice_xml(1000, 60_001).is_err());
+        assert!(local_voice_xml(1000, 0).is_err());
+    }
+    #[test]
+    fn largest_voice_request_fits_one_short_link_record() {
+        // Worst case: longest accepted identities, a full incompressible range,
+        // either packet mode and the longest host name the route can carry.
+        let mut state = synthetic_state();
+        state.own_username = "u".repeat(256);
+        let destination = "d".repeat(512);
+        let client = "c".repeat(128);
+        let note = synthetic_note(silk::MAX_NOTE_BYTES);
+        let upload = VoiceUpload::new(&destination, &client, u32::MAX, 60_000, &note).unwrap();
+        let request = upload.request(&state).unwrap();
+        let path = b"/cgi-bin/micromsg-bin/uploadvoice";
+        for keys in [vec![], vec![2; 24]] {
+            state.request_key = keys.clone();
+            state.response_key = keys;
+            let packet = crate::business::AuthenticatedPacket::prepare(&state, 127, &request)
+                .unwrap()
+                .packet
+                .clone();
+            let route = crate::mmtls::section(
+                &[
+                    (path.len() as u16).to_be_bytes().as_slice(),
+                    path,
+                    &253u16.to_be_bytes(),
+                    &[b'h'; 253],
+                    &crate::mmtls::section(&packet),
+                ]
+                .concat(),
+            );
+            assert!(route.len() <= 65519, "{}", route.len());
+            assert!(crate::mmtls::seal(0x17, &route, &[0; 16], &[0; 12], 2).is_ok());
+        }
     }
     #[test]
     fn voice_response_needs_unique_correlation() {
