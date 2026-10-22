@@ -30,6 +30,7 @@ env:
   CARGO_PROFILE_DEV_OPT_LEVEL: 1
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  FFMPEG_RELEASE: autobuild-2026-10-22-13-06
 
 jobs:
   native:
@@ -38,6 +39,13 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         suite: [lint, test]
+        include:
+          - runner: ubuntu-24.04
+            ffmpeg_asset: ffmpeg-n8.1.3-23-g5c4f5744cd-linux64-lgpl-8.1.tar.xz
+            ffmpeg_sha256: 309502e48756a917bafa9bf30a3d73098491750d1211637eed7d19e06c17f7c8
+          - runner: ubuntu-24.04-arm
+            ffmpeg_asset: ffmpeg-n8.1.3-23-g5c4f5744cd-linuxarm64-lgpl-8.1.tar.xz
+            ffmpeg_sha256: 6a601112e0d032676f2048205fabe998900d44bac2a57f7ca35619c705326002
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -66,13 +74,32 @@ jobs:
         run: cargo fmt --all --check
       - if: matrix.suite == 'lint'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Ensure image decoder runtime
+      - name: Restore pinned image decoder runtime
+        if: matrix.suite == 'test'
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/native-ffmpeg
+          key: native-ffmpeg-${{ runner.arch }}-${{ matrix.ffmpeg_sha256 }}
+      - name: Install verified image decoder runtime
+        if: matrix.suite == 'test' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        env:
+          FFMPEG_ASSET: ${{ matrix.ffmpeg_asset }}
+          FFMPEG_SHA256: ${{ matrix.ffmpeg_sha256 }}
+        run: |
+          archive="$RUNNER_TEMP/native-ffmpeg.tar.xz"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ASSET" \
+            --output "$archive"
+          printf '%s  %s\n' "$FFMPEG_SHA256" "$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/native-ffmpeg"
+          tar -xJf "$archive" --strip-components=1 -C "$RUNNER_TEMP/native-ffmpeg"
+      - name: Enable the pinned image decoder
         if: matrix.suite == 'test'
         run: |
-          if ! command -v ffmpeg >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends ffmpeg
-          fi
+          "$RUNNER_TEMP/native-ffmpeg/bin/ffmpeg" -version
+          "$RUNNER_TEMP/native-ffmpeg/bin/ffprobe" -version
+          echo "$RUNNER_TEMP/native-ffmpeg/bin" >> "$GITHUB_PATH"
       - if: matrix.suite == 'test'
         run: cargo test --workspace --locked
       - if: matrix.suite == 'test'
