@@ -277,22 +277,21 @@ body {
   color: #858783;
 }
 .illustration-viewport {
-  width: calc(100% + var(--story-inset) * 2);
-  margin-inline: calc(var(--story-inset) * -1);
+  width: min(
+    calc(100% + var(--story-inset)),
+    600px,
+    max(180px, calc((100dvh - 420px) * 460 / 282))
+  );
   aspect-ratio: 460 / 282;
-  min-height: 0;
-  flex-shrink: 1;
-  overflow: hidden;
-  position: relative;
+  flex-shrink: 0;
 }
 .app-illustration {
   display: block;
-  position: absolute;
-  width: 133.333333%;
+  width: 100%;
   height: auto;
   aspect-ratio: 460 / 282;
-  top: 0;
-  right: 0;
+  transform: perspective(1800px) rotateY(-4deg) rotateX(1deg);
+  transform-origin: left center;
   border-radius: 12px;
   box-shadow: 0 20px 40px #0002;
 }

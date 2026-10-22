@@ -3,4 +3,4 @@
 "@agent-wechat/shared": patch
 ---
 
-Add a connected browser development client for the isolated Rust hub and synthetic upstream, with QR sign-in, account selection, conversations, text send receipts and event replay. Render valid synthetic QR codes and renew expired codes automatically using the hub login policy. Preserve the browser fetch receiver in the shared SDK and expose stream activity so clients report a connection after receiving a frame.
+Add a connected browser development client for the isolated Rust hub and synthetic upstream, with QR sign-in, account selection, conversations, text send receipts and event replay. Render valid synthetic QR codes and renew expired codes automatically using the hub login policy. Scale the sign-in illustration proportionally from the text's left edge. Preserve the browser fetch receiver in the shared SDK and expose stream activity so clients report a connection after receiving a frame.
