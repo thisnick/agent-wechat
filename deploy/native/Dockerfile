@@ -23,6 +23,13 @@ COPY packages/native-client-rust/ ./
 RUN cargo test --workspace --locked \
     && cargo build --release --locked
 
+# CI extracts one tested binary. Exporting this stage avoids loading the Rust
+# toolchain and both profiles' compiled dependencies into the Docker daemon.
+FROM scratch AS release-artifact
+COPY --from=builder /build/target/release/wx /build/target/release/wx
+# docker create requires a command; this extraction image is never started.
+CMD ["/build/target/release/wx"]
+
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tini ffmpeg \

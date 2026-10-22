@@ -97,7 +97,12 @@ jobs:
           path: |
             node_modules
             packages/*/node_modules
-          key: portable-pnpm-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ steps.cache-key.outputs.pnpm }}
+          # Node 24 patch releases share the native module ABI. Runner image
+          # updates must not force another full installation of the same lock.
+          key: portable-pnpm-${{ runner.os }}-${{ runner.arch }}-node24-${{ steps.cache-key.outputs.pnpm }}
+          restore-keys: |
+            portable-pnpm-${{ runner.os }}-${{ runner.arch }}-node24-
+            portable-pnpm-${{ runner.os }}-${{ runner.arch }}-v24.
       - if: steps.node-modules.outputs.cache-hit != 'true'
         run: pnpm install --frozen-lockfile --filter @agent-wechat/agent-wechat...
       - run: pnpm --filter @agent-wechat/agent-wechat... build
@@ -144,8 +149,15 @@ jobs:
       - name: Validate actual executable and npm installation
         run: |
           BINARY=$(node --input-type=module -e "import {assetName} from './packages/cli/scripts/native-runtime.mjs'; import fs from 'node:fs'; console.log('artifacts/native/'+assetName(JSON.parse(fs.readFileSync('packages/cli/package.json')).version))")
-          node scripts/native-platform-smoke.mjs "$BINARY"
-          node scripts/native-package-smoke.mjs artifacts/native
+          # Both checks read the artifact and create independent temporary data.
+          node scripts/native-platform-smoke.mjs "$BINARY" &
+          platform_smoke=$!
+          node scripts/native-package-smoke.mjs artifacts/native &
+          package_smoke=$!
+          smoke_status=0
+          wait "$platform_smoke" || smoke_status=1
+          wait "$package_smoke" || smoke_status=1
+          exit "$smoke_status"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_prefix || 'native-validation' }}-${{ matrix.target }}

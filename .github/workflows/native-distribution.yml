@@ -102,7 +102,7 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: deploy/native/Dockerfile
-          target: builder
+          target: release-artifact
           platforms: ${{ matrix.platform }}
           load: true
           tags: native-release-builder:ci
