@@ -55,7 +55,7 @@ Override any of this per group in `groups`, keyed by group ID, with `"*"` for al
 Here the agent answers Alice and Bob directly. In the family group it answers Alice and Bob without needing a mention. In the project group it answers only Carol, when she mentions you. Every other group is ignored.
 
 <Aside title="Good to know">
-- **Find IDs** with `wx contacts find NAME` for people and `wx groups get ID` or `wx chats list` for groups. Group IDs end in `@chatroom`.
+- **Find IDs** with `wx contacts find NAME` for people and `wx chats find NAME` for groups (group IDs end in `@chatroom`). Your own ID is the `senderId` on messages you sent.
 - **A mention means a real WeChat @mention** of your account. Typing "@yourname" as plain text doesn't count.
 - **Group context:** `messages.groupChat.historyLimit` sets how many unmentioned messages are kept per group (default 50, maximum 200, 0 turns it off). Images in that context are downloaded only when a mention triggers a reply.
 - **Recalled messages** are removed from the context, even if they were never answered.

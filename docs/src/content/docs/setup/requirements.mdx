@@ -1,28 +1,19 @@
 ---
 title: What you need
-description: The machine, WeChat profile and tools to have ready before you install.
+description: The machine, tools and WeChat account to have ready before you install.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 | You need | Why |
 | --- | --- |
-| **A Linux machine for the daemon**: x64 or ARM64, glibc 2.36+ (Debian 12, Ubuntu 24.04 or newer) | Taking over a WeChat profile only works on Linux for now. Alpine (musl) isn't supported. |
-| **An existing WeChat for Linux profile** | agent-wechat takes over the files of an account that has already logged in to WeChat for Linux. It can't create a profile from scratch yet. |
-| **The WeChat app closed** | Only one program may write to the profile at a time. |
-| **Your phone, logged in to the same account** | WeChat may ask you to approve the login or scan a QR code. |
+| **A computer to run the daemon**: Linux, macOS (Apple Silicon) or Windows | `wx serve` runs there and stays connected to WeChat. On Linux, glibc 2.36+ (Debian 12, Ubuntu 24.04 or newer). |
+| **WeChat on your phone** | You log in by scanning a QR code or approving on the phone. |
 | **FFmpeg and FFprobe** | Used for voice and video sends and some image previews. The Docker image includes them. |
-| **Node 24.16+** | Only for the npm installer. The standalone binary doesn't need Node. |
+| **Node 24.16+** | Only if you install with npm or pnpm. |
+| **Optional: WeChat for Linux data** | To keep your existing chat history, agent-wechat can use the data folder of WeChat for Linux. Without it, you start with a new profile. |
 
-## Where `wx` runs
-
-| Platform | CLI | Daemon |
-| --- | --- | --- |
-| Linux x64 / ARM64 | Yes | Yes |
-| macOS on Apple Silicon | Yes | Release candidate; can't take over a profile yet |
-| Windows x64 / ARM64 | Yes | Release candidate; can't take over a profile yet |
-
-macOS and Windows builds ship from version 1.0.0-beta.9. On those machines, the usual setup is the `wx` CLI (or OpenClaw) talking to a daemon on Linux or in Docker.
+Docker works too, on Linux or through Docker Desktop on macOS and Windows.
 
 Next: [install](/setup/install/).
 
@@ -30,17 +21,17 @@ Next: [install](/setup/install/).
 
 | Works | Not yet |
 | --- | --- |
-| Log in with saved device trust, phone approval or a QR code | Creating groups, inviting or removing members |
-| Read local history, contacts, groups and members | Fetching history the profile never had |
+| Log in with a QR code or phone approval | Creating groups, inviting or removing members |
+| Read history, contacts, groups and members | Fetching old history from WeChat's servers |
 | Receive new messages as they arrive | Sending stickers and very large files |
-| Send text, images, files, video, voice and link cards | Profiles from WeChat for macOS or Windows |
-| Download images, files, video and voice | Keeping WeChat's own search index up to date |
-| Recall your own messages | Proxy support for outgoing connections |
+| Send text, images, files, video, voice and link cards | Using data from WeChat for macOS or Windows |
+| Download images, files, video and voice | Proxy support for outgoing connections |
+| Recall your own messages | |
 | Mark chats read and notify your other devices | |
 
 <Aside title="Good to know">
-- OpenClaw and HTTP API clients can run on any OS, as long as they can reach the daemon.
-- macOS and Windows support is new. The [platform checklist](https://github.com/thisnick/agent-wechat/blob/main/dev-notes/native-platform-acceptance.md) shows what has been tested.
-- agent-wechat checks the profile's format before it writes anything, and stops if it doesn't recognize it.
-- Creating a new profile, copying a profile elsewhere, and handing a profile back to the WeChat app are experimental. See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for what has been tested and how.
+- **History comes from your WeChat data, not the server.** WeChat doesn't resend old chats to a new login, so a new profile only fills up from now on.
+- **Your data stays in WeChat's own format.** agent-wechat reads and writes the same files WeChat for Linux uses, so it can pick up where that app left off.
+- OpenClaw and other clients can run on any machine that can reach the daemon.
+- See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for what has been tested and how.
 </Aside>

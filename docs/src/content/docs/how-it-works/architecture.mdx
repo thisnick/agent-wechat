@@ -10,7 +10,7 @@ flowchart LR
   CLI[wx CLI]
   OC[OpenClaw plugin]
   App[Other agents and apps]
-  subgraph Host["Linux host"]
+  subgraph Host["Your machine"]
     W["wx serve"]
     P[("WeChat profile<br/>history, contacts, media")]
     S[("Daemon data<br/>credentials, jobs, events")]
@@ -26,7 +26,7 @@ flowchart LR
 
 `wx serve` speaks WeChat's own protocol, like the desktop app does. No WeChat app, screen or browser runs anywhere.
 
-**Your WeChat profile stays the main store.** History, contacts and media are read from and written to the same encrypted files WeChat for Linux uses. Messages the daemon sends or receives appear there just as if the app had handled them.
+**Your WeChat profile stays the main store.** History, contacts and media are kept in the same encrypted format WeChat for Linux uses, either in a profile the daemon created or in an existing one used with `--official`. Messages the daemon sends or receives are written there as if the app had handled them.
 
 **The daemon keeps its own data separately:** login credentials, queued sends and downloads, the event log, and anything the profile has no place for.
 

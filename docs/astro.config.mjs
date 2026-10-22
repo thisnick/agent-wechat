@@ -71,7 +71,7 @@ export default defineConfig({
         ] },
         { label: 'How it works', items: [
           { label: 'Architecture', slug: 'how-it-works/architecture' },
-          { label: 'Message lifecycle', slug: 'how-it-works/message-lifecycle' },
+          { label: 'How wx talks to WeChat', slug: 'how-it-works/wechat' },
           { label: 'Sends and recovery', slug: 'how-it-works/sends' },
           { label: 'Message types', slug: 'how-it-works/message-types' },
           { label: 'Storage and backups', slug: 'how-it-works/storage' },

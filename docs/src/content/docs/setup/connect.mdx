@@ -1,38 +1,51 @@
 ---
 title: Connect your account
-description: Start the daemon, take over your WeChat profile and log in.
+description: Start the daemon and log in to WeChat, with a new profile or your existing WeChat data.
 ---
 
-import { Aside, Steps } from '@astrojs/starlight/components';
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 import qrLogin from '../../../assets/qr-login.svg';
 
 <Steps>
 
-1. **Quit WeChat and back up the profile.** The profile is the `xwechat_files` and `.xwechat` folders in the home directory of the user who ran WeChat.
-
-   ```bash
-   tar -czf ~/wechat-profile-backup.tgz -C ~ xwechat_files .xwechat
-   ```
-
-2. **Start the daemon** and leave it running.
+1. **Start the daemon** and leave it running.
 
    ```bash
    wx serve
    ```
 
-3. **Log in** from a second terminal.
+2. **Log in** from a second terminal.
+
+   <Tabs>
+   <TabItem label="New profile">
+
+   Works on every platform. agent-wechat creates a fresh WeChat profile in its own data folder.
 
    ```bash
+   wx accounts create --alias me
+   wx auth login
+   ```
+
+   </TabItem>
+   <TabItem label="Existing WeChat data (Linux)">
+
+   Keeps your chat history by using WeChat for Linux's files where they are. Quit WeChat and back them up first:
+
+   ```bash
+   tar -czf ~/wechat-profile-backup.tgz -C ~ xwechat_files .xwechat
    wx auth login --official
    ```
 
-   `--official` finds the profile in your home directory and uses it in place; nothing is copied. If the profile is somewhere else, give its path: `--official=/path/to/home`. This step needs the daemon to run on Linux.
+   `--official` looks in your home directory. If the files are elsewhere, pass the folder that contains them: `--official=/path/to/home`.
 
-   WeChat may log you straight in using the profile's saved device. Otherwise it asks you to approve on your phone, or prints a QR code to scan with WeChat:
+   </TabItem>
+   </Tabs>
+
+   Scan the QR code with WeChat on your phone, or approve the login there:
 
    <img src={qrLogin.src} class="mock wide" alt="Terminal showing wx auth login printing a QR code, then confirming the login" />
 
-4. **Check it worked.**
+3. **Check it worked.**
 
    ```bash
    wx messages list filehelper --limit 1
@@ -59,10 +72,11 @@ import qrLogin from '../../../assets/qr-login.svg';
 You're connected. Next: [keep it running](/setup/run/) in the background, then use it from the [CLI](/use/cli/), [OpenClaw](/openclaw/setup/) or [your own code](/use/api/).
 
 <Aside title="Good to know">
-- **Keep WeChat closed** while the daemon owns the profile. agent-wechat can't stop you reopening the app, and two writers can damage the profile.
-- **The login must match the profile.** If you log in with a different account, the daemon refuses to write to the profile.
-- **The QR code** shows in the terminal. Without a terminal, `wx` saves it as a PNG and prints the path.
-- **Some approvals need your phone to reach the daemon** over the local network, on a port between 8050 and 8100. If approval stalls, check the host firewall and Wi-Fi client isolation.
-- **Several accounts:** each login adds an account to the same daemon. Run `wx accounts list`, then pick one with `--account ID`, or name it with `wx accounts alias ID home`.
-- **Reading history doesn't mark anything read** or send anything.
+- **A new profile starts without your old chats.** WeChat doesn't send full history to a new login, so it fills up from new messages onward.
+- **With `--official`, keep WeChat closed** while the daemon is running. Both writing to the same files can damage them.
+- **The account has to match.** With `--official`, log in as the account those files belong to; the daemon won't write another account's messages into them.
+- **Next time you start the daemon, it reconnects on its own.** You only log in again if WeChat ends the session.
+- **No terminal?** `wx` saves the QR code as a PNG and prints the path.
+- **Phone approval stalls?** Some approvals need your phone to reach the daemon over the local network (ports 8050 to 8100). Check the firewall and Wi-Fi client isolation.
+- **Several accounts:** create and log in to each one, then pick one with `--account ALIAS`.
 </Aside>

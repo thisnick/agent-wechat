@@ -27,7 +27,7 @@ You need a daemon that is running and logged in. If you haven't set one up, see 
 2. **Install the plugin.**
 
    ```bash
-   openclaw plugins install @agent-wechat/agent-wechat@beta
+   openclaw plugins install @agent-wechat/agent-wechat
    ```
 
 3. **Add the channel** to `~/.openclaw/openclaw.json`. This example lets one friend message the agent:
@@ -51,7 +51,7 @@ You need a daemon that is running and logged in. If you haven't set one up, see 
    }
    ```
 
-   Find a friend's ID with `wx contacts find NAME`.
+   IDs look like `wxid_…`. Find a friend's with `wx contacts find NAME`, and a group's (ending in `@chatroom`) with `wx chats find NAME`. Your own ID is the `senderId` on any message you sent, for example in `wx messages list filehelper --limit 1`.
 
 4. **Give the Gateway the token** by setting `AGENT_WECHAT_TOKEN` in its environment, then restart the Gateway.
 
@@ -66,6 +66,5 @@ Next: decide [who the bot answers](/openclaw/access/), including groups, and whi
 - **The agent replies as you.** Replies go out from your WeChat account, and OpenClaw marks the chat read once it has handled the message. See [read receipts](/openclaw/read-receipts/).
 - **`consumerStateDir`** keeps track of which messages OpenClaw has already handled. Put it somewhere that survives restarts.
 - **If your config has a `plugins.allow` list,** add `agent-wechat` to it.
-- **Don't use npm's `latest` tag** for the plugin yet. It still installs the old 0.x plugin.
 - The token can come from any OpenClaw secret provider, not only the environment. See [Configuration](/reference/configuration/#openclaw).
 </Aside>

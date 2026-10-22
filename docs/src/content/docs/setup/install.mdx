@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Install the wx binary with npm, as a standalone download, or as a Docker image.
+description: Install the wx binary with npm or pnpm, as a standalone download, or as a Docker image.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -11,16 +11,27 @@ import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 <TabItem label="npm">
 
 ```bash
-npm install -g @agent-wechat/cli@beta
+npm install -g --allow-scripts=@agent-wechat/cli @agent-wechat/cli
 wx --json version
 ```
 
-The package downloads the `wx` binary for your OS and CPU and checks it against hashes shipped inside the package. Works on Linux, macOS and Windows.
+The package's install script downloads the `wx` binary for your OS and CPU and checks it against hashes shipped in the package. `--allow-scripts` approves that script.
+
+</TabItem>
+<TabItem label="pnpm">
+
+```bash
+pnpm add -g @agent-wechat/cli
+pnpm approve-builds -g        # select @agent-wechat/cli
+wx --json version
+```
+
+pnpm doesn't run install scripts until you approve them, so `wx` isn't usable until you do.
 
 </TabItem>
 <TabItem label="Binary">
 
-Download the file for your machine from [GitHub releases](https://github.com/thisnick/agent-wechat/releases):
+Download the file for your machine from the [latest release](https://github.com/thisnick/agent-wechat/releases/latest), rename it to `wx` (`wx.exe` on Windows) and put it on your `PATH`:
 
 | Machine | File |
 | --- | --- |
@@ -28,21 +39,16 @@ Download the file for your machine from [GitHub releases](https://github.com/thi
 | macOS, Apple Silicon | `wx-vVERSION-darwin-arm64` |
 | Windows x64 / ARM64 | `wx-vVERSION-win32-x64.exe`, `wx-vVERSION-win32-arm64.exe` |
 
-```bash
-install -m 0755 wx-v*-linux-x64-gnu ~/.local/bin/wx
-wx --json version
-```
-
-Compare the file's SHA-256 with `wx-vVERSION-checksums.json` from the same release.
+Check the file's SHA-256 against `wx-vVERSION-checksums.json` from the same release.
 
 </TabItem>
 <TabItem label="Docker">
 
 ```bash
-docker pull ghcr.io/thisnick/agent-wechat-native:vVERSION
+docker pull ghcr.io/thisnick/agent-wechat-native:latest
 ```
 
-One tag covers `linux/amd64` and `linux/arm64`. The image contains `wx`, FFmpeg and FFprobe, and no WeChat app. See [Keep it running](/setup/run/#docker-compose) for a Compose file.
+The image contains `wx`, FFmpeg and FFprobe, for `linux/amd64` and `linux/arm64`. See [Keep it running](/setup/run/#docker-compose) for a Compose file.
 
 </TabItem>
 </Tabs>
@@ -50,8 +56,6 @@ One tag covers `linux/amd64` and `linux/arm64`. The image contains `wx`, FFmpeg 
 Next: [connect your account](/setup/connect/).
 
 <Aside title="Good to know">
-- **Use the `beta` tag.** The 1.0 betas are the native daemon. npm's `latest` tag still points to the old container-based CLI until 1.0 is released.
-- **macOS and Windows** builds start at 1.0.0-beta.9. The Docker image is Linux only.
-- **Offline or locked-down installs:** `npm install --ignore-scripts` skips the download; run `wx-native-install` later. Set `AGENT_WECHAT_NATIVE_ARTIFACT_DIR` to a folder holding the release binary and checksum file to install without network access, or `AGENT_WECHAT_NATIVE_BINARY` to use a binary you provide.
-- The npm launcher never downloads anything when you run `wx`. If the binary is missing, it reports an error.
+- If `wx` says no native runtime is installed, the install script didn't run. Run `wx-native-install`.
+- Install FFmpeg and FFprobe on the daemon's machine (for example `apt install ffmpeg`, `brew install ffmpeg` or `winget install Gyan.FFmpeg`) if you'll send voice or video.
 </Aside>

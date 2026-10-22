@@ -6,25 +6,30 @@ description: Where agent-wechat keeps its files, and what to back up.
 import { Aside } from '@astrojs/starlight/components';
 
 ```text
-~/xwechat_files/, ~/.xwechat/     WeChat profile: history, contacts, media (used in place)
 ~/.config/agent-wechat/
-├── server/config.toml           daemon settings (optional)
-└── client.toml                  CLI: saved servers and default account
-~/.local/share/agent-wechat/     daemon data: credentials, API token, jobs, event log
-$TMPDIR                          temporary read snapshots
+├── server/config.toml              daemon settings (optional)
+└── client.toml                     CLI: saved servers and default account
+~/.local/share/agent-wechat/        data folder
+├── api-token                       owner API token
+└── accounts/<id>/
+    ├── profile/                    WeChat profile: history, contacts, media
+    └── agent/                      credentials, jobs, event log
+$TMPDIR                             temporary read snapshots
 ```
 
-The profile stays wherever it was when you ran `wx auth login --official`. Everything else the daemon needs goes in its data folder. On Windows, settings live in `%APPDATA%\agent-wechat` and data in `%LOCALAPPDATA%\agent-wechat`. macOS uses the same paths as Linux.
+On Windows, settings live in `%APPDATA%\agent-wechat` and data in `%LOCALAPPDATA%\agent-wechat`. macOS uses the same paths as Linux.
+
+If you logged in with `--official`, there's no `profile/` folder: the daemon uses WeChat for Linux's `~/xwechat_files` and `~/.xwechat` where they are, and keeps only its own files in the data folder.
 
 ## Back up
 
-Back up **both** the profile and the daemon's data folder, with the daemon stopped (`wx daemon stop`, `systemctl --user stop agent-wechat-native` or `docker compose stop`):
+Stop the daemon (`wx daemon stop`, `systemctl --user stop agent-wechat-native` or `docker compose stop`), then copy the data folder:
 
 ```bash
-tar -czf wechat-backup.tgz -C ~ xwechat_files .xwechat .local/share/agent-wechat
+tar -czf wechat-backup.tgz -C ~ .local/share/agent-wechat
 ```
 
-The profile alone loses queued sends, OpenClaw's progress and recall records. The data folder alone has no history.
+With `--official`, add `xwechat_files .xwechat` to that command. The profile alone would lose queued sends, OpenClaw's progress and recall records; the data folder alone would have no history.
 
 ## Change locations
 

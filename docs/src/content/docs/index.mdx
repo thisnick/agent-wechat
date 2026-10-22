@@ -34,13 +34,14 @@ flowchart LR
   W <--> P
 ```
 
-`wx serve` talks to WeChat directly; no WeChat app or desktop runs. It keeps using your existing WeChat profile, so your history stays where it is. Every client goes through its HTTP API: the `wx` CLI, the OpenClaw plugin, and anything you build. A native desktop app is on the way.
+`wx serve` talks to WeChat directly; no WeChat app or desktop runs. It stores everything in WeChat's own data format, and can pick up an existing WeChat for Linux profile with its history. Every client goes through its HTTP API: the `wx` CLI, the OpenClaw plugin, and anything you build. A native desktop app is on the way.
 
 ```bash
-npm install -g @agent-wechat/cli@beta
+npm install -g --allow-scripts=@agent-wechat/cli @agent-wechat/cli
 wx serve                          # terminal 1
-wx auth login --official          # terminal 2: approve on your phone or scan the QR
-wx messages list filehelper
+wx accounts create --alias me     # terminal 2
+wx auth login                     # scan the QR with WeChat on your phone
+wx chats list
 ```
 
 <CardGrid>

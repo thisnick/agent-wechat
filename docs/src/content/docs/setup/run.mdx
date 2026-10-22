@@ -10,7 +10,7 @@ Pick **one** way to run the daemon. Each one owns the process, so don't combine 
 <Tabs>
 <TabItem label="wx daemon">
 
-The simplest option, and the only one that also works on macOS and Windows. It starts `wx serve` in the background for the current user.
+The simplest option, on any OS. It starts `wx serve` in the background for the current user.
 
 ```bash
 wx daemon start
@@ -35,7 +35,7 @@ test -f ~/.config/agent-wechat/server/config.toml ||
 Before enabling it, edit the unit:
 
 - `ExecStart=` runs `~/.local/bin/wx`. Change it if `command -v wx` says otherwise.
-- `ReadWritePaths=` only allows `~/.local/share/agent-wechat`. Add your profile's folders, for example `%h/xwechat_files %h/.xwechat`.
+- If you logged in with `--official`, add WeChat's folders to `ReadWritePaths=`, for example `%h/xwechat_files %h/.xwechat`. By default the unit can only write to `~/.local/share/agent-wechat`.
 
 ```bash
 systemctl --user daemon-reload
@@ -49,7 +49,7 @@ On a headless server, run `loginctl enable-linger` so the service starts without
 
 Start from the example [`compose.yaml`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/compose.yaml) and [`server.toml`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/server.toml), then:
 
-1. Set `image:` to `ghcr.io/thisnick/agent-wechat-native:vVERSION` and remove the `build:` section.
+1. Set `image:` to `ghcr.io/thisnick/agent-wechat-native:latest` and remove the `build:` section.
 2. Create an API token: one copy for your CLI, one owned by the container user (UID 10001).
 
    ```bash
@@ -58,31 +58,26 @@ Start from the example [`compose.yaml`](https://github.com/thisnick/agent-wechat
    sudo install -m 600 -o 10001 -g 10001 ~/.config/agent-wechat/box-token secrets/api-token
    ```
 
-3. Add your profile to `volumes:`. The source is the folder that contains `xwechat_files` and `.xwechat`:
-
-   ```yaml
-   - type: bind
-     source: /home/you
-     target: /profiles/wechat
-   ```
-
-4. Start it, then log in using the path inside the container:
+3. Start it and log in from the host:
 
    ```bash
    docker compose up -d
    wx config server add box --url http://127.0.0.1:6174 \
      --token-file ~/.config/agent-wechat/box-token
-   wx --server-name box auth login --official=/profiles/wechat
+   wx --server-name box accounts create --alias me
+   wx --server-name box auth login
    ```
 
-The container runs as UID 10001, so that user needs write access to the profile.
+To use existing WeChat for Linux data instead, add its folder (the one containing `xwechat_files` and `.xwechat`) to `volumes:` as `/home/you:/profiles/wechat`. Then log in with `--official=/profiles/wechat`. The container runs as UID 10001, so that user needs write access to it.
+
+On macOS and Windows, Docker Desktop runs the same image. The example uses host networking, so turn it on under **Settings › Resources › Network**.
 
 </TabItem>
 </Tabs>
 
 <Aside title="Good to know">
 - **Stopping keeps you logged in.** History and saved login survive restarts. Use `wx auth logout` to actually log out.
-- **The daemon listens on 127.0.0.1:6174 only.** To reach it from another machine, put it behind an HTTPS reverse proxy or an SSH or VPN tunnel.
+- **The daemon only listens on localhost** (`127.0.0.1:6174`); it refuses other addresses. To reach it from another machine, put it behind an HTTPS reverse proxy or an SSH or VPN tunnel.
 - **OpenClaw can also run the daemon for you.** See [managed mode](/openclaw/modes/). Stop any other owner first.
 - Back up both the profile and the daemon's data folder. See [Storage and backups](/how-it-works/storage/).
 </Aside>
