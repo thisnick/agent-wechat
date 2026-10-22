@@ -122,4 +122,7 @@ jobs:
           refs=()
           for digest in artifacts/digests/*; do refs+=("$IMAGE@sha256:${digest##*/}"); done
           test "${#refs[@]}" = 2
-          docker buildx imagetools create --tag "$IMAGE:v$RELEASE_VERSION" "${refs[@]}"
+          tags=(--tag "$IMAGE:v$RELEASE_VERSION")
+          # Stable versions also move `latest`; prereleases (1.0.0-beta.N) never do.
+          if [[ "$RELEASE_VERSION" != *-* ]]; then tags+=(--tag "$IMAGE:latest"); fi
+          docker buildx imagetools create "${tags[@]}" "${refs[@]}"
