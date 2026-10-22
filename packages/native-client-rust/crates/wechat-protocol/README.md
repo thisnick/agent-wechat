@@ -10,6 +10,19 @@ business GCM envelopes before decoding service messages. No insecure peer or
 signature-bypass setting exists. Routing redirects are accepted only from
 authenticated responses and are restricted to supported official domain suffixes.
 
+The conditional LAN login challenge is experimental. Notification field17 is an
+SKBuffer containing a non-store risk extension; state11 starts CGI22312 with
+local IPv4 address/port entries, the current login identifier and a fresh
+16-byte SKBuffer. A temporary TCP listener replies with a big-endian u32 total
+length followed by JSON containing the returned opaque token and string
+`scene: "xwechat"`. It never grants authorization; normal polling and final
+authentication still apply. Listener/token state is never serialized and is
+bounded by cancellation and the attempt deadline. Upload submission is attempted
+once for an issued login identifier; an uncertain upload is not retried by the
+repeatable polling path. `poll_login_guarded` lets an owner supply an earlier
+deadline and nonblocking cancellation callback. This path has offline fixtures
+and simulated-phone coverage; live phone/server acceptance remains unverified.
+
 The crate includes QR login, QR polling/approval exchange, saved-device phone
 approval, trusted AutoAuth renewal, NewSync cursor merging, heartbeat, text send,
 known contact and group lookups, contact bootstrap pages, avatar bytes and voice

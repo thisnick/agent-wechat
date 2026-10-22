@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 wechat-media = { path = "../wechat-media" }
+wechat-platform = { path = "../wechat-platform" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

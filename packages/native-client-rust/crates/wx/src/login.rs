@@ -289,6 +289,7 @@ pub async fn login(r: &Remote, settings: &settings::File, options: Options) -> R
         .to_string();
     let deadline = std::time::Instant::now() + Duration::from_secs(options.timeout + 35);
     let mut shown = 0;
+    let mut lan_notice_shown = false;
     loop {
         if terminal(operation["state"].as_str().unwrap_or("")) {
             return Ok(operation);
@@ -296,6 +297,12 @@ pub async fn login(r: &Remote, settings: &settings::File, options: Options) -> R
         if std::time::Instant::now() >= deadline {
             operation["clientWaitExpired"] = json!(true);
             return Ok(operation);
+        }
+        if !options.json && !lan_notice_shown
+            && operation["result"]["lanChallenge"].as_str() == Some("waiting_for_phone")
+        {
+            eprintln!("WeChat requires a local network check. Keep your phone on a network that can reach this computer.");
+            lan_notice_shown = true;
         }
         let generation = operation["result"]["qrGeneration"].as_u64().unwrap_or(0);
         if operation["result"]["qrAvailable"] == true && generation > shown {

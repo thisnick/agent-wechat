@@ -5,6 +5,8 @@
 //! Network methods are blocking; async services must use a blocking worker.
 pub mod business;
 mod client;
+mod lan_login;
+pub use lan_login::login_lan_error_reason;
 pub mod crypto;
 pub mod media;
 pub mod media_send;

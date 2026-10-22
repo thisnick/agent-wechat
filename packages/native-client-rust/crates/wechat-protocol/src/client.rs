@@ -327,6 +327,11 @@ pub struct LoginAttempt {
     key_info: Vec<u8>,
     credential3: Option<Vec<u8>>,
     credential4: Option<Vec<u8>>,
+    #[serde(default)]
+    lan_upload_attempted: bool,
+    // Socket/token ownership never survives serialization or daemon restart.
+    #[serde(skip)]
+    lan_challenge: Option<std::sync::Arc<crate::lan_login::Challenge>>,
 }
 impl fmt::Debug for LoginAttempt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -340,6 +345,7 @@ impl fmt::Debug for LoginAttempt {
 }
 impl Drop for LoginAttempt {
     fn drop(&mut self) {
+        self.stop_lan_login();
         self.identifier.zeroize();
         self.notify_key.zeroize();
         self.cookie.zeroize();
@@ -349,6 +355,12 @@ impl Drop for LoginAttempt {
     }
 }
 impl LoginAttempt {
+    pub fn lan_login_state(&self) -> Option<&'static str> {
+        self.lan_challenge.as_ref().map(|challenge| challenge.status())
+    }
+    fn stop_lan_login(&mut self) {
+        if let Some(challenge) = self.lan_challenge.take() { challenge.stop(); }
+    }
     pub fn qr_svg(&self) -> Result<String> {
         use base64::Engine;
         ensure!(
@@ -446,6 +458,7 @@ pub struct NativeClient {
 /// Polling an issued login challenge is repeatable. This does not authorize
 /// retrying QR creation, credential exchange, sends or rejected authentication.
 pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
+    if crate::login_lan_error_reason(error).is_some() { return false; }
     error.chain().any(|cause| {
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
             return matches!(
@@ -582,6 +595,8 @@ impl NativeClient {
             key_info: key_info.to_vec(),
             credential3: None,
             credential4: None,
+            lan_upload_attempted: false,
+            lan_challenge: None,
         })
     }
     /// Initiates phone approval for an existing remembered device without a QR.
@@ -681,11 +696,22 @@ impl NativeClient {
             key_info: key_info.to_vec(),
             credential3: None,
             credential4: None,
+            lan_upload_attempted: false,
+            lan_challenge: None,
         })
     }
     pub fn poll_login(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
+        self.poll_login_guarded(attempt, std::time::Instant::now() + Duration::from_secs(900), || false)
+    }
+    /// The guard bounds the temporary LAN listener even while a blocking poll
+    /// or upload is in flight. It must not perform blocking work itself.
+    pub fn poll_login_guarded(
+        &self, attempt: &mut LoginAttempt, deadline: std::time::Instant,
+        cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<LoginStatus> {
         let now = wire::unix_time()?;
         if attempt.locally_expired(now) {
+            attempt.stop_lan_login();
             attempt.status = LoginStatus::Expired;
             return Ok(attempt.status);
         }
@@ -712,24 +738,28 @@ impl NativeClient {
         if !cookie.is_empty() {
             attempt.cookie = cookie;
         }
-        if let Some(status) = response.status {
-            attempt.status = match status {
-                0 if attempt.status == LoginStatus::Scanned => LoginStatus::Scanned,
-                0 => LoginStatus::Pending,
-                1 => LoginStatus::Scanned,
-                2 => LoginStatus::Approved,
-                // Unrecognized terminal notification values do not establish
-                // an expiry/cancellation reason. Only our own timer expires it.
-                _ => LoginStatus::Rejected,
-            };
-            if attempt.status == LoginStatus::Approved {
-                attempt.credential3 = response.credential3;
-                attempt.credential4 = response.credential4;
-            }
-        }
-        Ok(attempt.status)
+        let remaining = attempt.created_at.saturating_add(900).saturating_sub(wire::unix_time()?);
+        let deadline = deadline.min(std::time::Instant::now() + Duration::from_secs(u64::from(remaining)));
+        let scope = crate::lan_login::Scope::new(deadline, cancelled);
+        apply_login_notification(attempt, response, |attempt| self.start_lan_login(attempt, scope))
+    }
+    fn start_lan_login(&self, attempt: &mut LoginAttempt, scope: crate::lan_login::Scope) -> Result<std::sync::Arc<crate::lan_login::Challenge>> {
+        use crate::lan_login as lan;
+        let challenge = std::sync::Arc::new(lan::Challenge::bind(scope)?);
+        let random = zeroize::Zeroizing::new(crate::crypto::random::<16>()?);
+        let request = zeroize::Zeroizing::new(challenge.request(&attempt.device, &attempt.identifier, &random)?);
+        let (reply, cookie, _) = self.prelogin_rpc(
+            &attempt.long_host, &attempt.short_host, lan::CGI, lan::PATH,
+            &request, &attempt.cookie, &[], Some(attempt.key_version),
+        ).map_err(|_| lan::failure("upload_failed"))?;
+        let reply = zeroize::Zeroizing::new(reply);
+        let token = lan::response(&reply).map_err(|_| lan::failure("upload_rejected_or_invalid"))?;
+        challenge.arm(&token)?;
+        if !cookie.is_empty() { attempt.cookie = cookie; }
+        Ok(challenge)
     }
     pub fn complete_login(&self, attempt: &mut LoginAttempt) -> Result<AccountState> {
+        attempt.stop_lan_login();
         attempt.validate()?;
         ensure!(
             attempt.status == LoginStatus::Approved,
@@ -1209,6 +1239,57 @@ fn reduce_auth(
     Ok(state)
 }
 
+fn apply_login_notification(
+    attempt: &mut LoginAttempt,
+    response: wire::PollResponse,
+    start_lan: impl FnOnce(&mut LoginAttempt) -> Result<std::sync::Arc<crate::lan_login::Challenge>>,
+) -> Result<LoginStatus> {
+    if response.lan_challenge && matches!(response.status, Some(0..=2)) {
+        // A risk challenge is not approval, including a notification carrying
+        // the ordinary approval status without the final credentials yet.
+        attempt.credential3.zeroize();
+        attempt.credential4.zeroize();
+        attempt.credential3 = None;
+        attempt.credential4 = None;
+        attempt.status = LoginStatus::Scanned;
+        if let Some(challenge) = &attempt.lan_challenge {
+            if challenge.active() { return Ok(attempt.status); }
+            attempt.stop_lan_login();
+            return Err(crate::lan_login::failure("listener_stopped"));
+        }
+        if attempt.lan_upload_attempted {
+            return Err(crate::lan_login::failure("upload_already_attempted"));
+        }
+        // Record before submission. A lost upload response must not produce an
+        // automatic new nonce/token exchange on the next repeatable QR poll.
+        attempt.lan_upload_attempted = true;
+        attempt.lan_challenge = Some(start_lan(attempt)?);
+        return Ok(attempt.status);
+    }
+    if let Some(status) = response.status {
+        attempt.status = match status {
+            0 if attempt.status == LoginStatus::Scanned => LoginStatus::Scanned,
+            0 => LoginStatus::Pending,
+            1 => LoginStatus::Scanned,
+            2 => LoginStatus::Approved,
+            // Unknown terminal states never count as approval or local expiry.
+            _ => LoginStatus::Rejected,
+        };
+        if attempt.status == LoginStatus::Approved {
+            attempt.credential3 = response.credential3;
+            attempt.credential4 = response.credential4;
+        }
+        if matches!(attempt.status, LoginStatus::Approved | LoginStatus::Rejected) {
+            attempt.stop_lan_login();
+        }
+    }
+    if attempt.lan_challenge.as_ref().is_some_and(|challenge| !challenge.active()) {
+        attempt.stop_lan_login();
+        return Err(crate::lan_login::failure("listener_stopped"));
+    }
+    Ok(attempt.status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1232,6 +1313,8 @@ mod tests {
             key_info: b"persisted installation key-info".to_vec(),
             credential3: Some(vec![4; 16]),
             credential4: Some(vec![5; 16]),
+            lan_upload_attempted: false,
+            lan_challenge: None,
         }
     }
     #[test]
@@ -1274,6 +1357,77 @@ mod tests {
             assert!(attempt.validate_at(1240).is_ok());
             assert!(attempt.validate_at(1899).is_ok());
             assert!(attempt.validate_at(1900).is_err());
+        }
+    }
+    fn notification(status: u32, lan_challenge: bool) -> wire::PollResponse {
+        wire::PollResponse { status: Some(status), lan_challenge,
+            credential3: (status == 2).then(|| vec![4; 16]),
+            credential4: (status == 2).then(|| vec![5; 16]) }
+    }
+    fn synthetic_lan() -> std::sync::Arc<crate::lan_login::Challenge> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let challenge = crate::lan_login::Challenge::from_listener(listener,
+            vec![std::net::Ipv4Addr::LOCALHOST], crate::lan_login::Scope::new(
+                std::time::Instant::now()+Duration::from_secs(5), || false)).unwrap();
+        challenge.arm(b"synthetic temporary token").unwrap();
+        std::sync::Arc::new(challenge)
+    }
+    #[test]
+    fn repeated_risk_notifications_upload_once_and_never_install_approval() {
+        let mut attempt = attempt(LoginStatus::Pending, true);
+        let challenge = synthetic_lan();
+        assert_eq!(apply_login_notification(&mut attempt, notification(2, true), |_| Ok(challenge.clone())).unwrap(), LoginStatus::Scanned);
+        assert!(attempt.credential3.is_none() && attempt.credential4.is_none());
+        assert_eq!(attempt.lan_login_state(), Some("waiting_for_phone"));
+        for _ in 0..3 {
+            assert_eq!(apply_login_notification(&mut attempt, notification(1, true), |_| panic!("duplicate upload")).unwrap(), LoginStatus::Scanned);
+        }
+        // A normal pending poll while the phone works retains the same listener.
+        apply_login_notification(&mut attempt, notification(0, false), |_| panic!("ordinary poll started LAN")).unwrap();
+        assert_eq!(attempt.status, LoginStatus::Scanned);
+        assert!(challenge.active());
+        let serialized = serde_json::to_string(&attempt).unwrap();
+        assert!(!serialized.contains("synthetic temporary token"));
+        assert!(!format!("{attempt:?}").contains("synthetic temporary token"));
+        let restored: LoginAttempt = serde_json::from_str(&serialized).unwrap();
+        assert!(restored.lan_login_state().is_none());
+        assert!(restored.lan_upload_attempted); // No restart replay of an uncertain upload.
+        assert_eq!(apply_login_notification(&mut attempt, notification(2, false), |_| panic!("approval started LAN")).unwrap(), LoginStatus::Approved);
+        assert!(attempt.lan_login_state().is_none());
+        assert!(!challenge.active());
+        assert!(attempt.credential3.is_some() && attempt.credential4.is_some());
+    }
+    #[test]
+    fn failed_upload_is_not_retried_by_the_repeatable_poll_path() {
+        let mut attempt = attempt(LoginStatus::Pending, true);
+        let error = apply_login_notification(&mut attempt, notification(1, true), |_| Err(crate::lan_login::failure("upload_failed"))).unwrap_err();
+        assert!(!is_retryable_login_poll_error(&error));
+        assert_eq!(crate::login_lan_error_reason(&error), Some("upload_failed"));
+        assert!(attempt.lan_login_state().is_none());
+        let error = apply_login_notification(&mut attempt, notification(1, true), |_| panic!("resubmitted upload")).unwrap_err();
+        assert_eq!(crate::login_lan_error_reason(&error), Some("upload_already_attempted"));
+        assert!(attempt.credential3.is_none() && attempt.credential4.is_none());
+    }
+    #[test]
+    fn rejection_or_attempt_drop_closes_the_shared_listener() {
+        for reject in [false, true] {
+            let mut attempt = attempt(LoginStatus::Pending, false);
+            let challenge = synthetic_lan();
+            apply_login_notification(&mut attempt, notification(1, true), |_| Ok(challenge.clone())).unwrap();
+            if reject {
+                assert_eq!(apply_login_notification(&mut attempt, notification(3, true), |_| panic!("rejection started LAN")).unwrap(), LoginStatus::Rejected);
+            }
+            drop(attempt);
+            assert!(!challenge.active());
+        }
+    }
+    #[test]
+    fn ordinary_login_does_not_open_a_lan_listener() {
+        let mut attempt = attempt(LoginStatus::Pending, true);
+        for status in [0,1,2] {
+            apply_login_notification(&mut attempt, notification(status, false), |_| panic!("ordinary login opened a socket")).unwrap();
+            assert!(attempt.lan_login_state().is_none());
+            assert!(!attempt.lan_upload_attempted);
         }
     }
     fn state() -> AccountState {

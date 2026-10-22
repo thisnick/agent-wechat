@@ -97,6 +97,7 @@ pub struct PollResponse {
     pub status: Option<u32>,
     pub credential3: Option<Vec<u8>>,
     pub credential4: Option<Vec<u8>>,
+    pub lan_challenge: bool,
 }
 pub fn decode_poll(input: &[u8], notify_key: &[u8]) -> Result<PollResponse> {
     let f = p::decode(input)?;
@@ -107,6 +108,7 @@ pub fn decode_poll(input: &[u8], notify_key: &[u8]) -> Result<PollResponse> {
             status: None,
             credential3: None,
             credential4: None,
+            lan_challenge: false,
         });
     };
     let pkg = p::decode(pkg)?;
@@ -114,10 +116,25 @@ pub fn decode_poll(input: &[u8], notify_key: &[u8]) -> Result<PollResponse> {
     p::scalar(&pkg, 2)?;
     let plain = crate::crypto::cbc(&ciphertext, notify_key, openssl::symm::Mode::Decrypt)?;
     let notify = p::decode(&plain)?;
+    // LoginQRCodeNotifyData.f17 is an SKBuffer containing
+    // LoginQRCodeNonStoreExtNotifyData; its f1 is the risk state.
+    let lan_challenge = match p::optional_data(&notify, 17)? {
+        Some(buffer) => {
+            ensure!(buffer.len() <= 4096, "Login risk extension too large");
+            let extension = p::unbuffer(buffer)?;
+            let extension = p::decode(&extension)?;
+            match p::optional(&extension, 1)? {
+                Some(p::Value::Varint(state)) => *state == 11,
+                None => false,
+                _ => bail!("Invalid login risk state"),
+            }
+        }
+        None => false,
+    };
     let status = u32::try_from(p::scalar(&notify, 2)?)?;
     let credential3 = p::optional_data(&notify, 3)?.map(Vec::from);
     let credential4 = p::optional_data(&notify, 4)?.map(Vec::from);
-    if status == 2 {
+    if status == 2 && !lan_challenge {
         ensure!(
             credential3
                 .as_ref()
@@ -132,6 +149,7 @@ pub fn decode_poll(input: &[u8], notify_key: &[u8]) -> Result<PollResponse> {
         status: Some(status),
         credential3,
         credential4,
+        lan_challenge,
     })
 }
 pub fn manual_auth(

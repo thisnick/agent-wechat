@@ -114,6 +114,21 @@ local image timer. Transient polling timeouts/disconnections retain the same
 challenge, cookie and QR generation until its expiry or the operation deadline;
 protocol/integrity failures and final credential exchanges are not retried this way.
 
+Some phone/QR approvals require the phone to reach the daemon over the local
+network. Experimental handling starts a temporary IPv4 listener on an available
+TCP port from 8050 through 8100 only when the server requests this challenge.
+Keep the phone on a network that can reach the daemon's advertised interfaces;
+check host firewall and Wi-Fi client isolation if it stalls. For a container,
+its advertised addresses must be reachable from the phone; publishing a port
+alone does not make an internal container address reachable.
+
+The same login operation reports `result.lanChallenge` as `waiting_for_phone` or
+`token_sent`. Token delivery still requires normal server approval before login
+succeeds. A failed upload is not automatically resubmitted; inspect the failure
+and start a new explicit login after fixing connectivity. Cancellation, terminal
+approval/rejection, the attempt deadline and daemon shutdown close the listener.
+Actual phone/server acceptance of this experimental path remains unverified.
+
 Attached login displays the issued PNG's module grid on white in a terminal.
 Without a terminal it writes a private PNG and returns its path. `--json` emits
 one result and keeps QR bytes out of JSON. Explicit output paths cannot be

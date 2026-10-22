@@ -23,7 +23,11 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if path.endswith("/operations/login-fixture/qr"):
                 assert "generation=1" in self.path
                 return self.reply(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII="),kind="image/png")
-            if path.endswith("/operations/login-fixture"):return self.reply({"id":"login-fixture","state":"awaiting_scan","result":{"qrAvailable":True,"qrGeneration":1}})
+            if path.endswith("/operations/login-fixture"):
+                if state.get("lan_mode"):
+                    state["lan_polls"]=state.get("lan_polls",0)+1
+                    return self.reply({"id":"login-fixture","state":"succeeded" if state["lan_polls"]>=2 else "awaiting_approval","result":{"qrAvailable":False,"qrGeneration":1,"lanChallenge":"waiting_for_phone"}})
+                return self.reply({"id":"login-fixture","state":"awaiting_scan","result":{"qrAvailable":True,"qrGeneration":1}})
             if "/operations/recall-" in path:
                 operation=state["recall_operations"][path.split("/")[-1]]
                 return self.reply({**operation,"id":"wrong-operation"} if state["recall_wrong_get"] else operation)
@@ -62,6 +66,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
                 receipts=list((root/"login-receipts").glob("*.json"));assert receipts,"login receipt was not durable before first request"
                 assert any(json.loads(p.read_text())["idempotencyKey"]==self.headers.get("Idempotency-Key") for p in receipts)
                 state["login_posts"]+=1
+                if state.get("lan_mode"):
+                    state["lan_polls"]=0
+                    return self.reply({"id":"login-fixture","state":"awaiting_approval","result":{"qrAvailable":False,"qrGeneration":1,"lanChallenge":"waiting_for_phone"}},202)
                 return self.reply({"id":"login-fixture","state":"awaiting_scan","result":{"qrAvailable":True,"qrGeneration":1}},202)
             self.reply({"error":{"code":"fixture_not_found"}},404)
         def do_DELETE(self):
@@ -132,6 +139,16 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             result=json.loads(output);assert result["id"]=="login-fixture" and result["cancellationConfirmed"] and state["cancelled"]==1
         finally:
             if login.poll() is None: login.kill();login.wait()
+        state["lan_mode"]=True
+        human_args=[arg for arg in args if arg!="--json"]
+        lan=subprocess.run(human_args+["auth","login","--strategy","qr","--qr-refresh","manual","--idempotency-key","fixture-lan-human"],env=env,capture_output=True,text=True,timeout=10)
+        assert lan.returncode==0,(lan.stdout,lan.stderr)
+        assert lan.stderr.count("WeChat requires a local network check.")==1,lan.stderr
+        assert "synthetic-token" not in lan.stdout+lan.stderr
+        quiet=subprocess.run(args+["auth","login","--strategy","qr","--qr-refresh","manual","--idempotency-key","fixture-lan-json"],env=env,capture_output=True,text=True,timeout=10)
+        assert quiet.returncode==0 and json.loads(quiet.stdout)["state"]=="succeeded",(quiet.stdout,quiet.stderr)
+        assert "WeChat requires a local network check." not in quiet.stderr
+        state["lan_mode"]=False
         for flag, path in [("--official", None), ("--official=/daemon/profile", "/daemon/profile")]:
             state["official_first"]=True
             result=run("auth","login",flag,"--strategy","qr","--qr-refresh","manual","--detach","--idempotency-key", "fixture-official-"+str(len(state["official_posts"])))

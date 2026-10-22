@@ -786,15 +786,29 @@ impl Core {
                 self.store
                     .put_runtime(&account, &key, &self.vault.seal(&account, &key, &png)?)?;
             }
-            self.progress(&op,if scanned||attempt.qr_png.is_empty(){"awaiting_approval"}else{"awaiting_scan"},json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty()}))?;
+            self.progress(&op,if scanned||attempt.qr_png.is_empty(){"awaiting_approval"}else{"awaiting_scan"},json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty(),"lanChallenge":attempt.lan_login_state()}))?;
+            let poll_cancel = cancel.clone();
+            let poll_owner = Arc::downgrade(self);
+            let poll_deadline = start + Duration::from_secs(request.timeout_seconds);
             let result = blocking(move || {
                 // Return the issued challenge even on a failed read. Never lose
                 // its cookie/notify state or create a replacement QR on timeout.
-                let status = client().and_then(|native| native.poll_login(&mut attempt));
+                let status = client().and_then(|native| native.poll_login_guarded(&mut attempt, poll_deadline, move || {
+                    poll_cancel.load(Ordering::SeqCst)
+                        || poll_owner.upgrade().is_none_or(|core| core.stopping.load(Ordering::SeqCst))
+                }));
                 Ok((attempt, status))
             })
             .await?;
             attempt = result.0;
+            if cancel.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) {
+                self.progress(&op, "cancelled", json!({}))?;
+                return Ok(());
+            }
+            if start.elapsed() > Duration::from_secs(request.timeout_seconds) {
+                self.progress(&op, "expired", json!({"reason":"attempt_deadline"}))?;
+                return Ok(());
+            }
             let status = match result.1 {
                 Ok(status) => {
                     poll_failures = 0;
@@ -803,13 +817,17 @@ impl Core {
                 Err(error) if wechat_protocol::is_retryable_login_poll_error(&error) => {
                     poll_failures = poll_failures.saturating_add(1);
                     self.progress(&op, if scanned || attempt.qr_png.is_empty() { "awaiting_approval" } else { "awaiting_scan" },
-                        json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty(),"connection":"retrying","reason":"temporary_transport_failure","pollFailures":poll_failures}))?;
+                        json!({"qrGeneration":generation,"expiresAt":attempt.expires_at,"qrAvailable":!attempt.qr_png.is_empty(),"lanChallenge":attempt.lan_login_state(),"connection":"retrying","reason":"temporary_transport_failure","pollFailures":poll_failures}))?;
                     // Both the issued challenge expiry and the overall operation
                     // deadline still bound retries. Cancellation keeps its fence.
                     tokio::time::sleep(Duration::from_secs(u64::from(poll_failures.min(5)))).await;
                     continue;
                 }
                 Err(error) => {
+                    if let Some(reason) = wechat_protocol::login_lan_error_reason(&error) {
+                        self.progress(&op, "failed", json!({"code":"login_lan_challenge_failed","reason":reason,"retryable":false,"hint":"Your phone must be able to reach this computer over the local network. Start a new login after checking connectivity."}))?;
+                        return Ok(());
+                    }
                     let service_code = error.chain().find_map(|cause| {
                         cause
                             .to_string()
