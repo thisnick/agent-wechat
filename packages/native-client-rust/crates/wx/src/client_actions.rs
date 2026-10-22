@@ -344,8 +344,11 @@ pub async fn send(
     }
     let (kind, bytes, name) = if let Some(url) = share {
         let request = wechat_core::ShareSendRequest::Share {
-            thread_id: thread.clone(), title: title.context("--share requires --title")?,
-            url, description, thumbnail_url,
+            thread_id: thread.clone(),
+            title: title.context("--share requires --title")?,
+            url,
+            description,
+            thumbnail_url,
         };
         request.validate()?;
         ("share", serde_json::to_vec(&request)?, None)
@@ -405,8 +408,11 @@ pub async fn send(
             r.request(
                 reqwest::Method::POST,
                 &r.path("sends")?,
-                Some(if kind == "share" { serde_json::from_slice(&bytes)? }
-                    else { json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?}) }),
+                Some(if kind == "share" {
+                    serde_json::from_slice(&bytes)?
+                } else {
+                    json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?})
+                }),
                 Some(&key),
             )
             .await

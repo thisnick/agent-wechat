@@ -939,7 +939,8 @@ impl Core {
         destination: &str,
         text: &str,
     ) -> Result<SendIntent> {
-        self.queue_message_send(account, key, destination, text, None).await
+        self.queue_message_send(account, key, destination, text, None)
+            .await
     }
     pub async fn send_share(
         self: &Arc<Self>,
@@ -951,7 +952,8 @@ impl Core {
         let state = self.account_state(account)?;
         request.xml(&state.own_username)?;
         let destination = request.destination().to_owned();
-        self.queue_message_send(account, key, &destination, "", Some(request)).await
+        self.queue_message_send(account, key, &destination, "", Some(request))
+            .await
     }
     async fn queue_message_send(
         self: &Arc<Self>,
@@ -1055,17 +1057,35 @@ impl Core {
             }
             let result = if let Some(share) = &payload.share {
                 let xml = share.xml(&state.own_username)?;
-                native.send_share(&mut state, &payload.thread_id, &payload.client_id.to_string(), payload.created_at, &xml)
+                native
+                    .send_share(
+                        &mut state,
+                        &payload.thread_id,
+                        &payload.client_id.to_string(),
+                        payload.created_at,
+                        &xml,
+                    )
                     .map(|result| SendReceipt {
-                        accepted: result.status == wechat_protocol::media_send::SendStatus::ServerAccepted,
+                        accepted: result.status
+                            == wechat_protocol::media_send::SendStatus::ServerAccepted,
                         correlated: result.client_id_matches == Some(true),
                         server_message_id: result.server_message_id,
                     })
             } else {
-                native.send_text(&mut state, &payload.thread_id, &payload.text, payload.created_at, payload.client_id)
-                    .map(|result| SendReceipt { accepted: result.accepted,
-                        correlated: result.returned_destination_matches && result.returned_client_id_matches,
-                        server_message_id: result.server_message_id })
+                native
+                    .send_text(
+                        &mut state,
+                        &payload.thread_id,
+                        &payload.text,
+                        payload.created_at,
+                        payload.client_id,
+                    )
+                    .map(|result| SendReceipt {
+                        accepted: result.accepted,
+                        correlated: result.returned_destination_matches
+                            && result.returned_client_id_matches,
+                        server_message_id: result.server_message_id,
+                    })
             };
             // A logout may suppress credential installation during this RPC,
             // but cannot erase an authenticated, accepted send receipt.
@@ -1075,17 +1095,13 @@ impl Core {
                     .mark_validated_if_active(&account, &core.ownership_generation)?;
             }
             let updated = match result {
-                Ok(result)
-                    if result.accepted && result.correlated =>
-                {
-                    core.store.update_send(
-                        &account,
-                        &id,
-                        "accepted",
-                        result.server_message_id.as_deref(),
-                        None,
-                    )?
-                }
+                Ok(result) if result.accepted && result.correlated => core.store.update_send(
+                    &account,
+                    &id,
+                    "accepted",
+                    result.server_message_id.as_deref(),
+                    None,
+                )?,
                 Ok(result) if !result.accepted => core.store.update_send(
                     &account,
                     &id,
@@ -1124,9 +1140,25 @@ impl Core {
         let source = if let Some(share) = &payload.share {
             let state = self.account_state(account)?;
             let content = format!("<msg>{}</msg>", share.xml(&state.own_username)?);
-            self.project_accepted_media(account, &payload.thread_id, 49, &content, "[Link]", u64::from(payload.created_at), server, &receipt)?
+            self.project_accepted_media(
+                account,
+                &payload.thread_id,
+                49,
+                &content,
+                "[Link]",
+                u64::from(payload.created_at),
+                server,
+                &receipt,
+            )?
         } else {
-            self.project_accepted_text(account, &payload.thread_id, &payload.text, u64::from(payload.created_at), server, &receipt)?
+            self.project_accepted_text(
+                account,
+                &payload.thread_id,
+                &payload.text,
+                u64::from(payload.created_at),
+                server,
+                &receipt,
+            )?
         };
         self.store
             .finish_text_projection(account, id, &crate::message_id(&source)?)
@@ -1700,26 +1732,56 @@ mod tests {
         let store = Arc::new(Store::open(&root).unwrap());
         store.create_account("one").unwrap();
         let core = Core::new(store.clone(), None).unwrap();
-        core.restore_credentials("one", &serde_json::to_vec(&state()).unwrap()).unwrap();
+        core.restore_credentials("one", &serde_json::to_vec(&state()).unwrap())
+            .unwrap();
         // Keep workers offline while exercising the real durable admission path.
         store.put_runtime("one", "desired", b"connected").unwrap();
-        store.mark_validated_if_active("one", &core.ownership_generation).unwrap();
+        store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
         core.stopping.store(true, Ordering::SeqCst);
-        let request = crate::ShareSendRequest::Share { thread_id: "peer".into(), title: "Private share title".into(),
-            url: "https://example.invalid/private-article".into(), description: Some("Description".into()), thumbnail_url: None };
-        let first = core.send_share("one", "share-key", request.clone()).await.unwrap();
-        let repeated = core.send_share("one", "share-key", request.clone()).await.unwrap();
+        let request = crate::ShareSendRequest::Share {
+            thread_id: "peer".into(),
+            title: "Private share title".into(),
+            url: "https://example.invalid/private-article".into(),
+            description: Some("Description".into()),
+            thumbnail_url: None,
+        };
+        let first = core
+            .send_share("one", "share-key", request.clone())
+            .await
+            .unwrap();
+        let repeated = core
+            .send_share("one", "share-key", request.clone())
+            .await
+            .unwrap();
         assert_eq!(first.id, repeated.id);
         assert_eq!(first.state, "queued");
         let sealed = store.send_payload("one", &first.id).unwrap();
         assert!(!sealed.windows(13).any(|v| v == b"Private share"));
-        let payload: SendPayload = serde_json::from_slice(&core.vault.open_record("one", "send-payload", &sealed).unwrap()).unwrap();
+        let payload: SendPayload = serde_json::from_slice(
+            &core
+                .vault
+                .open_record("one", "send-payload", &sealed)
+                .unwrap(),
+        )
+        .unwrap();
         assert!(payload.share.is_some());
         assert_eq!(payload.thread_id, "peer");
         let mut changed = serde_json::to_value(&request).unwrap();
         changed["title"] = "Changed title".into();
-        assert!(core.send_share("one", "share-key", serde_json::from_value(changed).unwrap()).await.unwrap_err().to_string().contains("idempotency_conflict"));
-        assert!(core.send_text("one", "share-key", "peer", "text instead").await.unwrap_err().to_string().contains("idempotency_conflict"));
+        assert!(core
+            .send_share("one", "share-key", serde_json::from_value(changed).unwrap())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(core
+            .send_text("one", "share-key", "peer", "text instead")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
         core.perform_send("one", &first.id).await.unwrap();
         tokio::task::yield_now().await;
         assert_eq!(store.send("one", &first.id).unwrap().state, "queued");
@@ -1728,18 +1790,26 @@ mod tests {
             while Arc::strong_count(&core) > 1 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         drop(core);
         drop(store);
         let store = Arc::new(Store::open_existing(&root).unwrap());
         let core = Core::new(store.clone(), None).unwrap();
         let recovered = store.send("one", &first.id).unwrap();
         assert_eq!(recovered.state, "needs_review");
-        assert_eq!(recovered.error_code.as_deref(), Some("restart_after_submission"));
+        assert_eq!(
+            recovered.error_code.as_deref(),
+            Some("restart_after_submission")
+        );
         assert!(store.queued_sends("one").unwrap().is_empty());
         assert!(!store.claim_send("one", &first.id).unwrap());
         // Legacy encrypted text payloads continue to decode without a kind field.
-        let old: SendPayload = serde_json::from_value(json!({"thread_id":"peer","text":"old text","created_at":1,"client_id":2})).unwrap();
+        let old: SendPayload = serde_json::from_value(
+            json!({"thread_id":"peer","text":"old text","created_at":1,"client_id":2}),
+        )
+        .unwrap();
         assert!(old.share.is_none());
         core.logout_local("one").unwrap();
         assert!(core.send_share("one", "new-key", request).await.is_err());

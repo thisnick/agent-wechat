@@ -284,9 +284,16 @@ pub(super) async fn send(
     if input.get("kind").is_some_and(|v| v == "share") {
         let request: wechat_core::ShareSendRequest = serde_json::from_value(input)
             .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
-        request.validate().map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_share_request"))?;
-        return Ok((StatusCode::ACCEPTED,
-            Json(serde_json::to_value(app.core.send_share(&a, key, request).await?).map_err(anyhow::Error::from)?)));
+        request
+            .validate()
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_share_request"))?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                serde_json::to_value(app.core.send_share(&a, key, request).await?)
+                    .map_err(anyhow::Error::from)?,
+            ),
+        ));
     }
     if input.get("kind").is_some_and(|v| v != "text") {
         let request: MediaSendRequest = serde_json::from_value(input)

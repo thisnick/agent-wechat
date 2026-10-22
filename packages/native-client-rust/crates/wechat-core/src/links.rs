@@ -28,14 +28,32 @@ impl ShareSendRequest {
     }
     pub fn validate(&self) -> anyhow::Result<()> {
         let destination = self.destination();
-        anyhow::ensure!(!destination.is_empty() && destination.len() <= 256
-            && !destination.chars().any(|c| c.is_control() || c.is_whitespace()), "invalid_share_request");
+        anyhow::ensure!(
+            !destination.is_empty()
+                && destination.len() <= 256
+                && !destination
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace()),
+            "invalid_share_request"
+        );
         self.xml("validation-only")?;
         Ok(())
     }
     pub(crate) fn xml(&self, sender: &str) -> anyhow::Result<String> {
-        let Self::Share { title, url, description, thumbnail_url, .. } = self;
-        wechat_protocol::media_send::share_xml(sender, title, url, description.as_deref(), thumbnail_url.as_deref())
+        let Self::Share {
+            title,
+            url,
+            description,
+            thumbnail_url,
+            ..
+        } = self;
+        wechat_protocol::media_send::share_xml(
+            sender,
+            title,
+            url,
+            description.as_deref(),
+            thumbnail_url.as_deref(),
+        )
     }
 }
 
@@ -163,16 +181,35 @@ mod tests {
         let profile = temp.path().join("fixture");
         let password = [42u8; 32];
         let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
-        let db = rusqlite::Connection::open(profile.join("db_storage/message/message_0.db")).unwrap();
-        assert_eq!(unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) }, 0);
+        let db =
+            rusqlite::Connection::open(profile.join("db_storage/message/message_0.db")).unwrap();
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+            0
+        );
         db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000; INSERT INTO Name2Id(rowid,user_name,is_session)VALUES(1,'room@chatroom',1),(2,'sender',0);").unwrap();
         let table = format!("Msg_{:x}", md5::Md5::digest(b"room@chatroom"));
         db.execute_batch(&format!("CREATE TABLE {table}(local_id INTEGER PRIMARY KEY,server_id INTEGER,local_type INTEGER,create_time INTEGER,real_sender_id INTEGER,message_content TEXT,source TEXT,WCDB_CT_message_content INTEGER,WCDB_CT_source INTEGER)")).unwrap();
         let xml = format!("sender:\n{CARD}");
-        db.execute(&format!("INSERT INTO {table} VALUES(1,1,?1,1,2,?2,'',0,0)"), rusqlite::params![(5i64 << 32) | 49, &xml]).unwrap();
-        db.execute(&format!("INSERT INTO {table} VALUES(2,2,?1,2,2,?2,'',4,0)"), rusqlite::params![(5i64 << 32) | 49, zstd::stream::encode_all(xml.as_bytes(), 3).unwrap()]).unwrap();
+        db.execute(
+            &format!("INSERT INTO {table} VALUES(1,1,?1,1,2,?2,'',0,0)"),
+            rusqlite::params![(5i64 << 32) | 49, &xml],
+        )
+        .unwrap();
+        db.execute(
+            &format!("INSERT INTO {table} VALUES(2,2,?1,2,2,?2,'',4,0)"),
+            rusqlite::params![
+                (5i64 << 32) | 49,
+                zstd::stream::encode_all(xml.as_bytes(), 3).unwrap()
+            ],
+        )
+        .unwrap();
         // Stored subtype disagreement must not turn a file into a card.
-        db.execute(&format!("INSERT INTO {table} VALUES(3,3,?1,3,2,?2,'',0,0)"), rusqlite::params![(6i64 << 32) | 49, &xml]).unwrap();
+        db.execute(
+            &format!("INSERT INTO {table} VALUES(3,3,?1,3,2,?2,'',0,0)"),
+            rusqlite::params![(6i64 << 32) | 49, &xml],
+        )
+        .unwrap();
         drop(db);
         let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
         store.attach("a", &profile, true).unwrap();
@@ -181,9 +218,14 @@ mod tests {
         store.set_keys_file("a", &key_path).unwrap();
         let core = Core::new(store, None).unwrap();
         core.create_account("b").unwrap();
-        let id = |local: i32| crate::message_id(&wechat_profile::SourceMessageId {
-            database: "message/message_0.db".into(), table: table.clone(), local_id: local.to_string(),
-        }).unwrap();
+        let id = |local: i32| {
+            crate::message_id(&wechat_profile::SourceMessageId {
+                database: "message/message_0.db".into(),
+                table: table.clone(),
+                local_id: local.to_string(),
+            })
+            .unwrap()
+        };
         for local in [1, 2] {
             let message = core.message("a", &id(local)).unwrap();
             assert_eq!(message["body"], "[Link] Title & preview\nDescription <kept as text>\nhttps://example.invalid/article?a=1&b=2");
@@ -192,11 +234,19 @@ mod tests {
             let assets = core.media_assets("a", &id(local)).unwrap();
             assert_eq!(assets.len(), 1);
             assert_eq!(assets[0].kind, crate::media_types::MediaKind::Image);
-            assert_eq!(assets[0].variant, crate::media_types::MediaVariant::Thumbnail);
+            assert_eq!(
+                assets[0].variant,
+                crate::media_types::MediaVariant::Thumbnail
+            );
             assert_eq!(assets[0].message_id.as_deref(), Some(id(local).as_str()));
             assert_eq!(assets[0].official_writeback, "unsupported");
             let public = format!("{message}{}", serde_json::to_string(&assets).unwrap());
-            for private in ["synthetic-cdn-id", "0101010101010101", "private-signature", "<appmsg"] {
+            for private in [
+                "synthetic-cdn-id",
+                "0101010101010101",
+                "private-signature",
+                "<appmsg",
+            ] {
                 assert!(!public.contains(private));
             }
             assert!(core.media_assets("b", &id(local)).is_err());
@@ -210,20 +260,35 @@ mod tests {
     #[test]
     fn decodes_shared_card_fields_without_exposing_transport_metadata() {
         for subtype in [3, 4, 5] {
-            let app = app_message(&CARD.replace("<type>5</type>", &format!("<type>{subtype}</type>"))).unwrap();
+            let app =
+                app_message(&CARD.replace("<type>5</type>", &format!("<type>{subtype}</type>")))
+                    .unwrap();
             let link = app.link.unwrap();
             assert_eq!(link.card.title.as_deref(), Some("Title & preview"));
-            assert_eq!(link.card.description.as_deref(), Some("Description <kept as text>"));
-            assert_eq!(link.card.url.as_deref(), Some("https://example.invalid/article?a=1&b=2"));
+            assert_eq!(
+                link.card.description.as_deref(),
+                Some("Description <kept as text>")
+            );
+            assert_eq!(
+                link.card.url.as_deref(),
+                Some("https://example.invalid/article?a=1&b=2")
+            );
             assert_eq!(link.card.source_name.as_deref(), Some("Example publisher"));
             assert_eq!(link.card.body(), "[Link] Title & preview\nDescription <kept as text>\nhttps://example.invalid/article?a=1&b=2");
-            let LinkThumbnail::Cdn(descriptor) = link.thumbnail.unwrap() else { panic!("expected CDN thumbnail"); };
+            let LinkThumbnail::Cdn(descriptor) = link.thumbnail.unwrap() else {
+                panic!("expected CDN thumbnail");
+            };
             assert_eq!(descriptor.aes_key, [1; 16]);
             assert_eq!(descriptor.expected_bytes, Some(123));
             assert!(descriptor.strict_size);
             assert!(matches!(descriptor.quality, MediaQuality::Thumbnail));
             let public = serde_json::to_string(&link.card).unwrap();
-            for private in ["synthetic-cdn-id", "0101010101010101", "preview.jpg", "private-signature"] {
+            for private in [
+                "synthetic-cdn-id",
+                "0101010101010101",
+                "preview.jpg",
+                "private-signature",
+            ] {
                 assert!(!public.contains(private));
             }
         }
@@ -233,8 +298,14 @@ mod tests {
     fn malformed_or_missing_thumbnail_never_removes_the_card() {
         for xml in [
             CARD.replace("01010101010101010101010101010101", "bad-key"),
-            CARD.replace("<cdnthumblength>123</cdnthumblength>", "<cdnthumblength>8388609</cdnthumblength>"),
-            CARD.replace("<cdnthumblength>123</cdnthumblength>", "<cdnthumblength>invalid</cdnthumblength>"),
+            CARD.replace(
+                "<cdnthumblength>123</cdnthumblength>",
+                "<cdnthumblength>8388609</cdnthumblength>",
+            ),
+            CARD.replace(
+                "<cdnthumblength>123</cdnthumblength>",
+                "<cdnthumblength>invalid</cdnthumblength>",
+            ),
         ] {
             let link = app_message(&xml).unwrap().link.unwrap();
             assert!(matches!(link.thumbnail, Some(LinkThumbnail::Http(_))));
@@ -245,16 +316,36 @@ mod tests {
         assert_eq!(link.card.body(), "[Link] Only title");
         assert!(link.card.url.is_none());
         assert!(link.thumbnail.is_none());
-        assert!(app_message(&minimal.replace("<title>Only title</title>", "")).unwrap().link.is_none());
+        assert!(
+            app_message(&minimal.replace("<title>Only title</title>", ""))
+                .unwrap()
+                .link
+                .is_none()
+        );
     }
 
     #[test]
     fn duplicate_nested_and_oversized_fields_are_not_metadata() {
-        for title in ["<title>one</title><title>two</title>".into(), "<title><b>nested</b></title>".into(), format!("<title>{}</title>", "a".repeat(16385))] {
+        for title in [
+            "<title>one</title><title>two</title>".into(),
+            "<title><b>nested</b></title>".into(),
+            format!("<title>{}</title>", "a".repeat(16385)),
+        ] {
             let xml = format!("<msg><appmsg><type>5</type>{title}<url>https://example.invalid/</url></appmsg></msg>");
-            assert!(app_message(&xml).unwrap().link.unwrap().card.title.is_none());
+            assert!(app_message(&xml)
+                .unwrap()
+                .link
+                .unwrap()
+                .card
+                .title
+                .is_none());
         }
-        for xml in [format!("<!DOCTYPE msg>{CARD}"), CARD.replace("<msg>", "<msg xmlns='foreign'>"), CARD.replace("<type>5</type>", "<type>6</type>"), CARD.replace("</appmsg>", "</broken>")] {
+        for xml in [
+            format!("<!DOCTYPE msg>{CARD}"),
+            CARD.replace("<msg>", "<msg xmlns='foreign'>"),
+            CARD.replace("<type>5</type>", "<type>6</type>"),
+            CARD.replace("</appmsg>", "</broken>"),
+        ] {
             assert!(app_message(&xml).and_then(|app| app.link).is_none());
         }
     }

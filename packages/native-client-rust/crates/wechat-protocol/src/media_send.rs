@@ -62,17 +62,40 @@ pub fn share_xml(
     thumbnail_url: Option<&str>,
 ) -> Result<String> {
     clean(sender, 256)?;
-    ensure!(!title.trim().is_empty() && title.len() <= 16384
-        && !title.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')), "invalid_share_request");
+    ensure!(
+        !title.trim().is_empty()
+            && title.len() <= 16384
+            && !title
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+        "invalid_share_request"
+    );
     crate::media::validate_shared_link_url(url)?;
     let description = description.unwrap_or("");
-    ensure!(description.len() <= 16384
-        && !description.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')), "invalid_share_request");
-    if let Some(url) = thumbnail_url { crate::media::validate_link_thumbnail_url(url)?; }
-    let xml = format!("<appmsg appid=\"\" sdkver=\"0\">{}{}{}{}{}{}{}{}{}{}</appmsg>{}",
-        tag("title", title), tag("des", description), tag("action", "view"), tag("type", 5),
-        tag("showtype", 0), tag("url", url), tag("lowurl", ""), tag("thumburl", thumbnail_url.unwrap_or("")),
-        tag("sourceusername", ""), tag("sourcedisplayname", ""), tag("fromusername", sender));
+    ensure!(
+        description.len() <= 16384
+            && !description
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+        "invalid_share_request"
+    );
+    if let Some(url) = thumbnail_url {
+        crate::media::validate_link_thumbnail_url(url)?;
+    }
+    let xml = format!(
+        "<appmsg appid=\"\" sdkver=\"0\">{}{}{}{}{}{}{}{}{}{}</appmsg>{}",
+        tag("title", title),
+        tag("des", description),
+        tag("action", "view"),
+        tag("type", 5),
+        tag("showtype", 0),
+        tag("url", url),
+        tag("lowurl", ""),
+        tag("thumburl", thumbnail_url.unwrap_or("")),
+        tag("sourceusername", ""),
+        tag("sourcedisplayname", ""),
+        tag("fromusername", sender)
+    );
     ensure!(xml.len() <= 256 * 1024, "invalid_share_request");
     Ok(xml)
 }
@@ -85,7 +108,10 @@ pub fn share_send_request(
 ) -> Result<Vec<u8>> {
     clean(destination, 256)?;
     clean(client_id, 1024)?;
-    ensure!(created_at > 0 && !content.is_empty() && content.len() <= 256 * 1024, "invalid_share_request");
+    ensure!(
+        created_at > 0 && !content.is_empty() && content.len() <= 256 * 1024,
+        "invalid_share_request"
+    );
     let app = p::message(&[
         p::bytes(1, state.own_username.as_bytes()),
         p::bytes(2, &[]),
@@ -658,14 +684,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hex::encode(file), expected["fileHex"]);
-        let share_xml = share_xml("synthetic-user", "A <title> & preview", "https://example.invalid/a?x=1&y=2", Some("Description <as text>"), Some("https://example.invalid/preview.jpg")).unwrap();
+        let share_xml = share_xml(
+            "synthetic-user",
+            "A <title> & preview",
+            "https://example.invalid/a?x=1&y=2",
+            Some("Description <as text>"),
+            Some("https://example.invalid/preview.jpg"),
+        )
+        .unwrap();
         assert!(share_xml.starts_with("<appmsg "));
         assert!(share_xml.contains("<title>A &lt;title&gt; &amp; preview</title>"));
         assert!(share_xml.contains("<type>5</type>"));
         assert!(share_xml.contains("<url>https://example.invalid/a?x=1&amp;y=2</url>"));
         assert!(share_xml.ends_with("<fromusername>synthetic-user</fromusername>"));
         assert!(!share_xml.contains("<msg>"));
-        let share = share_send_request(&state, "room@chatroom", "share-client", 1234567, &share_xml).unwrap();
+        let share =
+            share_send_request(&state, "room@chatroom", "share-client", 1234567, &share_xml)
+                .unwrap();
         let outer = p::decode(&share).unwrap();
         let app = p::decode(p::data(&outer, 2).unwrap()).unwrap();
         assert_eq!(p::scalar(&app, 5).unwrap(), 5);

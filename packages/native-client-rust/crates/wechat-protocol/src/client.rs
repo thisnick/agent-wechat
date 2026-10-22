@@ -995,7 +995,13 @@ impl NativeClient {
         created_at: u32,
         content: &str,
     ) -> Result<crate::media_send::MediaSendResult> {
-        let request = crate::media_send::share_send_request(state, destination, client_id, created_at, content)?;
+        let request = crate::media_send::share_send_request(
+            state,
+            destination,
+            client_id,
+            created_at,
+            content,
+        )?;
         crate::media_send::decode_file_send(
             &self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?,
             client_id,

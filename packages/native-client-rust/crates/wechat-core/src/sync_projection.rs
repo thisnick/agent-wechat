@@ -1738,25 +1738,71 @@ mod encrypted_roundtrip {
             30
         );
         let share = crate::ShareSendRequest::Share {
-            thread_id: "peer".into(), title: "Shared & accepted".into(),
-            url: "https://example.invalid/article?a=1&b=2".into(), description: Some("Description".into()),
+            thread_id: "peer".into(),
+            title: "Shared & accepted".into(),
+            url: "https://example.invalid/article?a=1&b=2".into(),
+            description: Some("Description".into()),
             thumbnail_url: Some("https://example.invalid/preview.jpg".into()),
         };
-        let payload = super::SendPayload { thread_id: "peer".into(), text: "".into(), created_at: 300, client_id: 123, share: Some(share) };
-        let sealed = core.vault.seal("one", "send-payload", &serde_json::to_vec(&payload).unwrap()).unwrap();
-        let (intent, _) = store.create_send("one", "share-projection", "peer", "synthetic-share-hash", &sealed, "123").unwrap();
-        store.update_send("one", &intent.id, "accepted", Some("18446744073709551615"), None).unwrap();
+        let payload = super::SendPayload {
+            thread_id: "peer".into(),
+            text: "".into(),
+            created_at: 300,
+            client_id: 123,
+            share: Some(share),
+        };
+        let sealed = core
+            .vault
+            .seal(
+                "one",
+                "send-payload",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+        let (intent, _) = store
+            .create_send(
+                "one",
+                "share-projection",
+                "peer",
+                "synthetic-share-hash",
+                &sealed,
+                "123",
+            )
+            .unwrap();
+        store
+            .update_send(
+                "one",
+                &intent.id,
+                "accepted",
+                Some("18446744073709551615"),
+                None,
+            )
+            .unwrap();
         core.project_message_send("one", &intent.id).unwrap();
-        let projected = store.send("one", &intent.id).unwrap().local_message_id.unwrap();
+        let projected = store
+            .send("one", &intent.id)
+            .unwrap()
+            .local_message_id
+            .unwrap();
         core.project_message_send("one", &intent.id).unwrap();
-        assert_eq!(store.send("one", &intent.id).unwrap().local_message_id.as_deref(), Some(projected.as_str()));
+        assert_eq!(
+            store
+                .send("one", &intent.id)
+                .unwrap()
+                .local_message_id
+                .as_deref(),
+            Some(projected.as_str())
+        );
         let message = core.message("one", &projected).unwrap();
         assert_eq!(message["type"], 49);
         assert_eq!(message["appMessageType"], 5);
         assert_eq!(message["serverId"], "18446744073709551615");
         assert_eq!(message["direction"], "outgoing");
         assert_eq!(message["link"]["title"], "Shared & accepted");
-        assert!(message["body"].as_str().unwrap().contains("https://example.invalid/article?a=1&b=2"));
+        assert!(message["body"]
+            .as_str()
+            .unwrap()
+            .contains("https://example.invalid/article?a=1&b=2"));
     }
 }
 

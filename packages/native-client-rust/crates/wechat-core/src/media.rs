@@ -294,8 +294,17 @@ impl Core {
         let sidecar_only = quoted_image.is_some() || link.is_some();
         let mut quoted = msg.clone();
         let mut plans = if let Some(link) = link {
-            link.thumbnail.into_iter().map(|source| (MediaKind::Image, MediaVariant::Thumbnail,
-                DownloadPlan::LinkThumbnail { source }, Some("link-preview".into()))).collect()
+            link.thumbnail
+                .into_iter()
+                .map(|source| {
+                    (
+                        MediaKind::Image,
+                        MediaVariant::Thumbnail,
+                        DownloadPlan::LinkThumbnail { source },
+                        Some("link-preview".into()),
+                    )
+                })
+                .collect()
         } else if let Some(content) = &quoted_image {
             quoted.message_type = 3;
             discover(&quoted, content)?
@@ -895,13 +904,19 @@ impl Core {
         let progress = |n, t: Option<u64>| {
             if link_thumbnail {
                 let bound = wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES as u64 + 16;
-                ensure!(n <= bound && t.is_none_or(|t| t <= bound), "link_thumbnail_size_limit");
+                ensure!(
+                    n <= bound && t.is_none_or(|t| t <= bound),
+                    "link_thumbnail_size_limit"
+                );
             }
             self.progress_media(account, id, n, t)
         };
         let mut official_writeback = None;
         let (bytes, mime, actual, frames) = match plan {
-            DownloadPlan::Cdn { descriptor } | DownloadPlan::LinkThumbnail { source: crate::links::LinkThumbnail::Cdn(descriptor) } => {
+            DownloadPlan::Cdn { descriptor }
+            | DownloadPlan::LinkThumbnail {
+                source: crate::links::LinkThumbnail::Cdn(descriptor),
+            } => {
                 let mut state = self.account_state(account)?;
                 let native = NativeClient::new(NativeOptions::default())?;
                 let conf = match native.cdn_config(&mut state) {
@@ -916,7 +931,10 @@ impl Core {
                 let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
                 let media = cdn.download_with_progress(&descriptor, progress)?;
                 if link_thumbnail {
-                    ensure!(media.bytes.len() <= wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES, "link_thumbnail_size_limit");
+                    ensure!(
+                        media.bytes.len() <= wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES,
+                        "link_thumbnail_size_limit"
+                    );
                 }
                 let (mime, frames) = validate_asset_bytes(asset.kind, asset.variant, &media.bytes)?;
                 let actual = if media
@@ -943,9 +961,12 @@ impl Core {
                 };
                 (media.bytes, mime, actual, frames)
             }
-            DownloadPlan::LinkThumbnail { source: crate::links::LinkThumbnail::Http(url) } => {
+            DownloadPlan::LinkThumbnail {
+                source: crate::links::LinkThumbnail::Http(url),
+            } => {
                 let bytes = wechat_protocol::media::fetch_link_thumbnail(&url, progress)?;
-                let (mime, frames) = validate_asset_bytes(MediaKind::Image, MediaVariant::Thumbnail, &bytes)?;
+                let (mime, frames) =
+                    validate_asset_bytes(MediaKind::Image, MediaVariant::Thumbnail, &bytes)?;
                 (bytes, mime, Some(MediaVariant::Thumbnail), frames)
             }
             DownloadPlan::Sticker { descriptor } => {

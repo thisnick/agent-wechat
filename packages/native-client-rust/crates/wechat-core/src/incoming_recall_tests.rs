@@ -30,18 +30,31 @@ fn recall_count(store: &Store) -> usize {
 #[test]
 fn recalled_share_redacts_structured_metadata_and_blocks_its_thumbnail() {
     let (_temporary, _store, core) = fixture();
-    let original = add(49, "peer", "synthetic_self", include_bytes!("../tests/fixtures/shared-link.xml"), 123, 100);
-    core.apply_sync_command("one", &original, "original-share", "live").unwrap();
+    let original = add(
+        49,
+        "peer",
+        "synthetic_self",
+        include_bytes!("../tests/fixtures/shared-link.xml"),
+        123,
+        100,
+    );
+    core.apply_sync_command("one", &original, "original-share", "live")
+        .unwrap();
     let before = first(&core);
     let id = before["id"].as_str().unwrap();
     assert_eq!(before["link"]["title"], "Title & preview");
     assert_eq!(core.media_assets("one", id).unwrap().len(), 1);
-    core.apply_sync_command("one", &recall(123), "recall-share", "live").unwrap();
+    core.apply_sync_command("one", &recall(123), "recall-share", "live")
+        .unwrap();
     let after = core.message("one", id).unwrap();
     assert!(after["link"].is_null());
     assert_eq!(after["body"], crate::recalls::RECALLED_BODY);
     assert!(!after.to_string().contains("Title & preview"));
-    assert!(core.media_assets("one", id).unwrap_err().to_string().contains("message_recalled"));
+    assert!(core
+        .media_assets("one", id)
+        .unwrap_err()
+        .to_string()
+        .contains("message_recalled"));
 }
 fn synthetic_database(
     core: &Core,
