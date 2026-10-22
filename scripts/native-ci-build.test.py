@@ -35,6 +35,27 @@ class ConcurrentBuildTest(unittest.TestCase):
     def test_compiler_failure_and_diagnostics_are_preserved(self):
         self.assertIn(b"compile failed", self.exercise('import sys; print("compile failed", file=sys.stderr); sys.exit(7)', 7))
 
+    def test_result_recorded_during_liveness_check_keeps_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "request.json").write_text("{}", encoding="utf-8")
+            (state / "pid").write_text("0", encoding="ascii")
+
+            def compiler_finishes_now(pid):
+                (state / "compiler.log").write_bytes(b"late diagnostics\n")
+                (state / "exit-code").write_text("7", encoding="ascii")
+                return False
+
+            wait_build = helpers["wait_build"]
+            original = wait_build.__globals__["process_alive"]
+            wait_build.__globals__["process_alive"] = compiler_finishes_now
+            try:
+                output = io.BytesIO()
+                self.assertEqual(wait_build(state, timeout=5, output=output), 7)
+            finally:
+                wait_build.__globals__["process_alive"] = original
+            self.assertIn(b"late diagnostics", output.getvalue())
+
     def test_dependency_setup_can_run_before_compiler_finishes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
