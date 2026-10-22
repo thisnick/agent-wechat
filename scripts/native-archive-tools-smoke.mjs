@@ -16,8 +16,9 @@ const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/
 assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.2');
 const temporary = await mkdtemp(join(tmpdir(), 'native-archive-policy-'));
 const token = 'synthetic-native-token-'.repeat(3), streams = new Set(), requests = [], accesses = [];
+const roles = ['ungranted', 'ordinary', 'privileged'], inputRechecks = new Set();
 const stages = { ungranted: 0, ordinary: 0, privileged: 0 };
-let child, fixtureError, log = '', activeRole;
+let child, fixtureError, log = '', activeRole, eventReplayReads = 0;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const image = await readFile(join(root, 'packages/openclaw-extension/test/fixtures/native-model.png'));
 const file = Buffer.from('Synthetic archive file');
@@ -50,7 +51,12 @@ const upstream = createServer(async (req, res) => {
     if (url.pathname === '/v1/status') return json({ serverId: 'fixture', dataDir: '/fixture', pid: process.pid, ownershipGeneration: 'fixture', state: 'running',
       version: { product: 'agent-wechat', backend: 'native', version: '1.0.0', apiVersion: 1, capabilities: ['serve', 'events', 'profile-read', 'text-send', 'native-login'] } });
     if (url.pathname === '/v1/accounts/a') return json({ id: 'a', authenticated: true, connection: 'online' });
+    if (url.pathname === '/v1/accounts/a/events') {
+      assert.equal(req.method, 'GET'); eventReplayReads++;
+      return json({ items: [], nextCursor: url.searchParams.get('after') ?? '0' });
+    }
     if (url.pathname === '/v1/accounts/a/events/stream') {
+      assert.ok(eventReplayReads > 0, 'Channel must replay durable events before opening its live stream');
       res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return;
     }
     if (url.pathname === '/v1/accounts/a/threads') {
@@ -64,6 +70,12 @@ const upstream = createServer(async (req, res) => {
     }
     if (url.pathname === '/v1/accounts/a/threads/private-peer/messages') {
       accesses.push({ role: activeRole, kind: 'history' }); return json(page([message('archive-image'), message('archive-file')]));
+    }
+    const trigger = /^\/v1\/accounts\/a\/messages\/trigger-(ungranted|ordinary|privileged)$/.exec(url.pathname);
+    if (trigger) {
+      assert.equal(req.method, 'GET'); const role = trigger[1]; inputRechecks.add(role);
+      return json({ ...message(`trigger-${role}`, `${role}-peer`), senderId: `${role}-peer`,
+        serverId: String(roles.indexOf(role) + 1), body: `archive-case:${role}` });
     }
     const exact = /^\/v1\/accounts\/a\/messages\/(archive-image|archive-file)$/.exec(url.pathname);
     if (exact) { accesses.push({ role: activeRole, kind: 'message', id: exact[1] }); return json(message(exact[1])); }
@@ -114,7 +126,6 @@ try {
   await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-archive-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const apiPort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
-  const roles = ['ungranted', 'ordinary', 'privileged'];
   const native = { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${apiPort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy: 'never' };
   const config = {
     gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } },
@@ -141,6 +152,8 @@ try {
     await writeFile(join(process.env.NATIVE_ARCHIVE_PROOF_DIR, 'observations.json'), JSON.stringify({ result, requests, accesses, log }), { mode: 0o600 });
   }
   assert.ifError(fixtureError); assert.ok(result, `Gateway deadline: ${log}`); assert.equal(result.error, undefined, `${result.error}; ${log}`);
+  assert.ok(eventReplayReads > 0 && streams.size > 0, 'Channel event replay and live intake must be active');
+  assert.deepEqual([...inputRechecks].sort(), [...roles].sort(), 'Every dispatched role must recheck its current input');
   for (const role of roles) { assert.equal(result.outcomes[role], 'completed'); assert.equal(stages[role], (role === 'privileged' ? allowedSteps : deniedSteps).length + 1); }
   assert.ok(accesses.length > 0); assert.ok(accesses.every(access => access.role === 'privileged'), 'Unprivileged invocation reached the archive API');
   assert.deepEqual(accesses.filter(access => access.kind === 'search').map(access => access.query.cursor), [undefined, 'archive-next']);
@@ -152,7 +165,7 @@ try {
   assert.ok(fileResult.attachment.path.startsWith(join(temporary, 'state/media') + '/'), 'Archive file path must be in managed media storage');
   assert.deepEqual(await readFile(fileResult.attachment.path), file, 'Provider file path must resolve to the verified attachment bytes');
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));
-  console.log(JSON.stringify({ gatewayVersion: '2026.10.2', optionalToolsAbsentWithoutGrant: true, denyOverridesFullProfile: true, guessedArchiveCallsRejected: true,
+  console.log(JSON.stringify({ gatewayVersion: '2026.10.2', startupEventReplay: true, sourceInputRechecks: true, optionalToolsAbsentWithoutGrant: true, denyOverridesFullProfile: true, guessedArchiveCallsRejected: true,
     accountWideSearchAndPagination: true, otherSenderHistoryAndMedia: true, defaultToolsRemainCurrentThread: true, archiveImageHashReachedProvider: true, archiveFilePathReachedProvider: true }));
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(5000)]); if (child.exitCode === null) child.kill('SIGKILL'); }
