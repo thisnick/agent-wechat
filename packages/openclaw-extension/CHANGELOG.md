@@ -1,5 +1,13 @@
 # @agent-wechat/wechat
 
+## 1.0.0-beta.11
+
+### Patch Changes
+
+- [#252](https://github.com/thisnick/agent-wechat/pull/252) [`4591315`](https://github.com/thisnick/agent-wechat/commit/45913156c8baeb945d2db147067a499b24649018) Thanks [@thisnick](https://github.com/thisnick)! - Declare `wechat_send_share` in the plugin manifest's `contracts.tools`. OpenClaw drops tools a plugin registers without declaring them, so agents never saw the share tool and `openclaw plugins doctor` reported an error.
+
+- [#253](https://github.com/thisnick/agent-wechat/pull/253) [`e259b46`](https://github.com/thisnick/agent-wechat/commit/e259b462a7dc7e6511a2680cb76c84b066229bb1) Thanks [@thisnick](https://github.com/thisnick)! - Correct metadata for voice notes uploaded in multiple requests by including the client-ID buffer only in the first request. Notes continue to support up to 60 seconds.
+
 ## 1.0.0-beta.10
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.11
+
+### Patch Changes
+
+- [#253](https://github.com/thisnick/agent-wechat/pull/253) [`e259b46`](https://github.com/thisnick/agent-wechat/commit/e259b462a7dc7e6511a2680cb76c84b066229bb1) Thanks [@thisnick](https://github.com/thisnick)! - Correct metadata for voice notes uploaded in multiple requests by including the client-ID buffer only in the first request. Notes continue to support up to 60 seconds.
+
 ## 1.0.0-beta.10
 
 ### Patch Changes
