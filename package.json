@@ -19,7 +19,9 @@
     "native:release:build": "bash scripts/native-build-release.sh",
     "build:image": "docker build -f deploy/native/Dockerfile -t agent-wechat-native:local .",
     "build:image:amd64": "docker build --platform linux/amd64 -f deploy/native/Dockerfile -t agent-wechat-native:local .",
-    "build:image:arm64": "docker build --platform linux/arm64 -f deploy/native/Dockerfile -t agent-wechat-native:local ."
+    "build:image:arm64": "docker build --platform linux/arm64 -f deploy/native/Dockerfile -t agent-wechat-native:local .",
+    "client:dev": "pnpm --filter @agent-wechat/client-ui dev",
+    "client:smoke": "pnpm --filter @agent-wechat/shared build && node scripts/client-ui-smoke.mjs"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",

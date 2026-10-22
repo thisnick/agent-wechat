@@ -70,3 +70,7 @@ Start the local upstream simulator and real hub API with `pnpm native:dev`, or r
 `pnpm native:simulator:smoke` for the SDK regression journey. Both use synthetic
 accounts without connecting to WeChat. See the [simulator guide](dev-notes/simulator.md)
 for state controls, isolation and the current implementation scope.
+
+Start the connected browser preview with `pnpm client:dev`. It starts its own
+isolated simulator and hub, then prints a browser URL. See the [client preview
+guide](dev-notes/client-ui.md) for sign-in, scenario controls and current limits.

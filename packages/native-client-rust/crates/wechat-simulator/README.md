@@ -5,8 +5,9 @@ workers, encrypted profiles, outbox, projection journals and durable event/SSE
 stream. An injected upstream adapter exchanges local JSON with a separate Rust
 scenario service. The scenario service owns a separate SQLite database.
 
-This first milestone provides an API/SDK development environment. The shared
-production web frontend and Tauri shell remain follow-up work.
+This command provides an API/SDK development environment. For the connected
+browser preview, use `pnpm client:dev`; see [the client preview guide](client-ui.md).
+Production web hosting and the Tauri shell remain follow-up work.
 
 ## Start
 

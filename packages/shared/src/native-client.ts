@@ -58,7 +58,7 @@ export class NativeWeChatClient {
     const nodeEnvironment = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
     if (this.baseUrl.protocol === "https:" && nodeEnvironment?.NODE_TLS_REJECT_UNAUTHORIZED === "0") throw new Error("Native API refuses HTTPS with TLS verification disabled");
     if (typeof options.token !== "string" || !options.token || /[\r\n]/.test(options.token)) throw new Error("Native API bearer token is required");
-    this.token = options.token; this.fetchImpl = options.fetch ?? fetch; this.timeoutMs = options.timeoutMs ?? 30000;
+    this.token = options.token; this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis); this.timeoutMs = options.timeoutMs ?? 30000;
     this.mediaTimeoutMs = options.mediaTimeoutMs ?? 60 * 60000;
     if (!Number.isInteger(this.mediaTimeoutMs) || this.mediaTimeoutMs < 1 || this.mediaTimeoutMs > 60 * 60000) throw new Error("Invalid native media timeout");
     this.streamIdleTimeoutMs = options.streamIdleTimeoutMs ?? 45000;
@@ -303,7 +303,7 @@ export class NativeWeChatClient {
   ack(accountId: string, consumerId: string, cursor: string): Promise<unknown> {
     return this.request(`v1/accounts/${id(accountId)}/consumers/${id(consumerId)}/ack`, { method: "POST", body: JSON.stringify({ cursor: decimal(cursor) }) });
   }
-  async *watch(accountId: string, after = "0", signal?: AbortSignal): AsyncGenerator<NativeEvent> {
+  async *watch(accountId: string, after = "0", signal?: AbortSignal, options: { onActivity?: () => void } = {}): AsyncGenerator<NativeEvent> {
     const connection = new AbortController();
     const streamSignal = signal ? AbortSignal.any([signal, connection.signal]) : connection.signal;
     const bounded = async <T>(work: () => Promise<T>, milliseconds: number, reason: string): Promise<T> => {
@@ -329,6 +329,7 @@ export class NativeWeChatClient {
         // awaited read, not time spent yielding an event to a slow consumer.
         const activeReader = reader;
         const { value, done } = await bounded(() => activeReader.read(), this.streamIdleTimeoutMs, "Native SSE idle timeout"); if (done) break;
+        options.onActivity?.();
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > 1024 * 1024) throw new Error("Native SSE frame exceeds its bound");
         let newline: number;

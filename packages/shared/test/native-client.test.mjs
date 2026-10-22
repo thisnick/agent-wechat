@@ -412,3 +412,18 @@ test('invalid retry options never fall back to an ordinary job retry', () => {
     assert.throws(() => client.retryJob('a', 'original-job', invalid), /Invalid media retry options/);
   }
 });
+test('default browser fetch keeps the global receiver', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = function () { assert.equal(this, globalThis); return Promise.resolve(Response.json({ items: [] })); };
+  try { await new NativeWeChatClient(options).accounts(); } finally { globalThis.fetch = original; }
+});
+test('SSE activity starts on actual frames, including keepalive comments', async () => {
+  const encoder = new TextEncoder(); let activity = 0;
+  const client = new NativeWeChatClient({ ...options, fetch: async () => new Response(new ReadableStream({ start(controller) {
+    controller.enqueue(encoder.encode(': keepalive\n\n'));
+    controller.enqueue(encoder.encode('data: {"cursor":"1","kind":"message.committed","data":{"messageId":"m"},"createdAt":"1"}\n\n')); controller.close();
+  } }), { headers: { 'Content-Type': 'text/event-stream' } }) });
+  assert.equal(activity,0); const events=[];
+  for await (const event of client.watch('a','0',undefined,{ onActivity: () => activity++ })) events.push(event);
+  assert.equal(activity,2); assert.equal(events.length,1);
+});

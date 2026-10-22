@@ -1,0 +1,1309 @@
+import { createRoot } from "react-dom/client";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+  type ReactNode,
+} from "react";
+import {
+  type NativeMessage,
+  type NativeOperation,
+  type MediaAsset,
+  type NativeGroupMember,
+  isNativeTombstone,
+} from "@agent-wechat/shared";
+import { bootstrap, connect, control, type Connection } from "./connection.ts";
+import {
+  readableError,
+  pause,
+  type Account,
+  type PendingSend,
+} from "./session.ts";
+import { Avatar, Button, Icon, Logo, Welcome } from "./ui.tsx";
+import "./style.css";
+import "./onboarding.css";
+import "./client.css";
+
+function date(value: string | null): Date {
+  return new Date(
+    value && /^\d+$/.test(value) ? Number(value) * 1000 : (value ?? 0),
+  );
+}
+function time(value: string | null): string {
+  return value
+    ? date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+}
+function useTheme() {
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem("agentwechat-theme") ?? "system";
+    } catch {
+      return "system";
+    }
+  });
+  useEffect(() => {
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" || (theme === "system" && media.matches);
+      document.body.classList.toggle("dark", dark);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      document.documentElement.style.colorScheme = dark ? "dark" : "light";
+    };
+    apply();
+    media.addEventListener("change", apply);
+    try {
+      localStorage.setItem("agentwechat-theme", theme);
+    } catch {
+      /* Optional preferences. */
+    }
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+  return [theme, setTheme] as const;
+}
+function ErrorNotice({ children }: { children: ReactNode }) {
+  return (
+    <div className="connection-error" role="alert">
+      <Icon name="help" />
+      <span>{children}</span>
+    </div>
+  );
+}
+function App() {
+  const [connection, setConnection] = useState<Connection | null>(null);
+  const [starting, setStarting] = useState(true);
+  const [error, setError] = useState("");
+  const [theme, setTheme] = useTheme();
+  useEffect(() => {
+    let cancelled = false;
+    void bootstrap()
+      .then((value) => {
+        if (cancelled) value?.session.close();
+        else setConnection(value);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(readableError(e));
+      })
+      .finally(() => {
+        if (!cancelled) setStarting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(
+    () => () => {
+      connection?.session.close();
+    },
+    [connection],
+  );
+  useEffect(() => {
+    document.body.classList.toggle("onboarding-active", !connection);
+  }, [connection]);
+  if (starting)
+    return (
+      <Welcome simulator={false}>
+        <h1>Opening AgentWechat…</h1>
+      </Welcome>
+    );
+  if (!connection)
+    return <ConnectionForm error={error} onConnect={setConnection} />;
+  return (
+    <Client
+      key={connection.endpoint}
+      connection={connection}
+      theme={theme}
+      setTheme={setTheme}
+      disconnect={() => setConnection(null)}
+    />
+  );
+}
+function ConnectionForm({
+  onConnect,
+  error: initialError,
+}: {
+  onConnect: (c: Connection) => void;
+  error: string;
+}) {
+  const [endpoint, setEndpoint] = useState(location.origin),
+    [token, setToken] = useState("");
+  const [error, setError] = useState(initialError),
+    [busy, setBusy] = useState(false),
+    [show, setShow] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const connection = await connect(endpoint, token);
+      setToken("");
+      onConnect(connection);
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Welcome simulator={false}>
+      <div className="welcome-heading">
+        <h1>Connect to a hub</h1>
+        <p>Enter the address and access key for your agent-wechat hub.</p>
+      </div>
+      <form onSubmit={submit}>
+        <div className="remote-fields">
+          <label htmlFor="hub-address">Hub address</label>
+          <div className="connection-input">
+            <Icon name="server" />
+            <input
+              id="hub-address"
+              type="url"
+              required
+              value={endpoint}
+              onChange={(e) => setEndpoint(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <label htmlFor="hub-key">Hub access key</label>
+          <div className="connection-input">
+            <input
+              id="hub-key"
+              type={show ? "text" : "password"}
+              required
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              autoComplete="off"
+            />
+            <button type="button" onClick={() => setShow(!show)}>
+              {show ? "Hide" : "Show"}
+            </button>
+          </div>
+        </div>
+        {error && <ErrorNotice>{error}</ErrorNotice>}
+        <button className="continue-button" disabled={busy}>
+          {busy ? "Connecting…" : "Connect"} <Icon name="chevron" />
+        </button>
+      </form>
+      <details className="hub-help">
+        <summary>Use this device as a hub</summary>
+        <p>
+          The browser connects to a running hub. For local development, start{" "}
+          <code>pnpm client:dev</code> on this device and open its printed URL.
+        </p>
+      </details>
+    </Welcome>
+  );
+}
+function Client({
+  connection,
+  theme,
+  setTheme,
+  disconnect,
+}: {
+  connection: Connection;
+  theme: string;
+  setTheme: (t: string) => void;
+  disconnect: () => void;
+}) {
+  const { session, simulator } = connection;
+  const state = useSyncExternalStore(session.subscribe, session.snapshot);
+  const [screen, setScreen] = useState<"accounts" | "login" | "chats">(
+    "accounts",
+  );
+  const [loginAccount, setLoginAccount] = useState<Account | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    document.body.classList.toggle("onboarding-active", screen !== "chats");
+  }, [screen]);
+  async function open(account: Account) {
+    setBusy(true);
+    setError("");
+    try {
+      if (!account.authenticated) {
+        setLoginAccount(account);
+        setScreen("login");
+        return;
+      }
+      await session.activate(account.id);
+      setScreen("chats");
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function add() {
+    setBusy(true);
+    setError("");
+    try {
+      const id = simulator
+        ? `account-${crypto.randomUUID().slice(0, 8)}`
+        : undefined;
+      const result = await session.client.createAccount({
+        id,
+        alias: `account-${state.accounts.length + 1}`,
+      });
+      await session.accounts();
+      setLoginAccount(result as Account);
+      setScreen("login");
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (screen === "login" && loginAccount)
+    return (
+      <Welcome simulator={simulator}>
+        <Login
+          connection={connection}
+          account={loginAccount.id}
+          cancel={() => {
+            setScreen("accounts");
+            void session.accounts();
+          }}
+          signedIn={async () => {
+            await session.accounts();
+            await session.activate(loginAccount.id);
+            setScreen("chats");
+          }}
+        />
+      </Welcome>
+    );
+  if (screen !== "chats")
+    return (
+      <Welcome simulator={simulator}>
+        <div className="welcome-heading">
+          <h1>
+            {state.accounts.length ? "Choose an account" : "Sign in to WeChat"}
+          </h1>
+          {!state.accounts.length && (
+            <p>
+              {simulator
+                ? "Create a synthetic account to try the connected client."
+                : "Add your WeChat account to get started."}
+            </p>
+          )}
+        </div>
+        <div className="login-accounts">
+          {state.accounts.map((a) => (
+            <button
+              key={a.id}
+              className="login-account"
+              disabled={busy}
+              onClick={() => void open(a)}
+            >
+              <Avatar name={a.alias || a.id} />
+              <span>
+                <strong>{a.alias || a.id}</strong>
+                <small>
+                  {a.authenticated ? "Open chats" : "Sign in to WeChat"}
+                </small>
+              </span>
+              <Icon name="chevron" />
+            </button>
+          ))}
+        </div>
+        {error && <ErrorNotice>{error}</ErrorNotice>}
+        <button
+          className="continue-button"
+          disabled={busy}
+          onClick={() => void add()}
+        >
+          {busy ? "Opening…" : "Add WeChat account"} <Icon name="plus" />
+        </button>
+        <button className="quiet-button" onClick={disconnect}>
+          Connect to a different hub
+        </button>
+      </Welcome>
+    );
+  return (
+    <Chats
+      connection={connection}
+      theme={theme}
+      setTheme={setTheme}
+      switchAccount={() => {
+        setScreen("accounts");
+        void session.accounts();
+      }}
+      addAccount={() => void add()}
+    />
+  );
+}
+function Login({
+  connection,
+  account,
+  signedIn,
+  cancel,
+}: {
+  connection: Connection;
+  account: string;
+  signedIn: () => Promise<void>;
+  cancel: () => void;
+}) {
+  const [operation, setOperation] = useState<NativeOperation | null>(null),
+    [qr, setQr] = useState(""),
+    [error, setError] = useState(""),
+    [attempt, setAttempt] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const operationId = useRef<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    let url = "";
+    const key = crypto.randomUUID();
+    void (async () => {
+      try {
+        setError("");
+        setOperation(null);
+        setQr("");
+        const op = await connection.session.client.login(
+          account,
+          { strategy: "qr", qrRefresh: { mode: "manual", maxRefreshes: 0 } },
+          key,
+        );
+        if (controller.signal.aborted) {
+          await connection.session.client.cancelOperation(account, op.id);
+          return;
+        }
+        operationId.current = op.id;
+        let generation = 0;
+        while (!controller.signal.aborted) {
+          const current = await connection.session.client.operation(
+            account,
+            op.id,
+            controller.signal,
+          );
+          if (controller.signal.aborted) return;
+          setOperation(current);
+          const result = current.result as {
+            qrAvailable?: boolean;
+            qrGeneration?: number;
+          } | null;
+          if (current.state === "succeeded") {
+            operationId.current = null;
+            await signedIn();
+            return;
+          }
+          if (
+            ["failed", "expired", "rejected", "cancelled"].includes(
+              current.state,
+            )
+          ) {
+            operationId.current = null;
+            return;
+          }
+          if (result?.qrAvailable && result.qrGeneration !== generation) {
+            const bytes = await connection.session.client.qr(
+              account,
+              op.id,
+              result.qrGeneration,
+            );
+            if (controller.signal.aborted) return;
+            if (url) URL.revokeObjectURL(url);
+            url = URL.createObjectURL(
+              new Blob([new Uint8Array(bytes).buffer], { type: "image/png" }),
+            );
+            setQr(url);
+            generation = result.qrGeneration ?? 1;
+          }
+          await pause(650, controller.signal);
+        }
+      } catch (e) {
+        if (!controller.signal.aborted) setError(readableError(e));
+      }
+    })();
+    return () => {
+      controller.abort();
+      if (url) URL.revokeObjectURL(url);
+      const id = operationId.current;
+      operationId.current = null;
+      if (id)
+        void connection.session.client
+          .cancelOperation(account, id)
+          .catch(() => {});
+    };
+  }, [account, attempt]);
+  const state = operation?.state;
+  const terminal = ["failed", "expired", "rejected", "cancelled"].includes(
+    state ?? "",
+  );
+  async function simulate(status: string) {
+    setBusy(true);
+    try {
+      await control({ op: "login", account, status });
+    } catch {
+      setError("Simulator control failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <button className="step-back" onClick={cancel}>
+        <Icon name="back" /> Back
+      </button>
+      <div className="welcome-heading">
+        <h1>
+          {state === "awaiting_approval"
+            ? "Confirm sign-in in WeChat"
+            : state === "expired"
+              ? "QR code expired"
+              : terminal
+                ? "Sign-in could not finish"
+                : "Sign in to WeChat"}
+        </h1>
+        <p>
+          {connection.simulator
+            ? "This QR belongs to the local simulator. Use the phone controls below."
+            : "In WeChat on your phone, tap +, then Scan."}
+        </p>
+      </div>
+      <div className="account-link-card">
+        {state === "awaiting_approval" ? (
+          <div className="approval-symbol">
+            <Icon name="check" />
+          </div>
+        ) : qr && !terminal ? (
+          <img className="login-qr" src={qr} alt="WeChat sign-in QR code" />
+        ) : (
+          <p>
+            {terminal ? "Get a new code to try again." : "Preparing your code…"}
+          </p>
+        )}
+      </div>
+      {error && <ErrorNotice>{error}</ErrorNotice>}
+      {terminal || error ? (
+        <button
+          className="continue-button"
+          onClick={() => setAttempt((a) => a + 1)}
+        >
+          Get a new code
+        </button>
+      ) : connection.simulator ? (
+        <div className="sim-phone">
+          <span>Simulated phone</span>
+          <button
+            className="continue-button"
+            disabled={busy || !qr}
+            onClick={() =>
+              void simulate(
+                state === "awaiting_approval" ? "approved" : "scanned",
+              )
+            }
+          >
+            {state === "awaiting_approval"
+              ? "Simulate phone approval"
+              : "Simulate scan"}{" "}
+            <Icon name="chevron" />
+          </button>
+          <button
+            className="quiet-button"
+            disabled={busy || !qr}
+            onClick={() =>
+              void control({ op: "advance", seconds: 121 }).catch(() =>
+                setError("Simulator control failed."),
+              )
+            }
+          >
+            Expire this code
+          </button>
+        </div>
+      ) : (
+        <p className="field-help">
+          Chats open automatically after you confirm on your phone.
+        </p>
+      )}
+    </>
+  );
+}
+function Chats({
+  connection,
+  theme,
+  setTheme,
+  switchAccount,
+  addAccount,
+}: {
+  connection: Connection;
+  theme: string;
+  setTheme: (t: string) => void;
+  switchAccount: () => void;
+  addAccount: () => void;
+}) {
+  const { session, simulator } = connection,
+    state = useSyncExternalStore(session.subscribe, session.snapshot);
+  const [section, setSection] = useState<"chats" | "contacts">("chats"),
+    [query, setQuery] = useState(""),
+    [filter, setFilter] = useState("all");
+  const [mobile, setMobile] = useState(false),
+    [details, setDetails] = useState(false),
+    [settings, setSettings] = useState(false),
+    [accountMenu, setAccountMenu] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [simBody, setSimBody] = useState("Hello from the simulated phone."),
+    [simStatus, setSimStatus] = useState("");
+  const [find, setFind] = useState(false),
+    [inChat, setInChat] = useState("");
+  const messages = useRef<HTMLDivElement>(null);
+  const account = state.accounts.find((a) => a.id === state.account);
+  const name = (id: string) =>
+    state.contacts.find((c) => c.id === id)?.displayName ||
+    state.threads.find((t) => t.id === id)?.displayName ||
+    (id === "filehelper" ? "File Transfer" : id);
+  const selectedName = state.selected ? name(state.selected) : "";
+  const draftKey = `${state.account}:${state.selected}`,
+    draft = drafts[draftKey] ?? "";
+  useEffect(() => {
+    const box = messages.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [state.selected, state.messages.at(-1)?.id, state.sends.length]);
+  const active = account?.authenticated !== false;
+  async function simulate(op: Record<string, unknown>) {
+    try {
+      await control({ account: state.account, ...op });
+      setSimStatus("Scenario applied.");
+    } catch {
+      setSimStatus("Scenario control failed.");
+    }
+  }
+  function send() {
+    if (!draft.trim() || !state.selected || !active) return;
+    setDrafts((d) => ({ ...d, [draftKey]: "" }));
+    void session.send(draft);
+  }
+  function select(id: string) {
+    setMobile(true);
+    setInChat("");
+    void session.select(id);
+  }
+  const threads = state.threads.filter(
+    (t) =>
+      name(t.id).toLowerCase().includes(query.toLowerCase()) &&
+      (filter !== "unread" || !!t.unreadCount) &&
+      (filter !== "groups" || t.kind === "group"),
+  );
+  return (
+    <div className={`shell ${mobile ? "mobile-chat" : ""}`}>
+      <nav className="rail" aria-label="Main navigation">
+        <div className="brand" title="AgentWechat">
+          <Logo />
+        </div>
+        <button
+          className={`nav-btn ${section === "chats" ? "active" : ""}`}
+          aria-label="Chats"
+          onClick={() => {
+            setSection("chats");
+            setMobile(false);
+          }}
+        >
+          <Icon name="chat" />
+        </button>
+        <button
+          className={`nav-btn ${section === "contacts" ? "active" : ""}`}
+          aria-label="Contacts"
+          onClick={() => {
+            setSection("contacts");
+            setMobile(false);
+          }}
+        >
+          <Icon name="people" />
+        </button>
+        <div className="rail-spacer" />
+        <button
+          className="nav-btn"
+          aria-label="Settings"
+          onClick={() => setSettings(true)}
+        >
+          <Icon name="settings" />
+        </button>
+        <div className="rail-rule" />
+        <button
+          className="nav-btn account-btn"
+          aria-label="Switch account"
+          onClick={() => setAccountMenu(!accountMenu)}
+        >
+          <Avatar name={account?.alias || state.account || "?"} />
+        </button>
+      </nav>
+      <aside className="sidebar">
+        <div className="side-head">
+          <div className="eyebrow">{account?.alias || "AgentWechat"}</div>
+          <div className="title-row">
+            <h1>{section === "chats" ? "Messages" : "Contacts"}</h1>
+            <Button
+              icon="plus"
+              label="New conversation"
+              onClick={() => {
+                setSection("contacts");
+                setMobile(false);
+              }}
+            />
+          </div>
+          <label className="search">
+            <Icon name="search" />
+            <input
+              aria-label={
+                section === "chats" ? "Search conversations" : "Search contacts"
+              }
+              placeholder={
+                section === "chats" ? "Search conversations" : "Find a person"
+              }
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
+          {section === "chats" && (
+            <div className="filters">
+              {["all", "unread", "groups"].map((f) => (
+                <button
+                  key={f}
+                  className={`pill ${filter === f ? "active" : ""}`}
+                  onClick={() => setFilter(f)}
+                >
+                  {f[0].toUpperCase() + f.slice(1)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="list-label">
+          {section === "chats" ? "CONVERSATIONS" : "CONTACTS"}
+        </div>
+        <div className="chat-list">
+          {section === "chats"
+            ? threads.map((t) => (
+                <button
+                  key={t.id}
+                  className={`chat-row ${state.selected === t.id ? "selected" : ""}`}
+                  onClick={() => select(t.id)}
+                >
+                  <Avatar name={name(t.id)} />
+                  <div className="chat-copy">
+                    <div className="chat-top">
+                      <span className="chat-name">{name(t.id)}</span>
+                    </div>
+                    <div className="preview-row">
+                      <span className="preview">
+                        {t.id === "filehelper"
+                          ? "Notes and files to yourself"
+                          : t.kind === "group"
+                            ? "Group conversation"
+                            : "WeChat conversation"}
+                      </span>
+                      {!!t.unreadCount && (
+                        <span className="count">{t.unreadCount}</span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              ))
+            : state.contacts
+                .filter((c) =>
+                  (c.displayName || c.id)
+                    .toLowerCase()
+                    .includes(query.toLowerCase()),
+                )
+                .map((c) => (
+                  <button
+                    key={c.id}
+                    className="chat-row"
+                    onClick={() => {
+                      select(c.id);
+                      setSection("chats");
+                    }}
+                  >
+                    <Avatar name={c.displayName || c.id} />
+                    <div className="chat-copy">
+                      <strong>{c.displayName || c.id}</strong>
+                      <p className="preview">{c.username}</p>
+                    </div>
+                  </button>
+                ))}
+          {!state.loading &&
+            (section === "chats" ? threads.length : state.contacts.length) ===
+              0 && (
+              <p className="no-results">
+                {query ? "No matches." : "No conversations yet."}
+              </p>
+            )}
+        </div>
+        <div className="side-footer">
+          <span>
+            <i className={`status-dot ${!state.connected ? "off" : ""}`} />
+            {state.connected ? "Hub connected" : "Connecting to hub…"}
+          </span>
+          {simulator && <span className="sim-label">SIMULATOR</span>}
+        </div>
+      </aside>
+      <main className="workspace">
+        <header className="chat-header">
+          <Button
+            icon="back"
+            label="Back to conversations"
+            className="back-btn"
+            onClick={() => setMobile(false)}
+          />
+          {state.selected && <Avatar name={selectedName} />}
+          <div className="chat-heading">
+            <h2>{selectedName || "AgentWechat"}</h2>
+            <p>
+              {state.selected === "filehelper"
+                ? "Notes to yourself"
+                : state.selected
+                  ? "WeChat conversation"
+                  : "Choose a conversation"}
+            </p>
+          </div>
+          <div className="header-actions">
+            <Button
+              icon="search"
+              label="Find in conversation"
+              onClick={() => setFind(!find)}
+            />
+            <Button
+              icon="panel"
+              label="Conversation details"
+              onClick={() => setDetails(!details)}
+            />
+          </div>
+          {find && (
+            <label className="search conversation-search">
+              <input
+                aria-label="Find in this chat"
+                placeholder="Find in this chat…"
+                value={inChat}
+                onChange={(e) => setInChat(e.target.value)}
+              />
+            </label>
+          )}
+        </header>
+        {state.error && (
+          <div className="banner" role="alert">
+            {state.error}
+            <button
+              onClick={() => {
+                session.clearError();
+                void session.refresh().catch(() => {});
+              }}
+            >
+              Refresh
+            </button>
+          </div>
+        )}
+        {!active && (
+          <div className="banner">
+            Sign in to WeChat again to send messages.
+            <button onClick={switchAccount}>Sign in</button>
+          </div>
+        )}
+        {simulator && (
+          <details className="simulator-tools">
+            <summary>Simulator controls</summary>
+            <div className="sim-controls">
+              <input
+                aria-label="Synthetic incoming text"
+                value={simBody}
+                onChange={(e) => setSimBody(e.target.value)}
+              />
+              <button
+                onClick={() =>
+                  void simulate({
+                    op: "inbound",
+                    peer: state.selected || "sim_mei",
+                    body: simBody,
+                  })
+                }
+              >
+                Receive message
+              </button>
+              <button
+                onClick={() =>
+                  void simulate({
+                    op: "inbound",
+                    peer: state.selected || "sim_mei",
+                    body: simBody,
+                    self_sent: true,
+                  })
+                }
+              >
+                Send from phone
+              </button>
+              <button
+                onClick={() =>
+                  void simulate({
+                    op: "advertise_image",
+                    peer: state.selected || "sim_mei",
+                  })
+                }
+              >
+                Unavailable image
+              </button>
+              <button
+                onClick={() =>
+                  void simulate({ op: "send_fault", fault: "reject" })
+                }
+              >
+                Reject next send
+              </button>
+              <button
+                onClick={() =>
+                  void simulate({
+                    op: "send_fault",
+                    fault: "lost_acknowledgment",
+                  })
+                }
+              >
+                Lose next acknowledgment
+              </button>
+            </div>
+            <p role="status">
+              {simStatus ||
+                "Synthetic upstream only. No official WeChat connection."}
+            </p>
+          </details>
+        )}
+        <div className="body-row">
+          <section className="conversation" aria-label="Conversation">
+            <div
+              className="messages"
+              ref={messages}
+              role="log"
+              aria-label="Messages"
+            >
+              {state.nextMessages && (
+                <button
+                  className="load-history"
+                  disabled={state.loading}
+                  onClick={() => void session.older()}
+                >
+                  Load older messages
+                </button>
+              )}
+              {state.loading && <p className="date-label">Loading messages…</p>}
+              {state.messages.map((m, index) => (
+                <div
+                  key={m.id}
+                  style={{
+                    opacity:
+                      inChat &&
+                      !m.body
+                        ?.toLowerCase()
+                        .includes(inChat.toLowerCase())
+                        ?.valueOf()
+                        ? 0.25
+                        : 1,
+                  }}
+                >
+                  {index === 0 ||
+                  date(state.messages[index - 1].createdAt).toDateString() !==
+                    date(m.createdAt).toDateString() ? (
+                    <div className="date-label">
+                      {date(m.createdAt).toLocaleDateString([], {
+                        month: "long",
+                        day: "numeric",
+                      })}
+                    </div>
+                  ) : null}
+                  <Message message={m} connection={connection} name={name} />
+                </div>
+              ))}
+              {state.sends
+                .filter((s) => s.threadId === state.selected)
+                .map((s) => (
+                  <Pending
+                    key={s.key}
+                    send={s}
+                    check={() => void session.checkSend(s.key)}
+                  />
+                ))}
+              {!state.loading &&
+                state.selected &&
+                state.messages.length === 0 && (
+                  <p className="empty-chat">Start the conversation.</p>
+                )}
+            </div>
+            <div className="composer-wrap">
+              <div className="composer">
+                <div className="composer-tools">
+                  <Button
+                    icon="attach"
+                    label="Attachments unavailable in this preview"
+                    disabled
+                    onClick={() => {}}
+                  />
+                  {simulator && (
+                    <span className="field-help">
+                      Text sends are available in the simulator.
+                    </span>
+                  )}
+                </div>
+                <textarea
+                  aria-label="Message"
+                  rows={2}
+                  placeholder={
+                    state.selected
+                      ? `Message ${selectedName}…`
+                      : "Choose a conversation"
+                  }
+                  value={draft}
+                  disabled={!state.selected || !active}
+                  onChange={(e) =>
+                    setDrafts((d) => ({ ...d, [draftKey]: e.target.value }))
+                  }
+                  onKeyDown={(e) => {
+                    if (
+                      e.key === "Enter" &&
+                      !e.shiftKey &&
+                      !e.nativeEvent.isComposing
+                    ) {
+                      e.preventDefault();
+                      send();
+                    }
+                  }}
+                />
+                <div className="composer-bottom">
+                  <span className="composer-hint">
+                    Enter to send · Shift + Enter for a new line
+                  </span>
+                  <button
+                    className="send-btn"
+                    disabled={!state.selected || !draft.trim() || !active}
+                    onClick={send}
+                  >
+                    Send <Icon name="send" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+          {details && state.selected && (
+            <Details
+              key={`${state.account}:${state.selected}`}
+              connection={connection}
+              threadId={state.selected}
+              name={selectedName}
+            />
+          )}
+        </div>
+      </main>
+      {accountMenu && (
+        <div className="account-menu" role="dialog" aria-label="Switch account">
+          <div className="eyebrow">WeChat accounts</div>
+          {state.accounts.map((a) => (
+            <button
+              key={a.id}
+              className={`account-option ${a.id === state.account ? "selected" : ""}`}
+              onClick={() => {
+                setAccountMenu(false);
+                setMobile(false);
+                void (a.authenticated
+                  ? session.activate(a.id)
+                  : Promise.resolve(switchAccount()));
+              }}
+            >
+              <Avatar name={a.alias || a.id} />
+              <span>
+                <strong>{a.alias || a.id}</strong>
+                <small>
+                  {a.authenticated ? "Signed in" : "Sign-in needed"}
+                </small>
+              </span>
+            </button>
+          ))}
+          <button
+            className="account-option"
+            onClick={() => {
+              setAccountMenu(false);
+              addAccount();
+            }}
+          >
+            <Icon name="plus" /> Add WeChat account
+          </button>
+          <button className="account-option" onClick={switchAccount}>
+            Choose an account
+          </button>
+        </div>
+      )}
+      {settings && (
+        <div className="overlay-backdrop" onClick={() => setSettings(false)}>
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-head">
+              <h2>Settings</h2>
+              <Button
+                icon="close"
+                label="Close settings"
+                onClick={() => setSettings(false)}
+              />
+            </div>
+            <div className="modal-body">
+              <label className="setting">
+                Appearance
+                <select
+                  value={theme}
+                  onChange={(e) => setTheme(e.target.value)}
+                >
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <div className="setting">
+                <span>
+                  Hub<small>{connection.endpoint}</small>
+                </span>
+                {simulator ? "Simulator" : "Connected"}
+              </div>
+              <button className="secondary" onClick={switchAccount}>
+                Manage accounts
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+function Pending({ send, check }: { send: PendingSend; check: () => void }) {
+  const state = send.intent?.state;
+  const uncertain = send.uncertain || state === "needs_review";
+  const label = uncertain
+    ? "Couldn't confirm send"
+    : state === "rejected" || state === "failed"
+      ? "Send rejected"
+      : state === "cancelled"
+        ? "Send cancelled"
+        : state === "accepted"
+          ? "Accepted · loading message…"
+          : "Queued…";
+  return (
+    <article
+      className="message own"
+      data-send-state={state || (send.uncertain ? "uncertain" : "submitting")}
+    >
+      <Avatar name="You" />
+      <div className="message-body">
+        <div className="bubble">
+          <p>{send.text}</p>
+        </div>
+        <div
+          className={`delivery ${uncertain || state === "rejected" || state === "failed" ? "warn" : ""}`}
+          role="status"
+        >
+          {label} <button onClick={check}>Check status</button>
+        </div>
+        {uncertain && (
+          <small className="send-explanation">
+            Check the conversation before sending again.
+          </small>
+        )}
+      </div>
+    </article>
+  );
+}
+function Message({
+  message: m,
+  connection,
+  name,
+}: {
+  message: NativeMessage;
+  connection: Connection;
+  name: (id: string) => string;
+}) {
+  const own = m.direction === "outgoing";
+  return (
+    <article
+      className={`message ${own ? "own" : ""}`}
+      data-message-id={m.id}
+      data-direction={m.direction}
+    >
+      <Avatar name={own ? "You" : name(m.senderId || m.threadId)} />
+      <div className="message-body">
+        <div className="message-meta">
+          <b>{own ? "You" : name(m.senderId || m.threadId)}</b>
+          <time dateTime={date(m.createdAt).toISOString()}>
+            {time(m.createdAt)}
+          </time>
+        </div>
+        {m.recall ? (
+          <div className="bubble recalled">Message recalled</div>
+        ) : m.type === 1 ? (
+          <div className="bubble">
+            <p>{m.body}</p>
+          </div>
+        ) : m.link ? (
+          <div className="bubble">
+            <strong>{m.link.title || "Shared link"}</strong>
+            <p>{m.link.description}</p>
+            {m.link.url && /^https?:\/\//i.test(m.link.url) && (
+              <a href={m.link.url} target="_blank" rel="noreferrer">
+                Open link
+              </a>
+            )}
+          </div>
+        ) : (
+          <Media message={m} connection={connection} />
+        )}
+      </div>
+    </article>
+  );
+}
+function Media({
+  message,
+  connection,
+}: {
+  message: NativeMessage;
+  connection: Connection;
+}) {
+  const [assets, setAssets] = useState<MediaAsset[]>([]),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void connection.session.client
+      .mediaAssets(message.accountId, message.id)
+      .then((r) => {
+        if (active) setAssets(r.items);
+      })
+      .catch((e) => {
+        if (active) setError(readableError(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, [message.accountId, message.id]);
+  async function download(asset: MediaAsset) {
+    setBusy(true);
+    setError("");
+    try {
+      const content = await connection.session.client.mediaContent(
+        message.accountId,
+        asset.id,
+      );
+      const url = URL.createObjectURL(
+        new Blob([new Uint8Array(content.bytes).buffer], {
+          type: content.contentType,
+        }),
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = asset.filename || "attachment";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="bubble media-status">
+      <Icon name="file" />
+      <strong>
+        {assets[0]?.filename || (message.type === 3 ? "Image" : "Attachment")}
+      </strong>
+      {assets.length ? (
+        assets.map((asset) => (
+          <div key={asset.id}>
+            <span>
+              {asset.state === "available"
+                ? "Available"
+                : asset.state === "expired"
+                  ? "Expired"
+                  : asset.state === "pending"
+                    ? "Pending"
+                    : "Unavailable"}
+              {asset.variant ? ` · ${asset.variant}` : ""}
+            </span>
+            {asset.state === "available" && (
+              <button disabled={busy} onClick={() => void download(asset)}>
+                Download
+              </button>
+            )}
+          </div>
+        ))
+      ) : (
+        <p>{error || "Attachment unavailable"}</p>
+      )}
+      {error && assets.length > 0 && <small>{error}</small>}
+    </div>
+  );
+}
+function Details({
+  connection,
+  threadId,
+  name,
+}: {
+  connection: Connection;
+  threadId: string;
+  name: string;
+}) {
+  const [members, setMembers] = useState<NativeGroupMember[]>([]),
+    [error, setError] = useState("");
+  const state = connection.session.snapshot();
+  useEffect(() => {
+    let active = true;
+    const account = state.account;
+    if (account && threadId.endsWith("@chatroom"))
+      void connection.session.client
+        .groupMembers(account, threadId, { limit: 200 })
+        .then((r) => {
+          if (active)
+            setMembers(
+              r.items.filter(
+                (x) => !isNativeTombstone(x),
+              ) as NativeGroupMember[],
+            );
+        })
+        .catch((e) => {
+          if (active) setError(readableError(e));
+        });
+    return () => {
+      active = false;
+    };
+  }, [state.account, threadId]);
+  return (
+    <aside className="detail-panel" aria-label="Conversation details">
+      <div className="detail-profile">
+        <Avatar name={name} />
+        <h3>{name}</h3>
+        <p>
+          {threadId === "filehelper"
+            ? "Notes to yourself"
+            : threadId.endsWith("@chatroom")
+              ? "Group conversation"
+              : "WeChat contact"}
+        </p>
+      </div>
+      <div className="detail-section">
+        <div className="section-head">Conversation</div>
+        <p className="peer-id">{threadId}</p>
+        <p className="field-help">
+          History contains the messages available on this hub.
+        </p>
+      </div>
+      {members.length > 0 && (
+        <div className="detail-section">
+          <div className="section-head">Members</div>
+          {members.map((m) => (
+            <div key={m.id} className="member">
+              <Avatar name={m.displayName || m.id} />
+              <span>{m.roomDisplayName || m.displayName || m.username}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <p>{error}</p>}
+    </aside>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<App />);

@@ -20,3 +20,25 @@ pnpm build:image         # tags agent-wechat-native:local
 ```
 
 Release builds, CI and the publishing process are described in [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md). Contributor rules are in [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md).
+
+## Try the browser client
+
+1. Start the local simulator and connected browser client:
+
+   ```bash
+   pnpm client:dev
+   ```
+
+   It prints a local browser URL and the location of its synthetic data.
+
+2. Open the URL, add an account, then use **Simulate scan** and
+   **Simulate phone approval**. Chats open automatically after approval.
+
+3. Open **Simulator controls** in a conversation to receive a message, send from
+   the simulated phone, or try a rejected or unconfirmed send.
+
+:::note[Good to know]
+This source preview uses synthetic accounts and does not connect to WeChat.
+Text messaging is available; file sending, desktop packaging and installed-app
+setup are still in development. Ctrl+C stops the preview's own processes.
+:::
