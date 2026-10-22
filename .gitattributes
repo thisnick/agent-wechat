@@ -1,0 +1,2 @@
+# Release notices must have identical bytes on every build worker.
+packages/cli/THIRD_PARTY_NOTICES.txt text eol=lf
