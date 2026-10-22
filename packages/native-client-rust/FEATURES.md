@@ -93,11 +93,13 @@ those gaps.
   upload path: the CDN returned HTTP 400 on the first piece, nothing was sent, and the jobs
   ended `needs_review` with `serviceStage: http`. Sources above 25 MiB need the separate
   large-file upload branch.
-- Incoming status notifications (message type 51) with operation IDs 2 and 11 arrive on
-  most pushes during live use and remain staged as `unsupported_sync_control`, so
+- Incoming status notifications (message type 51) with operation IDs 2, 11 and 23, the
+  session-exit part of opcode 5, and type 10002 `functionmsg`/`dynacfg` controls arrive
+  during normal live use and remain staged as `unsupported_sync_control`. As a result
   `pendingProjectionBatches` grows and `pendingCursorProjection` stays true. New messages
-  still commit as `live`. Mapping these to read state, or classifying them as safe to skip,
-  is pending.
+  still commit as `live`. Each needs its official handler established, then applying or an
+  explicit no-local-effect classification; see
+  [sync control gaps](../../dev-notes/sync-control-gaps.md).
 - WXGF encoding/sending, source animation timing and faithful alpha rendering
   require separate evidence. Current incoming support preserves the container
   and supplies a representative still preview.
