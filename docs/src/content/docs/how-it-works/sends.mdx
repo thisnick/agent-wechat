@@ -41,7 +41,7 @@ Queued sends, downloads, read notices, the event log and the login all survive a
 Stopping the daemon (or disconnecting) doesn't log you out. Only `wx auth logout` does, and after that the daemon won't reconnect on its own until you log in again.
 
 <Aside title="Good to know">
-- **Voice notes are split** into 10-second parts. A partial result keeps the IDs of the parts that went out.
+- **Voice longer than 60 seconds is split** into equal notes. A partial result keeps the IDs of the notes that went out.
 - **Closing the connection doesn't cancel anything.** Ctrl-C on the CLI or a dropped HTTP request leaves the daemon's work running.
 - **Media writeback repair:** if a sent or downloaded file didn't make it into the profile's own folders, `wx jobs repair-writeback` finishes the job from files the daemon already has. It never downloads or sends anything.
 - **Don't delete files to force a fresh login.** You can lose saved device trust, database keys or pending receipts.
