@@ -437,6 +437,19 @@ impl Core {
                 // behavior. Retain the full command as blocked below, even
                 // after its independently journaled unread component is done.
             }
+            if let Some(control) =
+                super::status_control::parse_no_local_effect_status(&message, &state.own_username)
+            {
+                self.retain_control_raw(account, command, receipt)?;
+                self.store.append_event_once(
+                    account,
+                    &format!("control-no-local-effect:{receipt}"),
+                    "account.control_observed",
+                    &json!({"commandId":5,"messageType":51,"operationIds":[control.operation_id()],"classification":control.classification(),"projection":"no_local_effect","policy":"linux_4_1_13_26","origin":origin}),
+                )?;
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
+            }
             if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
                 let blocked = message_blocker(&message);
                 if matches!(message.message_type, 51 | 10002) {
@@ -1041,6 +1054,271 @@ mod encrypted_roundtrip {
             .unwrap(),
         }
     }
+    #[test]
+    fn supported_status_controls_recover_blocked_batch_without_session_mutation() {
+        use base64::Engine;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("data");
+        let store = Arc::new(Store::open(&root).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let key_file: Value = serde_json::from_slice(
+            &std::fs::read(store.keys_file("one").unwrap().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(
+                key_file["databases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|key| key["relativePath"] == "session/session.db")
+                    .unwrap()["rawPageKeyBase64"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let hex: String = raw.iter().map(|byte| format!("{byte:02x}")).collect();
+        let (location, _) = core.profile_location_keys("one").unwrap();
+        let sessions =
+            rusqlite::Connection::open(location.root().join("db_storage/session/session.db"))
+                .unwrap();
+        sessions.execute_batch(&format!("PRAGMA key=\"x'{hex}'\";PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;")).unwrap();
+        sessions.execute_batch("INSERT INTO Name2Id(rowid,user_name)VALUES(1,'peer'),(2,'synthetic_self');
+            INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp,draft)VALUES('peer',3,0,120,50,'preserved draft'),('synthetic_self',3,0,120,50,'preserved draft');
+            INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,9,1,95),(2,10,2,95);").unwrap();
+        let control = add(
+            51,
+            "synthetic_self",
+            "synthetic_self",
+            br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7"/></arg></op></msg>"#,
+            900,
+            100,
+        );
+        let packages = add(
+            51,
+            "synthetic_self",
+            "peer",
+            br#"<msg><op id="23"><name>packagesUpdated</name><arg><![CDATA[{"op":"newPackage","packageId":1}]]></arg></op></msg>"#,
+            901,
+            100,
+        );
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            commands: vec![control.clone(), packages.clone()],
+            continuation: false,
+        };
+        let receipt = "projected:empty-handoff:0";
+        store
+            .stage_sync(
+                "one",
+                "empty-handoff",
+                &core
+                    .vault
+                    .seal(
+                        "one",
+                        "apply:empty-handoff",
+                        &serde_json::to_vec(&batch).unwrap(),
+                    )
+                    .unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &batch.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
+        // An upgrade must be able to finish an original batch that the older
+        // implementation retained, without deleting or replacing its bytes.
+        store.block_sync("one", "empty-handoff").unwrap();
+        store.append_event_once("one", &format!("control-observed:{receipt}"), "account.control_observed", &json!({"control":{"commandId":5,"messageType":51,"operationIds":[11]},"projection":"blocked"})).unwrap();
+        assert!(store.pending_cursor_projection("one").unwrap());
+        let result = core.recover_projection("one").unwrap();
+        assert_eq!(result["projectedCommands"], 2);
+        assert_eq!(result["pendingCommands"], 0);
+        assert_eq!(store.pending_sync_count("one").unwrap(), 0);
+        assert!(!store.pending_cursor_projection("one").unwrap());
+        for (index, command) in [&control, &packages].into_iter().enumerate() {
+            let receipt = format!("projected:empty-handoff:{index}");
+            assert!(store.runtime("one", &receipt).unwrap().is_some());
+            let key = format!("sync-control:{receipt}");
+            let sealed = store.runtime("one", &key).unwrap().unwrap();
+            assert_eq!(
+                *core.vault.open_record("one", &key, &sealed).unwrap(),
+                command.payload
+            );
+            assert!(!sealed
+                .windows(b"HandOffMaster".len())
+                .any(|bytes| bytes == b"HandOffMaster"));
+            assert!(!sealed
+                .windows(b"packageId".len())
+                .any(|bytes| bytes == b"packageId"));
+        }
+        for peer in ["peer", "synthetic_self"] {
+            let row = sessions.query_row("SELECT unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp,draft FROM SessionTable WHERE username=?1", [peer], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?,row.get::<_,String>(4)?))).unwrap();
+            assert_eq!(row, (3, 0, 120, 50, "preserved draft".into()));
+        }
+        assert_eq!(
+            sessions
+                .query_row("SELECT COUNT(*) FROM SessionUnreadListTable_1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+        drop(sessions);
+        drop(core);
+        drop(store);
+        let store = Arc::new(Store::open_existing(&root).unwrap());
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        assert_eq!(
+            core.recover_projection("one").unwrap()["projectedCommands"],
+            0
+        );
+        // Replaying the command itself cannot duplicate its event or introduce
+        // a profile effect, even outside the batch's normal receipt fast path.
+        core.apply_sync_command("one", &control, receipt, "catchup")
+            .unwrap();
+        core.apply_sync_command("one", &packages, "projected:empty-handoff:1", "catchup")
+            .unwrap();
+        let events = store.events("one", 0, 100).unwrap();
+        let observed: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.kind == "account.control_observed"
+                    && event.data["projection"] == "no_local_effect"
+            })
+            .collect();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].data["operationIds"], json!([11]));
+        assert_eq!(
+            observed[0].data["classification"],
+            "empty_handoff_master_list"
+        );
+        assert_eq!(observed[1].data["operationIds"], json!([23]));
+        for event in observed {
+            let value = event.data.to_string();
+            assert!(
+                !value.contains("synthetic_self")
+                    && !value.contains("packageId")
+                    && !value.contains("synthetic-device")
+                    && !value.contains("<arg")
+            );
+        }
+        assert!(!events.iter().any(|event| matches!(
+            event.kind.as_str(),
+            "message.committed" | "thread.read-state"
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "sync.committed")
+                .count(),
+            1
+        );
+        let conflicting = add(
+            51,
+            "synthetic_self",
+            "synthetic_self",
+            br#"<msg><op id="11"><name>HandOffMaster</name><arg/></op></msg>"#,
+            901,
+            100,
+        );
+        assert!(core
+            .apply_sync_command("one", &conflicting, receipt, "catchup")
+            .unwrap_err()
+            .to_string()
+            .contains("sync_control_receipt_conflict"));
+    }
+
+    #[test]
+    fn known_status_controls_do_not_complete_unknown_controls_or_starve_later_messages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            commands: vec![
+                add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7"/></arg></op></msg>"#, 900, 100),
+                add(51, "synthetic_self", "peer", br#"<msg><op id="23"><name>packagesUpdated</name><arg>{"op":"newPackage","packageId":1}</arg></op></msg>"#, 905, 100),
+                add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="2"><name>unknown</name><arg/></op></msg>"#, 901, 100),
+                add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7"><handoffitem/></handofflist></arg></op></msg>"#, 902, 100),
+                add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="5" seq="7"/></arg></op></msg>"#, 908, 100),
+                add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7" currenthandoffcount="0"/></arg></op></msg>"#, 909, 100),
+                add(51, "synthetic_self", "peer", br#"<msg><op id="23"><name>packagesUpdated</name><arg>{"op":"update","packageId":1}</arg></op></msg>"#, 903, 100),
+                add(10002, "peer", "synthetic_self", br#"<sysmsg type="dynacfg"/>"#, 904, 100),
+                add(10002, "peer", "synthetic_self", br#"<sysmsg type="functionmsg"><private>sensitive-function-data</private></sysmsg>"#, 906, 100),
+                add(10002, "peer", "synthetic_self", b"\xff\xfe", 907, 100),
+                add(1, "peer", "synthetic_self", b"First retained message", 77, 101),
+            ],
+            continuation: false,
+        };
+        let committed_before = store.runtime("one", "projected-cursor").unwrap();
+        let result = core
+            .commit_sync_batch("one", batch.clone(), "fixture", "fixture")
+            .unwrap();
+        assert_eq!(result["projection"]["projectedCommands"], 3);
+        assert_eq!(result["projection"]["pendingCommands"], 8);
+        assert_eq!(store.pending_sync_count("one").unwrap(), 1);
+        assert!(store.pending_cursor_projection("one").unwrap());
+        let later = wechat_protocol::wire::SyncBatch {
+            commands: vec![add(
+                1,
+                "peer",
+                "synthetic_self",
+                b"Later retained message",
+                78,
+                102,
+            )],
+            ..batch
+        };
+        let result = core
+            .commit_sync_batch("one", later, "fixture", "fixture")
+            .unwrap();
+        assert_eq!(result["projection"]["projectedCommands"], 1);
+        assert_eq!(result["projection"]["pendingCommands"], 0);
+        assert_eq!(
+            core.recover_projection("one").unwrap()["pendingCommands"],
+            8
+        );
+        assert_eq!(store.pending_sync_count("one").unwrap(), 1);
+        assert_eq!(
+            store.runtime("one", "projected-cursor").unwrap(),
+            committed_before
+        );
+        let events = store.events("one", 0, 100).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "message.committed")
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "account.control_observed"
+                    && event.data["projection"] == "no_local_effect")
+                .count(),
+            2
+        );
+        assert!(!events.iter().any(|event| event.kind == "sync.committed"));
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("sensitive-function-data"));
+    }
+
     #[tokio::test]
     async fn reordered_unread_columns_recover_message_only_commit_and_exact_read_once() {
         use base64::Engine;

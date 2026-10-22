@@ -28,6 +28,8 @@ mod read_control;
 mod read_sync;
 #[path = "saved_login.rs"]
 mod saved_login;
+#[path = "status_control.rs"]
+mod status_control;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
