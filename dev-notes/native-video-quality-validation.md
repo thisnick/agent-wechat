@@ -97,8 +97,10 @@ normal/raw/thumbnail XML-descriptor joins, all three protected sources/assets,
 resource31/32/33 records and official hardlink/cache bytes. Five original
 database-family members and six other key/source/cache files stayed unchanged.
 Cold CLI original retrieval matches all 50 MiB and SHA-256; the daemon returned
-online without another login. Recipient playback/original download for this
-final control is awaiting the account owner's check.
+online without another login. The account owner confirmed the final
+original-mode File Transfer video on the recipient phone. Recipient-exported
+SHA-256 remains unavailable; exact-byte equality above was checked on the
+daemon, SDK and CLI copies.
 
 The controlled source contains short video/audio and a valid ISO-BMFF padding
 atom to exactly 50 MiB. Ordinary-file success does not establish large-video
