@@ -709,7 +709,9 @@ function MediaDownloadAction({
   const job = state.jobs[asset.id];
   const original = asset.variant === "original";
   const downloadBytes =
-    (ready && asset.kind === "image" ? asset.preview?.byteLength : null) ??
+    (ready && !original && asset.kind === "image"
+      ? asset.preview?.byteLength
+      : null) ??
     asset.byteLength ??
     job?.totalBytes;
   const quality = original
@@ -724,7 +726,7 @@ function MediaDownloadAction({
       : ready
         ? "Download"
         : original && canRetrieve(asset)
-          ? "Request original"
+          ? "Get original"
           : canRetrieve(asset)
             ? "Download"
             : `${original ? "Original" : "Download"} unavailable`;
@@ -740,8 +742,11 @@ function MediaDownloadAction({
     setSaving(true);
     setError("");
     try {
+      // Original downloads keep source bytes even when the viewer uses a preview.
       const representation =
-        asset.preview && asset.kind === "image" ? "preview" : "original";
+        !original && asset.preview && asset.kind === "image"
+          ? "preview"
+          : "original";
       const content = await connection.session.client.mediaContent(
         asset.accountId,
         asset.id,
@@ -777,14 +782,11 @@ function MediaDownloadAction({
         <Icon name="download" />
         <span>{label}</span>
       </button>
-      {quality && label !== "Request original" && (
-        <span className="download-quality">
-          {quality === "original" ? "Original" : "Standard"}
-        </span>
-      )}
       <span className="download-disclosure" id={id} role="tooltip">
         {quality
-          ? `${quality[0].toUpperCase()}${quality.slice(1)}`
+          ? quality === "original"
+            ? "Original"
+            : "Smaller copy"
           : asset.filename || "File"}
         {downloadBytes ? ` · ${size(downloadBytes)}` : " · Size unknown"}
         {quality === "standard" &&

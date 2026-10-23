@@ -139,21 +139,24 @@ acceptance and recipient rendering remain separate final checks.
 
 Incoming images automatically load standard quality. Clicking a photo or video opens a
 shared viewer with previous/next controls, a thumbnail strip, and **Show message**.
-Photo zoom stays centered on the viewed point, including after panning; **Fit**
-resets the view. Videos have native playback controls. Video thumbnails
+Images zoom and pan on the full viewer canvas, behind the fixed navigation arrows
+and thumbnail tray. Animated zoom, drag panning, wheel and pinch gestures use
+`react-zoom-pan-pinch`; **Reset zoom** returns to the centered fit view. Double-click
+toggles zoom, and `+`, `-`, and `0` zoom in, out, and reset. Reduced-motion preferences
+disable zoom animation and pan inertia. Videos have native playback controls. Video thumbnails
 load separately from playback, so browsing the strip does not fetch full videos.
 Earlier photos and videos load through the conversation's history cursor as needed. The
-viewer keeps **Download** with a Standard label available beside **Request original**
-and its transfer progress. Once the original is cached, **Download** saves that
-original to this device and its label changes to Original. When no original source is
-provided, only standard can be downloaded; the download tooltip explains this. Size
-appears only when the download control is hovered or focused; transfer progress
+viewer keeps **Download** available beside **Get original** and its transfer progress.
+Once the original is cached, **Download** saves that original to this device. Quality
+and size appear only when the download control is hovered or focused, as
+“Smaller copy” or “Original.” When no original source is provided, only standard can
+be downloaded; the download tooltip explains this. Transfer progress
 and cancellation appear while it runs. The conversation keeps displaying standard
 quality even after an original is downloaded. The carousel first shows standard,
 then replaces it with a verified cached original after its bytes load and decode.
 A failed upgrade leaves the standard visible. Opening the carousel does not
 request an original from WeChat. An unavailable image shows an icon.
-Files show their filename and an always-visible download control. **Request original**
+Files show their filename and an always-visible download control. **Get original**
 keeps an uncached file on the hub, then **Download** saves it to the device. Generic
 files, including PDFs, do not render an image placeholder or an inline PDF viewer.
 
