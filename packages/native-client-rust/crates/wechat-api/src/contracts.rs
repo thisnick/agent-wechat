@@ -290,7 +290,7 @@ pub fn typescript() -> String {
         wechat_core::media_types::MediaJob::decl(),
         wechat_store::OwnedMediaSource::decl(),
     ];
-    let mut output=format!("// Generated from wechat-api/src/contracts.rs. Do not edit.\nexport const NATIVE_MAX_SOURCE_BYTES = {} as const;\n",wechat_core::MAX_SOURCE_BYTES);
+    let mut output=format!("// Generated from wechat-api/src/contracts.rs. Do not edit.\nexport const NATIVE_MAX_SOURCE_BYTES = {} as const;\nexport const NATIVE_MAX_ORDINARY_SOURCE_BYTES = {} as const;\n",wechat_core::MAX_SOURCE_BYTES,wechat_core::MAX_ORDINARY_SOURCE_BYTES);
     for declaration in declarations {
         output.push_str("export ");
         output.push_str(&declaration);
@@ -318,6 +318,8 @@ mod tests {
     #[test]
     fn generated_contract_uses_lossless_strings_and_nullable_metadata() {
         let generated = typescript();
+        assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 33554432 as const"));
+        assert!(generated.contains("NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const"));
         assert!(generated.contains("serverId: string | null"));
         assert!(generated.contains("unreadCount: number | null"));
         assert!(generated.contains("type NativePage<T>"));

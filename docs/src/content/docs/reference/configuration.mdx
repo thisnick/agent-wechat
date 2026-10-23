@@ -31,7 +31,7 @@ Under `channels.agent-wechat` in `openclaw.json`. The `native` block can also go
 | `enabled` | | Turn the channel on |
 | `dmPolicy`, `allowFrom` | `disabled` | [Direct messages](/openclaw/access/#direct-messages) |
 | `groupPolicy`, `groupAllowFrom`, `groups` | `disabled` | [Groups](/openclaw/access/#groups) |
-| `mediaMaxMb` | `50` | Largest attachment kept for the agent |
+| `mediaMaxMb` | `50` | Attachment limit in MiB for retrieval and outgoing source files; outgoing sends also obey the selected kind's daemon limit. See [attachment limits](/use/media/). |
 | `native.mode` | | `external` or `managed`. See [Managed or external](/openclaw/modes/). |
 | `native.accountId` | | Account ID from `wx accounts list` |
 | `native.endpoint` | | Daemon URL (external mode) |

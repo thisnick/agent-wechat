@@ -23,7 +23,7 @@ Next: [install](/setup/install/).
 | --- | --- |
 | Log in with a QR code or phone approval | Creating groups, inviting or removing members |
 | Read history, contacts, groups and members | Fetching old history from WeChat's servers |
-| Receive new messages as they arrive | Sending stickers and very large files |
+| Receive new messages as they arrive | Sending stickers and files above the initial 32 MiB limit |
 | Send text, images, files, video, voice and link cards | Using data from WeChat for macOS or Windows |
 | Download images, files, video and voice | Proxy support for outgoing connections |
 | Recall your own messages | |
@@ -34,4 +34,5 @@ Next: [install](/setup/install/).
 - **Your data stays in WeChat's own format.** agent-wechat reads and writes the same files WeChat for Linux uses, so it can pick up where that app left off.
 - OpenClaw and other clients can run on any machine that can reach the daemon.
 - See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for what has been tested and how.
+- [Attachment limits](/use/media/) differ by send kind; the larger ordinary-file path has a separate validation status.
 </Aside>

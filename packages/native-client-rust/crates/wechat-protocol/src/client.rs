@@ -1052,6 +1052,16 @@ impl NativeClient {
             self.authenticated_rpc(state, 379, "/cgi-bin/micromsg-bin/getcdndns", &request)?;
         crate::media::decode_cdn_config(&reply, state)
     }
+    pub fn large_cdn_config(
+        &self,
+        state: &mut AccountState,
+        route: crate::media::LargeCdnRoute,
+    ) -> Result<crate::media::CdnConfig> {
+        let request = p::bytes(1, &wire::base_request(&state.device, state.uin, 0)?);
+        let reply =
+            self.authenticated_rpc(state, 379, "/cgi-bin/micromsg-bin/getcdndns", &request)?;
+        crate::media::decode_large_cdn_config(&reply, state, route)
+    }
     /// Submit a URL card once through the app-message carrier. The caller owns
     /// the durable intent and must inspect an uncertain submission outcome.
     pub fn send_share(
@@ -1074,6 +1084,32 @@ impl NativeClient {
             client_id,
         )
     }
+    /// Reserve one file-upload message. An uncertain response must not be
+    /// retried automatically; retain the returned receipt with the send intent.
+    pub fn reserve_file_upload(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        progress_client_id: &str,
+        file_name: &str,
+        plaintext_bytes: usize,
+        md5: &str,
+    ) -> Result<crate::file_upload::FileUploadReservation> {
+        let request = crate::file_upload::file_upload_request(
+            state,
+            destination,
+            progress_client_id,
+            file_name,
+            plaintext_bytes,
+            md5,
+        )?;
+        crate::file_upload::decode_file_upload_reservation(&self.authenticated_rpc(
+            state,
+            6691,
+            "/cgi-bin/micromsg-bin/sendfileuploadmsg",
+            &request,
+        )?)
+    }
     pub fn send_file(
         &self,
         state: &mut AccountState,
@@ -1093,6 +1129,38 @@ impl NativeClient {
             &self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?,
             client_id,
         )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_file_with_reservation(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        client_id: &str,
+        created_at: u32,
+        upload: &crate::media::UploadedMedia,
+        reservation: Option<&crate::file_upload::FileUploadReservation>,
+    ) -> Result<crate::media_send::MediaSendResult> {
+        let request = crate::media_send::file_send_request_with_reservation(
+            state,
+            destination,
+            client_id,
+            created_at,
+            upload,
+            reservation,
+        )?;
+        let reply =
+            self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?;
+        if reservation.is_some() {
+            crate::media_send::decode_file_send_correlated(
+                &reply,
+                client_id,
+                &state.own_username,
+                destination,
+                &upload.descriptor.aes_key,
+            )
+        } else {
+            crate::media_send::decode_file_send(&reply, client_id)
+        }
     }
     pub fn send_image(
         &self,

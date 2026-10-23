@@ -35,6 +35,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 Every send needs an `Idempotency-Key`. Sending the same key again returns the original send instead of sending twice. Check progress with `GET /sends/{id}`, or find a send by key with `GET /sends/by-idempotency-key?key=...`.
 
+For files, images, video and voice, stage bytes with `POST /uploads` and send the returned source ID. [Send attachments](/use/media/) covers the request, SDK methods, per-kind capability limits and longer job polling.
+
 ## Receive
 
 ```bash

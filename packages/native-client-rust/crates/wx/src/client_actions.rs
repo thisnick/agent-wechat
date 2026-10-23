@@ -359,22 +359,20 @@ pub async fn send(
         ("text", text.into_bytes(), None)
     } else {
         let (kind, path) = &inputs[0];
+        let max_source_bytes = send_kind_source_limit(kind)?;
         let mut file = wechat_platform::OpenOptions::new()
             .read(true)
             .custom_flags(wechat_platform::NOFOLLOW)
             .open(path)?;
         let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.len() == 0
-            || metadata.len() > wechat_core::MAX_SOURCE_BYTES as u64
-        {
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_source_bytes as u64 {
             bail!("source must be a nonempty regular file within the native source limit");
         }
         let mut bytes = vec![];
         (&mut file)
-            .take(wechat_core::MAX_SOURCE_BYTES as u64 + 1)
+            .take(max_source_bytes as u64 + 1)
             .read_to_end(&mut bytes)?;
-        if bytes.len() > wechat_core::MAX_SOURCE_BYTES {
+        if bytes.len() > max_source_bytes {
             bail!("source exceeds native source limit");
         }
         (
@@ -463,6 +461,17 @@ pub async fn send(
     result["receiptPath"] = json!(path);
     Ok(result)
 }
+fn send_kind_source_limit(kind: &str) -> Result<usize> {
+    use wechat_core::MediaKind;
+    let kind = match kind {
+        "file" => MediaKind::File,
+        "image" => MediaKind::Image,
+        "video" => MediaKind::Video,
+        "voice" => MediaKind::Voice,
+        _ => bail!("unsupported media send kind"),
+    };
+    Ok(kind.max_source_bytes())
+}
 #[allow(clippy::too_many_arguments)] // One command's identity, quality, output and wait policy.
 pub async fn media(
     r: &Remote,
@@ -550,4 +559,64 @@ pub async fn media(
         return Ok(asset);
     }
     Ok(asset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_payload_flag_controls_source_read_bound() {
+        assert_eq!(send_kind_source_limit("file").unwrap(), 33_554_432);
+        for kind in ["image", "video", "voice"] {
+            assert_eq!(send_kind_source_limit(kind).unwrap(), 26_214_383);
+        }
+        for unsupported in ["sticker", "text", "share", "unknown"] {
+            assert!(send_kind_source_limit(unsupported).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_ordinary_kinds_are_rejected_before_daemon_submission() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("synthetic.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(wechat_core::MAX_ORDINARY_SOURCE_BYTES as u64 + 1)
+            .unwrap();
+        let remote = Remote {
+            http: reqwest::Client::new(),
+            base: reqwest::Url::parse("http://127.0.0.1:1/").unwrap(),
+            token: "synthetic-test-token".into(),
+            account: Some("synthetic".into()),
+        };
+        let config = settings::File {
+            path: temp.path().join("client.toml"),
+            settings: Default::default(),
+        };
+        for kind in ["image", "video", "voice"] {
+            let error = send(
+                &remote,
+                &config,
+                "filehelper".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                (kind == "image").then(|| path.clone()),
+                None,
+                (kind == "video").then(|| path.clone()),
+                (kind == "voice").then(|| path.clone()),
+                Some("synthetic-key".into()),
+                false,
+                0,
+            )
+            .await
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("source must be a nonempty regular file"));
+        }
+    }
 }

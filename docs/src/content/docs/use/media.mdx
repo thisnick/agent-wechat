@@ -1,0 +1,97 @@
+---
+title: Send attachments
+description: File, image, video and voice limits, longer sends, and the CLI, API and SDK interfaces.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Send attachments through the CLI, HTTP API or OpenClaw. The initial ordinary-file source limit is **32 MiB (33,554,432 bytes)**. Other send kinds keep their existing limit:
+
+| Send kind | Maximum source size |
+| --- | --- |
+| Ordinary file | 33,554,432 bytes |
+| Image, video or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
+| Sticker | Sending unavailable |
+
+## CLI
+
+1. Send a file and allow five minutes for upload, download verification and submission:
+
+   ```bash
+   wx messages send filehelper --file ./report.pdf --wait 300 \
+     --idempotency-key report-2026-10
+   ```
+
+   `--wait` is in seconds; its default is 30 and maximum is 900. `--detach` returns the job immediately.
+
+2. If the wait ends, inspect the returned job:
+
+   ```bash
+   wx jobs get JOB_ID
+   ```
+
+   While verifying the uploaded bytes, the JSON includes:
+
+   ```json
+   { "state": "running", "phase": "readback" }
+   ```
+
+   Keep the job ID and key. Ending the wait leaves the daemon working.
+
+## HTTP API and SDK
+
+1. Inspect the connected daemon's limits with `GET /v1/accounts/{account}/capabilities`. The relevant response fields are:
+
+   ```json
+   {
+     "mediaUploadMaxBytes": 33554432,
+     "mediaSendMaxBytes": {
+       "file": 33554432,
+       "image": 26214383,
+       "video": 26214383,
+       "voice": 26214383
+     }
+   }
+   ```
+
+   `mediaUploadMaxBytes` limits staging. Check `mediaSendMaxBytes[kind]` before staging bytes for a particular send.
+
+2. Stage one file, then submit its returned `id` as `sourceId`:
+
+   ```bash
+   curl -H "Authorization: Bearer $TOKEN" -F 'file=@report.pdf' \
+     "$WX/accounts/$ACCOUNT/uploads"
+   curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: report-2026-10' \
+     -d '{"threadId":"filehelper","kind":"file","sourceId":"SOURCE_ID"}' \
+     "$WX/accounts/$ACCOUNT/sends"
+   ```
+
+   Here, `WX` ends in `/v1`. The send returns HTTP 202 with a job. Poll `GET /jobs/{id}`; allow several minutes for larger files.
+
+   The internal TypeScript SDK exposes the same workflow:
+
+   ```ts
+   const source = await client.upload(accountId, bytes, "report.pdf");
+   const job = await client.sendMedia(accountId, {
+     threadId: "filehelper", kind: "file", sourceId: source.id,
+     standardSourceId: null, thumbnailSourceId: null,
+     playSeconds: null, durationMs: null,
+   }, "report-2026-10");
+   const progress = await client.job(accountId, job.id);
+   ```
+
+   `NATIVE_MAX_SOURCE_BYTES` is the 32 MiB staging ceiling. `NATIVE_MAX_ORDINARY_SOURCE_BYTES` is 26,214,383. Both are exported by `@agent-wechat/shared`; use the daemon's capabilities when connecting to another version.
+
+## OpenClaw
+
+Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `32` permits files up to 32 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend image, video or voice limits.
+
+Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary files get up to five minutes of job polling. If polling ends, retain the reported job ID and inspect it instead of starting another send.
+
+<Aside title="Good to know">
+- See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.
+- The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
+- Reusing an existing uploaded copy offered by WeChat is not supported yet. That response, or an uncertain upload reservation or send, becomes `needs_review` and is never automatically repeated.
+- Use the same idempotency key to inspect the original intent after a lost response. See [Sends and recovery](/how-it-works/sends/).
+</Aside>

@@ -214,7 +214,7 @@ assuming a successful operation means every candidate was repaired.
 wx --account home messages send filehelper --text "A deliberate message" \
   --idempotency-key one-logical-intent
 wx --account home messages send filehelper --image /private/photo.png --detach
-wx --account home messages send filehelper --file /private/report.pdf
+wx --account home messages send filehelper --file /private/report.pdf --wait 300
 wx --account home messages send filehelper --video /private/clip.mp4
 wx --account home messages send filehelper --voice /private/audio.wav
 wx --account home messages sends lookup --idempotency-key one-logical-intent
@@ -230,13 +230,28 @@ returns the same resource; changed input is a conflict. Accepted means native
 server acceptance, not recipient delivery. `needs_review`/partial voice outcomes
 retain completed note IDs and must not automatically resend.
 
-The current native source cap is25MiB−17bytes, below the separate128MiB cached
-HTTP bound. Voice uses independent SILK encoding; one note holds up to 60
+Ordinary file sources have an initial 32 MiB cap (33,554,432 bytes). Image, video
+and voice sources retain the 25 MiB minus 17 byte cap (26,214,383 bytes), below the
+separate 128 MiB cached HTTP bound. A 32 MiB File Transfer PDF passed native
+acceptance, recipient opening and cold byte verification; see
+[FEATURES.md](FEATURES.md) for the tested scope and remaining limits.
+`account capabilities` reports `mediaUploadMaxBytes` for staging and a
+`mediaSendMaxBytes` map for each supported send kind. Uploading a source does not
+make it eligible for every kind.
+
+`messages send --wait` is in seconds (default 30, maximum 900). Use `--wait 300`
+for larger files, or `--detach` followed by `jobs get JOB_ID`. A wait ending
+does not cancel or resubmit the job. Upload readback must verify before final
+submission. A large-file cache-hit response currently stops with `needs_review`
+because its existing encryption key cannot yet be recovered; inspect the same
+job and never automatically create a replacement send.
+
+Voice uses independent SILK encoding; one note holds up to 60
 seconds and longer audio splits into the fewest equal-length notes. Notes above
 about 15 seconds use a multi-request upload that is not yet live-verified. Video
 requires supported MP4 input and server-side FFmpeg preparation. The runtime
 image includes FFmpeg/FFprobe; direct installs must provision these tools for
-source normalization. Large-file branches and sticker sending are unavailable.
+source normalization. Sticker sending is unavailable.
 
 ```bash
 wx --account home chats read filehelper --expected-version VERSION

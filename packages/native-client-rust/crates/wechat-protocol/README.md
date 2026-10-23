@@ -26,15 +26,40 @@ and simulated-phone coverage; live phone/server acceptance remains unverified.
 The crate includes QR login, QR polling/approval exchange, saved-device phone
 approval, trusted AutoAuth renewal, NewSync cursor merging, heartbeat, text send,
 known contact and group lookups, contact bootstrap pages, avatar bytes and voice
-download chunks. The CDN module supports authenticated routing bootstrap, bounded
-encrypted range downloads and uploads below the native 25 MiB big-file branch,
-supplied JPEG image variants and MP4/thumbnail uploads. Metadata finalizers cover
+download chunks. The CDN module implements authenticated routing bootstrap,
+encrypted range downloads, ordinary-file uploads with an initial 32 MiB plaintext
+ceiling, supplied JPEG image variants and MP4/thumbnail uploads. Metadata finalizers cover
 files, images, videos and bounded SILK voice notes. The bundled portable SILK SDK
 encodes fresh mono 16 kHz audio and decodes incoming voice bytes without loading
 an official client codec. A separate core layer owns resizing, input conversion,
 durable jobs, upload readback and uncertain-send handling. Sticker retrieval is
 restricted to the verified original-byte CDN host, with pinned public DNS,
 redirect refusal, MD5 validation and bounded full image decoding.
+
+The native ordinary-file implementation selects the four-phase
+apply/uploadblock/fin/complete carrier when PKCS#7 ciphertext reaches 25 MiB.
+This uses the reference's supported multiphase policy for the 16-byte padding
+band below 25 MiB plaintext; the reference's default binary-stream `uploadbig`
+carrier is not implemented. Plaintext above 25 MiB selects filetype 7 and final
+app-message field 6=7. Upload and download independently select the authenticated
+safe C2C routing table with their respective operation selectors; upload routing
+type 7 is separate from the request's actual filetype 5 or 7. Filetype7 readback uses
+`downloadbig`, exact encrypted and plaintext sizes, source MD5 and caller-owned
+SHA-256 verification before final submission. Ordinary image/video/voice upload
+limits remain 26,214,383 bytes.
+
+`NativeClient::reserve_file_upload` submits CGI6691 once using a separate,
+caller-persisted progress ID. Its `FileUploadReservation` contains secret token
+material with redacted Debug and zeroization; protect it with the upload key,
+source and final client ID. `send_file_with_reservation` emits the reservation
+metadata and correlates the final CGI222 receipt. A response failure must not
+cause a new reservation or final send. Existing no-reservation APIs retain their
+previous wire form. Large-file cache hits and server retry/routing controls are
+rejected rather than guessed. The path has synthetic schema/transfer tests and
+an isolated native 32 MiB File Transfer PDF accepted with exact readback,
+recipient opening and complete local writeback. Cold CLI/SDK byte and range
+checks passed; recipient-exported SHA-256 remains unavailable.
+See [FEATURES.md](../../FEATURES.md) for the current validation record.
 
 Results preserve unsigned 64-bit message IDs as decimal strings.
 Unknown command payloads and contact fields remain available as original bytes.

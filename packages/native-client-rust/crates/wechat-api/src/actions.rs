@@ -104,8 +104,17 @@ async fn capabilities(
     c.require(Some(&a), "read")?;
     app.core.store.account(&a)?;
     Ok(Json(
-        json!({"nativeRuntime":true,"officialBinaryRequired":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
+        json!({"nativeRuntime":true,"officialBinaryRequired":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
     ))
+}
+fn media_send_max_bytes() -> Value {
+    use wechat_core::MediaKind;
+    json!({
+        "file": MediaKind::File.max_source_bytes(),
+        "image": MediaKind::Image.max_source_bytes(),
+        "video": MediaKind::Video.max_source_bytes(),
+        "voice": MediaKind::Voice.max_source_bytes(),
+    })
 }
 async fn connect(
     State(app): State<App>,
@@ -316,4 +325,42 @@ async fn sync_groups(
         a,
         wechat_core::MetadataAction::GroupSync { max_pages: 10 },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn capabilities_distinguish_staging_from_each_send_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store, None).unwrap();
+        let token = "0123456789abcdef0123456789abcdef";
+        let app = crate::router(core, token);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/accounts/one/capabilities")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["mediaUploadMaxBytes"], 33_554_432);
+        assert_eq!(body["mediaSendMaxBytes"]["file"], 33_554_432);
+        for kind in ["image", "video", "voice"] {
+            assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
+        }
+        assert!(body["mediaSendMaxBytes"].get("sticker").is_none());
+    }
 }

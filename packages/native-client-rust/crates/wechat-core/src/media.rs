@@ -10,9 +10,11 @@ use std::{
     time::Duration,
 };
 use wechat_protocol::{
+    file_upload::FileUploadReservation,
     media::{
-        CdnClient, MediaDescriptor, MediaQuality, PreparedImageUpload, PreparedUpload,
-        PreparedVideoUpload, StickerDescriptor, UploadedImage, UploadedMedia, UploadedVideo,
+        CdnClient, LargeCdnRoute, MediaDescriptor, MediaQuality, PreparedImageUpload,
+        PreparedUpload, PreparedVideoUpload, StickerDescriptor, UploadedImage, UploadedMedia,
+        UploadedVideo,
     },
     NativeClient, NativeOptions,
 };
@@ -52,12 +54,15 @@ struct VoicePart {
 struct UploadMaterial {
     key: Vec<u8>,
     file_key: String,
+    #[serde(default)]
+    task_id: u64,
 }
 impl Drop for UploadMaterial {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.key.zeroize();
         self.file_key.zeroize();
+        self.task_id.zeroize();
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -66,6 +71,10 @@ struct SendPlan {
     client_id: String,
     created_at: u32,
     material: Option<UploadMaterial>,
+    #[serde(default)]
+    reservation: Option<FileUploadReservation>,
+    #[serde(default)]
+    file_upload_progress_id: Option<String>,
     uploaded_file: Option<UploadedMedia>,
     uploaded_image: Option<UploadedImage>,
     uploaded_video: Option<UploadedVideo>,
@@ -75,6 +84,62 @@ struct SendPlan {
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+fn validate_send_source_sizes(
+    request: &MediaSendRequest,
+    primary: u64,
+    standard: Option<u64>,
+    thumbnail: Option<u64>,
+) -> Result<()> {
+    ensure!(
+        request.kind == MediaKind::Image || standard.is_none(),
+        "unsupported_standard_variant"
+    );
+    ensure!(
+        matches!(request.kind, MediaKind::Image | MediaKind::Video) || thumbnail.is_none(),
+        "unsupported_thumbnail_variant"
+    );
+    ensure!(
+        primary > 0 && primary <= request.kind.max_source_bytes() as u64,
+        "source_size_limit"
+    );
+    for size in [standard, thumbnail].into_iter().flatten() {
+        ensure!(
+            size > 0 && size <= MAX_ORDINARY_SOURCE_BYTES as u64,
+            "source_size_limit"
+        );
+    }
+    Ok(())
+}
+fn file_upload_quality(bytes: usize) -> MediaQuality {
+    if bytes > wechat_protocol::media::MAX_CDN_TRANSFER_BYTES {
+        MediaQuality::LargeFile
+    } else {
+        MediaQuality::File
+    }
+}
+fn file_uses_multiphase(bytes: usize) -> bool {
+    bytes > MAX_ORDINARY_SOURCE_BYTES
+}
+fn new_upload_task_id() -> Result<u64> {
+    Ok(u64::from_le_bytes(wechat_protocol::crypto::random::<8>()?).max(1))
+}
+fn initialize_file_upload_ids(plan: &mut SendPlan, source_bytes: usize) -> Result<bool> {
+    if plan.request.kind != MediaKind::File || source_bytes <= MAX_ORDINARY_SOURCE_BYTES {
+        return Ok(false);
+    }
+    if plan.file_upload_progress_id.is_some() {
+        return Ok(false);
+    }
+    ensure!(
+        plan.reservation.is_none() && plan.uploaded_file.is_none(),
+        "file_reservation_needs_review"
+    );
+    let local = u32::from_le_bytes(wechat_protocol::crypto::random::<4>()?).max(1);
+    let progress_id = format!("{}_{}_{local}", plan.request.thread_id, plan.created_at);
+    plan.client_id = format!("{progress_id}_xwechat_1");
+    plan.file_upload_progress_id = Some(progress_id);
+    Ok(true)
 }
 fn wxgf_preview_source_id(source_sha256: &str) -> String {
     format!("wxgf-preview-v1_{source_sha256}")
@@ -151,10 +216,10 @@ impl Core {
     }
     fn source_bytes(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
         let (meta, sealed) = self.store.media_source(account, id)?;
-        let bytes = self
+        let mut opened = self
             .vault
-            .open_record(account, &format!("source:{id}"), &sealed)?
-            .to_vec();
+            .open_record(account, &format!("source:{id}"), &sealed)?;
+        let bytes = std::mem::take(&mut *opened);
         ensure!(
             bytes.len() as u64 == meta.byte_length && digest(&bytes) == meta.sha256,
             "source_integrity_failed"
@@ -626,30 +691,41 @@ impl Core {
             "sticker_send_unsupported"
         );
         let (source, _) = self.source_bytes(account, &request.source_id)?;
-        let source_hash = |id: &Option<String>| -> Result<Option<String>> {
+        let extra_source = |id: &Option<String>| -> Result<Option<OwnedMediaSource>> {
             id.as_ref()
-                .map(|id| Ok(self.store.media_source(account, id)?.0.sha256))
+                .map(|id| Ok(self.store.media_source(account, id)?.0))
                 .transpose()
         };
+        let standard = extra_source(&request.standard_source_id)?;
+        let thumbnail = extra_source(&request.thumbnail_source_id)?;
+        validate_send_source_sizes(
+            &request,
+            source.byte_length,
+            standard.as_ref().map(|source| source.byte_length),
+            thumbnail.as_ref().map(|source| source.byte_length),
+        )?;
         let hash = media_request_hash(
             &request,
             &source.sha256,
-            source_hash(&request.standard_source_id)?.as_deref(),
-            source_hash(&request.thumbnail_source_id)?.as_deref(),
+            standard.as_ref().map(|source| source.sha256.as_str()),
+            thumbnail.as_ref().map(|source| source.sha256.as_str()),
             (request.kind == MediaKind::File).then_some(source.name.as_str()),
         )?;
         let id = format!("job_{}", uuid::Uuid::new_v4());
-        let plan = SendPlan {
+        let mut plan = SendPlan {
             request: request.clone(),
             client_id: format!("aw_{}", uuid::Uuid::new_v4().simple()),
             created_at: wechat_protocol::wire::unix_time()?,
             material: None,
+            reservation: None,
+            file_upload_progress_id: None,
             uploaded_file: None,
             uploaded_image: None,
             uploaded_video: None,
             prepared_video_thumbnail_source_id: None,
             voice: vec![],
         };
+        initialize_file_upload_ids(&mut plan, source.byte_length as usize)?;
         let payload = self.vault.seal(
             account,
             &format!("media-job:{id}"),
@@ -837,8 +913,9 @@ impl Core {
         ) {
             return Ok(());
         }
-        let uncertain =
-            row.kind == "send" && matches!(row.phase.as_str(), "uploading" | "submitting");
+        let uncertain = row.kind == "send"
+            && (matches!(row.phase.as_str(), "reserving" | "uploading" | "submitting")
+                || code == "file_reservation_needs_review");
         row.state = if uncertain {
             "needs_review"
         } else if code == "media_cancelled" {
@@ -919,11 +996,18 @@ impl Core {
             } => {
                 let mut state = self.account_state(account)?;
                 let native = NativeClient::new(NativeOptions::default())?;
-                let conf = match native.cdn_config(&mut state) {
+                let load_config = |state: &mut wechat_protocol::AccountState| {
+                    if descriptor.quality == MediaQuality::LargeFile {
+                        native.large_cdn_config(state, LargeCdnRoute::Download)
+                    } else {
+                        native.cdn_config(state)
+                    }
+                };
+                let conf = match load_config(&mut state) {
                     Ok(conf) => conf,
                     Err(error) if is_media_auth_rejected(&error) => {
                         state = native.renew_session(&state, "agent-wechat media")?;
-                        native.cdn_config(&mut state)?
+                        load_config(&mut state)?
                     }
                     Err(error) => return Err(error),
                 };
@@ -1337,6 +1421,8 @@ fn classify_error(error: &anyhow::Error) -> String {
     for cause in error.chain() {
         let message = cause.to_string();
         if [
+            "file_reservation_needs_review",
+            "source_size_limit",
             "image_size_limit",
             "image_decode_limit",
             "image_decode_failed",
@@ -1688,7 +1774,9 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                             .context("unsupported_attachment_transport")?
                             .into(),
                         aes_key: key(value("aeskey"))?,
-                        quality: MediaQuality::File,
+                        quality: file_upload_quality(usize::try_from(
+                            number(value("totallen")).unwrap_or(0),
+                        )?),
                         expected_bytes: number(value("totallen")),
                         expected_md5: child("md5").and_then(|n| n.text()).map(str::to_string),
                         strict_size: true,
@@ -1778,6 +1866,60 @@ impl Core {
         self.store.save_media_job(account, &row)?;
         Ok(())
     }
+    fn ensure_upload_material(&self, account: &str, id: &str, plan: &mut SendPlan) -> Result<()> {
+        let changed = if let Some(material) = plan.material.as_mut() {
+            if material.task_id == 0 {
+                material.task_id = new_upload_task_id()?;
+                true
+            } else {
+                false
+            }
+        } else {
+            plan.material = Some(UploadMaterial {
+                key: wechat_protocol::crypto::random::<16>()?.to_vec(),
+                file_key: hex_string(&wechat_protocol::crypto::random::<16>()?),
+                task_id: new_upload_task_id()?,
+            });
+            true
+        };
+        if changed {
+            self.save_send_plan(account, id, plan)?;
+        }
+        Ok(())
+    }
+    fn reserve_media_file_upload(
+        &self,
+        account: &str,
+        id: &str,
+        plan: &mut SendPlan,
+        source_bytes: usize,
+        reserve: impl FnOnce() -> Result<FileUploadReservation>,
+    ) -> Result<bool> {
+        if plan.request.kind != MediaKind::File || source_bytes <= MAX_ORDINARY_SOURCE_BYTES {
+            return Ok(false);
+        }
+        ensure!(
+            plan.file_upload_progress_id
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            "file_reservation_needs_review"
+        );
+        if let Some(reservation) = &plan.reservation {
+            reservation.validate()?;
+            return Ok(false);
+        }
+        ensure!(
+            self.store.media_job(account, id)?.phase != "reserving",
+            "file_reservation_needs_review"
+        );
+        // CGI6691 can create account state. Persist this boundary first and
+        // retain the receipt before any state write or transfer can fail.
+        self.phase_media(account, id, "reserving")?;
+        plan.reservation = Some(reserve()?);
+        plan.reservation.as_ref().unwrap().validate()?;
+        self.save_send_plan(account, id, plan)?;
+        Ok(true)
+    }
     fn perform_media_send(&self, account: &str, id: &str) -> Result<()> {
         let row = self.store.media_job(account, id)?;
         let mut plan: SendPlan = serde_json::from_slice(&self.vault.open_record(
@@ -1787,6 +1929,33 @@ impl Core {
         )?)?;
         self.progress_media(account, id, 0, None)?;
         let (source, bytes) = self.source_bytes(account, &plan.request.source_id)?;
+        let source_size = |id: &Option<String>| -> Result<Option<u64>> {
+            id.as_ref()
+                .map(|id| Ok(self.store.media_source(account, id)?.0.byte_length))
+                .transpose()
+        };
+        validate_send_source_sizes(
+            &plan.request,
+            source.byte_length,
+            source_size(&plan.request.standard_source_id)?,
+            source_size(&plan.request.thumbnail_source_id)?,
+        )?;
+        if let Some(id) = &plan.prepared_video_thumbnail_source_id {
+            ensure!(
+                self.store.media_source(account, id)?.0.byte_length
+                    <= MAX_ORDINARY_SOURCE_BYTES as u64,
+                "source_size_limit"
+            );
+        }
+        if row.phase == "readback"
+            && plan.request.kind == MediaKind::File
+            && bytes.len() > MAX_ORDINARY_SOURCE_BYTES
+        {
+            ensure!(
+                plan.reservation.is_some() && plan.uploaded_file.is_some(),
+                "file_reservation_needs_review"
+            );
+        }
         let native = NativeClient::new(NativeOptions::default())?;
         let mut state = self.account_state(account)?;
         if plan.request.kind == MediaKind::Video && plan.request.play_seconds.is_none() {
@@ -1875,39 +2044,69 @@ impl Core {
                 },
             );
         }
-        if plan.material.is_none() {
-            plan.material = Some(UploadMaterial {
-                key: wechat_protocol::crypto::random::<16>()?.to_vec(),
-                file_key: hex_string(&wechat_protocol::crypto::random::<16>()?),
-            });
+        if initialize_file_upload_ids(&mut plan, bytes.len())? {
+            ensure!(
+                matches!(row.phase.as_str(), "queued" | "preparing"),
+                "file_reservation_needs_review"
+            );
             self.save_send_plan(account, id, &plan)?;
         }
-        let material = plan.material.as_ref().unwrap();
-        let mut conf = match native.cdn_config(&mut state) {
+        self.ensure_upload_material(account, id, &mut plan)?;
+        let modern_file = plan.request.kind == MediaKind::File && file_uses_multiphase(bytes.len());
+        let load_config = |state: &mut wechat_protocol::AccountState, route| {
+            if let Some(route) = route {
+                native.large_cdn_config(state, route)
+            } else {
+                native.cdn_config(state)
+            }
+        };
+        let upload_route = modern_file.then_some(LargeCdnRoute::Upload);
+        let mut conf = match load_config(&mut state, upload_route) {
             Ok(conf) => conf,
             Err(error) if is_media_auth_rejected(&error) => {
                 state = native.renew_session(&state, "agent-wechat media")?;
-                native.cdn_config(&mut state)?
+                load_config(&mut state, upload_route)?
             }
             Err(e) => return Err(e),
         };
         self.save_state(account, &state)?;
-        let cdn = CdnClient::new(conf.clone(), Duration::from_secs(25))?;
+        let mut cdn = CdnClient::new(conf.clone(), Duration::from_secs(25))?;
         conf.auth_key.fill(0);
+        let destination = plan.request.thread_id.clone();
+        let progress_id = plan.file_upload_progress_id.clone();
+        if self.reserve_media_file_upload(account, id, &mut plan, bytes.len(), || {
+            native.reserve_file_upload(
+                &mut state,
+                &destination,
+                progress_id
+                    .as_deref()
+                    .context("file_reservation_needs_review")?,
+                &source.name,
+                bytes.len(),
+                &hex_string(&wechat_protocol::crypto::md5(&bytes)),
+            )
+        })? {
+            self.save_state(account, &state)?;
+        }
+        let material = plan.material.as_ref().unwrap();
         let callback = |n, t| self.progress_media(account, id, n, t);
         match plan.request.kind {
             MediaKind::File => {
                 if plan.uploaded_file.is_none() {
                     let prepared = PreparedUpload::with_material(
                         &bytes,
-                        MediaQuality::File,
+                        file_upload_quality(bytes.len()),
                         &source.name,
                         &plan.request.thread_id,
                         &material.key,
                         &material.file_key,
                     )?;
                     self.phase_media(account, id, "uploading")?;
-                    let uploaded = cdn.upload_with_progress(&prepared, callback)?;
+                    let uploaded = if modern_file {
+                        cdn.upload_large_file_with_progress(&prepared, material.task_id, callback)?
+                    } else {
+                        cdn.upload_with_progress(&prepared, callback)?
+                    };
                     plan.uploaded_file = Some(uploaded);
                     self.save_send_plan(account, id, &plan)?;
                 }
@@ -1993,7 +2192,26 @@ impl Core {
             }
             _ => bail!("unsupported_media_send"),
         }
+        drop(bytes);
         self.phase_media(account, id, "readback")?;
+        if modern_file {
+            let uploaded = plan
+                .uploaded_file
+                .as_ref()
+                .context("missing_uploaded_file")?;
+            let download_route = (uploaded.descriptor.quality == MediaQuality::LargeFile)
+                .then_some(LargeCdnRoute::Download);
+            let conf = match load_config(&mut state, download_route) {
+                Ok(conf) => conf,
+                Err(error) if is_media_auth_rejected(&error) => {
+                    state = native.renew_session(&state, "agent-wechat media")?;
+                    load_config(&mut state, download_route)?
+                }
+                Err(error) => return Err(error),
+            };
+            self.save_state(account, &state)?;
+            cdn = CdnClient::new(conf, Duration::from_secs(25))?;
+        }
         let mut verified = vec![];
         if let Some(u) = &plan.uploaded_file {
             let downloaded = cdn.download_with_progress(&u.descriptor, callback)?;
@@ -2027,12 +2245,13 @@ impl Core {
         self.store.save_media_job(account, &row)?;
         self.phase_media(account, id, "submitting")?;
         let result = match plan.request.kind {
-            MediaKind::File => native.send_file(
+            MediaKind::File => native.send_file_with_reservation(
                 &mut state,
                 &plan.request.thread_id,
                 &plan.client_id,
                 plan.created_at,
                 plan.uploaded_file.as_ref().unwrap(),
+                plan.reservation.as_ref(),
             ),
             MediaKind::Image => native.send_image(
                 &mut state,
@@ -2182,11 +2401,12 @@ impl Core {
             let (kind, content, summary) = match plan.request.kind {
                 MediaKind::File => (
                     49,
-                    wechat_protocol::media_send::local_file_xml(
+                    wechat_protocol::media_send::local_file_xml_with_reservation(
                         &own,
                         plan.uploaded_file
                             .as_ref()
                             .context("uploaded_media_missing")?,
+                        plan.reservation.as_ref(),
                     )?,
                     source.name.clone(),
                 ),
@@ -2658,6 +2878,67 @@ fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn file_plan() -> SendPlan {
+        SendPlan {
+            request: MediaSendRequest {
+                thread_id: "filehelper".into(),
+                kind: MediaKind::File,
+                source_id: "source-test".into(),
+                standard_source_id: None,
+                thumbnail_source_id: None,
+                play_seconds: None,
+                duration_ms: None,
+            },
+            client_id: "persisted-client-id".into(),
+            created_at: 123,
+            material: None,
+            reservation: None,
+            file_upload_progress_id: None,
+            uploaded_file: None,
+            uploaded_image: None,
+            uploaded_video: None,
+            prepared_video_thumbnail_source_id: None,
+            voice: vec![],
+        }
+    }
+    fn plan_job(core: &Core, id: &str, plan: &SendPlan) {
+        let payload = core
+            .vault
+            .seal(
+                "one",
+                &format!("media-job:{id}"),
+                &serde_json::to_vec(plan).unwrap(),
+            )
+            .unwrap();
+        core.store
+            .create_media_job(
+                "one",
+                id,
+                &format!("send:{id}"),
+                &"0".repeat(64),
+                "send",
+                &json!({}),
+                &payload,
+            )
+            .unwrap();
+        assert!(core.store.claim_media_job("one", id).unwrap());
+    }
+    fn saved_plan(core: &Core, id: &str) -> SendPlan {
+        let row = core.store.media_job("one", id).unwrap();
+        serde_json::from_slice(
+            &core
+                .vault
+                .open_record("one", &format!("media-job:{id}"), &row.payload)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    fn reservation() -> FileUploadReservation {
+        FileUploadReservation {
+            file_upload_token: "v1_c3ludGhldGljLXByaXZhdGU=".into(),
+            overwrite_newmsgid: u64::MAX,
+        }
+    }
     fn test_core() -> (tempfile::TempDir, Arc<Core>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(wechat_store::Store::open(&dir.path().join("data")).unwrap());
@@ -2679,6 +2960,366 @@ mod tests {
             "line\nbreak",
         ] {
             assert!(validate_destination(value).is_err());
+        }
+    }
+    #[test]
+    fn source_limits_follow_kind_and_variant_roles_on_queue_and_replay() {
+        let mut plan = file_plan();
+        assert!(
+            validate_send_source_sizes(&plan.request, MAX_SOURCE_BYTES as u64, None, None).is_ok()
+        );
+        assert!(
+            validate_send_source_sizes(&plan.request, MAX_SOURCE_BYTES as u64 + 1, None, None)
+                .is_err()
+        );
+        assert!(validate_send_source_sizes(&plan.request, 1, Some(1), None).is_err());
+        assert!(validate_send_source_sizes(&plan.request, 1, None, Some(1)).is_err());
+        for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Voice] {
+            plan.request.kind = kind;
+            assert!(validate_send_source_sizes(
+                &plan.request,
+                MAX_ORDINARY_SOURCE_BYTES as u64,
+                None,
+                None
+            )
+            .is_ok());
+            assert!(validate_send_source_sizes(
+                &plan.request,
+                MAX_ORDINARY_SOURCE_BYTES as u64 + 1,
+                None,
+                None
+            )
+            .is_err());
+        }
+        plan.request.kind = MediaKind::Image;
+        for (standard, thumbnail) in [
+            (Some(MAX_ORDINARY_SOURCE_BYTES as u64 + 1), None),
+            (None, Some(MAX_ORDINARY_SOURCE_BYTES as u64 + 1)),
+            (Some(0), None),
+        ] {
+            assert!(validate_send_source_sizes(&plan.request, 1, standard, thumbnail).is_err());
+        }
+        let (_dir, core) = test_core();
+        let source = core
+            .upload_source(
+                "one",
+                "large.bin",
+                "application/octet-stream",
+                &vec![3; MAX_ORDINARY_SOURCE_BYTES + 1],
+            )
+            .unwrap();
+        plan.request.kind = MediaKind::Image;
+        plan.request.source_id = source.id;
+        plan_job(&core, "oversized-image", &plan);
+        assert_eq!(
+            core.perform_media_send("one", "oversized-image")
+                .unwrap_err()
+                .to_string(),
+            "source_size_limit"
+        );
+        assert_eq!(
+            core.store
+                .media_job("one", "oversized-image")
+                .unwrap()
+                .phase,
+            "preparing"
+        );
+        assert!(saved_plan(&core, "oversized-image").material.is_none());
+    }
+    #[test]
+    fn protected_plan_backwards_decode_repairs_task_once_without_changing_material() {
+        let (_dir, core) = test_core();
+        let mut value = serde_json::to_value(file_plan()).unwrap();
+        value.as_object_mut().unwrap().remove("reservation");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("file_upload_progress_id");
+        value["material"] =
+            json!({"key":vec![4u8;16],"file_key":"00112233445566778899aabbccddeeff"});
+        let mut plan: SendPlan = serde_json::from_value(value).unwrap();
+        assert!(plan.reservation.is_none());
+        assert!(plan.file_upload_progress_id.is_none());
+        assert_eq!(plan.material.as_ref().unwrap().task_id, 0);
+        plan_job(&core, "legacy-plan", &plan);
+        core.ensure_upload_material("one", "legacy-plan", &mut plan)
+            .unwrap();
+        let restored = saved_plan(&core, "legacy-plan");
+        let material = restored.material.as_ref().unwrap();
+        assert_ne!(material.task_id, 0);
+        assert_eq!(material.key, vec![4; 16]);
+        assert_eq!(material.file_key, "00112233445566778899aabbccddeeff");
+        assert_eq!(restored.client_id, "persisted-client-id");
+        let sealed = core.store.media_job("one", "legacy-plan").unwrap().payload;
+        core.ensure_upload_material("one", "legacy-plan", &mut plan)
+            .unwrap();
+        assert_eq!(
+            core.store.media_job("one", "legacy-plan").unwrap().payload,
+            sealed
+        );
+        assert!(core
+            .vault
+            .open_record("two", "media-job:legacy-plan", &sealed)
+            .is_err());
+    }
+    #[test]
+    fn file_progress_and_final_ids_are_generated_once_and_never_rebuilt_from_receipts() {
+        let mut small = file_plan();
+        assert!(!initialize_file_upload_ids(&mut small, MAX_ORDINARY_SOURCE_BYTES).unwrap());
+        assert_eq!(small.client_id, "persisted-client-id");
+        assert!(small.file_upload_progress_id.is_none());
+        let mut plan = file_plan();
+        assert!(initialize_file_upload_ids(&mut plan, MAX_ORDINARY_SOURCE_BYTES + 1).unwrap());
+        let progress = plan.file_upload_progress_id.as_ref().unwrap().clone();
+        assert!(progress.starts_with("filehelper_123_"));
+        assert_ne!(
+            progress.rsplit('_').next().unwrap().parse::<u32>().unwrap(),
+            0
+        );
+        assert_eq!(plan.client_id, format!("{progress}_xwechat_1"));
+        let saved = serde_json::to_vec(&plan).unwrap();
+        assert!(!initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap());
+        assert_eq!(serde_json::to_vec(&plan).unwrap(), saved);
+        let mut missing_id = file_plan();
+        missing_id.reservation = Some(reservation());
+        assert!(initialize_file_upload_ids(&mut missing_id, MAX_SOURCE_BYTES).is_err());
+        assert_eq!(missing_id.client_id, "persisted-client-id");
+        assert!(missing_id.file_upload_progress_id.is_none());
+    }
+    #[test]
+    fn reservation_is_saved_before_transfer_and_reused_without_another_rpc() {
+        let (_dir, core) = test_core();
+        let mut plan = file_plan();
+        initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap();
+        plan_job(&core, "reserved-plan", &plan);
+        let calls = std::cell::Cell::new(0);
+        assert!(core
+            .reserve_media_file_upload(
+                "one",
+                "reserved-plan",
+                &mut plan,
+                MAX_ORDINARY_SOURCE_BYTES + 1,
+                || {
+                    calls.set(calls.get() + 1);
+                    assert_eq!(
+                        core.store.media_job("one", "reserved-plan")?.phase,
+                        "reserving"
+                    );
+                    assert!(saved_plan(&core, "reserved-plan").reservation.is_none());
+                    Ok(reservation())
+                }
+            )
+            .unwrap());
+        let restored = saved_plan(&core, "reserved-plan");
+        assert_eq!(
+            restored.reservation.as_ref().unwrap().overwrite_newmsgid,
+            u64::MAX
+        );
+        let row = core.store.media_job("one", "reserved-plan").unwrap();
+        let token = reservation().file_upload_token.clone();
+        assert!(!row
+            .payload
+            .windows(token.len())
+            .any(|bytes| bytes == token.as_bytes()));
+        assert!(!serde_json::to_string(&row.data).unwrap().contains(&token));
+        assert!(!core
+            .reserve_media_file_upload("one", "reserved-plan", &mut plan, MAX_SOURCE_BYTES, || {
+                calls.set(calls.get() + 1);
+                bail!("must not reserve twice")
+            })
+            .unwrap());
+        assert_eq!(calls.get(), 1);
+        plan.uploaded_file = Some(UploadedMedia {
+            descriptor: MediaDescriptor {
+                file_id: "persisted-object".into(),
+                aes_key: vec![4; 16],
+                quality: MediaQuality::LargeFile,
+                expected_bytes: Some(MAX_SOURCE_BYTES as u64),
+                expected_md5: Some("0".repeat(32)),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: MAX_SOURCE_BYTES as u32,
+            md5: "0".repeat(32),
+            sha256: "1".repeat(64),
+            file_name: "large.bin".into(),
+            width: None,
+            height: None,
+        });
+        core.save_send_plan("one", "reserved-plan", &plan).unwrap();
+        core.phase_media("one", "reserved-plan", "readback")
+            .unwrap();
+        core.store.recover_media_jobs("one").unwrap();
+        assert_eq!(
+            core.store.media_job("one", "reserved-plan").unwrap().state,
+            "queued"
+        );
+        let mut replay = saved_plan(&core, "reserved-plan");
+        assert!(replay.uploaded_file.is_some());
+        assert!(!core
+            .reserve_media_file_upload(
+                "one",
+                "reserved-plan",
+                &mut replay,
+                MAX_SOURCE_BYTES,
+                || {
+                    calls.set(calls.get() + 1);
+                    bail!("readback must reuse both persisted receipts")
+                }
+            )
+            .unwrap());
+        assert_eq!(calls.get(), 1);
+    }
+    #[test]
+    fn uncertain_reservation_is_never_repeated_and_cancellation_preserves_receipt() {
+        let (_dir, core) = test_core();
+        let mut plan = file_plan();
+        initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap();
+        plan_job(&core, "uncertain-reservation", &plan);
+        let calls = std::cell::Cell::new(0);
+        for _ in 0..2 {
+            assert!(core
+                .reserve_media_file_upload(
+                    "one",
+                    "uncertain-reservation",
+                    &mut plan,
+                    MAX_SOURCE_BYTES,
+                    || {
+                        calls.set(calls.get() + 1);
+                        bail!("transport_unavailable")
+                    }
+                )
+                .is_err());
+        }
+        assert_eq!(calls.get(), 1);
+        core.fail_media_job("one", "uncertain-reservation", "transport_unavailable")
+            .unwrap();
+        assert_eq!(
+            core.store
+                .media_job("one", "uncertain-reservation")
+                .unwrap()
+                .state,
+            "needs_review"
+        );
+        assert!(core
+            .store
+            .retry_media_job("one", "uncertain-reservation")
+            .is_err());
+        for during_rpc in [false, true] {
+            let id = if during_rpc {
+                "cancel-during-reservation"
+            } else {
+                "cancel-before-reservation"
+            };
+            let mut plan = file_plan();
+            initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap();
+            plan_job(&core, id, &plan);
+            if !during_rpc {
+                core.store.cancel_media_job("one", id).unwrap();
+            }
+            let mut called = false;
+            let outcome =
+                core.reserve_media_file_upload("one", id, &mut plan, MAX_SOURCE_BYTES, || {
+                    called = true;
+                    core.store.cancel_media_job("one", id)?;
+                    Ok(reservation())
+                });
+            assert_eq!(called, during_rpc);
+            assert_eq!(outcome.is_ok(), during_rpc);
+            assert_eq!(saved_plan(&core, id).reservation.is_some(), during_rpc);
+            assert!(core.progress_media("one", id, 0, None).is_err());
+            core.fail_media_job("one", id, "media_cancelled").unwrap();
+            assert_eq!(
+                core.store.media_job("one", id).unwrap().state,
+                if during_rpc {
+                    "needs_review"
+                } else {
+                    "cancelled"
+                }
+            );
+        }
+    }
+    #[test]
+    fn logout_during_reservation_retains_receipt_and_blocks_transfer() {
+        let (_dir, core) = test_core();
+        let mut plan = file_plan();
+        initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap();
+        plan_job(&core, "logout-reservation", &plan);
+        assert!(core
+            .reserve_media_file_upload(
+                "one",
+                "logout-reservation",
+                &mut plan,
+                MAX_SOURCE_BYTES,
+                || {
+                    core.store.put_runtime("one", "logged-out", b"1")?;
+                    Ok(reservation())
+                }
+            )
+            .unwrap());
+        assert_eq!(
+            saved_plan(&core, "logout-reservation")
+                .reservation
+                .as_ref()
+                .unwrap()
+                .overwrite_newmsgid,
+            u64::MAX
+        );
+        assert_eq!(
+            core.phase_media("one", "logout-reservation", "uploading")
+                .err()
+                .unwrap()
+                .to_string(),
+            "auth_required"
+        );
+        core.fail_media_job("one", "logout-reservation", "auth_required")
+            .unwrap();
+        let row = core.store.media_job("one", "logout-reservation").unwrap();
+        assert_eq!(row.state, "needs_review");
+        assert_eq!(row.phase, "reserving");
+        assert!(!row.retryable);
+    }
+    #[test]
+    fn file_quality_has_separate_plaintext_and_ciphertext_boundaries() {
+        let boundary = wechat_protocol::media::MAX_CDN_TRANSFER_BYTES;
+        for bytes in [boundary - 17, boundary - 16, boundary - 1, boundary] {
+            assert_eq!(file_upload_quality(bytes), MediaQuality::File);
+        }
+        assert!(!file_uses_multiphase(boundary - 17));
+        for bytes in [
+            boundary - 16,
+            boundary - 1,
+            boundary,
+            boundary + 1,
+            MAX_SOURCE_BYTES,
+        ] {
+            assert!(file_uses_multiphase(bytes));
+        }
+        assert_eq!(file_upload_quality(boundary + 1), MediaQuality::LargeFile);
+        assert_eq!(
+            file_upload_quality(MAX_SOURCE_BYTES),
+            MediaQuality::LargeFile
+        );
+        let xml = file_message_xml(
+            "<encryver>1</encryver>",
+            "<cdnattachurl>synthetic-large-file</cdnattachurl>",
+        );
+        for (length, quality) in [
+            (boundary, MediaQuality::File),
+            (boundary + 1, MediaQuality::LargeFile),
+            (MAX_SOURCE_BYTES, MediaQuality::LargeFile),
+        ] {
+            let xml = xml.replace(
+                "<totallen>8260</totallen>",
+                &format!("<totallen>{length}</totallen>"),
+            );
+            let plans = discover(&message(49), &xml).unwrap();
+            let DownloadPlan::Cdn { descriptor } = &plans[0].2 else {
+                panic!("expected file CDN plan")
+            };
+            assert_eq!(descriptor.quality, quality);
+            assert_eq!(descriptor.expected_bytes, Some(length as u64));
+            assert!(descriptor.strict_size);
         }
     }
     #[test]

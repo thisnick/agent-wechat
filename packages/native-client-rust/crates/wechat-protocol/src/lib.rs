@@ -8,6 +8,7 @@ mod client;
 mod lan_login;
 pub use lan_login::login_lan_error_reason;
 pub mod crypto;
+pub mod file_upload;
 pub mod media;
 pub mod media_send;
 pub mod mmtls;

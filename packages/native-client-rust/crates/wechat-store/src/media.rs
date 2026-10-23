@@ -350,7 +350,7 @@ impl Store {
     pub fn retry_media_job(&self, account: &str, id: &str) -> Result<MediaJobRecord> {
         self.control(account,|db|{
             let tx=db.transaction()?;let row=read_job(&tx,id)?;
-            if !row.retryable || !matches!(row.state.as_str(),"failed"|"cancelled") || row.attempts>=3 || row.phase=="submitting" {bail!("media_job_not_retryable");}
+            if !row.retryable || !matches!(row.state.as_str(),"failed"|"cancelled") || row.attempts>=3 || matches!(row.phase.as_str(),"reserving"|"uploading"|"submitting") {bail!("media_job_not_retryable");}
             let queued:u32=tx.query_row("SELECT count(*) FROM media_jobs WHERE state IN ('queued','running')",[],|r|r.get(0))?;
             if queued>=100 {bail!("media_queue_full");}
             tx.execute("UPDATE media_jobs SET state='queued',cancel_requested=0,error_code=NULL,retryable=0,updated_at=?2 WHERE id=?1",params![id,chrono::Utc::now().to_rfc3339()])?;
@@ -363,7 +363,7 @@ impl Store {
             let tx=db.transaction()?;
             let ids={let mut q=tx.prepare("SELECT id FROM media_jobs WHERE state='running'")?;let rows=q.query_map([],|r|r.get::<_,String>(0))?;rows.collect::<rusqlite::Result<Vec<_>>>()?};
             let now=chrono::Utc::now().to_rfc3339();
-            tx.execute("UPDATE media_jobs SET state='needs_review',error_code='restart_after_submission',retryable=0,updated_at=?1 WHERE state='running' AND kind='send' AND phase IN ('uploading','submitting')",[&now])?;
+            tx.execute("UPDATE media_jobs SET state='needs_review',error_code=CASE WHEN phase='reserving' THEN 'restart_during_reservation' ELSE 'restart_after_submission' END,retryable=0,updated_at=?1 WHERE state='running' AND kind='send' AND phase IN ('reserving','uploading','submitting')",[&now])?;
             tx.execute("UPDATE media_jobs SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' WHEN attempts<3 THEN 'queued' ELSE 'failed' END,retryable=CASE WHEN attempts<3 THEN 1 ELSE 0 END,error_code='worker_interrupted',updated_at=?1 WHERE state='running'",[&now])?;
             for id in &ids {job_event(&tx,account,&read_job(&tx,id)?)?;}
             tx.commit()?;Ok(ids.len())
@@ -666,6 +666,73 @@ mod tests {
         s.recover_media_jobs("test").unwrap();
         assert_eq!(s.media_job("test", "job1").unwrap().state, "needs_review");
         assert!(s.retry_media_job("test", "job1").is_err());
+    }
+    #[test]
+    fn reservation_restart_is_uncertain_while_readback_reuses_its_saved_plan() {
+        let (directory, s) = setup();
+        for phase in ["reserving", "uploading", "submitting", "readback"] {
+            s.create_media_job(
+                "test",
+                phase,
+                &format!("send:{phase}"),
+                &"0".repeat(64),
+                "send",
+                &json!({}),
+                b"protected-existing-receipts",
+            )
+            .unwrap();
+            assert!(s.claim_media_job("test", phase).unwrap());
+            let mut row = s.media_job("test", phase).unwrap();
+            row.phase = phase.into();
+            s.save_media_job("test", &row).unwrap();
+        }
+        s.cancel_media_job("test", "reserving").unwrap();
+        assert_eq!(s.recover_media_jobs("test").unwrap(), 4);
+        for phase in ["reserving", "uploading", "submitting"] {
+            let row = s.media_job("test", phase).unwrap();
+            assert_eq!(row.state, "needs_review");
+            assert!(!row.retryable);
+            assert!(s.retry_media_job("test", phase).is_err());
+        }
+        assert_eq!(
+            s.media_job("test", "reserving")
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("restart_during_reservation")
+        );
+        let row = s.media_job("test", "readback").unwrap();
+        assert_eq!(row.state, "queued");
+        assert_eq!(row.phase, "readback");
+        assert_eq!(row.payload, b"protected-existing-receipts");
+        drop(s);
+        let s = Store::open_existing(&directory.path().join("data")).unwrap();
+        assert_eq!(s.recover_media_jobs("test").unwrap(), 0);
+        assert_eq!(s.queued_media_jobs("test").unwrap(), vec!["readback"]);
+        assert!(s.claim_media_job("test", "readback").unwrap());
+        assert!(!s.claim_media_job("test", "readback").unwrap());
+    }
+    #[test]
+    fn retry_guard_rejects_uncertain_phase_even_with_stale_retryable_flag() {
+        let (_directory, s) = setup();
+        for phase in ["reserving", "uploading", "submitting"] {
+            s.create_media_job(
+                "test",
+                phase,
+                &format!("send:{phase}"),
+                &"0".repeat(64),
+                "send",
+                &json!({}),
+                b"protected",
+            )
+            .unwrap();
+            let mut row = s.media_job("test", phase).unwrap();
+            row.phase = phase.into();
+            row.state = "cancelled".into();
+            row.retryable = true;
+            s.save_media_job("test", &row).unwrap();
+            assert!(s.retry_media_job("test", phase).is_err());
+        }
     }
     #[test]
     fn queued_cancel_is_durable_and_claim_is_atomic() {

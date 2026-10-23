@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES } from '../src/native-client.ts';
+import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES } from '../src/native-client.ts';
 const options = { baseUrl: 'http://127.0.0.1:6174', token: 'fixture-secret' };
 test('native transport rejects plaintext remote URLs and embedded credentials', () => {
   for (const url of ['http://example.net', 'https://user:secret@example.net', 'https://example.net?token=x', 'file:///tmp/store']) assert.throws(() => validateNativeBaseUrl(url));
@@ -181,7 +181,17 @@ test('whole-thread reads require a bounded optimistic version', async () => {
  for(const invalid of ['', 'x'.repeat(129), ['old-message-selection']]) assert.throws(()=>client.markRead('a','t',invalid));
 });
 test('media upload native limit is generated from the daemon contract and refuses before transport', async () => {
- let calls=0;const client=new NativeWeChatClient({...options,fetch:async()=>{calls++;throw Error('unexpected transport');}});assert.equal(NATIVE_MAX_SOURCE_BYTES,25*1024*1024-17);await assert.rejects(client.upload('a',new Uint8Array(NATIVE_MAX_SOURCE_BYTES+1),'fixture.bin'));assert.equal(calls,0);
+ let calls=0;const client=new NativeWeChatClient({...options,fetch:async()=>{calls++;throw Error('unexpected transport');}});assert.equal(NATIVE_MAX_SOURCE_BYTES,32*1024*1024);assert.equal(NATIVE_MAX_ORDINARY_SOURCE_BYTES,25*1024*1024-17);await assert.rejects(client.upload('a',new Uint8Array(NATIVE_MAX_SOURCE_BYTES+1),'fixture.bin'));assert.equal(calls,0);
+});
+test('source staging accepts a 32 MiB file without increasing ordinary media limits', async () => {
+  let uploads=0;
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    uploads++;assert.equal(new URL(url).pathname,'/v1/accounts/a/uploads');assert.equal(init.method,'POST');
+    const file=init.body.get('file');assert.equal(file.size,32*1024*1024);assert.equal(file.name,'synthetic.bin');
+    return Response.json({id:'staged-source',byteLength:file.size});
+  }});
+  const source=await client.upload('a',new Uint8Array(NATIVE_MAX_SOURCE_BYTES),'synthetic.bin');
+  assert.equal(source.id,'staged-source');assert.equal(uploads,1);assert.ok(NATIVE_MAX_ORDINARY_SOURCE_BYTES<NATIVE_MAX_SOURCE_BYTES);
 });
 
 test('local media writeback repair is bounded and does not submit a send or transfer', async () => {

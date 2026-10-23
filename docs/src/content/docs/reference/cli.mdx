@@ -42,6 +42,8 @@ Run `wx COMMAND --help` for the full options of any command. Output is JSON.
 
 Flags win over environment variables, which win over saved settings. Commands that start background work (sends, downloads, login, recall) also take `--detach` to return as soon as the work is queued.
 
+`messages send --wait SECONDS` waits up to 900 seconds (default 30). Use `--wait 300` for a larger file. A wait ending returns exit code 7 while the same job continues; inspect it with `wx jobs get JOB_ID`. See [Send attachments](/use/media/).
+
 ## Exit codes
 
 | Code | Meaning |

@@ -1,6 +1,7 @@
 //! Final media-message metadata. CDN upload and message submission are separate
 //! steps; persist source bytes, generated keys and intent before either step.
 use crate::{
+    file_upload::{FileUploadReservation, MAX_RESERVED_FILE_BYTES},
     media::{MediaQuality, UploadedImage, UploadedMedia, UploadedVideo},
     protobuf as p, silk,
     wire::base_request,
@@ -23,11 +24,14 @@ fn hex32(value: &str) -> Result<String> {
     Ok(value.to_ascii_lowercase())
 }
 fn descriptor(v: &UploadedMedia, kind: MediaQuality) -> Result<()> {
+    descriptor_bound(v, kind, 25 * 1024 * 1024)
+}
+fn descriptor_bound(v: &UploadedMedia, kind: MediaQuality, max_bytes: usize) -> Result<()> {
     ensure!(
         v.descriptor.quality == kind
             && v.descriptor.aes_key.len() == 16
             && v.plaintext_bytes > 0
-            && v.plaintext_bytes <= 25 * 1024 * 1024,
+            && v.plaintext_bytes as usize <= max_bytes,
         "Invalid uploaded media descriptor"
     );
     clean(&v.descriptor.file_id, 8192)?;
@@ -135,8 +139,27 @@ pub fn share_send_request(
     ])
 }
 pub fn file_xml(sender: &str, upload: &UploadedMedia) -> Result<String> {
+    file_xml_with_reservation(sender, upload, None)
+}
+pub fn file_xml_with_reservation(
+    sender: &str,
+    upload: &UploadedMedia,
+    reservation: Option<&FileUploadReservation>,
+) -> Result<String> {
     clean(sender, 1024)?;
-    descriptor(upload, MediaQuality::File)?;
+    if let Some(reservation) = reservation {
+        reservation.validate()?;
+        ensure!(
+            matches!(
+                upload.descriptor.quality,
+                MediaQuality::File | MediaQuality::LargeFile
+            ),
+            "Expected an uploaded file descriptor"
+        );
+        descriptor_bound(upload, upload.descriptor.quality, MAX_RESERVED_FILE_BYTES)?;
+    } else {
+        descriptor(upload, MediaQuality::File)?;
+    }
     let name = &upload.file_name;
     clean(name, 255)?;
     ensure!(
@@ -164,12 +187,20 @@ pub fn file_xml(sender: &str, upload: &UploadedMedia) -> Result<String> {
     }
     app.push_str("<appattach>");
     app.push_str(&tag("totallen", upload.plaintext_bytes));
-    app.push_str(&tag("attachid", ""));
+    let aes_key = hex::encode(&upload.descriptor.aes_key);
+    let attach_id = reservation
+        .map(|_| format!("@cdn_{}_{aes_key}_1", upload.descriptor.file_id))
+        .unwrap_or_default();
+    app.push_str(&tag("attachid", attach_id));
     app.push_str(&tag("emoticonmd5", ""));
     app.push_str(&tag("fileext", extension));
     app.push_str(&tag("cdnattachurl", &upload.descriptor.file_id));
-    app.push_str(&tag("aeskey", hex::encode(&upload.descriptor.aes_key)));
-    app.push_str(&tag("encryver", 1));
+    app.push_str(&tag("aeskey", aes_key));
+    app.push_str(&tag("encryver", if reservation.is_some() { 0 } else { 1 }));
+    if let Some(reservation) = reservation {
+        app.push_str(&tag("overwrite_newmsgid", reservation.overwrite_newmsgid));
+        app.push_str(&tag("fileuploadtoken", &reservation.file_upload_token));
+    }
     app.push_str("</appattach>");
     for name in ["extinfo", "sourceusername", "sourcedisplayname", "thumburl"] {
         app.push_str(&tag(name, ""));
@@ -278,7 +309,17 @@ pub fn local_voice_xml(encoded_bytes: usize, duration_ms: u32) -> Result<String>
     ))
 }
 pub fn local_file_xml(sender: &str, upload: &UploadedMedia) -> Result<String> {
-    Ok(format!("<msg>{}</msg>", file_xml(sender, upload)?))
+    local_file_xml_with_reservation(sender, upload, None)
+}
+pub fn local_file_xml_with_reservation(
+    sender: &str,
+    upload: &UploadedMedia,
+    reservation: Option<&FileUploadReservation>,
+) -> Result<String> {
+    Ok(format!(
+        "<msg>{}</msg>",
+        file_xml_with_reservation(sender, upload, reservation)?
+    ))
 }
 pub fn file_send_request(
     state: &AccountState,
@@ -287,10 +328,20 @@ pub fn file_send_request(
     created_at: u32,
     upload: &UploadedMedia,
 ) -> Result<Vec<u8>> {
+    file_send_request_with_reservation(state, destination, client_id, created_at, upload, None)
+}
+pub fn file_send_request_with_reservation(
+    state: &AccountState,
+    destination: &str,
+    client_id: &str,
+    created_at: u32,
+    upload: &UploadedMedia,
+    reservation: Option<&FileUploadReservation>,
+) -> Result<Vec<u8>> {
     clean(destination, 512)?;
     clean(client_id, 1024)?;
     ensure!(created_at > 0, "Invalid media timestamp");
-    let content = file_xml(&state.own_username, upload)?;
+    let content = file_xml_with_reservation(&state.own_username, upload, reservation)?;
     let app = p::message(&[
         p::bytes(1, state.own_username.as_bytes()),
         p::bytes(2, &[]),
@@ -305,14 +356,16 @@ pub fn file_send_request(
         p::bytes(14, &[]),
         p::bytes(15, &[]),
     ])?;
-    p::message(&[
+    let mut fields = vec![
         p::bytes(1, &base_request(&state.device, state.uin, 0)?),
         p::bytes(2, &app),
         p::bytes(5, hex32(&upload.md5)?.as_bytes()),
-        p::uint(9, 0),
-        p::uint(10, 0),
-        p::uint(11, 2),
-    ])
+    ];
+    if upload.plaintext_bytes > 25 * 1024 * 1024 {
+        fields.push(p::uint(6, 7));
+    }
+    fields.extend([p::uint(9, 0), p::uint(10, 0), p::uint(11, 2)]);
+    p::message(&fields)
 }
 pub fn image_send_request(
     state: &AccountState,
@@ -638,6 +691,40 @@ pub fn decode_file_send(input: &[u8], client_id: &str) -> Result<MediaSendResult
         client_id_matches: matches.then_some(true),
     })
 }
+/// Correlate the final reply for a reserved file with its submitted intent.
+pub fn decode_file_send_correlated(
+    input: &[u8],
+    client_id: &str,
+    sender: &str,
+    destination: &str,
+    aes_key: &[u8],
+) -> Result<MediaSendResult> {
+    ensure!(aes_key.len() == 16, "Invalid file AES key");
+    let mut result = decode_file_send(input, client_id)?;
+    if result.status == SendStatus::Rejected {
+        return Ok(result);
+    }
+    let fields = p::decode(input)?;
+    let base = p::decode(p::data(&fields, 1)?)?;
+    ensure!(p::scalar(&base, 1)? == 0, "Invalid file response status");
+    let key = hex::encode(aes_key);
+    let mut correlated = true;
+    for (number, expected) in [
+        (3, sender.as_bytes()),
+        (4, destination.as_bytes()),
+        (6, client_id.as_bytes()),
+        (10, key.as_bytes()),
+    ] {
+        correlated &= p::optional_data(&fields, number)? == Some(expected);
+    }
+    result.status = if correlated {
+        SendStatus::ServerAccepted
+    } else {
+        SendStatus::NeedsReview
+    };
+    result.client_id_matches = Some(correlated);
+    Ok(result)
+}
 pub fn decode_image_send(
     input: &[u8],
     client_id: &str,
@@ -778,6 +865,258 @@ mod tests {
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
         }
+    }
+    fn synthetic_file(size: usize, quality: MediaQuality) -> UploadedMedia {
+        UploadedMedia {
+            descriptor: crate::media::MediaDescriptor {
+                file_id: "synthetic-file-id".into(),
+                aes_key: vec![1; 16],
+                quality,
+                expected_bytes: Some(size as u64),
+                expected_md5: Some("a".repeat(32)),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: size.try_into().unwrap(),
+            md5: "a".repeat(32),
+            sha256: "b".repeat(64),
+            file_name: "synthetic&file.txt".into(),
+            width: None,
+            height: None,
+        }
+    }
+    fn synthetic_reservation() -> FileUploadReservation {
+        FileUploadReservation {
+            file_upload_token: "v1_c3ludGhldGlj".into(),
+            overwrite_newmsgid: u64::MAX,
+        }
+    }
+    #[test]
+    fn file_upload_reservation_ordinary_request_schema() {
+        let state = synthetic_state();
+        let raw = crate::file_upload::file_upload_request(
+            &state,
+            "filehelper",
+            "filehelper_1234567_42",
+            "synthetic&file.TXT",
+            32 * 1024 * 1024,
+            &"A".repeat(32),
+        )
+        .unwrap();
+        let fields = p::decode(&raw).unwrap();
+        assert_eq!(
+            fields.iter().map(|f| f.number).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 7, 12]
+        );
+        assert_eq!(p::data(&fields, 2).unwrap(), b"filehelper");
+        assert_eq!(p::data(&fields, 3).unwrap(), b"filehelper_1234567_42");
+        assert_ne!(p::data(&fields, 2).unwrap(), state.own_username.as_bytes());
+        assert_eq!(p::scalar(&fields, 4).unwrap(), 1);
+        assert_eq!(p::scalar(&fields, 7).unwrap(), 0);
+        assert_eq!(p::scalar(&fields, 12).unwrap(), 0);
+        let base = p::decode(p::data(&fields, 1).unwrap()).unwrap();
+        assert_eq!(p::scalar(&base, 2).unwrap(), 123);
+        assert_eq!(p::scalar(&base, 6).unwrap(), 0);
+        let info = p::decode(p::data(&fields, 5).unwrap()).unwrap();
+        assert_eq!(
+            info.iter().map(|f| f.number).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(p::data(&info, 1).unwrap(), b"synthetic&file.TXT");
+        assert_eq!(p::data(&info, 2).unwrap(), b"TXT");
+        assert_eq!(
+            p::data(&info, 3).unwrap(),
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(p::scalar(&info, 4).unwrap(), 33_554_432);
+        let final_client_id = "filehelper_1234567_42_xwechat_1";
+        let final_request = file_send_request_with_reservation(
+            &state,
+            "filehelper",
+            final_client_id,
+            1_234_567,
+            &synthetic_file(MAX_RESERVED_FILE_BYTES, MediaQuality::LargeFile),
+            Some(&synthetic_reservation()),
+        )
+        .unwrap();
+        let final_fields = p::decode(&final_request).unwrap();
+        let final_app = p::decode(p::data(&final_fields, 2).unwrap()).unwrap();
+        assert_eq!(p::data(&final_app, 8).unwrap(), final_client_id.as_bytes());
+        assert_ne!(
+            p::data(&fields, 3).unwrap(),
+            p::data(&final_app, 8).unwrap()
+        );
+        assert!(
+            final_client_id.starts_with(std::str::from_utf8(p::data(&fields, 3).unwrap()).unwrap())
+        );
+        assert!(crate::file_upload::file_upload_request(
+            &state,
+            "bad\npeer",
+            "filehelper_1234567_42",
+            "file.txt",
+            1,
+            &"a".repeat(32)
+        )
+        .is_err());
+        for progress_id in ["", "bad\nidentity", &"a".repeat(1025)] {
+            assert!(crate::file_upload::file_upload_request(
+                &state,
+                "filehelper",
+                progress_id,
+                "file.txt",
+                1,
+                &"a".repeat(32)
+            )
+            .is_err());
+        }
+    }
+    #[test]
+    fn reserved_file_metadata_and_plaintext_boundary_flag() {
+        let state = synthetic_state();
+        let reservation = synthetic_reservation();
+        let threshold = 25 * 1024 * 1024;
+        for size in [
+            threshold - 17,
+            threshold - 16,
+            threshold - 15,
+            threshold - 1,
+            threshold,
+            threshold + 1,
+            MAX_RESERVED_FILE_BYTES,
+        ] {
+            let upload = synthetic_file(size, MediaQuality::LargeFile);
+            let raw = file_send_request_with_reservation(
+                &state,
+                "filehelper",
+                "synthetic-client",
+                1,
+                &upload,
+                Some(&reservation),
+            )
+            .unwrap();
+            let fields = p::decode(&raw).unwrap();
+            assert_eq!(p::optional(&fields, 6).unwrap().is_some(), size > threshold);
+            if size > threshold {
+                assert_eq!(p::scalar(&fields, 6).unwrap(), 7);
+            }
+            let app = p::decode(p::data(&fields, 2).unwrap()).unwrap();
+            let xml = std::str::from_utf8(p::data(&app, 6).unwrap()).unwrap();
+            assert!(xml.contains("<encryver>0</encryver>"));
+            assert!(xml.contains(
+                "<attachid>@cdn_synthetic-file-id_01010101010101010101010101010101_1</attachid>"
+            ));
+            assert!(xml.contains("<fileuploadtoken>v1_c3ludGhldGlj</fileuploadtoken>"));
+            assert!(xml.contains("<overwrite_newmsgid>18446744073709551615</overwrite_newmsgid>"));
+            assert!(xml.contains("<title>synthetic&amp;file.txt</title>"));
+            assert_eq!(
+                local_file_xml_with_reservation(&state.own_username, &upload, Some(&reservation))
+                    .unwrap(),
+                format!("<msg>{xml}</msg>")
+            );
+            assert!(
+                file_send_request(&state, "filehelper", "synthetic-client", 1, &upload).is_err()
+            );
+        }
+        // Upload routing changes at an AES-padding boundary; the app-message
+        // field6 still follows plaintext size, including at exactly 25 MiB.
+        assert_eq!(((threshold - 17) / 16 + 1) * 16, threshold - 16);
+        assert_eq!(((threshold - 16) / 16 + 1) * 16, threshold);
+        let small = synthetic_file(1, MediaQuality::File);
+        assert!(file_xml("synthetic-user", &small)
+            .unwrap()
+            .contains("<encryver>1</encryver>"));
+        assert!(!file_xml("synthetic-user", &small)
+            .unwrap()
+            .contains("fileuploadtoken"));
+        let too_large = synthetic_file(MAX_RESERVED_FILE_BYTES + 1, MediaQuality::LargeFile);
+        assert!(
+            file_xml_with_reservation("synthetic-user", &too_large, Some(&reservation)).is_err()
+        );
+        let mut mismatch = synthetic_file(MAX_RESERVED_FILE_BYTES, MediaQuality::LargeFile);
+        mismatch.descriptor.expected_md5 = Some("0".repeat(32));
+        assert!(
+            file_xml_with_reservation("synthetic-user", &mismatch, Some(&reservation)).is_err()
+        );
+    }
+    #[test]
+    fn reserved_file_acceptance_requires_all_correlations() {
+        let response = |sender: &[u8], destination: &[u8], client: &[u8], key: &[u8]| {
+            p::message(&[
+                p::bytes(1, &p::int32(1, 0)),
+                p::bytes(3, sender),
+                p::bytes(4, destination),
+                p::uint(5, 1),
+                p::bytes(6, client),
+                p::uint(7, 1),
+                p::uint(9, u64::MAX),
+                p::bytes(10, key),
+                p::bytes(13, b"synthetic-client"),
+            ])
+            .unwrap()
+        };
+        let key = b"01010101010101010101010101010101";
+        for (sender, destination, client, aes, status) in [
+            (
+                &b"synthetic-user"[..],
+                &b"filehelper"[..],
+                &b"synthetic-client"[..],
+                &key[..],
+                SendStatus::ServerAccepted,
+            ),
+            (
+                &b"wrong"[..],
+                &b"filehelper"[..],
+                &b"synthetic-client"[..],
+                &key[..],
+                SendStatus::NeedsReview,
+            ),
+            (
+                &b"synthetic-user"[..],
+                &b"wrong"[..],
+                &b"synthetic-client"[..],
+                &key[..],
+                SendStatus::NeedsReview,
+            ),
+            (
+                &b"synthetic-user"[..],
+                &b"filehelper"[..],
+                &b"wrong"[..],
+                &key[..],
+                SendStatus::NeedsReview,
+            ),
+            (
+                &b"synthetic-user"[..],
+                &b"filehelper"[..],
+                &b"synthetic-client"[..],
+                &b"00000000000000000000000000000000"[..],
+                SendStatus::NeedsReview,
+            ),
+        ] {
+            let raw = response(sender, destination, client, aes);
+            let result = decode_file_send_correlated(
+                &raw,
+                "synthetic-client",
+                "synthetic-user",
+                "filehelper",
+                &[1; 16],
+            )
+            .unwrap();
+            assert_eq!(result.status, status);
+            assert_eq!(result.server_message_id, Some(u64::MAX.to_string()));
+        }
+        let rejected = p::bytes(1, &p::int32(1, -13));
+        assert_eq!(
+            decode_file_send_correlated(
+                &rejected,
+                "synthetic-client",
+                "synthetic-user",
+                "filehelper",
+                &[1; 16]
+            )
+            .unwrap()
+            .status,
+            SendStatus::Rejected
+        );
     }
     #[test]
     fn metadata_matches_independent_synthetic_wire_vectors() {

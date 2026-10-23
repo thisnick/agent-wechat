@@ -159,6 +159,25 @@ Run `node scripts/native-model-smoke.mjs` and `node scripts/native-media-model-s
 
 Native text/media sends retain daemon intent/job identity and caller idempotency. Text waits for accepted submission; media jobs preserve partial and uncertain outcomes rather than resending. Ordinary audio remains a file; only explicit `audioAsVoice` requests independently encoded voice. Sender/group/mention gates run before retrieval/transcription. Verified voice may use the configured OpenClaw transcription runtime after admission. Native QR login uses a durable daemon operation and authenticated PNG retrieval. Logout commits local inhibition before at most one authenticated native logout, reporting the remote outcome separately; saved-device revocation remains unverified. Explicitly confirmed forgetting removes local auth while retaining history; disconnect retains reusable trust.
 
+## Outgoing attachment sizes
+
+`channels.agent-wechat.mediaMaxMb` limits both incoming retained attachments and
+outgoing sources in MiB. Outgoing sources must also fit the selected kind's
+native limit: ordinary files have an initial 32 MiB ceiling (33,554,432 bytes);
+images, video and voice retain 26,214,383 bytes. The native daemon's 32 MiB File
+Transfer PDF passed acceptance, recipient opening and cold byte verification;
+see the [native capability checklist](../native-client-rust/FEATURES.md).
+Raising `mediaMaxMb` cannot extend the kind-specific limit. Kind selection occurs
+before staging, using the local extension or HTTP content type. Ordinary audio
+is a file unless `audioAsVoice` selects voice.
+
+For ordinary files above 26,214,383 bytes, the adapter polls the same submitted
+job for up to five minutes, allowing upload and exact readback before final
+message submission. A timeout or status-poll failure preserves the job ID and idempotency key and never
+automatically sends another copy. Unsupported cache-hit responses or uncertain
+reservations/submissions require inspection. See [Send attachments](https://thisnick.github.io/agent-wechat/use/media/)
+for CLI, HTTP API and SDK examples.
+
 ## Optional Gateway facade
 
 Set `native.gatewayFacade: {"enabled": true}` to register `/plugins/agent-wechat/native` on the Gateway. The default is disabled. A custom prefix must remain namespaced under `/plugins/...`; changing daemon configuration requires a Gateway reload.

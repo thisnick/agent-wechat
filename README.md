@@ -41,6 +41,8 @@ The initial scope is taking over an existing official profile and continuing sup
 
 Use `wx messages recall MESSAGE_ID --server-id SERVER_ID` to recall an own message with its exact stored identities. OpenClaw exposes the scoped `wechat_recall` tool. Incoming recalls become durable placeholders and block attachment access; uncertain outgoing outcomes retain their operation without automatic resubmission. See [recall behavior and storage](https://thisnick.github.io/agent-wechat/how-it-works/message-types/#recalls).
 
+See [Send attachments](https://thisnick.github.io/agent-wechat/use/media/) for the initial 32 MiB ordinary-file limit, unchanged image/video/voice limits, current validation status and longer CLI/API waits.
+
 On Windows, configuration defaults under `%APPDATA%/agent-wechat` and durable data under `%LOCALAPPDATA%/agent-wechat`; `USERPROFILE` supplies the home fallback. Explicit and XDG overrides take precedence. On Unix, server configuration defaults to `~/.config/agent-wechat/server/config.toml`; daemon data defaults to `~/.local/share/agent-wechat`. XDG paths and explicit overrides are supported. Client endpoint, token reference and selected account belong in a separate `~/.config/agent-wechat/client.toml`. The operating official profile stays at its selected path; daemon state stays in sidecars.
 
 See the [native guide](packages/native-client-rust/README.md) for configuration, profile ownership, recovery, API commands and current limits. [Deployment templates](deploy/native/README.md) include a user service and an official-binary-free image. Building these assets does not deploy them.

@@ -1,5 +1,6 @@
 // Generated from wechat-api/src/contracts.rs. Do not edit.
-export const NATIVE_MAX_SOURCE_BYTES = 26214383 as const;
+export const NATIVE_MAX_SOURCE_BYTES = 33554432 as const;
+export const NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const;
 export type NativeMentions = { state: string, userIds: Array<string>, self: boolean | null, all: boolean | null, source: string | null, };
 export type NativeQuoteReference = { serverId: string, type: number, };
 export type LinkCard = { title: string | null, description: string | null, url: string | null, sourceName: string | null, };

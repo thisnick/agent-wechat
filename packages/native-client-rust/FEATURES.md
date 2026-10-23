@@ -49,6 +49,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Incoming recalls and durable message suppression | Implemented for recognized recall controls and supported rows | Controlled external-party text recall preserved exact IDs/order, projected a notice and emitted one event. Out-of-order/replay, malformed controls, retained views, quotes and cached-media fixtures; original encrypted journals, unknown FTS and cached files remain retained |
 | Own-message native recall, CLI and scoped OpenClaw tool | Implemented | Shipped Linux x64 codec evidence, durable one-attempt/uncertainty fixtures and real Gateway send-receipt/tool replay. Controlled own-text/file recalls returned server acceptance and recipient phone notices; the file's captured media handle returned HTTP 410 before and after restart, and key replay retained one operation/event. Other native-machine live acceptance remains separate |
 | Outgoing image/file/video/independently encoded voice | Implemented | Fresh native File Transfer submissions accepted all four kinds and committed history rows; all four supported official caches/resource joins complete after local repair. CDN readback checked before final CGI; the account owner confirmed the latest file/image open and video/voice playback |
+| Ordinary-file attachments through 32 MiB | Implemented for fresh cache misses | Isolated Linux x64 File Transfer validation accepted one 32 MiB PDF after exact upload readback; the recipient downloaded/opened it and confirmed its visible code. Cold CLI/SDK reads matched all source bytes/SHA-256, HTTP ranges returned correct 206 bytes, same-key lookup retained one attempt, and official-profile history/media writeback completed. Recipient-exported SHA-256 is unavailable. Exact padding/routing boundary results and memory/disk measurements are recorded in [the validation note](../../dev-notes/native-large-file-validation.md). Image/video/voice source limits remain 26,214,383 bytes; no large-media, group or live ARM64 claim follows |
 | Voice splitting and per-note partial/uncertain receipts | Implemented; phone playback pending for notes above 32 KiB | Independent codec; one note holds up to 60 seconds (the official limit) and longer audio splits into the fewest equal-length notes, with per-note IDs/status and stop after uncertainty. A note above 32 KiB of SILK (about 15 seconds) is uploaded as consecutive offset/length ranges of one client message ID, with the end flag on the last range. A controlled live check on 2026-10-22 sent File Transfer notes of 10, 30 and 60 seconds and 90 seconds of audio (two 45-second notes); every note returned server acceptance with a server message ID. Phone playback of the multi-range notes is not yet confirmed. Single-note phone playback was confirmed for notes of up to 10 seconds |
 | Bounded local media writeback repair | Implemented | Actual CLI repaired nine retained candidates with zero blocked; all four accepted media sends now report complete. Uses owned bytes/receipts without a transfer or resend |
 | Local source staging, upload bounds, media cancellation/retry | Implemented | Encrypted immutable sources, claim CAS, bounded retry/cancel/restart and atomic event rollback fixtures |
@@ -88,12 +89,12 @@ those gaps.
 - Group creation, invitation, joining/leaving and rename mutations require a
   separately approved destination/member experiment and uncertainty handling.
 - A web application follows stabilization of the API, events and media surface.
-- Large-file variants, sticker sending/packs, official macOS/Windows profile compatibility and
-  arbitrary official-build migration require independent evidence and testing. A controlled
-  live check on 2026-10-22 sent 40 MiB file and 40 MB video sources through the existing
-  upload path: the CDN returned HTTP 400 on the first piece, nothing was sent, and the jobs
-  ended `needs_review` with `serviceStage: http`. Sources above 25 MiB need the separate
-  large-file upload branch.
+- File sources above 32 MiB, existing-ciphertext cache-hit recovery, large image/video/voice,
+  sticker sending/packs, official macOS/Windows profile compatibility and arbitrary
+  official-build migration require independent evidence and testing. The ordinary-file
+  ceiling is a tested product bound, not a universal service maximum. The native client
+  uses the reference's multiphase policy for the 16-byte encrypted-size padding band;
+  the reference's separate binary stream uploader is not implemented.
 - Incoming status notifications (message type 51) with operation IDs 2, 11 and 23, the
   session-exit part of opcode 5, and type 10002 `functionmsg`/`dynacfg` controls arrive
   during normal live use and remain staged as `unsupported_sync_control`. As a result

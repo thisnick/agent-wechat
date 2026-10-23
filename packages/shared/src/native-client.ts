@@ -1,7 +1,7 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
 import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
-export { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
+export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }

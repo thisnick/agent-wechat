@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, truncate, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { NativeApiError, type NativeMessage, type NativeWeChatClient, type MediaAsset, type MediaJob } from "@agent-wechat/shared";
-import { prepareNativeAttachment, sendNativeAttachment, waitNativeMediaSendReceipts } from "./native-media.ts";
+import { NativeApiError, NativeWeChatClient, type NativeMessage, type MediaAsset, type MediaJob } from "@agent-wechat/shared";
+import { NativeMediaJobInspectionError, prepareNativeAttachment, sendNativeAttachment, waitNativeMediaJob, waitNativeMediaSendReceipts } from "./native-media.ts";
 import { resolveWeChatAccount } from "./types.ts";
 const account=resolveWeChatAccount({channels:{"agent-wechat":{backend:"native",native:{mode:"external",accountId:"a",endpoint:"http://127.0.0.1:6174",token: "synthetic-native-token-".repeat(3),consumerStateDir:"/unused"}}}})!;
 const message={id:"m",accountId:"a",threadId:"u",type:3} as NativeMessage;
@@ -80,6 +80,89 @@ test("native outbound ordinary audio stays file and explicit voice stays voice",
   const directory=await mkdtemp(join(tmpdir(),"native-audio-fixture-"));t.after(()=>rm(directory,{recursive:true,force:true}));const path=join(directory,"fixture.wav");await writeFile(path,bytes);
   const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return sendJob({result:{messageIds:["msg"],chunks:[{state:"accepted",serverMessageId:"18446744073709551614"}]}});}}as unknown as NativeWeChatClient;
   await sendNativeAttachment(client,account,"filehelper",path,false,"stable-key");await sendNativeAttachment(client,account,"filehelper",path,true,"stable-key");assert.deepEqual(kinds,["file","voice"]);assert.equal(submissions,2);
+});
+test("only selected file sends accept 32 MiB and configured limits still apply before staging", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-file-size-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  let uploads = 0, sends = 0;
+  const client = { upload: async (_a: string, content: Uint8Array) => { uploads++; assert.equal(content.length, 32 * 1024 * 1024); return { id: "upload" }; },
+    sendMedia: async (_a: string, input: any, key: string) => { sends++; assert.equal(input.kind, "file"); assert.equal(key, "large-stable"); return sendJob({ result: { messageIds: ["stored-file"] } }); },
+    message: async () => ({ id: "stored-file", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
+  } as unknown as NativeWeChatClient;
+  const file = join(directory, "synthetic.bin"); await writeFile(file, new Uint8Array(1)); await truncate(file, 32 * 1024 * 1024);
+  const result = await sendNativeAttachment(client, account, "filehelper", file, false, "large-stable");
+  assert.equal(result.messageId, "stored-file"); assert.equal(uploads, 1); assert.equal(sends, 1);
+  await assert.rejects(sendNativeAttachment(client, { ...account, mediaMaxMb: 25 }, "filehelper", file), /bounded regular file/);
+  await truncate(file, 32 * 1024 * 1024 + 1);
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", file), /bounded regular file/);
+  for (const [extension, voice] of [["jpg", false], ["mp4", false], ["wav", true]] as const) {
+    const path = join(directory, `synthetic.${extension}`); await writeFile(path, new Uint8Array(1)); await truncate(path, 25 * 1024 * 1024 - 16);
+    await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, voice), /bounded regular file/);
+  }
+  assert.equal(uploads, 1); assert.equal(sends, 1);
+});
+test("remote image metadata selects the ordinary bound before staging bytes", async t => {
+  let cancelled = 0, uploads = 0;
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({ cancel() { cancelled++; } }), {
+    headers: { "content-type": "image/jpeg", "content-length": String(25 * 1024 * 1024 - 16) },
+  }));
+  const client = { upload: async () => { uploads++; throw Error("must not stage"); } } as unknown as NativeWeChatClient;
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", "https://example.invalid/file.bin"), /configured size/);
+  assert.equal(cancelled, 1); assert.equal(uploads, 0);
+});
+test("large file polling allows a three-minute transfer and a deadline never resubmits", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-large-file-wait-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "synthetic.bin"); await writeFile(path, new Uint8Array(1)); await truncate(path, 26 * 1024 * 1024);
+  let clock = 0; t.mock.method(Date, "now", () => clock);
+  for (const completes of [true, false]) {
+    clock = 0; let uploads = 0, sends = 0, polls = 0;
+    const initial = sendJob({ state: "running", phase: "uploading" });
+    const client = { upload: async () => { uploads++; return { id: "upload" }; },
+      sendMedia: async (_a: string, _input: unknown, key: string) => { sends++; assert.equal(key, "same-large-key"); return initial; },
+      job: async (a: string, id: string) => { polls++; clock += completes ? 70_000 : 100_000; assert.equal(a, "a"); assert.equal(id, initial.id);
+        return completes && clock >= 180_000 ? sendJob({ result: { messageIds: ["stored-file"] } }) : initial; },
+      message: async () => ({ id: "stored-file", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
+      retryJob: async () => assert.fail("Polling cannot retry a send"),
+    } as unknown as NativeWeChatClient;
+    if (completes) assert.equal((await sendNativeAttachment(client, account, "filehelper", path, false, "same-large-key")).messageId, "stored-file");
+    else await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "same-large-key"), /job job requires inspection.*do not automatically resend/);
+    assert.equal(uploads, 1); assert.equal(sends, 1); assert.equal(polls, 3);
+  }
+});
+test("a failed status poll retains the submitted media job without another POST or private error content", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-send-poll-error-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "synthetic.pdf"); await writeFile(path, bytes);
+  for (const failure of [new DOMException("synthetic-private-response", "TimeoutError"), new Error("synthetic-private-response")]) {
+    let uploads = 0, sends = 0, polls = 0;
+    const client = new NativeWeChatClient({ baseUrl: "http://127.0.0.1:6174", token: "synthetic-api-token", fetch: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/accounts/a/uploads" && init?.method === "POST") {
+        uploads++; return Response.json({ id: "upload" }, { status: 201 });
+      }
+      if (url.pathname === "/v1/accounts/a/sends" && init?.method === "POST") {
+        sends++; assert.equal(new Headers(init.headers).get("Idempotency-Key"), "stable-poll-key");
+        return Response.json(sendJob({ id: "known-submitted-job", state: "running", phase: "readback", serverMessageId: null }), { status: 202 });
+      }
+      if (url.pathname === "/v1/accounts/a/jobs/known-submitted-job" && !init?.method) { polls++; throw failure; }
+      assert.fail(`Unexpected request ${init?.method ?? "GET"} ${url.pathname}`);
+    } });
+    await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "stable-poll-key"), (error: unknown) => {
+      assert.ok(error instanceof NativeMediaJobInspectionError);
+      assert.equal(error.jobId, "known-submitted-job"); assert.equal(error.accountId, "a"); assert.equal(error.threadId, "filehelper");
+      assert.equal(error.idempotencyKey, "stable-poll-key"); assert.equal(error.state, "running"); assert.equal(error.reason, "status_unavailable");
+      assert.equal(error.retryable, false); assert.match(error.message, /known-submitted-job.*do not automatically resend/);
+      assert.equal(error.cause, undefined);
+      for (const sensitive of ["synthetic-private-response", "synthetic-api-token"]) {
+        assert.ok(!String(error).includes(sensitive)); assert.ok(!JSON.stringify(error).includes(sensitive));
+      }
+      return true;
+    });
+    assert.equal(uploads, 1); assert.equal(sends, 1); assert.equal(polls, 1);
+  }
+});
+test("caller cancellation still leaves media polling with the original abort reason", async () => {
+  const controller = new AbortController(), reason = new Error("caller stopped waiting"); controller.abort(reason);
+  const client = { job: async () => assert.fail("Cancelled callers must not poll or resubmit") } as unknown as NativeWeChatClient;
+  await assert.rejects(waitNativeMediaJob(client, "a", sendJob({ state: "running" }), 300000, controller.signal), error => error === reason);
 });
 test("outbound media returns verified stored receipts and a recall during upload prevents submission", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-send-receipt-")); t.after(() => rm(directory, { recursive: true, force: true }));

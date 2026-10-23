@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { getImageMetadata, resizeToJpeg, IMAGE_REDUCE_QUALITY_STEPS } from "openclaw/plugin-sdk/media-runtime";
-import { NATIVE_MAX_SOURCE_BYTES, NativeApiError } from "@agent-wechat/shared";
+import { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NativeApiError } from "@agent-wechat/shared";
 import type { MediaAsset, MediaJob, MediaSendRequest, MediaVariant, NativeMessage, NativeWeChatClient } from "@agent-wechat/shared";
 import { saveManagedAttachment } from "./attachment-store.ts";
 import { renderAttachmentBody, type WeChatAttachment } from "./media-delivery.ts";
@@ -17,6 +17,22 @@ function kind(type: number): WeChatAttachment["kind"] | undefined {
 const terminalJobs = new Set(["accepted", "completed", "succeeded", "available", "failed", "partial", "cancelled", "expired", "needs_review"]);
 const successfulSendJobs = new Set(["accepted", "completed", "succeeded"]);
 const terminalIdentityErrors = new Set(["media_identity_unavailable", "media_source_changed"]);
+export class NativeMediaJobInspectionError extends Error {
+  readonly code = "native_media_job_inspection_required";
+  readonly retryable = false;
+  readonly jobId: string;
+  readonly accountId: string;
+  readonly threadId: string;
+  readonly idempotencyKey: string;
+  readonly state: string;
+  readonly reason: "status_unavailable" | "job_not_completed";
+  constructor(job: MediaJob, accountId: string, threadId: string, key: string, reason: "status_unavailable" | "job_not_completed") {
+    super(`Native media job ${job.id} requires inspection (${job.state}); retain the original job and idempotency key and do not automatically resend`);
+    this.name = "NativeMediaJobInspectionError";
+    this.jobId = job.id; this.accountId = accountId; this.threadId = threadId;
+    this.idempotencyKey = key; this.state = job.state; this.reason = reason;
+  }
+}
 function mediaSendResult(job: MediaJob): Record<string, unknown> { return job.result && typeof job.result === "object" && !Array.isArray(job.result) ? job.result as Record<string, unknown> : {}; }
 function mediaSendReceiptIds(job: MediaJob, audioAsVoice: boolean): string[] | undefined {
   const result = mediaSendResult(job), ids = result.messageIds;
@@ -299,28 +315,46 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
     mediaPath: attachmentKind === "image" || attachmentKind === "video" ? suppliedPath : undefined, mediaMime: suppliedMime, pending: false };
 }
 
+function outboundMediaKind(mime: string, audioAsVoice: boolean): MediaSendRequest["kind"] {
+  if (audioAsVoice && !mime.startsWith("audio/")) throw new Error("Voice sending requires an explicit audio attachment");
+  return audioAsVoice ? "voice" : mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "file";
+}
+function outboundSourceLimit(account: ResolvedWeChatAccount, selectedKind: MediaSendRequest["kind"]): number {
+  return Math.min(account.mediaMaxMb * 1024 * 1024, selectedKind === "file" ? NATIVE_MAX_SOURCE_BYTES : NATIVE_MAX_ORDINARY_SOURCE_BYTES);
+}
 export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>): Promise<NativeOutboundDelivery> {
-  const max = Math.min(account.mediaMaxMb * 1024 * 1024, NATIVE_MAX_SOURCE_BYTES); let bytes: Uint8Array; let filename: string; let mime: string;
+  let bytes: Uint8Array; let filename: string; let mime: string; let selectedKind: MediaSendRequest["kind"];
   if (/^https?:/.test(mediaUrl)) {
     const response = await fetch(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(30000) }); if (!response.ok) throw new Error(`Native outbound source unavailable (${response.status})`);
+    filename = basename(new URL(mediaUrl).pathname) || "attachment"; mime = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "application/octet-stream";
+    try { selectedKind = outboundMediaKind(mime, audioAsVoice); } catch (error) { await response.body?.cancel(); throw error; }
+    const max = outboundSourceLimit(account, selectedKind);
     const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native outbound source exceeds configured size"); }
     const reader = response.body?.getReader(); if (!reader) throw new Error("Native outbound source has no bytes");
     const chunks: Uint8Array[] = []; let size = 0; try { while (true) { const { value, done } = await reader.read(); if (done) break; size += value.length; if (size > max) throw new Error("Native outbound source exceeds configured size"); chunks.push(value); } } catch (error) { await reader.cancel(); throw error; } finally { reader.releaseLock(); }
     bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    filename = basename(new URL(mediaUrl).pathname) || "attachment"; mime = response.headers.get("content-type")?.split(";")[0] ?? "application/octet-stream";
   } else {
-    const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl; const file = await open(path, "r");
-    try { const stat = await file.stat(); if (!stat.isFile() || stat.size === 0 || stat.size > max) throw new Error("Native outbound source must be a bounded regular file"); const chunks: Buffer[] = []; let size = 0; while (true) { const chunk = Buffer.alloc(Math.min(65536, max + 1 - size)); const { bytesRead } = await file.read(chunk, 0, chunk.length, null); if (!bytesRead) break; size += bytesRead; if (size > max) throw new Error("Native outbound source exceeds configured size"); chunks.push(chunk.subarray(0, bytesRead)); } bytes = Buffer.concat(chunks, size); } finally { await file.close(); }
+    const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl;
     filename = basename(path instanceof URL ? path.pathname : path); const extension = extname(filename).toLowerCase(); mime = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension) ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}` : extension === ".mp4" ? "video/mp4" : [".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac"].includes(extension) ? `audio/${extension.slice(1)}` : "application/octet-stream";
+    selectedKind = outboundMediaKind(mime, audioAsVoice); const max = outboundSourceLimit(account, selectedKind); const file = await open(path, "r");
+    try { const stat = await file.stat(); if (!stat.isFile() || stat.size === 0 || stat.size > max) throw new Error("Native outbound source must be a bounded regular file"); const chunks: Buffer[] = []; let size = 0; while (true) { const chunk = Buffer.alloc(Math.min(65536, max + 1 - size)); const { bytesRead } = await file.read(chunk, 0, chunk.length, null); if (!bytesRead) break; size += bytesRead; if (size > max) throw new Error("Native outbound source exceeds configured size"); chunks.push(chunk.subarray(0, bytesRead)); } bytes = Buffer.concat(chunks, size); } finally { await file.close(); }
   }
-  if (audioAsVoice && !mime.startsWith("audio/")) throw new Error("Voice sending requires an explicit audio attachment");
+  if (bytes.length > outboundSourceLimit(account, selectedKind)) throw new Error("Native outbound source exceeds selected media kind size");
   await beforeSend?.();
   const accountId = account.native!.accountId; const source = await client.upload(accountId, bytes, filename, mime);
-  const input: MediaSendRequest = { threadId, kind: audioAsVoice ? "voice" : mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "file", sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null };
+  const input: MediaSendRequest = { threadId, kind: selectedKind, sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null };
   await beforeSend?.();
-  let job = await waitNativeMediaJob(client, accountId, await client.sendMedia(accountId, input, key), audioAsVoice ? 25 * 60000 : 65000);
+  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "file" && bytes.length > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 5 * 60000 : 65000;
+  const submitted = await client.sendMedia(accountId, input, key);
+  let job: MediaJob;
+  try { job = await waitNativeMediaJob(client, accountId, submitted, waitMs); }
+  catch {
+    // Keep only the known intent identity: transport errors may contain URLs,
+    // response content or credentials, and cannot authorize another submission.
+    throw new NativeMediaJobInspectionError(submitted, accountId, threadId, key, "status_unavailable");
+  }
   if (successfulSendJobs.has(job.state)) job = await waitNativeMediaSendReceipts(client, accountId, threadId, job, audioAsVoice);
-  if (!successfulSendJobs.has(job.state)) throw new Error(`Native media job ${job.id} requires inspection (${job.state}); retain completed items and do not automatically resend`);
+  if (!successfulSendJobs.has(job.state)) throw new NativeMediaJobInspectionError(job, accountId, threadId, key, "job_not_completed");
   const result = mediaSendResult(job);
   const chunks = Array.isArray(result.chunks) ? result.chunks.filter(chunk => chunk && typeof chunk === "object") as Array<{ state?: string; serverMessageId?: string }> : [];
   const serverIds = audioAsVoice ? chunks.filter(chunk => chunk.state === "accepted" && typeof chunk.serverMessageId === "string").map(chunk => chunk.serverMessageId!) : job.serverMessageId ? [job.serverMessageId] : undefined;
