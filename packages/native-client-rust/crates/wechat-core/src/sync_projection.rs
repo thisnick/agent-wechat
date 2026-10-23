@@ -570,30 +570,6 @@ impl Core {
             .context("missing_message_server_identity")?;
         let recall = self.store.recall_marker(account, &message.peer, sid)?;
         if let Some(marker) = recall.as_ref() {
-            // A late original can identify the author even when an imported
-            // official row was already cleared. The recall control's sender
-            // does not establish that identity.
-            self.store.record_recall_details(
-                account,
-                &message.peer,
-                sid,
-                None,
-                None,
-                marker.recalled_at,
-                &marker.origin,
-                &wechat_store::RecallMetadata {
-                    original_sender_id: Some(sender.clone()),
-                    original_direction: Some(
-                        if message.outgoing {
-                            "outgoing"
-                        } else {
-                            "incoming"
-                        }
-                        .into(),
-                    ),
-                    ..Default::default()
-                },
-            )?;
             if wechat_profile::find_projected_message(
                 &location,
                 &keys,
@@ -682,10 +658,7 @@ impl Core {
                 &MessageSessionProjection {
                     source: source.clone(),
                     peer: message.peer.clone(),
-                    summary: marker
-                        .replacement_text
-                        .clone()
-                        .unwrap_or_else(|| crate::recalls::RECALLED_BODY.into()),
+                    summary: self.recall_preview(account, marker)?,
                     outgoing: message.outgoing,
                     unread: false,
                     sender: None,
@@ -1065,12 +1038,8 @@ impl Core {
                 peer: destination.into(),
                 summary: recalled
                     .as_ref()
-                    .map(|marker| {
-                        marker
-                            .replacement_text
-                            .clone()
-                            .unwrap_or_else(|| crate::recalls::RECALLED_BODY.into())
-                    })
+                    .map(|marker| self.recall_preview(account, marker))
+                    .transpose()?
                     .unwrap_or_else(|| text.into()),
                 outgoing: true,
                 unread: false,
@@ -2376,12 +2345,8 @@ impl Core {
                 peer: destination.into(),
                 summary: recalled
                     .as_ref()
-                    .map(|marker| {
-                        marker
-                            .replacement_text
-                            .clone()
-                            .unwrap_or_else(|| crate::recalls::RECALLED_BODY.into())
-                    })
+                    .map(|marker| self.recall_preview(account, marker))
+                    .transpose()?
                     .unwrap_or_else(|| summary.into()),
                 outgoing: true,
                 unread: false,

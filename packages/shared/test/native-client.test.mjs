@@ -131,19 +131,17 @@ test('recall transport rejects foreign operation identities and does not retry a
   let attempts=0;const client=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('lost response');}});
   await assert.rejects(client.recallMessage('a','m','3','key'),/lost response/);assert.equal(attempts,1);
 });
-test('recall metadata preserves optional unknowns and validates public author and notice fields', async () => {
+test('derived recall notices preserve optional unknowns and reject malformed text', async () => {
   const observedAt='2026-10-23T00:00:00Z';
-  const recall={observedAt,originalSenderId:'original-author',originalDirection:'outgoing',replacementText:'Localized notice <text> & detail'};
+  const recall={observedAt,replacementText:'Localized notice <text> & detail'};
   const message={id:'m',accountId:'a',threadId:'t',serverId:'42',senderId:'original-author',direction:'outgoing',type:10000,recall};
   const valid=new NativeWeChatClient({...options,fetch:async()=>Response.json(message)});
   assert.deepEqual((await valid.message('a','m')).recall,recall);
-  for(const unknown of [{observedAt},{observedAt,originalSenderId:null,originalDirection:null,replacementText:null}]) {
+  for(const unknown of [{observedAt},{observedAt,replacementText:null}]) {
     const client=new NativeWeChatClient({...options,fetch:async()=>Response.json({...message,recall:unknown})});
     assert.deepEqual((await client.message('a','m')).recall,unknown);
   }
-  for(const change of [{originalSenderId:42},{originalSenderId:''},{originalSenderId:'two authors'},
-    {originalSenderId:'author\0hidden'},{originalSenderId:'界'.repeat(171)}, {originalDirection:'self'},
-    {originalDirection:true},{replacementText:42},{replacementText:'bad\u0001notice'},{replacementText:'🧪'.repeat(4097)}]) {
+  for(const change of [{replacementText:42},{replacementText:''},{replacementText:'bad\u0001notice'},{replacementText:'🧪'.repeat(4097)}]) {
     const invalid={...message,recall:{...recall,...change}};
     const client=new NativeWeChatClient({...options,fetch:async(url)=>{
       const path=new URL(url).pathname;

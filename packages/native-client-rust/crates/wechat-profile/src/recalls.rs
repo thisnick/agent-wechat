@@ -76,8 +76,8 @@ pub fn apply_recall_projection_with_notice(
         params![local, sid as i64],
         |r| r.get(0),
     )?;
-    // The marker already preserves the author and notice. Clean search in its
-    // own transaction before clearing this row; either phase can be replayed.
+    // The caller retains the operation receipt for recovery. Clean search in
+    // its own transaction before clearing this row; either phase can be replayed.
     remove_recalled_search(location, keys, peer, server_id, &source, created, options)?;
     let escaped = notice
         .replace('&', "&amp;")

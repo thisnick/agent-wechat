@@ -6,14 +6,10 @@ import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import type { NativeGroupCreateRequest, NativeGroupMemberLookup } from "./native.generated.js";
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
-/** Author metadata is separate from the unknown actor who initiated the recall. */
+/** Validate a derived official notice without interpreting it as identity metadata. */
 export function validateNativeRecallMetadata(value: unknown): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid native recall metadata");
-  const recall = value as { originalSenderId?: unknown; originalDirection?: unknown; replacementText?: unknown };
-  if (recall.originalSenderId != null && (typeof recall.originalSenderId !== "string" || !recall.originalSenderId
-    || recall.originalSenderId.length > 512 || new TextEncoder().encode(recall.originalSenderId).length > 512
-    || /[\s\u0000-\u001f\u007f-\u009f]/.test(recall.originalSenderId))) throw new Error("Invalid native recall metadata");
-  if (recall.originalDirection != null && !["incoming", "outgoing"].includes(recall.originalDirection as string)) throw new Error("Invalid native recall metadata");
+  const recall = value as { replacementText?: unknown };
   if (recall.replacementText != null && (typeof recall.replacementText !== "string" || !recall.replacementText
     || recall.replacementText.length > 16384 || new TextEncoder().encode(recall.replacementText).length > 16384
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffe\uffff]/.test(recall.replacementText))) throw new Error("Invalid native recall metadata");

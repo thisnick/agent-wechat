@@ -35,7 +35,7 @@ You can send one with `wx messages send --share URL --title ...` or the `wechat_
 
 When someone recalls a message, the daemon replaces its stored body with a recall notice, keeping its ID and position. Its media can no longer be fetched (HTTP 410), even if cached. You can recall your own messages with `wx messages recall` or the `wechat_recall` tool; WeChat decides whether a message is still recallable.
 
-The API keeps `body` as `[Message recalled]`. When known, `recall.replacementText` contains the server's notice, and `recall.originalSenderId` and `recall.originalDirection` identify the original message. The same details appear in `message.recalled` events. Message `senderId` and `direction` keep those original values. An imported row that was already cleared can have an unknown author; both fields are then `null`.
+The API keeps `body` as `[Message recalled]` and reads `recall.replacementText` from the saved notice when available. It derives the original message's `senderId` and `direction` from the original row or existing sync and accepted-send receipts, without storing a second author record. Missing or conflicting evidence leaves those fields `null`. The recall event identifies the affected message; retrieve it for the current details.
 
 For supported official message search indexes, recall also removes the original entry and its search terms. Unrelated entries stay in place. An unfamiliar index layout leaves local cleanup pending for inspection.
 

@@ -51,7 +51,7 @@ pub struct CompletedUploadRetry<'a> {
     pub ownership_generation: &'a str,
     pub payload: &'a [u8],
 }
-fn read_job(db: &Connection, id: &str) -> Result<MediaJobRecord> {
+pub(crate) fn read_job(db: &Connection, id: &str) -> Result<MediaJobRecord> {
     let row=db.query_row("SELECT id,kind,state,phase,attempts,cancel_requested,retryable,error_code,data_json,payload,created_at,updated_at FROM media_jobs WHERE id=?1",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,u32>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?,r.get::<_,Option<String>>(7)?,r.get::<_,String>(8)?,r.get::<_,Vec<u8>>(9)?,r.get::<_,String>(10)?,r.get::<_,String>(11)?)))?;
     Ok(MediaJobRecord {
         id: row.0,

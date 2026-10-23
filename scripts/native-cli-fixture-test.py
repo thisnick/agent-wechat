@@ -33,7 +33,7 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
                 return self.reply({**operation,"id":"wrong-operation"} if state["recall_wrong_get"] else operation)
             if path.endswith("/messages/m"):
                 if state.get("recalled_message"):
-                    return self.reply({"id":"m","threadId":"filehelper","senderId":"original-author","direction":"outgoing","type":10000,"body":"[Message recalled]","recall":{"observedAt":"2026-10-23T00:00:00Z","originalSenderId":"original-author","originalDirection":"outgoing","replacementText":"Server notice <text> & detail"}})
+                    return self.reply({"id":"m","threadId":"filehelper","senderId":"original-author","direction":"outgoing","type":10000,"body":"[Message recalled]","recall":{"observedAt":"2026-10-23T00:00:00Z","replacementText":"Server notice <text> & detail"}})
                 return self.reply({"id":"m","threadId":"filehelper"})
             if path.endswith("/messages/m/media"):return self.reply({"items":[asset("thumbnail"),asset("original")]})
             if "/media/" in path and path.endswith("/content"):return self.reply(content[path.split("/")[-2]],kind="image/png")

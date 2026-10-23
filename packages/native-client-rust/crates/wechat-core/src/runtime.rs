@@ -77,6 +77,7 @@ pub struct Core {
     pub(crate) vault: Arc<Vault>,
     pub(crate) cursor_vault: Arc<Vault>,
     password_proofs: Mutex<BTreeMap<String, String>>,
+    pub(crate) recall_sync_cache: Mutex<BTreeMap<String, crate::recall_evidence::RecallSyncCache>>,
     profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     startup_profiles_recovered: AtomicBool,
@@ -172,6 +173,8 @@ struct SendPayload {
     #[serde(default)]
     quote: Option<crate::quote_send::ResolvedQuote>,
 }
+#[path = "recall_send_author.rs"]
+mod recall_send_author;
 struct SendReceipt {
     accepted: bool,
     correlated: bool,
@@ -259,6 +262,7 @@ impl Core {
             vault: Arc::new(vault),
             cursor_vault: Arc::new(cursor_vault),
             password_proofs: Mutex::new(BTreeMap::new()),
+            recall_sync_cache: Mutex::new(BTreeMap::new()),
             profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
             bootstrap_leases: Mutex::new(bootstrap_leases),
             startup_profiles_recovered: AtomicBool::new(false),

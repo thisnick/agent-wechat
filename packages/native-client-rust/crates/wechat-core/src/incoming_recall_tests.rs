@@ -28,8 +28,32 @@ fn recall_count(store: &Store) -> usize {
         .count()
 }
 
+// Production stages the original batch before projection. Direct command tests
+// retain that existing journal separately so attribution has the same evidence.
+fn retain_original(core: &Core, store: &Store, id: &str, command: SyncCommand) {
+    let batch = wechat_protocol::SyncBatch {
+        code: 0,
+        flags: 0,
+        cursor: vec![1],
+        commands: vec![command],
+        continuation: false,
+    };
+    let sealed = core
+        .vault
+        .seal(
+            "one",
+            &format!("apply:{id}"),
+            &serde_json::to_vec(&batch).unwrap(),
+        )
+        .unwrap();
+    store
+        .stage_sync("one", id, &sealed, b"synthetic-cursor")
+        .unwrap();
+    store.finish_sync("one", id).unwrap();
+}
+
 #[test]
-fn recall_preserves_own_and_group_authors_instead_of_using_the_control_sender() {
+fn recall_api_derives_own_and_group_authors_from_existing_sync_receipts() {
     for (thread, from, to, body, author, direction) in [
         (
             "peer",
@@ -57,6 +81,12 @@ fn recall_preserves_own_and_group_authors_instead_of_using_the_control_sender() 
         ),
     ] {
         let (_temporary, store, core) = fixture();
+        retain_original(
+            &core,
+            &store,
+            "original-author-batch",
+            add(1, from, to, body.as_bytes(), 123, 100),
+        );
         core.apply_sync_command(
             "one",
             &add(1, from, to, body.as_bytes(), 123, 100),
@@ -83,8 +113,6 @@ fn recall_preserves_own_and_group_authors_instead_of_using_the_control_sender() 
         let value = core.message("one", id).unwrap();
         assert_eq!(value["senderId"], author);
         assert_eq!(value["direction"], direction);
-        assert_eq!(value["recall"]["originalSenderId"], author);
-        assert_eq!(value["recall"]["originalDirection"], direction);
         assert_eq!(value["recall"]["replacementText"], notice);
         let raw = core
             .profile_reader("one")
@@ -122,9 +150,9 @@ fn recall_preserves_own_and_group_authors_instead_of_using_the_control_sender() 
             .into_iter()
             .find(|event| event.kind == "message.recalled")
             .unwrap();
-        assert_eq!(event.data["originalSenderId"], author);
-        assert_eq!(event.data["originalDirection"], direction);
-        assert_eq!(event.data["replacementText"], notice);
+        assert!(event.data.get("originalSenderId").is_none());
+        assert!(event.data.get("originalDirection").is_none());
+        assert!(event.data.get("replacementText").is_none());
         core.reconcile_recall_markers("one").unwrap();
         assert_eq!(core.message("one", id).unwrap()["senderId"], author);
         assert_eq!(recall_count(&store), 1);
@@ -175,6 +203,12 @@ fn imported_cleared_row_keeps_notice_and_unknown_author_until_a_late_original() 
         assert!(value["direction"].is_null());
         assert!(value["recall"]["originalSenderId"].is_null());
         assert_eq!(value["recall"]["replacementText"], "You recalled a message");
+        retain_original(
+            &core,
+            &store,
+            "late-import-batch",
+            add(1, "synthetic_self", "peer", b"original", 123, 100),
+        );
         core.apply_sync_command(
             "one",
             &add(1, "synthetic_self", "peer", b"original", 123, 100),
@@ -214,8 +248,8 @@ fn replacement_notice_is_bounded_text_and_replay_keeps_the_first_notice() {
     .unwrap();
     let marker = store.recall_marker("one", "peer", "123").unwrap().unwrap();
     assert_eq!(
-        marker.replacement_text.as_deref(),
-        Some("Localized recall notice")
+        core.recall_preview("one", &marker).unwrap(),
+        "Localized recall notice"
     );
     assert_eq!(recall_count(&store), 1);
 }
@@ -291,27 +325,16 @@ fn accepted_text_and_media_repair_keep_recalled_group_notice_and_blank_preview_s
             if existing {
                 project("before-recall").unwrap();
             }
-            store
-                .record_recall_details(
-                    "one",
-                    "room@chatroom",
-                    "123",
-                    None,
-                    None,
-                    None,
-                    "live",
-                    &wechat_store::RecallMetadata {
-                        replacement_text: Some("Server group notice".into()),
-                        ..Default::default()
-                    },
-                )
+            let control = add(10002, "room@chatroom", "synthetic_self", b"<sysmsg type='revokemsg'><revokemsg><session>room@chatroom</session><newmsgid>123</newmsgid><replacemsg>Server group notice</replacemsg></revokemsg></sysmsg>", 999, 110);
+            core.apply_sync_command("one", &control, "accepted-recall", "live")
                 .unwrap();
             let source = project("accepted-repair").unwrap();
             let value = core
                 .message("one", &crate::message_id(&source).unwrap())
                 .unwrap();
-            assert_eq!(value["senderId"], "synthetic_self");
-            assert_eq!(value["direction"], "outgoing");
+            // Direct projection helpers are not accepted-send receipts.
+            assert!(value["senderId"].is_null());
+            assert!(value["direction"].is_null());
             assert_eq!(value["recall"]["replacementText"], "Server group notice");
             let thread = core
                 .profile_reader("one")
@@ -360,6 +383,8 @@ fn unavailable_search_index_keeps_author_notice_and_suppression_pending_without_
     db.execute_batch("CREATE TABLE unsupported_index(payload TEXT); INSERT INTO unsupported_index VALUES('synthetic retained data');").unwrap();
     drop(db);
     for receipt in ["index-recall", "index-retry"] {
+        core.retain_control_raw("one", &recall(123), receipt)
+            .unwrap();
         let error = core
             .apply_confirmed_recall_with_notice(
                 "one",
@@ -650,6 +675,7 @@ fn sender_prefixed_group_recall_projects_once_without_creating_a_control_message
         123,
         100,
     );
+    retain_original(&core, &store, "original-batch", original.clone());
     core.apply_sync_command("one", &original, "group-original", "live")
         .unwrap();
     let before = core.messages("one", "room@chatroom", None, None).unwrap()["items"][0].clone();
@@ -666,7 +692,6 @@ fn sender_prefixed_group_recall_projects_once_without_creating_a_control_message
     assert_eq!(after["type"], 10000);
     assert_eq!(after["senderId"], "member");
     assert_eq!(after["direction"], "incoming");
-    assert_eq!(after["recall"]["originalSenderId"], "member");
     assert!(after["recall"]["replacementText"].is_null());
     assert_eq!(
         core.messages("one", "room@chatroom", None, None).unwrap()["items"]
@@ -711,6 +736,7 @@ fn incoming_recall_preserves_identity_and_blocks_replayed_history_quotes_and_cac
         server,
         100,
     );
+    retain_original(&core, &store, "original-batch", original.clone());
     core.apply_sync_command("one", &original, "original", "live")
         .unwrap();
     let before = first(&core);
@@ -730,7 +756,6 @@ fn incoming_recall_preserves_identity_and_blocks_replayed_history_quotes_and_cac
     assert_eq!(after["type"], 10000);
     assert_eq!(after["senderId"], "peer");
     assert_eq!(after["direction"], "incoming");
-    assert_eq!(after["recall"]["originalSenderId"], "peer");
     assert_eq!(
         after["recall"]["replacementText"],
         "Localized recall notice"
@@ -818,6 +843,12 @@ fn out_of_order_recall_suppresses_later_original_without_duplicate_events_or_unr
     let marker = store.recall_marker("one", "peer", "200").unwrap().unwrap();
     assert!(marker.message_id.is_none());
     assert_eq!(marker.projection_state, "target_absent");
+    retain_original(
+        &core,
+        &store,
+        "late-original-batch",
+        add(1, "peer", "synthetic_self", b"Late original body", 200, 100),
+    );
     core.apply_sync_command(
         "one",
         &add(1, "peer", "synthetic_self", b"Late original body", 200, 100),
@@ -832,7 +863,6 @@ fn out_of_order_recall_suppresses_later_original_without_duplicate_events_or_unr
     let marker = store.recall_marker("one", "peer", "200").unwrap().unwrap();
     assert_eq!(marker.message_id.as_deref(), value["id"].as_str());
     assert_eq!(marker.projection_state, "applied");
-    assert_eq!(marker.original_sender_id.as_deref(), Some("peer"));
     assert_eq!(value["senderId"], "peer");
     assert_eq!(value["direction"], "incoming");
     let threads = core
@@ -1386,4 +1416,156 @@ fn exact_message_recall_survives_removed_peer_metadata_without_masking_a_new_ser
         core.message("one", &id).unwrap()["body"],
         "Private original"
     );
+}
+
+#[test]
+fn recall_api_author_evidence_is_exact_and_conflicts_remain_unknown() {
+    let (_temporary, store, core) = fixture();
+    core.apply_sync_command(
+        "one",
+        &add(1, "peer", "synthetic_self", b"original", 123, 100),
+        "original",
+        "live",
+    )
+    .unwrap();
+    let id = first(&core)["id"].as_str().unwrap().to_owned();
+    core.apply_sync_command("one", &recall(123), "recall", "live")
+        .unwrap();
+    // A cleared row and a human-readable notice cannot establish ownership.
+    assert!(core.message("one", &id).unwrap()["senderId"].is_null());
+    for (key, command) in [
+        (
+            "wrong-time",
+            add(1, "peer", "synthetic_self", b"other", 123, 101),
+        ),
+        (
+            "wrong-server",
+            add(1, "peer", "synthetic_self", b"other", 124, 100),
+        ),
+        (
+            "wrong-thread",
+            add(1, "different", "synthetic_self", b"other", 123, 100),
+        ),
+        (
+            "wrong-recipient",
+            add(1, "peer", "foreign", b"other", 123, 100),
+        ),
+    ] {
+        retain_original(&core, &store, key, command);
+        assert!(
+            core.message("one", &id).unwrap()["senderId"].is_null(),
+            "{key}"
+        );
+    }
+    retain_original(
+        &core,
+        &store,
+        "matching",
+        add(1, "peer", "synthetic_self", b"original", 123, 100),
+    );
+    let events = store.events("one", 0, 200).unwrap().len();
+    let markers = store.recall_markers("one").unwrap();
+    let revision = store.recall_sync_evidence_revision("one").unwrap();
+    let evidence = store.recall_sync_evidence("one").unwrap();
+    for _ in 0..2 {
+        let value = core.message("one", &id).unwrap();
+        assert_eq!(value["senderId"], "peer");
+        assert_eq!(value["direction"], "incoming");
+    }
+    assert_eq!(store.events("one", 0, 200).unwrap().len(), events);
+    assert_eq!(
+        serde_json::to_value(store.recall_markers("one").unwrap()).unwrap(),
+        serde_json::to_value(markers).unwrap()
+    );
+    assert_eq!(
+        store.recall_sync_evidence_revision("one").unwrap(),
+        revision
+    );
+    assert_eq!(store.recall_sync_evidence("one").unwrap(), evidence);
+    let raw = core
+        .profile_reader("one")
+        .unwrap()
+        .message(&crate::source_message_id(&id).unwrap(), None)
+        .unwrap();
+    assert_eq!(raw.sender.as_deref(), Some(""));
+    retain_original(
+        &core,
+        &store,
+        "contradiction",
+        add(
+            1,
+            "synthetic_self",
+            "peer",
+            b"contradictory original",
+            123,
+            100,
+        ),
+    );
+    let value = core.message("one", &id).unwrap();
+    assert!(value["senderId"].is_null());
+    assert!(value["direction"].is_null());
+}
+
+#[test]
+fn settled_official_notice_is_read_on_each_api_request() {
+    let (temporary, _store, core) = fixture();
+    core.apply_sync_command(
+        "one",
+        &add(1, "peer", "synthetic_self", b"original", 123, 100),
+        "original",
+        "live",
+    )
+    .unwrap();
+    let id = first(&core)["id"].as_str().unwrap().to_owned();
+    core.apply_sync_command("one", &recall(123), "recall", "live")
+        .unwrap();
+    assert_eq!(
+        core.message("one", &id).unwrap()["recall"]["replacementText"],
+        "Localized recall notice"
+    );
+    let source = crate::source_message_id(&id).unwrap();
+    let db = synthetic_database(&core, &temporary, &source.database);
+    db.execute(&format!("UPDATE {} SET message_content=?1 WHERE local_id=?2", source.table), rusqlite::params!["<sysmsg type='revokemsg'><revokemsg><content>Official profile notice</content><revoketime>0</revoketime></revokemsg></sysmsg>", source.local_id.parse::<i64>().unwrap()]).unwrap();
+    drop(db);
+    core.reconcile_recall_markers("one").unwrap();
+    assert_eq!(
+        core.message("one", &id).unwrap()["recall"]["replacementText"],
+        "Official profile notice"
+    );
+}
+
+#[test]
+fn unavailable_optional_author_evidence_still_returns_a_redacted_recall() {
+    let (_temporary, store, core) = fixture();
+    let original = add(1, "peer", "synthetic_self", b"private body", 123, 100);
+    retain_original(&core, &store, "original-batch", original.clone());
+    core.apply_sync_command("one", &original, "original", "live")
+        .unwrap();
+    let id = first(&core)["id"].as_str().unwrap().to_owned();
+    core.apply_sync_command("one", &recall(123), "recall", "live")
+        .unwrap();
+    assert_eq!(core.message("one", &id).unwrap()["senderId"], "peer");
+    store
+        .create_media_job(
+            "one",
+            "oversized-evidence",
+            "send:oversized",
+            &"a".repeat(64),
+            "send",
+            &json!({"threadId":"peer", "serverMessageId":"123"}),
+            &vec![0; 4 * 1024 * 1024 + 1],
+        )
+        .unwrap();
+    let mut row = store.media_job("one", "oversized-evidence").unwrap();
+    row.state = "accepted".into();
+    store.save_media_job("one", &row).unwrap();
+    let value = core.message("one", &id).unwrap();
+    assert_eq!(value["body"], crate::recalls::RECALLED_BODY);
+    assert!(value["senderId"].is_null());
+    assert!(value["direction"].is_null());
+    assert_eq!(
+        value["recall"]["replacementText"],
+        "Localized recall notice"
+    );
+    assert!(!value.to_string().contains("private body"));
 }

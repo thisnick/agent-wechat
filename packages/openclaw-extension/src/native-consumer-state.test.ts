@@ -104,38 +104,31 @@ test("invalid recall identities cannot advance durable custody", t => {
     assert.throws(() => state.acceptRecall("2", data)); assert.equal(state.cursor, "1"); assert.equal(state.get("m")?.message.body, "fixture");
   }
 });
-test("recall author metadata overrides placeholders, keeps the first notice and survives restart", t => {
-  const state=fixture(t), target=message('metadata');
+test("recall notices keep cached authors and survive replay and restart", t => {
+  const state=fixture(t), target={...message('notice'),senderId:'cached-author',direction:'outgoing'};
   state.accept('1',target,'live');
-  const recall={threadId:target.threadId,serverId:target.serverId!,observedAt:'2026-10-23T00:00:00Z',
-    originalSenderId:'verified-author',originalDirection:'outgoing',replacementText:'Localized notice <text> & detail'};
+  const recall={threadId:target.threadId,serverId:target.serverId!,observedAt:'2026-10-23T00:00:00Z',replacementText:'Localized notice <text> & detail'};
   state.acceptRecall('2',recall);
   const cleared=state.get(target.id)!.message;
-  assert.equal(cleared.senderId,'verified-author'); assert.equal(cleared.direction,'outgoing');
+  assert.equal(cleared.senderId,'cached-author'); assert.equal(cleared.direction,'outgoing');
   assert.equal(cleared.body,'[Message recalled]'); assert.equal(cleared.recall?.replacementText,recall.replacementText);
   state.acceptRecall('3',{...recall,replacementText:'Later wording'});
-  state.acceptRecall('4',{threadId:target.threadId,serverId:target.serverId!,observedAt:'2026-10-23T01:00:00Z',originalSenderId:null,originalDirection:null,replacementText:null});
-  assert.equal(state.get(target.id)!.message.recall?.replacementText,recall.replacementText);
+  state.acceptRecall('4',{threadId:target.threadId,serverId:target.serverId!,observedAt:'2026-10-23T01:00:00Z',replacementText:null});
   const reopened=new NativeConsumerState(join(state.file,'..'),'server','a');
-  assert.equal(reopened.cursor,'4'); assert.equal(reopened.get(target.id)!.message.senderId,'verified-author');
+  assert.equal(reopened.cursor,'4'); assert.equal(reopened.get(target.id)!.message.senderId,'cached-author');
   assert.equal(reopened.get(target.id)!.message.direction,'outgoing');
-  assert.equal(reopened.get(target.id)!.message.recall?.originalSenderId,'verified-author');
-  const before=readFileSync(state.file,'utf8');
-  for(const change of [{originalSenderId:'different-author'},{originalDirection:'incoming'}]) {
-    assert.throws(()=>reopened.acceptRecall('5',{...recall,...change}),/Conflicting native recall author/);
-    assert.equal(reopened.cursor,'4'); assert.equal(readFileSync(state.file,'utf8'),before);
-  }
+  assert.equal(reopened.get(target.id)!.message.recall?.replacementText,recall.replacementText);
+  assert.deepEqual(Object.keys(reopened.get(target.id)!.message.recall!).sort(),['observedAt','replacementText']);
 });
-test("unknown recall metadata preserves cached author and later API metadata enriches it", t => {
+test("a later API notice enriches an early recall without replacing cached authors", t => {
   const state=fixture(t), target={...message('cached'),senderId:'cached-author',direction:'outgoing'};
   state.accept('1',target,'live');
   const recall={threadId:target.threadId,serverId:target.serverId!,observedAt:'2026-10-23T00:00:00Z'};
   state.acceptRecall('2',recall);
+  state.accept('3',{...target,type:10000,senderId:null,direction:null,body:'[Message recalled]',recall:{...recall,replacementText:'Official notice'}},'live');
   assert.equal(state.get(target.id)!.message.senderId,'cached-author');
   assert.equal(state.get(target.id)!.message.direction,'outgoing');
-  state.accept('3',{...target,type:10000,senderId:null,direction:null,body:'[Message recalled]',recall:{...recall,originalSenderId:'verified-author',originalDirection:'outgoing',replacementText:'Server notice'}},'live');
-  assert.equal(state.get(target.id)!.message.senderId,'verified-author');
-  assert.equal(state.get(target.id)!.message.recall?.replacementText,'Server notice');
+  assert.equal(state.get(target.id)!.message.recall?.replacementText,'Official notice');
 });
 test("a legacy cleared sender cannot manufacture an incoming author", t => {
   const state=fixture(t), target={...message('legacy-cleared'),type:10000,senderId:'',direction:'incoming',body:'[Message recalled]'};
@@ -144,11 +137,10 @@ test("a legacy cleared sender cannot manufacture an incoming author", t => {
   assert.equal(state.get(target.id)!.message.senderId,null);
   assert.equal(state.get(target.id)!.message.direction,null);
 });
-test("invalid author metadata cannot advance or modify persisted recall custody", t => {
+test("invalid notices cannot advance or modify persisted recall custody", t => {
   const state=fixture(t), target=message('invalid-metadata'); state.accept('1',target,'live');
   const before=readFileSync(state.file,'utf8');
-  for(const change of [{originalSenderId:42},{originalSenderId:''},{originalSenderId:'two users'},
-    {originalSenderId:'界'.repeat(171)},{originalDirection:'self'},{replacementText:'bad\u0001notice'}, {replacementText:'🧪'.repeat(4097)}]) {
+  for(const change of [{replacementText:42},{replacementText:''},{replacementText:'bad\u0001notice'}, {replacementText:'🧪'.repeat(4097)}]) {
     assert.throws(()=>state.acceptRecall('2',{threadId:target.threadId,serverId:target.serverId!,observedAt:'2026-10-23T00:00:00Z',...change} as any),/recall metadata/);
     assert.equal(state.cursor,'1'); assert.equal(state.get(target.id)!.message.body,'fixture');
     assert.equal(readFileSync(state.file,'utf8'),before);

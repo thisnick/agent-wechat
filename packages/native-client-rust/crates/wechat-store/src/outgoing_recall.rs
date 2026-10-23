@@ -583,7 +583,7 @@ mod tests {
         store
             .control("a", |db| {
                 db.execute_batch(
-                    "DROP TABLE group_mutations;DROP TABLE recall_keys;DROP TABLE outgoing_recalls;ALTER TABLE message_recalls DROP COLUMN original_sender_id;ALTER TABLE message_recalls DROP COLUMN original_direction;ALTER TABLE message_recalls DROP COLUMN replacement_text;PRAGMA user_version=5;",
+                    "DROP TABLE group_mutations;DROP TABLE recall_keys;DROP TABLE outgoing_recalls;PRAGMA user_version=5;",
                 )?;
                 Ok(())
             })

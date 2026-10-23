@@ -13,20 +13,39 @@ message identity and order while clearing the real sender. The control's outer
 sender and its own message ID do not identify the original author or target.
 The cleared row does not provide an independent recall-initiator identity.
 
-Before clearing the row, the native client saves its original sender and
-direction in the account-local recall marker. A late original can fill unknown
-values. Contradictory known author metadata fails rather than overwriting the
-first observation. An already-cleared imported row retains an unknown author;
-the API returns null sender/direction instead of inventing an incoming message.
+Settled message state stays in the supported official profile. The native client
+does not add original-author, direction or notice columns to its sidecar. On API
+reads it uses an original row that is still pending cleanup, or derives an author
+from existing sealed original-sync batches and correlated accepted-send receipts.
+Chat, server ID, timestamp, account and available source/client IDs must agree.
+Group authors come from the original member envelope, never the recall control.
+Missing or conflicting evidence returns null sender/direction. Human-readable
+notice text is not parsed as an account identity. This is a derived API view;
+this analysis does not establish that the official client exposes the same view
+or lacks other bookkeeping outside the cleared row.
 
-The server replacement text is limited to 16 KiB and stored as text in the
+The sync scan is limited to the newest 256 retained batches, at most 4 MiB each
+and 16 MiB total. An in-memory account cache holds only author proofs, at most
+4,096 targets, and is invalidated by new sync receipts. Accepted-send evidence is
+checked separately so a newly accepted send can resolve a previously unknown
+author without a sync event. There is no additional author retention.
+
+The server replacement text is limited to 16 KiB and written as text in the
 official recall XML and session preview. XML characters are escaped. A missing
-notice uses the existing generic fallback. The API body stays
-`[Message recalled]`; optional `originalSenderId`, `originalDirection` and
-`replacementText` appear in its `recall` object and in the first
-`message.recalled` event when known. Enrichment preserves event deduplication.
-The TypeScript SDK validates those fields and OpenClaw preserves them when
-redacting cached messages.
+notice uses the generic fallback. API `body` stays `[Message recalled]`;
+`recall.replacementText` reads the official notice, and ordinary `senderId` and
+`direction` expose a proved author when available. SDK validation and OpenClaw
+redaction accept the optional notice. Recall events keep their existing message
+identity and deduplication behavior; clients retrieve the message for its current
+details.
+
+`message_recalls` remains the existing operational ledger, with no new migration.
+Its target/source identity guards replay and suppresses a late original; its
+phase tracks unfinished writes across separate databases. Observation time and
+origin preserve first-event provenance. An immutable reference to an existing
+sealed control receipt supplies replacement text during recovery when the target
+is absent or unfinished. Once the official row is settled, its notice takes
+precedence. These records are recovery inputs, not a second canonical message.
 
 ## Search cleanup and recovery
 
@@ -68,8 +87,8 @@ cleared row for replay.
 Synthetic encrypted-profile fixtures cover own and peer messages, group
 authors, other-device own messages, absent originals, late binding, restart,
 replay, malformed and oversized notices, escaped text, unknown imported authors
-and failed local projection. Store migration, event and consumer fixtures check
-metadata validation and single-event behavior.
+and failed local projection. Store, event and consumer fixtures check receipt validation, unchanged schema,
+read-only author derivation and single-event behavior.
 
 Search fixtures use both encrypted and plaintext synthetic databases. A fixture
 tokenizer supplies independently chosen Chinese tokens, colocated synonyms and

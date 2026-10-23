@@ -23,6 +23,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Preserve existing container data, official profiles and backups unless removal is explicitly requested. Retiring runtime source does not authorize deleting deployed containers, registry tags or volumes.
 - Use one writer per official profile. Stop the official app before takeover; a caller assertion is not proof that an unmanaged app stopped. Do not infer arbitrary official-build or live ARM64 compatibility from synthetic tests.
 - Add a changeset for user-facing behavior or package changes. Documentation-only edits do not need one.
+- Follow the official client's verified implementation and storage for existing WeChat features. Settled message/contact/group state belongs in the supported official profile; read or derive it there instead of creating a parallel settled-state model in a sidecar. Sidecars may track pending work, raw receipts, deduplication, idempotency and recovery. Keep those operational records separate from canonical state and document why each is needed. An API may derive additional information from existing evidence without persisting a second copy. Treat behavior or retention beyond the official client as a separate proposed feature, state that difference, and obtain user agreement before implementing it. Missing or incomplete analysis is not evidence that extra storage is necessary.
 
 ## Documentation site
 
