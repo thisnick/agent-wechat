@@ -1394,6 +1394,7 @@ input:focus-visible {
   height: 100%;
   min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
 }
 .photo-stage .bubble.viewer-media {
   width: calc(100% * var(--photo-zoom));

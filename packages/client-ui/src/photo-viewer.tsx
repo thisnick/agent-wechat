@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -33,6 +34,8 @@ export function PhotoViewer({
   const [zoom, setZoom] = useState(1);
   const navigation = useConversationNavigation();
   const dialog = useRef<HTMLDialogElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
+  const zoomCenter = useRef({ x: 0.5, y: 0.5 });
   const thumbnails = useRef<HTMLDivElement>(null);
   const request = useRef(0);
   const scoped =
@@ -58,9 +61,35 @@ export function PhotoViewer({
   }, [current?.id]);
   const previous = index > 0 || !!state.nextMessages;
   const next = index >= 0 && index < photos.length - 1;
-  useEffect(() => {
+  useLayoutEffect(() => {
+    zoomCenter.current = { x: 0.5, y: 0.5 };
     setZoom(1);
   }, [current?.id]);
+  useLayoutEffect(() => {
+    const viewport = stage.current;
+    if (!viewport) return;
+    viewport.scrollLeft =
+      zoomCenter.current.x * viewport.scrollWidth - viewport.clientWidth / 2;
+    viewport.scrollTop =
+      zoomCenter.current.y * viewport.scrollHeight - viewport.clientHeight / 2;
+  }, [zoom, current?.id]);
+  function changeZoom(value: number) {
+    const viewport = stage.current;
+    if (viewport && value !== 1) {
+      // Keep the point at the viewport's center fixed, including after panning.
+      zoomCenter.current = {
+        x:
+          (viewport.scrollLeft + viewport.clientWidth / 2) /
+          viewport.scrollWidth,
+        y:
+          (viewport.scrollTop + viewport.clientHeight / 2) /
+          viewport.scrollHeight,
+      };
+    } else {
+      zoomCenter.current = { x: 0.5, y: 0.5 };
+    }
+    setZoom(value);
+  }
   function close() {
     request.current++;
     setSelected(null);
@@ -194,12 +223,12 @@ export function PhotoViewer({
                     icon="zoom-out"
                     label="Zoom out"
                     disabled={zoom <= 1}
-                    onClick={() => setZoom((value) => Math.max(1, value - 0.5))}
+                    onClick={() => changeZoom(Math.max(1, zoom - 0.5))}
                   />
                   <button
                     className="photo-zoom-reset"
                     aria-label="Fit photo"
-                    onClick={() => setZoom(1)}
+                    onClick={() => changeZoom(1)}
                   >
                     {zoom === 1 ? "Fit" : `${Math.round(zoom * 100)}%`}
                   </button>
@@ -207,7 +236,7 @@ export function PhotoViewer({
                     icon="zoom-in"
                     label="Zoom in"
                     disabled={zoom >= 4}
-                    onClick={() => setZoom((value) => Math.min(4, value + 0.5))}
+                    onClick={() => changeZoom(Math.min(4, zoom + 0.5))}
                   />
                 </>
               )}
@@ -223,6 +252,7 @@ export function PhotoViewer({
               onClick={() => void move(-1)}
             />
             <div
+              ref={stage}
               className="photo-stage"
               style={{ "--photo-zoom": zoom } as import("react").CSSProperties}
             >

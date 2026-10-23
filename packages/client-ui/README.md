@@ -139,12 +139,13 @@ acceptance and recipient rendering remain separate final checks.
 
 Incoming images automatically load standard quality. Clicking a photo or video opens a
 shared viewer with previous/next controls, a thumbnail strip, and **Show message**.
-Photos have zoom controls; videos have native playback controls. Video thumbnails
+Photo zoom stays centered on the viewed point, including after panning; **Fit**
+resets the view. Videos have native playback controls. Video thumbnails
 load separately from playback, so browsing the strip does not fetch full videos.
 Earlier photos and videos load through the conversation's history cursor as needed. The
-viewer offers **Request original** when an advertised original is not cached,
-then **Download** to save the cached original to this device. A small quality label
-beside the button identifies original or standard. When no original source is
+viewer keeps **Download** with a Standard label available beside **Request original**
+and its transfer progress. Once the original is cached, **Download** saves that
+original to this device and its label changes to Original. When no original source is
 provided, only standard can be downloaded; the download tooltip explains this. Size
 appears only when the download control is hovered or focused; transfer progress
 and cancellation appear while it runs. The conversation keeps displaying standard

@@ -658,10 +658,52 @@ export function MediaDownload({
   connection: Connection;
 }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
+  if (!asset) return null;
+  const standard = state.assets.find(
+    (item) =>
+      item.kind === asset.kind &&
+      item.variant === (asset.kind === "video" ? "normal" : "standard") &&
+      cachedVariant(item),
+  );
+  const fallback =
+    asset.variant === "original" && !cachedVariant(asset)
+      ? standard
+      : undefined;
+  return (
+    <>
+      {fallback && (
+        <MediaDownloadAction
+          key={fallback.id}
+          asset={fallback}
+          model={model}
+          connection={connection}
+        />
+      )}
+      {(!fallback || canRetrieve(asset) || model.working(asset)) && (
+        <MediaDownloadAction
+          key={asset.id}
+          asset={asset}
+          model={model}
+          connection={connection}
+        />
+      )}
+    </>
+  );
+}
+
+function MediaDownloadAction({
+  asset,
+  model,
+  connection,
+}: {
+  asset: MediaAsset;
+  model: IncomingMedia;
+  connection: Connection;
+}) {
+  const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const id = useId();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  if (!asset) return null;
   const ready = cachedVariant(asset);
   const working = model.working(asset);
   const job = state.jobs[asset.id];
