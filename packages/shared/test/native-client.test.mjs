@@ -427,3 +427,4 @@ test('SSE activity starts on actual frames, including keepalive comments', async
   for await (const event of client.watch('a','0',undefined,{ onActivity: () => activity++ })) events.push(event);
   assert.equal(activity,2); assert.equal(events.length,1);
 });
+

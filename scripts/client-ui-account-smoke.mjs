@@ -21,6 +21,11 @@ export async function accountJourney({
     peer: "sim_mei",
     body: "Read-state fixture",
   });
+  await wait("read fixture committed before marking", async () =>
+    (await client.messages(account, "sim_mei")).items.some(
+      (message) => message.body === "Read-state fixture",
+    ),
+  );
   let priorVersion;
   const read = await wait("read stable profile generation", async () => {
     const thread = await client.thread(account, "sim_mei");

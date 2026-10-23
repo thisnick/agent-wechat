@@ -308,8 +308,8 @@ export function Welcome({
           <span className="connection-location">
             <i />
             {simulator
-              ? "Hub: this device · synthetic accounts"
-              : "AgentWechat hub"}
+              ? "agent-wechat hub: this device · synthetic accounts"
+              : "agent-wechat hub"}
           </span>
         </footer>
       </section>

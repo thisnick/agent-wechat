@@ -13,6 +13,7 @@ import {
 export type Account = {
   id: string;
   alias?: string;
+  ownUsername?: string | null;
   authenticated?: boolean;
   connection?: string;
 };
@@ -57,7 +58,7 @@ export function readableError(error: unknown): string {
     return (
       (
         {
-          unauthorized: "The hub access key wasn't accepted.",
+          unauthorized: "The agent-wechat hub access key wasn't accepted.",
           forbidden: "This access key doesn't allow that action.",
           auth_required: "Sign in to WeChat again.",
           operation_in_progress:
@@ -67,12 +68,16 @@ export function readableError(error: unknown): string {
           idempotency_conflict: "This send key is already in use.",
           unsupported_simulator_operation:
             "This action isn't available on the simulator.",
+          unsupported_group_creation:
+            "Group creation isn't available on this agent-wechat hub yet.",
+          invalid_group_creation:
+            "Choose a group name and at least two distinct contacts.",
           pagination_cursor_expired:
             "This history view expired. Reopen the conversation.",
         } as Record<string, string>
-      )[error.code] ?? `Hub request failed (${error.code}).`
+      )[error.code] ?? `agent-wechat hub request failed (${error.code}).`
     );
-  return "Couldn't reach the hub. Check the connection and try again.";
+  return "Couldn't reach the agent-wechat hub. Check the connection and try again.";
 }
 function timestamp(value: string | null): number {
   return value && /^\d+$/.test(value)
@@ -471,6 +476,7 @@ export class HubSession {
         "thread.read",
         "thread.read-state",
         "metadata.changed",
+        "contacts.updated",
       ].includes(event.kind)
     ) {
       await this.refresh(account, generation);

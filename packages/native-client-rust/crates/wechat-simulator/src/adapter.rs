@@ -92,6 +92,36 @@ impl SimulatorUpstream {
     }
 }
 impl Upstream for SimulatorUpstream {
+    fn can_create_groups(&self) -> bool {
+        true
+    }
+    fn create_group(
+        &self,
+        state: &mut AccountState,
+        input: &wechat_core::GroupCreateRequest,
+        key: &str,
+    ) -> Result<String> {
+        self.rpc(&Request::CreateGroup {
+            session: self.session(state)?,
+            input: input.clone(),
+            key: key.into(),
+        })
+    }
+    fn lookup_room_receipt(
+        &self,
+        state: &mut AccountState,
+        room: &str,
+        _version: u32,
+    ) -> Result<wechat_protocol::MetadataReply<wechat_protocol::RoomRoster>> {
+        let raw: Vec<u8> = self.rpc(&Request::Room {
+            session: self.session(state)?,
+            room: room.into(),
+        })?;
+        Ok(wechat_protocol::MetadataReply {
+            value: wechat_protocol::wire::decode_room(&raw, room)?,
+            raw,
+        })
+    }
     fn notify_read(
         &self,
         state: &mut AccountState,

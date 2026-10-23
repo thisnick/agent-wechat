@@ -442,3 +442,87 @@ input:focus-visible {
   color: var(--accent-ink);
   font-size: 12px;
 }
+
+.new-chat {
+  width: min(480px, calc(100vw - 32px));
+}
+.new-chat-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+.new-chat-tabs button {
+  padding: 10px 12px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+.new-chat-tabs button[aria-selected="true"] {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+.group-name {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.group-name input {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.new-chat-contacts {
+  max-height: min(320px, 40vh);
+  overflow-y: auto;
+  margin-top: 12px;
+}
+.new-chat-contact {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  text-align: left;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.new-chat-contact:hover {
+  background: var(--canvas);
+}
+.new-chat-contact span {
+  flex: 1;
+}
+.new-chat-contact input {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+.new-chat-footer {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.new-chat-footer small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.group-result {
+  display: grid;
+  gap: 14px;
+  padding: 12px 0 24px;
+}
+.group-result h3,
+.group-result p {
+  margin: 0;
+}
+.group-result p {
+  font-size: 13px;
+  color: var(--muted);
+}

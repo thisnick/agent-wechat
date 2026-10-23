@@ -50,6 +50,26 @@ pub trait PushConnection: Send {
 /// operations fail closed through `native`, including secondary media paths.
 pub trait Upstream: Send + Sync {
     fn kind(&self) -> UpstreamKind;
+    fn can_create_groups(&self) -> bool {
+        false
+    }
+    fn create_group(
+        &self,
+        _state: &mut AccountState,
+        _input: &crate::GroupCreateRequest,
+        _key: &str,
+    ) -> Result<String> {
+        bail!("unsupported_group_creation")
+    }
+    fn lookup_room_receipt(
+        &self,
+        state: &mut AccountState,
+        room: &str,
+        version: u32,
+    ) -> Result<wechat_protocol::MetadataReply<wechat_protocol::RoomRoster>> {
+        self.native(NativeOptions::default())?
+            .lookup_room_receipt(state, room, version)
+    }
     fn validate_state(&self, state: &AccountState) -> Result<()> {
         state.validate()
     }

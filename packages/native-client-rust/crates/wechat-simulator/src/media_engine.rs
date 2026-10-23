@@ -74,7 +74,7 @@ pub(super) fn request(
             content,
             voice,
         } => {
-            validate_peer(&destination)?;
+            validate_destination(db, &session.account, &destination)?;
             ensure!(
                 !client_id.is_empty()
                     && client_id.len() <= 200
@@ -221,7 +221,7 @@ fn save_object(
     Ok(())
 }
 pub(super) fn receive(db: &mut Connection, account: &str, peer: &str, kind: &str) -> Result<()> {
-    validate_peer(peer)?;
+    validate_destination(db, account, peer)?;
     ensure!(
         ["image", "file", "video", "voice", "sticker"].contains(&kind),
         "unsupported_simulator_media"

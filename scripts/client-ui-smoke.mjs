@@ -11,6 +11,7 @@ import { HubSession } from "../packages/client-ui/src/session.ts";
 import { HistorySearch } from "../packages/client-ui/src/history-search.ts";
 import { LoginAttempt } from "../packages/client-ui/src/login-attempt.ts";
 import { mediaJourney } from "./client-ui-media-smoke.mjs";
+import { groupJourney } from "./client-ui-group-smoke.mjs";
 import { accountJourney } from "./client-ui-account-smoke.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -541,6 +542,8 @@ try {
     endpoint: hub.endpoint,
     token,
   });
+  await login("group-controls");
+  await groupJourney({ client, wait, account: "group-controls" });
   await launcherCheck();
   console.log(
     JSON.stringify({
@@ -561,6 +564,7 @@ try {
         "outgoing media preparation, upload, readback and committed history",
         "media rejection, uncertainty and receipt recovery without resubmission",
         "account alias, read-state CAS, cached avatars and recoverable logout",
+        "group creation, roster, text, account isolation and lost admission recovery",
         "UI launcher authentication and origin checks",
         "UI launcher owned-child and disposable-state cleanup",
       ],

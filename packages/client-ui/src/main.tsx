@@ -32,6 +32,7 @@ import { HistorySearch } from "./history-search.ts";
 import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
 import { HubAvatar } from "./avatars.tsx";
 import { AccountSettings } from "./account-settings.tsx";
+import { NewChat } from "./new-chat.tsx";
 import "./style.css";
 import "./onboarding.css";
 import "./client.css";
@@ -160,12 +161,12 @@ function ConnectionForm({
   return (
     <Welcome simulator={false}>
       <div className="welcome-heading">
-        <h1>Connect to a hub</h1>
+        <h1>Connect to an agent-wechat hub</h1>
         <p>Enter the address and access key for your agent-wechat hub.</p>
       </div>
       <form onSubmit={submit}>
         <div className="remote-fields">
-          <label htmlFor="hub-address">Hub address</label>
+          <label htmlFor="hub-address">agent-wechat hub address</label>
           <div className="connection-input">
             <Icon name="server" />
             <input
@@ -177,7 +178,7 @@ function ConnectionForm({
               autoComplete="off"
             />
           </div>
-          <label htmlFor="hub-key">Hub access key</label>
+          <label htmlFor="hub-key">agent-wechat hub access key</label>
           <div className="connection-input">
             <input
               id="hub-key"
@@ -198,10 +199,11 @@ function ConnectionForm({
         </button>
       </form>
       <details className="hub-help">
-        <summary>Use this device as a hub</summary>
+        <summary>Use this device as an agent-wechat hub</summary>
         <p>
-          The browser connects to a running hub. For local development, start{" "}
-          <code>pnpm client:dev</code> on this device and open its printed URL.
+          The browser connects to a running agent-wechat hub. For local
+          development, start <code>pnpm client:dev</code> on this device and
+          open its printed URL.
         </p>
       </details>
     </Welcome>
@@ -327,7 +329,7 @@ function Client({
           {busy ? "Opening…" : "Add WeChat account"} <Icon name="plus" />
         </button>
         <button className="quiet-button" onClick={disconnect}>
-          Connect to a different hub
+          Connect to a different agent-wechat hub
         </button>
       </Welcome>
     );
@@ -588,6 +590,7 @@ function Chats({
     [details, setDetails] = useState(false),
     [settings, setSettings] = useState(false),
     [accountMenu, setAccountMenu] = useState(false);
+  const [newChat, setNewChat] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [simBody, setSimBody] = useState("Hello from the simulated phone."),
     [simStatus, setSimStatus] = useState("");
@@ -687,8 +690,7 @@ function Chats({
               icon="plus"
               label="New conversation"
               onClick={() => {
-                setSection("contacts");
-                setMobile(false);
+                setNewChat(true);
               }}
             />
           </div>
@@ -793,7 +795,9 @@ function Chats({
         <div className="side-footer">
           <span>
             <i className={`status-dot ${!state.connected ? "off" : ""}`} />
-            {state.connected ? "Hub connected" : "Connecting to hub…"}
+            {state.connected
+              ? "agent-wechat hub connected"
+              : "Connecting to agent-wechat hub…"}
           </span>
           {simulator && <span className="sim-label">SIMULATOR</span>}
         </div>
@@ -820,7 +824,9 @@ function Chats({
               {state.selected === "filehelper"
                 ? "Notes to yourself"
                 : state.selected
-                  ? "WeChat conversation"
+                  ? state.selected.endsWith("@chatroom")
+                    ? "Group conversation"
+                    : "WeChat conversation"
                   : "Choose a conversation"}
             </p>
           </div>
@@ -1150,6 +1156,19 @@ function Chats({
           </button>
         </div>
       )}
+      {newChat && state.account && (
+        <NewChat
+          key={state.account}
+          connection={connection}
+          account={state.account}
+          close={() => setNewChat(false)}
+          open={(id) => {
+            setSection("chats");
+            setNewChat(false);
+            select(id);
+          }}
+        />
+      )}
       {settings && (
         <div className="overlay-backdrop" onClick={() => setSettings(false)}>
           <section
@@ -1181,7 +1200,7 @@ function Chats({
               </label>
               <div className="setting">
                 <span>
-                  Hub<small>{connection.endpoint}</small>
+                  agent-wechat hub<small>{connection.endpoint}</small>
                 </span>
                 {simulator ? "Simulator" : "Connected"}
               </div>
@@ -1239,7 +1258,7 @@ function SearchResults({
       <div className="history-search-status">
         <span role="status">
           {!current || state.loading
-            ? "Searching history on this hub…"
+            ? "Searching history on this agent-wechat hub…"
             : `${state.items.length}${state.nextCursor ? "+" : ""} ${state.items.length === 1 && !state.nextCursor ? "match" : "matches"} in this conversation`}
         </span>
         <button onClick={close}>Back to chat</button>
@@ -1272,7 +1291,7 @@ function SearchResults({
       )}
       {current && !state.loading && !state.error && !state.items.length && (
         <p className="empty-chat">
-          No matches in the history available on this hub.
+          No matches in the history available on this agent-wechat hub.
         </p>
       )}
     </section>
@@ -1346,9 +1365,9 @@ function Message({
         </div>
         {m.recall ? (
           <div className="bubble recalled">Message recalled</div>
-        ) : m.type === 1 ? (
+        ) : m.type === 1 || m.type === 10000 ? (
           <div className="bubble">
-            <p>{m.body}</p>
+            <p>{m.body || (m.type === 10000 ? "System message" : "")}</p>
           </div>
         ) : m.link ? (
           <div className="bubble">
@@ -1428,7 +1447,7 @@ function Details({
         <div className="section-head">Conversation</div>
         <p className="peer-id">{threadId}</p>
         <p className="field-help">
-          History contains the messages available on this hub.
+          History contains the messages available on this agent-wechat hub.
         </p>
         <div className="detail-actions">
           <button
@@ -1446,7 +1465,7 @@ function Details({
                   setNotice(
                     (result as { phoneReceiptSent?: boolean }).phoneReceiptSent
                       ? "Marked as read."
-                      : "Marked read on this hub. Phone confirmation is unavailable.",
+                      : "Marked read on this agent-wechat hub. Phone confirmation is unavailable.",
                   );
                 })
                 .catch((error) => setError(readableError(error)))

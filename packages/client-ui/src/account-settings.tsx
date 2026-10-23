@@ -109,7 +109,7 @@ export function AccountSettings({
         <div className="signout-confirm">
           <p>
             Sign out of <strong>{account.alias || account.id}</strong>? Chat
-            history stays on this hub.
+            history stays on this agent-wechat hub.
           </p>
           <div className="attachment-actions">
             <button

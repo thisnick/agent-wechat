@@ -141,7 +141,7 @@ phone read-state synchronization for these controls is not implemented here.
 - The mock uses decoded sync batches and existing command codecs. It does not
   implement WeChat wire encryption or establish protocol compatibility.
 - Supported operations are synthetic QR/saved-session login, heartbeat, sync,
-  text/media sends, push hints, read notifications, contact/avatar refresh and
+  text/media sends, group creation/rosters, push hints, read notifications, contact/avatar refresh and
   logout. Incoming fixture kinds are image, file, video, voice and animated sticker.
   Outgoing kinds are image, file, video and voice. Sources, preparation, jobs,
   readback and history still use the production hub pipeline. Media objects and

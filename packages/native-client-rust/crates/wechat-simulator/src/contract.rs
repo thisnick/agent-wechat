@@ -68,6 +68,15 @@ pub enum Request {
         session: Session,
         username: String,
     },
+    CreateGroup {
+        session: Session,
+        input: wechat_core::GroupCreateRequest,
+        key: String,
+    },
+    Room {
+        session: Session,
+        room: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

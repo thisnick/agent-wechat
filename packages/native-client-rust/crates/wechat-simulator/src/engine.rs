@@ -14,6 +14,8 @@ const INITIAL_TIME: u32 = 1_700_000_000;
 const PAGE_SIZE: usize = 32;
 const SERVER_ID_BASE: u64 = 9_007_199_254_740_993;
 
+#[path = "group_engine.rs"]
+mod groups;
 #[path = "media_engine.rs"]
 mod media;
 
@@ -64,7 +66,8 @@ impl Engine {
             CREATE TABLE IF NOT EXISTS media_objects(account TEXT NOT NULL,id TEXT NOT NULL,quality INTEGER NOT NULL,metadata TEXT NOT NULL,encrypted BLOB NOT NULL,PRIMARY KEY(account,id,quality));
             CREATE TABLE IF NOT EXISTS media_sends(account TEXT NOT NULL,client_id TEXT NOT NULL,hash TEXT NOT NULL,server_id TEXT,accepted INTEGER NOT NULL,PRIMARY KEY(account,client_id));
             CREATE TABLE IF NOT EXISTS voice_objects(account TEXT NOT NULL,server_id TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY(account,server_id));
-            CREATE TABLE IF NOT EXISTS read_receipts(account TEXT NOT NULL,client_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,client_id));",
+            CREATE TABLE IF NOT EXISTS read_receipts(account TEXT NOT NULL,client_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,client_id));
+            CREATE TABLE IF NOT EXISTS group_creations(account TEXT NOT NULL,key TEXT NOT NULL,hash TEXT NOT NULL,room TEXT NOT NULL,name TEXT NOT NULL,members TEXT NOT NULL,PRIMARY KEY(account,key),UNIQUE(account,room));",
         )?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -74,12 +77,20 @@ impl Engine {
             .lock()
             .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?;
         match request {
+            Request::CreateGroup {
+                session,
+                input,
+                key,
+            } => groups::create(&mut db, &session, input, &key),
+            Request::Room { session, room } => {
+                Ok(serde_json::to_value(groups::roster(&db, &session, &room)?)?)
+            }
             Request::Read {
                 session,
                 notification,
             } => {
                 check_session(&db, &session)?;
-                validate_peer(&notification.peer_username)?;
+                validate_destination(&db, &session.account, &notification.peer_username)?;
                 ensure!(
                     notification.client_message_id.len() <= 256
                         && !notification.client_message_id.is_empty()
@@ -117,12 +128,16 @@ impl Engine {
                 ensure!(!ids.is_empty() && ids.len() <= 2, "invalid_contact_batch");
                 let mut fields = vec![p::bytes(1, &p::uint(1, 0)), p::uint(2, ids.len() as u64)];
                 for username in &ids {
-                    validate_peer(username)?;
+                    validate_destination(&db, &session.account, username)?;
                     let label = match username.as_str() {
-                        "sim_mei" => "Mei Chen",
-                        "sim_daniel" => "Daniel Park",
-                        "filehelper" => "File Transfer",
-                        _ => "Simulated contact",
+                        "sim_mei" => "Mei Chen".to_string(),
+                        "sim_daniel" => "Daniel Park".to_string(),
+                        "filehelper" => "File Transfer".to_string(),
+                        _ => db.query_row(
+                            "SELECT name FROM group_creations WHERE account=?1 AND room=?2",
+                            params![session.account, username],
+                            |r| r.get::<_, String>(0),
+                        )?,
                     };
                     fields.push(p::bytes(
                         3,
@@ -143,7 +158,7 @@ impl Engine {
             }
             Request::Avatar { session, username } => {
                 check_session(&db, &session)?;
-                validate_peer(&username)?;
+                validate_destination(&db, &session.account, &username)?;
                 let color = Sha256::digest(username.as_bytes());
                 let image = image::RgbImage::from_fn(64, 64, |x, y| {
                     if (x / 12 + y / 12) % 2 == 0 {
@@ -292,7 +307,7 @@ impl Engine {
                 client_id,
             } => {
                 check_session(&db, &session)?;
-                validate_peer(&destination)?;
+                validate_destination(&db, &session.account, &destination)?;
                 ensure!(
                     !content.is_empty()
                         && content.len() <= 64 * 1024
@@ -586,6 +601,20 @@ fn validate_account(account: &str) -> Result<()> {
 fn validate_peer(peer: &str) -> Result<()> {
     ensure!(
         matches!(peer, "sim_mei" | "sim_daniel" | "filehelper"),
+        "unknown_synthetic_peer"
+    );
+    Ok(())
+}
+fn validate_destination(db: &Connection, account: &str, peer: &str) -> Result<()> {
+    if validate_peer(peer).is_ok() {
+        return Ok(());
+    }
+    ensure!(
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM group_creations WHERE account=?1 AND room=?2)",
+            params![account, peer],
+            |r| r.get::<_, bool>(0)
+        )?,
         "unknown_synthetic_peer"
     );
     Ok(())

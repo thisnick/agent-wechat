@@ -3,6 +3,7 @@ import { HubSession, type PendingSend } from "./session.ts";
 import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
 import { MediaOutbox, type PendingMedia } from "./media-outbox.ts";
 import { AvatarCache } from "./avatar-cache.ts";
+import { GroupCreation, type GroupReceipt } from "./group-creation.ts";
 export type Connection = {
   session: HubSession;
   simulator: boolean;
@@ -13,6 +14,7 @@ export type Connection = {
   avatars: AvatarCache;
   logout: (account: string) => Promise<NativeOperation>;
   clearLogout: (account: string) => void;
+  groupCreation: (account: string) => GroupCreation;
 };
 export async function connect(
   endpoint: string,
@@ -59,6 +61,7 @@ export async function connect(
   const logins = new Map<string, SavedLogin>();
   const media = new Map<string, MediaOutbox>();
   const avatars = new AvatarCache(client);
+  const groups = new Map<string, GroupCreation>();
   const logouts = new Map<string, SavedLogin>();
   const logoutKey = (account: string) =>
     `agentwechat-logout:${status.serverId}:${account}`;
@@ -81,8 +84,47 @@ export async function connect(
       session.close();
       for (const queue of media.values()) queue.close();
       avatars.close();
+      for (const group of groups.values()) group.close();
     },
     avatars,
+    groupCreation(account) {
+      let creation = groups.get(account);
+      if (!creation) {
+        const key = `agentwechat-group:${status.serverId}:${account}`;
+        creation = new GroupCreation(client, account, {
+          read() {
+            try {
+              const saved = JSON.parse(
+                sessionStorage.getItem(key) ?? "null",
+              ) as GroupReceipt | null;
+              return saved &&
+                typeof saved.key === "string" &&
+                saved.key.length <= 200 &&
+                typeof saved.input?.name === "string" &&
+                Array.isArray(saved.input.members) &&
+                saved.input.members.length <= 39 &&
+                saved.input.members.every(
+                  (member) => typeof member === "string",
+                )
+                ? saved
+                : null;
+            } catch {
+              return null;
+            }
+          },
+          write(value) {
+            try {
+              if (value) sessionStorage.setItem(key, JSON.stringify(value));
+              else sessionStorage.removeItem(key);
+            } catch {
+              /* Optional metadata-only recovery. */
+            }
+          },
+        });
+        groups.set(account, creation);
+      }
+      return creation;
+    },
     clearLogout(account) {
       saveLogout(account, null);
     },

@@ -120,6 +120,28 @@ readback, idempotency, cancellation, logout fences and official-format history
 writes still run in the real hub. These checks do not establish live WeChat
 acceptance or recipient playback.
 
+## New chats and groups
+
+**New conversation** opens a contact picker for a direct message. **New group**
+lets you enter a name, select at least two other contacts and review the selected
+count before creating a synthetic group. The current simulator accepts up to
+39 invitees; this is a development limit, not a claim about WeChat's service limits.
+The account's own contact and File Transfer are excluded from group selection.
+
+Creation uses an admin-only operation and a stable request key. After a lost
+response or reload, the client checks the same operation/key without creating
+again. The store checks authorization and logout state atomically before its one
+submission. Interrupted submissions become `needs_review`; queued requests that
+never reached submission fail without being replayed. The created group, system
+notice, roster and messages use the real hub profile and event pipeline.
+
+This is enabled only for the simulator. Native capabilities report
+`groupCreation: false` and reject creation before any service call. Creating a
+real WeChat group, its per-member results and any required invitations still need
+a native implementation and separately authorized final testing. The UI does
+not present these as supported. System notices render as text and do not start
+OpenClaw agent turns.
+
 ## Accounts and conversation details
 
 Settings can rename the selected account and sign it out, with confirmation and
@@ -130,15 +152,15 @@ replace initials; absent avatars keep initials. A successful receipt reports
 server acceptance, not observation of a real phone badge. Group details load all
 roster pages.
 
-| Area             | Current browser behavior                                                                                   |
-| ---------------- | ---------------------------------------------------------------------------------------------------------- |
-| Hub and accounts | Simulator bootstrap, bearer connection, account creation/switching, rename and logout                      |
-| Sign-in          | QR PNG, countdown, automatic renewal, phone approval and automatic chat entry                              |
-| Conversations    | Contacts, thread filters, paginated history/search, full group roster, read-state and cached avatars       |
-| Messaging        | Text and attachment composer, progress, receipt status, uncertainty, self-sends and SSE replay             |
-| Media            | Image/video/voice previews, downloads, incoming animated stickers and outgoing file/image/video/voice jobs |
-| Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                |
-| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                      |
+| Area             | Current browser behavior                                                                                                |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Hub and accounts | Simulator bootstrap, bearer connection, account creation/switching, rename and logout                                   |
+| Sign-in          | QR PNG, countdown, automatic renewal, phone approval and automatic chat entry                                           |
+| Conversations    | Contacts, thread filters, paginated history/search, full group roster, read-state, avatars and simulator group creation |
+| Messaging        | Text and attachment composer, progress, receipt status, uncertainty, self-sends and SSE replay                          |
+| Media            | Image/video/voice previews, downloads, incoming animated stickers and outgoing file/image/video/voice jobs              |
+| Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                             |
+| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                                   |
 
 ## Verification
 
@@ -173,3 +195,11 @@ The 17-check client journey passed in the isolated container. Browser checks
 confirmed automatic incoming sticker rendering, attachment review and an
 accepted outgoing file appearing in canonical history. Desktop packaging and
 live endpoint testing remain unverified.
+
+After the group-creation addition and rebase onto `main`, 425 native tests passed
+across the isolated workspace executables. The client passed 32 model tests,
+the SDK 31 and OpenClaw 211. Both simulator journeys passed (18 check groups each),
+including group identity/roster projection, account isolation and recovery of a
+lost group response without another creation. Browser validation created a
+synthetic group with two selected contacts, opened its three-member roster and
+sent a synthetic group message. UI copy now says **agent-wechat hub** throughout.
