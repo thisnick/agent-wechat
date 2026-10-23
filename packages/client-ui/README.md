@@ -72,7 +72,26 @@ origin. It changes the preview's allowed host/origin and browser connection;
 it does not connect to another hub. Keep any proxy inside a trusted network.
 The launcher refuses a hub whose identity does not say `simulator`.
 
-The browser launcher advances the simulator clock once per second, so QR expiry
+To connect the preview to an existing native daemon, select it deliberately with
+the separate launcher:
+
+```bash
+pnpm --filter @agent-wechat/client-ui connect \
+  --server http://127.0.0.1:6174 \
+  --account ACCOUNT_ID \
+  --token-file /absolute/private/browser-token \
+  --state-dir /absolute/private/browser-preview
+```
+
+Use an owner-only, account-scoped token file. This launcher checks the daemon's
+native identity and selected account before listening, proxies only that account
+plus status/account-list reads, and omits simulator controls. It accepts the same
+`CLIENT_UI_PORT` and HTTPS `CLIENT_UI_ORIGIN` settings. The printed fragment link
+bootstraps the browser session; keep it private. Closing the launcher leaves the
+external daemon running. `node scripts/client-ui-connect-smoke.mjs` checks these
+boundaries against a local HTTP fixture without contacting WeChat.
+
+The simulator launcher advances its clock once per second, so QR expiry
 and renewal occur naturally. The standalone simulator retains its controlled
 virtual clock for repeatable regression tests.
 
@@ -88,8 +107,8 @@ Vite serves development assets and proxies the existing API. There is no second
 business backend. A production static host, bundled desktop hub, agent settings
 and Tauri packaging remain follow-ups. The connection form uses the existing
 bearer SDK and requires HTTPS or loopback HTTP; cross-origin remote hubs also
-need an approved browser CORS arrangement. This work has not connected that form
-to a live wx daemon.
+need an approved browser CORS arrangement. Prefer the same-origin proxy above
+when connecting this preview to an explicitly selected native daemon.
 
 ## Attachments and stickers
 
@@ -203,8 +222,8 @@ networking disabled. It includes incoming media integrity/ranges/account isolati
 animated GIF frames, outgoing preparation and readback, rejection and lost replies,
 receipt recovery, account aliases, versioned read-state, cached avatars and logout.
 Pinned Rust format/Clippy, native tests and generated contracts are required for
-changes to the decoded transport. Browser checks exercise the same Rust simulator;
-no live endpoint is used.
+changes to the decoded transport. Automated journeys use the Rust simulator and
+do not contact a live endpoint.
 
 Linux x64 validation including thread summaries: 527 Rust tests
 passed across 20 executables in a non-root, read-only container with external
@@ -216,5 +235,9 @@ The group journey checks create/rename, own display name, mute/unmute, add/remov
 announcement clearing, refresh and three-step leave with retained history. It also
 checks partial member acceptance, service rejection, a lost admission response,
 a lost upstream acknowledgment, same-key status recovery and account isolation.
-The browser was checked against this simulator; live endpoint testing and desktop
-packaging remain unverified.
+The explicit-connect launcher additionally passes local HTTP fixture checks for
+bootstrap authorization, origin checks, account-only proxying, blocked owner
+routes and leaving the external daemon running. A read-only Linux x64 native
+browser check confirmed account admission, saved threads, message previews,
+cached avatars and group details. Browser mutation flows on a live account and
+desktop packaging remain unverified.
