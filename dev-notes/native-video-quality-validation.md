@@ -81,7 +81,24 @@ values alongside zero; unknown fields and other routing/format controls remain
 strict. The complete retained object passed an independent 101-range readback
 with exact source-byte equality. The stopped job and upload objects are
 retained, with no automatic retry or message send.
-A fresh control will validate the corrected daemon path; no original-mode recipient claim follows yet.
+A fresh 50 MiB control then passed the corrected built-image path in one
+worker attempt: paired playback/thumbnail upload, separate original upload,
+complete readback of all three objects, accepted CGI149 and complete local
+message/media writeback. It was sent at about 21:44 Pacific on 2026-10-22.
+Only unused padding bytes changed from the first control; the failed job was
+not retried. The retained playback is 1,531,327 bytes, thumbnail 7,095 bytes and
+original exactly 52,428,800 bytes. SDK streams and saved-file hashes match all
+three objects, with correct HTTP206 final ranges. The saved original fully
+decodes. The original SHA-256 is
+`139b48e617d3bf8cd5b42587bde08b366cbcd6c2152d95a83aacd38e71c2919f`.
+
+Copied-database verification independently checked one type43 history row,
+normal/raw/thumbnail XML-descriptor joins, all three protected sources/assets,
+resource31/32/33 records and official hardlink/cache bytes. Five original
+database-family members and six other key/source/cache files stayed unchanged.
+Cold CLI original retrieval matches all 50 MiB and SHA-256; the daemon returned
+online without another login. Recipient playback/original download for this
+final control is awaiting the account owner's check.
 
 The controlled source contains short video/audio and a valid ISO-BMFF padding
 atom to exactly 50 MiB. Ordinary-file success does not establish large-video
