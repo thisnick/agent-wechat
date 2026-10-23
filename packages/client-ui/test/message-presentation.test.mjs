@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { messagePresentation } from "../src/message-presentation.ts";
+import {
+  messagePresentation,
+  recallText,
+} from "../src/message-presentation.ts";
 
 test("quoted replies and forwarded history never enter the media download flow", () => {
   assert.equal(
@@ -57,5 +60,26 @@ test("recall markers override every body and content renderer", () => {
       recall: { observedAt: "now" },
     }),
     "recalled",
+  );
+});
+
+test("recall wording uses the recorded actor rather than assuming the original author recalled it", () => {
+  const name = (id) => (id === "bot" ? "Nick Bot" : "Someone");
+  const own = { direction: "outgoing", senderId: "self" };
+  assert.equal(
+    recallText({ ...own, recall: { actorId: "self" } }, name),
+    "You recalled this message",
+  );
+  assert.equal(
+    recallText({ ...own, recall: { actorId: "bot" } }, name),
+    "Nick Bot recalled this message",
+  );
+  assert.equal(recallText({ ...own, recall: {} }, name), "Message recalled");
+  assert.equal(
+    recallText(
+      { direction: "incoming", senderId: "bot", recall: { actorId: "bot" } },
+      name,
+    ),
+    "Message recalled",
   );
 });

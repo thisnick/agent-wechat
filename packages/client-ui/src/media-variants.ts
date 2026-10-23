@@ -18,7 +18,18 @@ export const downloadAsset = (
 ): MediaAsset | undefined =>
   assets.find((asset) => asset.variant === "original") ?? displayed;
 
-export const conversationPhotos = (
+// Thumbnail browsing never starts a full video transfer. Playback is admitted
+// only for the selected viewer item, using normal quality when offered.
+export const videoAsset = (
+  assets: MediaAsset[],
+  viewer: boolean,
+): MediaAsset | undefined =>
+  viewer
+    ? (cachedOriginal(assets) ??
+      assets.find((asset) => asset.variant === "normal"))
+    : assets.find((asset) => asset.variant === "thumbnail");
+
+export const conversationMedia = (
   messages: import("@agent-wechat/shared").NativeMessage[],
   account: string,
   thread: string,
@@ -27,6 +38,6 @@ export const conversationPhotos = (
     (message) =>
       message.accountId === account &&
       message.threadId === thread &&
-      message.type === 3 &&
+      [3, 43].includes(message.type) &&
       !message.recall,
   );

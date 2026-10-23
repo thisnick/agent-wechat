@@ -3,7 +3,7 @@ import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { canRecall } from "./message-recall.ts";
 import { messagePresentation } from "./message-presentation.ts";
-import { usePhotoViewer } from "./photo-viewer.tsx";
+import { useMediaViewer } from "./media-viewer-context.ts";
 import { Button, Icon } from "./ui.tsx";
 
 export function MessageActions({
@@ -13,12 +13,12 @@ export function MessageActions({
   message: NativeMessage;
   connection: Connection;
 }) {
-  const gallery = usePhotoViewer();
+  const gallery = useMediaViewer();
   const presentation = messagePresentation(message);
   const copyable =
     ["text", "reply", "forwarded", "link"].includes(presentation) &&
     !!message.body;
-  const photo = message.type === 3 && !message.recall && gallery;
+  const photo = [3, 43].includes(message.type) && !message.recall && gallery;
   const [status, setStatus] = useState("");
   const [open, setOpen] = useState(false);
   const menu = useRef<HTMLDetailsElement>(null);
@@ -83,7 +83,7 @@ export function MessageActions({
                     if (menu.current) menu.current.open = false;
                   }}
                 >
-                  Open photo
+                  {message.type === 43 ? "Open video" : "Open photo"}
                 </button>
               )}
             </div>

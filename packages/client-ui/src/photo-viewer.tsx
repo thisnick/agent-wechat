@@ -1,6 +1,4 @@
 import {
-  createContext,
-  useContext,
   useEffect,
   useRef,
   useState,
@@ -9,17 +7,14 @@ import {
 } from "react";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
-import { conversationPhotos } from "./media-variants.ts";
+import { conversationMedia, videoAsset } from "./media-variants.ts";
 import { mergeMessage } from "./session.ts";
 import { MediaCard, MediaDownload } from "./media.tsx";
 import { downloadAsset, standardImage } from "./media-variants.ts";
 import { useConversationNavigation } from "./conversation-navigation.tsx";
 import { Button } from "./ui.tsx";
 
-const Photos = createContext<{ open: (message: NativeMessage) => void } | null>(
-  null,
-);
-export const usePhotoViewer = () => useContext(Photos);
+import { MediaViewerContext } from "./media-viewer-context.ts";
 
 export function PhotoViewer({
   connection,
@@ -48,7 +43,7 @@ export function PhotoViewer({
       : null;
   const active = scoped && !scoped.recall ? scoped : null;
   const photos = active
-    ? conversationPhotos(
+    ? conversationMedia(
         mergeMessage(state.messages, active),
         active.accountId,
         active.threadId,
@@ -113,7 +108,7 @@ export function PhotoViewer({
           after.selected !== anchor.threadId
         )
           return;
-        const updated = conversationPhotos(
+        const updated = conversationMedia(
           mergeMessage(after.messages, anchor),
           anchor.accountId,
           anchor.threadId,
@@ -124,7 +119,7 @@ export function PhotoViewer({
           return;
         }
         if (after.nextMessages === before.nextMessages) {
-          setError(after.error || "Couldn’t load earlier photos.");
+          setError(after.error || "Couldn’t load earlier media.");
           break;
         }
       }
@@ -133,7 +128,7 @@ export function PhotoViewer({
     }
   }
   return (
-    <Photos.Provider
+    <MediaViewerContext.Provider
       value={{
         open: (message) => {
           setError("");
@@ -146,7 +141,7 @@ export function PhotoViewer({
         <dialog
           ref={dialog}
           className="photo-viewer"
-          aria-label="Photos"
+          aria-label="Media viewer"
           onCancel={(event) => {
             event.preventDefault();
             close();
@@ -155,6 +150,8 @@ export function PhotoViewer({
             if (event.target === event.currentTarget) close();
           }}
           onKeyDown={(event) => {
+            // Native video controls use arrow keys for seeking.
+            if (event.target instanceof HTMLVideoElement) return;
             if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
               event.preventDefault();
               void move(event.key === "ArrowLeft" ? -1 : 1);
@@ -170,11 +167,11 @@ export function PhotoViewer({
                       (contact) => contact.id === current.senderId,
                     )?.displayName ||
                     current.senderId ||
-                    "Photo"}
+                    (current.type === 43 ? "Video" : "Photo")}
               </strong>
               <span aria-live="polite">
                 {loading
-                  ? "Finding earlier photos…"
+                  ? "Finding earlier media…"
                   : `${index + 1} / ${photos.length}`}
                 {current.createdAt &&
                   ` · ${new Date(/^\d+$/.test(current.createdAt) ? Number(current.createdAt) * 1000 : current.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
@@ -191,33 +188,37 @@ export function PhotoViewer({
               </span>
             </div>
             <div className="photo-viewer-tools">
-              <Button
-                icon="zoom-out"
-                label="Zoom out"
-                disabled={zoom <= 1}
-                onClick={() => setZoom((value) => Math.max(1, value - 0.5))}
-              />
-              <button
-                className="photo-zoom-reset"
-                aria-label="Fit photo"
-                onClick={() => setZoom(1)}
-              >
-                {zoom === 1 ? "Fit" : `${Math.round(zoom * 100)}%`}
-              </button>
-              <Button
-                icon="zoom-in"
-                label="Zoom in"
-                disabled={zoom >= 4}
-                onClick={() => setZoom((value) => Math.min(4, value + 0.5))}
-              />
+              {current.type === 3 && (
+                <>
+                  <Button
+                    icon="zoom-out"
+                    label="Zoom out"
+                    disabled={zoom <= 1}
+                    onClick={() => setZoom((value) => Math.max(1, value - 0.5))}
+                  />
+                  <button
+                    className="photo-zoom-reset"
+                    aria-label="Fit photo"
+                    onClick={() => setZoom(1)}
+                  >
+                    {zoom === 1 ? "Fit" : `${Math.round(zoom * 100)}%`}
+                  </button>
+                  <Button
+                    icon="zoom-in"
+                    label="Zoom in"
+                    disabled={zoom >= 4}
+                    onClick={() => setZoom((value) => Math.min(4, value + 0.5))}
+                  />
+                </>
+              )}
               <PhotoDownload message={current} connection={connection} />
-              <Button icon="close" label="Close photos" onClick={close} />
+              <Button icon="close" label="Close viewer" onClick={close} />
             </div>
           </div>
           <div className="photo-viewer-body">
             <Button
               icon="back"
-              label="Previous photo"
+              label="Previous item"
               disabled={!previous || loading}
               onClick={() => void move(-1)}
             />
@@ -234,7 +235,7 @@ export function PhotoViewer({
             </div>
             <Button
               icon="chevron"
-              label="Next photo"
+              label="Next item"
               disabled={!next || loading}
               onClick={() => void move(1)}
             />
@@ -242,7 +243,7 @@ export function PhotoViewer({
           <div
             ref={thumbnails}
             className="photo-thumbnails"
-            aria-label="Photo thumbnails"
+            aria-label="Media thumbnails"
           >
             {state.nextMessages && (
               <button
@@ -252,14 +253,14 @@ export function PhotoViewer({
                   void earlier(photos[0]);
                 }}
               >
-                Earlier photos
+                Earlier media
               </button>
             )}
             {photos.map((photo, position) => (
               <button
                 key={photo.id}
                 className="photo-thumbnail"
-                aria-label={`Photo ${position + 1}`}
+                aria-label={`${photo.type === 43 ? "Video" : "Photo"} ${position + 1}`}
                 aria-current={photo.id === current.id ? "true" : undefined}
                 onClick={() => setSelected(photo)}
               >
@@ -278,7 +279,7 @@ export function PhotoViewer({
           )}
         </dialog>
       )}
-    </Photos.Provider>
+    </MediaViewerContext.Provider>
   );
 }
 
@@ -298,7 +299,12 @@ function PhotoDownload({
     <MediaDownload
       model={model}
       connection={connection}
-      asset={downloadAsset(state.assets, standardImage(state.assets))}
+      asset={downloadAsset(
+        state.assets,
+        message.type === 43
+          ? videoAsset(state.assets, true)
+          : standardImage(state.assets),
+      )}
     />
   );
 }

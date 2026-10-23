@@ -53,7 +53,7 @@ test("advertised originals and lower quality fallback bytes are not saved origin
 });
 
 test("downloads prefer the advertised original and never substitute standard bytes", async () => {
-  const { downloadAsset, conversationPhotos } = await import(
+  const { downloadAsset, conversationMedia } = await import(
     "../src/media-variants.ts"
   );
   const standard = {
@@ -81,9 +81,11 @@ test("downloads prefer the advertised original and never substitute standard byt
     "o",
   );
   assert.deepEqual(
-    conversationPhotos(
+    conversationMedia(
       [
         { id: "photo", accountId: "a", threadId: "t", type: 3 },
+        { id: "video", accountId: "a", threadId: "t", type: 43 },
+        { id: "pdf", accountId: "a", threadId: "t", type: 49 },
         { id: "sticker", accountId: "a", threadId: "t", type: 47 },
         { id: "recalled", accountId: "a", threadId: "t", type: 3, recall: {} },
         { id: "other-account", accountId: "b", threadId: "t", type: 3 },
@@ -92,8 +94,22 @@ test("downloads prefer the advertised original and never substitute standard byt
       "a",
       "t",
     ).map((m) => m.id),
-    ["photo"],
+    ["photo", "video"],
   );
+});
+
+test("video browsing uses thumbnails while the viewer prefers cached originals or normal playback", async () => {
+  const { videoAsset } = await import("../src/media-variants.ts");
+  const thumbnail = { id: "thumb", variant: "thumbnail", state: "pending" };
+  const normal = { id: "normal", variant: "normal", state: "pending" };
+  const original = { id: "original", variant: "original", state: "pending" };
+  assert.equal(videoAsset([original, normal, thumbnail], false), thumbnail);
+  assert.equal(videoAsset([original, normal, thumbnail], true), normal);
+  assert.equal(videoAsset([original, normal], false), undefined);
+  assert.equal(videoAsset([original], true), undefined);
+  const cached = { ...original, state: "available", actualVariant: "original" };
+  assert.equal(videoAsset([normal, cached, thumbnail], true), cached);
+  assert.equal(videoAsset([normal, cached, thumbnail], false), thumbnail);
 });
 
 test("carousel upgrades accept only verified cached originals", async () => {

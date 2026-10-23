@@ -22,9 +22,10 @@ import {
   canRetrieve,
   downloadAsset,
   cachedOriginal,
+  videoAsset,
 } from "./media-variants.ts";
 import { useVisible } from "./visible.tsx";
-import { usePhotoViewer } from "./photo-viewer.tsx";
+import { useMediaViewer } from "./media-viewer-context.ts";
 import type { IncomingMedia } from "./media-inbox.ts";
 
 const ended = new Set([
@@ -341,43 +342,60 @@ export function MediaCard({
   ).opening;
   const model = connection.incomingMedia.get(message.accountId, message.id);
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
-  const gallery = usePhotoViewer();
-  const image = previewOnly || message.type === 3;
+  const gallery = useMediaViewer();
+  const image = message.type === 3;
+  const video = message.type === 43;
   const sticker = message.type === 47;
   const voice = message.type === 34;
-  const visual = image || sticker;
+  const visual = image || sticker || video;
   const standard = standardImage(state.assets);
   const original = viewer ? cachedOriginal(state.assets) : undefined;
   const asset = image
     ? viewer && (!standard || !cachedVariant(standard)) && original
       ? original
       : standard
-    : (state.assets.find(
-        (asset) => asset.variant === (voice ? "normal" : "standard"),
-      ) ?? state.assets[0]);
+    : video
+      ? videoAsset(state.assets, viewer)
+      : (state.assets.find(
+          (asset) => asset.variant === (voice ? "normal" : "standard"),
+        ) ?? state.assets[0]);
   const working = !!asset && model.working(asset);
   useEffect(() => {
     if (visible || viewer) void model.load();
   }, [model, visible, viewer]);
   useEffect(() => {
-    if ((visual || voice) && !opening && (visible || viewer) && asset)
+    if (
+      (visual || voice) &&
+      !opening &&
+      (visible || viewer) &&
+      asset &&
+      // An original video is already cached; only normal playback or a
+      // thumbnail may be fetched automatically.
+      (!video || asset.variant !== "original")
+    )
       model.ensure(asset);
-  }, [model, asset, opening, visible, viewer, visual, voice]);
+  }, [model, asset, opening, visible, viewer, visual, voice, video]);
   const available = asset && cachedVariant(asset);
   return (
     <div
       ref={element}
-      className={`bubble media-card${visual ? " visual-media" : ""}${sticker ? " sticker-card" : ""}${voice ? " voice-card" : ""}${viewer ? " viewer-media" : ""}`}
+      className={`bubble media-card${visual ? " visual-media" : ""}${video ? " video-card" : ""}${sticker ? " sticker-card" : ""}${voice ? " voice-card" : ""}${viewer ? " viewer-media" : ""}`}
     >
       {!visual && !voice && (
         <div className="attachment-file">
           <Icon name="file" />
-          <strong>
-            {asset?.filename || (message.type === 43 ? "Video" : "Attachment")}
-          </strong>
+          <strong>{asset?.filename || "Attachment"}</strong>
         </div>
       )}
-      {available ? (
+      {video && !viewer ? (
+        <VideoPoster
+          asset={available ? asset : undefined}
+          connection={connection}
+          open={
+            !previewOnly && gallery ? () => gallery.open(message) : undefined
+          }
+        />
+      ) : available && (visual || voice) ? (
         <AssetContent
           key={`${asset.id}:${asset.sha256}`}
           asset={asset}
@@ -397,13 +415,17 @@ export function MediaCard({
             !state.loaded || working
               ? voice
                 ? "Loading voice message"
-                : "Loading image"
+                : video
+                  ? "Loading video"
+                  : "Loading image"
               : voice
                 ? "Voice message unavailable"
-                : "Image unavailable"
+                : video
+                  ? "Video unavailable"
+                  : "Image unavailable"
           }
         >
-          <Icon name={voice ? "play" : "image-off"} />
+          <Icon name={voice || video ? "play" : "image-off"} />
           {!state.loaded || working ? (
             <span className="media-spinner" />
           ) : asset && canRetrieve(asset) ? (
@@ -411,7 +433,7 @@ export function MediaCard({
           ) : null}
         </div>
       ) : null}
-      {!previewOnly && !voice && !image && state.loaded && (
+      {!previewOnly && !voice && !image && !video && state.loaded && (
         <MediaDownload
           model={model}
           connection={connection}
@@ -439,6 +461,32 @@ export function MediaCard({
         </span>
       )}
     </div>
+  );
+}
+
+function VideoPoster({
+  asset,
+  connection,
+  open,
+}: {
+  asset?: MediaAsset;
+  connection: Connection;
+  open?: () => void;
+}) {
+  const content = (
+    <>
+      {asset && <AssetContent asset={asset} connection={connection} />}
+      <span className="video-play">
+        <Icon name="play" />
+      </span>
+    </>
+  );
+  return open ? (
+    <button className="video-poster" aria-label="Open video" onClick={open}>
+      {content}
+    </button>
+  ) : (
+    <div className="video-poster">{content}</div>
   );
 }
 
@@ -624,7 +672,7 @@ export function MediaDownload({
     job?.totalBytes;
   const quality = original
     ? "original"
-    : asset.kind === "image"
+    : asset.kind === "image" || asset.kind === "video"
       ? "standard"
       : "";
   const label = saving
@@ -632,7 +680,7 @@ export function MediaDownload({
     : working
       ? "Downloading…"
       : ready
-        ? `Download${quality ? ` ${quality}` : ""}`
+        ? "Download"
         : original && canRetrieve(asset)
           ? "Request original"
           : canRetrieve(asset)
@@ -687,11 +735,20 @@ export function MediaDownload({
         <Icon name="download" />
         <span>{label}</span>
       </button>
+      {quality && label !== "Request original" && (
+        <span className="download-quality">
+          {quality === "original" ? "Original" : "Standard"}
+        </span>
+      )}
       <span className="download-disclosure" id={id} role="tooltip">
         {quality
           ? `${quality[0].toUpperCase()}${quality.slice(1)}`
           : asset.filename || "File"}
         {downloadBytes ? ` · ${size(downloadBytes)}` : " · Size unknown"}
+        {quality === "standard" &&
+        !state.assets.some((item) => item.variant === "original")
+          ? " · Original unavailable"
+          : ""}
         {!ready && canRetrieve(asset) ? " · Keep on agent-wechat hub" : ""}
       </span>
       {working && (

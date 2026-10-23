@@ -123,6 +123,10 @@
   font-style: italic;
   color: var(--muted);
 }
+.recall-notice {
+  justify-content: center;
+  font-size: 11px;
+}
 .empty-chat {
   text-align: center;
   color: var(--muted);
@@ -1012,6 +1016,10 @@ input:focus-visible {
 .media-download-button:hover {
   color: var(--ink);
 }
+.download-quality {
+  color: var(--muted);
+  font-size: 10px;
+}
 .media-download-button .icon,
 .media-error-indicator .icon {
   width: 15px;
@@ -1159,18 +1167,37 @@ input:focus-visible {
 .message-body {
   position: relative;
 }
-.message-meta time {
+.message-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.own .message-line {
+  flex-direction: row-reverse;
+}
+.message-content {
+  position: relative;
+  min-width: 0;
+}
+.message.own > .avatar {
+  margin-top: 0;
+}
+.message-time {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 9px;
+  color: var(--muted);
   opacity: 0;
   transition: opacity 0.12s;
 }
-.message:hover .message-meta time,
-.message:focus-within .message-meta time {
+.message:hover .message-time,
+.message:focus-within .message-time {
   opacity: 1;
 }
 .message-actions {
   position: absolute;
   right: 0;
-  top: -15px;
+  bottom: calc(100% + 4px);
   z-index: 4;
   display: flex;
   align-items: center;
@@ -1185,6 +1212,14 @@ input:focus-visible {
 }
 .message-actions:empty {
   display: none;
+}
+.message-actions::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 5px;
 }
 .message:hover .message-actions,
 .message:focus-within .message-actions {
@@ -1258,7 +1293,7 @@ input:focus-visible {
   background: var(--surface);
   font-size: 11px;
 }
-.message .media-card:not(.viewer-media) > .media-download {
+.message .sticker-card > .media-download {
   opacity: 0;
   pointer-events: none;
 }
@@ -1373,19 +1408,57 @@ input:focus-visible {
   width: 16px;
   height: 16px;
 }
+.video-poster {
+  display: grid;
+  position: relative;
+  place-items: center;
+  width: 280px;
+  max-width: 100%;
+  min-height: 150px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #0002;
+}
+.video-poster .media-preview {
+  display: block;
+  grid-area: 1 / 1;
+}
+.video-play {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  color: #fff;
+  background: #0008;
+}
+.video-play .icon {
+  width: 20px;
+  height: 20px;
+}
+.photo-thumbnail .video-poster {
+  width: 100%;
+  height: 60px;
+  min-height: 0;
+}
+.photo-thumbnail .video-play {
+  width: 26px;
+  height: 26px;
+}
 .earlier-photos {
   flex: 0 0 68px;
   font-size: 11px;
   color: var(--muted);
 }
 @media (hover: none) {
-  .message-meta time {
+  .message-time {
     opacity: 1;
   }
   .message-actions {
     position: static;
-    float: right;
-    margin-top: -5px;
+    justify-content: flex-end;
+    margin: 0 0 4px auto;
     opacity: 1;
     pointer-events: auto;
     background: transparent;

@@ -1,5 +1,18 @@
 import type { NativeMessage } from "@agent-wechat/shared";
 
+export function recallText(
+  message: NativeMessage,
+  name: (id: string) => string,
+) {
+  const actor = message.recall?.actorId;
+  if (!actor) return "Message recalled";
+  if (message.direction === "outgoing" && actor === message.senderId)
+    return "You recalled this message";
+  return actor === message.senderId
+    ? "Message recalled"
+    : `${name(actor)} recalled this message`;
+}
+
 // WeChat's application-message envelope also carries replies and shared cards.
 // Only file subtype 6 belongs in the ordinary attachment download flow.
 export function messagePresentation(message: NativeMessage) {

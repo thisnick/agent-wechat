@@ -32,7 +32,7 @@ import { HistorySearch } from "./history-search.ts";
 import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
 import { threadPreview } from "./thread-preview.ts";
-import { messagePresentation } from "./message-presentation.ts";
+import { messagePresentation, recallText } from "./message-presentation.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import { QuotedReply } from "./quoted-reply.tsx";
@@ -1394,6 +1394,20 @@ function Message({
   const navigation = useConversationNavigation();
   const own = m.direction === "outgoing";
   const presentation = messagePresentation(m);
+  if (presentation === "recalled" && !m.senderId)
+    return (
+      <article className="message recall-notice" data-message-id={m.id}>
+        <div className="message-line">
+          <span className="recalled">{recallText(m, name)}</span>
+          <time
+            className="message-time"
+            dateTime={date(m.createdAt).toISOString()}
+          >
+            {time(m.createdAt)}
+          </time>
+        </div>
+      </article>
+    );
   return (
     <article
       className={`message ${own ? "own" : ""}${navigation?.target?.id === m.id ? " quote-target" : ""}`}
@@ -1407,53 +1421,66 @@ function Message({
         name={own ? "You" : name(m.senderId || m.threadId)}
       />
       <div className="message-body">
-        <div className="message-meta">
-          <b>{own ? "You" : name(m.senderId || m.threadId)}</b>
-          <time dateTime={date(m.createdAt).toISOString()}>
+        {!own && (
+          <div className="message-meta">
+            <b>{name(m.senderId || m.threadId)}</b>
+          </div>
+        )}
+        <div className="message-line">
+          <div className="message-content">
+            <MessageActions message={m} connection={connection} />
+            {presentation === "recalled" ? (
+              <div className="bubble recalled">{recallText(m, name)}</div>
+            ) : presentation === "text" ? (
+              <div className="bubble">
+                <p>{m.body || (m.type >= 10000 ? "System message" : "")}</p>
+              </div>
+            ) : presentation === "reply" || presentation === "forwarded" ? (
+              <div className={`bubble ${presentation}-message`}>
+                {presentation === "reply" ? (
+                  <QuotedReply
+                    message={m}
+                    connection={connection}
+                    name={name}
+                  />
+                ) : (
+                  <div className="message-context">
+                    <Icon name="chat" />
+                    Forwarded messages
+                  </div>
+                )}
+                <p>
+                  {m.body ||
+                    (presentation === "reply"
+                      ? "Reply text is unavailable."
+                      : "Forwarded content is unavailable.")}
+                </p>
+              </div>
+            ) : presentation === "link" && m.link ? (
+              <div className="bubble">
+                <strong>{m.link.title || "Shared link"}</strong>
+                <p>{m.link.description}</p>
+                {m.link.url && /^https?:\/\//i.test(m.link.url) && (
+                  <a href={m.link.url} target="_blank" rel="noreferrer">
+                    Open link
+                  </a>
+                )}
+              </div>
+            ) : presentation === "media" ? (
+              <MediaCard message={m} connection={connection} />
+            ) : (
+              <div className="bubble unsupported-message">
+                <p>This WeChat message type isn’t supported yet.</p>
+              </div>
+            )}
+          </div>
+          <time
+            className="message-time"
+            dateTime={date(m.createdAt).toISOString()}
+          >
             {time(m.createdAt)}
           </time>
         </div>
-        <MessageActions message={m} connection={connection} />
-        {presentation === "recalled" ? (
-          <div className="bubble recalled">Message recalled</div>
-        ) : presentation === "text" ? (
-          <div className="bubble">
-            <p>{m.body || (m.type >= 10000 ? "System message" : "")}</p>
-          </div>
-        ) : presentation === "reply" || presentation === "forwarded" ? (
-          <div className={`bubble ${presentation}-message`}>
-            {presentation === "reply" ? (
-              <QuotedReply message={m} connection={connection} name={name} />
-            ) : (
-              <div className="message-context">
-                <Icon name="chat" />
-                Forwarded messages
-              </div>
-            )}
-            <p>
-              {m.body ||
-                (presentation === "reply"
-                  ? "Reply text is unavailable."
-                  : "Forwarded content is unavailable.")}
-            </p>
-          </div>
-        ) : presentation === "link" && m.link ? (
-          <div className="bubble">
-            <strong>{m.link.title || "Shared link"}</strong>
-            <p>{m.link.description}</p>
-            {m.link.url && /^https?:\/\//i.test(m.link.url) && (
-              <a href={m.link.url} target="_blank" rel="noreferrer">
-                Open link
-              </a>
-            )}
-          </div>
-        ) : presentation === "media" ? (
-          <MediaCard message={m} connection={connection} />
-        ) : (
-          <div className="bubble unsupported-message">
-            <p>This WeChat message type isn’t supported yet.</p>
-          </div>
-        )}
       </div>
     </article>
   );

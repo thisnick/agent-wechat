@@ -119,25 +119,34 @@ status label. Forwarded history renders normalized text. Unknown message types
 show an unsupported-content label instead of entering the media flow.
 
 Images and stickers show their content without a file header or status text.
-Timestamps and message actions appear on hover or keyboard focus. Touch devices
+Timestamps beside the bubble and message actions above its right edge appear on
+hover or keyboard focus. Sent messages have no sender label; received messages
+keep the sender name. Timestamps sit to the left of sent bubbles and to the right
+of received bubbles. Touch devices
 keep the actions accessible. The menu offers copying text or opening a photo;
 own messages also offer **Recall**. Recall keeps its admission key and operation
 receipt across reloads. Unknown outcomes offer a status check instead of starting
 another attempt. The hub decides whether the exact message can be recalled.
-Sending native quoted replies still needs a send API extension.
+The hub supports sending native quoted text replies; a quoted-reply composer is not yet connected in this UI.
 
-Incoming images automatically load standard quality. Clicking a photo opens a
-viewer with previous/next controls, a thumbnail strip, zoom, and **Show message**.
-Earlier photos load through the conversation's history cursor as needed. The
+Incoming images automatically load standard quality. Clicking a photo or video opens a
+shared viewer with previous/next controls, a thumbnail strip, and **Show message**.
+Photos have zoom controls; videos have native playback controls. Video thumbnails
+load separately from playback, so browsing the strip does not fetch full videos.
+Earlier photos and videos load through the conversation's history cursor as needed. The
 viewer offers **Request original** when an advertised original is not cached,
-then **Download original** to save the cached full-quality image to this device.
-When there is no original source, it offers **Download standard** instead. Size
+then **Download** to save the cached original to this device. A small quality label
+beside the button identifies original or standard. When no original source is
+provided, only standard can be downloaded; the download tooltip explains this. Size
 appears only when the download control is hovered or focused; transfer progress
 and cancellation appear while it runs. The conversation keeps displaying standard
 quality even after an original is downloaded. The carousel first shows standard,
 then replaces it with a verified cached original after its bytes load and decode.
 A failed upgrade leaves the standard visible. Opening the carousel does not
 request an original from WeChat. An unavailable image shows an icon.
+Files show their filename and an always-visible download control. **Request original**
+keeps an uncached file on the hub, then **Download** saves it to the device. Generic
+files, including PDFs, do not render an image placeholder or an inline PDF viewer.
 
 Clicking a resolved quote loads any intervening history pages and scrolls to its
 source message. Missing or recalled originals retain their state. Searches can
