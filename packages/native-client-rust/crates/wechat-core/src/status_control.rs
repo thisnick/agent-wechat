@@ -9,6 +9,9 @@ pub(super) enum NoLocalEffectStatus {
     EmptyHandOffMaster,
     EmptyHandOffMasterList,
     PackagesUpdatedWithoutHandler,
+    OwnUsernameWithoutHandler,
+    ZeroLastMessageWithoutHandler,
+    PeerLastMessageWithoutHandler,
 }
 
 impl NoLocalEffectStatus {
@@ -16,6 +19,9 @@ impl NoLocalEffectStatus {
         match self {
             Self::EmptyHandOffMaster | Self::EmptyHandOffMasterList => 11,
             Self::PackagesUpdatedWithoutHandler => 23,
+            Self::OwnUsernameWithoutHandler => 3,
+            Self::ZeroLastMessageWithoutHandler => 15,
+            Self::PeerLastMessageWithoutHandler => 16,
         }
     }
 
@@ -24,6 +30,9 @@ impl NoLocalEffectStatus {
             Self::EmptyHandOffMaster => "empty_handoff_master",
             Self::EmptyHandOffMasterList => "empty_handoff_master_list",
             Self::PackagesUpdatedWithoutHandler => "packages_updated_without_handler",
+            Self::OwnUsernameWithoutHandler => "own_username_without_handler",
+            Self::ZeroLastMessageWithoutHandler => "zero_last_message_without_handler",
+            Self::PeerLastMessageWithoutHandler => "peer_last_message_without_handler",
         }
     }
 }
@@ -34,6 +43,15 @@ struct PackagesUpdated {
     op: String,
     #[serde(rename = "packageId")]
     _package_id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LastMessage {
+    #[serde(rename = "messageSvrId")]
+    server_id: String,
+    #[serde(rename = "MsgCreateTime")]
+    create_time: String,
 }
 
 fn field_text<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Result<&'a str> {
@@ -49,8 +67,10 @@ fn field_text<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Result<&'a str> 
 /// updates only in-memory sequence/counters when its inner opcode is 4 and
 /// neither counter attribute is present; without items, dispatch loops do not
 /// run. Other inner opcodes can request synchronization and remain blocked.
-/// The complete status-handler table has no opcode 23 entry; only the observed
-/// peer-directed packagesUpdated/newPackage shape is classified here.
+/// Table 0xa8b0ec0 and constructor 0x6202080 register exactly 1,2,4,5,7,9,11,
+/// 13,14,21. Lookup 0x61fe220 returns a null handler for absent entries, and
+/// dispatcher 0x61fc800 advances without calling one. Only the recorded forms
+/// of unregistered opcodes 3,15,16,23 are classified here.
 pub(super) fn parse_no_local_effect_status(
     message: &AddMessage,
     own_username: &str,
@@ -105,7 +125,7 @@ pub(super) fn parse_no_local_effect_status(
         ensure!(
             ordinary(op, "op")
                 && op.attributes().len() == 1
-                && matches!(op.attribute("id"), Some("11" | "23"))
+                && matches!(op.attribute("id"), Some("3" | "11" | "15" | "16" | "23"))
                 && op
                     .attributes()
                     .all(|attribute| attribute.namespace().is_none())
@@ -113,7 +133,6 @@ pub(super) fn parse_no_local_effect_status(
             "unsupported_status_control"
         );
         let children: Vec<_> = op.children().filter(|node| node.is_element()).collect();
-        ensure!(children.len() == 2, "unsupported_status_control");
         let field = |name: &str| -> Result<roxmltree::Node<'_, '_>> {
             let mut nodes = children
                 .iter()
@@ -126,6 +145,42 @@ pub(super) fn parse_no_local_effect_status(
             );
             Ok(node)
         };
+        if op.attribute("id") == Some("3") {
+            ensure!(
+                children.len() == 1
+                    && message.to == own_username
+                    && field_text(field("username")?)? == own_username,
+                "unsupported_status_control"
+            );
+            return Ok(NoLocalEffectStatus::OwnUsernameWithoutHandler);
+        }
+        if matches!(op.attribute("id"), Some("15" | "16")) {
+            ensure!(
+                children.len() == 2
+                    && message.to != own_username
+                    && field_text(field("name")?)? == "lastMessage",
+                "unsupported_status_control"
+            );
+            let last: LastMessage = serde_json::from_str(field_text(field("arg")?)?)?;
+            if op.attribute("id") == Some("15") {
+                ensure!(
+                    last.server_id == "0" && last.create_time == "0",
+                    "unsupported_status_control"
+                );
+                return Ok(NoLocalEffectStatus::ZeroLastMessageWithoutHandler);
+            }
+            let positive = |value: &str| {
+                value
+                    .parse::<u64>()
+                    .is_ok_and(|n| n != 0 && n.to_string() == value)
+            };
+            ensure!(
+                positive(&last.server_id) && positive(&last.create_time),
+                "unsupported_status_control"
+            );
+            return Ok(NoLocalEffectStatus::PeerLastMessageWithoutHandler);
+        }
+        ensure!(children.len() == 2, "unsupported_status_control");
         let name = field_text(field("name")?)?;
         let arg = field("arg")?;
         match op.attribute("id") {
@@ -196,6 +251,73 @@ pub(super) fn parse_no_local_effect_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_handler_policy_accepts_only_the_recorded_opcode_forms() {
+        let own = "<msg><op id='3'><username>self</username></op></msg>";
+        let last = |opcode, server, time| {
+            format!("<msg><op id='{opcode}'><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"{server}\",\"MsgCreateTime\":\"{time}\"}}]]></arg></op></msg>")
+        };
+        for (xml, peer, expected, opcode) in [
+            (
+                own.into(),
+                "self",
+                NoLocalEffectStatus::OwnUsernameWithoutHandler,
+                3,
+            ),
+            (
+                last(15, "0", "0"),
+                "peer",
+                NoLocalEffectStatus::ZeroLastMessageWithoutHandler,
+                15,
+            ),
+            (
+                last(16, "18446744073709551615", "1700000000123"),
+                "peer",
+                NoLocalEffectStatus::PeerLastMessageWithoutHandler,
+                16,
+            ),
+        ] {
+            let mut value = message(&xml);
+            value.to = peer.into();
+            value.peer = peer.into();
+            let classified = parse_no_local_effect_status(&value, "self").unwrap();
+            assert_eq!(classified, expected);
+            assert_eq!(classified.operation_id(), opcode);
+            for xml in [
+                xml.replace("</msg>", "<op id='999'/></msg>"),
+                xml.replace("<msg>", "<msg xmlns='urn:unknown'>"),
+                xml.replace("<msg>", "<msg>unexpected"),
+                xml.replace("</op>", "<unknown/></op>"),
+                xml.replace("<op ", "<op extra='1' "),
+                xml.replace("</op>", "<!--unknown--></op>"),
+            ] {
+                value.content = xml.into_bytes();
+                assert!(parse_no_local_effect_status(&value, "self").is_none());
+            }
+        }
+        for (opcode, server, time) in [
+            (1, "0", "0"),
+            (2, "1", "90"),
+            (5, "1", "90"),
+            (15, "1", "90"),
+            (16, "0", "0"),
+            (16, "01", "90"),
+            (16, "1", "18446744073709551616"),
+            (99, "1", "90"),
+        ] {
+            let mut value = message(&last(opcode, server, time));
+            value.to = "peer".into();
+            value.peer = "peer".into();
+            assert!(parse_no_local_effect_status(&value, "self").is_none());
+        }
+        for xml in [
+            own.replace(">self<", ">peer<"),
+            own.replace("</op>", "<username>self</username></op>"),
+        ] {
+            assert!(parse_no_local_effect_status(&message(&xml), "self").is_none());
+        }
+    }
     use wechat_protocol::protobuf as p;
 
     fn message(xml: &str) -> AddMessage {

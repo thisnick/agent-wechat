@@ -155,6 +155,167 @@ fn wire_recall_uses_explicit_target_and_does_not_assume_official_row_format() {
 }
 
 #[test]
+fn sender_prefixed_group_recall_keeps_the_chat_and_target_checks() {
+    let xml = "<sysmsg type='revokemsg'><revokemsg><session>room@chatroom</session><newmsgid>123</newmsgid></revokemsg></sysmsg>";
+    let command = add(
+        10002,
+        "room@chatroom",
+        "synthetic_self",
+        format!("member:\n{xml}").as_bytes(),
+        999,
+        110,
+    );
+    let message =
+        wechat_protocol::wire::decode_add_message(&command.payload, "synthetic_self").unwrap();
+    let parsed = crate::recalls::incoming_recall(&message, "synthetic_self")
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.thread, "room@chatroom");
+    assert_eq!(parsed.server, "123");
+    let mut with_empty_announcement = message.clone();
+    with_empty_announcement.content = String::from_utf8(with_empty_announcement.content)
+        .unwrap()
+        .replace("</revokemsg>", "<announcement_id/></revokemsg>")
+        .into_bytes();
+    assert_eq!(
+        crate::recalls::incoming_recall(&with_empty_announcement, "synthetic_self")
+            .unwrap()
+            .unwrap()
+            .server,
+        "123"
+    );
+    let mut with_empty_cdata = with_empty_announcement.clone();
+    with_empty_cdata.content = String::from_utf8(with_empty_cdata.content)
+        .unwrap()
+        .replace(
+            "<announcement_id/>",
+            "<announcement_id><![CDATA[]]></announcement_id>",
+        )
+        .into_bytes();
+    assert_eq!(
+        crate::recalls::incoming_recall(&with_empty_cdata, "synthetic_self")
+            .unwrap()
+            .unwrap()
+            .server,
+        "123"
+    );
+    for field in [
+        "<announcement_id>123</announcement_id>",
+        "<announcement_id> </announcement_id>",
+        "<announcement_id unknown='1'/>",
+        "<announcement_id><unknown/></announcement_id>",
+        "<announcement_id><!--unknown--></announcement_id>",
+        "<announcement_id/><announcement_id/>",
+        "<announcement_id/><revoketime>110</revoketime>",
+    ] {
+        let mut invalid = with_empty_announcement.clone();
+        invalid.content = String::from_utf8(invalid.content)
+            .unwrap()
+            .replace("<announcement_id/>", field)
+            .into_bytes();
+        assert!(crate::recalls::incoming_recall(&invalid, "synthetic_self").is_err());
+    }
+    for prefix in [
+        "",
+        "member@chatroom",
+        "two words",
+        "member\r",
+        "member\n",
+        &"x".repeat(513),
+    ] {
+        let mut invalid = message.clone();
+        invalid.content = format!("{prefix}:\n{xml}").into_bytes();
+        assert!(crate::recalls::incoming_recall(&invalid, "synthetic_self")
+            .unwrap()
+            .is_none());
+    }
+    for mutation in 0..5 {
+        let mut invalid = message.clone();
+        match mutation {
+            0 => invalid.from = "peer".into(),
+            1 => invalid.peer = "other@chatroom".into(),
+            2 => invalid.to = "foreign".into(),
+            3 => invalid.outgoing = true,
+            _ => invalid.sender_id = Some("other-member".into()),
+        }
+        assert!(crate::recalls::incoming_recall(&invalid, "synthetic_self")
+            .unwrap()
+            .is_none());
+    }
+    let mut wrong_target = message.clone();
+    wrong_target.content = String::from_utf8(wrong_target.content)
+        .unwrap()
+        .replace(
+            "<session>room@chatroom</session>",
+            "<session>other@chatroom</session>",
+        )
+        .into_bytes();
+    assert!(
+        crate::recalls::incoming_recall(&wrong_target, "synthetic_self")
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("recall_target_thread_mismatch")
+    );
+}
+
+#[test]
+fn sender_prefixed_group_recall_projects_once_without_creating_a_control_message() {
+    let (_temporary, store, core) = fixture();
+    let original = add(
+        1,
+        "room@chatroom",
+        "synthetic_self",
+        b"member:\nOriginal group message",
+        123,
+        100,
+    );
+    core.apply_sync_command("one", &original, "group-original", "live")
+        .unwrap();
+    let before = core.messages("one", "room@chatroom", None, None).unwrap()["items"][0].clone();
+    let control = add(10002, "room@chatroom", "synthetic_self", b"member:\n<sysmsg type='revokemsg'><revokemsg><session>room@chatroom</session><newmsgid>123</newmsgid><announcement_id><![CDATA[]]></announcement_id></revokemsg></sysmsg>", 999, 110);
+    for _ in 0..2 {
+        core.apply_sync_command("one", &control, "group-recall", "live")
+            .unwrap();
+    }
+    let id = before["id"].as_str().unwrap();
+    let after = core.message("one", id).unwrap();
+    assert_eq!(after["id"], before["id"]);
+    assert_eq!(after["serverId"], "123");
+    assert_eq!(after["body"], crate::recalls::RECALLED_BODY);
+    assert_eq!(after["type"], 10000);
+    assert_eq!(
+        core.messages("one", "room@chatroom", None, None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(recall_count(&store), 1);
+    let key = "sync-control:group-recall";
+    let sealed = store.runtime("one", key).unwrap().unwrap();
+    assert_eq!(
+        *core.vault.open_record("one", key, &sealed).unwrap(),
+        control.payload
+    );
+    assert!(store.runtime("one", "group-recall").unwrap().is_some());
+    assert!(store
+        .recall_marker("one", "room@chatroom", "999")
+        .unwrap()
+        .is_none());
+    drop(core);
+    let core = Core::new(store.clone(), None).unwrap();
+    core.configure_profile_format_key(&[9; 16]).unwrap();
+    core.apply_sync_command("one", &control, "group-recall", "catchup")
+        .unwrap();
+    assert_eq!(
+        core.message("one", id).unwrap()["body"],
+        crate::recalls::RECALLED_BODY
+    );
+    assert_eq!(recall_count(&store), 1);
+}
+
+#[test]
 fn incoming_recall_preserves_identity_and_blocks_replayed_history_quotes_and_cached_bytes() {
     let (_temporary, store, core) = fixture();
     let server = u64::MAX - 1;

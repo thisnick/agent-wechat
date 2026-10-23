@@ -35,6 +35,8 @@ mod read_sync;
 mod saved_login;
 #[path = "status_control.rs"]
 mod status_control;
+#[path = "system_control.rs"]
+mod system_control;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

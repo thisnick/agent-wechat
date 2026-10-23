@@ -450,6 +450,19 @@ impl Core {
                 self.store.put_runtime(account, receipt, b"1")?;
                 return Ok(());
             }
+            if let Some(control) =
+                super::system_control::parse_no_local_effect_system(&message, &state.own_username)
+            {
+                self.retain_control_raw(account, command, receipt)?;
+                self.store.append_event_once(
+                    account,
+                    &format!("control-no-local-effect:{receipt}"),
+                    "account.control_observed",
+                    &json!({"commandId":5,"messageType":10002,"classification":control.classification(),"projection":"no_local_effect","policy":"linux_4_1_13_26","origin":origin}),
+                )?;
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
+            }
             if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
                 let blocked = message_blocker(&message);
                 if matches!(message.message_type, 51 | 10002) {
@@ -1133,11 +1146,22 @@ mod encrypted_roundtrip {
             901,
             100,
         );
+        let new_controls = vec![
+            add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="3"><username>synthetic_self</username></op></msg>"#, 902, 100),
+            add(51, "synthetic_self", "peer", br#"<msg><op id="15"><name>lastMessage</name><arg>{"messageSvrId":"0","MsgCreateTime":"0"}</arg></op></msg>"#, 903, 100),
+            add(51, "synthetic_self", "peer", br#"<msg><op id="16"><name>lastMessage</name><arg>{"messageSvrId":"99","MsgCreateTime":"1700000000123"}</arg></op></msg>"#, 904, 100),
+            add(10002, "weixin", "synthetic_self", br#"<sysmsg type="ClientCheckGetExtInfo"><ClientCheckGetExtInfo><ReportContext>private-check</ReportContext><Basic>1</Basic><Cellular>0</Cellular></ClientCheckGetExtInfo></sysmsg>"#, 905, 100),
+            add(10002, "synthetic_self", "synthetic_self", br#"<appmsg appid="" sdkver="0"><type>35</type><msgcontent>private-card</msgcontent></appmsg>"#, 906, 100),
+            add(10002, "synthetic_self", "room@chatroom", br#"<sysmsg type="mmchatroombarannouncememt"><mmchatroombarannouncememt><content>private-bar</content><xmlcontent>private-xml</xmlcontent><announcement_id>123</announcement_id></mmchatroombarannouncememt></sysmsg>"#, 907, 100),
+        ];
         let batch = wechat_protocol::wire::SyncBatch {
             code: 0,
             flags: 0,
             cursor: p::uint(1, 0),
-            commands: vec![control.clone(), packages.clone()],
+            commands: [control.clone(), packages.clone()]
+                .into_iter()
+                .chain(new_controls.clone())
+                .collect(),
             continuation: false,
         };
         let receipt = "projected:empty-handoff:0";
@@ -1165,11 +1189,11 @@ mod encrypted_roundtrip {
         store.append_event_once("one", &format!("control-observed:{receipt}"), "account.control_observed", &json!({"control":{"commandId":5,"messageType":51,"operationIds":[11]},"projection":"blocked"})).unwrap();
         assert!(store.pending_cursor_projection("one").unwrap());
         let result = core.recover_projection("one").unwrap();
-        assert_eq!(result["projectedCommands"], 2);
+        assert_eq!(result["projectedCommands"], 8);
         assert_eq!(result["pendingCommands"], 0);
         assert_eq!(store.pending_sync_count("one").unwrap(), 0);
         assert!(!store.pending_cursor_projection("one").unwrap());
-        for (index, command) in [&control, &packages].into_iter().enumerate() {
+        for (index, command) in batch.commands.iter().enumerate() {
             let receipt = format!("projected:empty-handoff:{index}");
             assert!(store.runtime("one", &receipt).unwrap().is_some());
             let key = format!("sync-control:{receipt}");
@@ -1213,6 +1237,15 @@ mod encrypted_roundtrip {
             .unwrap();
         core.apply_sync_command("one", &packages, "projected:empty-handoff:1", "catchup")
             .unwrap();
+        for (index, command) in new_controls.iter().enumerate() {
+            core.apply_sync_command(
+                "one",
+                command,
+                &format!("projected:empty-handoff:{}", index + 2),
+                "catchup",
+            )
+            .unwrap();
+        }
         let events = store.events("one", 0, 100).unwrap();
         let observed: Vec<_> = events
             .iter()
@@ -1221,7 +1254,7 @@ mod encrypted_roundtrip {
                     && event.data["projection"] == "no_local_effect"
             })
             .collect();
-        assert_eq!(observed.len(), 2);
+        assert_eq!(observed.len(), 8);
         assert_eq!(observed[0].data["operationIds"], json!([11]));
         assert_eq!(
             observed[0].data["classification"],
@@ -1234,6 +1267,7 @@ mod encrypted_roundtrip {
                 !value.contains("synthetic_self")
                     && !value.contains("packageId")
                     && !value.contains("synthetic-device")
+                    && !value.contains("private-")
                     && !value.contains("<arg")
             );
         }
@@ -1287,6 +1321,7 @@ mod encrypted_roundtrip {
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="dynacfg"/>"#, 904, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="functionmsg"><private>sensitive-function-data</private></sysmsg>"#, 906, 100),
                 add(10002, "peer", "synthetic_self", b"\xff\xfe", 907, 100),
+                add(10002, "synthetic_self", "synthetic_self", br#"<appmsg appid="" sdkver="0"><type>35</type></appmsg>"#, 910, 100),
                 add(1, "peer", "synthetic_self", b"First retained message", 77, 101),
             ],
             continuation: false,
@@ -1295,7 +1330,7 @@ mod encrypted_roundtrip {
         let result = core
             .commit_sync_batch("one", batch.clone(), "fixture", "fixture")
             .unwrap();
-        assert_eq!(result["projection"]["projectedCommands"], 3);
+        assert_eq!(result["projection"]["projectedCommands"], 4);
         assert_eq!(result["projection"]["pendingCommands"], 8);
         assert_eq!(store.pending_sync_count("one").unwrap(), 1);
         assert!(store.pending_cursor_projection("one").unwrap());
@@ -1338,7 +1373,7 @@ mod encrypted_roundtrip {
                 .filter(|event| event.kind == "account.control_observed"
                     && event.data["projection"] == "no_local_effect")
                 .count(),
-            2
+            3
         );
         assert!(!events.iter().any(|event| event.kind == "sync.committed"));
         assert!(!serde_json::to_string(&events)
@@ -1580,7 +1615,7 @@ mod encrypted_roundtrip {
         ];
         let commands: Vec<_> = peers.iter().enumerate().map(|(index, peer)| {
             add(51, "synthetic_self", peer,
-                format!("<msg><op id=\"5\"><username>{peer}</username><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"90\"}}]]></arg></op></msg>").as_bytes(),
+                format!("<msg><op id=\"5\"><username>{peer}</username><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"1700000000123\"}}]]></arg></op></msg>").as_bytes(),
                 900 + index as u64, 100)
         }).collect();
         // Simulate a crash after durable admission and before its outcome was

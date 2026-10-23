@@ -77,7 +77,30 @@ pub(crate) fn incoming_recall(message: &AddMessage, own: &str) -> Result<Option<
     let Ok(text) = std::str::from_utf8(&message.content) else {
         return Ok(None);
     };
-    let Some(doc) = recall_xml(text) else {
+    let group_xml = || {
+        // Incoming group controls use the ordinary "sender:\n" envelope.
+        // Admit it only for this account's incoming group, preserving the
+        // session/target checks below and the original sealed wire bytes.
+        if !message.from.ends_with("@chatroom")
+            || message.peer != message.from
+            || message.to != own
+            || message.outgoing
+            || text.len() > 128 * 1024 + 514
+        {
+            return None;
+        }
+        let (sender, xml) = text.split_once(":\n")?;
+        if sender.is_empty()
+            || sender.len() > 512
+            || sender.ends_with("@chatroom")
+            || sender.chars().any(|c| c.is_whitespace() || c.is_control())
+            || message.sender_id.as_deref().is_some_and(|id| id != sender)
+        {
+            return None;
+        }
+        recall_xml(xml)
+    };
+    let Some(doc) = recall_xml(text).or_else(group_xml) else {
         return Ok(None);
     };
     ensure!(
@@ -96,17 +119,42 @@ pub(crate) fn incoming_recall(message: &AddMessage, own: &str) -> Result<Option<
             .all(|n| n.tag_name().namespace().is_none()
                 && matches!(
                     n.tag_name().name(),
-                    "session" | "msgid" | "newmsgid" | "replacemsg" | "revoketime"
+                    "session"
+                        | "msgid"
+                        | "newmsgid"
+                        | "replacemsg"
+                        | "revoketime"
+                        | "announcement_id"
                 )),
         "unsupported_recall_control"
     );
-    for name in ["session", "msgid", "newmsgid", "replacemsg", "revoketime"] {
+    for name in [
+        "session",
+        "msgid",
+        "newmsgid",
+        "replacemsg",
+        "revoketime",
+        "announcement_id",
+    ] {
         ensure!(
             revoke
                 .children()
                 .filter(|n| n.is_element() && n.tag_name().name() == name)
                 .count()
                 <= 1,
+            "unsupported_recall_control"
+        );
+    }
+    if let Some(announcement) = child(revoke, "announcement_id") {
+        // Linux 4.1.13.26 parser 0x60df1e0's ordinary recall branch (without
+        // revoketime) reads session/newmsgid/replacemsg and ignores this field.
+        // Admit only the recorded empty form, not announcement mutations.
+        ensure!(
+            announcement.attributes().len() == 0
+                && announcement
+                    .children()
+                    .all(|node| node.is_text() && node.text().is_some_and(str::is_empty))
+                && child(revoke, "revoketime").is_none(),
             "unsupported_recall_control"
         );
     }

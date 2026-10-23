@@ -124,7 +124,9 @@ fn parse_thread_control(
         );
         ensure!(
             last.create_time
-                .parse::<u32>()
+                // This metadata can exceed the notification's 32-bit seconds.
+                // Validate it losslessly without using it as the read cutoff.
+                .parse::<u64>()
                 .is_ok_and(|value| value != 0 && value.to_string() == last.create_time),
             "unsupported_read_control"
         );
@@ -238,6 +240,60 @@ mod tests {
         assert!(parse_remote_thread_exit_read(&message(), "self").is_none());
         value.from = "foreign".into();
         assert!(parse_remote_thread_exit_read(&value, "self").is_none());
+    }
+
+    #[test]
+    fn wide_last_message_times_do_not_replace_the_notification_cutoff() {
+        let original = String::from_utf8(message().content).unwrap();
+        for timestamp in ["4294967296", "1700000000123", "18446744073709551615"] {
+            for operation in ["1", "5"] {
+                let mut value = message();
+                value.content = original
+                    .replace("id=\"1\"", &format!("id=\"{operation}\""))
+                    .replace(
+                        "MsgCreateTime\":\"90",
+                        &format!("MsgCreateTime\":\"{timestamp}"),
+                    )
+                    .into_bytes();
+                let read = if operation == "1" {
+                    parse_remote_thread_read(&value, "self")
+                } else {
+                    parse_remote_thread_exit_read(&value, "self")
+                }
+                .unwrap();
+                assert_eq!(read.thread, "peer");
+                assert_eq!(read.through_time, 100);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_last_message_times_remain_blocked_for_reads_and_exits() {
+        let original = String::from_utf8(message().content).unwrap();
+        for timestamp in [
+            "0",
+            "090",
+            "-1",
+            "+1",
+            " 90",
+            "90.0",
+            "1e3",
+            "18446744073709551616",
+        ] {
+            let mut value = message();
+            value.content = original
+                .replace(
+                    "MsgCreateTime\":\"90",
+                    &format!("MsgCreateTime\":\"{timestamp}"),
+                )
+                .into_bytes();
+            assert!(parse_remote_thread_read(&value, "self").is_none());
+            value.content = String::from_utf8(value.content)
+                .unwrap()
+                .replace("id=\"1\"", "id=\"5\"")
+                .into_bytes();
+            assert!(parse_remote_thread_exit_read(&value, "self").is_none());
+        }
     }
 
     #[test]
