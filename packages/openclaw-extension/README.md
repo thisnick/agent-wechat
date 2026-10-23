@@ -164,9 +164,10 @@ Native text/media sends retain daemon intent/job identity and caller idempotency
 `channels.agent-wechat.mediaMaxMb` limits both incoming retained attachments and
 outgoing sources in MiB. Outgoing sources must also fit the selected kind's
 native limit: ordinary files have a 512 MiB ceiling (536,870,912 bytes);
-images, video and voice retain 26,214,383 bytes. The native daemon's 32 MiB File
-Transfer PDF passed acceptance, recipient opening and cold byte verification;
-see the [native capability checklist](../native-client-rust/FEATURES.md).
+images, video and voice retain 26,214,383 bytes. Native File Transfer PDFs passed
+acceptance, recipient opening and cold byte verification at 32 MiB and 50 MiB.
+Full-client 512 MiB send validation remains pending. The 50 MiB file also passed
+real OpenClaw storage; see the [native capability checklist](../native-client-rust/FEATURES.md).
 Raising `mediaMaxMb` cannot extend the kind-specific limit. Kind selection occurs
 before staging, using the local extension or HTTP content type. Ordinary audio
 is a file unless `audioAsVoice` selects voice.
