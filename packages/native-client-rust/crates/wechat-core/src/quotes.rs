@@ -207,7 +207,7 @@ impl Core {
         if self.quote_is_recalled(account, thread, &server, &reader, own.as_deref())? {
             return Ok(response("recalled", Value::Null));
         }
-        if ![1, 3].contains(&kind) {
+        if ![1, 3, 34, 43, 49].contains(&kind) {
             return Ok(response("unsupported", Value::Null));
         }
         let mut matches = reader.messages_by_server_id(thread, &server, own.as_deref())?;
@@ -231,6 +231,9 @@ impl Core {
         };
         if original.id == parent.id || original.message_type != i64::from(kind) {
             return Ok(response("invalid", Value::Null));
+        }
+        if kind == 49 && !message_app(&original).is_some_and(|a| matches!(a.subtype, 5 | 6 | 57)) {
+            return Ok(response("unsupported", Value::Null));
         }
         Ok(response(
             "resolved",
@@ -293,6 +296,47 @@ mod tests {
             ],
         )
         .unwrap();
+        for (index, kind, subtype, content) in [
+            (0, 34, 0, "<msg><voicemsg voiceformat='4'/></msg>"),
+            (1, 43, 0, "<msg><videomsg playlength='3'/></msg>"),
+            (
+                2,
+                49,
+                5,
+                "<msg><appmsg><type>5</type><title>Link</title></appmsg></msg>",
+            ),
+            (
+                3,
+                49,
+                6,
+                "<msg><appmsg><type>6</type><title>File</title></appmsg></msg>",
+            ),
+            (
+                4,
+                49,
+                57,
+                "<msg><appmsg><type>57</type><title>Reply</title></appmsg></msg>",
+            ),
+        ] {
+            let original_id = 30 + index;
+            let server = 300 + index;
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(?1,?2,?3,30,3,?4,'',0,0)"),
+                rusqlite::params![
+                    original_id,
+                    server,
+                    (subtype << 32) | i64::from(kind),
+                    format!("sender:\n{content}")
+                ],
+            )
+            .unwrap();
+            let xml = format!("<msg><appmsg><type>57</type><title>Quote</title><refermsg><type>{kind}</type><svrid>{server}</svrid></refermsg></appmsg></msg>");
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(?1,?1,?2,60,3,?3,'',0,0)"),
+                rusqlite::params![60 + index, (57i64 << 32) | 49, xml],
+            )
+            .unwrap();
+        }
         drop(db);
         let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
         store.attach("a", &profile, true).unwrap();
@@ -326,11 +370,17 @@ mod tests {
             (12, "embedded"),
             (13, "invalid"),
             (14, "invalid"),
-            (15, "unsupported"),
+            (15, "invalid"),
         ] {
             let result = core.quoted_message("a", &id(local)).unwrap();
             assert_eq!(result["state"], state);
             assert!(result["message"].is_null());
+        }
+        for (index, kind) in [(0, 34), (1, 43), (2, 49), (3, 49), (4, 49)] {
+            let resolved = core.quoted_message("a", &id(60 + index)).unwrap();
+            assert_eq!(resolved["state"], "resolved");
+            assert_eq!(resolved["message"]["type"], kind);
+            assert!(!resolved.to_string().contains("<msg>"));
         }
         let embedded = core.quoted_message("a", &id(16)).unwrap();
         assert_eq!(embedded["state"], "embedded");

@@ -104,7 +104,7 @@ async fn capabilities(
     c.require(Some(&a), "read")?;
     app.core.store.account(&a)?;
     Ok(Json(
-        json!({"nativeRuntime":true,"officialBinaryRequired":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["group"],"incomingGroupUpdates":"partial"}),
+        json!({"nativeRuntime":true,"officialBinaryRequired":false,"quotedTextSend":true,"quotedTextSendScopes":["read","send"],"quotedTextSendLiveValidated":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["group"],"incomingGroupUpdates":"partial"}),
     ))
 }
 fn media_send_max_bytes() -> Value {
@@ -361,6 +361,9 @@ mod tests {
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
         assert_eq!(body["mediaUploadMaxBytes"], 536_870_912);
+        assert_eq!(body["quotedTextSend"], true);
+        assert_eq!(body["quotedTextSendScopes"], json!(["read", "send"]));
+        assert_eq!(body["quotedTextSendLiveValidated"], false);
         assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
         assert_eq!(body["mediaSendMaxBytes"]["video"], 52_428_800);
         for kind in ["image", "voice"] {

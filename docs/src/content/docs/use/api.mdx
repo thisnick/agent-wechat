@@ -35,6 +35,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 Every send needs an `Idempotency-Key`. Sending the same key again returns the original send instead of sending twice. Check progress with `GET /sends/{id}`, or find a send by key with `GET /sends/by-idempotency-key?key=...`.
 
+For [quoted replies](/use/quoted-replies/), add `"kind":"text"` and `"quote":{"messageId":"MESSAGE_ID","serverId":"SERVER_ID"}`. The token needs both `read` and `send`; the daemon reads the original from the destination chat's saved history.
+
 For files, images, video and voice, stage bytes with `POST /uploads` and send the returned source ID. [Send attachments](/use/media/) covers the request, SDK methods, per-kind capability limits and longer job polling.
 
 ## Receive

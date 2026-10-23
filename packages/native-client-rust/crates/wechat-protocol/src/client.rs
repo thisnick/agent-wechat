@@ -1090,6 +1090,28 @@ impl NativeClient {
             client_id,
         )
     }
+    /// Submit a quoted reply once. The caller owns the persisted XML, intent and
+    /// uncertain-submission handling, as for other app-message sends.
+    pub fn send_quote(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        client_id: &str,
+        created_at: u32,
+        content: &str,
+    ) -> Result<crate::media_send::MediaSendResult> {
+        let request = crate::quote_send::quote_send_request(
+            state,
+            destination,
+            client_id,
+            created_at,
+            content,
+        )?;
+        crate::media_send::decode_file_send(
+            &self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?,
+            client_id,
+        )
+    }
     /// Reserve one file-upload message. An uncertain response must not be
     /// retried automatically; retain the returned receipt with the send intent.
     pub fn reserve_file_upload(

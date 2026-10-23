@@ -169,6 +169,8 @@ struct SendPayload {
     // Missing in existing encrypted text intents.
     #[serde(default)]
     share: Option<crate::ShareSendRequest>,
+    #[serde(default)]
+    quote: Option<crate::quote_send::ResolvedQuote>,
 }
 struct SendReceipt {
     accepted: bool,
@@ -1009,7 +1011,7 @@ impl Core {
         destination: &str,
         text: &str,
     ) -> Result<SendIntent> {
-        self.queue_message_send(account, key, destination, text, None)
+        self.queue_message_send(account, key, destination, text, None, None)
             .await
     }
     pub async fn send_share(
@@ -1022,7 +1024,19 @@ impl Core {
         let state = self.account_state(account)?;
         request.xml(&state.own_username)?;
         let destination = request.destination().to_owned();
-        self.queue_message_send(account, key, &destination, "", Some(request))
+        self.queue_message_send(account, key, &destination, "", Some(request), None)
+            .await
+    }
+    pub async fn send_quoted_text(
+        self: &Arc<Self>,
+        account: &str,
+        key: &str,
+        destination: &str,
+        text: &str,
+        quote: crate::QuoteSendReference,
+    ) -> Result<SendIntent> {
+        quote.validate()?;
+        self.queue_message_send(account, key, destination, text, None, Some(quote))
             .await
     }
     async fn queue_message_send(
@@ -1032,8 +1046,35 @@ impl Core {
         destination: &str,
         text: &str,
         share: Option<crate::ShareSendRequest>,
+        quote: Option<crate::QuoteSendReference>,
     ) -> Result<SendIntent> {
-        self.account_state(account)?;
+        let gate = self.gate(account)?;
+        let _guard = if quote.is_some() {
+            Some(gate.lock().await)
+        } else {
+            None
+        };
+        // A replay uses the sealed reference even if the profile row was later
+        // removed or changed. It must never create a second submission.
+        if let Some(reference) = &quote {
+            if let Ok(prior) = self.store.send_by_key(account, key) {
+                let sealed = self.store.send_payload(account, &prior.id)?;
+                let old: SendPayload = serde_json::from_slice(&self.vault.open_record(
+                    account,
+                    "send-payload",
+                    &sealed,
+                )?)?;
+                if old.thread_id != destination
+                    || old.text != text
+                    || old.share.is_some()
+                    || old.quote.as_ref().map(|q| &q.target) != Some(reference)
+                {
+                    bail!("idempotency_conflict");
+                }
+                return Ok(prior);
+            }
+        }
+        let state = self.account_state(account)?;
         if self.media_job_by_key(account, key).is_ok() {
             bail!("idempotency_conflict");
         }
@@ -1044,6 +1085,9 @@ impl Core {
             || text.len() > 64 * 1024
             || destination.is_empty()
             || destination.len() > 256
+            || destination
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace())
         {
             bail!("invalid send request");
         }
@@ -1055,12 +1099,21 @@ impl Core {
             created_at: wechat_protocol::wire::unix_time()?,
             client_id,
             share,
+            quote: quote
+                .as_ref()
+                .map(|q| self.resolve_quote(account, destination, text, q, &state.own_username))
+                .transpose()?,
         };
         let hash = format!(
             "{:x}",
             Sha256::digest(match &payload.share {
                 Some(share) => serde_json::to_vec(share)?,
-                None => serde_json::to_vec(&json!({"threadId":destination,"text":text}))?,
+                None => match &quote {
+                    Some(reference) => serde_json::to_vec(
+                        &json!({"threadId":destination,"text":text,"quote":reference})
+                    )?,
+                    None => serde_json::to_vec(&json!({"threadId":destination,"text":text}))?,
+                },
             })
         );
         let encrypted = self
@@ -1122,10 +1175,44 @@ impl Core {
             let payload: SendPayload = serde_json::from_slice(&plain)?;
             let mut state = core.account_state(&account)?;
             let native = client()?;
+            if let Some(quote) = &payload.quote {
+                if core
+                    .quote_target(&account, &payload.thread_id, &quote.target)
+                    .is_err()
+                {
+                    // Compete with cancellation/logout before recording a
+                    // known pre-submission failure. No network call follows.
+                    if core.store.claim_send(&account, &id)? {
+                        core.store.update_send(
+                            &account,
+                            &id,
+                            "failed",
+                            None,
+                            Some("quote_target_unavailable"),
+                        )?;
+                    }
+                    return Ok(());
+                }
+            }
             if !core.store.claim_send(&account, &id)? {
                 return Ok(());
             }
-            let result = if let Some(share) = &payload.share {
+            let result = if let Some(quote) = &payload.quote {
+                native
+                    .send_quote(
+                        &mut state,
+                        &payload.thread_id,
+                        &payload.client_id.to_string(),
+                        payload.created_at,
+                        &quote.xml,
+                    )
+                    .map(|result| SendReceipt {
+                        accepted: result.status
+                            == wechat_protocol::media_send::SendStatus::ServerAccepted,
+                        correlated: result.client_id_matches == Some(true),
+                        server_message_id: result.server_message_id,
+                    })
+            } else if let Some(share) = &payload.share {
                 let xml = share.xml(&state.own_username)?;
                 native
                     .send_share(
@@ -1207,7 +1294,18 @@ impl Core {
         let payload: SendPayload =
             serde_json::from_slice(&self.vault.open_record(account, "send-payload", &sealed)?)?;
         let receipt = format!("send-projection:{id}");
-        let source = if let Some(share) = &payload.share {
+        let source = if let Some(quote) = &payload.quote {
+            self.project_accepted_media(
+                account,
+                &payload.thread_id,
+                49,
+                &format!("<msg>{}</msg>", quote.xml),
+                &payload.text,
+                u64::from(payload.created_at),
+                server,
+                &receipt,
+            )?
+        } else if let Some(share) = &payload.share {
             let state = self.account_state(account)?;
             let content = format!("<msg>{}</msg>", share.xml(&state.own_username)?);
             self.project_accepted_media(
@@ -2396,6 +2494,291 @@ mod tests {
                 .unwrap()["direction"],
             "incoming"
         );
+    }
+    #[tokio::test]
+    async fn quote_intents_bind_source_identity_and_reuse_sealed_material_for_replay_and_projection(
+    ) {
+        use wechat_protocol::protobuf as p;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        let mut accepted = state();
+        accepted.database_password = vec![7; 32];
+        accepted.key_info = vec![8; 32];
+        accepted.auto_auth_key = p::message(&[
+            p::bytes(1, &p::buffer(&[1; 16])),
+            p::bytes(2, &p::buffer(&[2; 16])),
+        ])
+        .unwrap();
+        core.install_login_state("one", &accepted, None).unwrap();
+        core.ensure_managed_profile("one", &accepted).unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        // All jobs stay offline; only synthetic local profiles are used.
+        core.stopping.store(true, Ordering::SeqCst);
+        let original = core
+            .project_accepted_text(
+                "one",
+                "peer",
+                "Original <private> & text",
+                42,
+                "18446744073709551610",
+                "original-fixture",
+            )
+            .unwrap();
+        let target = crate::QuoteSendReference {
+            message_id: crate::message_id(&original).unwrap(),
+            server_id: "18446744073709551610".into(),
+        };
+        let first = core
+            .send_quoted_text("one", "quote-key", "peer", "Reply & <text>", target.clone())
+            .await
+            .unwrap();
+        let sealed = store.send_payload("one", &first.id).unwrap();
+        assert!(!sealed.windows(b"Original".len()).any(|w| w == b"Original"));
+        let payload: SendPayload = serde_json::from_slice(
+            &core
+                .vault
+                .open_record("one", "send-payload", &sealed)
+                .unwrap(),
+        )
+        .unwrap();
+        let quote = payload.quote.as_ref().unwrap();
+        assert_eq!(quote.target, target);
+        assert!(quote.xml.contains("18446744073709551610"));
+        assert!(quote.xml.contains("Original &lt;private&gt; &amp; text"));
+        assert!(quote
+            .xml
+            .contains("<fromusr>synthetic_self</fromusr><chatusr>synthetic_self</chatusr>"));
+        let group_source = core
+            .project_accepted_text(
+                "one",
+                "room@chatroom",
+                "synthetic_self:\nLiteral own prefix",
+                43,
+                "780",
+                "own-group-quote-source",
+            )
+            .unwrap();
+        let group_target = crate::QuoteSendReference {
+            message_id: crate::message_id(&group_source).unwrap(),
+            server_id: "780".into(),
+        };
+        let group_quote = core
+            .resolve_quote(
+                "one",
+                "room@chatroom",
+                "Reply",
+                &group_target,
+                "synthetic_self",
+            )
+            .unwrap();
+        assert!(group_quote
+            .xml
+            .contains("<fromusr>synthetic_self</fromusr><chatusr>synthetic_self</chatusr>"));
+        assert!(group_quote
+            .xml
+            .contains("synthetic_self:\nLiteral own prefix"));
+
+        assert_eq!(
+            core.send_quoted_text("one", "quote-key", "peer", "Reply & <text>", target.clone())
+                .await
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert!(core
+            .send_quoted_text("one", "quote-key", "peer", "Changed reply", target.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(core
+            .send_text("one", "quote-key", "peer", "Reply & <text>")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(core
+            .send_quoted_text("one", "different-thread", "other", "Reply", target.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("quote_target_mismatch"));
+        let mut wrong = target.clone();
+        wrong.server_id = "1".into();
+        assert!(core
+            .send_quoted_text("one", "wrong-server", "peer", "Reply", wrong)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("quote_target_mismatch"));
+        assert!(store.claim_send("one", &first.id).unwrap());
+        store
+            .update_send("one", &first.id, "accepted", Some("456"), None)
+            .unwrap();
+        core.project_message_send("one", &first.id).unwrap();
+        let projected = store
+            .send("one", &first.id)
+            .unwrap()
+            .local_message_id
+            .unwrap();
+        let message = core.message("one", &projected).unwrap();
+        assert_eq!(message["appMessageType"], 57);
+        assert_eq!(message["body"], "Reply & <text>");
+        assert_eq!(message["quote"]["serverId"], target.server_id);
+        assert_eq!(
+            core.quoted_message("one", &projected).unwrap()["state"],
+            "resolved"
+        );
+        core.project_message_send("one", &first.id).unwrap();
+        assert_eq!(
+            store
+                .send("one", &first.id)
+                .unwrap()
+                .local_message_id
+                .as_deref(),
+            Some(projected.as_str())
+        );
+        assert_eq!(core.recover_text_projections("one").unwrap(), 0);
+        let recall_source = core
+            .project_accepted_text(
+                "one",
+                "peer",
+                "Later recalled",
+                43,
+                "789",
+                "recall-quote-fixture",
+            )
+            .unwrap();
+        let recall_target = crate::QuoteSendReference {
+            message_id: crate::message_id(&recall_source).unwrap(),
+            server_id: "789".into(),
+        };
+        let canceled = core
+            .send_quoted_text(
+                "one",
+                "canceled-quote",
+                "peer",
+                "Cancel this",
+                recall_target.clone(),
+            )
+            .await
+            .unwrap();
+        store.cancel_send("one", &canceled.id).unwrap();
+        let recalled = core
+            .send_quoted_text(
+                "one",
+                "recalled-quote",
+                "peer",
+                "Do not send after recall",
+                recall_target.clone(),
+            )
+            .await
+            .unwrap();
+        store
+            .record_recall(
+                "one",
+                "peer",
+                "789",
+                Some(&recall_target.message_id),
+                Some(43),
+                Some(44),
+                "synthetic",
+            )
+            .unwrap();
+        assert!(core
+            .send_quoted_text("one", "new-recalled-quote", "peer", "Reply", recall_target)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("message_recalled"));
+        core.stopping.store(false, Ordering::SeqCst);
+        core.perform_send("one", &canceled.id).await.unwrap();
+        core.perform_send("one", &recalled.id).await.unwrap();
+        core.stopping.store(true, Ordering::SeqCst);
+        assert_eq!(store.send("one", &canceled.id).unwrap().state, "cancelled");
+        assert_eq!(
+            store
+                .send("one", &recalled.id)
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("quote_target_unavailable")
+        );
+        let second = core
+            .send_quoted_text(
+                "one",
+                "deleted-target",
+                "peer",
+                "Another reply",
+                target.clone(),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        let (location, _) = core.profile_location_keys("one").unwrap();
+        let db =
+            rusqlite::Connection::open(location.root().join("db_storage").join(&original.database))
+                .unwrap();
+        assert_eq!(
+            unsafe {
+                rusqlite::ffi::sqlite3_key(
+                    db.handle(),
+                    accepted.database_password.as_ptr().cast(),
+                    32,
+                )
+            },
+            0
+        );
+        db.execute_batch("PRAGMA cipher_compatibility=4;").unwrap();
+        db.execute(
+            &format!("DELETE FROM {} WHERE local_id=?1", original.table),
+            [&original.local_id],
+        )
+        .unwrap();
+        drop(db);
+        // Repeating an intent does not resolve or replace its original snapshot.
+        assert_eq!(
+            core.send_quoted_text(
+                "one",
+                "deleted-target",
+                "peer",
+                "Another reply",
+                target.clone()
+            )
+            .await
+            .unwrap()
+            .id,
+            second.id
+        );
+        core.stopping.store(false, Ordering::SeqCst);
+        core.perform_send("one", &second.id).await.unwrap();
+        core.stopping.store(true, Ordering::SeqCst);
+        let failed = store.send("one", &second.id).unwrap();
+        assert_eq!(failed.state, "failed");
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("quote_target_unavailable")
+        );
+        core.logout_local("one").unwrap();
+        assert_eq!(
+            core.send_quoted_text("one", "quote-key", "peer", "Reply & <text>", target)
+                .await
+                .unwrap()
+                .id,
+            first.id
+        );
+        // Existing encrypted text/share payloads remain readable.
+        let legacy: SendPayload = serde_json::from_value(
+            json!({"thread_id":"peer","text":"old","created_at":1,"client_id":2}),
+        )
+        .unwrap();
+        assert!(legacy.quote.is_none());
     }
     #[test]
     fn qr_is_opaque_white_with_a_quiet_border() {

@@ -60,6 +60,7 @@ export default defineConfig({
         ] },
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
+          { label: 'Quoted replies', slug: 'use/quoted-replies' },
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Video quality', slug: 'use/video' },

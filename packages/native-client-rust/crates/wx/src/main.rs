@@ -538,36 +538,7 @@ enum MessageCommand {
         thread_or_id: String,
         id: Option<String>,
     },
-    Send {
-        thread: String,
-        #[arg(long, group = "payload", requires = "title")]
-        share: Option<String>,
-        #[arg(long, requires = "share")]
-        title: Option<String>,
-        #[arg(long, requires = "share")]
-        description: Option<String>,
-        #[arg(long, requires = "share")]
-        thumbnail_url: Option<String>,
-        #[arg(long, group = "payload")]
-        text: Option<String>,
-        #[arg(long, group = "payload")]
-        image: Option<PathBuf>,
-        #[arg(long, group = "payload")]
-        file: Option<PathBuf>,
-        #[arg(long, group = "payload")]
-        video: Option<PathBuf>,
-        /// Prepare normal playback, or include the unchanged original video too.
-        #[arg(long, requires = "video", value_parser = ["normal", "original"])]
-        video_quality: Option<String>,
-        #[arg(long, group = "payload")]
-        voice: Option<PathBuf>,
-        #[arg(long)]
-        idempotency_key: Option<String>,
-        #[arg(long)]
-        detach: bool,
-        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
-        wait: u64,
-    },
+    Send(Box<MessageSendArgs>),
     SendStatus {
         id: String,
     },
@@ -577,6 +548,42 @@ enum MessageCommand {
         expected_version: String,
     },
     Sync,
+}
+#[derive(Args)]
+struct MessageSendArgs {
+    thread: String,
+    #[arg(long, group = "payload", requires = "title")]
+    share: Option<String>,
+    #[arg(long, requires = "share")]
+    title: Option<String>,
+    #[arg(long, requires = "share")]
+    description: Option<String>,
+    #[arg(long, requires = "share")]
+    thumbnail_url: Option<String>,
+    #[arg(long, group = "payload")]
+    text: Option<String>,
+    /// Quote a stored message in this chat; also supply its exact server ID.
+    #[arg(long, requires_all = ["text", "quote_server_id"], conflicts_with_all = ["share", "image", "file", "video", "voice"])]
+    quote_message_id: Option<String>,
+    #[arg(long, requires_all = ["text", "quote_message_id"], conflicts_with_all = ["share", "image", "file", "video", "voice"])]
+    quote_server_id: Option<String>,
+    #[arg(long, group = "payload")]
+    image: Option<PathBuf>,
+    #[arg(long, group = "payload")]
+    file: Option<PathBuf>,
+    #[arg(long, group = "payload")]
+    video: Option<PathBuf>,
+    /// Prepare normal playback, or include the unchanged original video too.
+    #[arg(long, requires = "video", value_parser = ["normal", "original"])]
+    video_quality: Option<String>,
+    #[arg(long, group = "payload")]
+    voice: Option<PathBuf>,
+    #[arg(long)]
+    idempotency_key: Option<String>,
+    #[arg(long)]
+    detach: bool,
+    #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+    wait: u64,
 }
 #[derive(Subcommand)]
 enum SendAction {
@@ -1584,22 +1591,25 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 message
             }
-            MessageCommand::Send {
-                thread,
-                share,
-                title,
-                description,
-                thumbnail_url,
-                text,
-                image,
-                file,
-                video,
-                video_quality,
-                voice,
-                detach,
-                wait,
-                idempotency_key,
-            } => {
+            MessageCommand::Send(args) => {
+                let MessageSendArgs {
+                    thread,
+                    share,
+                    title,
+                    description,
+                    thumbnail_url,
+                    text,
+                    quote_message_id,
+                    quote_server_id,
+                    image,
+                    file,
+                    video,
+                    video_quality,
+                    voice,
+                    detach,
+                    wait,
+                    idempotency_key,
+                } = *args;
                 client_actions::send(
                     &r,
                     &settings,
@@ -1609,6 +1619,8 @@ async fn run(cli: Cli) -> Result<()> {
                     description,
                     thumbnail_url,
                     text,
+                    quote_message_id,
+                    quote_server_id,
                     image,
                     file,
                     video,

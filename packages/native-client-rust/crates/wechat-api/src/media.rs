@@ -336,6 +336,9 @@ pub(super) async fn send(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     c.require(Some(&a), "send")?;
     let key = super::idempotency_key(&headers)?;
+    if input.get("quote").is_some() && input.get("kind").is_some_and(|v| v != "text") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+    }
     if input.get("kind").is_some_and(|v| v == "share") {
         let request: wechat_core::ShareSendRequest = serde_json::from_value(input)
             .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
@@ -367,16 +370,19 @@ pub(super) async fn send(
     }
     let request: TextSend = serde_json::from_value(input)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    let send = if let Some(reference) = request.quote {
+        c.require(Some(&a), "read")?;
+        app.core
+            .send_quoted_text(&a, key, &request.thread_id, &request.text, reference)
+            .await?
+    } else {
+        app.core
+            .send_text(&a, key, &request.thread_id, &request.text)
+            .await?
+    };
     Ok((
         StatusCode::ACCEPTED,
-        Json(
-            serde_json::to_value(
-                app.core
-                    .send_text(&a, key, &request.thread_id, &request.text)
-                    .await?,
-            )
-            .map_err(anyhow::Error::from)?,
-        ),
+        Json(serde_json::to_value(send).map_err(anyhow::Error::from)?),
     ))
 }
 

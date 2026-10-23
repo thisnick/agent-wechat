@@ -272,6 +272,9 @@ pub struct NativeStatus {
 pub struct NativeTextSendRequest {
     pub thread_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quote: Option<wechat_core::QuoteSendReference>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -338,6 +341,7 @@ pub fn typescript() -> String {
         NativeEvent::decl(),
         NativeIdentity::decl(),
         NativeStatus::decl(),
+        wechat_core::QuoteSendReference::decl(),
         NativeTextSendRequest::decl(),
         wechat_core::ShareSendRequest::decl(),
         NativeRecallRequest::decl(),
@@ -396,6 +400,29 @@ mod tests {
         assert!(generated.contains("serverId: string | null"));
         assert!(generated.contains("unreadCount: number | null"));
         assert!(generated.contains("type NativePage<T>"));
+        assert!(generated.contains("quote?: QuoteSendReference"));
+        assert!(
+            generated.contains("type QuoteSendReference = { messageId: string, serverId: string,")
+        );
+    }
+    #[test]
+    fn text_send_contract_preserves_both_quote_ids_and_rejects_untrusted_content() {
+        let request = serde_json::json!({"threadId":"peer","text":"Reply","quote":{"messageId":"opaque/source","serverId":"18446744073709551615"}});
+        let parsed: NativeTextSendRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+        let plain = serde_json::json!({"threadId":"peer","text":"Reply"});
+        let parsed: NativeTextSendRequest = serde_json::from_value(plain.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), plain);
+        for quote in [
+            serde_json::json!({"messageId":"source"}),
+            serde_json::json!({"serverId":"42"}),
+            serde_json::json!({"messageId":"source","serverId":9007199254740993u64}),
+            serde_json::json!({"messageId":"source","serverId":"42","content":"caller text"}),
+        ] {
+            let mut invalid = request.clone();
+            invalid["quote"] = quote;
+            assert!(serde_json::from_value::<NativeTextSendRequest>(invalid).is_err());
+        }
     }
 }
 

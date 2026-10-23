@@ -533,6 +533,8 @@ pub async fn send(
     description: Option<String>,
     thumbnail_url: Option<String>,
     text: Option<String>,
+    quote_message_id: Option<String>,
+    quote_server_id: Option<String>,
     image: Option<PathBuf>,
     file: Option<PathBuf>,
     video: Option<PathBuf>,
@@ -542,6 +544,27 @@ pub async fn send(
     detach: bool,
     wait: u64,
 ) -> Result<Value> {
+    let quote = match (quote_message_id, quote_server_id) {
+        (None, None) => None,
+        (Some(message_id), Some(server_id)) => {
+            if text.is_none()
+                || message_id.is_empty()
+                || message_id.len() > 8192
+                || server_id
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .is_none_or(|value| value.to_string() != server_id)
+            {
+                bail!("quote requires --text, a message ID and an exact positive server ID");
+            }
+            Some(wechat_core::QuoteSendReference {
+                message_id,
+                server_id,
+            })
+        }
+        _ => bail!("--quote-message-id and --quote-server-id are required together"),
+    };
     let inputs = [
         image.map(|p| ("image", p)),
         file.map(|p| ("file", p)),
@@ -568,7 +591,14 @@ pub async fn send(
         if text.is_empty() {
             bail!("message text cannot be empty");
         }
-        ("text", text.into_bytes(), None)
+        let bytes = if let Some(reference) = &quote {
+            serde_json::to_vec(&json!({
+                "kind":"text", "threadId":thread, "text":text, "quote":reference
+            }))?
+        } else {
+            text.into_bytes()
+        };
+        ("text", bytes, None)
     } else {
         let (kind, path) = &inputs[0];
         let max_source_bytes = send_kind_source_limit(kind)?;
@@ -628,7 +658,7 @@ pub async fn send(
             r.request(
                 reqwest::Method::POST,
                 &r.path("sends")?,
-                Some(if kind == "share" {
+                Some(if kind == "share" || quote.is_some() {
                     serde_json::from_slice(&bytes)?
                 } else {
                     json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?})
@@ -800,6 +830,134 @@ pub async fn media(
 mod tests {
     use super::*;
 
+    #[test]
+    fn quote_flags_require_both_ids_and_a_text_payload() {
+        let base = ["wx", "messages", "send", "peer", "--text", "Reply"];
+        let valid = [
+            "--quote-message-id",
+            "opaque/source",
+            "--quote-server-id",
+            "18446744073709551615",
+        ];
+        assert!(Cli::try_parse_from(base.into_iter().chain(valid)).is_ok());
+        for flags in [
+            vec!["--text", "Reply", "--quote-message-id", "source"],
+            vec!["--text", "Reply", "--quote-server-id", "42"],
+            vec![
+                "--image",
+                "synthetic.png",
+                "--quote-message-id",
+                "source",
+                "--quote-server-id",
+                "42",
+            ],
+            vec![
+                "--share",
+                "https://example.invalid",
+                "--title",
+                "Title",
+                "--quote-message-id",
+                "source",
+                "--quote-server-id",
+                "42",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(
+                ["wx", "messages", "send", "peer"].into_iter().chain(flags)
+            )
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn quoted_send_binds_reference_to_receipt_and_never_reposts_a_replay() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let receipt_directory = directory.path().join("receipts");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/v1/accounts/synthetic/sends", post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let seen = seen.clone(); let receipt_directory = receipt_directory.clone();
+                async move {
+                    assert_eq!(headers["idempotency-key"], "quoted-fixture-key");
+                    assert_eq!(body, json!({"kind":"text","threadId":"peer","text":"Reply","quote":{"messageId":"opaque/source","serverId":"18446744073709551615"}}));
+                    let receipt = std::fs::read_dir(receipt_directory).unwrap().next().unwrap().unwrap().path();
+                    let receipt: Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+                    assert_eq!(receipt["state"], "prepared");
+                    assert_eq!(receipt["sourceSha256"], format!("{:x}", Sha256::digest(serde_json::to_vec(&body).unwrap())));
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"id":"quoted-fixture","state":"queued"}))
+                }
+            })).route("/v1/accounts/synthetic/sends/by-idempotency-key", axum::routing::get(|| async { Json(json!({"id":"quoted-fixture","state":"accepted"})) }))).await.unwrap();
+        });
+        let remote = Remote {
+            http: reqwest::Client::new(),
+            base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            token: "synthetic-token".into(),
+            account: Some("synthetic".into()),
+        };
+        let config = settings::File {
+            path: directory.path().join("client.toml"),
+            settings: Default::default(),
+        };
+        async fn submit(
+            remote: &Remote,
+            config: &settings::File,
+            message: &str,
+            server: &str,
+        ) -> Result<Value> {
+            send(
+                remote,
+                config,
+                "peer".into(),
+                None,
+                None,
+                None,
+                None,
+                Some("Reply".into()),
+                Some(message.into()),
+                Some(server.into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("quoted-fixture-key".into()),
+                true,
+                0,
+            )
+            .await
+        }
+        let first = submit(&remote, &config, "opaque/source", "18446744073709551615")
+            .await
+            .unwrap();
+        assert_eq!(first["state"], "queued");
+        let replay = submit(&remote, &config, "opaque/source", "18446744073709551615")
+            .await
+            .unwrap();
+        assert_eq!(replay["state"], "accepted");
+        for (message, server) in [("changed", "18446744073709551615"), ("opaque/source", "42")] {
+            assert!(submit(&remote, &config, message, server)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("idempotency_conflict"));
+        }
+        for invalid in ["0", "01", "-1", "18446744073709551616"] {
+            assert!(submit(&remote, &config, "opaque/source", invalid)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("exact positive server ID"));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn streamed_media_output_requires_complete_digest_and_preserves_existing_files() {
         use axum::{body::Body, routing::get, Router};
@@ -943,6 +1101,8 @@ mod tests {
                 &remote,
                 &config,
                 "filehelper".into(),
+                None,
+                None,
                 None,
                 None,
                 None,

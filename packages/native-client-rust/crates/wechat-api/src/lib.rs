@@ -62,6 +62,7 @@ pub fn version() -> Version {
             "native-sync",
             "native-push",
             "text-send",
+            "quoted-text-send",
             "events",
             "scoped-tokens",
             "config",
@@ -123,6 +124,9 @@ impl From<anyhow::Error> for ApiError {
             "invalid_group_text",
             "invalid_group_members",
             "invalid_group_idempotency_key",
+            "invalid_quote_reference",
+            "invalid_quote_request",
+            "unsupported_quote_type",
         ] {
             if message == code {
                 return Self(StatusCode::BAD_REQUEST, code);
@@ -133,10 +137,17 @@ impl From<anyhow::Error> for ApiError {
             "ordinary_contact_required",
             "group_contact_unavailable",
             "group_state_incomplete",
+            "quote_target_mismatch",
+            "quote_target_ambiguous",
+            "quote_content_unavailable",
+            "quote_sender_unavailable",
         ] {
             if message == code {
                 return Self(StatusCode::CONFLICT, code);
             }
+        }
+        if message == "quote_target_unavailable" {
+            return Self(StatusCode::NOT_FOUND, "quote_target_unavailable");
         }
         // Remote message metadata failures are media errors. Never diagnose
         // these as a local profile/schema mismatch through the broad fallback.
@@ -925,6 +936,8 @@ async fn recover_projection(
 struct TextSend {
     thread_id: String,
     text: String,
+    #[serde(default)]
+    quote: Option<wechat_core::QuoteSendReference>,
 }
 fn idempotency_key(headers: &HeaderMap) -> ApiResult<&str> {
     let key = headers
@@ -1323,6 +1336,24 @@ mod tests {
         ));
         assert_eq!(actual, "unsupported_profile");
     }
+    #[test]
+    fn quote_errors_keep_stable_public_codes() {
+        for (code, expected) in [
+            ("invalid_quote_reference", StatusCode::BAD_REQUEST),
+            ("invalid_quote_request", StatusCode::BAD_REQUEST),
+            ("unsupported_quote_type", StatusCode::BAD_REQUEST),
+            ("quote_target_unavailable", StatusCode::NOT_FOUND),
+            ("quote_target_mismatch", StatusCode::CONFLICT),
+            ("quote_target_ambiguous", StatusCode::CONFLICT),
+            ("quote_content_unavailable", StatusCode::CONFLICT),
+            ("quote_sender_unavailable", StatusCode::CONFLICT),
+            ("message_recalled", StatusCode::GONE),
+        ] {
+            let ApiError(status, actual) = ApiError::from(anyhow::anyhow!(code));
+            assert_eq!(status, expected);
+            assert_eq!(actual, code);
+        }
+    }
     fn setup() -> (tempfile::TempDir, Arc<Core>, Router) {
         let t = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&t.path().join("data")).unwrap());
@@ -1624,6 +1655,113 @@ mod tests {
                 expected
             );
         }
+    }
+    #[tokio::test]
+    async fn quoted_text_requires_both_scopes_and_rejects_quote_on_other_send_kinds() {
+        let (_temp, core, app) = setup();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let send = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let both = "cccccccccccccccccccccccccccccccc";
+        for (token, scopes) in [
+            (read, vec!["read".into()]),
+            (send, vec!["send".into()]),
+            (both, vec!["read".into(), "send".into()]),
+        ] {
+            core.store
+                .issue_token(
+                    token,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &scopes,
+                    None,
+                )
+                .unwrap();
+        }
+        let source = wechat_core::message_id(&wechat_profile::SourceMessageId {
+            database: "message/message_0.db".into(),
+            table: "Msg_synthetic".into(),
+            local_id: "1".into(),
+        })
+        .unwrap();
+        let quote = json!({"messageId":source,"serverId":"18446744073709551615"});
+        let quoted = json!({"kind":"text","threadId":"peer","text":"Reply","quote":quote});
+        let send_request = |account: &str, token: &str, body: Value| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/accounts/{account}/sends"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .header("idempotency-key", "synthetic-quoted-send")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+        for (account, token) in [("one", read), ("one", send), ("two", both)] {
+            let response = app
+                .clone()
+                .oneshot(send_request(account, token, quoted.clone()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        for body in [quoted.clone(), json!({"threadId":"peer","text":"Plain"})] {
+            let response = app
+                .clone()
+                .oneshot(send_request("one", both, body))
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+                "auth_required"
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(send_request(
+                "one",
+                send,
+                json!({"threadId":"peer","text":"Plain"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        for kind in ["share", "image", "file", "video", "voice"] {
+            let body = json!({"kind":kind,"threadId":"peer","text":"Reply","quote":quote});
+            let response = app
+                .clone()
+                .oneshot(send_request("one", both, body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{kind}");
+        }
+        for invalid in [
+            json!({"messageId":"source","serverId":42}),
+            json!({"messageId":"source","serverId":"42","content":"untrusted"}),
+            json!({"messageId":"source"}),
+        ] {
+            let mut body = quoted.clone();
+            body["quote"] = invalid;
+            let response = app
+                .clone()
+                .oneshot(send_request("one", both, body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let mut invalid = quoted;
+        invalid["quote"]["serverId"] = json!("0");
+        let response = app
+            .clone()
+            .oneshot(send_request("one", both, invalid))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            "invalid_quote_reference"
+        );
+        assert!(core.store.queued_sends("one").unwrap().is_empty());
     }
     #[tokio::test]
     async fn official_profile_preparation_requires_global_admin_before_reading_files() {

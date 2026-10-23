@@ -2142,6 +2142,7 @@ mod encrypted_roundtrip {
             created_at: 300,
             client_id: 123,
             share: Some(share),
+            quote: None,
         };
         let sealed = core
             .vault

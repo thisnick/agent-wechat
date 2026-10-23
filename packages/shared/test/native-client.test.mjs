@@ -91,6 +91,26 @@ test('send uses caller idempotency key and read marks the whole thread', async (
   assert.deepEqual(JSON.parse(requests[1].init.body), { expectedVersion: '7' });
   assert.throws(() => client.markRead('a', 't', []));
 });
+test('quoted text preserves exact source IDs and rejects invalid references before transport', async () => {
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{requests.push({url:String(url),init});return Response.json({id:'quoted-send',state:'queued'});}});
+  const quote={messageId:'opaque/source?=1',serverId:'18446744073709551615'};
+  await client.sendText('a','room@chatroom','Reply','quote-key',quote);
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].url,'http://127.0.0.1:6174/v1/accounts/a/sends');
+  assert.equal(requests[0].init.headers.get('Idempotency-Key'),'quote-key');
+  assert.deepEqual(JSON.parse(requests[0].init.body),{kind:'text',threadId:'room@chatroom',text:'Reply',quote});
+  for(const invalid of [null,[],{}, {messageId:'',serverId:'42'}, {messageId:'source',serverId:9007199254740992},
+    ...['0','01','-1','1.0','18446744073709551616'].map(serverId=>({messageId:'source',serverId})),
+    {...quote,content:'caller-selected source'}, {...quote,threadId:'another-chat'}]) {
+    assert.throws(()=>client.sendText('a','room@chatroom','Reply','quote-key',invalid),/quote message identity/);
+  }
+  assert.equal(requests.length,1);
+  let attempts=0;
+  const lost=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('lost response');}});
+  await assert.rejects(lost.sendText('a','room@chatroom','Reply','same-key',quote),/lost response/);
+  assert.equal(attempts,1);
+});
 
 test('recall sends an exact decimal identity and caller key once without cancelling its operation', async () => {
   const requests=[];
@@ -329,6 +349,8 @@ test('quoted originals are parent-bound with embedded fallback and no caller-sel
   }
   const embedded=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'embedded',message:null,embeddedText:'inside quote'})});
   assert.equal((await embedded.quotedMessage('a','parent')).embeddedText,'inside quote');
+  const recalled=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'recalled',message:null})});
+  assert.equal((await recalled.quotedMessage('a','parent')).state,'recalled');
 });
 
 test('completed upload reuse is an explicit option on the original job retry', async () => {

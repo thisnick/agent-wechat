@@ -1,5 +1,5 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -192,7 +192,7 @@ export class NativeWeChatClient {
   async quotedMessage(accountId: string, messageId: string): Promise<NativeQuoteResolution> {
     const quote = await this.request<NativeQuoteResolution>(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/quote`);
     if (quote.accountId !== accountId || quote.messageId !== messageId || typeof quote.threadId !== "string"
-      || !["resolved", "embedded", "missing", "invalid", "unsupported", "ambiguous"].includes(quote.state)
+      || !["resolved", "embedded", "missing", "invalid", "unsupported", "ambiguous", "recalled"].includes(quote.state)
       || (quote.state === "resolved" ? !quote.message || quote.message.accountId !== accountId || quote.message.threadId !== quote.threadId || quote.message.id === messageId : quote.message != null)) throw new Error("Invalid native quote identity");
     return quote;
   }
@@ -206,9 +206,18 @@ export class NativeWeChatClient {
     }
     return result;
   }
-  sendText(accountId: string, threadId: string, text: string, idempotencyKey: string): Promise<NativeSendIntent> {
+  /** Quote a locally stored text, image, voice, video, link, file or quoted reply in the same chat.
+   * Live acceptance and recipient rendering remain unverified; other source kinds are rejected.
+   */
+  sendText(accountId: string, threadId: string, text: string, idempotencyKey: string, quote?: QuoteSendReference): Promise<NativeSendIntent> {
     if (!idempotencyKey || /[\r\n]/.test(idempotencyKey)) throw new Error("An idempotency key is required");
-    return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ threadId, text }) });
+    if (quote !== undefined && (!quote || typeof quote !== "object" || Array.isArray(quote)
+      || Object.keys(quote).some(key => key !== "messageId" && key !== "serverId")
+      || typeof quote.messageId !== "string" || !quote.messageId || quote.messageId.length > 8192
+      || typeof quote.serverId !== "string" || !/^[1-9]\d{0,19}$/.test(quote.serverId)
+      || BigInt(quote.serverId) > 18446744073709551615n)) throw new Error("Invalid quote message identity");
+    const input = quote === undefined ? { threadId, text } : { kind: "text", threadId, text, quote };
+    return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(input) });
   }
   send(accountId: string, sendId: string, signal?: AbortSignal): Promise<NativeSendIntent> { return this.request(`v1/accounts/${id(accountId)}/sends/${id(sendId)}`, { signal }); }
   sendShare(accountId: string, input: ShareSendRequest, key: string, signal?: AbortSignal): Promise<NativeSendIntent> {

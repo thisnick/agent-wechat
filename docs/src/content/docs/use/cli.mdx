@@ -23,6 +23,8 @@ wx groups members list 'family@chatroom'
 
 ```bash
 wx messages send CHAT_ID --text "On my way"
+wx messages send CHAT_ID --text "Agreed" \
+  --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID
 wx messages send CHAT_ID --image ./photo.jpg
 wx messages send CHAT_ID --file ./report.pdf
 wx messages send CHAT_ID --video ./clip.mp4
@@ -32,6 +34,8 @@ wx messages send CHAT_ID --share https://example.com/post --title "Worth a read"
 
 Sends wait up to 30 seconds for WeChat to accept them. Use `--detach` to return right away.
 For larger files, use `--wait 3600` to allow an hour. See [attachment limits and progress](/use/media/).
+
+To quote a message, copy its `id` and `serverId` from `wx messages list CHAT_ID`. Both quote flags are required with `--text`; the source must belong to that same chat. See [Quoted replies](/use/quoted-replies/) for supported originals, permissions and validation limits.
 
 ## Download media
 
