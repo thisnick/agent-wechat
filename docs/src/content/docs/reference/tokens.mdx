@@ -22,7 +22,7 @@ The new token is printed once, in the `token` field.
 | `send` | Sending and recalling messages |
 | `read-state` | Marking chats read |
 | `login` | Logging in, connecting and disconnecting |
-| `admin` | Managing tokens and accounts. Only the owner token needs this. |
+| `admin` | Managing tokens and accounts, and editing groups. Group reads use `read`. |
 
 OpenClaw needs `read`, `media`, `send` and `login`, plus `read-state` unless `readPolicy` is `never`.
 

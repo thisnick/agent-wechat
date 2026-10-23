@@ -124,17 +124,25 @@ impl NativeClient {
         id: &str,
         version: u32,
     ) -> Result<MetadataReply<RoomRoster>> {
-        let request = wire::room_request(state, id, version)?;
-        let raw = self.authenticated_rpc(
-            state,
-            551,
-            "/cgi-bin/micromsg-bin/getchatroommemberdetail",
-            &request,
-        )?;
+        let raw = self.lookup_room_raw(state, id, version)?;
         Ok(MetadataReply {
             value: wire::decode_room(&raw, id)?,
             raw,
         })
+    }
+    pub fn lookup_room_raw(
+        &self,
+        state: &mut AccountState,
+        id: &str,
+        version: u32,
+    ) -> Result<Vec<u8>> {
+        let request = wire::room_request(state, id, version)?;
+        self.authenticated_rpc(
+            state,
+            551,
+            "/cgi-bin/micromsg-bin/getchatroommemberdetail",
+            &request,
+        )
     }
     pub fn init_contacts_receipt(
         &self,

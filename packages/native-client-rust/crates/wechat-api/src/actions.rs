@@ -104,7 +104,7 @@ async fn capabilities(
     c.require(Some(&a), "read")?;
     app.core.store.account(&a)?;
     Ok(Json(
-        json!({"nativeRuntime":true,"officialBinaryRequired":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some()}),
+        json!({"nativeRuntime":true,"officialBinaryRequired":false,"mediaUploadMaxBytes":wechat_core::MAX_SOURCE_BYTES,"mediaSendMaxBytes":media_send_max_bytes(),"mediaKinds":["image","file","video","voice"],"downloadQualities":["best","thumbnail","standard","original","normal","encoded"],"logout":true,"savedDeviceLogin":true,"profileKeysConfigured":app.core.store.keys_file(&a)?.is_some(),"groupMutations":["create","rename","leave","add_members","remove_members","my_name","clear_announcement"],"groupMutationScope":"admin","groupCreateMinSelectedMembers":2,"groupMutationMaxSelectedMembers":40,"threadNotificationTargets":["group"],"incomingGroupUpdates":"partial"}),
     ))
 }
 fn media_send_max_bytes() -> Value {
@@ -204,7 +204,11 @@ async fn exact(
     let guard = app.core.lock_account(&a).await?;
     let value = work(move || {
         let _guard = guard;
-        app.core.catalog_item(&a, kind, &id)
+        if kind == "groups" {
+            app.core.group_info(&a, &id)
+        } else {
+            app.core.catalog_item(&a, kind, &id)
+        }
     })
     .await?;
     match kind {

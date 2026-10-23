@@ -1,0 +1,70 @@
+---
+title: Manage groups
+description: Read members, create and edit groups, and change group notifications.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Use `wx groups` for ordinary group chats and `wx chats mute/unmute` for their notifications. Edits require a daemon token with `admin` scope. WeChat still checks your account's permissions in the group.
+
+## Read and refresh
+
+1. Find the group and read its saved members:
+
+   ```bash
+   wx groups list
+   wx groups get '123456@chatroom'
+   wx groups members list '123456@chatroom' --limit 50
+   wx groups members get '123456@chatroom' wxid_alice
+   ```
+
+   Exact member lookup returns `{"state":"present","member":{...}}` or `{"state":"unconfirmed","member":null}`. A missing saved row does not prove someone left.
+
+2. Fetch current server data when needed:
+
+   ```bash
+   wx groups refresh '123456@chatroom'
+   wx groups members refresh '123456@chatroom'
+   ```
+
+   Group refresh reads the shared name, notifications and announcement. Member refresh reads the roster. The operation reports whether the server supplied a complete member list.
+
+## Edit
+
+1. Choose the group and contacts carefully. Creation selects at least two contacts in addition to you; each selected member can have a different server result.
+
+   ```bash
+   wx groups create wxid_alice wxid_bob --name 'Book club' --idempotency-key group-create-001
+   wx groups rename '123456@chatroom' 'Book club' --idempotency-key group-name-001
+   wx groups members add '123456@chatroom' wxid_alice --idempotency-key group-add-001
+   wx groups members remove '123456@chatroom' wxid_alice --idempotency-key group-remove-001
+   wx groups my-name '123456@chatroom' 'Sam' --idempotency-key group-my-name-001
+   wx chats mute '123456@chatroom' --idempotency-key group-mute-001
+   wx chats unmute '123456@chatroom' --idempotency-key group-unmute-001
+   wx groups clear-announcement '123456@chatroom' --idempotency-key group-clear-001
+   wx groups leave '123456@chatroom' --idempotency-key group-leave-001
+   ```
+
+2. Check the operation's `remoteOutcome`, `members`, `unconfirmedMembers` and `profileProjection`. `succeeded` means the group request was accepted; inspect individual member statuses for partial acceptance. Leaving keeps saved history. Each command prints the operation ID and a local receipt path.
+
+   ```bash
+   wx operations get OPERATION_ID
+   ```
+
+   Reuse the same key and identical arguments after a lost response. `needs_review` means WeChat might have accepted the request; inspect the existing operation instead of trying a new key.
+
+## API and SDK
+
+[API group routes](/use/api/#routes) require `Idempotency-Key` and return HTTP 202 with an operation. Look it up with `GET /group-mutations/by-idempotency-key?key=...`. The SDK exposes `createGroup`, `renameGroup`, `leaveGroup`, `addGroupMembers`, `removeGroupMembers`, `setMyGroupName`, `clearGroupAnnouncement`, `setThreadMuted`, `groupMember` and `groupMutationByKey`.
+
+```ts
+const op = await client.renameGroup(accountId, groupId, 'Book club', 'group-name-001');
+const status = await client.operation(accountId, op.id);
+```
+
+<Aside title="Good to know">
+- Group information is saved locally. Recognized incoming changes emit `group.updated` after saving; version notifications can trigger roster and announcement reads. Two controlled phone rename/mute checks needed manual refresh. Automatic delivery of every other-device edit remains unverified.
+- Unknown sync fields remain pending. Local notices, search indexes and some settings are not reconstructed, so edits can report `profileProjection: "partial"` after the supported fields are saved.
+- Notification edits currently support groups. Direct-chat mute, personal group remarks, announcement publication, invitation links, ownership transfer and administrator changes are not supported.
+- OpenClaw exposes only the owner-only [group information tool](/openclaw/tools/), with no mutation tools.
+</Aside>

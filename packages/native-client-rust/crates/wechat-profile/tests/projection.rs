@@ -32,6 +32,129 @@ fn options() -> WriteOptions {
     }
 }
 #[test]
+fn group_control_edits_preserve_unknown_chunks_other_members_and_history() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["self", "peer", "other", "room@chatroom"] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: ["self", "peer", "other"]
+                .iter()
+                .map(|name| NativeMemberPatch {
+                    flags: None,
+                    opaque: None,
+                    username: (*name).into(),
+                    display: None,
+                })
+                .collect(),
+            complete_roster: true,
+        },
+        &o,
+    )
+    .unwrap();
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    // self has a minimized bit plus an unrelated bit, and an unknown member
+    // extension. The root extension and every other member must survive.
+    let packed = [
+        10, 14, 10, 4, b's', b'e', b'l', b'f', 24, 129, 64, 34, 3, 1, 2, 3, 10, 6, 10, 4, b'p',
+        b'e', b'e', b'r', 10, 7, 10, 5, b'o', b't', b'h', b'e', b'r', 42, 3, 9, 8, 7,
+    ];
+    c.execute("UPDATE chat_room SET ext_buffer=?1", [packed.as_slice()])
+        .unwrap();
+    c.execute("UPDATE contact SET flag=268435458,chat_room_notify=0,is_in_chat_room=1 WHERE username='room@chatroom'",[]).unwrap();
+    apply_native_group_edit(
+        &loc,
+        &keys,
+        "room@chatroom",
+        NativeGroupEdit::Notifications {
+            muted: false,
+            clear_minimized: true,
+            own: "self",
+        },
+        &o,
+    )
+    .unwrap();
+    let (flag, notify): (i64, i64) = c
+        .query_row(
+            "SELECT flag,chat_room_notify FROM contact WHERE username='room@chatroom'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((flag, notify), (2, 1));
+    let after: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(after.windows(2).any(|w| w == [24, 1]));
+    assert!(after.ends_with(&[42, 3, 9, 8, 7]));
+    assert!(after.windows(5).any(|w| w == [34, 3, 1, 2, 3]));
+    let history = message("room@chatroom", "peer", "123", 50);
+    let source = apply_message_projection(&loc, &keys, &history, &o)
+        .unwrap()
+        .source_id;
+    let opaque = loc.root().join("keep.fts");
+    fs::write(&opaque, b"retained index").unwrap();
+    for _ in 0..2 {
+        apply_native_group_edit(
+            &loc,
+            &keys,
+            "room@chatroom",
+            NativeGroupEdit::RemoveMembers(&["peer".into()]),
+            &o,
+        )
+        .unwrap();
+        apply_native_group_edit(
+            &loc,
+            &keys,
+            "room@chatroom",
+            NativeGroupEdit::Leave { own: "self" },
+            &o,
+        )
+        .unwrap();
+    }
+    let reader = ProfileReader::open(
+        loc.clone(),
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let members = reader
+        .group_members("room@chatroom", &Default::default())
+        .unwrap();
+    assert_eq!(
+        members
+            .items
+            .iter()
+            .map(|m| m.username.as_str())
+            .collect::<Vec<_>>(),
+        ["other"]
+    );
+    assert_eq!(
+        reader
+            .message(&source, None)
+            .unwrap()
+            .server_message_id
+            .as_deref(),
+        Some("123")
+    );
+    assert_eq!(fs::read(opaque).unwrap(), b"retained index");
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(packed.ends_with(&[42, 3, 9, 8, 7]));
+}
+#[test]
 fn recall_projection_preserves_identity_ordering_other_resources_and_opaque_files() {
     let d = fixture();
     let resources_path = d
@@ -570,6 +693,8 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let initial = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
+            flags: None,
+            opaque: None,
             username: "peer".into(),
             display: Some("Per-room label".into()),
         }],
@@ -594,6 +719,8 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let partial = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
+            flags: None,
+            opaque: None,
             username: "other".into(),
             display: Some("Other room label".into()),
         }],
@@ -615,6 +742,8 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let complete = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
+            flags: None,
+            opaque: None,
             username: "peer".into(),
             display: None,
         }],
@@ -669,6 +798,8 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
         username: "room@chatroom".into(),
         members: vec![
             NativeMemberPatch {
+                flags: None,
+                opaque: None,
                 username: "peer".into(),
                 display: None
             };

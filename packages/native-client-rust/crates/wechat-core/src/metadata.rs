@@ -29,9 +29,17 @@ enum ReceiptBody {
     Roster {
         reply: MetadataReply<RoomRoster>,
         complete: bool,
+        #[serde(default)]
+        profile_revision: Option<Vec<u8>>,
     },
     ContactCatalog(MetadataReply<InitContactPage>),
     GroupCatalog(GroupMetadataPage),
+    GroupDetail {
+        group_id: String,
+        raw: Vec<u8>,
+        #[serde(default)]
+        profile_revision: Option<Vec<u8>>,
+    },
     Avatar {
         username: String,
         source_url: String,
@@ -148,6 +156,7 @@ fn valid_name(value: &str) -> Result<()> {
 }
 pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection> {
     let fields = p::decode(&record.raw)?;
+    let controlled = wechat_protocol::controlled_contact_fields(&record.raw)?;
     let mut out = RawFields::new();
     let sk = |number| -> Result<Option<String>> {
         p::optional_data(&fields, number)?
@@ -165,6 +174,9 @@ pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection>
         (11, "remark_pin_yin_initial"),
         (12, "remark_quan_pin"),
     ] {
+        if controlled.contains(&n) {
+            continue;
+        }
         if let Some(v) = sk(n)? {
             out.insert(name.into(), SqlValue::Text(v));
         }
@@ -191,12 +203,26 @@ pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection>
     if let (Some(p::Value::Varint(mask)), Some(p::Value::Varint(value))) =
         (p::optional(&fields, 7)?, p::optional(&fields, 8)?)
     {
-        let flag = u32::try_from(*mask)? & u32::try_from(*value)?;
-        out.insert("flag".into(), SqlValue::Integer(flag.to_string()));
-        if flag & 1 != 0 {
-            out.insert("local_type".into(), SqlValue::Integer("1".into()));
-        } else if flag & 2 != 0 && record.username.ends_with("@chatroom") {
-            out.insert("local_type".into(), SqlValue::Integer("2".into()));
+        let mask = u32::try_from(*mask)?;
+        if mask == u32::MAX && !controlled.contains(&8) {
+            let flag = mask & u32::try_from(*value)?;
+            out.insert("flag".into(), SqlValue::Integer(flag.to_string()));
+            if flag & 1 != 0 {
+                out.insert("local_type".into(), SqlValue::Integer("1".into()));
+            } else if flag & 2 != 0 && record.username.ends_with("@chatroom") {
+                out.insert("local_type".into(), SqlValue::Integer("2".into()));
+            }
+        }
+    }
+    for (field, name) in [(17, "chat_room_notify"), (85, "is_in_chat_room")] {
+        if let Some(value) = p::optional(&fields, field)? {
+            let p::Value::Varint(value) = value else {
+                bail!("invalid_group_metadata");
+            };
+            out.insert(
+                name.into(),
+                SqlValue::Integer(u32::try_from(*value)?.to_string()),
+            );
         }
     }
     valid_name(&record.username)?;
@@ -311,6 +337,7 @@ impl Core {
                 &options,
             )?;
             if record.username.ends_with("@chatroom") {
+                self.mark_group_revision(account, &record.username, id)?;
                 // Explicit native group metadata supplies catalog identity.
                 // Unknown membership/owner/opaque ext fields stay SQL NULL on
                 // new rows and unchanged on existing rows; no thread is made.
@@ -388,10 +415,37 @@ impl Core {
                 ));
                 "contact_catalog"
             }
-            ReceiptBody::Roster { reply, complete } => {
+            ReceiptBody::Roster {
+                reply,
+                complete,
+                profile_revision,
+            } => {
+                let current = self.group_revision(account, &reply.value.room_id)?;
+                ensure!(
+                    current == profile_revision || current.as_deref() == Some(id.as_bytes()),
+                    "group_projection_superseded"
+                );
                 self.project_metadata_roster(&location, &keys, &reply, &options, complete)?;
+                self.mark_group_revision(account, &reply.value.room_id, id)?;
+                self.store.append_event_once(account,&format!("group-members:{id}"),"group.updated",&json!({"groupId":reply.value.room_id,"source":"metadata_refresh","membersRefreshed":true,"profileProjection":"partial"}))?;
                 count = reply.value.members.len();
                 "members"
+            }
+            ReceiptBody::GroupDetail {
+                group_id,
+                raw,
+                profile_revision,
+            } => {
+                let current = self.group_revision(account, &group_id)?;
+                ensure!(
+                    current == profile_revision || current.as_deref() == Some(id.as_bytes()),
+                    "group_projection_superseded"
+                );
+                self.project_group_detail(account, &group_id, &raw, 0, id)?;
+                self.mark_group_revision(account, &group_id, id)?;
+                self.store.append_event_once(account,&format!("group-detail:{id}"),"group.updated",&json!({"groupId":group_id,"source":"metadata_refresh","profileProjection":"partial"}))?;
+                count = 1;
+                "group_detail"
             }
             ReceiptBody::Avatar {
                 username,
@@ -546,26 +600,48 @@ impl Core {
         self.metadata_check(account, operation, deadline)?;
         self.recover_metadata(account)?;
         match action {
-            MetadataAction::Contact { contact_id }
-            | MetadataAction::Group {
-                group_id: contact_id,
-            } => {
+            MetadataAction::Contact { contact_id } => {
                 let outcome = self.metadata_contact_lookup(account, &[contact_id])?;
                 Ok(
                     json!({"recordCount":outcome.applied,"failedItems":outcome.failed,"profileProjection":if outcome.failed==0{"complete"}else{"partial"},"coverage":"known_identity"}),
                 )
             }
+            MetadataAction::Group { group_id } => {
+                let outcome =
+                    self.metadata_contact_lookup(account, std::slice::from_ref(&group_id))?;
+                let profile_revision = self.group_revision(account, &group_id)?;
+                let epoch = self.store.runtime(account, "logout-epoch")?;
+                let raw = self.group_read(account, epoch.as_deref(), |state| {
+                    client()?.group_detail_raw(state, &group_id)
+                })?;
+                let id = self.stage_metadata_body(
+                    account,
+                    ReceiptBody::GroupDetail {
+                        group_id,
+                        raw,
+                        profile_revision,
+                    },
+                )?;
+                self.apply_metadata_receipt(account, &id, false)?;
+                Ok(
+                    json!({"recordCount":outcome.applied+1,"failedItems":outcome.failed,"profileProjection":"partial","coverage":"group_metadata"}),
+                )
+            }
             MetadataAction::Members { group_id, version } => {
                 self.metadata_contact_lookup(account, std::slice::from_ref(&group_id))?;
                 let mut state = self.account_state(account)?;
+                let profile_revision = self.group_revision(account, &group_id)?;
                 let reply = client()?.lookup_room_receipt(&mut state, &group_id, version)?;
                 self.save_state(account, &state)?;
-                let fields = p::decode(&reply.raw)?;
-                let members = p::decode(p::data(&fields, 4)?)?;
-                let complete =
-                    version == 0 && matches!(p::optional(&members, 1)?, Some(p::Value::Varint(_)));
-                let id =
-                    self.stage_metadata_body(account, ReceiptBody::Roster { reply, complete })?;
+                let complete = reply.value.full_member_ids.is_some();
+                let id = self.stage_metadata_body(
+                    account,
+                    ReceiptBody::Roster {
+                        reply,
+                        complete,
+                        profile_revision,
+                    },
+                )?;
                 let count = self.apply_metadata_receipt(account, &id, false)?;
                 Ok(
                     json!({"memberCount":count,"profileProjection":"complete","completeRoster":complete}),
@@ -800,24 +876,26 @@ impl Core {
             json!({"recordCount":count,"pages":max_pages,"complete":false,"reason":"page_bound","profileProjection":"complete"}),
         )
     }
-    fn project_metadata_roster(
+    pub(super) fn project_metadata_roster(
         &self,
         location: &wechat_profile::ProfileLocation,
         keys: &wechat_profile::KeyFile,
         reply: &MetadataReply<RoomRoster>,
         options: &wechat_profile::WriteOptions,
-        complete: bool,
+        _complete: bool,
     ) -> Result<()> {
+        let decoded = wechat_protocol::wire::decode_room(&reply.raw, &reply.value.room_id)?;
+        let value = &decoded;
         wechat_profile::apply_contact_patch(
             location,
             keys,
             &ContactProjection {
-                username: reply.value.room_id.clone(),
+                username: value.room_id.clone(),
                 fields: RawFields::new(),
             },
             options,
         )?;
-        for member in &reply.value.members {
+        for member in &value.members {
             let mut fields = RawFields::new();
             if let Some(nickname) = &member.nickname {
                 fields.insert("nick_name".into(), SqlValue::Text(nickname.clone()));
@@ -832,20 +910,95 @@ impl Core {
                 options,
             )?;
         }
-        let patch = wechat_profile::NativeRosterPatch {
-            username: reply.value.room_id.clone(),
-            members: reply
-                .value
-                .members
+        // f4 contains changed member rows. A separate, count-checked f6/f7
+        // list establishes the whole roster, even when f4 is a delta.
+        let mut members = value
+            .members
+            .iter()
+            .map(|m| wechat_profile::NativeMemberPatch {
+                flags: Some(m.flags),
+                opaque: m.opaque.clone(),
+                username: m.username.clone(),
+                display: m.room_display_name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let complete = if let Some(ids) = &value.full_member_ids {
+            let reader = wechat_profile::ProfileReader::open(
+                location.clone(),
+                keys.clone(),
+                wechat_profile::ReadOptions {
+                    stopped_or_consistent_snapshot: true,
+                    allow_plaintext: options.allow_plaintext,
+                    ..Default::default()
+                },
+            )?;
+            let mut old = std::collections::BTreeSet::new();
+            let mut cursor = None;
+            loop {
+                let page = match reader.group_members(
+                    &value.room_id,
+                    &wechat_profile::ListQuery {
+                        limit: Some(200),
+                        cursor,
+                        search: None,
+                    },
+                ) {
+                    Ok(page) => page,
+                    Err(wechat_profile::ProfileError::NotCached) => break,
+                    Err(error) => return Err(error.into()),
+                };
+                old.extend(page.items.into_iter().map(|m| m.username));
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            ensure!(
+                ids.iter()
+                    .all(|id| old.contains(id) || members.iter().any(|m| &m.username == id)),
+                "group_roster_base_incomplete"
+            );
+            members = ids
                 .iter()
-                .map(|m| wechat_profile::NativeMemberPatch {
-                    username: m.username.clone(),
-                    display: m.room_display_name.clone(),
+                .map(|id| {
+                    members
+                        .iter()
+                        .find(|m| &m.username == id)
+                        .cloned()
+                        .unwrap_or(wechat_profile::NativeMemberPatch {
+                            flags: None,
+                            opaque: None,
+                            username: id.clone(),
+                            display: None,
+                        })
                 })
-                .collect(),
+                .collect();
+            true
+        } else {
+            false
+        };
+        let patch = wechat_profile::NativeRosterPatch {
+            username: value.room_id.clone(),
+            members,
             complete_roster: complete,
         };
         wechat_profile::apply_native_roster_patch(location, keys, &patch, options)?;
+        if let Some(owner) = &value.owner {
+            let mut fields = RawFields::new();
+            fields.insert("owner".into(), SqlValue::Text(owner.clone()));
+            wechat_profile::apply_group_patch(
+                location,
+                keys,
+                &wechat_profile::GroupProjection {
+                    username: value.room_id.clone(),
+                    fields,
+                    detail_fields: None,
+                    members: vec![],
+                    complete_roster: false,
+                },
+                options,
+            )?;
+        }
         Ok(())
     }
 }
@@ -1005,7 +1158,7 @@ mod tests {
         let raw = p::message(&[
             p::bytes(1, &p::bytes(1, b"synthetic")),
             p::bytes(2, &p::bytes(1, b"")),
-            p::uint(7, 3),
+            p::uint(7, u64::from(u32::MAX)),
             p::uint(8, 1),
             p::uint(24, 4),
         ])
@@ -1016,5 +1169,28 @@ mod tests {
         assert!(!patch.fields.contains_key("remark"));
         assert_eq!(patch.fields["flag"], SqlValue::Integer("1".into()));
         assert_eq!(patch.fields["local_type"], SqlValue::Integer("1".into()));
+    }
+    #[test]
+    fn partial_masks_do_not_replace_flags_or_hide_independent_group_fields() {
+        let raw = p::message(&[
+            p::bytes(1, &p::bytes(1, b"synthetic@chatroom")),
+            p::uint(7, 3),
+            p::uint(8, 1),
+            p::uint(17, 0),
+            p::uint(85, 2),
+        ])
+        .unwrap();
+        let record = wechat_protocol::wire::decode_contact_record(&raw).unwrap();
+        let patch = contact_patch(&record).unwrap();
+        assert!(!patch.fields.contains_key("flag"));
+        assert!(!patch.fields.contains_key("local_type"));
+        assert_eq!(
+            patch.fields["chat_room_notify"],
+            SqlValue::Integer("0".into())
+        );
+        assert_eq!(
+            patch.fields["is_in_chat_room"],
+            SqlValue::Integer("2".into())
+        );
     }
 }

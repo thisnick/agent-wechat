@@ -705,16 +705,21 @@ pub fn apply_contact_patch(
     let db = find_database(location, "contact.db")?;
     let c = open_write(location, &db, keys, options.allow_plaintext)?;
     check_known_table(&c, "contact")?;
-    let exists = c
+    let existing = c
         .query_row(
             "SELECT id FROM contact WHERE username=?1",
             [&input.username],
             |r| r.get::<_, i64>(0),
         )
-        .optional()?
-        .is_some();
+        .optional()?;
+    if let Some(id) = existing.filter(|_| input.fields.is_empty()) {
+        return Ok(AppliedContact {
+            local_id: id,
+            changed: false,
+        });
+    }
     let mut input = input.clone();
-    if !exists {
+    if existing.is_none() {
         let mut fields = nullable_fields(&c, &db, "contact", &["id", "username"])?;
         fields.extend(input.fields);
         input.fields = fields;
@@ -797,6 +802,10 @@ pub fn apply_group_patch(
 pub struct NativeMemberPatch {
     pub username: String,
     pub display: Option<String>,
+    #[serde(default)]
+    pub flags: Option<u32>,
+    #[serde(default)]
+    pub opaque: Option<Vec<u8>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -804,6 +813,152 @@ pub struct NativeRosterPatch {
     pub username: String,
     pub members: Vec<NativeMemberPatch>,
     pub complete_roster: bool,
+}
+
+/// Effects established for ordinary Linux group controls. This writer never
+/// deletes chat history and never treats a membership delta as a full roster.
+pub enum NativeGroupEdit<'a> {
+    RemoveMembers(&'a [String]),
+    Leave {
+        own: &'a str,
+    },
+    MyName {
+        own: &'a str,
+        display: &'a str,
+    },
+    Notifications {
+        muted: bool,
+        clear_minimized: bool,
+        own: &'a str,
+    },
+    ClearAnnouncement,
+}
+
+pub fn apply_native_group_edit(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    room: &str,
+    edit: NativeGroupEdit<'_>,
+    options: &WriteOptions,
+) -> Result<()> {
+    ownership(location, keys, options)?;
+    identity(room)?;
+    if !room.ends_with("@chatroom") {
+        return Err(ProfileError::InvalidMetadata);
+    }
+    let db = find_database(location, "contact.db")?;
+    let mut c = open_write(location, &db, keys, options.allow_plaintext)?;
+    for table in [
+        "contact",
+        "chat_room",
+        "chatroom_member",
+        "chat_room_info_detail",
+    ] {
+        check_known_table(&c, table)?;
+    }
+    let tx = c.transaction()?;
+    let (id, old): (i64, Option<Vec<u8>>) = tx.query_row(
+        "SELECT id,ext_buffer FROM chat_room WHERE username=?1",
+        [room],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut packed = vec![];
+    let mut remove = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut matched_name = false;
+    match &edit {
+        NativeGroupEdit::RemoveMembers(names) => remove.extend_from_slice(names),
+        NativeGroupEdit::Leave { own } => remove.push((*own).to_owned()),
+        _ => {}
+    }
+    for name in &remove {
+        identity(name)?;
+    }
+    for chunk in proto_chunks(old.as_deref().unwrap_or_default())? {
+        if chunk.field != 1 {
+            packed.extend_from_slice(chunk.raw);
+            continue;
+        }
+        if chunk.wire != 2 {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        let name = member_name(chunk.value)?;
+        if !seen.insert(name.clone()) {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        if remove.contains(&name) {
+            continue;
+        }
+        let updated = match &edit {
+            NativeGroupEdit::MyName { own, display } if name == *own => {
+                matched_name = true;
+                Some(patch_member(
+                    Some(chunk.value),
+                    &NativeMemberPatch {
+                        flags: None,
+                        opaque: None,
+                        username: name,
+                        display: Some((*display).into()),
+                    },
+                )?)
+            }
+            NativeGroupEdit::Notifications {
+                own,
+                clear_minimized: true,
+                ..
+            } if name == *own => {
+                let mut member = vec![];
+                let mut flag_seen = false;
+                for field in proto_chunks(chunk.value)? {
+                    if field.field == 3 {
+                        if field.wire != 0 || flag_seen {
+                            return Err(ProfileError::InvalidMetadata);
+                        }
+                        flag_seen = true;
+                        let mut at = 0;
+                        let value = proto_var(field.value, &mut at)?;
+                        var_out(3 << 3, &mut member);
+                        var_out(value & !0x2000, &mut member);
+                    } else {
+                        member.extend_from_slice(field.raw);
+                    }
+                }
+                Some(member)
+            }
+            _ => None,
+        };
+        if let Some(member) = updated {
+            proto_bytes(1, &member, &mut packed);
+        } else {
+            packed.extend_from_slice(chunk.raw);
+        }
+    }
+    if matches!(edit, NativeGroupEdit::MyName { .. }) && !matched_name {
+        return Err(ProfileError::InvalidMetadata);
+    }
+    if packed != old.as_deref().unwrap_or_default() {
+        tx.execute(
+            "UPDATE chat_room SET ext_buffer=?2 WHERE id=?1",
+            rusqlite::params![id, packed],
+        )?;
+    }
+    for name in &remove {
+        tx.execute("DELETE FROM chatroom_member WHERE room_id=?1 AND member_id IN (SELECT id FROM contact WHERE username=?2)", rusqlite::params![id,name])?;
+    }
+    match edit {
+        NativeGroupEdit::Leave { .. } => {
+            if tx.execute("UPDATE contact SET is_in_chat_room=2 WHERE username=?1", [room])? != 1 { return Err(ProfileError::InvalidMetadata); }
+        }
+        NativeGroupEdit::Notifications { muted, clear_minimized, .. } => {
+            if tx.execute("UPDATE contact SET chat_room_notify=?2,flag=CASE WHEN ?3 THEN flag & ~268435456 ELSE flag END WHERE username=?1 AND flag IS NOT NULL", rusqlite::params![room,i64::from(!muted),clear_minimized])? != 1 { return Err(ProfileError::InvalidMetadata); }
+        }
+        NativeGroupEdit::ClearAnnouncement => {
+            tx.execute("INSERT INTO chat_room_info_detail(room_id_,username_,announcement_,xml_announcement_)VALUES(?1,?2,'','') ON CONFLICT(room_id_) DO UPDATE SET announcement_='',xml_announcement_=''", rusqlite::params![id,room])?;
+        }
+        _ => {}
+    }
+    tx.commit()?;
+    Ok(())
 }
 struct ProtoChunk<'a> {
     field: u64,
@@ -889,6 +1044,9 @@ fn member_name(data: &[u8]) -> Result<String> {
 }
 fn patch_member(old: Option<&[u8]>, patch: &NativeMemberPatch) -> Result<Vec<u8>> {
     identity(&patch.username)?;
+    if patch.opaque.as_ref().is_some_and(|b| b.len() > 65536) {
+        return Err(ProfileError::ResourceLimit);
+    }
     if patch
         .display
         .as_ref()
@@ -898,6 +1056,8 @@ fn patch_member(old: Option<&[u8]>, patch: &NativeMemberPatch) -> Result<Vec<u8>
     }
     let mut out = vec![];
     let mut wrote_display = false;
+    let mut wrote_flags = false;
+    let mut wrote_opaque = false;
     if let Some(old) = old {
         if member_name(old)? != patch.username {
             return Err(ProfileError::InvalidMetadata);
@@ -910,6 +1070,19 @@ fn patch_member(old: Option<&[u8]>, patch: &NativeMemberPatch) -> Result<Vec<u8>
                 } else {
                     out.extend_from_slice(chunk.raw);
                 }
+            } else if chunk.field == 3 && patch.flags.is_some() {
+                if chunk.wire != 0 || wrote_flags {
+                    return Err(ProfileError::InvalidMetadata);
+                }
+                var_out(3 << 3, &mut out);
+                var_out(u64::from(patch.flags.unwrap()), &mut out);
+                wrote_flags = true;
+            } else if chunk.field == 4 && patch.opaque.is_some() {
+                if chunk.wire != 2 || wrote_opaque {
+                    return Err(ProfileError::InvalidMetadata);
+                }
+                proto_bytes(4, patch.opaque.as_deref().unwrap(), &mut out);
+                wrote_opaque = true;
             } else {
                 out.extend_from_slice(chunk.raw);
             }
@@ -922,11 +1095,22 @@ fn patch_member(old: Option<&[u8]>, patch: &NativeMemberPatch) -> Result<Vec<u8>
             proto_bytes(2, display.as_bytes(), &mut out)
         }
     }
+    if !wrote_flags {
+        if let Some(flags) = patch.flags {
+            var_out(3 << 3, &mut out);
+            var_out(u64::from(flags), &mut out);
+        }
+    }
+    if !wrote_opaque {
+        if let Some(opaque) = &patch.opaque {
+            proto_bytes(4, opaque, &mut out);
+        }
+    }
     Ok(out)
 }
 /// Translate only the proved network member identity/display semantics into the
 /// local repeated-field1 representation. Caller proves roster completeness (for
-/// example, a present declared count on a version-zero full response). Unknown
+/// example, a separate complete member identity list in the server reply). Unknown
 /// root/member protobuf chunks, existing owner and unrelated contact fields are
 /// retained byte-for-byte. No network version is guessed into opaque fields.
 pub fn apply_native_roster_patch(
@@ -1009,6 +1193,8 @@ pub fn apply_native_roster_patch(
     // exist; the SQL projection checks that binding and allocates destination IDs.
     for name in result_members.difference(&written) {
         let empty = NativeMemberPatch {
+            flags: None,
+            opaque: None,
             username: name.clone(),
             display: None,
         };

@@ -239,7 +239,7 @@ impl Store {
     fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=6).contains(&version) {
+        if !(1..=7).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -273,11 +273,18 @@ impl Store {
             ))?;
             tx.commit()?;
         }
+        if version < 7 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V007__group_mutations.sql"
+            ))?;
+            tx.commit()?;
+        }
         Ok(())
     }
     pub fn protected_state_exists(&self) -> Result<bool> {
         for account in self.accounts()? {
-            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)+(SELECT count(*) FROM message_recalls)+(SELECT count(*) FROM outgoing_recalls)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
+            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)+(SELECT count(*) FROM message_recalls)+(SELECT count(*) FROM outgoing_recalls)+(SELECT count(*) FROM group_mutations)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
         }
         Ok(false)
     }

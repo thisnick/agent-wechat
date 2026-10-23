@@ -6,6 +6,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from '../src/native-client.ts';
 const options = { baseUrl: 'http://127.0.0.1:6174', token: 'fixture-secret' };
+test('group mutations preserve exact methods, stable keys and operation identity without transport retries', async () => {
+  const calls=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    const path=new URL(url).pathname; calls.push([path,init.method,init.headers.get('Idempotency-Key'),JSON.parse(init.body)]);
+    const action=path.endsWith('/leave')?'leave':path.endsWith('/members')?(init.method==='DELETE'?'remove_members':'add_members'):path.endsWith('/my-name')?'my_name':path.endsWith('/announcement')?'clear_announcement':path.endsWith('/notifications')?'mute':init.method==='PATCH'?'rename':'create';
+    return Response.json({id:'operation',accountId:'a',kind:'group_mutation',state:'queued',result:{action,targetId:action==='create'?null:'room@chatroom'}});
+  }});
+  await client.createGroup('a',{members:['peer'],name:'Synthetic'},'key');
+  await client.renameGroup('a','room@chatroom','New','key2');
+  await client.addGroupMembers('a','room@chatroom',['peer'],'key3');
+  await client.removeGroupMembers('a','room@chatroom',['peer'],'key4');
+  await client.setMyGroupName('a','room@chatroom','Me','key5');
+  await client.clearGroupAnnouncement('a','room@chatroom','key6');
+  await client.setThreadMuted('a','room@chatroom',false,'key7');
+  await client.leaveGroup('a','room@chatroom','key8');
+  assert.deepEqual(calls.map(v=>v[1]),['POST','PATCH','POST','DELETE','PUT','DELETE','PUT','POST']);
+  assert.ok(calls[1][0].includes('room%40chatroom'));assert.deepEqual(calls[6][3],{muted:false});
+  for(const key of ['', 'x'.repeat(201),'bad\nkey'])await assert.rejects(client.createGroup('a',{members:['peer']},key));
+  assert.equal(calls.length,8);
+  let tries=0; const lost=new NativeWeChatClient({...options,fetch:async()=>{tries++;throw Error('lost');}});
+  await assert.rejects(lost.leaveGroup('a','room@chatroom','same'),/lost/);assert.equal(tries,1);
+  const foreign=new NativeWeChatClient({...options,fetch:async()=>Response.json({id:'o',accountId:'other',kind:'group_mutation',result:{action:'create',targetId:null}})});
+  await assert.rejects(foreign.createGroup('a',{members:['peer']},'k'),/identity/);
+});
+test('single group member reads retain unconfirmed absence and encode both selectors',async()=>{
+  const client=new NativeWeChatClient({...options,fetch:async(url)=>{assert.match(String(url),/groups\/room%40chatroom\/members\/peer%2Fexact$/);return Response.json({state:'unconfirmed',member:null,coverage:'cached'});}});
+  const result=await client.groupMember('a','room@chatroom','peer/exact');assert.equal(result.state,'unconfirmed');assert.equal(result.member,null);
+});
 test('video send quality and its separate 50 MiB source bound are exposed without changing other source limits', async () => {
   assert.equal(NATIVE_MAX_VIDEO_SOURCE_BYTES, 50 * 1024 * 1024); assert.equal(NATIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024);
   assert.equal(NATIVE_MAX_ORDINARY_SOURCE_BYTES, 25 * 1024 * 1024 - 17);

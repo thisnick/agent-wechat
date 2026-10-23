@@ -34,7 +34,7 @@ export function createNativeFacade(config: WeChatNativeConfig, dependencies: { e
     const pieces = parsed.pathname.split("/").filter(Boolean);
     let accountId; try { accountId = pieces[2] ? decodeURIComponent(pieces[2]) : undefined; } catch { fail(res, 400, "invalid_facade_path"); return true; }
     if (pieces[0] !== "v1" || pieces[1] !== "accounts" || accountId !== config.accountId) { fail(res, 403, "facade_account_forbidden"); return true; }
-    if (!["GET", "HEAD", "POST", "PATCH", "DELETE"].includes(req.method ?? "")) { fail(res, 405, "method_not_allowed"); return true; }
+    if (!["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].includes(req.method ?? "")) { fail(res, 405, "method_not_allowed"); return true; }
     const abort = new AbortController(); active.add(abort); const cancel = () => abort.abort(); req.once("aborted", cancel); res.once("close", cancel);
     let tooLarge = false;
     try {

@@ -18,6 +18,16 @@ Besides replying, the agent gets tools for the **current chat**. They can't see 
 
 For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
 
+## Group information for the owner
+
+`wechat_group_info` reads a group and one page of cached members, or one exact member with `username`. It requires OpenClaw's trusted owner/admin invocation context and the daemon's `read` scope. Group ownership does not grant this permission. Allow the tool for your owner-facing agent; it cannot create groups or change settings.
+
+```json
+{ "groupId": "123456@chatroom", "limit": 50 }
+```
+
+A missing cached member is `unconfirmed`. Use [the CLI or API](/use/groups/) to refresh server data. No group mutation tools are registered.
+
 ## Reading all chats
 
 Five optional tools work across **every** chat on the account. They're off unless you grant them to an agent:

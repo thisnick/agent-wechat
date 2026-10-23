@@ -3,6 +3,7 @@ import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, Qr
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
+import type { NativeGroupCreateRequest, NativeGroupMemberLookup } from "./native.generated.js";
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 function listQuery(input?: string | NativeListOptions): string { const options = typeof input === "string" ? { cursor: input } : input; if (!options) return ""; if (options.limit != null && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200)) throw new Error("Invalid native page limit"); const query = new URLSearchParams(); for (const [key, value] of Object.entries(options)) if (value != null) query.set(key, String(value)); return query.size ? `?${query}` : ""; }
@@ -145,8 +146,27 @@ export class NativeWeChatClient {
   groups(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeGroup>> { return this.request(`v1/accounts/${id(accountId)}/groups${listQuery(options)}`); }
   thread(accountId: string, threadId: string): Promise<NativeThread> { return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}`); }
   contact(accountId: string, username: string): Promise<NativeContact> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}`); }
-  group(accountId: string, roomId: string): Promise<NativeGroup> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}`); }
-  groupMembers(accountId: string, roomId: string, options?: string | NativeListOptions): Promise<NativePage<NativeGroupMember>> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members${listQuery(options)}`); }
+  group(accountId: string, roomId: string, signal?: AbortSignal): Promise<NativeGroup> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}`, { signal }); }
+  groupMembers(accountId: string, roomId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeGroupMember>> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members${listQuery(options)}`, { signal }); }
+  groupMember(accountId: string, roomId: string, username: string, signal?: AbortSignal): Promise<NativeGroupMemberLookup> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members/${id(username)}`, { signal }); }
+  private async groupMutation(accountId: string, path: string, method: string, body: unknown, key: string, action: string, target: string | null, signal?: AbortSignal): Promise<NativeOperation> {
+    if (typeof key !== "string" || !key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) throw new Error("A stable group idempotency key is required");
+    const operation = await this.request<NativeOperation>(`v1/accounts/${id(accountId)}/${path}`, { method, body: JSON.stringify(body), headers: { "Idempotency-Key": key }, signal });
+    const result = operation?.result as Record<string, unknown> | undefined;
+    if (!operation || operation.accountId !== accountId || operation.kind !== "group_mutation" || typeof operation.id !== "string" || !operation.id
+      || !result || result.action !== action || result.targetId !== target) throw new Error("Native group operation identity is invalid");
+    return operation;
+  }
+  /** A repeated key returns the same operation. Uncertain mutations must be inspected, never repeated with a new key. */
+  createGroup(accountId: string, input: NativeGroupCreateRequest, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, "groups", "POST", input, key, "create", null, signal); }
+  renameGroup(accountId: string, groupId: string, name: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `groups/${id(groupId)}`, "PATCH", { name }, key, "rename", groupId, signal); }
+  leaveGroup(accountId: string, groupId: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `groups/${id(groupId)}/leave`, "POST", {}, key, "leave", groupId, signal); }
+  addGroupMembers(accountId: string, groupId: string, members: string[], key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `groups/${id(groupId)}/members`, "POST", { members }, key, "add_members", groupId, signal); }
+  removeGroupMembers(accountId: string, groupId: string, members: string[], key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `groups/${id(groupId)}/members`, "DELETE", { members }, key, "remove_members", groupId, signal); }
+  setMyGroupName(accountId: string, groupId: string, displayName: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `groups/${id(groupId)}/my-name`, "PUT", { displayName }, key, "my_name", groupId, signal); }
+  clearGroupAnnouncement(accountId: string, groupId: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `groups/${id(groupId)}/announcement`, "DELETE", {}, key, "clear_announcement", groupId, signal); }
+  setThreadMuted(accountId: string, threadId: string, muted: boolean, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.groupMutation(accountId, `threads/${id(threadId)}/notifications`, "PUT", { muted }, key, "mute", threadId, signal); }
+  groupMutationByKey(accountId: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/group-mutations/by-idempotency-key?${new URLSearchParams({ key })}`, { signal }); }
   refreshAvatar(accountId: string, username: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/avatars/${id(username)}/refresh`, { method: "POST", body: "{}" }); }
   async avatar(accountId: string, username: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string; etag: string | null }> { const response = await this.response(`v1/accounts/${id(accountId)}/avatars/${id(username)}`, { signal }); const type = response.headers.get("content-type") ?? ""; if (!type.startsWith("image/")) { await response.body?.cancel(); throw new Error("Cached avatar is not an image"); } return { bytes: await this.readBounded(response, 16 * 1024 * 1024), contentType: type, etag: response.headers.get("etag") }; }
   refreshContact(accountId: string, username: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/refresh`, { method: "POST", body: "{}" }); }

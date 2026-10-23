@@ -147,7 +147,7 @@ test("registration separates default current-thread tools from optional account-
   assert.equal(registrations[0][0].contextVersion, 2); assert.deepEqual(registrations[0][1], { names: toolNames });
   assert.equal(registrations[1][0].contextVersion, 2); assert.deepEqual(registrations[1][1], { names: archiveNames, optional: true });
   const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.contracts.tools, [...toolNames, ...archiveNames, "wechat_recall", "wechat_send_share"]);
+  assert.deepEqual(manifest.contracts.tools, [...toolNames, ...archiveNames, "wechat_recall", "wechat_send_share", "wechat_group_info"]);
   for (const name of archiveNames) assert.equal(manifest.toolMetadata[name].optional, true);
   for (const tool of fixture().tools) {
     const schema = tool.parameters as any; assert.equal(schema.additionalProperties, false);

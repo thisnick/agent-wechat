@@ -1,3 +1,9 @@
+#[path = "group_mutation.rs"]
+mod group_mutation;
+pub use group_mutation::*;
+#[path = "group_detail.rs"]
+mod group_detail;
+pub use group_detail::*;
 #[path = "group_inventory.rs"]
 mod group_inventory;
 pub use group_inventory::*;

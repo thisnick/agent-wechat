@@ -10,6 +10,7 @@ import { registerNativePreparedBoundary } from "./src/native-prepared-boundary.j
 import { registerNativeHistoryTools } from "./src/native-history-tools.js";
 import { registerNativeShareTools } from "./src/native-share-tool.js";
 import { registerNativeRecallTools } from "./src/native-recall-tools.js";
+import { registerNativeGroupTools } from "./src/native-group-tool.js";
 
 const plugin: {
   id: string;
@@ -29,6 +30,7 @@ const plugin: {
     registerNativeHistoryTools(api);
     registerNativeShareTools(api);
     registerNativeRecallTools(api);
+    registerNativeGroupTools(api);
     const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
     const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
       ? registerNativePreparedBoundary(api) : () => {};

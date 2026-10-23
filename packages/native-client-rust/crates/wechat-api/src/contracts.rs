@@ -109,6 +109,24 @@ pub struct NativeGroup {
     pub display_name: Option<String>,
     pub owner_id: Option<String>,
     pub announcement: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub name: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub remark: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub muted: Option<bool>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub minimized: Option<bool>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub is_in_group: Option<bool>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub my_display_name: Option<String>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +135,43 @@ pub struct NativeGroupMember {
     pub username: String,
     pub display_name: Option<String>,
     pub room_display_name: Option<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeGroupMemberLookup {
+    pub group_id: String,
+    pub username: String,
+    pub state: String,
+    pub member: Option<NativeGroupMember>,
+    pub coverage: String,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeGroupCreateRequest {
+    pub members: Vec<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeGroupNameRequest {
+    pub name: String,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeGroupMembersRequest {
+    pub members: Vec<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeGroupMyNameRequest {
+    pub display_name: String,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeThreadNotificationsRequest {
+    pub muted: bool,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -269,6 +324,12 @@ pub fn typescript() -> String {
         NativeContact::decl(),
         NativeGroup::decl(),
         NativeGroupMember::decl(),
+        NativeGroupMemberLookup::decl(),
+        NativeGroupCreateRequest::decl(),
+        NativeGroupNameRequest::decl(),
+        NativeGroupMembersRequest::decl(),
+        NativeGroupMyNameRequest::decl(),
+        NativeThreadNotificationsRequest::decl(),
         NativeTombstone::decl(),
         NativePageItem::<String>::decl(),
         NativePage::<String>::decl(),

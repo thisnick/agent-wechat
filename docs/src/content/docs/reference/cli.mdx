@@ -14,10 +14,10 @@ Run `wx COMMAND --help` for the full options of any command. Output is JSON.
 | `wx auth` | `login [--official[=PATH]] [--qr] [--saved-only]`, `status`, `qr ID`, `attempts get/cancel ID`, `logout`, `forget --yes` |
 | `wx accounts` | `list`, `get`, `default ID`, `alias ID NAME` |
 | `wx account` | `status`, `capabilities`, `connect`, `disconnect` |
-| `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V` |
+| `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V`, `mute ID`, `unmute ID` |
 | `wx messages` | `list CHAT`, `get CHAT ID`, `send CHAT --text/--image/--file/--video/--voice/--share`, `media CHAT ID`, `--video-quality normal/original` with `--video`, `recall ID --server-id S`, `sends lookup/get/cancel` |
 | `wx contacts` | `list`, `find TEXT`, `get ID`, `refresh ID`, `sync`, `avatar ID` |
-| `wx groups` | `list`, `get ID`, `members ID`, `refresh ID`, `sync` |
+| `wx groups` | `list`, `get ID`, `members list/get/refresh/add/remove`, `create MEMBERS...`, `rename ID NAME`, `leave ID`, `my-name ID NAME`, `clear-announcement ID`, `refresh ID`, `sync` |
 | `wx events` | `watch [--cursor-file F]`, `list`, `ack --consumer NAME --through CURSOR` |
 | `wx jobs` | `get ID`, `cancel ID`, `retry ID [--reuse-completed-upload]`, `repair-writeback` |
 | `wx operations` | `get ID` |

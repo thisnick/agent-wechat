@@ -470,35 +470,62 @@ impl Core {
         let (location, keys) = self.profile_location_keys(account)?;
         if command.id == 2 {
             let contact = wechat_protocol::wire::decode_contact_record(&command.payload)?;
-            wechat_profile::apply_contact_patch(
-                &location,
-                &keys,
-                &super::metadata::contact_patch(&contact)?,
-                &options,
-            )?;
-            if contact.username.ends_with("@chatroom") {
-                // Explicit native contact metadata establishes catalog presence.
-                // Missing owner/roster fields remain NULL/preserved; a group seen
-                // only in an AddMsg does not create this catalog row.
-                wechat_profile::apply_group_patch(
+            let fields_applied = format!("contact-fields:{receipt}");
+            let controlled = wechat_protocol::controlled_contact_fields(&contact.raw)?;
+            let wire = wechat_protocol::protobuf::decode(&contact.raw)?;
+            let partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
+                Some(wechat_protocol::protobuf::Value::Varint(n)) => *n != u64::from(u32::MAX),
+                None => false,
+                _ => true,
+            };
+            if self.store.runtime(account, &fields_applied)?.is_none() {
+                wechat_profile::apply_contact_patch(
                     &location,
                     &keys,
-                    &wechat_profile::GroupProjection {
-                        username: contact.username.clone(),
-                        fields: RawFields::new(),
-                        detail_fields: None,
-                        members: vec![],
-                        complete_roster: false,
-                    },
+                    &super::metadata::contact_patch(&contact)?,
                     &options,
                 )?;
+                if contact.username.ends_with("@chatroom") {
+                    // Explicit native contact metadata establishes catalog presence.
+                    // Missing owner/roster fields remain NULL/preserved; a group seen
+                    // only in an AddMsg does not create this catalog row.
+                    wechat_profile::apply_group_patch(
+                        &location,
+                        &keys,
+                        &wechat_profile::GroupProjection {
+                            username: contact.username.clone(),
+                            fields: RawFields::new(),
+                            detail_fields: None,
+                            members: vec![],
+                            complete_roster: false,
+                        },
+                        &options,
+                    )?;
+                }
+                self.store.append_event_once(
+                    account,
+                    &format!("contact:{receipt}"),
+                    "contacts.updated",
+                    &json!({"contactId":contact.username,"origin":origin}),
+                )?;
+                if contact.username.ends_with("@chatroom") {
+                    self.mark_group_revision(account, &contact.username, receipt)?;
+                    self.store.append_event_once(account,&format!("group-fields:{receipt}"),"group.updated",&json!({"groupId":contact.username,"origin":origin,"source":"remote_sync","profileProjection":"partial"}))?;
+                }
+                self.store.put_runtime(account, &fields_applied, b"1")?;
             }
-            self.store.append_event_once(
-                account,
-                &format!("contact:{receipt}"),
-                "contacts.updated",
-                &json!({"contactId":contact.username,"origin":origin}),
-            )?;
+            let pending = contact.username.ends_with("@chatroom")
+                && self.queue_incoming_group(account, &contact, receipt, origin)?;
+            if pending || !controlled.is_empty() || partial_mask {
+                let mut blocked = command_blocker(command);
+                blocked.classification = "contact_update";
+                blocked.reason = if pending {
+                    "group_metadata_refresh_pending"
+                } else {
+                    "contact_update_control_unresolved"
+                };
+                return Err(blocked.into());
+            }
             self.store.put_runtime(account, receipt, b"1")?;
             return Ok(());
         }
@@ -1712,7 +1739,7 @@ mod encrypted_roundtrip {
                 payload: p::message(&[
                     p::bytes(1, &p::bytes(1, name.as_bytes())),
                     p::bytes(2, &p::bytes(1, format!("Synthetic {name}").as_bytes())),
-                    p::uint(7, 3),
+                    p::uint(7, u64::from(u32::MAX)),
                     p::uint(8, flag),
                 ])
                 .unwrap(),

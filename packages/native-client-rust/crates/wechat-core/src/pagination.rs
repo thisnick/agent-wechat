@@ -38,6 +38,24 @@ const MAX_ITEMS: usize = 100_000;
 const VIEW_SECONDS: i64 = 30 * 60;
 
 impl Core {
+    pub fn group_member(&self, account: &str, group: &str, username: &str) -> Result<Value> {
+        wechat_protocol::ordinary_identity(group)?;
+        wechat_protocol::ordinary_identity(username)?;
+        if !group.ends_with("@chatroom") {
+            bail!("invalid_group_identity");
+        }
+        let reader = self.profile_reader(account)?;
+        let own = self.profile_username(account)?;
+        let member = self
+            .catalog_rows(account, "members", Some(group), &reader, own.as_deref())?
+            .into_iter()
+            .find(|m| m["username"] == username);
+        // A cached roster can be incomplete. Absence is never an authoritative
+        // server assertion that this person is not a member.
+        Ok(
+            json!({"groupId":group,"username":username,"state":if member.is_some(){"present"}else{"unconfirmed"},"member":member,"coverage":"cached"}),
+        )
+    }
     fn pagination_continuation(
         &self,
         account: &str,

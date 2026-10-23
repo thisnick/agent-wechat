@@ -146,13 +146,21 @@ wx --account home chats list --limit 20
 wx --account home chats get filehelper
 wx --account home contacts find Example
 wx --account home groups get 'room@chatroom'
-wx --account home groups members 'room@chatroom'
+wx --account home groups members list 'room@chatroom'
+wx --account home groups members get 'room@chatroom' USERNAME
 wx --account home messages list filehelper --limit 50
 wx --account home messages get filehelper MESSAGE_ID
 wx --account home messages media filehelper MESSAGE_ID \
   --quality original --output /private/new-image.jpg
 wx --account home contacts avatar USERNAME --output /private/new-avatar.jpg
 ```
+
+Group edits use an `admin` token and a stable `--idempotency-key`. The native CLI
+supports `groups create/rename/leave/my-name/clear-announcement`,
+`groups members add/remove`, and group-only `chats mute/unmute`. Member reads are
+split into `members list` and exact `members get`; absence is unconfirmed.
+See [Manage groups](../../docs/src/content/docs/use/groups.mdx) for commands,
+partial member results, events and the current phone-side sync gap.
 
 Listing history never marks it read or opens a GUI. Online cursors bind the
 account, query, ordering and a retained read view. Keep the original query and

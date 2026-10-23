@@ -756,12 +756,20 @@ pub struct RoomMember {
     pub nickname: Option<String>,
     pub room_display_name: Option<String>,
     pub raw: Vec<u8>,
+    #[serde(default)]
+    pub flags: u32,
+    #[serde(default)]
+    pub opaque: Option<Vec<u8>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RoomRoster {
     pub room_id: String,
     pub version: u32,
     pub members: Vec<RoomMember>,
+    #[serde(default)]
+    pub full_member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 pub fn room_request(state: &AccountState, room_id: &str, version: u32) -> Result<Vec<u8>> {
     ensure!(room_id.ends_with("@chatroom"), "Invalid room identity");
@@ -797,15 +805,63 @@ pub fn decode_room(input: &[u8], room_id: &str) -> Result<RoomRoster> {
             nickname: p::optional_data(&m, 2)?.map(raw_text).transpose()?,
             room_display_name: p::optional_data(&m, 3)?.map(raw_text).transpose()?,
             raw: raw.clone(),
+            flags: u32::try_from(p::scalar(&m, 6)?)?,
+            opaque: p::optional_data(&m, 7)?.map(Vec::from),
         });
     }
-    if let Some(p::Value::Varint(n)) = p::optional(&member_data, 1)? {
-        ensure!(*n == members.len() as u64, "Member count mismatch");
+    match p::optional(&member_data, 1)? {
+        Some(p::Value::Varint(n)) => ensure!(*n == members.len() as u64, "Member count mismatch"),
+        None => {}
+        _ => bail!("Invalid member count"),
     }
+    let mut full_ids = vec![];
+    let mut full_seen = HashSet::new();
+    for field in f.iter().filter(|v| v.number == 7) {
+        let p::Value::Bytes(raw) = &field.value else {
+            bail!("Invalid full member identity");
+        };
+        let name = raw_text(p::data(&p::decode(raw)?, 1)?)?;
+        ensure!(
+            !name.is_empty()
+                && name.len() <= 256
+                && !name.chars().any(|c| c.is_control() || c.is_whitespace())
+                && full_seen.insert(name.clone())
+                && full_ids.len() < 10000,
+            "Invalid full member identity"
+        );
+        full_ids.push(name);
+    }
+    let full_member_ids = match p::optional(&f, 6)? {
+        Some(p::Value::Varint(n)) => {
+            ensure!(
+                u32::try_from(*n)? as usize == full_ids.len(),
+                "Full member count mismatch"
+            );
+            Some(full_ids)
+        }
+        None if full_ids.is_empty() => None,
+        _ => bail!("Invalid full member count"),
+    };
+    match p::optional(&f, 8)? {
+        None | Some(p::Value::Varint(0)) => {}
+        _ => bail!("Unsupported member deletion metadata"),
+    }
+    for field in f.iter().filter(|v| v.number == 9) {
+        ensure!(
+            matches!(&field.value,p::Value::Bytes(raw) if raw.is_empty()),
+            "Unsupported member deletion metadata"
+        );
+    }
+    let owner = p::optional_data(&f, 5)?
+        .map(raw_text)
+        .transpose()?
+        .filter(|s| !s.is_empty());
     Ok(RoomRoster {
         room_id: room_id.to_string(),
         version,
         members,
+        full_member_ids,
+        owner,
     })
 }
 
@@ -989,6 +1045,56 @@ pub fn decode_voice(input: &[u8], server_id: u64, total: u32, offset: u32) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn room_delta_count_is_independent_of_complete_identity_list() {
+        let member = p::message(&[
+            p::bytes(1, b"changed"),
+            p::uint(6, 0x2000),
+            p::bytes(7, b"opaque"),
+        ])
+        .unwrap();
+        let roster = |nested: Vec<u8>, extra: Vec<Vec<u8>>| {
+            let mut fields = vec![
+                p::bytes(1, &p::uint(1, 0)),
+                p::uint(3, 7),
+                p::bytes(4, &nested),
+            ];
+            fields.extend(extra);
+            p::message(&fields).unwrap()
+        };
+        let nested = p::message(&[p::uint(1, 1), p::bytes(2, &member)]).unwrap();
+        let full = vec![
+            p::uint(6, 2),
+            p::bytes(7, &p::bytes(1, b"changed")),
+            p::bytes(7, &p::bytes(1, b"unchanged")),
+        ];
+        let decoded = decode_room(&roster(nested.clone(), full.clone()), "room@chatroom").unwrap();
+        assert_eq!(decoded.members.len(), 1);
+        assert_eq!(decoded.members[0].flags, 0x2000);
+        assert_eq!(
+            decoded.members[0].opaque.as_deref(),
+            Some(b"opaque".as_slice())
+        );
+        assert_eq!(decoded.full_member_ids.unwrap(), ["changed", "unchanged"]);
+        assert!(decode_room(
+            &roster(nested.clone(), vec![p::uint(6, 2)]),
+            "room@chatroom"
+        )
+        .is_err());
+        assert!(decode_room(&roster(p::bytes(1, b"wrong type"), vec![]), "room@chatroom").is_err());
+        assert!(decode_room(
+            &roster(p::bytes(2, &p::bytes(1, b"missing-flags")), vec![]),
+            "room@chatroom"
+        )
+        .is_err());
+        let mut unknown_deletion = full;
+        unknown_deletion.push(p::uint(8, 1));
+        assert!(decode_room(&roster(nested.clone(), unknown_deletion), "room@chatroom").is_err());
+        assert!(decode_room(&roster(nested, vec![]), "room@chatroom")
+            .unwrap()
+            .full_member_ids
+            .is_none());
+    }
     fn cursor(k: u64, v: u64) -> Vec<u8> {
         p::message(&[
             p::uint(1, 1),

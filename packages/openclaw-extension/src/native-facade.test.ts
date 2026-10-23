@@ -47,3 +47,20 @@ test("facade admits 512 MiB upload/content headers while JSON, previews and over
   responseBytes++;
   assert.equal((await headersOnly("media/asset/content", "GET")).status, 502);
 });
+
+test("facade forwards notification PUT bodies and stable mutation keys", async t => {
+  const upstream = await server(t, async (req, res) => {
+    assert.equal(req.method, "PUT");
+    assert.equal(req.url, "/v1/accounts/a/threads/room%40chatroom/notifications");
+    assert.equal(req.headers["idempotency-key"], "notification-fixture");
+    let body = ""; for await (const chunk of req) body += chunk;
+    assert.deepEqual(JSON.parse(body), { muted: true });
+    res.writeHead(202, { "content-type": "application/json" }); res.end('{"id":"operation"}');
+  });
+  const handler = createNativeFacade(config, { endpoint: upstream, token: "native-fixture" });
+  const base = await server(t, async (req, res) => { await handler(req, res); }); t.after(() => handler.stop());
+  const result = await fetch(`${base}/plugins/agent-wechat/native/v1/accounts/a/threads/room%40chatroom/notifications`, {
+    method: "PUT", headers: { "Content-Type": "application/json", "Idempotency-Key": "notification-fixture" }, body: JSON.stringify({ muted: true }),
+  });
+  assert.equal(result.status, 202); assert.deepEqual(await result.json(), { id: "operation" });
+});

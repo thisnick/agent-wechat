@@ -1,6 +1,7 @@
 //! Authenticated, account-scoped native daemon API.
 mod actions;
 pub mod contracts;
+mod groups;
 mod media;
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -117,6 +118,26 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
+        for code in [
+            "invalid_group_identity",
+            "invalid_group_text",
+            "invalid_group_members",
+            "invalid_group_idempotency_key",
+        ] {
+            if message == code {
+                return Self(StatusCode::BAD_REQUEST, code);
+            }
+        }
+        for code in [
+            "ordinary_group_required",
+            "ordinary_contact_required",
+            "group_contact_unavailable",
+            "group_state_incomplete",
+        ] {
+            if message == code {
+                return Self(StatusCode::CONFLICT, code);
+            }
+        }
         // Remote message metadata failures are media errors. Never diagnose
         // these as a local profile/schema mismatch through the broad fallback.
         for code in [
@@ -1130,6 +1151,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .layer(DefaultBodyLimit::max(128 * 1024))
         .merge(media::routes())
         .merge(actions::routes())
+        .merge(groups::routes())
         .with_state(app.clone());
     // Resolve aliases before route matching so scope checks and vault AAD always
     // use the canonical account identifier.

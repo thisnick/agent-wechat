@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 #[cfg(all(unix, test))]
 use std::os::unix::fs::MetadataExt;
@@ -133,7 +133,7 @@ enum Command {
     },
     Groups {
         #[command(subcommand)]
-        command: Option<CatalogCommand>,
+        command: Option<GroupCommand>,
         #[arg(long)]
         search: Option<String>,
         #[arg(long)]
@@ -278,9 +278,8 @@ enum CatalogCommand {
         wait: u64,
     },
     Members {
-        id: String,
-        #[arg(long)]
-        cursor: Option<String>,
+        #[command(subcommand)]
+        command: MemberCommand,
     },
     Sync {
         #[arg(long)]
@@ -291,6 +290,17 @@ enum CatalogCommand {
 }
 #[derive(Subcommand)]
 enum ChatCommand {
+    /// Change group thread notifications.
+    Mute {
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    Unmute {
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
     List {
         #[arg(long)]
         limit: Option<usize>,
@@ -314,6 +324,86 @@ enum ChatCommand {
     },
     Open {
         id: String,
+    },
+}
+
+#[derive(Args)]
+struct MutationOptions {
+    #[arg(long)]
+    idempotency_key: Option<String>,
+    #[arg(long)]
+    detach: bool,
+    #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+    wait: u64,
+}
+#[derive(Subcommand)]
+enum GroupCommand {
+    #[command(flatten)]
+    Catalog(CatalogCommand),
+    Create {
+        #[arg(required = true, num_args = 2..=40)]
+        members: Vec<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    Rename {
+        id: String,
+        name: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    Leave {
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    MyName {
+        id: String,
+        display_name: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    ClearAnnouncement {
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+}
+#[derive(Subcommand)]
+enum MemberCommand {
+    List {
+        id: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    Get {
+        id: String,
+        username: String,
+    },
+    Refresh {
+        id: String,
+        #[arg(long)]
+        detach: bool,
+        #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+        wait: u64,
+    },
+    Add {
+        id: String,
+        #[arg(required = true)]
+        members: Vec<String>,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    Remove {
+        id: String,
+        #[arg(required = true)]
+        members: Vec<String>,
+        #[command(flatten)]
+        options: MutationOptions,
     },
 }
 #[derive(Subcommand)]
@@ -1224,7 +1314,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Contacts {
             command: Some(command),
             ..
-        } => client_actions::catalog(&r, "contacts", command).await?,
+        } => client_actions::catalog(&r, &settings, "contacts", command).await?,
         Command::Contacts {
             command: None,
             search,
@@ -1239,7 +1329,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Groups {
             command: Some(command),
             ..
-        } => client_actions::catalog(&r, "groups", command).await?,
+        } => client_actions::group(&r, &settings, command).await?,
         Command::Groups {
             command: None,
             search,
@@ -1347,6 +1437,28 @@ async fn run(cli: Cli) -> Result<()> {
             wait_operation(&r, op, if detach { 0 } else { wait }).await?
         }
         Command::Chats { command } => match command {
+            ChatCommand::Mute { id, options } => {
+                client_actions::mutation(
+                    &r,
+                    &settings,
+                    reqwest::Method::PUT,
+                    &format!("threads/{}/notifications", encode(&id)),
+                    json!({"muted":true}),
+                    options,
+                )
+                .await?
+            }
+            ChatCommand::Unmute { id, options } => {
+                client_actions::mutation(
+                    &r,
+                    &settings,
+                    reqwest::Method::PUT,
+                    &format!("threads/{}/notifications", encode(&id)),
+                    json!({"muted":false}),
+                    options,
+                )
+                .await?
+            }
             ChatCommand::List {
                 limit,
                 cursor,

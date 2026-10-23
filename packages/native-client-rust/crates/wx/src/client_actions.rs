@@ -2,7 +2,12 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
-pub async fn catalog(r: &Remote, kind: &str, command: CatalogCommand) -> Result<Value> {
+pub async fn catalog(
+    r: &Remote,
+    config: &settings::File,
+    kind: &str,
+    command: CatalogCommand,
+) -> Result<Value> {
     match command {
         CatalogCommand::Avatar {
             id,
@@ -59,15 +64,66 @@ pub async fn catalog(r: &Remote, kind: &str, command: CatalogCommand) -> Result<
                 .await?;
             wait_operation(r, op, if detach { 0 } else { wait }).await
         }
-        CatalogCommand::Members { id, cursor } => {
+        CatalogCommand::Members { command } => {
             if kind != "groups" {
                 bail!("unsupported_capability: only groups have members");
             }
-            r.get(&query(
-                r.path(&format!("groups/{}/members", encode(&id)))?,
-                &[("cursor", cursor)],
-            ))
-            .await
+            match command {
+                MemberCommand::List { id, limit, cursor } => {
+                    r.get(&query(
+                        r.path(&format!("groups/{}/members", encode(&id)))?,
+                        &[("limit", limit.map(|n| n.to_string())), ("cursor", cursor)],
+                    ))
+                    .await
+                }
+                MemberCommand::Get { id, username } => {
+                    r.get(&r.path(&format!(
+                        "groups/{}/members/{}",
+                        encode(&id),
+                        encode(&username)
+                    ))?)
+                    .await
+                }
+                MemberCommand::Refresh { id, detach, wait } => {
+                    let op = r
+                        .post(
+                            &r.path(&format!("groups/{}/members/refresh", encode(&id)))?,
+                            json!({}),
+                        )
+                        .await?;
+                    wait_operation(r, op, if detach { 0 } else { wait }).await
+                }
+                MemberCommand::Add {
+                    id,
+                    members,
+                    options,
+                } => {
+                    mutation(
+                        r,
+                        config,
+                        reqwest::Method::POST,
+                        &format!("groups/{}/members", encode(&id)),
+                        json!({"members":members}),
+                        options,
+                    )
+                    .await
+                }
+                MemberCommand::Remove {
+                    id,
+                    members,
+                    options,
+                } => {
+                    mutation(
+                        r,
+                        config,
+                        reqwest::Method::DELETE,
+                        &format!("groups/{}/members", encode(&id)),
+                        json!({"members":members}),
+                        options,
+                    )
+                    .await
+                }
+            }
         }
         CatalogCommand::Sync { detach, wait } => {
             let op = r
@@ -83,6 +139,130 @@ pub async fn catalog(r: &Remote, kind: &str, command: CatalogCommand) -> Result<
             wait_operation(r, op, if detach { 0 } else { wait }).await
         }
     }
+}
+pub async fn group(r: &Remote, config: &settings::File, command: GroupCommand) -> Result<Value> {
+    match command {
+        GroupCommand::Catalog(command) => catalog(r, config, "groups", command).await,
+        GroupCommand::Create {
+            members,
+            name,
+            options,
+        } => {
+            mutation(
+                r,
+                config,
+                reqwest::Method::POST,
+                "groups",
+                json!({"members":members,"name":name}),
+                options,
+            )
+            .await
+        }
+        GroupCommand::Rename { id, name, options } => {
+            mutation(
+                r,
+                config,
+                reqwest::Method::PATCH,
+                &format!("groups/{}", encode(&id)),
+                json!({"name":name}),
+                options,
+            )
+            .await
+        }
+        GroupCommand::Leave { id, options } => {
+            mutation(
+                r,
+                config,
+                reqwest::Method::POST,
+                &format!("groups/{}/leave", encode(&id)),
+                json!({}),
+                options,
+            )
+            .await
+        }
+        GroupCommand::MyName {
+            id,
+            display_name,
+            options,
+        } => {
+            mutation(
+                r,
+                config,
+                reqwest::Method::PUT,
+                &format!("groups/{}/my-name", encode(&id)),
+                json!({"displayName":display_name}),
+                options,
+            )
+            .await
+        }
+        GroupCommand::ClearAnnouncement { id, options } => {
+            mutation(
+                r,
+                config,
+                reqwest::Method::DELETE,
+                &format!("groups/{}/announcement", encode(&id)),
+                json!({}),
+                options,
+            )
+            .await
+        }
+    }
+}
+pub async fn mutation(
+    r: &Remote,
+    config: &settings::File,
+    method: reqwest::Method,
+    path: &str,
+    body: Value,
+    options: MutationOptions,
+) -> Result<Value> {
+    if options.wait > 900 {
+        bail!("wait must be at most 900 seconds");
+    }
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(method.as_str(), path, &body))?)
+    );
+    let key = options
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (receipt_path, mut saved) = receipt(config, r, path, "group_mutation", &hash, &key, None)?;
+    eprintln!("Group mutation receipt: {}", receipt_path.display());
+    let op = if let Some(id) = saved["operationId"].as_str() {
+        r.get(&r.path(&format!("operations/{}", encode(id)))?)
+            .await?
+    } else {
+        saved["state"] = json!("submitting");
+        write_replace(&receipt_path, &saved)?;
+        let op=r.request(method,&r.path(path)?,Some(body),Some(&key)).await
+            .with_context(||format!("group result unavailable; retain the same idempotency key from {} and inspect group-mutations/by-idempotency-key before a new action",receipt_path.display()))?;
+        if op["accountId"].as_str() != Some(r.account()?)
+            || op["kind"] != "group_mutation"
+            || op["id"].as_str().is_none_or(str::is_empty)
+        {
+            bail!("group operation identity unverified; inspect the saved receipt");
+        }
+        saved["operationId"] = op["id"].clone();
+        saved["state"] = json!("accepted_by_daemon");
+        write_replace(&receipt_path, &saved)?;
+        op
+    };
+    let id = saved["operationId"]
+        .as_str()
+        .context("group operation receipt missing")?;
+    let mut out =
+        wait_operation_checked(r, op, if options.detach { 0 } else { options.wait }, |op| {
+            if op["accountId"].as_str() != Some(r.account()?)
+                || op["kind"] != "group_mutation"
+                || op["id"] != id
+            {
+                bail!("group operation identity unverified");
+            }
+            Ok(())
+        })
+        .await?;
+    out["receiptPath"] = json!(receipt_path);
+    Ok(out)
 }
 pub async fn jobs(r: &Remote, command: JobsAction) -> Result<Value> {
     match command {

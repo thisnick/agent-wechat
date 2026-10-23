@@ -1,11 +1,16 @@
 #[path = "checkpoint.rs"]
 mod checkpoint;
+#[path = "groups.rs"]
+mod groups;
+#[path = "incoming_groups.rs"]
+mod incoming_groups;
 #[path = "logout.rs"]
 mod logout;
 #[path = "metadata.rs"]
 mod metadata;
 #[path = "outgoing_recall.rs"]
 mod outgoing_recall;
+pub use wechat_protocol::GroupMutation;
 #[path = "sync_projection.rs"]
 mod sync_projection;
 pub use metadata::MetadataAction;
@@ -269,11 +274,14 @@ impl Core {
             core.store.recover_uncertain_sends(&account.id)?;
             core.store.recover_media_jobs(&account.id)?;
             core.store.recover_message_recalls(&account.id)?;
+            core.store.recover_group_mutations(&account.id)?;
             core.recover_logout(&account.id)?;
             core.store.recover_interrupted_operations(&account.id)?;
             let _ = core.recover_metadata(&account.id)?;
             let _ = core.recover_saved_login(&account.id);
             let _ = core.recover_outgoing_recall_projections(&account.id);
+            let _ = core.repair_group_mutations(&account.id);
+            let _ = core.refresh_incoming_groups(&account.id, false);
         }
         Ok(core)
     }
@@ -493,6 +501,9 @@ impl Core {
         let mut op = self.store.operation(account, id)?;
         if op.kind == "message_recall" {
             bail!("operation_cannot_cancel");
+        }
+        if op.kind == "group_mutation" {
+            return self.store.cancel_group_mutation(account, id);
         }
         if let Some(cancel) = self
             .cancels
@@ -1230,6 +1241,8 @@ impl Core {
         Ok(done)
     }
     pub fn recover_projection(&self, account: &str) -> Result<Value> {
+        self.repair_group_mutations(account)?;
+        self.refresh_incoming_groups(account, false)?;
         if self.store.pending_sync(account)?.is_empty() {
             self.store.retry_blocked(account)?;
         }
@@ -1543,6 +1556,10 @@ impl Core {
             blocking(move || {
                 let _guard = guard;
                 let _ = core.recover_text_projections(&owned)?;
+                if core.refresh_incoming_groups(&owned, true)? > 0 {
+                    core.store.retry_blocked(&owned)?;
+                    core.project_pending(&owned)?;
+                }
                 if core.store.pending_sync_count(&owned)? == 0 {
                     core.publish_profile_checkpoint(&owned)?;
                 }
@@ -1560,6 +1577,10 @@ impl Core {
             blocking(move || {
                 let mut state = core.account_state(&account)?;
                 let _ = core.recover_text_projections(&account)?;
+                if core.refresh_incoming_groups(&account, true)? > 0 {
+                    core.store.retry_blocked(&account)?;
+                    core.project_pending(&account)?;
+                }
                 if core.store.pending_sync_count(&account)? == 0 {
                     let _ = core.publish_profile_checkpoint(&account);
                 }
