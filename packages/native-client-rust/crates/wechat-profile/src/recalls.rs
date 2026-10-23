@@ -17,7 +17,30 @@ pub fn apply_recall_projection(
     recalled_at: Option<i64>,
     options: &WriteOptions,
 ) -> Result<Option<SourceMessageId>> {
+    apply_recall_projection_with_notice(location, keys, peer, server_id, recalled_at, None, options)
+}
+
+/// Preserve the server's replacement text as XML text, never as markup.
+pub fn apply_recall_projection_with_notice(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    peer: &str,
+    server_id: &str,
+    recalled_at: Option<i64>,
+    replacement_text: Option<&str>,
+    options: &WriteOptions,
+) -> Result<Option<SourceMessageId>> {
     ownership(location, keys, options)?;
+    let notice = replacement_text.unwrap_or("[Message recalled]");
+    if notice.is_empty()
+        || notice.len() > 16 * 1024
+        || notice.chars().any(|c| {
+            (c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+                || matches!(c, '\u{fffe}' | '\u{ffff}')
+        })
+    {
+        return Err(ProfileError::InvalidMetadata);
+    }
     let Some(source) = find_projected_message(location, keys, peer, server_id, options)? else {
         return Ok(None);
     };
@@ -53,7 +76,15 @@ pub fn apply_recall_projection(
         params![local, sid as i64],
         |r| r.get(0),
     )?;
-    let xml=format!("<sysmsg type=\"revokemsg\"><revokemsg><content>[Message recalled]</content><revoketime>{}</revoketime></revokemsg></sysmsg>",recalled_at.unwrap_or(0));
+    // The marker already preserves the author and notice. Clean search in its
+    // own transaction before clearing this row; either phase can be replayed.
+    remove_recalled_search(location, keys, peer, server_id, &source, created, options)?;
+    let escaped = notice
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\r', "&#13;");
+    let xml=format!("<sysmsg type=\"revokemsg\"><revokemsg><content>{escaped}</content><revoketime>{}</revoketime></revokemsg></sysmsg>",recalled_at.unwrap_or(0));
     let tx = messages.transaction()?;
     tx.execute(
         "INSERT INTO Name2Id(user_name,is_session) VALUES('',0) ON CONFLICT(user_name) DO NOTHING",
@@ -71,7 +102,7 @@ pub fn apply_recall_projection(
     tx.execute("DELETE FROM MessageResourceInfo WHERE chat_id=(SELECT rowid FROM ChatName2Id WHERE user_name=?1) AND message_svr_id=?2 AND message_local_id=?3 AND message_create_time=?4",params![peer,sid as i64,local,created])?;
     tx.commit()?;
     let tx = sessions.transaction()?;
-    tx.execute("UPDATE SessionTable SET summary='[Message recalled]',last_msg_type=10000,last_msg_sub_type=0,last_msg_sender='',last_sender_display_name='' WHERE username=?1 AND last_msg_locald_id=?2 AND last_timestamp=?3",params![peer,local,created])?;
+    tx.execute("UPDATE SessionTable SET summary=?4,last_msg_type=10000,last_msg_sub_type=0,last_msg_sender='',last_sender_display_name='' WHERE username=?1 AND last_msg_locald_id=?2 AND last_timestamp=?3",params![peer,local,created,notice])?;
     tx.commit()?;
     Ok(Some(source))
 }

@@ -31,7 +31,10 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if "/operations/recall-" in path:
                 operation=state["recall_operations"][path.split("/")[-1]]
                 return self.reply({**operation,"id":"wrong-operation"} if state["recall_wrong_get"] else operation)
-            if path.endswith("/messages/m"):return self.reply({"id":"m","threadId":"filehelper"})
+            if path.endswith("/messages/m"):
+                if state.get("recalled_message"):
+                    return self.reply({"id":"m","threadId":"filehelper","senderId":"original-author","direction":"outgoing","type":10000,"body":"[Message recalled]","recall":{"observedAt":"2026-10-23T00:00:00Z","originalSenderId":"original-author","originalDirection":"outgoing","replacementText":"Server notice <text> & detail"}})
+                return self.reply({"id":"m","threadId":"filehelper"})
             if path.endswith("/messages/m/media"):return self.reply({"items":[asset("thumbnail"),asset("original")]})
             if "/media/" in path and path.endswith("/content"):return self.reply(content[path.split("/")[-2]],kind="image/png")
             self.reply({"error":{"code":"fixture_not_found"}},404)
@@ -126,6 +129,11 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         state["recall_wrong_get"]=False
         image=root/"image";result=run("messages","media","filehelper","m","--quality","best","--output",str(image));assert result["actualVariant"]=="original" and image.read_bytes()==content["original"]
         assert run("messages","media","filehelper","m","--quality","standard","--cached-only",code=9)["state"]=="not_cached"
+        state["recalled_message"]=True
+        message=run("messages","get","m")
+        assert message["senderId"]=="original-author" and message["direction"]=="outgoing"
+        assert message["body"]=="[Message recalled]" and message["recall"]["replacementText"]=="Server notice <text> & detail"
+        state["recalled_message"]=False
         result=run("auth","login","--strategy","qr","--qr-refresh","manual","--detach","--idempotency-key","fixture-login")
         assert state["login_posts"]==1 and pathlib.Path(result["receiptPath"]).is_file()
         run("auth","login","--strategy","qr","--qr-refresh","manual","--detach","--idempotency-key","fixture-login");assert state["login_posts"]==1

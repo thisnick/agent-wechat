@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import type { NativeMessage } from "@agent-wechat/shared";
-import { nativeRecallIdentity, nativeRecallInfo, recalledNativeMessage, validateNativeRecall, type NativeRecallObservation } from "./native-recall-state.ts";
+import { nativeRecallIdentity, nativeRecallInfo, recalledNativeMessage, validateNativeRecall, mergeNativeRecall, type NativeRecallObservation } from "./native-recall-state.ts";
 export type NativeSuppliedAsset = Readonly<{
   id: string; sha256: string; byteLength: number; mime: string; path: string;
   role: "model_image" | "file_reference"; kind: "image" | "audio" | "video" | "file";
@@ -50,6 +50,7 @@ export class NativeConsumerState {
       if (parsed.schemaVersion !== 1 || parsed.serverId !== serverId || parsed.accountId !== accountId || !/^\d+$/.test(parsed.cursor) || !parsed.items || typeof parsed.items !== "object") throw new Error("Native consumer identity or schema mismatch; state was preserved");
       for (const [id, item] of Object.entries(parsed.items)) {
         if (item.message?.id !== id || item.message.accountId !== accountId || typeof item.message.threadId !== "string" || !["received", "dispatching", "handed_off", "completed", "ignored", "needs_review"].includes(item.state)) throw new Error("Invalid native custody record; state was preserved");
+        nativeRecallInfo(item.message);
         if ((item.cursor != null && !/^\d+$/.test(item.cursor)) || (item.groupContext != null && typeof item.groupContext !== "boolean")) throw new Error("Invalid native group context record; state was preserved");
         if (item.revision != null && (typeof item.revision !== "string" || !item.revision || item.revision.length > 64)) throw Error("Invalid native custody revision; state was preserved");
         item.revision ??= randomUUID();
@@ -145,8 +146,8 @@ export class NativeConsumerState {
     }
     const key = nativeRecallIdentity(recall.threadId, recall.serverId);
     this.value.recalls ??= {};
-    this.value.recalls[key] ??= { threadId: recall.threadId, serverId: recall.serverId, observedAt: recall.observedAt,
-      ...(recall.messageId ? { messageId: recall.messageId } : {}), ...(recall.recalledAt ? { recalledAt: recall.recalledAt } : {}) };
+    const remembered = mergeNativeRecall(this.value.recalls[key] ?? recall, recall);
+    this.value.recalls[key] = remembered;
     const affected = new Set<string>();
     for (const item of this.items()) {
       if (item.message.threadId !== recall.threadId) continue;
@@ -154,7 +155,7 @@ export class NativeConsumerState {
       const quote = item.message.quote?.serverId === recall.serverId;
       if (!target && !quote) continue;
       affected.add(item.message.id);
-      item.message = target ? recalledNativeMessage(item.message, recall) : { ...item.message, quote: undefined };
+      item.message = target ? recalledNativeMessage(item.message, remembered) : { ...item.message, quote: undefined };
       if (target) item.groupContext = false;
       item.readPending = false;
       if (["dispatching", "handed_off"].includes(item.state)) item.state = "needs_review";

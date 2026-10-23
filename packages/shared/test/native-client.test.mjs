@@ -131,6 +131,36 @@ test('recall transport rejects foreign operation identities and does not retry a
   let attempts=0;const client=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('lost response');}});
   await assert.rejects(client.recallMessage('a','m','3','key'),/lost response/);assert.equal(attempts,1);
 });
+test('recall metadata preserves optional unknowns and validates public author and notice fields', async () => {
+  const observedAt='2026-10-23T00:00:00Z';
+  const recall={observedAt,originalSenderId:'original-author',originalDirection:'outgoing',replacementText:'Localized notice <text> & detail'};
+  const message={id:'m',accountId:'a',threadId:'t',serverId:'42',senderId:'original-author',direction:'outgoing',type:10000,recall};
+  const valid=new NativeWeChatClient({...options,fetch:async()=>Response.json(message)});
+  assert.deepEqual((await valid.message('a','m')).recall,recall);
+  for(const unknown of [{observedAt},{observedAt,originalSenderId:null,originalDirection:null,replacementText:null}]) {
+    const client=new NativeWeChatClient({...options,fetch:async()=>Response.json({...message,recall:unknown})});
+    assert.deepEqual((await client.message('a','m')).recall,unknown);
+  }
+  for(const change of [{originalSenderId:42},{originalSenderId:''},{originalSenderId:'two authors'},
+    {originalSenderId:'author\0hidden'},{originalSenderId:'界'.repeat(171)}, {originalDirection:'self'},
+    {originalDirection:true},{replacementText:42},{replacementText:'bad\u0001notice'},{replacementText:'🧪'.repeat(4097)}]) {
+    const invalid={...message,recall:{...recall,...change}};
+    const client=new NativeWeChatClient({...options,fetch:async(url)=>{
+      const path=new URL(url).pathname;
+      return Response.json(path.endsWith('/quote') ? {accountId:'a',messageId:'parent',threadId:'t',state:'resolved',message:invalid}
+        : path.endsWith('/m') ? invalid : {items:[invalid],nextCursor:null});
+    }});
+    await assert.rejects(client.message('a','m'),/recall metadata/);
+    await assert.rejects(client.messages('a','t'),/recall metadata/);
+    await assert.rejects(client.searchMessages('a',{query:'notice'}),/recall metadata/);
+    await assert.rejects(client.quotedMessage('a','parent'),/recall metadata/);
+    const event={cursor:'1',kind:'message.recalled',createdAt:observedAt,data:{threadId:'t',serverId:'42',...invalid.recall}};
+    const events=new NativeWeChatClient({...options,fetch:async()=>Response.json({items:[event],nextCursor:'1'})});
+    await assert.rejects(events.events('a'),/recall metadata/);
+    const stream=new NativeWeChatClient({...options,fetch:async()=>new Response(`data: ${JSON.stringify(event)}\n\n`,{headers:{'Content-Type':'text/event-stream'}})});
+    await assert.rejects(async()=>{for await(const _event of stream.watch('a')) assert.fail('invalid recall must not be yielded');},/recall metadata/);
+  }
+});
 test('structured failures expose safe error codes but never raw server messages', async () => {
   const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ error: { code: 'read_state_conflict', message: 'private source content', retryable: false } }, { status: 409 }) });
   await assert.rejects(client.markRead('a', 't', '7'), error => error instanceof NativeApiError && error.status === 409 && error.code === 'read_state_conflict' && !error.message.includes('private'));
@@ -145,7 +175,7 @@ test('URL shares use the typed send route, caller key and cancellation signal ex
   for (const key of ['', 'x'.repeat(201), 'bad\nkey']) assert.throws(() => client.sendShare('a', request, key));
 });
 test('event pages enforce the server maximum of 200', async () => {
-  const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({}) });
+  const client = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ items: [], nextCursor: '0' }) });
   await client.events('a', '0', 200);
   assert.throws(() => client.events('a', '0', 201));
 });

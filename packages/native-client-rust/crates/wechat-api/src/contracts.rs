@@ -50,6 +50,15 @@ pub struct NativeRecallInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recalled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub original_sender_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub original_direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub replacement_text: Option<String>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -380,6 +389,24 @@ mod tests {
     #[test]
     fn wire_contract_rejects_numeric_remote_ids_and_bad_scope_shapes() {
         assert!(serde_json::from_value::<NativeMessage>(serde_json::json!({"id":"m","accountId":"a","threadId":"t","serverId":9007199254740992u64,"senderId":null,"type":1,"direction":null,"body":null,"createdAt":null,"mentions":{"state":"unknown","userIds":[],"self":null,"all":null,"source":null},"version":"1","media":[]})).is_err());
+    }
+    #[test]
+    fn recall_metadata_is_optional_nullable_and_keeps_identity_strings() {
+        for value in [
+            serde_json::json!({"observedAt":"2026-10-23T00:00:00Z"}),
+            serde_json::json!({"observedAt":"2026-10-23T00:00:00Z","originalSenderId":null,"originalDirection":null,"replacementText":null}),
+            serde_json::json!({"observedAt":"2026-10-23T00:00:00Z","originalSenderId":"author","originalDirection":"outgoing","replacementText":"Server notice"}),
+        ] {
+            assert!(serde_json::from_value::<NativeRecallInfo>(value).is_ok());
+        }
+        assert!(serde_json::from_value::<NativeRecallInfo>(
+            serde_json::json!({"observedAt":"2026-10-23T00:00:00Z","originalSenderId":42})
+        )
+        .is_err());
+        let generated = typescript();
+        for field in ["originalSenderId", "originalDirection", "replacementText"] {
+            assert!(generated.contains(&format!("{field}?: string | null")));
+        }
     }
     #[test]
     fn deleted_members_preserve_position_without_fabricated_resources() {

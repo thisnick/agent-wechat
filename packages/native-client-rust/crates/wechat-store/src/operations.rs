@@ -239,7 +239,7 @@ impl Store {
     fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=7).contains(&version) {
+        if !(1..=8).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -277,6 +277,13 @@ impl Store {
             let tx = db.transaction()?;
             tx.execute_batch(include_str!(
                 "../migrations/account/V007__group_mutations.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 8 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V008__recall_metadata.sql"
             ))?;
             tx.commit()?;
         }
