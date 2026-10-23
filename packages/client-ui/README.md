@@ -116,10 +116,15 @@ Quoted replies and forwarded chat history render the hub's normalized text. They
 are application messages, not downloadable file attachments. Unknown message
 types show an unsupported-content label instead of entering the media flow.
 
-Incoming images, files, videos and voice messages use real hub transfer jobs.
-**Load attachment** retrieves the selected quality; progress, cancellation and
-retry use the job API. Verified images render inline, videos and decoded voice
-use browser playback controls, and files can be downloaded. Other clients see
+Incoming images automatically download standard quality to the hub and render
+inline without a quality picker. **Download original** separately keeps the full
+image on the agent-wechat hub; **Save original** then saves those cached bytes to
+the browser's device. **Save image** saves the standard image. An original becoming
+available never replaces the standard image in the conversation.
+
+Files, videos and voice messages use **Load attachment** and real hub transfer
+jobs. Progress, cancellation and retry use the job API. Videos and decoded voice
+use browser playback controls, and files can be saved. Other clients see
 ready assets through the hub event stream. Unsupported, pending and expired
 assets keep their actual state; raw message XML is never a retrieved attachment.
 
@@ -142,6 +147,33 @@ outgoing media through its decoded local transport. Production preparation,
 readback, idempotency, cancellation, logout fences and official-format history
 writes still run in the real hub. These checks do not establish live WeChat
 acceptance or recipient playback.
+
+## Opening a conversation
+
+Recent chat history stays in session memory across conversation and account
+switches: up to 20 chats and 5,000 messages total, evicting the least recently
+used chats. Reopening shows saved pages immediately and refreshes the latest
+page in the background. Events update cached chats too. History is not written to
+browser storage; disconnecting or reloading drops it. An expired event stream
+invalidates that account's cache so missed recalls are not kept in old pages.
+
+The client marks unread history as read after it successfully loads the selected
+chat. It sends the read version captured before loading; a conflict keeps newer
+unread counts and reports an error instead of retrying against unseen messages.
+Failed loads and responses from a previously selected chat do not clear badges.
+Cross-device read synchronization is handled by the hub.
+
+The conversation uses the headless shadcn Message Scroller. Opening a chat starts
+at the bottom and follows images and other content as they load. Scrolling away
+releases that follow; **Latest messages** resumes it. Loading older messages keeps
+the visible message in place. Search uses a separate view.
+
+Group avatars first use cached hub bytes. Opening a group lazily requests missing
+avatars for visible message senders and the header collage; opening its member
+list does the same for visible rows. These requests use the existing per-person
+avatar refresh operation, with deduplication and at most four refreshes at once.
+The client does not download the entire roster on group open. Missing or unavailable
+photos keep initials; **Refresh avatar** remains available for direct contacts.
 
 ## New chats and groups
 

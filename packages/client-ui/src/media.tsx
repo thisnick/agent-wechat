@@ -10,6 +10,7 @@ import type { Connection } from "./connection.ts";
 import { pause, readableError } from "./session.ts";
 import { Avatar, Button, Icon } from "./ui.tsx";
 import type { PendingMedia } from "./media-outbox.ts";
+import { standardImage, cachedVariant, canRetrieve } from "./media-variants.ts";
 
 const ended = new Set([
   "available",
@@ -18,6 +19,8 @@ const ended = new Set([
   "cancelled",
   "needs_review",
   "partial",
+  "expired",
+  "unsupported",
 ]);
 const size = (bytes: number) =>
   bytes < 1024 * 1024
@@ -226,12 +229,17 @@ export function PendingAttachments({
                   </span>
                 </div>
                 <div
-                  className={`delivery ${uncertain || item.error ? "warn" : ""}`}
+                  className={`delivery ${
+                    uncertain || item.error ? "warn" : ""
+                  }`}
                   role="status"
                 >
                   {label}
                   {job?.totalBytes && !ended.has(job.state)
-                    ? ` · ${Math.min(100, Math.round((job.completedBytes / job.totalBytes) * 100))}%`
+                    ? ` · ${Math.min(
+                        100,
+                        Math.round((job.completedBytes / job.totalBytes) * 100),
+                      )}%`
                     : ""}
                 </div>
                 {item.error && (
@@ -383,7 +391,10 @@ export function MediaCard({
     })();
     return () => controller.abort();
   }, [job?.id, job?.state]);
-  const asset = assets.find((asset) => asset.id === selected);
+  const image = message.type === 3;
+  const asset = image
+    ? standardImage(assets)
+    : assets.find((asset) => asset.id === selected);
   const working = !!job && !ended.has(job.state);
   async function retrieve() {
     if (!asset) return;
@@ -403,9 +414,9 @@ export function MediaCard({
   }
   useEffect(() => {
     if (
-      message.type === 47 &&
-      asset?.state === "pending" &&
-      asset.retryable &&
+      (image || message.type === 47) &&
+      asset &&
+      canRetrieve(asset) &&
       !working &&
       !automaticallyRequested.current.has(asset.id)
     ) {
@@ -415,7 +426,9 @@ export function MediaCard({
   }, [message.type, asset?.id, asset?.state, working]);
   return (
     <div
-      className={`bubble media-card${message.type === 47 ? " sticker-card" : ""}`}
+      className={`bubble media-card${
+        message.type === 47 ? " sticker-card" : ""
+      }`}
     >
       <div className="attachment-file">
         <Icon
@@ -440,7 +453,7 @@ export function MediaCard({
           </small>
         </span>
       </div>
-      {assets.length > 1 && (
+      {!image && assets.length > 1 && (
         <select
           aria-label="Attachment quality"
           value={selected}
@@ -458,11 +471,12 @@ export function MediaCard({
           ))}
         </select>
       )}
-      {asset?.state === "available" ? (
+      {asset?.state === "available" && (!image || cachedVariant(asset)) ? (
         <AssetContent
           key={`${asset.accountId}:${asset.id}:${asset.sha256}`}
           asset={asset}
           connection={connection}
+          saveLabel={image ? "Save image" : "Save attachment"}
         />
       ) : (
         asset && (
@@ -476,17 +490,35 @@ export function MediaCard({
               }
               onClick={() => void retrieve()}
             >
-              {working ? "Loading…" : "Load attachment"}
+              {working
+                ? "Downloading…"
+                : image
+                  ? "Retry image download"
+                  : "Load attachment"}
             </button>
           </div>
         )
+      )}
+      {image && !loading && !asset && (
+        <small>Standard image is unavailable.</small>
+      )}
+      {image && (
+        <OriginalImage
+          asset={assets.find((asset) => asset.variant === "original")}
+          connection={connection}
+          message={message}
+          reload={reload}
+        />
       )}
       {working && (
         <div className="attachment-job-actions">
           <span role="status">
             {job.phase}
             {job.totalBytes
-              ? ` · ${Math.min(100, Math.round((job.completedBytes / job.totalBytes) * 100))}%`
+              ? ` · ${Math.min(
+                  100,
+                  Math.round((job.completedBytes / job.totalBytes) * 100),
+                )}%`
               : ""}
           </span>
           <button
@@ -526,9 +558,11 @@ export function MediaCard({
 function AssetContent({
   asset,
   connection,
+  saveLabel,
 }: {
   asset: MediaAsset;
   connection: Connection;
+  saveLabel: string;
 }) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
@@ -565,26 +599,6 @@ function AssetContent({
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [asset.accountId, asset.id, asset.sha256]);
-  async function download() {
-    try {
-      const content = await connection.session.client.mediaContent(
-        asset.accountId,
-        asset.id,
-      );
-      const href = URL.createObjectURL(
-        new Blob([new Uint8Array(content.bytes).buffer], {
-          type: content.contentType,
-        }),
-      );
-      const link = document.createElement("a");
-      link.href = href;
-      link.download = asset.filename || "attachment";
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(href), 30000);
-    } catch (error) {
-      setError(readableError(error));
-    }
-  }
   return (
     <>
       {inline && !url && !error && <small>Loading preview…</small>}
@@ -614,8 +628,71 @@ function AssetContent({
             preload="metadata"
           />
         ))}
+      <SaveAsset
+        asset={asset}
+        connection={connection}
+        label={saveLabel}
+        representation={
+          preview && asset.kind === "image" ? "preview" : "original"
+        }
+      />
+      {error && (
+        <small className="attachment-error" role="alert">
+          {error}
+        </small>
+      )}
+    </>
+  );
+}
+
+function SaveAsset({
+  asset,
+  connection,
+  label,
+  representation = "original",
+}: {
+  asset: MediaAsset;
+  connection: Connection;
+  label: string;
+  representation?: "original" | "preview";
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function save() {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const content = await connection.session.client.mediaContent(
+        asset.accountId,
+        asset.id,
+        { representation },
+      );
+      const href = URL.createObjectURL(
+        new Blob([new Uint8Array(content.bytes).buffer], {
+          type: content.contentType,
+        }),
+      );
+      const link = document.createElement("a");
+      link.href = href;
+      link.download =
+        (representation === "preview"
+          ? asset.preview?.filename
+          : asset.filename) || "attachment";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(href), 30000);
+    } catch (error) {
+      setError(readableError(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <>
       <div className="attachment-job-actions">
-        <button onClick={() => void download()}>Download</button>
+        <button disabled={saving} onClick={() => void save()}>
+          {saving ? "Saving…" : label}
+        </button>
       </div>
       {error && (
         <small className="attachment-error" role="alert">
@@ -623,5 +700,135 @@ function AssetContent({
         </small>
       )}
     </>
+  );
+}
+
+function OriginalImage({
+  asset,
+  connection,
+  message,
+  reload,
+}: {
+  asset?: MediaAsset;
+  connection: Connection;
+  message: NativeMessage;
+  reload: () => Promise<void>;
+}) {
+  const [job, setJob] = useState<MediaJob | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState("");
+  const currentReload = useRef(reload);
+  currentReload.current = reload;
+  const client = connection.session.client;
+  useEffect(() => {
+    if (!job || ended.has(job.state)) return;
+    const controller = new AbortController();
+    void (async () => {
+      while (!controller.signal.aborted) {
+        await pause(700, controller.signal);
+        if (controller.signal.aborted) return;
+        const current = await client.job(
+          message.accountId,
+          job.id,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        setJob(current);
+        if (ended.has(current.state)) {
+          await currentReload.current();
+          return;
+        }
+      }
+    })().catch((error) => {
+      if (!controller.signal.aborted) setError(readableError(error));
+    });
+    return () => controller.abort();
+  }, [client, message.accountId, job?.id, job?.state]);
+  if (!asset) return null;
+  const working = starting || (!!job && !ended.has(job.state));
+  async function retrieve() {
+    if (!asset || working) return;
+    setStarting(true);
+    setError("");
+    try {
+      const current =
+        job?.retryable && ended.has(job.state)
+          ? await client.retryJob(message.accountId, job.id)
+          : await client.transferMedia(message.accountId, {
+              messageId: message.id,
+              assetId: asset.id,
+              quality: "original",
+            });
+      setJob(current);
+      if (ended.has(current.state)) await currentReload.current();
+    } catch (error) {
+      setError(readableError(error));
+    } finally {
+      setStarting(false);
+    }
+  }
+  return (
+    <div className="original-image-actions">
+      {cachedVariant(asset) ? (
+        <>
+          <small>
+            Original downloaded to agent-wechat hub
+            {asset.byteLength ? ` · ${size(asset.byteLength)}` : ""}
+          </small>
+          <SaveAsset
+            asset={asset}
+            connection={connection}
+            label="Save original"
+          />
+        </>
+      ) : (
+        <>
+          <button
+            disabled={working || (!canRetrieve(asset) && !job?.retryable)}
+            onClick={() => void retrieve()}
+          >
+            {working
+              ? "Downloading original…"
+              : job?.retryable
+                ? "Retry original download"
+                : "Download original"}
+          </button>
+          {job && working && (
+            <button
+              disabled={job.cancelRequested}
+              onClick={() =>
+                void client
+                  .cancelJob(message.accountId, job.id)
+                  .then(setJob)
+                  .catch((error) => setError(readableError(error)))
+              }
+            >
+              {job.cancelRequested ? "Cancelling…" : "Cancel original download"}
+            </button>
+          )}
+          <small>
+            {working
+              ? job?.totalBytes
+                ? `${Math.min(
+                    100,
+                    Math.round((job.completedBytes / job.totalBytes) * 100),
+                  )}%`
+                : "Keeping a copy on the agent-wechat hub."
+              : job && ended.has(job.state) && job.state !== "available"
+                ? `Original download ${job.state.replaceAll("_", " ")}.`
+                : asset.state === "expired"
+                  ? "Original expired."
+                  : asset.state === "unsupported"
+                    ? "Original unavailable."
+                    : "Keeps a copy on the agent-wechat hub; then you can save it to this device."}
+          </small>
+        </>
+      )}
+      {error && (
+        <small className="attachment-error" role="alert">
+          {error}
+        </small>
+      )}
+    </div>
   );
 }

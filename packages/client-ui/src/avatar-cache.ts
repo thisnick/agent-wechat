@@ -1,10 +1,15 @@
-import type { NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeApiError, type NativeWeChatClient } from "@agent-wechat/shared";
 import { pause } from "./session.ts";
 
 export class AvatarCache {
   private client: NativeWeChatClient;
   private values = new Map<string, string>();
   private pending = new Map<string, Promise<void>>();
+  private missing = new Set<string>();
+  private requested = new Set<string>();
+  private refreshing = new Map<string, Promise<void>>();
+  private queue: (() => void)[] = [];
+  private active = 0;
   private generations = new Map<string, number>();
   private listeners = new Set<() => void>();
   private controller = new AbortController();
@@ -49,15 +54,65 @@ export class AvatarCache {
         const old = this.values.get(key);
         if (old) URL.revokeObjectURL(old);
         this.values.set(key, url);
+        this.missing.delete(key);
         for (const listener of this.listeners) listener();
-      } catch {
-        /* Keep initials when the hub has no cached avatar. */
+      } catch (error) {
+        if (
+          error instanceof NativeApiError &&
+          error.code === "media_not_cached" &&
+          this.generations.get(key) === generation &&
+          !this.controller.signal.aborted
+        )
+          this.missing.add(key);
       }
     })();
     this.pending.set(key, request);
     await request;
   }
+  async ensure(account: string, username: string): Promise<void> {
+    await this.load(account, username);
+    const key = `${account}:${username}`;
+    if (
+      !this.missing.has(key) ||
+      this.requested.has(key) ||
+      this.controller.signal.aborted
+    )
+      return;
+    this.requested.add(key);
+    // Lazy requests are best effort. An unavailable avatar keeps its initials.
+    await this.refresh(account, username).catch(() => {});
+  }
   async refresh(account: string, username: string): Promise<void> {
+    const key = `${account}:${username}`;
+    const pending = this.refreshing.get(key);
+    if (pending) return pending;
+    const request = new Promise<void>((resolve, reject) => {
+      this.queue.push(() => {
+        if (this.controller.signal.aborted) {
+          resolve();
+          return;
+        }
+        this.active++;
+        void this.download(account, username)
+          .then(resolve, reject)
+          .finally(() => {
+            this.active--;
+            this.drain();
+          });
+      });
+    });
+    this.refreshing.set(key, request);
+    this.drain();
+    try {
+      await request;
+    } finally {
+      this.refreshing.delete(key);
+    }
+  }
+  private drain(): void {
+    while (this.active < 4 && this.queue.length) this.queue.shift()!();
+  }
+  private async download(account: string, username: string): Promise<void> {
     const operation = await this.client.refreshAvatar(account, username);
     const deadline = Date.now() + 125000;
     while (!this.controller.signal.aborted && Date.now() < deadline) {
@@ -81,6 +136,7 @@ export class AvatarCache {
   }
   close(): void {
     this.controller.abort();
+    this.drain();
     for (const url of this.values.values()) URL.revokeObjectURL(url);
     this.values.clear();
     this.listeners.clear();

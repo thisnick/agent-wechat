@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { Connection } from "./connection.ts";
 import type { NativeThreadAvatarMember } from "@agent-wechat/shared";
 import { Avatar, Icon } from "./ui.tsx";
@@ -9,12 +9,14 @@ export function ConversationAvatar({
   username,
   name,
   members,
+  downloadMissing = false,
 }: {
   connection: Connection;
   account: string;
   username: string;
   name: string;
   members?: NativeThreadAvatarMember[];
+  downloadMissing?: boolean;
 }) {
   if (!username.endsWith("@chatroom"))
     return (
@@ -35,7 +37,9 @@ export function ConversationAvatar({
     .slice(0, 4);
   return (
     <span
-      className={`conversation-avatar group-avatar ${faces.length ? "has-members" : ""}`}
+      className={`conversation-avatar group-avatar ${
+        faces.length ? "has-members" : ""
+      }`}
       aria-hidden="true"
     >
       {faces.length ? (
@@ -46,6 +50,7 @@ export function ConversationAvatar({
             account={account}
             username={member.id}
             name={member.displayName}
+            downloadMissing={downloadMissing}
           />
         ))
       ) : (
@@ -64,18 +69,35 @@ export function HubAvatar({
   account,
   username,
   name,
+  downloadMissing = false,
 }: {
   connection: Connection;
   account: string;
   username?: string | null;
   name: string;
+  downloadMissing?: boolean;
 }) {
   const cache = connection.avatars;
+  const element = useRef<HTMLSpanElement>(null);
   const url = useSyncExternalStore(cache.subscribe, () =>
     cache.get(account, username ?? ""),
   );
   useEffect(() => {
-    if (username) void cache.load(account, username);
-  }, [cache, account, username]);
-  return <Avatar name={name} src={url} />;
+    if (!username) return;
+    if (!downloadMissing) {
+      void cache.load(account, username);
+      return;
+    }
+    const target = element.current;
+    if (!target) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        void cache.ensure(account, username);
+      }
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [cache, account, username, downloadMissing]);
+  return <Avatar ref={element} name={name} src={url} />;
 }

@@ -448,6 +448,7 @@ export function GroupSettings({
               account={account}
               username={member.username || member.id}
               name={member.displayName || member.id}
+              downloadMissing
             />
             <span>
               {member.roomDisplayName || member.displayName || member.username}
@@ -624,7 +625,11 @@ export function GroupSettings({
                     Cancel
                   </button>
                   <button
-                    className={`primary ${mode === "leave" || mode === "remove_members" ? "danger" : ""}`}
+                    className={`primary ${
+                      mode === "leave" || mode === "remove_members"
+                        ? "danger"
+                        : ""
+                    }`}
                     disabled={
                       blocked ||
                       (mode === "rename" && !draft.trim()) ||

@@ -62,9 +62,17 @@ export function Logo() {
     </svg>
   );
 }
-export function Avatar({ name, src }: { name: string; src?: string }) {
+export function Avatar({
+  name,
+  src,
+  ref,
+}: {
+  name: string;
+  src?: string;
+  ref?: import("react").Ref<HTMLSpanElement>;
+}) {
   return (
-    <span className="avatar">
+    <span className="avatar" ref={ref}>
       {src ? (
         <img src={src} alt="" />
       ) : (

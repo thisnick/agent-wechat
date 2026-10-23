@@ -10,6 +10,7 @@ import {
   type NativeSendIntent,
   type NativeThread,
 } from "@agent-wechat/shared";
+import { HistoryCache } from "./history-cache.ts";
 
 export type Account = {
   id: string;
@@ -99,6 +100,9 @@ function timestamp(value: string | null): number {
     ? Number(value)
     : Date.parse(value ?? "") || 0;
 }
+const compareMessages = (a: NativeMessage, b: NativeMessage): number =>
+  timestamp(a.createdAt) - timestamp(b.createdAt) ||
+  a.id.localeCompare(b.id, undefined, { numeric: true });
 export function mergeMessage(
   messages: NativeMessage[],
   message: NativeMessage,
@@ -114,11 +118,7 @@ export function mergeMessage(
         ),
     ),
     message,
-  ].sort(
-    (a, b) =>
-      timestamp(a.createdAt) - timestamp(b.createdAt) ||
-      a.id.localeCompare(b.id, undefined, { numeric: true }),
-  );
+  ].sort(compareMessages);
 }
 export function pause(
   milliseconds: number,
@@ -179,6 +179,9 @@ export class HubSession {
   private stream?: AbortController;
   private cursor = "0";
   private pending = new Map<string, PendingSend[]>();
+  private histories = new HistoryCache();
+  private historyLoaded = false;
+  private historySource = "";
   private stopped = false;
   readonly client: NativeWeChatClient;
   private receipts?: {
@@ -221,6 +224,17 @@ export class HubSession {
   clearError(): void {
     this.publish({ error: null });
   }
+  private remember(): void {
+    const { account, selected, messages, nextMessages, selectedGroup } =
+      this.value;
+    if (this.historyLoaded && account && selected)
+      this.histories.set(account, selected, {
+        messages,
+        nextMessages,
+        group: selectedGroup,
+        sourceGeneration: this.historySource,
+      });
+  }
   async accounts(): Promise<Account[]> {
     const request = ++this.accountRequest,
       generation = this.generation;
@@ -243,8 +257,11 @@ export class HubSession {
     this.publish(initial());
     this.stopped = true;
     this.mediaListeners.clear();
+    this.histories.clear();
   }
   async activate(account: string): Promise<void> {
+    this.remember();
+    this.historyLoaded = false;
     this.stream?.abort();
     const generation = ++this.generation;
     this.threadGeneration++;
@@ -285,15 +302,27 @@ export class HubSession {
   async select(threadId: string): Promise<void> {
     const account = this.value.account;
     if (!account) return;
+    this.remember();
+    const cached = this.histories.get(account, threadId);
+    const restored = cached?.messages ?? [];
+    this.historyLoaded = !!cached;
+    this.historySource = cached?.sourceGeneration ?? "";
     const previousGroup =
-      this.value.selected === threadId ? this.value.selectedGroup : null;
+      this.value.selected === threadId
+        ? this.value.selectedGroup
+        : (cached?.group ?? null);
     const generation = this.generation,
       selected = ++this.threadGeneration;
+    // Capture before loading history. A newer unread version must not be cleared
+    // by an older snapshot, even when a message arrives during this request.
+    const readBoundary = this.value.threads.find(
+      (thread) => thread.id === threadId,
+    );
     this.publish({
       selected: threadId,
       selectedGroup: previousGroup,
-      messages: [],
-      nextMessages: null,
+      messages: restored,
+      nextMessages: cached?.nextMessages ?? null,
       loading: true,
       error: null,
     });
@@ -309,20 +338,56 @@ export class HubSession {
         selected !== this.threadGeneration
       )
         return;
-      const messages = this.value.messages.reduce(
-        mergeMessage,
-        (
-          page.items.filter(
-            (item) => !isNativeTombstone(item),
-          ) as NativeMessage[]
-        ).reduce(mergeMessage, []),
+      const latest = (
+        page.items.filter((item) => !isNativeTombstone(item)) as NativeMessage[]
+      ).reduce(mergeMessage, []);
+      // Preserve older loaded pages, replace the current server range, and apply
+      // only events received after this request on top of its snapshot.
+      const older =
+        page.nextCursor && latest.length
+          ? restored.filter((item) => compareMessages(item, latest[0]) < 0)
+          : [];
+      const arrivals = this.value.messages.filter(
+        (item) => !restored.includes(item),
       );
+      const removed = new Set(
+        page.items.filter(isNativeTombstone).map((item) => item.id),
+      );
+      const messages = arrivals
+        .reduce(mergeMessage, latest.reduce(mergeMessage, older))
+        .filter((item) => !removed.has(item.id));
+      const sameSource = cached?.sourceGeneration === page.sourceGeneration;
+      this.historyLoaded = true;
+      this.historySource = page.sourceGeneration;
       this.publish({
         messages,
         selectedGroup: group,
-        nextMessages: page.nextCursor,
+        nextMessages:
+          page.nextCursor && sameSource
+            ? cached!.nextMessages
+            : page.nextCursor,
         loading: false,
       });
+      this.remember();
+      if (readBoundary && (readBoundary.unreadCount ?? 0) > 0) {
+        try {
+          await this.client.markRead(
+            account,
+            threadId,
+            readBoundary.readStateVersion,
+          );
+          if (this.current(account, generation))
+            await this.refresh(account, generation);
+        } catch (error) {
+          if (
+            this.current(account, generation) &&
+            selected === this.threadGeneration
+          )
+            this.publish({
+              error: `Couldn’t clear unread status. ${readableError(error)}`,
+            });
+        }
+      }
     } catch (error) {
       if (
         this.current(account, generation) &&
@@ -356,6 +421,8 @@ export class HubSession {
         ).reduce(mergeMessage, []),
       );
       this.publish({ messages, nextMessages: page.nextCursor, loading: false });
+      this.historySource = page.sourceGeneration;
+      this.remember();
     } catch (error) {
       if (
         this.current(account, generation) &&
@@ -421,8 +488,17 @@ export class HubSession {
   ): Promise<void> {
     const message = await this.client.message(account, messageId);
     if (!this.current(account, generation)) return;
-    if (message.threadId === this.value.selected)
+    if (message.threadId === this.value.selected) {
       this.publish({ messages: mergeMessage(this.value.messages, message) });
+      this.remember();
+    } else {
+      const cached = this.histories.get(account, message.threadId);
+      if (cached)
+        this.histories.set(account, message.threadId, {
+          ...cached,
+          messages: mergeMessage(cached.messages, message),
+        });
+    }
     this.publish({
       sends: this.value.sends.filter(
         (send) =>
@@ -523,6 +599,8 @@ export class HubSession {
   private async recover(account: string, generation: number): Promise<void> {
     const boundary = await this.refresh(account, generation);
     if (!this.current(account, generation)) return;
+    this.histories.clear(account);
+    this.historyLoaded = false;
     const selected = this.value.selected;
     if (selected) await this.select(selected);
     if (this.current(account, generation)) this.cursor = boundary;

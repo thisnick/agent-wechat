@@ -35,6 +35,10 @@ import { threadPreview } from "./thread-preview.ts";
 import { messagePresentation } from "./message-presentation.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
+import {
+  ConversationScroll,
+  ConversationItem,
+} from "./conversation-scroll.tsx";
 import "./style.css";
 import "./onboarding.css";
 import "./client.css";
@@ -519,7 +523,9 @@ function Login({
           {remaining === 0 ? "Refreshing code…" : "Code refresh in"}
           {remaining !== null && (!connection.simulator || clock !== null)
             ? remaining > 0
-              ? ` ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`
+              ? ` ${Math.floor(remaining / 60)}:${String(
+                  remaining % 60,
+                ).padStart(2, "0")}`
               : ""
             : " a moment"}
         </p>
@@ -602,7 +608,6 @@ function Chats({
     setInChat("");
     setFind(false);
   }, [state.account, state.selected]);
-  const messages = useRef<HTMLDivElement>(null);
   const account = state.accounts.find((a) => a.id === state.account);
   const name = (id: string) =>
     state.contacts.find((c) => c.id === id)?.displayName ||
@@ -611,10 +616,6 @@ function Chats({
   const selectedName = state.selected ? name(state.selected) : "";
   const draftKey = `${state.account}:${state.selected}`,
     draft = drafts[draftKey] ?? "";
-  useEffect(() => {
-    const box = messages.current;
-    if (box) box.scrollTop = box.scrollHeight;
-  }, [state.selected, state.messages.at(-1)?.id, state.sends.length]);
   const leftGroup = state.selectedGroup?.isInGroup === false;
   const active = account?.authenticated !== false && !leftGroup;
   async function simulate(op: Record<string, unknown>) {
@@ -732,7 +733,9 @@ function Chats({
             ? threads.map((t) => (
                 <button
                   key={t.id}
-                  className={`chat-row ${state.selected === t.id ? "selected" : ""}`}
+                  className={`chat-row ${
+                    state.selected === t.id ? "selected" : ""
+                  }`}
                   onClick={() => select(t.id)}
                 >
                   <ConversationAvatar
@@ -816,6 +819,7 @@ function Chats({
               account={state.account}
               username={state.selected}
               name={selectedName}
+              downloadMissing
               members={
                 state.threads.find((thread) => thread.id === state.selected)
                   ?.avatarMembers
@@ -979,11 +983,21 @@ function Chats({
         )}
         <div className="body-row">
           <section className="conversation" aria-label="Conversation">
-            <div
-              className="messages"
-              ref={messages}
-              role="log"
-              aria-label="Messages"
+            <ConversationScroll
+              key={`${state.account}:${state.selected}:${!!(
+                find && inChat.trim()
+              )}`}
+              searching={!!(find && inChat.trim())}
+              history={{
+                hasMore: !!state.nextMessages,
+                loading: state.loading,
+                load: () => void session.older(),
+              }}
+              leading={
+                state.messages[0] ? (
+                  <MessageDate value={state.messages[0].createdAt} />
+                ) : null
+              }
             >
               {find && inChat.trim() && state.account && state.selected ? (
                 <SearchResults
@@ -997,64 +1011,56 @@ function Chats({
                 />
               ) : (
                 <>
-                  {state.nextMessages && (
-                    <button
-                      className="load-history"
-                      disabled={state.loading}
-                      onClick={() => void session.older()}
-                    >
-                      Load older messages
-                    </button>
-                  )}
-                  {state.loading && (
-                    <p className="date-label">Loading messages…</p>
-                  )}
                   {state.messages.map((m, index) => (
-                    <div key={m.id}>
-                      {index === 0 ||
-                      date(
-                        state.messages[index - 1].createdAt,
-                      ).toDateString() !== date(m.createdAt).toDateString() ? (
-                        <div className="date-label">
-                          {date(m.createdAt).toLocaleDateString([], {
-                            month: "long",
-                            day: "numeric",
-                          })}
-                        </div>
-                      ) : null}
+                    <ConversationItem key={m.id} messageId={m.id}>
                       <Message
                         message={m}
                         connection={connection}
                         name={name}
                       />
-                    </div>
+                      {state.messages[index + 1] &&
+                        date(m.createdAt).toDateString() !==
+                          date(
+                            state.messages[index + 1].createdAt,
+                          ).toDateString() && (
+                          <MessageDate
+                            value={state.messages[index + 1].createdAt}
+                          />
+                        )}
+                    </ConversationItem>
                   ))}
                   {state.sends
                     .filter((s) => s.threadId === state.selected)
                     .map((s) => (
-                      <Pending
+                      <ConversationItem
                         key={s.key}
-                        send={s}
-                        check={() => void session.checkSend(s.key)}
-                      />
+                        messageId={`pending:${s.key}`}
+                      >
+                        <Pending
+                          send={s}
+                          check={() => void session.checkSend(s.key)}
+                        />
+                      </ConversationItem>
                     ))}
-                  {state.account && (
-                    <PendingAttachments
-                      key={state.account}
-                      connection={connection}
-                      account={state.account}
-                      threadId={state.selected}
-                      messages={state.messages}
-                    />
-                  )}
-                  {!state.loading &&
-                    state.selected &&
-                    state.messages.length === 0 && (
-                      <p className="empty-chat">Start the conversation.</p>
+                  <ConversationItem messageId="pending-media">
+                    {state.account && (
+                      <PendingAttachments
+                        key={state.account}
+                        connection={connection}
+                        account={state.account}
+                        threadId={state.selected}
+                        messages={state.messages}
+                      />
                     )}
+                    {!state.loading &&
+                      state.selected &&
+                      state.messages.length === 0 && (
+                        <p className="empty-chat">Start the conversation.</p>
+                      )}
+                  </ConversationItem>
                 </>
               )}
-            </div>
+            </ConversationScroll>
             <div className="composer-wrap">
               <div className="composer">
                 <div className="composer-tools">
@@ -1133,7 +1139,9 @@ function Chats({
           {state.accounts.map((a) => (
             <button
               key={a.id}
-              className={`account-option ${a.id === state.account ? "selected" : ""}`}
+              className={`account-option ${
+                a.id === state.account ? "selected" : ""
+              }`}
               onClick={() => {
                 setAccountMenu(false);
                 setMobile(false);
@@ -1268,7 +1276,11 @@ function SearchResults({
         <span role="status">
           {!current || state.loading
             ? "Searching history on this agent-wechat hub…"
-            : `${state.items.length}${state.nextCursor ? "+" : ""} ${state.items.length === 1 && !state.nextCursor ? "match" : "matches"} in this conversation`}
+            : `${state.items.length}${state.nextCursor ? "+" : ""} ${
+                state.items.length === 1 && !state.nextCursor
+                  ? "match"
+                  : "matches"
+              } in this conversation`}
         </span>
         <button onClick={close}>Back to chat</button>
       </div>
@@ -1329,7 +1341,11 @@ function Pending({ send, check }: { send: PendingSend; check: () => void }) {
           <p>{send.text}</p>
         </div>
         <div
-          className={`delivery ${uncertain || state === "rejected" || state === "failed" ? "warn" : ""}`}
+          className={`delivery ${
+            uncertain || state === "rejected" || state === "failed"
+              ? "warn"
+              : ""
+          }`}
           role="status"
         >
           {label} <button onClick={check}>Check status</button>
@@ -1341,6 +1357,13 @@ function Pending({ send, check }: { send: PendingSend; check: () => void }) {
         )}
       </div>
     </article>
+  );
+}
+function MessageDate({ value }: { value: string | null }) {
+  return (
+    <div className="date-label">
+      {date(value).toLocaleDateString([], { month: "long", day: "numeric" })}
+    </div>
   );
 }
 function Message({
@@ -1365,6 +1388,7 @@ function Message({
         account={m.accountId}
         username={m.senderId || (!own ? m.threadId : null)}
         name={own ? "You" : name(m.senderId || m.threadId)}
+        downloadMissing={m.threadId.endsWith("@chatroom")}
       />
       <div className="message-body">
         <div className="message-meta">
@@ -1434,6 +1458,7 @@ function Details({
           account={state.account!}
           username={threadId}
           name={name}
+          downloadMissing
           members={
             state.threads.find((thread) => thread.id === threadId)
               ?.avatarMembers

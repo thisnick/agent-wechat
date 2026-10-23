@@ -118,6 +118,83 @@ test("a late read-state response cannot refresh the wrong account", async (t) =>
   assert.equal(hub.snapshot().account, "b");
 });
 
+test("opening a chat clears unread status only after history loads, at its captured version", async (t) => {
+  const history = deferred(),
+    seen = [];
+  let unread = 4,
+    version = "7";
+  const hub = session(t, {
+    threads: async () =>
+      page([{ id: "peer", unreadCount: unread, readStateVersion: version }]),
+    messages: async () => history.promise,
+    markRead: async (...args) => {
+      seen.push(args);
+      unread = 0;
+      version = "9";
+      return {};
+    },
+  });
+  const opening = hub.activate("a");
+  await eventually(() => hub.snapshot().selected === "peer");
+  assert.equal(seen.length, 0);
+  // A new incoming message changes the inventory while this snapshot is loading.
+  version = "8";
+  await hub.refresh();
+  history.resolve(page([message("loaded")]));
+  await opening;
+  assert.deepEqual(seen, [["a", "peer", "7"]]);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 0);
+  await hub.select("peer");
+  assert.equal(
+    seen.length,
+    1,
+    "already-read chats do not send another request",
+  );
+});
+
+test("failed or superseded history never clears unread status", async (t) => {
+  const late = deferred(),
+    seen = [];
+  const hub = session(t, {
+    threads: async () =>
+      page([{ id: "peer", unreadCount: 3, readStateVersion: "1" }]),
+    messages: async (_account, thread) =>
+      thread === "peer" ? late.promise : page([]),
+    markRead: async (...args) => {
+      seen.push(args);
+    },
+  });
+  const opening = hub.activate("a");
+  await eventually(() => hub.snapshot().selected === "peer");
+  await hub.select("other");
+  late.resolve(page([message("late")]));
+  await opening;
+  assert.deepEqual(seen, []);
+  hub.client.messages = async () => {
+    throw new Error("offline");
+  };
+  await hub.select("peer");
+  assert.deepEqual(seen, []);
+});
+
+test("a conflicting read version leaves the newer unread count intact and does not retry", async (t) => {
+  let calls = 0;
+  const hub = session(t, {
+    threads: async () =>
+      page([{ id: "peer", unreadCount: 2, readStateVersion: "1" }]),
+    messages: async () => page([message("loaded")]),
+    markRead: async () => {
+      calls++;
+      throw new NativeApiError(409, "read_state_conflict");
+    },
+  });
+  await hub.activate("a");
+  assert.equal(calls, 1);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 2);
+  assert.equal(hub.snapshot().messages[0].id, "loaded");
+  assert.match(hub.snapshot().error, /clear unread/);
+});
+
 test("media readiness reaches subscribers only for the active account", async (t) => {
   const hub = session(t),
     seen = [];
@@ -128,6 +205,118 @@ test("media readiness reaches subscribers only for the active account", async (t
   await hub.consume({ kind: "media.ready", data: { assetId: "late-a" } }, "a");
   assert.deepEqual(seen, ["asset-a"]);
   unsubscribe();
+});
+
+test("switching back restores history immediately, revalidates fresh content and retains older pages", async (t) => {
+  let refresh = false;
+  const late = deferred();
+  const hub = session(t, {
+    messages: async (_account, thread, options) => {
+      if (thread !== "peer") return page([]);
+      if (refresh) return late.promise;
+      return options.cursor
+        ? page([message("old", "a", "peer", "1")])
+        : page([message("recent", "a", "peer", "10")], "20", "older-page");
+    },
+  });
+  await hub.activate("a");
+  await hub.older();
+  await hub.select("other");
+  refresh = true;
+  const reopening = hub.select("peer");
+  assert.deepEqual(
+    hub.snapshot().messages.map((m) => m.id),
+    ["old", "recent"],
+  );
+  late.resolve(
+    page(
+      [message("recent", "a", "peer", "10", "Updated from server")],
+      "21",
+      "older-page",
+    ),
+  );
+  await reopening;
+  assert.deepEqual(
+    hub.snapshot().messages.map((m) => m.id),
+    ["old", "recent"],
+  );
+  assert.equal(hub.snapshot().messages[1].body, "Updated from server");
+  assert.equal(
+    hub.snapshot().nextMessages,
+    null,
+    "already-loaded history keeps its continuation",
+  );
+});
+
+test("cached histories are account scoped and a failed revalidation leaves cached content visible", async (t) => {
+  let fail = false;
+  const hub = session(t, {
+    messages: async (account) => {
+      if (fail) throw Error("offline");
+      return page([message(account, account)]);
+    },
+  });
+  await hub.activate("a");
+  await hub.activate("b");
+  assert.equal(hub.snapshot().messages[0].body, "b");
+  fail = true;
+  await hub.activate("a");
+  assert.equal(hub.snapshot().messages[0].body, "a");
+  assert.ok(hub.snapshot().error);
+});
+
+test("message events update cached inactive chats before they are reopened", async (t) => {
+  const late = deferred();
+  let refresh = false;
+  const hub = session(t, {
+    messages: async (_account, thread) =>
+      refresh
+        ? late.promise
+        : page(thread === "peer" ? [message("recent")] : []),
+    message: async () =>
+      message("recent", "a", "peer", "10", "Recalled message"),
+  });
+  await hub.activate("a");
+  await hub.select("other");
+  await hub.consume(
+    { kind: "message.recalled", data: { messageId: "recent" } },
+    "a",
+  );
+  refresh = true;
+  const reopening = hub.select("peer");
+  assert.equal(hub.snapshot().messages[0].body, "Recalled message");
+  late.resolve(
+    page([message("recent", "a", "peer", "10", "Recalled message")]),
+  );
+  await reopening;
+});
+
+test("revalidation removes missing current-page messages and retains only new in-flight events", async (t) => {
+  let refreshed = false;
+  const late = deferred();
+  const hub = session(t, {
+    messages: async (_account, thread) =>
+      thread !== "peer"
+        ? page([])
+        : refreshed
+          ? late.promise
+          : page([message("deleted")]),
+    message: async () => message("new"),
+  });
+  await hub.activate("a");
+  await hub.select("other");
+  refreshed = true;
+  const reopening = hub.select("peer");
+  await hub.consume(
+    { kind: "message.committed", data: { messageId: "new" } },
+    "a",
+  );
+  late.resolve(page([]));
+  await reopening;
+  assert.deepEqual(
+    hub.snapshot().messages.map((m) => m.id),
+    ["new"],
+  );
 });
 
 test("history sorts decimal timestamps numerically and continues using the opaque cursor", async (t) => {

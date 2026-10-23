@@ -290,7 +290,62 @@
   min-height: 30px;
 }
 .messages {
-  overflow-anchor: none;
+  /* Keep the reading position when images above it finish loading. */
+  overflow-anchor: auto;
+  min-height: 0;
+  scroll-behavior: auto;
+}
+.messages:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.message-scroller {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.message-scroller .messages[data-pending-scroll] {
+  visibility: hidden;
+}
+.jump-to-latest {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 3px 12px #0002;
+  white-space: nowrap;
+}
+.jump-to-latest[data-active="false"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+.jump-to-latest .icon {
+  width: 16px;
+  height: 16px;
+}
+.original-image-actions {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.original-image-actions > button {
+  justify-self: start;
+}
+.original-image-actions small {
+  color: var(--muted);
+  line-height: 1.45;
 }
 .login-account small {
   overflow-wrap: anywhere;
