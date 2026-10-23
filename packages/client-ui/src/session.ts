@@ -71,6 +71,8 @@ export function readableError(error: unknown): string {
           idempotency_conflict: "This send key is already in use.",
           unsupported_simulator_operation:
             "This action isn't available on the simulator.",
+          unsupported_application_media:
+            "This message doesn't contain a supported downloadable attachment.",
           unsupported_group_creation:
             "Group creation isn't available on this agent-wechat hub yet.",
           invalid_group_members:

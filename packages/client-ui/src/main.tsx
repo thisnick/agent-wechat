@@ -32,6 +32,7 @@ import { HistorySearch } from "./history-search.ts";
 import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
 import { threadPreview } from "./thread-preview.ts";
+import { messagePresentation } from "./message-presentation.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import "./style.css";
@@ -1352,6 +1353,7 @@ function Message({
   name: (id: string) => string;
 }) {
   const own = m.direction === "outgoing";
+  const presentation = messagePresentation(m);
   return (
     <article
       className={`message ${own ? "own" : ""}`}
@@ -1371,13 +1373,26 @@ function Message({
             {time(m.createdAt)}
           </time>
         </div>
-        {m.recall ? (
+        {presentation === "recalled" ? (
           <div className="bubble recalled">Message recalled</div>
-        ) : m.type === 1 || m.type === 10000 ? (
+        ) : presentation === "text" ? (
           <div className="bubble">
-            <p>{m.body || (m.type === 10000 ? "System message" : "")}</p>
+            <p>{m.body || (m.type >= 10000 ? "System message" : "")}</p>
           </div>
-        ) : m.link ? (
+        ) : presentation === "reply" || presentation === "forwarded" ? (
+          <div className={`bubble ${presentation}-message`}>
+            <div className="message-context">
+              <Icon name={presentation === "reply" ? "reply" : "chat"} />
+              {presentation === "reply" ? "Reply" : "Forwarded messages"}
+            </div>
+            <p>
+              {m.body ||
+                (presentation === "reply"
+                  ? "Reply text is unavailable."
+                  : "Forwarded content is unavailable.")}
+            </p>
+          </div>
+        ) : presentation === "link" && m.link ? (
           <div className="bubble">
             <strong>{m.link.title || "Shared link"}</strong>
             <p>{m.link.description}</p>
@@ -1387,8 +1402,12 @@ function Message({
               </a>
             )}
           </div>
-        ) : (
+        ) : presentation === "media" ? (
           <MediaCard message={m} connection={connection} />
+        ) : (
+          <div className="bubble unsupported-message">
+            <p>This WeChat message type isn’t supported yet.</p>
+          </div>
         )}
       </div>
     </article>

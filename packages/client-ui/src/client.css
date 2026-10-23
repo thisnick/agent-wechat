@@ -103,6 +103,22 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.message-context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.message-context .icon {
+  width: 13px;
+  height: 13px;
+}
+.unsupported-message {
+  color: var(--muted);
+  font-size: 12px;
+}
 .recalled {
   font-style: italic;
   color: var(--muted);

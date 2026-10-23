@@ -112,6 +112,10 @@ when connecting this preview to an explicitly selected native daemon.
 
 ## Attachments and stickers
 
+Quoted replies and forwarded chat history render the hub's normalized text. They
+are application messages, not downloadable file attachments. Unknown message
+types show an unsupported-content label instead of entering the media flow.
+
 Incoming images, files, videos and voice messages use real hub transfer jobs.
 **Load attachment** retrieves the selected quality; progress, cancellation and
 retry use the job API. Verified images render inline, videos and decoded voice
