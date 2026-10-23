@@ -111,10 +111,20 @@ impl Core {
         }
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
-        self.catalog_rows(account, kind, None, &reader, own.as_deref(), None)?
+        let mut item = self
+            .catalog_rows(account, kind, None, &reader, own.as_deref(), None)?
             .into_iter()
             .find(|r| r["id"] == id)
-            .context("no rows")
+            .context("no rows")?;
+        if kind == "threads" {
+            self.thread_summaries(
+                account,
+                std::slice::from_mut(&mut item),
+                &reader,
+                own.as_deref(),
+            )?;
+        }
+        Ok(item)
     }
     /// The account actor must be held around the profile snapshot and boundary.
     pub fn catalog_page(
@@ -239,7 +249,16 @@ impl Core {
             )?
         };
         let metadata = json!({"sourceGeneration":reader.generation(),"coverage":reader.coverage(),"order":rows.iter().map(|r|r["id"].clone()).collect::<Vec<_>>()});
-        self.paginate_values(account, &query, q, rows, metadata)
+        let mut page = self.paginate_values(account, &query, q, rows, metadata)?;
+        if kind == "threads" {
+            self.thread_summaries(
+                account,
+                page["items"].as_array_mut().context("invalid page")?,
+                &reader,
+                own.as_deref(),
+            )?;
+        }
+        Ok(page)
     }
     fn paginate_values(
         &self,

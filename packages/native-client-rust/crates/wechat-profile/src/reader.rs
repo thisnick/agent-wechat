@@ -530,6 +530,84 @@ impl ProfileReader {
             .collect())
     }
 
+    /// Read the latest saved message for each requested conversation in one
+    /// snapshot. Reuse each shard's connection and sender namespace; never scan
+    /// or decode the rest of a conversation's history for a sidebar preview.
+    pub fn latest_messages(
+        &self,
+        chats: &[String],
+        own_username: Option<&str>,
+    ) -> Result<BTreeMap<String, Message>> {
+        if chats.len() > 200 {
+            return Err(ProfileError::InvalidQuery);
+        }
+        for chat in chats {
+            validate_name(chat)?;
+        }
+        let shards: Vec<_> = self
+            .inventory()
+            .iter()
+            .filter(|db| shard(&db.relative_path))
+            .collect();
+        if shards.is_empty() || shards.iter().any(|db| db.state != DatabaseState::Readable) {
+            return Err(ProfileError::KeyUnavailable("message shards".into()));
+        }
+        let labels = self.labels()?;
+        let mut result: BTreeMap<String, Message> = BTreeMap::new();
+        for db in shards {
+            let schema = self
+                .schemas
+                .iter()
+                .find(|s| s.database == db.relative_path)
+                .ok_or(ProfileError::InvalidMetadata)?;
+            let c = self.snapshot.open(&db.relative_path)?;
+            let names = name_map(&c)?;
+            for chat in chats {
+                let table = format!("Msg_{:x}", Md5::digest(chat.as_bytes()));
+                let Some(table) = schema
+                    .tables
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(&table))
+                else {
+                    continue;
+                };
+                if !["local_id", "create_time"]
+                    .iter()
+                    .all(|name| table.columns.iter().any(|c| c.name == *name))
+                {
+                    return Err(ProfileError::UnsupportedSchema(db.relative_path.clone()));
+                }
+                let local = c
+                    .query_row(
+                        &format!("SELECT local_id FROM {} ORDER BY create_time DESC,local_id DESC LIMIT 1", quote_identifier(&table.name)),
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                let Some(local) = local else { continue };
+                let mut message = self.message_from_connection(
+                    &c,
+                    &SourceMessageId {
+                        database: db.relative_path.clone(),
+                        table: table.name.clone(),
+                        local_id: local.to_string(),
+                    },
+                    own_username,
+                    &labels,
+                    &names,
+                )?;
+                message.peer = Some(chat.clone());
+                if result
+                    .get(chat)
+                    .is_none_or(|old| message_order(&message) > message_order(old))
+                {
+                    result.insert(chat.clone(), message);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub fn messages(&self, q: &MessageQuery) -> Result<Page<Message>> {
         let n = limit(q.limit)?;
         if let Some(chat) = &q.chat {

@@ -312,6 +312,17 @@ try {
     ),
   );
   assert.equal(a.snapshot().sends.length, 0);
+  await wait("thread previews include own sends in both clients", () =>
+    [a, b].every((s) =>
+      s
+        .snapshot()
+        .threads.some(
+          (thread) =>
+            thread.lastMessage?.text === "A real session-model send" &&
+            thread.lastMessage.direction === "outgoing",
+        ),
+    ),
+  );
   await control({
     op: "inbound",
     account: "personal",
@@ -322,6 +333,27 @@ try {
     [a, b].every((s) =>
       s.snapshot().messages.some((m) => m.body === "A real incoming push"),
     ),
+  );
+  // Incoming fixture time is independent of wall-clock outgoing sends. Use a
+  // different conversation to check its latest local message.
+  await control({
+    op: "inbound",
+    account: "personal",
+    peer: "sim_daniel",
+    body: "Sidebar incoming preview",
+  });
+  await wait(
+    "thread preview updates for an unselected incoming conversation",
+    () =>
+      [a, b].every((s) =>
+        s
+          .snapshot()
+          .threads.some(
+            (thread) =>
+              thread.lastMessage?.text === "Sidebar incoming preview" &&
+              thread.lastMessage.direction === "incoming",
+          ),
+      ),
   );
   await control({
     op: "inbound",

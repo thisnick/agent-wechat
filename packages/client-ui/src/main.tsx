@@ -30,7 +30,8 @@ import {
 import { Avatar, Button, Icon, Logo, Welcome } from "./ui.tsx";
 import { HistorySearch } from "./history-search.ts";
 import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
-import { HubAvatar } from "./avatars.tsx";
+import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
+import { threadPreview } from "./thread-preview.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import "./style.css";
@@ -733,23 +734,20 @@ function Chats({
                   className={`chat-row ${state.selected === t.id ? "selected" : ""}`}
                   onClick={() => select(t.id)}
                 >
-                  <HubAvatar
+                  <ConversationAvatar
                     connection={connection}
                     account={state.account!}
                     username={t.id}
                     name={name(t.id)}
+                    members={t.avatarMembers}
                   />
                   <div className="chat-copy">
                     <div className="chat-top">
                       <span className="chat-name">{name(t.id)}</span>
                     </div>
                     <div className="preview-row">
-                      <span className="preview">
-                        {t.id === "filehelper"
-                          ? "Notes and files to yourself"
-                          : t.kind === "group"
-                            ? "Group conversation"
-                            : "WeChat conversation"}
+                      <span className="preview" title={threadPreview(t)}>
+                        {threadPreview(t)}
                       </span>
                       {!!t.unreadCount && (
                         <span className="count">{t.unreadCount}</span>
@@ -812,11 +810,15 @@ function Chats({
             onClick={() => setMobile(false)}
           />
           {state.selected && state.account && (
-            <HubAvatar
+            <ConversationAvatar
               connection={connection}
               account={state.account}
               username={state.selected}
               name={selectedName}
+              members={
+                state.threads.find((thread) => thread.id === state.selected)
+                  ?.avatarMembers
+              }
             />
           )}
           <div className="chat-heading">
@@ -1408,11 +1410,15 @@ function Details({
   return (
     <aside className="detail-panel" aria-label="Conversation details">
       <div className="detail-profile">
-        <HubAvatar
+        <ConversationAvatar
           connection={connection}
           account={state.account!}
           username={threadId}
           name={name}
+          members={
+            state.threads.find((thread) => thread.id === threadId)
+              ?.avatarMembers
+          }
         />
         <h3>{name}</h3>
         <p>

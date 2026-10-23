@@ -122,6 +122,14 @@ acceptance or recipient playback.
 
 ## New chats and groups
 
+The conversation list uses `lastMessage` and `avatarMembers` from the threads API.
+Direct chats show one avatar; groups show a collage of up to four saved members,
+with a group icon when roster data is missing. The second line previews the latest
+saved message, prefixes outgoing text with “You” and names incoming group senders.
+Media gets a short label. Empty and unavailable local history have distinct states.
+These summaries are read from the current profile snapshot after pagination; they
+do not add stored tables, start network refreshes or fetch attachments.
+
 **New conversation** opens a contact picker for a direct message. **New group**
 lets you optionally enter a name and select 2–40 other contacts. Your own contact
 and File Transfer are excluded. The UI uses the hub's `groupMutations`
@@ -198,10 +206,10 @@ Pinned Rust format/Clippy, native tests and generated contracts are required for
 changes to the decoded transport. Browser checks exercise the same Rust simulator;
 no live endpoint is used.
 
-Linux x64 validation after rebasing onto the merged group API: 524 Rust tests
+Linux x64 validation including thread summaries: 527 Rust tests
 passed across 20 executables in a non-root, read-only container with external
 networking disabled. Rust doc tests, pinned format/Clippy and generated contracts
-passed. The client passed 41 model tests, the SDK 41 and OpenClaw 239; workspace
+passed. The client passed 43 model tests, the SDK 41 and OpenClaw 239; workspace
 build/typecheck passed. Both complete simulator journeys passed.
 
 The group journey checks create/rename, own display name, mute/unmute, add/remove,

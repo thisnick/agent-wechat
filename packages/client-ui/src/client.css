@@ -145,6 +145,74 @@
 .workspace {
   min-width: 0;
 }
+.conversation-avatar {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 43px;
+  height: 43px;
+}
+.group-avatar {
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  color: var(--muted);
+}
+.group-avatar > .icon {
+  width: 23px;
+  height: 23px;
+}
+.group-avatar.has-members {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: auto;
+  align-content: center;
+  gap: 2px;
+  padding: 3px;
+}
+.group-avatar > .avatar,
+.group-avatar-placeholder {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  min-width: 0;
+  border-radius: 3px;
+  font-size: 7px;
+  letter-spacing: 0;
+}
+.group-avatar > .avatar:nth-child(2) {
+  background: #d2dfd8;
+  color: #45554a;
+}
+.group-avatar > .avatar:nth-child(3) {
+  background: #e4d8c9;
+  color: #60513f;
+}
+.group-avatar > .avatar:nth-child(4) {
+  background: #d8d6e2;
+  color: #504c60;
+}
+.group-avatar-placeholder {
+  display: grid;
+  place-items: center;
+}
+.group-avatar-placeholder .icon {
+  width: 12px;
+  height: 12px;
+}
+.detail-profile .conversation-avatar {
+  width: 76px;
+  height: 76px;
+}
+.detail-profile .group-avatar > .avatar {
+  font-size: 11px;
+}
+.preview-row .preview {
+  flex: 1;
+  min-width: 0;
+}
 .conversation-search input {
   width: 100%;
 }

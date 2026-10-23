@@ -90,8 +90,33 @@ pub struct NativeThread {
     #[ts(type = "number | null")]
     pub unread_count: Option<i64>,
     pub read_state_version: String,
+    // Absent when local message shards are unavailable; null for empty history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub last_message: Option<NativeThreadMessage>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub avatar_members: Option<Vec<NativeThreadAvatarMember>>,
     #[ts(type = "unknown")]
     pub history: Value,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeThreadMessage {
+    pub id: String,
+    pub sender_id: Option<String>,
+    pub sender_name: Option<String>,
+    pub direction: Option<String>,
+    #[serde(rename = "type")]
+    pub message_type: i32,
+    pub text: String,
+    pub created_at: Option<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeThreadAvatarMember {
+    pub id: String,
+    pub display_name: String,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -326,6 +351,8 @@ pub fn typescript() -> String {
         NativeRecallInfo::decl(),
         NativeMessage::decl(),
         NativeThread::decl(),
+        NativeThreadMessage::decl(),
+        NativeThreadAvatarMember::decl(),
         NativeContact::decl(),
         NativeGroup::decl(),
         NativeGroupMember::decl(),

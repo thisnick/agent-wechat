@@ -14,6 +14,7 @@ mod quotes;
 pub use quote_send::QuoteSendReference;
 mod recall_evidence;
 mod recalls;
+mod thread_summaries;
 pub use media_types::*;
 mod runtime;
 pub mod upstream;

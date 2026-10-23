@@ -121,7 +121,13 @@ impl Core {
     pub fn threads(&self, account: &str, q: &ListQuery) -> Result<Value> {
         let reader = self.profile_reader(account)?;
         let page = reader.threads(q)?;
-        let items:Vec<_>=page.items.into_iter().map(|t|Ok(json!({"id":t.username,"peerId":t.username,"accountId":account,"kind":if t.username.ends_with("@chatroom") {"group"}else{"direct"},"displayName":t.label,"unreadCount":t.unread_count,"readStateVersion":self.read_state_version(account,&t.username,reader.generation())?,"history":{"coverage":"partial","localCount":null},"version":reader.generation()}))).collect::<Result<Vec<_>>>()?;
+        let mut items:Vec<_>=page.items.into_iter().map(|t|Ok(json!({"id":t.username,"peerId":t.username,"accountId":account,"kind":if t.username.ends_with("@chatroom") {"group"}else{"direct"},"displayName":t.label,"unreadCount":t.unread_count,"readStateVersion":self.read_state_version(account,&t.username,reader.generation())?,"history":{"coverage":"partial","localCount":null},"version":reader.generation()}))).collect::<Result<Vec<_>>>()?;
+        self.thread_summaries(
+            account,
+            &mut items,
+            &reader,
+            self.profile_username(account)?.as_deref(),
+        )?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
         )

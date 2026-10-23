@@ -24,6 +24,15 @@ curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=inv
 
 Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the same query to get the next page.
 
+`GET /threads` and `GET /threads/{id}` include sidebar summaries from saved history:
+
+| Field | Contents |
+| --- | --- |
+| `lastMessage` | Latest local message ID, sender ID/name, direction, type, time and a plain-text `text` preview of up to 160 characters. `null` means empty local history; omitted means the preview is unavailable. |
+| `avatarMembers` | Up to four cached group members, each with `id` and `displayName`; empty for direct chats or an unavailable roster. Fetch cached pictures through `GET /avatars/{username}`. |
+
+These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message or group events to update the summaries.
+
 ## Send
 
 ```bash

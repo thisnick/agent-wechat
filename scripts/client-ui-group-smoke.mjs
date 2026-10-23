@@ -89,6 +89,12 @@ export async function groupJourney({ client, wait, account, control, state }) {
     assert.equal(info.isInGroup, true);
     assert.equal(info.muted, false);
     assert.equal((await client.groupMembers(account, room)).items.length, 3);
+    const groupThread = await client.thread(account, room);
+    assert.equal(groupThread.avatarMembers.length, 3);
+    assert.ok(
+      groupThread.avatarMembers.some((member) => member.id === "sim_mei"),
+    );
+    assert.equal(groupThread.lastMessage.text, "System message");
     const text = await client.sendText(
       account,
       room,
@@ -103,6 +109,13 @@ export async function groupJourney({ client, wait, account, control, state }) {
       (await client.messages(account, room)).items.some(
         (item) => item.body === "Synthetic group message",
       ),
+    );
+    const latest = (await client.thread(account, room)).lastMessage;
+    assert.equal(latest.text, "Synthetic group message");
+    assert.equal(latest.direction, "outgoing");
+    assert.equal(
+      latest.id,
+      (await client.messages(account, room, { limit: 1 })).items[0].id,
     );
     const rename = await finish(
       "rename group",
