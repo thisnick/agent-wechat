@@ -1521,11 +1521,14 @@ function Message({
   const navigation = useConversationNavigation();
   const own = m.direction === "outgoing";
   const presentation = messagePresentation(m);
-  if (presentation === "recalled" && !m.senderId)
+  if (
+    presentation === "recalled" &&
+    (!m.senderId || !["incoming", "outgoing"].includes(m.direction ?? ""))
+  )
     return (
       <article className="message recall-notice" data-message-id={m.id}>
         <div className="message-line">
-          <span className="recalled">{recallText(m, name)}</span>
+          <span className="recalled">{recallText(m)}</span>
           <time
             className="message-time"
             dateTime={date(m.createdAt).toISOString()}
@@ -1557,7 +1560,7 @@ function Message({
           <div className="message-content">
             <MessageActions message={m} connection={connection} />
             {presentation === "recalled" ? (
-              <div className="bubble recalled">{recallText(m, name)}</div>
+              <div className="bubble recalled">{recallText(m)}</div>
             ) : presentation === "text" ? (
               <div className="bubble">
                 <p>{m.body || (m.type >= 10000 ? "System message" : "")}</p>

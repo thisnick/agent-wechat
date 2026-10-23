@@ -485,29 +485,47 @@ test("cached histories are account scoped and a failed revalidation leaves cache
   assert.ok(hub.snapshot().error);
 });
 
-test("message events update cached inactive chats before they are reopened", async (t) => {
+test("recall events retrieve canonical notices and authors for inactive cached chats", async (t) => {
   const late = deferred();
   let refresh = false;
+  let reads = 0;
+  const recalled = {
+    ...message("recent", "a", "peer", "10", "[Message recalled]"),
+    type: 10000,
+    senderId: "self",
+    direction: "outgoing",
+    recall: { observedAt: "11", replacementText: "You recalled a message" },
+    version: "2",
+  };
   const hub = session(t, {
     messages: async (_account, thread) =>
       refresh
         ? late.promise
         : page(thread === "peer" ? [message("recent")] : []),
-    message: async () =>
-      message("recent", "a", "peer", "10", "Recalled message"),
+    message: async () => {
+      reads++;
+      return recalled;
+    },
   });
   await hub.activate("a");
   await hub.select("other");
   await hub.consume(
-    { kind: "message.recalled", data: { messageId: "recent" } },
+    {
+      kind: "message.recalled",
+      data: { messageId: "recent", replacementText: "Stale event notice" },
+    },
     "a",
   );
   refresh = true;
   const reopening = hub.select("peer");
-  assert.equal(hub.snapshot().messages[0].body, "Recalled message");
-  late.resolve(
-    page([message("recent", "a", "peer", "10", "Recalled message")]),
+  assert.equal(reads, 1);
+  assert.deepEqual(hub.snapshot().messages[0], recalled);
+  assert.equal(
+    hub.snapshot().threads.find((thread) => thread.id === "peer").lastMessage
+      .text,
+    "You recalled a message",
   );
+  late.resolve(page([recalled]));
   await reopening;
 });
 

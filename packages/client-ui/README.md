@@ -129,6 +129,12 @@ confirmation dialog showing the selected message; Cancel and Escape send no requ
 Recall keeps its admission key and operation
 receipt across reloads. Unknown outcomes offer a status check instead of starting
 another attempt. The hub decides whether the exact message can be recalled.
+Recalled bubbles use the API's derived original sender and direction for placement.
+Missing sender or direction produces a neutral notice with no avatar. The text comes
+from `recall.replacementText`, falling back to **Message recalled**; the UI does not
+infer a recall initiator from the original author, a control sender, or notice text.
+The sidebar uses the same notice. The merged native recall implementation owns
+author recovery, notice storage and search cleanup; the browser adds no author ledger.
 The **Reply** action selects a supported message for the text composer. Its preview
 can jump to the original or be dismissed without losing the draft. Text and quote
 selections are scoped to each account and chat. Sending passes only the stored

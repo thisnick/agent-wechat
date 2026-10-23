@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { threadPreview } from "../src/thread-preview.ts";
+import { messageSummary, threadPreview } from "../src/thread-preview.ts";
 
 test("thread previews distinguish incoming, own, group and system messages", () => {
   const message = {
@@ -50,4 +50,28 @@ test("missing history and missing member names have honest fallbacks", () => {
     }),
     "Member: Hi",
   );
+});
+
+test("recalled thread previews show the replacement notice without an inferred sender prefix", () => {
+  for (const direction of ["incoming", "outgoing", null]) {
+    const message = {
+      id: "recalled",
+      type: 10000,
+      direction,
+      senderId: direction === "outgoing" ? "self" : "bot",
+      body: "Original text must stay hidden",
+      recall: { replacementText: "Nick Bot recalled\n a message" },
+    };
+    const lastMessage = messageSummary(message, "Bot");
+    assert.equal(lastMessage.text, "Nick Bot recalled a message");
+    assert.equal(lastMessage.direction, direction);
+    assert.equal(
+      threadPreview({ id: "room@chatroom", kind: "group", lastMessage }),
+      "Nick Bot recalled a message",
+    );
+    assert.equal(
+      messageSummary({ ...message, recall: {} }, "Bot").text,
+      "Message recalled",
+    );
+  }
 });

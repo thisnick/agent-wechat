@@ -63,23 +63,38 @@ test("recall markers override every body and content renderer", () => {
   );
 });
 
-test("recall wording uses the recorded actor rather than assuming the original author recalled it", () => {
-  const name = (id) => (id === "bot" ? "Nick Bot" : "Someone");
-  const own = { direction: "outgoing", senderId: "self" };
-  assert.equal(
-    recallText({ ...own, recall: { actorId: "self" } }, name),
-    "You recalled this message",
-  );
-  assert.equal(
-    recallText({ ...own, recall: { actorId: "bot" } }, name),
-    "Nick Bot recalled this message",
-  );
-  assert.equal(recallText({ ...own, recall: {} }, name), "Message recalled");
-  assert.equal(
-    recallText(
-      { direction: "incoming", senderId: "bot", recall: { actorId: "bot" } },
-      name,
-    ),
-    "Message recalled",
-  );
+test("recall wording preserves the server notice independently of the original author", () => {
+  for (const direction of ["incoming", "outgoing", null]) {
+    const message = {
+      direction,
+      senderId: direction === "outgoing" ? "self" : "bot",
+      body: "Original text must stay hidden",
+      recall: { replacementText: 'Nick Bot recalled a message <&> "notice"' },
+    };
+    assert.equal(
+      recallText(message),
+      'Nick Bot recalled a message <&> "notice"',
+    );
+    assert.equal(
+      recallText({
+        ...message,
+        recall: { replacementText: "你撤回了一条消息" },
+      }),
+      "你撤回了一条消息",
+    );
+  }
+});
+
+test("missing notices never infer a recall initiator from sender or direction", () => {
+  for (const direction of ["incoming", "outgoing", null])
+    for (const replacementText of [undefined, null, ""])
+      assert.equal(
+        recallText({
+          direction,
+          senderId: "self",
+          body: "Original text must stay hidden",
+          recall: { replacementText },
+        }),
+        "Message recalled",
+      );
 });

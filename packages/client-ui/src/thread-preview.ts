@@ -3,7 +3,7 @@ import type {
   NativeMessage,
   NativeThreadMessage,
 } from "@agent-wechat/shared";
-import { messagePresentation } from "./message-presentation.ts";
+import { messagePresentation, recallText } from "./message-presentation.ts";
 
 export function messageSummary(
   message: NativeMessage,
@@ -12,7 +12,7 @@ export function messageSummary(
   const kind = messagePresentation(message);
   const text =
     kind === "recalled"
-      ? "Message recalled"
+      ? recallText(message)
       : ["text", "reply", "forwarded"].includes(kind)
         ? message.body || "Message"
         : kind === "link"

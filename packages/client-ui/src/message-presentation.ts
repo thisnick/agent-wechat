@@ -1,16 +1,8 @@
 import type { NativeMessage } from "@agent-wechat/shared";
 
-export function recallText(
-  message: NativeMessage,
-  name: (id: string) => string,
-) {
-  const actor = message.recall?.actorId;
-  if (!actor) return "Message recalled";
-  if (message.direction === "outgoing" && actor === message.senderId)
-    return "You recalled this message";
-  return actor === message.senderId
-    ? "Message recalled"
-    : `${name(actor)} recalled this message`;
+export function recallText(message: NativeMessage) {
+  // The original author controls placement, not the wording of who recalled it.
+  return message.recall?.replacementText || "Message recalled";
 }
 
 // WeChat's application-message envelope also carries replies and shared cards.

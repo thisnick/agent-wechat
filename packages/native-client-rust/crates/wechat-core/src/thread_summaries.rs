@@ -71,7 +71,10 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
     let kind = message["type"].as_i64().unwrap_or(0);
     let app = message["appMessageType"].as_i64();
     let text = if message["recall"].is_object() {
-        "Message recalled"
+        message["recall"]["replacementText"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .unwrap_or("Message recalled")
     } else {
         match (kind, app) {
             (1, _) | (49, Some(57)) => message["body"].as_str().unwrap_or("Message"),
@@ -130,6 +133,13 @@ mod tests {
         message["body"] = json!("<msg><emoji secret='not a preview'/></msg>");
         assert_eq!(message_summary(&message, None)["text"], "Sticker");
         message["recall"] = json!({"observedAt":"now"});
+        assert_eq!(message_summary(&message, None)["text"], "Message recalled");
+        message["recall"]["replacementText"] = json!("You recalled a message");
+        assert_eq!(
+            message_summary(&message, None)["text"],
+            "You recalled a message"
+        );
+        message["recall"]["replacementText"] = json!("");
         assert_eq!(message_summary(&message, None)["text"], "Message recalled");
         message["recall"] = Value::Null;
         for (kind, expected) in [
