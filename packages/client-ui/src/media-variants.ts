@@ -8,3 +8,23 @@ export const cachedVariant = (asset: MediaAsset): boolean =>
 export const canRetrieve = (asset: MediaAsset): boolean =>
   asset.retryable &&
   !["available", "expired", "unsupported"].includes(asset.state);
+
+// Never silently save standard bytes when an original is advertised.
+export const downloadAsset = (
+  assets: MediaAsset[],
+  displayed?: MediaAsset,
+): MediaAsset | undefined =>
+  assets.find((asset) => asset.variant === "original") ?? displayed;
+
+export const conversationPhotos = (
+  messages: import("@agent-wechat/shared").NativeMessage[],
+  account: string,
+  thread: string,
+) =>
+  messages.filter(
+    (message) =>
+      message.accountId === account &&
+      message.threadId === thread &&
+      message.type === 3 &&
+      !message.recall,
+  );

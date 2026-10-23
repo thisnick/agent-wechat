@@ -1,8 +1,14 @@
-import { NativeWeChatClient, type NativeOperation } from "@agent-wechat/shared";
+import {
+  NativeWeChatClient,
+  type NativeOperation,
+  type NativeMessage,
+} from "@agent-wechat/shared";
 import { HubSession, type PendingSend } from "./session.ts";
 import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
 import { MediaOutbox, type PendingMedia } from "./media-outbox.ts";
 import { AvatarCache } from "./avatar-cache.ts";
+import { MediaInbox } from "./media-inbox.ts";
+import { MessageRecall } from "./message-recall.ts";
 import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
 export type Connection = {
   session: HubSession;
@@ -12,6 +18,8 @@ export type Connection = {
   mediaOutbox: (account: string) => MediaOutbox;
   close: () => void;
   avatars: AvatarCache;
+  incomingMedia: MediaInbox;
+  messageRecall: (message: NativeMessage) => MessageRecall;
   logout: (account: string) => Promise<NativeOperation>;
   clearLogout: (account: string) => void;
   groupCreation: (account: string, target?: string) => GroupMutations;
@@ -60,7 +68,14 @@ export async function connect(
   await session.accounts();
   const logins = new Map<string, SavedLogin>();
   const media = new Map<string, MediaOutbox>();
-  const avatars = new AvatarCache(client);
+  const avatars = new AvatarCache(
+    client,
+    Date.now,
+    () => !session.snapshot().opening,
+  );
+  const incomingMedia = new MediaInbox(client);
+  const recalls = new Map<string, MessageRecall>();
+  const stopMedia = session.onMediaReady((id) => incomingMedia.ready(id));
   const groups = new Map<string, GroupMutations>();
   const logouts = new Map<string, SavedLogin>();
   const logoutKey = (account: string) =>
@@ -84,9 +99,42 @@ export async function connect(
       session.close();
       for (const queue of media.values()) queue.close();
       avatars.close();
+      stopMedia();
+      incomingMedia.close();
+      for (const recall of recalls.values()) recall.close();
       for (const group of groups.values()) group.close();
     },
     avatars,
+    incomingMedia,
+    messageRecall(message) {
+      const key = JSON.stringify([
+        message.accountId,
+        message.id,
+        message.serverId,
+      ]);
+      let recall = recalls.get(key);
+      if (!recall) {
+        const storageKey = `agentwechat-recall:${status.serverId}:${key}`;
+        recall = new MessageRecall(client, message, {
+          read() {
+            try {
+              return JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
+            } catch {
+              return null;
+            }
+          },
+          write(receipt) {
+            try {
+              sessionStorage.setItem(storageKey, JSON.stringify(receipt));
+            } catch {
+              /* Memory keeps the admission key when storage is disabled. */
+            }
+          },
+        });
+        recalls.set(key, recall);
+      }
+      return recall;
+    },
     groupCreation(account, target = "create") {
       const context = JSON.stringify([account, target]);
       let creation = groups.get(context);

@@ -36,6 +36,12 @@ import { messagePresentation } from "./message-presentation.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import { QuotedReply } from "./quoted-reply.tsx";
+import { PhotoViewer } from "./photo-viewer.tsx";
+import { MessageActions } from "./message-actions.tsx";
+import {
+  ConversationNavigation,
+  useConversationNavigation,
+} from "./conversation-navigation.tsx";
 import {
   ConversationScroll,
   ConversationItem,
@@ -820,7 +826,6 @@ function Chats({
               account={state.account}
               username={state.selected}
               name={selectedName}
-              downloadMissing={!state.opening}
               members={
                 state.threads.find((thread) => thread.id === state.selected)
                   ?.avatarMembers
@@ -982,157 +987,167 @@ function Chats({
             </p>
           </details>
         )}
-        <div className="body-row">
-          <section className="conversation" aria-label="Conversation">
-            <ConversationScroll
-              key={`${state.account}:${state.selected}:${!!(
-                find && inChat.trim()
-              )}`}
-              searching={!!(find && inChat.trim())}
-              history={{
-                hasMore: !!state.nextMessages,
-                loading: state.loading,
-                load: () => void session.older(),
-              }}
-              leading={
-                state.messages[0] ? (
-                  <MessageDate value={state.messages[0].createdAt} />
-                ) : null
-              }
-            >
-              {find && inChat.trim() && state.account && state.selected ? (
-                <SearchResults
-                  key={`${state.account}:${state.selected}`}
-                  connection={connection}
-                  account={state.account}
-                  thread={state.selected}
-                  query={inChat}
-                  name={name}
-                  close={() => setInChat("")}
-                />
-              ) : (
-                <>
-                  {state.messages.map((m, index) => (
-                    <ConversationItem key={m.id} messageId={m.id}>
-                      <Message
-                        message={m}
-                        connection={connection}
-                        name={name}
-                      />
-                      {state.messages[index + 1] &&
-                        date(m.createdAt).toDateString() !==
-                          date(
-                            state.messages[index + 1].createdAt,
-                          ).toDateString() && (
-                          <MessageDate
-                            value={state.messages[index + 1].createdAt}
-                          />
-                        )}
-                    </ConversationItem>
-                  ))}
-                  {state.sends
-                    .filter((s) => s.threadId === state.selected)
-                    .map((s) => (
-                      <ConversationItem
-                        key={s.key}
-                        messageId={`pending:${s.key}`}
-                      >
-                        <Pending
-                          send={s}
-                          check={() => void session.checkSend(s.key)}
-                        />
-                      </ConversationItem>
-                    ))}
-                  <ConversationItem messageId="pending-media">
-                    {state.account && (
-                      <PendingAttachments
-                        key={state.account}
-                        connection={connection}
-                        account={state.account}
-                        threadId={state.selected}
-                        messages={state.messages}
-                      />
-                    )}
-                    {!state.loading &&
-                      state.selected &&
-                      state.messages.length === 0 && (
-                        <p className="empty-chat">Start the conversation.</p>
-                      )}
-                  </ConversationItem>
-                </>
-              )}
-            </ConversationScroll>
-            <div className="composer-wrap">
-              <div className="composer">
-                <div className="composer-tools">
-                  {state.account && (
-                    <AttachmentPicker
-                      key={state.account}
+        <ConversationNavigation
+          key={`${state.account}:${state.selected}`}
+          session={session}
+          closeSearch={() => setInChat("")}
+        >
+          <PhotoViewer connection={connection}>
+            <div className="body-row">
+              <section className="conversation" aria-label="Conversation">
+                <ConversationScroll
+                  key={`${state.account}:${state.selected}:${!!(
+                    find && inChat.trim()
+                  )}`}
+                  searching={!!(find && inChat.trim())}
+                  history={{
+                    hasMore: !!state.nextMessages,
+                    loading: state.loading,
+                    load: () => void session.older(),
+                  }}
+                  leading={
+                    state.messages[0] ? (
+                      <MessageDate value={state.messages[0].createdAt} />
+                    ) : null
+                  }
+                >
+                  {find && inChat.trim() && state.account && state.selected ? (
+                    <SearchResults
+                      key={`${state.account}:${state.selected}`}
                       connection={connection}
                       account={state.account}
-                      threadId={state.selected}
-                      recipient={selectedName}
-                      enabled={
-                        active &&
-                        Array.isArray(state.capabilities.mediaKinds) &&
-                        state.capabilities.mediaKinds.length > 0
-                      }
+                      thread={state.selected}
+                      query={inChat}
+                      name={name}
+                      close={() => setInChat("")}
                     />
+                  ) : (
+                    <>
+                      {state.messages.map((m, index) => (
+                        <ConversationItem key={m.id} messageId={m.id}>
+                          <Message
+                            message={m}
+                            connection={connection}
+                            name={name}
+                          />
+                          {state.messages[index + 1] &&
+                            date(m.createdAt).toDateString() !==
+                              date(
+                                state.messages[index + 1].createdAt,
+                              ).toDateString() && (
+                              <MessageDate
+                                value={state.messages[index + 1].createdAt}
+                              />
+                            )}
+                        </ConversationItem>
+                      ))}
+                      {state.sends
+                        .filter((s) => s.threadId === state.selected)
+                        .map((s) => (
+                          <ConversationItem
+                            key={s.key}
+                            messageId={`pending:${s.key}`}
+                          >
+                            <Pending
+                              send={s}
+                              check={() => void session.checkSend(s.key)}
+                            />
+                          </ConversationItem>
+                        ))}
+                      <ConversationItem messageId="pending-media">
+                        {state.account && (
+                          <PendingAttachments
+                            key={state.account}
+                            connection={connection}
+                            account={state.account}
+                            threadId={state.selected}
+                            messages={state.messages}
+                          />
+                        )}
+                        {!state.loading &&
+                          state.selected &&
+                          state.messages.length === 0 && (
+                            <p className="empty-chat">
+                              Start the conversation.
+                            </p>
+                          )}
+                      </ConversationItem>
+                    </>
                   )}
-                  {simulator && (
-                    <span className="field-help">
-                      Messages and files stay in the simulator.
-                    </span>
-                  )}
+                </ConversationScroll>
+                <div className="composer-wrap">
+                  <div className="composer">
+                    <div className="composer-tools">
+                      {state.account && (
+                        <AttachmentPicker
+                          key={state.account}
+                          connection={connection}
+                          account={state.account}
+                          threadId={state.selected}
+                          recipient={selectedName}
+                          enabled={
+                            active &&
+                            Array.isArray(state.capabilities.mediaKinds) &&
+                            state.capabilities.mediaKinds.length > 0
+                          }
+                        />
+                      )}
+                      {simulator && (
+                        <span className="field-help">
+                          Messages and files stay in the simulator.
+                        </span>
+                      )}
+                    </div>
+                    <textarea
+                      aria-label="Message"
+                      rows={2}
+                      placeholder={
+                        state.selected
+                          ? `Message ${selectedName}…`
+                          : "Choose a conversation"
+                      }
+                      value={draft}
+                      disabled={!state.selected || !active}
+                      onChange={(e) =>
+                        setDrafts((d) => ({ ...d, [draftKey]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (
+                          e.key === "Enter" &&
+                          !e.shiftKey &&
+                          !e.nativeEvent.isComposing
+                        ) {
+                          e.preventDefault();
+                          send();
+                        }
+                      }}
+                    />
+                    <div className="composer-bottom">
+                      <span className="composer-hint">
+                        Enter to send · Shift + Enter for a new line
+                      </span>
+                      <button
+                        className="send-btn"
+                        disabled={!state.selected || !draft.trim() || !active}
+                        onClick={send}
+                      >
+                        Send <Icon name="send" />
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <textarea
-                  aria-label="Message"
-                  rows={2}
-                  placeholder={
-                    state.selected
-                      ? `Message ${selectedName}…`
-                      : "Choose a conversation"
-                  }
-                  value={draft}
-                  disabled={!state.selected || !active}
-                  onChange={(e) =>
-                    setDrafts((d) => ({ ...d, [draftKey]: e.target.value }))
-                  }
-                  onKeyDown={(e) => {
-                    if (
-                      e.key === "Enter" &&
-                      !e.shiftKey &&
-                      !e.nativeEvent.isComposing
-                    ) {
-                      e.preventDefault();
-                      send();
-                    }
-                  }}
+              </section>
+              {details && state.selected && (
+                <Details
+                  key={`${state.account}:${state.selected}`}
+                  connection={connection}
+                  threadId={state.selected}
+                  name={selectedName}
                 />
-                <div className="composer-bottom">
-                  <span className="composer-hint">
-                    Enter to send · Shift + Enter for a new line
-                  </span>
-                  <button
-                    className="send-btn"
-                    disabled={!state.selected || !draft.trim() || !active}
-                    onClick={send}
-                  >
-                    Send <Icon name="send" />
-                  </button>
-                </div>
-              </div>
+              )}
             </div>
-          </section>
-          {details && state.selected && (
-            <Details
-              key={`${state.account}:${state.selected}`}
-              connection={connection}
-              threadId={state.selected}
-              name={selectedName}
-            />
-          )}
-        </div>
+          </PhotoViewer>
+        </ConversationNavigation>
       </main>
       {accountMenu && (
         <div className="account-menu" role="dialog" aria-label="Switch account">
@@ -1376,11 +1391,12 @@ function Message({
   connection: Connection;
   name: (id: string) => string;
 }) {
+  const navigation = useConversationNavigation();
   const own = m.direction === "outgoing";
   const presentation = messagePresentation(m);
   return (
     <article
-      className={`message ${own ? "own" : ""}`}
+      className={`message ${own ? "own" : ""}${navigation?.target?.id === m.id ? " quote-target" : ""}`}
       data-message-id={m.id}
       data-direction={m.direction}
     >
@@ -1389,10 +1405,6 @@ function Message({
         account={m.accountId}
         username={m.senderId || (!own ? m.threadId : null)}
         name={own ? "You" : name(m.senderId || m.threadId)}
-        downloadMissing={
-          m.threadId.endsWith("@chatroom") &&
-          !connection.session.snapshot().opening
-        }
       />
       <div className="message-body">
         <div className="message-meta">
@@ -1401,6 +1413,7 @@ function Message({
             {time(m.createdAt)}
           </time>
         </div>
+        <MessageActions message={m} connection={connection} />
         {presentation === "recalled" ? (
           <div className="bubble recalled">Message recalled</div>
         ) : presentation === "text" ? (
@@ -1466,7 +1479,6 @@ function Details({
           account={state.account!}
           username={threadId}
           name={name}
-          downloadMissing={!state.opening}
           members={
             state.threads.find((thread) => thread.id === threadId)
               ?.avatarMembers

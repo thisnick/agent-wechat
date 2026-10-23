@@ -136,3 +136,97 @@ test("cached avatar reads cannot flood the hub while a conversation loads", asyn
   await Promise.all(requests);
   assert.equal(calls, 2);
 });
+
+test("visible cached avatars refresh after one hour and hidden avatars do not", async (t) => {
+  let now = 1000;
+  const refreshes = [];
+  const cache = new AvatarCache(
+    {
+      avatar: async (_a, user) => response(user),
+      refreshAvatar: async (account, user) => {
+        refreshes.push([account, user]);
+        return { id: user };
+      },
+      operation: async () => ({ state: "succeeded" }),
+    },
+    () => now,
+  );
+  t.after(() => cache.close());
+  await cache.load("a", "shown");
+  await cache.load("a", "hidden");
+  const hide = cache.show("a", "shown");
+  await cache.ensure("a", "shown", true);
+  assert.equal(refreshes.length, 0);
+  now += 3599999;
+  await cache.ensure("a", "shown", true);
+  assert.equal(refreshes.length, 0);
+  now++;
+  await Promise.all([
+    cache.ensure("a", "shown", true),
+    cache.ensure("a", "shown", true),
+    cache.ensure("a", "hidden", true),
+  ]);
+  assert.deepEqual(refreshes, [["a", "shown"]]);
+  hide();
+  now += 3600000;
+  await cache.ensure("a", "shown", true);
+  assert.equal(refreshes.length, 1);
+});
+test("an avatar still shown elsewhere remains visible and queued hidden downloads are skipped", async (t) => {
+  const gate = deferred();
+  const refreshes = [];
+  const cache = new AvatarCache({
+    avatar: async () => {
+      throw new NativeApiError(404, "media_not_cached");
+    },
+    refreshAvatar: async (_a, user) => {
+      refreshes.push(user);
+      return { id: user };
+    },
+    operation: async () => {
+      await gate.promise;
+      return { state: "failed" };
+    },
+  });
+  t.after(() => cache.close());
+  const hides = Array.from({ length: 6 }, (_, n) =>
+    cache.show("a", `visible-${n}`),
+  );
+  const secondView = cache.show("a", "visible-5");
+  await new Promise((done) => setTimeout(done, 10));
+  assert.equal(refreshes.length, 4);
+  hides[4]();
+  hides[5]();
+  gate.resolve();
+  await new Promise((done) => setTimeout(done, 10));
+  assert.equal(refreshes.includes("visible-4"), false);
+  assert.equal(refreshes.includes("visible-5"), true);
+  secondView();
+  hides.slice(0, 4).forEach((hide) => hide());
+});
+test("read-open admission pauses avatar refreshes while retaining visible cached reads", async (t) => {
+  let opening = true;
+  let downloads = 0;
+  const cache = new AvatarCache(
+    {
+      avatar: async () => {
+        throw new NativeApiError(404, "media_not_cached");
+      },
+      refreshAvatar: async () => {
+        downloads++;
+        return { id: "avatar" };
+      },
+      operation: async () => ({ state: "failed" }),
+    },
+    Date.now,
+    () => !opening,
+  );
+  t.after(() => cache.close());
+  const hide = cache.show("a", "member");
+  await cache.ensure("a", "member", true);
+  assert.equal(downloads, 0);
+  opening = false;
+  await cache.ensure("a", "member", true);
+  assert.equal(downloads, 1);
+  hide();
+});

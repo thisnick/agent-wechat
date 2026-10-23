@@ -820,3 +820,51 @@ test("a new direct chat can open before the hub has a session row", async (t) =>
   assert.equal(hub.snapshot().selected, "new-person");
   assert.equal(hub.snapshot().error, null);
 });
+
+test("quote navigation loads intervening history pages until its source is available", async (t) => {
+  const cursors = [];
+  const hub = session(t, {
+    messages: async (_a, _t, options) => {
+      cursors.push(options.cursor);
+      if (!options.cursor)
+        return page([message("new", "a", "peer", "30")], "20", "p2");
+      if (options.cursor === "p2")
+        return page([message("middle", "a", "peer", "20")], "20", "p3");
+      return page([message("source", "a", "peer", "10")]);
+    },
+  });
+  await hub.activate("a");
+  assert.equal(
+    await hub.revealMessage("source", new AbortController().signal),
+    true,
+  );
+  assert.deepEqual(cursors, [undefined, "p2", "p3"]);
+  assert.deepEqual(
+    hub.snapshot().messages.map((m) => m.id),
+    ["source", "middle", "new"],
+  );
+});
+test("a quote navigation stops on account/chat change and does not follow another chat's cursor", async (t) => {
+  const gate = deferred();
+  let older = 0;
+  const hub = session(t, {
+    messages: async (account, thread, options) => {
+      if (options.cursor) {
+        older++;
+        return gate.promise;
+      }
+      return page([message("new", account, thread)], "20", "older");
+    },
+  });
+  await hub.activate("a");
+  const finding = hub.revealMessage("source", new AbortController().signal);
+  await hub.select("elsewhere");
+  gate.resolve(page([message("source")]));
+  assert.equal(await finding, false);
+  assert.equal(older, 1);
+  assert.equal(hub.snapshot().selected, "elsewhere");
+  assert.equal(
+    hub.snapshot().messages.some((m) => m.id === "source"),
+    false,
+  );
+});

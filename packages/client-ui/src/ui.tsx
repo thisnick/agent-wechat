@@ -1,4 +1,4 @@
-import { Settings } from "lucide-react";
+import { Settings, ImageOff, Undo2, ZoomIn, ZoomOut } from "lucide-react";
 import type { ReactNode } from "react";
 const icons: Record<string, string> = {
   chat: "M21 11.5a8.4 8.4 0 0 1-9 8.5 10 10 0 0 1-4-.8L3 21l1.6-4.5A8.3 8.3 0 0 1 3 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5ZM8 11h.01M12 11h.01M16 11h.01",
@@ -33,6 +33,18 @@ const icons: Record<string, string> = {
 };
 
 export function Icon({ name }: { name: string }) {
+  const component = (
+    { recall: Undo2, "zoom-in": ZoomIn, "zoom-out": ZoomOut } as Record<
+      string,
+      typeof Undo2
+    >
+  )[name];
+  if (component) {
+    const Component = component;
+    return <Component className="icon" aria-hidden="true" strokeWidth={1.7} />;
+  }
+  if (name === "image-off")
+    return <ImageOff className="icon" aria-hidden="true" strokeWidth={1.7} />;
   if (name === "settings")
     return <Settings className="icon" aria-hidden="true" strokeWidth={1.7} />;
   return (

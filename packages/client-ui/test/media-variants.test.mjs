@@ -51,3 +51,47 @@ test("advertised originals and lower quality fallback bytes are not saved origin
   for (const state of ["available", "expired", "unsupported"])
     assert.equal(canRetrieve({ state, retryable: true }), false);
 });
+
+test("downloads prefer the advertised original and never substitute standard bytes", async () => {
+  const { downloadAsset, conversationPhotos } = await import(
+    "../src/media-variants.ts"
+  );
+  const standard = {
+    id: "s",
+    variant: "standard",
+    state: "available",
+    actualVariant: "standard",
+  };
+  const original = {
+    id: "o",
+    variant: "original",
+    state: "pending",
+    retryable: true,
+  };
+  assert.equal(downloadAsset([standard, original], standard), original);
+  assert.equal(downloadAsset([standard], standard), standard);
+  assert.equal(
+    downloadAsset(
+      [
+        { ...original, state: "available", actualVariant: "original" },
+        standard,
+      ],
+      standard,
+    ).id,
+    "o",
+  );
+  assert.deepEqual(
+    conversationPhotos(
+      [
+        { id: "photo", accountId: "a", threadId: "t", type: 3 },
+        { id: "sticker", accountId: "a", threadId: "t", type: 47 },
+        { id: "recalled", accountId: "a", threadId: "t", type: 3, recall: {} },
+        { id: "other-account", accountId: "b", threadId: "t", type: 3 },
+        { id: "other-chat", accountId: "a", threadId: "u", type: 3 },
+      ],
+      "a",
+      "t",
+    ).map((m) => m.id),
+    ["photo"],
+  );
+});

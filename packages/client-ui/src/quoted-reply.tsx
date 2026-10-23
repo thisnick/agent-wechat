@@ -7,6 +7,7 @@ import type { Connection } from "./connection.ts";
 import { localQuote, quotedText } from "./quote-preview.ts";
 import { useVisible } from "./visible.tsx";
 import { MediaCard } from "./media.tsx";
+import { useConversationNavigation } from "./conversation-navigation.tsx";
 
 export function QuotedReply({
   message,
@@ -25,6 +26,9 @@ export function QuotedReply({
   const local = localQuote(message, state.messages);
   const [quote, setQuote] = useState<NativeQuoteResolution | null>(null);
   const [failed, setFailed] = useState(false);
+  const navigation = useConversationNavigation();
+  const [jumping, setJumping] = useState(false);
+  const [jumpFailed, setJumpFailed] = useState(false);
   useEffect(() => {
     if (!visible || local) return;
     let cancelled = false;
@@ -55,11 +59,31 @@ export function QuotedReply({
   const sender = original?.senderId ?? quote?.senderId;
   const own = original?.direction === "outgoing";
   const image = !recalled && (original?.type === 3 || quote?.embeddedImage);
+  const canJump = !!original && !!navigation;
+  async function jump() {
+    if (!original || !navigation || jumping) return;
+    setJumping(true);
+    setJumpFailed(false);
+    const found = await navigation.jump(original);
+    setJumping(false);
+    setJumpFailed(!found);
+  }
   return (
     <blockquote
       className="quote-preview"
       ref={element}
       aria-label="Quoted message"
+      role={canJump ? "button" : undefined}
+      tabIndex={canJump ? 0 : undefined}
+      aria-busy={jumping || undefined}
+      title={canJump ? "Go to quoted message" : undefined}
+      onClick={canJump ? () => void jump() : undefined}
+      onKeyDown={(event) => {
+        if (canJump && ["Enter", " "].includes(event.key)) {
+          event.preventDefault();
+          void jump();
+        }
+      }}
     >
       <strong>{own ? "You" : sender ? name(sender) : "Quoted message"}</strong>
       {image ? (
@@ -81,6 +105,13 @@ export function QuotedReply({
                     ? "The quoted message is unavailable."
                     : "Loading quoted message…")}
         </p>
+      )}
+      {(jumping || jumpFailed) && (
+        <small role="status">
+          {jumping
+            ? "Finding message…"
+            : "Message isn’t in this chat’s history."}
+        </small>
       )}
     </blockquote>
   );

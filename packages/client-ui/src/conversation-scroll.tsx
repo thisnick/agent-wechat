@@ -1,6 +1,7 @@
 import { useRef, type ReactNode } from "react";
 import { MessageScroller } from "@shadcn/react/message-scroller";
 import { Icon } from "./ui.tsx";
+import { ScrollToQuotedMessage } from "./conversation-navigation.tsx";
 
 export const ConversationItem = MessageScroller.Item;
 
@@ -25,6 +26,7 @@ export function ConversationScroll({
     );
   return (
     <MessageScroller.Provider autoScroll defaultScrollPosition="end">
+      <ScrollToQuotedMessage />
       <MessageScroller.Root className="message-scroller">
         <MessageScroller.Viewport className="messages">
           {showedHistory.current ? (

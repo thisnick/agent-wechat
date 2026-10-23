@@ -448,7 +448,6 @@ export function GroupSettings({
               account={account}
               username={member.username || member.id}
               name={member.displayName || member.id}
-              downloadMissing={!state.opening}
             />
             <span>
               {member.roomDisplayName || member.displayName || member.username}

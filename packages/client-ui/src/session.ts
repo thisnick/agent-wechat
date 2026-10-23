@@ -464,6 +464,36 @@ export class HubSession {
         this.publish({ loading: false, error: readableError(error) });
     }
   }
+  async revealMessage(id: string, signal: AbortSignal): Promise<boolean> {
+    const { account, selected } = this.value;
+    const generation = this.generation,
+      threadGeneration = this.threadGeneration;
+    const current = () =>
+      !signal.aborted &&
+      !!account &&
+      this.current(account, generation) &&
+      threadGeneration === this.threadGeneration;
+    while (current()) {
+      if (
+        this.value.messages.some(
+          (message) =>
+            message.id === id &&
+            message.accountId === account &&
+            message.threadId === selected,
+        )
+      )
+        return true;
+      if (this.value.loading) {
+        await pause(50, signal);
+        continue;
+      }
+      const cursor = this.value.nextMessages;
+      if (!cursor) return false;
+      await this.older();
+      if (this.value.nextMessages === cursor) return false;
+    }
+    return false;
+  }
   private async refreshThread(
     account: string,
     threadId: string,
@@ -599,6 +629,10 @@ export class HubSession {
       ]);
     }
     return threads.cursor;
+  }
+  async refreshMessage(account: string, messageId: string): Promise<void> {
+    if (this.value.account !== account) return;
+    await this.canonical(account, messageId, this.generation);
   }
   private async canonical(
     account: string,

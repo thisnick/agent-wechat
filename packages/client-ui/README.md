@@ -118,20 +118,42 @@ quotes show a small standard preview. Recalled or unavailable originals keep a
 status label. Forwarded history renders normalized text. Unknown message types
 show an unsupported-content label instead of entering the media flow.
 
-Incoming images automatically download standard quality to the hub and render
-inline without a quality picker. **Download original** separately keeps the full
-image on the agent-wechat hub; **Save original** then saves those cached bytes to
-the browser's device. **Save image** saves the standard image. An original becoming
-available never replaces the standard image in the conversation.
-Images without an advertised original show why no download is offered; expired
-originals are labelled separately. Avatar reads, media discovery and quote lookups
-start near the viewport, so offscreen history does not flood the hub on open.
+Images and stickers show their content without a file header or status text.
+Timestamps and message actions appear on hover or keyboard focus. Touch devices
+keep the actions accessible. The menu offers copying text or opening a photo;
+own messages also offer **Recall**. Recall keeps its admission key and operation
+receipt across reloads. Unknown outcomes offer a status check instead of starting
+another attempt. The hub decides whether the exact message can be recalled.
+Sending native quoted replies still needs a send API extension.
 
-Files, videos and voice messages use **Load attachment** and real hub transfer
-jobs. Progress, cancellation and retry use the job API. Videos and decoded voice
-use browser playback controls, and files can be saved. Other clients see
-ready assets through the hub event stream. Unsupported, pending and expired
-assets keep their actual state; raw message XML is never a retrieved attachment.
+Incoming images automatically load standard quality. Clicking a photo opens a
+viewer with previous/next controls, a thumbnail strip, zoom, and **Show message**.
+Earlier photos load through the conversation's history cursor as needed. The
+viewer offers **Request original** when an advertised original is not cached,
+then **Download original** to save the cached full-quality image to this device.
+When there is no original source, it offers **Download standard** instead. Size
+appears only when the download control is hovered or focused; transfer progress
+and cancellation appear while it runs. The conversation keeps displaying standard
+quality even after an original is downloaded. An unavailable image shows an icon.
+
+Clicking a resolved quote loads any intervening history pages and scrolls to its
+source message. Missing or recalled originals retain their state. Searches can
+jump back into the conversation without losing its loaded history.
+
+Visible voice notes automatically load into browser playback controls. Files and
+videos use the same compact download action and transfer jobs. Unsupported,
+pending and expired assets retain their actual state; raw XML is never an
+attachment. The conversation and viewer share transfer state, so opening a viewer
+does not start another transfer.
+
+One shared avatar component tracks visibility in lists, group mosaics, details
+and messages. Missing visible avatars are fetched immediately; cached visible
+avatars refresh after one hour since their last successful browser cache read.
+Offscreen avatars do not refresh. Multiple views share each request, and queued
+refreshes are skipped if the last visible view disappears. Group rows show at most
+four member avatars and request only those faces. Refreshes pause while chat-open
+read state is being admitted. Avatar reads, media discovery and quote lookups
+start at the viewport so offscreen history does not flood the hub.
 
 Eligible incoming stickers load automatically when their message is displayed.
 The browser renders the checked original image, including GIF animation. The
@@ -241,15 +263,15 @@ replace initials; absent avatars keep initials. A successful receipt reports
 server acceptance, not observation of a real phone badge. Group details load all
 roster pages.
 
-| Area             | Current browser behavior                                                                                                |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Hub and accounts | Simulator bootstrap, bearer connection, account creation/switching, rename and logout                                   |
-| Sign-in          | QR PNG, countdown, automatic renewal, phone approval and automatic chat entry                                           |
+| Area             | Current browser behavior                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| Hub and accounts | Simulator bootstrap, bearer connection, account creation/switching, rename and logout                         |
+| Sign-in          | QR PNG, countdown, automatic renewal, phone approval and automatic chat entry                                 |
 | Conversations    | Contacts, thread filters, paginated history/search, full group roster, read-state, avatars and group controls |
-| Messaging        | Text and attachment composer, progress, receipt status, uncertainty, self-sends and SSE replay                          |
-| Media            | Image/video/voice previews, downloads, incoming animated stickers and outgoing file/image/video/voice jobs              |
-| Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                             |
-| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                                   |
+| Messaging        | Text and attachment composer, progress, receipt status, uncertainty, self-sends and SSE replay                |
+| Media            | Image/video/voice previews, downloads, incoming animated stickers and outgoing file/image/video/voice jobs    |
+| Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                   |
+| Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                         |
 
 ## Verification
 

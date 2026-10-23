@@ -6,7 +6,12 @@ export class AvatarCache {
   private values = new Map<string, string>();
   private pending = new Map<string, Promise<void>>();
   private missing = new Set<string>();
-  private requested = new Set<string>();
+  private checkedAt = new Map<string, number>();
+  private refreshedAt = new Map<string, number>();
+  private visible = new Map<string, number>();
+  private now: () => number;
+  private refreshAllowed: () => boolean;
+  private timer: ReturnType<typeof setInterval>;
   private refreshing = new Map<string, Promise<void>>();
   private queue: (() => void)[] = [];
   private active = 0;
@@ -15,8 +20,33 @@ export class AvatarCache {
   private generations = new Map<string, number>();
   private listeners = new Set<() => void>();
   private controller = new AbortController();
-  constructor(client: NativeWeChatClient) {
+  constructor(
+    client: NativeWeChatClient,
+    now = Date.now,
+    refreshAllowed = () => true,
+  ) {
     this.client = client;
+    this.now = now;
+    this.refreshAllowed = refreshAllowed;
+    this.timer = setInterval(() => {
+      for (const key of this.visible.keys()) {
+        const [account, username] = JSON.parse(key) as [string, string];
+        void this.ensure(account, username, true);
+      }
+    }, 60000);
+  }
+  private key(account: string, username: string): string {
+    return JSON.stringify([account, username]);
+  }
+  show(account: string, username: string): () => void {
+    const key = this.key(account, username);
+    this.visible.set(key, (this.visible.get(key) ?? 0) + 1);
+    void this.ensure(account, username, true);
+    return () => {
+      const count = (this.visible.get(key) ?? 1) - 1;
+      if (count) this.visible.set(key, count);
+      else this.visible.delete(key);
+    };
   }
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -25,22 +55,30 @@ export class AvatarCache {
     };
   };
   get = (account: string, username: string): string =>
-    this.values.get(`${account}:${username}`) ?? "";
-  async load(account: string, username: string, force = false): Promise<void> {
-    const key = `${account}:${username}`;
+    this.values.get(this.key(account, username)) ?? "";
+  async load(
+    account: string,
+    username: string,
+    force = false,
+    visibleOnly = false,
+  ): Promise<void> {
+    const key = this.key(account, username);
     if (
       !username ||
       this.controller.signal.aborted ||
-      (!force && this.pending.has(key))
+      (!force && this.pending.has(key)) ||
+      (!force && this.now() - (this.checkedAt.get(key) ?? -Infinity) < 3600000)
     )
       return this.pending.get(key);
     const generation = (this.generations.get(key) ?? 0) + 1;
     this.generations.set(key, generation);
     const request = (async () => {
       try {
-        const content = await this.read(() =>
-          this.client.avatar(account, username, this.controller.signal),
-        );
+        const content = await this.read(() => {
+          if (visibleOnly && !this.visible.has(key))
+            throw new Error("Avatar is offscreen");
+          return this.client.avatar(account, username, this.controller.signal);
+        });
         if (
           this.controller.signal.aborted ||
           this.generations.get(key) !== generation
@@ -54,41 +92,70 @@ export class AvatarCache {
         const old = this.values.get(key);
         if (old) URL.revokeObjectURL(old);
         this.values.set(key, url);
+        this.checkedAt.set(key, this.now());
         this.missing.delete(key);
         for (const listener of this.listeners) listener();
       } catch (error) {
+        if (
+          !this.controller.signal.aborted &&
+          this.generations.get(key) === generation &&
+          (!visibleOnly || this.visible.has(key))
+        )
+          this.checkedAt.set(key, this.now());
         if (
           error instanceof NativeApiError &&
           error.code === "media_not_cached" &&
           this.generations.get(key) === generation &&
           !this.controller.signal.aborted
-        )
+        ) {
           this.missing.add(key);
+          this.checkedAt.set(key, this.now());
+        }
       }
     })();
     this.pending.set(key, request);
     await request;
+    if (this.pending.get(key) === request) this.pending.delete(key);
   }
-  async ensure(account: string, username: string): Promise<void> {
-    await this.load(account, username);
-    const key = `${account}:${username}`;
+  async ensure(
+    account: string,
+    username: string,
+    visibleOnly = false,
+  ): Promise<void> {
+    const key = this.key(account, username);
+    if (visibleOnly && !this.visible.has(key)) return;
+    const stale =
+      this.values.has(key) &&
+      this.now() - (this.checkedAt.get(key) ?? -Infinity) >= 3600000;
+    if (!this.values.has(key))
+      await this.load(account, username, false, visibleOnly);
     if (
-      !this.missing.has(key) ||
-      this.requested.has(key) ||
+      (!this.missing.has(key) && (!this.values.has(key) || !stale)) ||
+      this.now() - (this.refreshedAt.get(key) ?? -Infinity) < 3600000 ||
+      (visibleOnly && !this.visible.has(key)) ||
+      (visibleOnly && !this.refreshAllowed()) ||
       this.controller.signal.aborted
     )
       return;
-    this.requested.add(key);
+    this.refreshedAt.set(key, this.now());
     // Lazy requests are best effort. An unavailable avatar keeps its initials.
-    await this.refresh(account, username).catch(() => {});
+    await this.refresh(account, username, visibleOnly).catch(() => {});
   }
-  async refresh(account: string, username: string): Promise<void> {
-    const key = `${account}:${username}`;
+  async refresh(
+    account: string,
+    username: string,
+    visibleOnly = false,
+  ): Promise<void> {
+    const key = this.key(account, username);
     const pending = this.refreshing.get(key);
     if (pending) return pending;
     const request = new Promise<void>((resolve, reject) => {
       this.queue.push(() => {
-        if (this.controller.signal.aborted) {
+        if (
+          this.controller.signal.aborted ||
+          (visibleOnly && (!this.visible.has(key) || !this.refreshAllowed()))
+        ) {
+          this.refreshedAt.delete(key);
           resolve();
           return;
         }
@@ -153,6 +220,8 @@ export class AvatarCache {
       throw new Error("Avatar refresh is taking longer than expected.");
   }
   close(): void {
+    clearInterval(this.timer);
+    this.visible.clear();
     this.controller.abort();
     this.drain();
     for (const url of this.values.values()) URL.revokeObjectURL(url);
