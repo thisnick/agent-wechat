@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename, isAbsolute } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
-import type { NativeMessage } from "@agent-wechat/shared";
+import { NATIVE_MAX_SOURCE_BYTES, type NativeMessage } from "@agent-wechat/shared";
 import type { NativeDispatchManifest, NativeSuppliedAsset } from "./native-consumer-state.ts";
 
 type Proof = { sessionId: string; provider: string; model: string };
@@ -26,7 +26,7 @@ export function nativeDispatchManifest(params: {
   if (history.length > 200 || history.some(message => message.accountId !== params.message.accountId || message.threadId !== params.message.threadId || message.id === params.message.id)) throw Error("Invalid native history manifest");
   const assets = Object.freeze((params.assets ?? []).map(asset => {
     if (typeof asset.id !== "string" || !asset.id || asset.id.length > 2048 || !/^[a-f0-9]{64}$/.test(asset.sha256) || !Number.isSafeInteger(asset.byteLength) || asset.byteLength < 1
-      || asset.byteLength > 128 * 1024 * 1024 || typeof asset.path !== "string" || !isAbsolute(asset.path) || asset.path.length > 4096
+      || asset.byteLength > (asset.kind === "file" ? NATIVE_MAX_SOURCE_BYTES : 128 * 1024 * 1024) || typeof asset.path !== "string" || !isAbsolute(asset.path) || asset.path.length > 4096
       || typeof asset.mime !== "string" || asset.mime.length > 128 || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(asset.mime)
       || !["image", "audio", "video", "file"].includes(asset.kind) || !["model_image", "file_reference"].includes(asset.role)
       || (asset.role === "model_image" && (asset.kind !== "image" || !asset.mime.startsWith("image/") || !asset.runtimeMedia))

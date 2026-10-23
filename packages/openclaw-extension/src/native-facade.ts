@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { TransformStream as NodeTransformStream } from "node:stream/web";
+import { NATIVE_MAX_SOURCE_BYTES } from "@agent-wechat/shared";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { ensureNativeHost } from "./native-host.ts";
 import type { WeChatNativeConfig } from "./types.ts";
@@ -40,9 +41,13 @@ export function createNativeFacade(config: WeChatNativeConfig, dependencies: { e
       const host = dependencies.endpoint ? undefined : await ensureNativeHost(config);
       const headers = new Headers();
       for (const name of ["content-type", "accept", "range", "if-none-match", "if-range", "last-event-id", "idempotency-key"]) { const value = req.headers[name]; if (typeof value === "string") headers.set(name, value); }
-      const length = req.headers["content-length"]; if (length && (!/^\d+$/.test(length) || Number(length) > MAX_BODY)) { fail(res, 413, "payload_too_large"); return true; }
+      const upload = pieces.length === 4 && pieces[3] === "uploads" && req.method === "POST";
+      const mediaContent = pieces.length === 6 && pieces[3] === "media" && pieces[5] === "content" && parsed.searchParams.get("representation") !== "preview";
+      const requestLimit = upload ? NATIVE_MAX_SOURCE_BYTES + 64 * 1024 : MAX_BODY;
+      const responseLimit = mediaContent ? Math.max(MAX_BODY, NATIVE_MAX_SOURCE_BYTES) : MAX_BODY;
+      const length = req.headers["content-length"]; if (length && (!/^\d+$/.test(length) || Number(length) > requestLimit)) { fail(res, 413, "payload_too_large"); return true; }
       let size = 0;
-      const body = ["GET", "HEAD"].includes(req.method ?? "") ? undefined : Readable.toWeb(req).pipeThrough(new NodeTransformStream({ transform(chunk, controller) { size += chunk.byteLength; if (size > MAX_BODY) { tooLarge = true; throw new Error("payload_too_large"); } controller.enqueue(chunk); } }));
+      const body = ["GET", "HEAD"].includes(req.method ?? "") ? undefined : Readable.toWeb(req).pipeThrough(new NodeTransformStream({ transform(chunk, controller) { size += chunk.byteLength; if (size > requestLimit) { tooLarge = true; throw new Error("payload_too_large"); } controller.enqueue(chunk); } }));
       const init = { method: req.method, headers, body: body as unknown as BodyInit | undefined, duplex: "half", signal: abort.signal, redirect: "error" } as RequestInit;
       let response: Response;
       if (host) response = await host.forward(relative, init);
@@ -51,12 +56,14 @@ export function createNativeFacade(config: WeChatNativeConfig, dependencies: { e
         headers.set("Authorization", `Bearer ${dependencies.token}`);
         response = await (dependencies.fetch ?? fetch)(new URL(relative, dependencies.endpoint!), init);
       }
+      const responseLength = response.headers.get("content-length");
+      if (responseLength && (!/^\d+$/.test(responseLength) || Number(responseLength) > responseLimit)) { await response.body?.cancel(); fail(res, 502, "native_facade_unavailable"); return true; }
       res.statusCode = response.status;
       for (const name of ["content-type", "content-length", "content-range", "accept-ranges", "etag", "cache-control", "content-disposition", "x-content-type-options"]) { const value = response.headers.get(name); if (value) res.setHeader(name, value); }
       res.setHeader("x-content-type-options", "nosniff");
       const reader = response.body?.getReader(); if (!reader) { res.end(); return true; }
       const sse = response.headers.get("content-type")?.startsWith("text/event-stream"); let emitted = 0;
-      try { while (!abort.signal.aborted) { const { value, done } = await reader.read(); if (done) break; emitted += value.length; if (!sse && emitted > MAX_BODY) throw new Error("upstream_response_too_large"); if (!res.write(value)) await drain(res, abort.signal); } } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      try { while (!abort.signal.aborted) { const { value, done } = await reader.read(); if (done) break; emitted += value.length; if (!sse && emitted > responseLimit) throw new Error("upstream_response_too_large"); if (!res.write(value)) await drain(res, abort.signal); } } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
       res.end();
     } catch { if (!abort.signal.aborted) fail(res, tooLarge ? 413 : 502, tooLarge ? "payload_too_large" : "native_facade_unavailable"); else if (!res.destroyed) res.destroy(); }
     finally { active.delete(abort); req.off("aborted", cancel); res.off("close", cancel); }

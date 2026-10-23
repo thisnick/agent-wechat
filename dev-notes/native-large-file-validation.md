@@ -1,6 +1,6 @@
 # Ordinary-file transfer validation
 
-The initial native ordinary-file ceiling is 33,554,432 plaintext bytes (32 MiB).
+The native ordinary-file ceiling is 536,870,912 plaintext bytes (512 MiB). The first validation used a 32 MiB ceiling; the larger-path results are recorded separately below.
 It is a product limit, not a statement of WeChat's maximum file size. Image,
 video and voice source limits remain 26,214,383 bytes. Sticker sending is not
 implemented.
@@ -81,14 +81,53 @@ The recipient could not export a saved file for hashing; phone byte equality is
 unverified. A separate official-client session displayed the native PDF message.
 That is not a profile-handoff or FTS-compatibility test.
 
+## Extension through 512 MiB
+
+| Milestone | Result |
+| --- | --- |
+| Independent fresh object | All 513 negotiated 1 MiB blocks, final 16-byte padding block and 516 requests completed in 1,401.56 seconds; no business message |
+| Actual Rust readback | Exact 536,870,912 bytes, full source/saved-byte equality and SHA-256 matched in 569.92 seconds; process peak RSS 1,060,332 KiB |
+| Rolling acknowledgements | Service accepted 16-, 32- and 48-byte windows, including boundaries at blocks 128, 256, 384 and 512 |
+| Real OpenClaw storage | Pinned Node 24.21.0/OpenClaw 2026.10.2 streamed all 512 MiB, fsynced and independently re-read the saved file with exact SHA-256; process peak RSS 249,148 KiB; no API or send |
+| Account sync during native upload | Succeeded in 1.58 seconds while the same file job remained uploading with one attempt; no extra message |
+| Built native file message | In progress; upload and readback precede final submission |
+| Recipient opening, cold API/CLI/SDK and database/cache checks | Pending final message |
+
+The fixed 128-block limit belonged to the initial native implementation. The
+reference uses a rolling window of the current 128-block group and its two
+preceding groups. File-relative offsets and all ordered block etags remain
+unchanged. The native request-field ceiling admits 1,025 blocks at a negotiated
+512 KiB size while retaining the independent 2 MiB request-byte envelope.
+Unknown block sizes and controls still stop the transfer.
+
+The 512 MiB initial maximum is a product limit, not an established service
+maximum. The original 25 MiB padding/type/routing boundaries still apply.
+Image/video/voice, group, forwarding and live ARM64 claims are unchanged.
+
 ## Bounds and recovery
 
-Transfers still hold whole buffers. The source is released before readback, but
-prepared ciphertext, downloaded ciphertext and plaintext can each occupy tens
-of MiB. Concurrent account transfers need additional memory. The 32 MiB ceiling
-stays below the existing 128 MiB profile-cache, stored-content, SDK-content and
-OpenClaw facade bounds; those bounds and image decoder limits are unchanged.
-The encrypted source vault admits exactly 32 MiB plus its existing envelope.
+Transfers still hold whole buffers. The source is released before readback;
+prepared ciphertext, downloaded ciphertext and plaintext can each occupy
+512 MiB. Prepared validation decrypts into a reusable 128 KiB buffer. Download
+reserves the exact padded size rather than doubling capacity at the boundary.
+SQLite retains whole encrypted BLOBs, and updates can use additional internal
+buffers. Concurrent accounts and source uploads need additional memory.
+
+Ordinary-file source, cache, profile and retrieval bounds now admit 512 MiB;
+image/video/voice source limits and nonfile content bounds are unchanged. The
+vault retains its existing format and account/purpose binding: only media
+source/asset records get 512 MiB, plus the 29-byte envelope. Generic control
+records retain 32 MiB. Metadata reads do not load attachment BLOBs. File
+writeback borrows owned bytes, and HTTP ranges share the verified allocation.
+CLI retrieval and OpenClaw storage stream verified bytes into private files;
+OpenClaw does not base64-encode large attachments.
+
+One media job per account remains active. Ordinary-file CDN I/O releases the
+account mutation guard, so push heartbeats and sync can proceed. The worker
+reacquires that guard before business RPCs or profile changes, verifies the
+accepted authorization and logout generation, checks cancellation and reloads
+the current cookie. A correlated upload completion is saved before late fence
+checks; it is never discarded merely because cancellation arrived in flight.
 
 Upload material, reservation receipts and completed object descriptors are
 stored with the job. Recovery after completed upload can repeat owned-object
@@ -109,12 +148,12 @@ With an isolated account and a confirmed destination:
 
 ```sh
 wx account capabilities
-wx messages send filehelper --file ./synthetic-32MiB.pdf \
-  --idempotency-key UNIQUE_KEY --wait 300
+wx messages send filehelper --file ./synthetic-512MiB.pdf \
+  --idempotency-key UNIQUE_KEY --wait 3600
 wx jobs get JOB_ID
 wx messages get MESSAGE_ID
 wx messages media filehelper MESSAGE_ID --output ./saved.pdf --cached-only
-sha256sum ./synthetic-32MiB.pdf ./saved.pdf
+sha256sum ./synthetic-512MiB.pdf ./saved.pdf
 ```
 
 Keep the original key and receipt after a timeout. Inspect the same job instead
@@ -124,4 +163,4 @@ Validation gates include the pinned 1.93.1 formatter and warning-denying Clippy,
 the full Rust workspace tests, generated-contract check, workspace build and
 type checks, OpenClaw tests and the repository's AMD64 image build. Synthetic
 tests cover padding boundaries, corrupt and incomplete replies, cancellation,
-reservation/restart uncertainty, idempotency and per-kind admission limits.
+reservation/restart uncertainty, idempotency and per-kind admission limits. A paused-transfer fixture also verifies that account work can proceed while a second media job stays serialized; cookie updates resume safely, and cancellation, logout, credential rotation, epoch changes or disconnect stop the next submission while retaining completed upload receipts.

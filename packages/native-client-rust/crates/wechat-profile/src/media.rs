@@ -17,6 +17,21 @@ use std::{
 };
 
 pub const MAX_CACHED_MEDIA_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_CACHED_FILE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
+fn hardlink_limit(kind: HardlinkKind) -> usize {
+    if kind == HardlinkKind::File {
+        MAX_CACHED_FILE_BYTES
+    } else {
+        MAX_CACHED_MEDIA_BYTES
+    }
+}
+fn cache_path_limit(relative: &str) -> usize {
+    if relative.starts_with("msg/file/") {
+        MAX_CACHED_FILE_BYTES
+    } else {
+        MAX_CACHED_MEDIA_BYTES
+    }
+}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedVoiceCache {
@@ -152,7 +167,11 @@ pub(crate) fn valid_component(value: &str) -> bool {
 pub(crate) fn digest_hex(value: &str, n: usize) -> bool {
     value.len() == n && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
-pub(crate) fn read_cache(root: &Path, relative: &Path, max: usize) -> Result<Vec<u8>> {
+fn open_cache(
+    root: &Path,
+    relative: &Path,
+    max: usize,
+) -> Result<(fs::File, fs::Metadata, std::path::PathBuf)> {
     if !crate::keys::valid_relative_path(relative.to_str().ok_or(ProfileError::InvalidMetadata)?) {
         return Err(ProfileError::InvalidMetadata);
     }
@@ -188,17 +207,44 @@ pub(crate) fn read_cache(root: &Path, relative: &Path, max: usize) -> Result<Vec
     if before.len() > max as u64 {
         return Err(ProfileError::ResourceLimit);
     }
-    let mut data = Vec::with_capacity(before.len() as usize);
-    f.take(max as u64 + 1).read_to_end(&mut data)?;
-    let after = fs::metadata(here)?;
-    if before.len() != after.len() || before.modified()? != after.modified()? {
+    Ok((f, before, here))
+}
+fn cache_stable(file: &fs::File, before: &fs::Metadata, path: &Path) -> Result<()> {
+    let after = file.metadata()?;
+    if before.len() != after.len()
+        || before.modified()? != after.modified()?
+        || !wechat_platform::same_path_file(path, file)?
+    {
         return Err(ProfileError::SourceChanged);
     }
+    Ok(())
+}
+pub(crate) fn read_cache(root: &Path, relative: &Path, max: usize) -> Result<Vec<u8>> {
+    let (mut file, before, path) = open_cache(root, relative, max)?;
+    let mut data = Vec::with_capacity(before.len() as usize);
+    (&mut file).take(max as u64 + 1).read_to_end(&mut data)?;
+    cache_stable(&file, &before, &path)?;
     if data.len() > max {
         return Err(ProfileError::ResourceLimit);
     }
     Ok(data)
 }
+fn cache_matches(root: &Path, relative: &Path, bytes: &[u8], max: usize) -> Result<bool> {
+    let (mut file, before, path) = open_cache(root, relative, max)?;
+    if before.len() != bytes.len() as u64 {
+        return Ok(false);
+    }
+    let mut buffer = [0; 64 * 1024];
+    for expected in bytes.chunks(buffer.len()) {
+        file.read_exact(&mut buffer[..expected.len()])?;
+        if &buffer[..expected.len()] != expected {
+            return Ok(false);
+        }
+    }
+    cache_stable(&file, &before, &path)?;
+    Ok(true)
+}
+
 impl ProfileReader {
     /// File/video hardlinks use one month directory and the observed zero second
     /// directory sentinel. Every candidate is content-MD5 verified; ambiguous bytes
@@ -246,7 +292,7 @@ impl ProfileReader {
             let bytes = match read_cache(
                 &self.snapshot.location.root,
                 &Path::new(directory).join(month).join(name),
-                MAX_CACHED_MEDIA_BYTES,
+                hardlink_limit(kind),
             ) {
                 Ok(b) => b,
                 Err(ProfileError::NotCached) => continue,
@@ -791,7 +837,7 @@ pub fn publish_cache_file(
         || !relative.starts_with("msg/")
         || !digest_hex(expected_sha256, 64)
         || bytes.is_empty()
-        || bytes.len() > MAX_CACHED_MEDIA_BYTES
+        || bytes.len() > cache_path_limit(relative)
     {
         return Err(ProfileError::InvalidMetadata);
     }
@@ -826,8 +872,12 @@ pub fn publish_cache_file(
         }
     }
     if fs::symlink_metadata(&target).is_ok() {
-        let old = read_cache(&location.root, Path::new(relative), MAX_CACHED_MEDIA_BYTES)?;
-        if old == bytes {
+        if cache_matches(
+            &location.root,
+            Path::new(relative),
+            bytes,
+            cache_path_limit(relative),
+        )? {
             return Ok(false);
         }
         return Err(ProfileError::SourceChanged);
@@ -1286,11 +1336,9 @@ fn bytes_match_metadata(
     size: &str,
     md5: Option<&str>,
     require_md5: bool,
+    max: usize,
 ) -> Result<String> {
-    if bytes.is_empty()
-        || bytes.len() > MAX_CACHED_MEDIA_BYTES
-        || checked_decimal(size)? != bytes.len() as u64
-    {
+    if bytes.is_empty() || bytes.len() > max || checked_decimal(size)? != bytes.len() as u64 {
         return Err(ProfileError::InvalidMetadata);
     }
     let digest = format!("{:x}", Md5::digest(bytes));
@@ -1566,6 +1614,7 @@ pub fn cache_file_projection(
         leaf("msg/appmsg/appattach/totallen")?,
         Some(leaf("msg/appmsg/md5")?),
         true,
+        MAX_CACHED_FILE_BYTES,
     )?;
     let extension = leaf("msg/appmsg/appattach/fileext")?;
     let kind = file_resource_type(extension) as i64;
@@ -1669,6 +1718,7 @@ pub fn cache_video_projection(
         attrs.get(size).ok_or(ProfileError::InvalidMetadata)?,
         attrs.get(digest).map(String::as_str),
         quality != VideoQuality::Thumbnail,
+        MAX_CACHED_MEDIA_BYTES,
     )?;
     if quality == VideoQuality::Thumbnail {
         if crate::images::validate_image(plaintext)?.0 != "image/jpeg" {
@@ -1761,7 +1811,7 @@ pub fn cache_hardlink_media_projection(
 ) -> Result<AppliedHardlinkCache> {
     ownership(location, keys, options)?;
     if plaintext.is_empty()
-        || plaintext.len() > MAX_CACHED_MEDIA_BYTES
+        || plaintext.len() > hardlink_limit(kind)
         || !valid_component(filename)
         || filename.len() > 180
     {
@@ -1824,4 +1874,35 @@ pub fn cache_hardlink_media_projection(
         changed,
         plaintext_bytes: plaintext.len(),
     })
+}
+
+#[cfg(test)]
+mod cache_limit_tests {
+    use super::*;
+    #[test]
+    fn only_ordinary_file_namespaces_receive_the_larger_limit() {
+        assert_eq!(hardlink_limit(HardlinkKind::File), 536_870_912);
+        assert_eq!(cache_path_limit("msg/file/2026-10/a.bin"), 536_870_912);
+        for kind in [HardlinkKind::Video, HardlinkKind::Image] {
+            assert_eq!(hardlink_limit(kind), MAX_CACHED_MEDIA_BYTES);
+        }
+        for path in ["msg/video/a", "msg/attach/a", "msg/file2/a"] {
+            assert_eq!(cache_path_limit(path), MAX_CACHED_MEDIA_BYTES);
+        }
+    }
+    #[test]
+    fn cache_comparison_checks_all_chunks_without_a_second_file_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture");
+        let mut bytes = vec![3; 128 * 1024 + 7];
+        fs::write(&path, &bytes).unwrap();
+        assert!(cache_matches(dir.path(), Path::new("fixture"), &bytes, bytes.len()).unwrap());
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        assert!(!cache_matches(dir.path(), Path::new("fixture"), &bytes, bytes.len()).unwrap());
+        assert!(matches!(
+            cache_matches(dir.path(), Path::new("fixture"), &bytes, bytes.len() - 1),
+            Err(ProfileError::ResourceLimit)
+        ));
+    }
 }

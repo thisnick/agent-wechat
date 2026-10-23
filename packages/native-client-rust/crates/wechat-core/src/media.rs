@@ -22,6 +22,42 @@ use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 #[path = "media_identity.rs"]
 mod identity;
 
+struct MediaAccountPermit {
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    runtime: tokio::runtime::Handle,
+}
+impl MediaAccountPermit {
+    /// Only CDN I/O runs without the account mutation guard. The independent
+    /// media-job guard remains held, so another queued file cannot start.
+    fn transfer<T>(
+        &mut self,
+        core: &Core,
+        account: &str,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        drop(self.guard.take().context("media account guard missing")?);
+        let result = action();
+        self.guard = Some(self.runtime.block_on(core.lock_account(account))?);
+        result
+    }
+}
+struct MediaAuthorizationFence {
+    authorization: [u8; 32],
+    logout_epoch: Option<Vec<u8>>,
+}
+fn cdn_transfer<T>(
+    permit: Option<&mut MediaAccountPermit>,
+    core: &Core,
+    account: &str,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some(permit) = permit {
+        permit.transfer(core, account, action)
+    } else {
+        action()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 enum DownloadPlan {
@@ -203,7 +239,9 @@ impl Core {
             "invalid_content_type"
         );
         let id = format!("upload_{}", uuid::Uuid::new_v4());
-        let sealed = self.vault.seal(account, &format!("source:{id}"), bytes)?;
+        let sealed = self
+            .vault
+            .seal_media(account, &format!("source:{id}"), bytes)?;
         self.store.create_media_source(
             account,
             &id,
@@ -218,7 +256,7 @@ impl Core {
         let (meta, sealed) = self.store.media_source(account, id)?;
         let mut opened = self
             .vault
-            .open_record(account, &format!("source:{id}"), &sealed)?;
+            .open_media_record(account, &format!("source:{id}"), &sealed)?;
         let bytes = std::mem::take(&mut *opened);
         ensure!(
             bytes.len() as u64 == meta.byte_length && digest(&bytes) == meta.sha256,
@@ -232,15 +270,19 @@ impl Core {
         Ok(serde_json::from_value(row.metadata)?)
     }
     pub fn media_content(&self, account: &str, id: &str) -> Result<MediaContent> {
-        let row = self.store.media_asset(account, id)?;
+        let metadata = self.store.media_asset(account, id)?;
+        self.authorize_media_record(account, &metadata)?;
+        let asset: MediaAsset = serde_json::from_value(metadata.metadata)?;
+        ensure!(asset.state == "available", "media_not_available");
+        let row = self.store.media_asset_with_payload(account, id)?;
         self.authorize_media_record(account, &row)?;
         let asset: MediaAsset = serde_json::from_value(row.metadata.clone())?;
         ensure!(asset.state == "available", "media_not_available");
         let sealed = row.payload.as_deref().context("media_not_cached")?;
-        let bytes = self
+        let mut opened = self
             .vault
-            .open_record(account, &format!("asset:{id}"), sealed)?
-            .to_vec();
+            .open_media_record(account, &format!("asset:{id}"), sealed)?;
+        let bytes = std::mem::take(&mut *opened);
         ensure!(
             asset.byte_length == Some(bytes.len() as u64)
                 && asset.sha256.as_deref() == Some(&digest(&bytes)),
@@ -493,7 +535,7 @@ impl Core {
                     asset = self.cache_asset(
                         account,
                         &id,
-                        cached.media.bytes,
+                        &cached.media.bytes,
                         &cached.media.media_type,
                         match cached.quality {
                             wechat_profile::VerifiedImageQuality::Original => {
@@ -526,7 +568,7 @@ impl Core {
                                 asset = self.cache_asset(
                                     account,
                                     &id,
-                                    cached.bytes,
+                                    &cached.bytes,
                                     &mime,
                                     Some(variant),
                                     frames,
@@ -693,7 +735,7 @@ impl Core {
         let (source, _) = self.source_bytes(account, &request.source_id)?;
         let extra_source = |id: &Option<String>| -> Result<Option<OwnedMediaSource>> {
             id.as_ref()
-                .map(|id| Ok(self.store.media_source(account, id)?.0))
+                .map(|id| self.store.media_source_metadata(account, id))
                 .transpose()
         };
         let standard = extra_source(&request.standard_source_id)?;
@@ -749,7 +791,7 @@ impl Core {
         &self,
         account: &str,
         id: &str,
-        bytes: Vec<u8>,
+        bytes: &[u8],
         mime: &str,
         actual: Option<MediaVariant>,
         frames: Option<u32>,
@@ -760,14 +802,14 @@ impl Core {
                 matches!(asset.kind, MediaKind::Image | MediaKind::Sticker),
                 "unsupported_media"
             );
-            Some(self.cache_wxgf_preview(account, id, &bytes)?)
+            Some(self.cache_wxgf_preview(account, id, bytes)?)
         } else {
             None
         };
         asset.state = "available".into();
         asset.content_type = Some(mime.into());
         asset.byte_length = Some(bytes.len() as u64);
-        asset.sha256 = Some(digest(&bytes));
+        asset.sha256 = Some(digest(bytes));
         asset.actual_variant = actual;
         asset.retryable = false;
         asset.reason = None;
@@ -776,7 +818,9 @@ impl Core {
         if mime == "image/x-wxgf" {
             asset.filename = Some(format!("{id}.wxgf"));
         }
-        let sealed = self.vault.seal(account, &format!("asset:{id}"), &bytes)?;
+        let sealed = self
+            .vault
+            .seal_media(account, &format!("asset:{id}"), bytes)?;
         self.authorize_media_record(account, &self.store.media_asset(account, id)?)?;
         self.store
             .save_media_asset(account, id, &serde_json::to_value(&asset)?, Some(&sealed))?;
@@ -790,7 +834,7 @@ impl Core {
     ) -> Result<MediaImagePreview> {
         let source_sha256 = digest(bytes);
         let id = wxgf_preview_source_id(&source_sha256);
-        let source = if self.store.media_source(account, &id).is_ok() {
+        let source = if self.store.media_source_metadata(account, &id).is_ok() {
             self.source_bytes(account, &id)?.0
         } else {
             let decoded = wechat_media::wxgf_preview(bytes)?;
@@ -854,22 +898,29 @@ impl Core {
         Ok(disconnected || auto_disabled)
     }
     async fn run_media_worker(self: Arc<Self>, account: &str, id: &str) -> Result<()> {
-        let _guard = self.lock_account(account).await?;
+        let media_guard = self.lock_media_job(account).await?;
+        let guard = self.lock_account(account).await?;
         if self.media_network_suspended(account)? {
             return Ok(());
         }
         let core = self.clone();
         let account = account.to_string();
         let id = id.to_string();
+        let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
+            let _media_guard = media_guard;
+            let mut permit = MediaAccountPermit {
+                guard: Some(guard),
+                runtime,
+            };
             if !core.store.claim_media_job(&account, &id)? {
                 return Ok(());
             }
             let row = core.store.media_job(&account, &id)?;
             let outcome = if row.kind == "download" {
-                core.perform_download(&account, &id)
+                core.perform_download_guarded(&account, &id, Some(&mut permit))
             } else {
-                core.perform_media_send(&account, &id)
+                core.perform_media_send_guarded(&account, &id, Some(&mut permit))
             };
             if let Err(error) = outcome {
                 let mut row = core.store.media_job(&account, &id)?;
@@ -886,7 +937,14 @@ impl Core {
         .context("media_worker_stopped")?
     }
     fn progress_media(&self, account: &str, id: &str, done: u64, total: Option<u64>) -> Result<()> {
-        let mut row = self.store.media_job(account, id)?;
+        let mut row = self.active_media_job(account, id)?;
+        row.data["completedBytes"] = done.into();
+        row.data["totalBytes"] = total.into();
+        self.store.save_media_job(account, &row)?;
+        Ok(())
+    }
+    fn active_media_job(&self, account: &str, id: &str) -> Result<MediaJobRecord> {
+        let row = self.store.media_job(account, id)?;
         ensure!(!row.cancel_requested, "media_cancelled");
         ensure!(
             self.store.runtime(account, "logged-out")?.is_none(),
@@ -900,10 +958,60 @@ impl Core {
             !self.stopping.load(Ordering::Acquire),
             "media_worker_stopping"
         );
-        row.data["completedBytes"] = done.into();
-        row.data["totalBytes"] = total.into();
-        self.store.save_media_job(account, &row)?;
-        Ok(())
+        Ok(row)
+    }
+    fn media_authorization_fence(&self, account: &str) -> Result<MediaAuthorizationFence> {
+        let logout_epoch = self.store.runtime(account, "logout-epoch")?;
+        let encrypted = self
+            .store
+            .runtime(account, "account-state")?
+            .context("auth_required")?;
+        ensure!(
+            self.store.saved_login_authorization_current(
+                account,
+                &encrypted,
+                logout_epoch.as_deref()
+            )?,
+            "media_authorization_changed"
+        );
+        Ok(MediaAuthorizationFence {
+            authorization: crate::runtime::authorization(&self.account_state(account)?)?,
+            logout_epoch,
+        })
+    }
+    fn resume_media_state(
+        &self,
+        account: &str,
+        id: &str,
+        fence: &MediaAuthorizationFence,
+    ) -> Result<wechat_protocol::AccountState> {
+        let current = self
+            .media_authorization_fence(account)
+            .map_err(|_| anyhow::anyhow!("media_authorization_changed"))?;
+        ensure!(
+            current.authorization == fence.authorization
+                && current.logout_epoch == fence.logout_epoch,
+            "media_authorization_changed"
+        );
+        self.active_media_job(account, id)?;
+        // Push can replace the cookie while CDN I/O is in progress. Never save
+        // the pre-transfer AccountState over that newly accepted state.
+        self.account_state(account)
+    }
+    fn complete_file_cdn_upload(
+        &self,
+        account: &str,
+        id: &str,
+        plan: &mut SendPlan,
+        uploaded: UploadedMedia,
+        fence: Option<&MediaAuthorizationFence>,
+    ) -> Result<Option<wechat_protocol::AccountState>> {
+        // Completion metadata survives a late cancellation or authorization fence.
+        plan.uploaded_file = Some(uploaded);
+        self.save_send_plan(account, id, plan)?;
+        fence
+            .map(|fence| self.resume_media_state(account, id, fence))
+            .transpose()
     }
     fn fail_media_job(&self, account: &str, id: &str, code: &str) -> Result<()> {
         let mut row = self.store.media_job(account, id)?;
@@ -915,7 +1023,10 @@ impl Core {
         }
         let uncertain = row.kind == "send"
             && (matches!(row.phase.as_str(), "reserving" | "uploading" | "submitting")
-                || code == "file_reservation_needs_review");
+                || matches!(
+                    code,
+                    "file_reservation_needs_review" | "media_authorization_changed"
+                ));
         row.state = if uncertain {
             "needs_review"
         } else if code == "media_cancelled" {
@@ -964,7 +1075,16 @@ impl Core {
         row.phase = phase.into();
         self.store.save_media_job(account, &row)
     }
+    #[cfg(test)]
     pub(crate) fn perform_download(&self, account: &str, id: &str) -> Result<()> {
+        self.perform_download_guarded(account, id, None)
+    }
+    fn perform_download_guarded(
+        &self,
+        account: &str,
+        id: &str,
+        permit: Option<&mut MediaAccountPermit>,
+    ) -> Result<()> {
         let row = self.store.media_job(account, id)?;
         let asset_id = row.data["assetId"]
             .as_str()
@@ -1013,7 +1133,17 @@ impl Core {
                 };
                 self.save_state(account, &state)?;
                 let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
-                let media = cdn.download_with_progress(&descriptor, progress)?;
+                let unlocked = permit.is_some() && asset.kind == MediaKind::File;
+                let fence = unlocked
+                    .then(|| self.media_authorization_fence(account))
+                    .transpose()?;
+                let media =
+                    cdn_transfer(if unlocked { permit } else { None }, self, account, || {
+                        cdn.download_with_progress(&descriptor, progress)
+                    })?;
+                if let Some(fence) = fence {
+                    self.resume_media_state(account, id, &fence)?;
+                }
                 if link_thumbnail {
                     ensure!(
                         media.bytes.len() <= wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES,
@@ -1121,7 +1251,7 @@ impl Core {
             DownloadPlan::CachedOnly => bail!("unsupported_media_transport"),
         };
         self.progress_media(account, id, bytes.len() as u64, Some(bytes.len() as u64))?;
-        let mut asset = self.cache_asset(account, asset_id, bytes, &mime, actual, frames)?;
+        let mut asset = self.cache_asset(account, asset_id, &bytes, &mime, actual, frames)?;
         if let Some(status) = official_writeback {
             asset.official_writeback = status.into();
             self.store
@@ -1172,13 +1302,13 @@ impl Core {
         if asset.actual_variant != Some(asset.variant) {
             return Ok(asset);
         }
-        let record = self.store.media_asset(account, &asset.id)?;
+        let record = self.store.media_asset_with_payload(account, &asset.id)?;
         let Some(sealed) = record.payload else {
             return Ok(asset);
         };
-        let bytes = self
-            .vault
-            .open_record(account, &format!("asset:{}", asset.id), &sealed)?;
+        let bytes =
+            self.vault
+                .open_media_record(account, &format!("asset:{}", asset.id), &sealed)?;
         ensure!(
             asset.byte_length == Some(bytes.len() as u64)
                 && asset.sha256.as_deref() == Some(digest(&bytes).as_str()),
@@ -1422,6 +1552,7 @@ fn classify_error(error: &anyhow::Error) -> String {
         let message = cause.to_string();
         if [
             "file_reservation_needs_review",
+            "media_authorization_changed",
             "source_size_limit",
             "image_size_limit",
             "image_decode_limit",
@@ -1920,7 +2051,16 @@ impl Core {
         self.save_send_plan(account, id, plan)?;
         Ok(true)
     }
+    #[cfg(test)]
     fn perform_media_send(&self, account: &str, id: &str) -> Result<()> {
+        self.perform_media_send_guarded(account, id, None)
+    }
+    fn perform_media_send_guarded(
+        &self,
+        account: &str,
+        id: &str,
+        mut permit: Option<&mut MediaAccountPermit>,
+    ) -> Result<()> {
         let row = self.store.media_job(account, id)?;
         let mut plan: SendPlan = serde_json::from_slice(&self.vault.open_record(
             account,
@@ -1931,7 +2071,7 @@ impl Core {
         let (source, bytes) = self.source_bytes(account, &plan.request.source_id)?;
         let source_size = |id: &Option<String>| -> Result<Option<u64>> {
             id.as_ref()
-                .map(|id| Ok(self.store.media_source(account, id)?.0.byte_length))
+                .map(|id| Ok(self.store.media_source_metadata(account, id)?.byte_length))
                 .transpose()
         };
         validate_send_source_sizes(
@@ -1942,7 +2082,7 @@ impl Core {
         )?;
         if let Some(id) = &plan.prepared_video_thumbnail_source_id {
             ensure!(
-                self.store.media_source(account, id)?.0.byte_length
+                self.store.media_source_metadata(account, id)?.byte_length
                     <= MAX_ORDINARY_SOURCE_BYTES as u64,
                 "source_size_limit"
             );
@@ -2102,13 +2242,30 @@ impl Core {
                         &material.file_key,
                     )?;
                     self.phase_media(account, id, "uploading")?;
-                    let uploaded = if modern_file {
-                        cdn.upload_large_file_with_progress(&prepared, material.task_id, callback)?
-                    } else {
-                        cdn.upload_with_progress(&prepared, callback)?
-                    };
-                    plan.uploaded_file = Some(uploaded);
-                    self.save_send_plan(account, id, &plan)?;
+                    let fence = permit
+                        .is_some()
+                        .then(|| self.media_authorization_fence(account))
+                        .transpose()?;
+                    let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                        if modern_file {
+                            cdn.upload_large_file_with_progress(
+                                &prepared,
+                                material.task_id,
+                                callback,
+                            )
+                        } else {
+                            cdn.upload_with_progress(&prepared, callback)
+                        }
+                    })?;
+                    if let Some(current) = self.complete_file_cdn_upload(
+                        account,
+                        id,
+                        &mut plan,
+                        uploaded,
+                        fence.as_ref(),
+                    )? {
+                        state = current;
+                    }
                 }
             }
             MediaKind::Image => {
@@ -2214,7 +2371,16 @@ impl Core {
         }
         let mut verified = vec![];
         if let Some(u) = &plan.uploaded_file {
-            let downloaded = cdn.download_with_progress(&u.descriptor, callback)?;
+            let fence = permit
+                .is_some()
+                .then(|| self.media_authorization_fence(account))
+                .transpose()?;
+            let downloaded = cdn_transfer(permit, self, account, || {
+                cdn.download_with_progress(&u.descriptor, callback)
+            })?;
+            if let Some(fence) = fence {
+                state = self.resume_media_state(account, id, &fence)?;
+            }
             ensure!(downloaded.sha256 == u.sha256, "media_integrity_failed");
             verified.push(downloaded.sha256);
         }
@@ -2378,7 +2544,7 @@ impl Core {
                     let mut cached = self.cache_asset(
                         account,
                         &asset.id,
-                        bytes,
+                        &bytes,
                         mime,
                         Some(asset.variant),
                         None,
@@ -2462,58 +2628,63 @@ impl Core {
                 None
             };
             for asset in self.media_assets(account, &message_id)? {
-                let (raw, expected, mime) = match plan.request.kind {
-                    MediaKind::Image => {
-                        let variants = image_bytes.as_ref().unwrap();
-                        let uploaded = plan.uploaded_image.as_ref().unwrap();
-                        match asset.variant {
-                            MediaVariant::Original => (
-                                variants.0.clone(),
-                                uploaded.original.sha256.clone(),
-                                "image/jpeg",
-                            ),
-                            MediaVariant::Standard => (
-                                variants.1.clone(),
-                                uploaded.standard.sha256.clone(),
-                                "image/jpeg",
-                            ),
-                            MediaVariant::Thumbnail => (
-                                variants.2.clone(),
-                                uploaded.thumbnail.sha256.clone(),
-                                "image/jpeg",
-                            ),
-                            _ => continue,
+                let (raw, expected, mime): (std::borrow::Cow<'_, [u8]>, String, &str) =
+                    match plan.request.kind {
+                        MediaKind::Image => {
+                            let variants = image_bytes.as_ref().unwrap();
+                            let uploaded = plan.uploaded_image.as_ref().unwrap();
+                            match asset.variant {
+                                MediaVariant::Original => (
+                                    variants.0.clone().into(),
+                                    uploaded.original.sha256.clone(),
+                                    "image/jpeg",
+                                ),
+                                MediaVariant::Standard => (
+                                    variants.1.clone().into(),
+                                    uploaded.standard.sha256.clone(),
+                                    "image/jpeg",
+                                ),
+                                MediaVariant::Thumbnail => (
+                                    variants.2.clone().into(),
+                                    uploaded.thumbnail.sha256.clone(),
+                                    "image/jpeg",
+                                ),
+                                _ => continue,
+                            }
                         }
-                    }
-                    MediaKind::File => (
-                        bytes.clone(),
-                        plan.uploaded_file.as_ref().unwrap().sha256.clone(),
-                        "application/octet-stream",
-                    ),
-                    MediaKind::Video => {
-                        let uploaded = plan.uploaded_video.as_ref().unwrap();
-                        if asset.variant == MediaVariant::Thumbnail {
-                            let raw = if let Some(id) = plan
-                                .request
-                                .thumbnail_source_id
-                                .as_ref()
-                                .or(plan.prepared_video_thumbnail_source_id.as_ref())
-                            {
-                                self.source_bytes(account, id)?.1
+                        MediaKind::File => (
+                            std::borrow::Cow::Borrowed(bytes.as_slice()),
+                            plan.uploaded_file.as_ref().unwrap().sha256.clone(),
+                            "application/octet-stream",
+                        ),
+                        MediaKind::Video => {
+                            let uploaded = plan.uploaded_video.as_ref().unwrap();
+                            if asset.variant == MediaVariant::Thumbnail {
+                                let raw = if let Some(id) = plan
+                                    .request
+                                    .thumbnail_source_id
+                                    .as_ref()
+                                    .or(plan.prepared_video_thumbnail_source_id.as_ref())
+                                {
+                                    self.source_bytes(account, id)?.1
+                                } else {
+                                    // Compatibility for a pre-thumbnail-checkpoint job:
+                                    // accept regenerated bytes only on exact saved SHA.
+                                    video_thumbnail(&bytes, || Ok(()))?
+                                };
+                                (raw.into(), uploaded.thumbnail.sha256.clone(), "image/jpeg")
+                            } else if asset.variant == MediaVariant::Normal {
+                                (
+                                    bytes.clone().into(),
+                                    uploaded.video.sha256.clone(),
+                                    "video/mp4",
+                                )
                             } else {
-                                // Compatibility for a pre-thumbnail-checkpoint job:
-                                // accept regenerated bytes only on exact saved SHA.
-                                video_thumbnail(&bytes, || Ok(()))?
-                            };
-                            (raw, uploaded.thumbnail.sha256.clone(), "image/jpeg")
-                        } else if asset.variant == MediaVariant::Normal {
-                            (bytes.clone(), uploaded.video.sha256.clone(), "video/mp4")
-                        } else {
-                            continue;
+                                continue;
+                            }
                         }
-                    }
-                    _ => continue,
-                };
+                        _ => continue,
+                    };
                 ensure!(digest(&raw) == expected, "media_integrity_failed");
                 let status = match plan.request.kind {
                     MediaKind::Image => self.project_received_image(account, id, &asset, &raw),
@@ -2526,7 +2697,7 @@ impl Core {
                     official_media_writeback = status;
                 }
                 let mut cached =
-                    self.cache_asset(account, &asset.id, raw, mime, Some(asset.variant), None)?;
+                    self.cache_asset(account, &asset.id, &raw, mime, Some(asset.variant), None)?;
                 cached.official_writeback = status.into();
                 self.store.save_media_asset(
                     account,
@@ -2878,6 +3049,202 @@ fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn accepted_media_state() -> wechat_protocol::AccountState {
+        wechat_protocol::AccountState {
+            schema: 1,
+            device: wechat_protocol::DeviceProfile {
+                device_id: [b"A".as_slice(), &[1u8; 15]].concat(),
+                device_type: "UnifiedPCLinux x86_64".into(),
+                client_version: -227271398,
+            },
+            uin: 1,
+            own_username: "synthetic_self".into(),
+            cookie: vec![],
+            session_key: vec![1; 16],
+            request_key: vec![2; 24],
+            response_key: vec![3; 24],
+            auto_auth_key: vec![],
+            key_info: vec![],
+            database_password: vec![],
+            auth_snapshot: Default::default(),
+            long_host: "long.weixin.qq.com".into(),
+            short_host: "short.weixin.qq.com".into(),
+        }
+    }
+    fn completed_test_upload() -> UploadedMedia {
+        UploadedMedia {
+            descriptor: MediaDescriptor {
+                file_id: "owned-complete-object".into(),
+                aes_key: vec![4; 16],
+                quality: MediaQuality::File,
+                expected_bytes: Some(8),
+                expected_md5: Some("0".repeat(32)),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: 8,
+            md5: "0".repeat(32),
+            sha256: "1".repeat(64),
+            file_name: "fixture.bin".into(),
+            width: None,
+            height: None,
+        }
+    }
+    #[tokio::test]
+    async fn paused_file_cdn_allows_account_work_but_preserves_receipts_across_late_fences() {
+        use std::future::Future;
+        for change in ["cookie", "cancel", "logout", "keys", "epoch", "disconnect"] {
+            let (_dir, core) = test_core();
+            core.save_state("one", &accepted_media_state()).unwrap();
+            core.store
+                .put_runtime("one", "desired", b"connected")
+                .unwrap();
+            core.store
+                .mark_validated_if_active("one", &core.ownership_generation)
+                .unwrap();
+            let source = core
+                .upload_source(
+                    "one",
+                    "fixture.bin",
+                    "application/octet-stream",
+                    b"original",
+                )
+                .unwrap();
+            let mut plan = file_plan();
+            plan.request.source_id = source.id.clone();
+            plan.reservation = Some(reservation());
+            plan_job(&core, "paused-file", &plan);
+            core.ensure_upload_material("one", "paused-file", &mut plan)
+                .unwrap();
+            core.phase_media("one", "paused-file", "uploading").unwrap();
+            let media_guard = core.lock_media_job("one").await.unwrap();
+            let guard = core.lock_account("one").await.unwrap();
+            let runtime = tokio::runtime::Handle::current();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let local = core.clone();
+            let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let final_submission = submitted.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let _media_guard = media_guard;
+                let mut permit = MediaAccountPermit {
+                    guard: Some(guard),
+                    runtime,
+                };
+                let fence = local.media_authorization_fence("one").unwrap();
+                let uploaded = permit
+                    .transfer(&local, "one", || {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().context("test transport stopped")?;
+                        Ok(completed_test_upload())
+                    })
+                    .unwrap();
+                match local.complete_file_cdn_upload(
+                    "one",
+                    "paused-file",
+                    &mut plan,
+                    uploaded,
+                    Some(&fence),
+                ) {
+                    Ok(state) => {
+                        // This stands for the next guarded business submission.
+                        final_submission.store(true, Ordering::SeqCst);
+                        Some(state.unwrap().cookie.clone())
+                    }
+                    Err(error) => {
+                        local
+                            .fail_media_job("one", "paused-file", &classify_error(&error))
+                            .unwrap();
+                        None
+                    }
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            // A second media worker stays serialized while heartbeat/sync work
+            // can acquire the ordinary account mutation guard immediately.
+            let mut second = Box::pin(core.lock_media_job("one"));
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(
+                    second.as_mut().poll(cx).is_pending()
+                ))
+                .await
+            );
+            drop(second);
+            let account_guard =
+                tokio::time::timeout(Duration::from_secs(5), core.lock_account("one"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            match change {
+                "cookie" => {
+                    let mut state = core.account_state("one").unwrap();
+                    state.cookie = vec![7, 8, 9];
+                    core.save_state("one", &state).unwrap();
+                }
+                "keys" => {
+                    let mut state = core.account_state("one").unwrap();
+                    state.request_key[0] ^= 1;
+                    core.save_state("one", &state).unwrap();
+                }
+                "epoch" => core
+                    .store
+                    .put_runtime("one", "logout-epoch", b"new-login-epoch")
+                    .unwrap(),
+                "disconnect" => {
+                    core.disconnect("one").unwrap();
+                }
+                "cancel" => {
+                    core.store.cancel_media_job("one", "paused-file").unwrap();
+                }
+                "logout" => {
+                    let stamp = chrono::Utc::now().to_rfc3339();
+                    core.store
+                        .begin_logout(
+                            &wechat_store::Operation {
+                                id: "logout-test".into(),
+                                account_id: "one".into(),
+                                kind: "logout".into(),
+                                state: "queued".into(),
+                                result: json!({}),
+                                created_at: stamp.clone(),
+                                updated_at: stamp,
+                            },
+                            b"new-logout-epoch",
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            drop(account_guard);
+            release_tx.send(()).unwrap();
+            let cookie = tokio::time::timeout(Duration::from_secs(5), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(submitted.load(Ordering::SeqCst), change == "cookie");
+            if change == "cookie" {
+                assert_eq!(cookie, Some(vec![7, 8, 9]));
+            }
+            let saved = saved_plan(&core, "paused-file");
+            assert_eq!(
+                saved.uploaded_file.unwrap().descriptor.file_id,
+                "owned-complete-object"
+            );
+            assert!(saved.material.is_some());
+            assert!(saved.reservation.is_some());
+            assert_eq!(core.source_bytes("one", &source.id).unwrap().1, b"original");
+            if change != "cookie" {
+                assert_eq!(
+                    core.store.media_job("one", "paused-file").unwrap().state,
+                    "needs_review"
+                );
+                assert!(core.store.retry_media_job("one", "paused-file").is_err());
+            }
+        }
+    }
     fn file_plan() -> SendPlan {
         SendPlan {
             request: MediaSendRequest {
@@ -3457,7 +3824,7 @@ mod tests {
             .cache_asset(
                 "one",
                 "asset_synthetic",
-                raw.to_vec(),
+                raw,
                 "text/plain",
                 Some(MediaVariant::Original),
                 None,
@@ -3513,7 +3880,7 @@ mod tests {
             .cache_asset(
                 "one",
                 &asset.id,
-                raw.to_vec(),
+                raw,
                 "image/x-wxgf",
                 Some(MediaVariant::Original),
                 Some(1),
@@ -3539,7 +3906,7 @@ mod tests {
             .cache_asset(
                 "one",
                 &asset.id,
-                raw.to_vec(),
+                raw,
                 "image/x-wxgf",
                 Some(MediaVariant::Original),
                 None,

@@ -10,6 +10,8 @@ pub use image::ImageInspection;
 pub use wxgf::wxgf_preview;
 
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Native ordinary-file plaintext limit, shared by transport and local storage.
+pub const MAX_FILE_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct DecodedImage {

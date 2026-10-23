@@ -1,8 +1,21 @@
 use super::*;
 
 const MAX_UPLOAD_TOKEN_BYTES: usize = 65536;
-const MAX_BLOCKS: usize = 128;
-const BITMAP_BYTES: usize = MAX_BLOCKS / 8;
+const BLOCKS_PER_GROUP: usize = 128;
+const MAX_BLOCKS: usize = (MAX_LARGE_FILE_BYTES + 16).div_ceil(512 * 1024);
+
+// The reference sends the current 128-block group and at most its two preceding
+// groups. This uploader is sequential: only blocks before `next_block` have a
+// verified acknowledgement. Offsets and alreadyupsize remain file-relative.
+fn acknowledged_bitmap(next_block: usize) -> Vec<u8> {
+    let group = next_block / BLOCKS_PER_GROUP;
+    let first_group = group.saturating_sub(2);
+    let mut bitmap = vec![0; (group - first_group + 1) * 16];
+    for bit in 0..next_block - first_group * BLOCKS_PER_GROUP {
+        bitmap[bit / 8] |= 1 << (bit % 8);
+    }
+    bitmap
+}
 
 impl CdnClient {
     /// Upload one ordinary file using previously persisted source/key material.
@@ -198,12 +211,11 @@ fn upload_large_file(
     progress(0, Some(total))?;
 
     let mut acknowledged = 0u64;
-    let mut bitmap = [0u8; BITMAP_BYTES];
     let mut etags = Vec::new();
     for (index, chunk) in prepared.encrypted.chunks(block_size).enumerate() {
         let mut fields = CdnFields::new();
         put(&mut fields, "alreadyupsize", acknowledged);
-        fields.insert("alreadyupbit".into(), bitmap.to_vec());
+        fields.insert("alreadyupbit".into(), acknowledged_bitmap(index));
         fields.insert("upinfo".into(), upinfo.clone());
         put(&mut fields, "offset", acknowledged);
         fields.insert("blockmd5".into(), hex::encode(md5(chunk)).into_bytes());
@@ -216,7 +228,6 @@ fn upload_large_file(
         );
         etags.push(opaque_field(&reply, "etag", 8192)?);
         acknowledged += chunk.len() as u64;
-        bitmap[index >> 3] |= 1 << (index & 7);
         progress(acknowledged, Some(total))?;
     }
     ensure!(acknowledged == total, "Incomplete large-file upload");
@@ -240,7 +251,8 @@ fn upload_large_file(
         !file_id.chars().any(|c| c.is_control()),
         "Invalid large-file identifier"
     );
-    progress(acknowledged, Some(total))?;
+    // Return the correlated completion even if cancellation arrived while this
+    // request was in flight. The caller persists it before checking its fence.
     Ok(UploadedMedia {
         descriptor: MediaDescriptor {
             file_id,
@@ -264,6 +276,64 @@ fn upload_large_file(
 mod tests {
     use super::*;
     use std::{cell::RefCell, sync::OnceLock};
+
+    #[test]
+    fn acknowledgement_windows_cross_multiple_groups_without_wrapping() {
+        assert_eq!(acknowledged_bitmap(0), vec![0; 16]);
+        let mut before_boundary = vec![255; 16];
+        before_boundary[15] = 127;
+        assert_eq!(acknowledged_bitmap(127), before_boundary);
+        assert_eq!(
+            acknowledged_bitmap(128),
+            [vec![255; 16], vec![0; 16]].concat()
+        );
+        assert_eq!(
+            acknowledged_bitmap(256),
+            [vec![255; 32], vec![0; 16]].concat()
+        );
+        for index in [384, 512, 1024] {
+            assert_eq!(
+                acknowledged_bitmap(index),
+                [vec![255; 32], vec![0; 16]].concat()
+            );
+        }
+        let mut after_boundary = [vec![255; 32], vec![0; 16]].concat();
+        after_boundary[32] = 1;
+        assert_eq!(acknowledged_bitmap(513), after_boundary);
+        assert_eq!(MAX_BLOCKS, 1025);
+    }
+
+    #[test]
+    fn final_request_serializes_all_maximum_file_etags_in_order() {
+        let mut fields = CdnFields::new();
+        put(&mut fields, "blocksum", MAX_BLOCKS);
+        fields.insert("upinfo".into(), b"synthetic-finish-context".to_vec());
+        for index in 0..MAX_BLOCKS {
+            fields.insert(
+                format!("etag_{index}"),
+                format!("synthetic-{index}").into_bytes(),
+            );
+        }
+        let wire = pack_cdn(&fields).unwrap();
+        let mut cursor = crate::mmtls::Cursor::new(&wire);
+        let mut decoded = CdnFields::new();
+        for _ in 0..MAX_BLOCKS + 2 {
+            let key = std::str::from_utf8(cursor.sized(4).unwrap())
+                .unwrap()
+                .to_owned();
+            decoded.insert(key, cursor.sized(4).unwrap().to_vec());
+        }
+        cursor.end().unwrap();
+        assert_eq!(integer(&decoded, "blocksum").unwrap(), 1025);
+        for index in 0..MAX_BLOCKS {
+            assert_eq!(
+                decoded[&format!("etag_{index}")],
+                format!("synthetic-{index}").as_bytes()
+            );
+        }
+        fields.extend((MAX_BLOCKS..2048).map(|i| (format!("etag_{i}"), vec![1])));
+        assert!(pack_cdn(&fields).is_err());
+    }
 
     fn config() -> CdnConfig {
         CdnConfig {
@@ -461,9 +531,11 @@ mod tests {
             )
             .unwrap();
             assert_eq!(peer.requests, peer.blocks() + 3);
-            for event in events.borrow().chunks(3) {
+            let events = events.borrow();
+            for event in events[..events.len() - 2].chunks(3) {
                 assert_eq!(event, ["progress", "request", "progress"]);
             }
+            assert_eq!(&events[events.len() - 2..], ["progress", "request"]);
             let positions = progress.borrow();
             assert!(positions.windows(2).all(|pair| pair[0] <= pair[1]));
             assert_eq!(
@@ -519,6 +591,32 @@ mod tests {
             assert_eq!(result.descriptor.quality, MediaQuality::File);
             assert_eq!(peer.requests, requests);
         }
+    }
+
+    #[test]
+    fn completed_object_receipt_survives_late_cancellation() {
+        let cancelled = std::cell::Cell::new(false);
+        let mut peer = Peer::new(prepared(), 1024 * 1024);
+        let uploaded = upload_large_file(
+            &config(),
+            prepared(),
+            987654321,
+            |path, fields| {
+                let reply = peer.respond(path, fields)?;
+                if path.ends_with("/complete") {
+                    cancelled.set(true);
+                }
+                Ok(reply)
+            },
+            |_, _| {
+                ensure!(!cancelled.get(), "cancelled");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(cancelled.get());
+        assert_eq!(uploaded.descriptor.file_id, "completed-object");
+        assert_eq!(peer.requests, peer.blocks() + 3);
     }
 
     #[test]

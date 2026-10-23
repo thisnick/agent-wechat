@@ -356,8 +356,8 @@ mod tests {
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(body["mediaUploadMaxBytes"], 33_554_432);
-        assert_eq!(body["mediaSendMaxBytes"]["file"], 33_554_432);
+        assert_eq!(body["mediaUploadMaxBytes"], 536_870_912);
+        assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
         for kind in ["image", "video", "voice"] {
             assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
         }

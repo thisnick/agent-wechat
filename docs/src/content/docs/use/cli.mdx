@@ -31,7 +31,7 @@ wx messages send CHAT_ID --share https://example.com/post --title "Worth a read"
 ```
 
 Sends wait up to 30 seconds for WeChat to accept them. Use `--detach` to return right away.
-For larger files, use `--wait 300` to allow five minutes. See [attachment limits and progress](/use/media/).
+For larger files, use `--wait 3600` to allow an hour. See [attachment limits and progress](/use/media/).
 
 ## Download media
 
@@ -70,6 +70,6 @@ wx config server use box
 <Aside title="Good to know">
 - **A lost response doesn't mean a lost send.** Before sending, `wx` saves a receipt with an idempotency key. If the network drops, check with `wx messages sends lookup --idempotency-key KEY` instead of sending again. See [Sends and recovery](/how-it-works/sends/).
 - **Voice** is encoded by `wx` itself. A note can be up to 60 seconds; longer audio is split into equal notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
-- **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the initial 32 MiB file limit, unchanged image/video/voice limits and current validation status. Stickers can't be sent.
+- **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the 512 MiB file limit, unchanged image/video/voice limits and current validation status. Stickers can't be sent.
 - **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
 </Aside>

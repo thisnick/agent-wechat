@@ -2375,6 +2375,7 @@ dependencies = [
  "tempfile",
  "ts-rs",
  "uuid",
+ "wechat-media",
  "wechat-platform",
  "zeroize",
 ]

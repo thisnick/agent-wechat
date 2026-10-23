@@ -5,7 +5,10 @@ use crate::{
     protobuf as p, AccountState,
 };
 use anyhow::{bail, ensure, Result};
-use openssl::symm::Cipher;
+use openssl::{
+    hash::{Hasher, MessageDigest},
+    symm::{Cipher, Crypter, Mode},
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, io::Read, net::Ipv4Addr, time::Duration};
 use zeroize::Zeroize;
@@ -14,7 +17,7 @@ const MAX_CDN_BODY: usize = 2 * 1024 * 1024;
 const UPLOAD_CHUNK: usize = 65536;
 pub const MAX_CDN_TRANSFER_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_NATIVE_UPLOAD_BYTES: usize = 25 * 1024 * 1024 - 17;
-pub const MAX_LARGE_FILE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_LARGE_FILE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
 #[path = "large_cdn_config.rs"]
 mod large_cdn_config;
 #[path = "large_file.rs"]
@@ -123,7 +126,9 @@ fn public_ipv4(ip: Ipv4Addr) -> bool {
         || (a == 203 && b == 0 && c == 113))
 }
 pub fn pack_cdn(fields: &CdnFields) -> Result<Vec<u8>> {
-    ensure!(fields.len() <= 256, "Too many CDN fields");
+    // A 512 MiB completion can contain 1025 ordered block etags. The byte
+    // envelope remains independently bounded, including individual values.
+    ensure!(fields.len() <= 2048, "Too many CDN fields");
     let mut out = vec![];
     for (k, v) in fields {
         ensure!(
@@ -424,11 +429,27 @@ impl PreparedUpload {
                 && self.encrypted.len() == ((self.plaintext_bytes as usize / 16) + 1) * 16,
             "Invalid prepared upload"
         );
-        let raw = decrypt_cdn(&self.encrypted, &self.aes_key)?;
+        // Validate persisted ciphertext without allocating a second whole file.
+        let mut decryptor =
+            Crypter::new(Cipher::aes_128_ecb(), Mode::Decrypt, &self.aes_key, None)?;
+        let mut buffer = zeroize::Zeroizing::new(vec![0; 128 * 1024 + 16]);
+        let mut md5 = Hasher::new(MessageDigest::md5())?;
+        let mut sha256 = Hasher::new(MessageDigest::sha256())?;
+        let mut plaintext_bytes = 0usize;
+        for chunk in self.encrypted.chunks(128 * 1024) {
+            let written = decryptor.update(chunk, &mut buffer)?;
+            md5.update(&buffer[..written])?;
+            sha256.update(&buffer[..written])?;
+            plaintext_bytes += written;
+        }
+        let written = decryptor.finalize(&mut buffer)?;
+        md5.update(&buffer[..written])?;
+        sha256.update(&buffer[..written])?;
+        plaintext_bytes += written;
         ensure!(
-            raw.len() == self.plaintext_bytes as usize
-                && hex::encode(md5(&raw)) == self.md5
-                && hex::encode(sha256(&raw)) == self.sha256,
+            plaintext_bytes == self.plaintext_bytes as usize
+                && hex::encode(md5.finish()?) == self.md5
+                && hex::encode(sha256.finish()?) == self.sha256,
             "Prepared upload digest mismatch"
         );
         Ok(())
@@ -611,6 +632,9 @@ impl CdnClient {
                 "Inconsistent CDN range response"
             );
             total = size;
+            if encrypted.is_empty() {
+                encrypted.try_reserve_exact(total)?;
+            }
             position += data.len();
             encrypted.extend(data);
             for (key, target) in [
@@ -674,7 +698,15 @@ impl CdnClient {
     pub fn upload_with_progress(
         &self,
         prepared: &PreparedUpload,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        self.upload_with_transport(prepared, progress, |path, fields| self.post(path, fields))
+    }
+    fn upload_with_transport(
+        &self,
+        prepared: &PreparedUpload,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<UploadedMedia> {
         prepared.validate()?;
         let path = legacy_upload_path(
@@ -690,9 +722,13 @@ impl CdnClient {
             let mut fields =
                 upload_fields(&self.config, prepared, sequence as u32 + 1, start, end)?;
             fields.insert("filedata".into(), chunk.to_vec());
-            let reply = self.post(path, &fields)?;
+            let reply = post(path, &fields)?;
             validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
-            progress((end + 1) as u64, Some(prepared.encrypted.len() as u64))?;
+            // The final correlated acknowledgement must reach the caller so it
+            // can save completion before applying cancellation/logout fences.
+            if end + 1 < prepared.encrypted.len() {
+                progress((end + 1) as u64, Some(prepared.encrypted.len() as u64))?;
+            }
         }
         let file_id =
             file_id.ok_or_else(|| anyhow::anyhow!("CDN upload returned no file identifier"))?;
@@ -1336,10 +1372,10 @@ mod tests {
         reply
     }
     #[test]
-    fn cold_large_descriptor_downloads_exact_maximum_with_padding_and_hashes() {
+    fn cold_large_descriptor_downloads_with_padding_and_hashes() {
         let (descriptor, raw, ciphertext) =
-            download_fixture(MAX_LARGE_FILE_BYTES, MediaQuality::LargeFile);
-        assert_eq!(ciphertext.len(), MAX_LARGE_FILE_BYTES + 16);
+            download_fixture(32 * 1024 * 1024, MediaQuality::LargeFile);
+        assert_eq!(ciphertext.len(), 32 * 1024 * 1024 + 16);
         let stored = serde_json::to_vec(&descriptor).unwrap();
         let cold: MediaDescriptor = serde_json::from_slice(&stored).unwrap();
         let events = std::cell::RefCell::new(Vec::new());
@@ -1679,6 +1715,43 @@ mod tests {
             assert_eq!(requests, 0);
         }
     }
+
+    #[test]
+    fn legacy_completion_receipt_survives_cancellation_after_final_ack() {
+        let prepared = PreparedUpload::prepare(
+            b"synthetic source",
+            MediaQuality::File,
+            "source.bin",
+            "filehelper",
+        )
+        .unwrap();
+        let cancelled = std::cell::Cell::new(false);
+        let calls = std::cell::Cell::new(0);
+        let upload = client()
+            .upload_with_transport(
+                &prepared,
+                |_, _| {
+                    ensure!(!cancelled.get(), "cancelled");
+                    Ok(())
+                },
+                |path, fields| {
+                    assert_eq!(path, "/uploadv3");
+                    calls.set(calls.get() + 1);
+                    let mut reply = CdnFields::new();
+                    put(&mut reply, "retcode", 0);
+                    for key in ["seq", "rangestart", "rangeend"] {
+                        reply.insert(key.into(), fields[key].clone());
+                    }
+                    reply.insert("fileid".into(), b"synthetic-completed-object".to_vec());
+                    cancelled.set(true);
+                    Ok(reply)
+                },
+            )
+            .unwrap();
+        assert!(cancelled.get());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(upload.descriptor.file_id, "synthetic-completed-object");
+    }
     #[test]
     fn boundary_matrix_keeps_ciphertext_and_media_kind_limits_separate() {
         let boundary = MAX_CDN_TRANSFER_BYTES;
@@ -1709,13 +1782,7 @@ mod tests {
                 );
             }
         }
-        assert!(PreparedUpload::prepare(
-            &vec![0; MAX_LARGE_FILE_BYTES + 1],
-            MediaQuality::LargeFile,
-            "large.bin",
-            "filehelper"
-        )
-        .is_err());
+        assert_eq!(MAX_LARGE_FILE_BYTES, 536_870_912);
         assert_eq!(MAX_NATIVE_UPLOAD_BYTES, 26_214_383);
         assert_eq!(MAX_CDN_TRANSFER_BYTES, 26_214_400);
     }

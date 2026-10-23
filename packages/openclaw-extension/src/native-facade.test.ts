@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, request, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
+import { NATIVE_MAX_SOURCE_BYTES } from "@agent-wechat/shared";
 import { createNativeFacade, facadePrefix, registerNativeFacade } from "./native-facade.ts";
 import type { WeChatNativeConfig } from "./types.ts";
 const config:WeChatNativeConfig={mode:"external",accountId:"a",endpoint:"http://127.0.0.1:1",token: "synthetic-native-token-".repeat(3),consumerStateDir:"/unused",gatewayFacade:{enabled:true}};
@@ -23,4 +24,26 @@ test("facade HTTP harness streams SSE and client cancellation closes upstream",a
   let closed!:()=>void;const closure=new Promise<void>(resolve=>{closed=resolve;});const upstream=await server(t,async(req,res)=>{res.writeHead(200,{"content-type":"text/event-stream"});res.write('id: 1\ndata: {"cursor":"1","kind":"fixture","data":{}}\n\n');req.once("close",closed);});
   const handler=createNativeFacade(config,{endpoint:upstream,token:"native-fixture"});const base=await server(t,async(req,res)=>{await handler(req,res);});t.after(()=>handler.stop());
   const response=await fetch(`${base}/plugins/agent-wechat/native/v1/accounts/a/events/stream`);const reader=response.body!.getReader();const frame=await reader.read();assert.match(new TextDecoder().decode(frame.value),/cursor/);await reader.cancel();await Promise.race([closure,new Promise((_,reject)=>setTimeout(()=>reject(Error("upstream cancellation deadline")),2000))]);
+});
+test("facade admits 512 MiB upload/content headers while JSON, previews and over-limit sources stay restricted", async t => {
+  assert.equal(NATIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024);
+  let calls = 0, responseBytes = 1;
+  const handler = createNativeFacade(config, { endpoint: "http://127.0.0.1:1", token: "native-fixture", fetch: async () => {
+    calls++; return new Response(new Uint8Array([1]), { headers: { "content-length": String(responseBytes) } });
+  } });
+  const base = await server(t, async (req, res) => { await handler(req, res); }); t.after(() => handler.stop());
+  const headersOnly = (path: string, method: string, length?: number): Promise<{ status: number; length?: string }> => new Promise((resolve, reject) => {
+    const req = request(`${base}/plugins/agent-wechat/native/v1/accounts/a/${path}`, { method, headers: length == null ? {} : { "content-length": length } }, res => {
+      resolve({ status: res.statusCode!, length: res.headers["content-length"] }); res.destroy(); req.destroy();
+    }); req.on("error", reject); req.setTimeout(3000, () => req.destroy(Error("Header fixture timed out"))); req.end();
+  });
+  assert.equal((await headersOnly("uploads", "POST", NATIVE_MAX_SOURCE_BYTES + 64 * 1024)).status, 200); assert.equal(calls, 1);
+  assert.equal((await headersOnly("uploads", "POST", NATIVE_MAX_SOURCE_BYTES + 64 * 1024 + 1)).status, 413); assert.equal(calls, 1);
+  assert.equal((await headersOnly("sends", "POST", 128 * 1024 * 1024 + 1)).status, 413); assert.equal(calls, 1);
+  responseBytes = NATIVE_MAX_SOURCE_BYTES;
+  const content = await headersOnly("media/asset/content", "GET"); assert.equal(content.status, 200); assert.equal(Number(content.length), NATIVE_MAX_SOURCE_BYTES);
+  assert.equal((await headersOnly("messages/message", "GET")).status, 502);
+  assert.equal((await headersOnly("media/asset/content?representation=preview", "GET")).status, 502);
+  responseBytes++;
+  assert.equal((await headersOnly("media/asset/content", "GET")).status, 502);
 });

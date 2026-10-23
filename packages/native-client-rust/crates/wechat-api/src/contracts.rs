@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn generated_contract_uses_lossless_strings_and_nullable_metadata() {
         let generated = typescript();
-        assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 33554432 as const"));
+        assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 536870912 as const"));
         assert!(generated.contains("NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const"));
         assert!(generated.contains("serverId: string | null"));
         assert!(generated.contains("unreadCount: number | null"));

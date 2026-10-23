@@ -3,6 +3,19 @@ use super::*;
 use axum::extract::Multipart;
 use wechat_core::{MediaSendRequest, MediaTransferRequest, MAX_SOURCE_BYTES};
 
+fn validate_upload_chunk(current: usize, next: usize) -> ApiResult<()> {
+    if current
+        .checked_add(next)
+        .is_none_or(|n| n > MAX_SOURCE_BYTES)
+    {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large"));
+    }
+    Ok(())
+}
+fn upload_capacity(current: usize, needed: usize) -> usize {
+    current.saturating_mul(2).max(needed).min(MAX_SOURCE_BYTES)
+}
+
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .route(
@@ -71,8 +84,18 @@ async fn upload(
             .await
             .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_upload"))?
         {
-            if bytes.len().saturating_add(chunk.len()) > MAX_SOURCE_BYTES {
-                return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large"));
+            validate_upload_chunk(bytes.len(), chunk.len())?;
+            let needed = bytes.len() + chunk.len();
+            if needed > bytes.capacity() {
+                let capacity = upload_capacity(bytes.capacity(), needed);
+                bytes
+                    .try_reserve_exact(capacity - bytes.len())
+                    .map_err(|_| {
+                        ApiError(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "upload_capacity_unavailable",
+                        )
+                    })?;
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -193,7 +216,8 @@ fn content_response(
     media: wechat_core::media_types::MediaContent,
     headers: &HeaderMap,
 ) -> ApiResult<Response> {
-    let total = media.bytes.len();
+    let bytes = axum::body::Bytes::from(media.bytes);
+    let total = bytes.len();
     let etag = format!("\"{}\"", media.sha256);
     let mut response = Response::builder()
         .header("cache-control", "private, no-store")
@@ -226,12 +250,9 @@ fn content_response(
                 .expect("valid range response"));
         };
         response = response.header("content-range", format!("bytes {start}-{end}/{total}"));
-        (
-            StatusCode::PARTIAL_CONTENT,
-            media.bytes[start..=end].to_vec(),
-        )
+        (StatusCode::PARTIAL_CONTENT, bytes.slice(start..=end))
     } else {
-        (StatusCode::OK, media.bytes)
+        (StatusCode::OK, bytes)
     };
     // MIME is validated when bytes are cached, and never taken from a URL.
     response = response
@@ -329,6 +350,47 @@ pub(super) async fn send(
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn range_body_reuses_the_verified_allocation() {
+        let bytes = vec![1, 2, 3, 4, 5];
+        let address = bytes.as_ptr() as usize;
+        let media = wechat_core::media_types::MediaContent {
+            bytes,
+            content_type: "application/octet-stream".into(),
+            sha256: "a".repeat(64),
+            filename: None,
+            source_sha256: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("range", "bytes=1-3".parse().unwrap());
+        let response = content_response(media, &headers).unwrap();
+        assert_eq!(response.headers()["content-length"], "3");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), &[2, 3, 4]);
+        assert_eq!(bytes.as_ptr() as usize, address + 1);
+    }
+    #[test]
+    fn upload_chunk_limit_accepts_exact_maximum_and_rejects_overflow_without_allocation() {
+        assert!(validate_upload_chunk(MAX_SOURCE_BYTES - 1, 1).is_ok());
+        assert!(validate_upload_chunk(MAX_SOURCE_BYTES, 0).is_ok());
+        for (current, next) in [
+            (MAX_SOURCE_BYTES, 1),
+            (0, MAX_SOURCE_BYTES + 1),
+            (usize::MAX, 1),
+        ] {
+            assert_eq!(
+                validate_upload_chunk(current, next).unwrap_err().0,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        // Multipart chunk boundaries need not align with powers of two.
+        assert_eq!(
+            upload_capacity(MAX_SOURCE_BYTES - 37, MAX_SOURCE_BYTES),
+            MAX_SOURCE_BYTES
+        );
+        assert_eq!(upload_capacity(100, 110), 200);
+        assert_eq!(upload_capacity(0, 37), 37);
+    }
     #[tokio::test]
     async fn preview_response_binds_source_hash_and_ranges_to_preview_bytes() {
         let source = "a".repeat(64);

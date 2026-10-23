@@ -4,7 +4,7 @@ use serde_json::Value;
 use ts_rs::TS;
 
 /// Largest source accepted by staging; send limits depend on the selected kind.
-pub const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_SOURCE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
 pub const MAX_ORDINARY_SOURCE_BYTES: usize = 25 * 1024 * 1024 - 17;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn staging_limit_does_not_expand_other_send_kinds() {
-        assert_eq!(MAX_SOURCE_BYTES, 33_554_432);
+        assert_eq!(MAX_SOURCE_BYTES, 536_870_912);
         assert_eq!(MediaKind::File.max_source_bytes(), MAX_SOURCE_BYTES);
         for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Voice] {
             assert_eq!(kind.max_source_bytes(), 26_214_383);

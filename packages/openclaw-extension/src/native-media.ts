@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { open } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { openAsBlob } from "node:fs";
+import { mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, join } from "node:path";
 import { getImageMetadata, resizeToJpeg, IMAGE_REDUCE_QUALITY_STEPS } from "openclaw/plugin-sdk/media-runtime";
+import { saveMediaStream } from "openclaw/plugin-sdk/media-store";
 import { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NativeApiError } from "@agent-wechat/shared";
 import type { MediaAsset, MediaJob, MediaSendRequest, MediaVariant, NativeMessage, NativeWeChatClient } from "@agent-wechat/shared";
-import { saveManagedAttachment } from "./attachment-store.ts";
+import { saveManagedAttachment, saveManagedAttachmentBytes, saveVerifiedManagedAttachmentStream } from "./attachment-store.ts";
 import { renderAttachmentBody, type WeChatAttachment } from "./media-delivery.ts";
 import type { NativeSuppliedAsset } from "./native-consumer-state.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
@@ -65,14 +68,37 @@ export async function waitNativeMediaSendReceipts(client: NativeWeChatClient, ac
   return job;
 }
 export async function waitNativeMediaJob(client: NativeWeChatClient, accountId: string, initial: MediaJob, timeoutMs = 65000, signal?: AbortSignal, assertCurrent?: () => void): Promise<MediaJob> {
+  return waitNativeMediaStatus(initial, timeoutMs, signal, assertCurrent, (job, pollSignal) => client.job(accountId, job.id, pollSignal));
+}
+async function waitNativeMediaStatus(initial: MediaJob, timeoutMs: number, signal: AbortSignal | undefined, assertCurrent: (() => void) | undefined,
+  readStatus: (job: MediaJob, signal: AbortSignal) => Promise<MediaJob | undefined>): Promise<MediaJob> {
   const deadline = Date.now() + timeoutMs; let job = initial; let delay = 250;
   while (!terminalJobs.has(job.state) && Date.now() < deadline) {
     signal?.throwIfAborted(); assertCurrent?.();
     await new Promise(resolve => setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now()))));
     const remaining = deadline - Date.now(); if (remaining <= 0) break;
     signal?.throwIfAborted(); assertCurrent?.();
-    job = await client.job(accountId, job.id, signal ? AbortSignal.any([signal, AbortSignal.timeout(remaining)]) : AbortSignal.timeout(remaining)); delay = Math.min(delay * 2, 1000);
+    const next = await readStatus(job, signal ? AbortSignal.any([signal, AbortSignal.timeout(remaining)]) : AbortSignal.timeout(remaining));
+    if (!next) break;
+    job = next; delay = Math.min(delay * 2, 1000);
   }
+  return job;
+}
+async function incomingMediaJobStatus(client: NativeWeChatClient, accountId: string, jobId: string, assetId: string | undefined,
+  signal: AbortSignal | undefined, assertCurrent: () => void): Promise<MediaJob | undefined> {
+  let job: MediaJob;
+  // Only this known job's read may become pending. Scope, identity and integrity
+  // failures stay outside the transport catch, and no transfer is resubmitted.
+  assertCurrent();
+  try { job = await client.job(accountId, jobId, signal); }
+  catch (error) {
+    assertCurrent();
+    if (error instanceof NativeApiError ? error.retryable && !terminalIdentityErrors.has(error.code) && error.code !== "message_recalled"
+      : error instanceof TypeError || error instanceof DOMException && ["TimeoutError", "NetworkError", "AbortError"].includes(error.name)) return undefined;
+    throw error;
+  }
+  assertCurrent();
+  if (job.id !== jobId || job.accountId !== accountId || job.kind !== "download" || (assetId != null && job.assetId != null && job.assetId !== assetId)) throw Error("Native download job identity does not match its attachment");
   return job;
 }
 function select(assets: MediaAsset[], type: number, quality: MediaVariant = "best"): MediaAsset | undefined {
@@ -94,7 +120,7 @@ async function prepareImageRepresentation(bytes: Buffer, mime: string, cfg: any)
   throw Error("Native model image representation exceeds its bound");
 }
 export type NativePreparedMedia = { body: string; attachment?: WeChatAttachment; mediaPath?: string; mediaMime?: string; suppliedAssets?: NativeSuppliedAsset[]; pending: boolean; jobId?: string; retryable?: boolean; reason?: string; variant?: MediaVariant; quote?: { state: string; messageId?: string; senderId?: string; type?: number } };
-export type NativePrepareMediaParams = { client: NativeWeChatClient; account: ResolvedWeChatAccount; message: NativeMessage; core: any; cfg?: any; waitMs?: number; download?: boolean; quality?: MediaVariant; signal?: AbortSignal; assertCurrent?: () => void; beforeMediaAccess?: () => Promise<void>; allowQuotedMessage?: (message: Pick<NativeMessage, "senderId" | "direction">) => Promise<boolean> };
+export type NativePrepareMediaParams = { client: NativeWeChatClient; account: ResolvedWeChatAccount; message: NativeMessage; core: any; cfg?: any; waitMs?: number; download?: boolean; quality?: MediaVariant; signal?: AbortSignal; assertCurrent?: () => void; beforeMediaAccess?: () => Promise<void>; allowQuotedMessage?: (message: Pick<NativeMessage, "senderId" | "direction">) => Promise<boolean>; saveMediaStream?: typeof saveMediaStream };
 async function prepareNativeLink(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
   const { message } = params;
   const link = message.link!;
@@ -206,7 +232,8 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   if (message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && message.link) return prepareNativeLink(params);
   if (message.type === 49 && message.appMessageType != null && message.appMessageType !== 6) return { body: `[Unsupported WeChat app message subtype ${message.appMessageType}]`, pending: false, retryable: false };
   if (!attachmentKind) return { body: message.type === 1 ? message.body ?? "" : `[Unsupported WeChat message type ${message.type}]`, pending: false };
-  const accountId = account.native!.accountId; const maxBytes = Math.min(account.mediaMaxMb * 1024 * 1024, 128 * 1024 * 1024);
+  const accountId = account.native!.accountId; const maxBytes = Math.min(account.mediaMaxMb * 1024 * 1024,
+    attachmentKind === "file" ? Math.max(NATIVE_MAX_SOURCE_BYTES, 128 * 1024 * 1024) : 128 * 1024 * 1024);
   const scopedAssets = async () => {
     await authorize();
     const items = (await client.mediaAssets(accountId, message.id)).items;
@@ -231,9 +258,9 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   let transferError: NativeApiError | undefined;
   if (!asset && initialCandidate?.jobId && initialCandidate.state !== "recalled") {
     await authorize();
-    job = await client.job(accountId, initialCandidate.jobId, params.signal);
+    job = await incomingMediaJobStatus(client, accountId, initialCandidate.jobId, initialCandidate.id, params.signal, guard);
     guard();
-    if (job.accountId !== accountId || job.kind !== "download" || (job.assetId != null && job.assetId !== initialCandidate.id)) throw Error("Native download job identity does not match its attachment");
+    if (!job) return { body: `[${attachmentKind} pending: retrieval is unavailable]`, pending: true, jobId: initialCandidate.jobId, retryable: true };
     assets = await scopedAssets(); asset = select(assets, message.type, quality);
     if (!asset && transferCandidate()?.state === "recalled") return { body: "[Message recalled]", pending: false, retryable: false, reason: "message_recalled" };
     if (!asset && ["queued", "running"].includes(job.state)) return { body: `[${attachmentKind} pending]`, pending: true, jobId: job.id, retryable: true };
@@ -243,7 +270,8 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
     try {
       job = await client.transferMedia(accountId, { messageId: message.id, assetId: null, quality: transferQuality });
       guard();
-      job = await waitNativeMediaJob(client, accountId, job, params.waitMs ?? 20000, params.signal, guard);
+      job = await waitNativeMediaStatus(job, params.waitMs ?? 20000, params.signal, guard,
+        (known, pollSignal) => incomingMediaJobStatus(client, accountId, known.id, initialCandidate?.id, pollSignal, guard));
       guard();
     } catch (error) {
       guard();
@@ -269,6 +297,21 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   }
   if (asset.byteLength != null && asset.byteLength > maxBytes) { const attachment: WeChatAttachment = { kind: attachmentKind, filename, status: "too_large" }; return { body: renderAttachmentBody("", attachment), attachment, pending: false }; }
   await authorize();
+  if (attachmentKind === "file" && asset.byteLength != null && asset.byteLength > 128 * 1024 * 1024) {
+    const content = await client.mediaContentStream(accountId, asset.id, { maxBytes, signal: params.signal });
+    const mime = content.contentType.split(";", 1)[0].trim().toLowerCase();
+    if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mime)) { await content.cancel(); throw Error("Native attachment MIME type is unsupported"); }
+    let saved;
+    try {
+      saved = await saveVerifiedManagedAttachmentStream({ stream: content.stream, mime, filename, maxBytes, expectedBytes: asset.byteLength,
+        expectedSha256: asset.sha256 ?? "", assertCurrent: guard, saveMediaStream: params.saveMediaStream ?? saveMediaStream });
+    } finally { await content.cancel(); }
+    await authorize();
+    const attachment: WeChatAttachment = { kind: "file", filename, status: "ready", path: saved.path, mime };
+    return { body: renderAttachmentBody("", attachment), attachment, mediaMime: mime, pending: false, jobId: job?.id, retryable: false, variant: asset.actualVariant ?? asset.variant,
+      suppliedAssets: [{ id: asset.id, contextRole: "trigger", role: "file_reference", kind: "file", path: saved.path, mime, sha256: saved.sha256, byteLength: saved.size, runtimeMedia: false,
+        sourceSha256: saved.sha256, sourceByteLength: saved.size, sourceMime: mime, sourcePath: saved.path }] };
+  }
   const content = await client.mediaContent(accountId, asset.id, { maxBytes, signal: params.signal });
   guard();
   const mime = content.contentType.split(";", 1)[0].trim().toLowerCase();
@@ -276,7 +319,7 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   const hash = createHash("sha256").update(content.bytes).digest("hex");
   if (!asset.sha256 || hash !== asset.sha256 || (asset.byteLength != null && asset.byteLength !== content.bytes.length)) throw new Error("Native attachment integrity did not verify");
   await authorize();
-  const saved = await saveManagedAttachment({ data: Buffer.from(content.bytes).toString("base64"), mime: mime, filename, maxBytes, saveMediaBuffer: core.channel.media.saveMediaBuffer });
+  const saved = await saveManagedAttachmentBytes({ bytes: content.bytes, mime, filename, maxBytes, saveMediaBuffer: core.channel.media.saveMediaBuffer });
   const actual = asset.actualVariant ?? asset.variant;
   const attachment: WeChatAttachment = { kind: attachmentKind, filename, status: "ready", path: saved.path, mime: mime,
     quality: actual === "original" ? "full" : actual === "standard" ? "standard" : actual === "thumbnail" ? "thumbnail" : undefined };
@@ -323,28 +366,42 @@ function outboundSourceLimit(account: ResolvedWeChatAccount, selectedKind: Media
   return Math.min(account.mediaMaxMb * 1024 * 1024, selectedKind === "file" ? NATIVE_MAX_SOURCE_BYTES : NATIVE_MAX_ORDINARY_SOURCE_BYTES);
 }
 export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>): Promise<NativeOutboundDelivery> {
-  let bytes: Uint8Array; let filename: string; let mime: string; let selectedKind: MediaSendRequest["kind"];
-  if (/^https?:/.test(mediaUrl)) {
-    const response = await fetch(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(30000) }); if (!response.ok) throw new Error(`Native outbound source unavailable (${response.status})`);
-    filename = basename(new URL(mediaUrl).pathname) || "attachment"; mime = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "application/octet-stream";
-    try { selectedKind = outboundMediaKind(mime, audioAsVoice); } catch (error) { await response.body?.cancel(); throw error; }
-    const max = outboundSourceLimit(account, selectedKind);
-    const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native outbound source exceeds configured size"); }
-    const reader = response.body?.getReader(); if (!reader) throw new Error("Native outbound source has no bytes");
-    const chunks: Uint8Array[] = []; let size = 0; try { while (true) { const { value, done } = await reader.read(); if (done) break; size += value.length; if (size > max) throw new Error("Native outbound source exceeds configured size"); chunks.push(value); } } catch (error) { await reader.cancel(); throw error; } finally { reader.releaseLock(); }
-    bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-  } else {
-    const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl;
-    filename = basename(path instanceof URL ? path.pathname : path); const extension = extname(filename).toLowerCase(); mime = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension) ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}` : extension === ".mp4" ? "video/mp4" : [".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac"].includes(extension) ? `audio/${extension.slice(1)}` : "application/octet-stream";
-    selectedKind = outboundMediaKind(mime, audioAsVoice); const max = outboundSourceLimit(account, selectedKind); const file = await open(path, "r");
-    try { const stat = await file.stat(); if (!stat.isFile() || stat.size === 0 || stat.size > max) throw new Error("Native outbound source must be a bounded regular file"); const chunks: Buffer[] = []; let size = 0; while (true) { const chunk = Buffer.alloc(Math.min(65536, max + 1 - size)); const { bytesRead } = await file.read(chunk, 0, chunk.length, null); if (!bytesRead) break; size += bytesRead; if (size > max) throw new Error("Native outbound source exceeds configured size"); chunks.push(chunk.subarray(0, bytesRead)); } bytes = Buffer.concat(chunks, size); } finally { await file.close(); }
-  }
-  if (bytes.length > outboundSourceLimit(account, selectedKind)) throw new Error("Native outbound source exceeds selected media kind size");
-  await beforeSend?.();
-  const accountId = account.native!.accountId; const source = await client.upload(accountId, bytes, filename, mime);
+  let filename: string, mime: string, selectedKind: MediaSendRequest["kind"], sourceBytes: number, source: Awaited<ReturnType<NativeWeChatClient["upload"]>>;
+  let temporary: string | undefined;
+  const accountId = account.native!.accountId;
+  try {
+    let blob: Blob;
+    if (/^https?:/.test(mediaUrl)) {
+      const response = await fetch(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(60 * 60000) }); if (!response.ok) throw new Error(`Native outbound source unavailable (${response.status})`);
+      filename = basename(new URL(mediaUrl).pathname) || "attachment"; mime = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "application/octet-stream";
+      try { selectedKind = outboundMediaKind(mime, audioAsVoice); } catch (error) { await response.body?.cancel(); throw error; }
+      const max = outboundSourceLimit(account, selectedKind);
+      const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native outbound source exceeds configured size"); }
+      const reader = response.body?.getReader(); if (!reader) throw new Error("Native outbound source has no bytes");
+      let path: string, file: Awaited<ReturnType<typeof open>> | undefined, size = 0;
+      try {
+        temporary = await mkdtemp(join(tmpdir(), "wechat-outbound-")); path = join(temporary, "source"); file = await open(path, "wx", 0o600);
+        while (true) { const { value, done } = await reader.read(); if (done) break; size += value.byteLength; if (size > max) throw new Error("Native outbound source exceeds configured size"); await file.writeFile(value); }
+        if (!size || length && size !== Number(length)) throw new Error("Native outbound source length mismatch");
+      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); await file?.close(); }
+      blob = await openAsBlob(path, { type: mime });
+    } else {
+      const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl;
+      filename = basename(path instanceof URL ? path.pathname : path); const extension = extname(filename).toLowerCase(); mime = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension) ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}` : extension === ".mp4" ? "video/mp4" : [".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac"].includes(extension) ? `audio/${extension.slice(1)}` : "application/octet-stream";
+      selectedKind = outboundMediaKind(mime, audioAsVoice); const max = outboundSourceLimit(account, selectedKind), file = await open(path, "r");
+      let size: number;
+      try { const stat = await file.stat(); if (!stat.isFile() || !stat.size || stat.size > max) throw new Error("Native outbound source must be a bounded regular file"); size = stat.size; } finally { await file.close(); }
+      blob = await openAsBlob(path, { type: mime });
+      if (blob.size !== size) throw new Error("Native outbound source changed before staging");
+    }
+    sourceBytes = blob.size;
+    if (sourceBytes > outboundSourceLimit(account, selectedKind)) throw new Error("Native outbound source exceeds selected media kind size");
+    await beforeSend?.();
+    source = await client.upload(accountId, blob, filename, mime);
+  } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   const input: MediaSendRequest = { threadId, kind: selectedKind, sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null };
   await beforeSend?.();
-  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "file" && bytes.length > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 5 * 60000 : 65000;
+  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "file" && sourceBytes > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 60 * 60000 : 65000;
   const submitted = await client.sendMedia(accountId, input, key);
   let job: MediaJob;
   try { job = await waitNativeMediaJob(client, accountId, submitted, waitMs); }

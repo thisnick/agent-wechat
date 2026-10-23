@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeApiError, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
 import { NativeConsumerState } from "./native-consumer-state.ts";
 import { acceptNativeEvent, dispatchNativeMessage, nativeWasMentioned, projectNativeRead, startNativeReadPump, synchronizeNativeEvents } from "./native-monitor.ts";
+import { prepareNativeAttachment } from "./native-media.ts";
 import { resolveWeChatAccount, type WeChatNativeConfig } from "./types.ts";
 function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?: string; readPolicy?: WeChatNativeConfig["readPolicy"] } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-model-harness-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -173,10 +175,60 @@ test("pending native media keeps dispatch custody without model or read receipt"
   const value=fixture(t);value.message.type=3;value.message.body='<private transport XML>';
   assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'image pending',pending:true})}),'pending');assert.equal(value.runs.length,0);assert.equal(value.state.get('m1')?.state,'received');assert.equal(value.state.get('m1')?.readPending,undefined);
 });
+test("incoming download status failures recover after ten minutes and media.ready without a second transfer", async t => {
+  let clock = 0; t.mock.method(Date, "now", () => clock);
+  for (const failureStage of ["initial", "later"]) {
+    clock = 0;
+    const value = fixture(t); value.message.type = 49; value.message.appMessageType = 6; value.message.body = null;
+    const source = Buffer.from("%PDF-synthetic-small-file"), sha256 = createHash("sha256").update(source).digest("hex");
+    let transfers = 0, polls = 0, attached = false, ready = false, failStatus = true;
+    Object.assign(value.client, {
+      mediaAssets: async () => ({ items: [{ id: "file-asset", accountId: "a", messageId: value.message.id, kind: "file", variant: "original", actualVariant: ready ? "original" : null,
+        state: ready ? "available" : "pending", byteLength: source.length, sha256, filename: "synthetic.pdf", jobId: attached ? "download-job" : null }] }),
+      transferMedia: async () => { transfers++; attached = true; return { id: "download-job", accountId: "a", assetId: "file-asset", kind: "download", state: "running" }; },
+      job: async (_account: string, id: string) => { polls++; assert.equal(id, "download-job");
+        if (failStatus) { failStatus = false; throw new TypeError("synthetic network interruption"); }
+        return { id, accountId: "a", assetId: "file-asset", kind: "download", state: ready ? "available" : "running" }; },
+      mediaContent: async () => ({ bytes: source, contentType: "application/pdf" }),
+    });
+    value.core.channel.media = { saveMediaBuffer: async () => ({ path: "/managed/synthetic.pdf" }) };
+    const params = { ...value, prepareAttachment: (input: Parameters<typeof prepareNativeAttachment>[0]) => prepareNativeAttachment({ ...input,
+      ...(failureStage === "later" && transfers === 0 ? { waitMs: 0 } : {}) }) };
+    assert.equal(await dispatchNativeMessage(params), "pending");
+    if (failureStage === "later") assert.equal(await dispatchNativeMessage(params), "pending");
+    assert.equal(polls, 1); assert.equal(transfers, 1); assert.equal(value.runs.length, 0);
+    assert.equal(value.state.get(value.message.id)?.state, "received"); assert.equal(value.state.get(value.message.id)?.readPending, undefined);
+    clock = 10 * 60000;
+    assert.equal(await dispatchNativeMessage(params), "pending");
+    assert.equal(polls, 2); assert.equal(transfers, 1); assert.equal(value.state.get(value.message.id)?.state, "received");
+    ready = true;
+    await acceptNativeEvent(value.client, "a", value.state, { cursor: "2", kind: "media.ready", data: { accountId: "a", assetId: "file-asset", jobId: "download-job" }, createdAt: "2026-10-22T12:10:00Z" });
+    assert.equal(await dispatchNativeMessage(params), "completed");
+    assert.equal(transfers, 1); assert.equal(value.runs.length, 1); assert.equal(value.state.get(value.message.id)?.state, "completed");
+    assert.deepEqual(value.runs[0].ctx.Attachments.map((attachment: any) => attachment.path), ["/managed/synthetic.pdf"]);
+  }
+});
 test("verified native media path is included in the correlated prepared model input",async t=>{
   const value=fixture(t,{readPolicy:"on_model_dispatch"});value.message.type=3;value.message.body='<private transport XML>';
   assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'<media:image>',pending:false,mediaPath:'/managed/fixture.png',mediaMime:'image/png',attachment:{kind:'image',status:'ready',filename:'fixture.png',path:'/managed/fixture.png',mime:'image/png'},suppliedAssets:[{id:"asset",sha256:"0".repeat(64),byteLength:10,mime:"image/png",path:"/managed/fixture.png",role:"model_image",kind:"image",runtimeMedia:true,contextRole:"trigger"}]} )}),'completed');
   assert.equal(value.runs[0].ctx.MediaPath,'/managed/fixture.png');assert.equal(value.runs[0].ctx.BodyForAgent,'<media:image>');assert.equal(value.state.get('m1')?.readPending,true);assert.equal(value.state.get('m1')?.runId,'run_1');
+});
+test("512 MiB file metadata reaches correlated dispatch and one excess byte stops before model handoff", async t => {
+  for (const excess of [0, 1]) {
+    const value = fixture(t, { readPolicy: "on_model_dispatch" }); value.message.type = 49; value.message.appMessageType = 6; value.message.body = null;
+    const byteLength = 512 * 1024 * 1024 + excess;
+    const result = await dispatchNativeMessage({ ...value, prepareAttachment: async () => ({ body: "[Local file: </managed/large.pdf>]", pending: false,
+      attachment: { kind: "file", status: "ready", filename: "large.pdf", path: "/managed/large.pdf", mime: "application/pdf" },
+      suppliedAssets: [{ id: "large-file-asset", sha256: "0".repeat(64), byteLength, mime: "application/pdf", path: "/managed/large.pdf",
+        role: "file_reference", kind: "file", runtimeMedia: false, contextRole: "trigger" }] }) });
+    assert.equal(result, excess ? "needs_review" : "completed"); assert.equal(value.runs.length, excess ? 0 : 1);
+    assert.equal(value.state.get(value.message.id)?.readPending, excess ? undefined : true);
+    if (!excess) {
+      const asset = value.state.get(value.message.id)!.dispatchManifest!.assets[0];
+      assert.equal(asset.byteLength, byteLength); assert.equal(asset.role, "file_reference"); assert.equal(asset.runtimeMedia, false);
+      assert.equal(value.state.get(value.message.id)?.runId, "run_1");
+    }
+  }
 });
 test("media preparation failure cannot record a prepared input or mark read",async t=>{
   const value=fixture(t);value.message.type=3;

@@ -39,6 +39,7 @@ pub struct MediaAssetRecord {
     pub kind: String,
     pub metadata: Value,
     pub plan: Vec<u8>,
+    /// Present on writes and `media_asset_with_payload`; metadata reads omit it.
     pub payload: Option<Vec<u8>>,
 }
 fn read_job(db: &Connection, id: &str) -> Result<MediaJobRecord> {
@@ -59,7 +60,21 @@ fn read_job(db: &Connection, id: &str) -> Result<MediaJobRecord> {
     })
 }
 fn read_asset(db: &Connection, id: &str) -> Result<MediaAssetRecord> {
-    let row=db.query_row("SELECT id,message_id,variant,kind,metadata_json,plan,payload FROM media_assets WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get::<_,String>(4)?,r.get(5)?,r.get(6)?)))?;
+    // Metadata and authorization checks must not materialize attachment BLOBs.
+    let row = db.query_row(
+        "SELECT id,message_id,variant,kind,metadata_json,plan FROM media_assets WHERE id=?1",
+        [id],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get::<_, String>(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
     Ok(MediaAssetRecord {
         id: row.0,
         message_id: row.1,
@@ -67,7 +82,7 @@ fn read_asset(db: &Connection, id: &str) -> Result<MediaAssetRecord> {
         kind: row.3,
         metadata: serde_json::from_str(&row.4)?,
         plan: row.5,
-        payload: row.6,
+        payload: None,
     })
 }
 fn media_event(tx: &Connection, kind: &str, data: &Value) -> Result<()> {
@@ -173,7 +188,7 @@ impl Store {
                 || name.len() > 255
                 || media_type.len() > 128
                 || byte_length == 0
-                || byte_length > 128 * 1024 * 1024
+                || byte_length > wechat_media::MAX_FILE_BYTES as u64
                 || sha256.len() != 64
             {
                 bail!("invalid media source");
@@ -195,6 +210,9 @@ impl Store {
     }
     pub fn media_source(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
         self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,payload,created_at FROM media_sources WHERE id=?1",[id],|r|Ok((OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(5)?},r.get(4)?)))?)})
+    }
+    pub fn media_source_metadata(&self, account: &str, id: &str) -> Result<OwnedMediaSource> {
+        self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,created_at FROM media_sources WHERE id=?1",[id],|r|Ok(OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(4)?}))?)})
     }
     #[allow(clippy::too_many_arguments)]
     pub fn create_media_job(
@@ -379,6 +397,17 @@ impl Store {
     pub fn media_asset(&self, account: &str, id: &str) -> Result<MediaAssetRecord> {
         self.control(account, |db| read_asset(db, id))
     }
+    /// Fetch cached bytes only for content reads or local writeback repair.
+    pub fn media_asset_with_payload(&self, account: &str, id: &str) -> Result<MediaAssetRecord> {
+        self.control(account, |db| {
+            let mut row = read_asset(db, id)?;
+            row.payload =
+                db.query_row("SELECT payload FROM media_assets WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })?;
+            Ok(row)
+        })
+    }
     pub fn media_assets(&self, account: &str, message_id: &str) -> Result<Vec<MediaAssetRecord>> {
         self.control(account, |db| {
             let mut q =
@@ -398,7 +427,10 @@ impl Store {
     ) -> Result<MediaAssetRecord> {
         self.control(account,|db|{
             let tx=db.transaction()?;let old=read_asset(&tx,id)?;
-            if metadata["state"]=="available" && payload.is_none() && old.payload.is_none(){bail!("media_bytes_missing");}
+            if metadata["state"]=="available" && payload.is_none() {
+                let cached:bool=tx.query_row("SELECT payload IS NOT NULL FROM media_assets WHERE id=?1",[id],|r|r.get(0))?;
+                if !cached {bail!("media_bytes_missing");}
+            }
             tx.execute("UPDATE media_assets SET metadata_json=?2,payload=COALESCE(?3,payload),updated_at=?4 WHERE id=?1",params![id,serde_json::to_string(metadata)?,payload,chrono::Utc::now().to_rfc3339()])?;
             let row=read_asset(&tx,id)?;
             if old.metadata["state"]!="available" && metadata["state"]=="available" {media_event(&tx,"media.ready",&json!({"assetId":id,"jobId":metadata["jobId"],"accountId":account}))?;}
@@ -756,5 +788,91 @@ mod tests {
         assert_eq!(row.state, "queued");
         assert!(s.claim_media_job("test", "download1").unwrap());
         assert!(!s.claim_media_job("test", "download1").unwrap());
+    }
+    #[test]
+    fn source_limits_and_asset_metadata_do_not_require_payload_copies() {
+        let (_t, store) = setup();
+        let max = wechat_media::MAX_FILE_BYTES as u64;
+        let hash = "0".repeat(64);
+        store
+            .create_media_source(
+                "test",
+                "large",
+                "large.bin",
+                "application/octet-stream",
+                max,
+                &hash,
+                b"opaque source record",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .media_source_metadata("test", "large")
+                .unwrap()
+                .byte_length,
+            max
+        );
+        assert!(store
+            .create_media_source(
+                "test",
+                "oversized",
+                "large.bin",
+                "application/octet-stream",
+                max + 1,
+                &hash,
+                b"opaque source record"
+            )
+            .is_err());
+        let payload = vec![9; 128 * 1024];
+        let record = MediaAssetRecord {
+            id: "cached".into(),
+            message_id: Some("message".into()),
+            variant: "normal".into(),
+            kind: "file".into(),
+            metadata: json!({"state":"available"}),
+            plan: b"opaque plan".to_vec(),
+            payload: Some(payload.clone()),
+        };
+        assert!(store
+            .put_media_asset("test", &record)
+            .unwrap()
+            .payload
+            .is_none());
+        assert!(store
+            .media_asset("test", "cached")
+            .unwrap()
+            .payload
+            .is_none());
+        assert!(store.media_assets("test", "message").unwrap()[0]
+            .payload
+            .is_none());
+        assert!(store
+            .save_media_asset(
+                "test",
+                "cached",
+                &json!({"state":"available","officialWriteback":"complete"}),
+                None
+            )
+            .unwrap()
+            .payload
+            .is_none());
+        assert_eq!(
+            store
+                .media_asset_with_payload("test", "cached")
+                .unwrap()
+                .payload
+                .unwrap(),
+            payload
+        );
+        store
+            .control("test", |db| {
+                // zeroblob is lazy here: validate SQLite's scalar/record capacity
+                // without writing or materializing a maximum-size attachment.
+                let length: u64 =
+                    db.query_row("SELECT length(zeroblob(?1))", [max + 29], |r| r.get(0))?;
+                assert_eq!(length, max + 29);
+                Ok(())
+            })
+            .unwrap();
     }
 }

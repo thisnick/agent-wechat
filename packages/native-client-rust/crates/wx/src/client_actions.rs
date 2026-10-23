@@ -132,8 +132,9 @@ pub async fn resource(r: &Remote, kind: &str, command: ResourceAction) -> Result
     }
 }
 pub async fn wait_resource(r: &Remote, mut value: Value, kind: &str, wait: u64) -> Result<Value> {
-    if wait > 900 {
-        bail!("wait must be at most900seconds");
+    let max_wait = if kind == "jobs" { 3600 } else { 900 };
+    if wait > max_wait {
+        bail!("wait must be at most{max_wait}seconds");
     }
     if wait == 0 {
         return Ok(value);
@@ -368,7 +369,7 @@ pub async fn send(
         if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_source_bytes as u64 {
             bail!("source must be a nonempty regular file within the native source limit");
         }
-        let mut bytes = vec![];
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
         (&mut file)
             .take(max_source_bytes as u64 + 1)
             .read_to_end(&mut bytes)?;
@@ -427,7 +428,7 @@ pub async fn send(
             id.to_string()
         } else {
             let source = r
-                .upload(&bytes, name.as_deref().context("source name missing")?)
+                .upload(bytes, name.as_deref().context("source name missing")?)
                 .await?;
             let id = source["id"]
                 .as_str()
@@ -540,20 +541,27 @@ pub async fn media(
         }
         let id = asset["id"].as_str().context("media identity missing")?;
         let response = r
-            .response(
+            .response_with_timeout(
                 reqwest::Method::GET,
                 &r.path(&format!("media/{}/content", encode(id)))?,
                 None,
                 None,
+                Duration::from_secs(3600),
             )
             .await?;
-        let bytes = super::bounded_bytes(response, 128 * 1024 * 1024).await?;
-        if asset["sha256"].as_str() != Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
-            || asset["byteLength"].as_u64() != Some(bytes.len() as u64)
-        {
-            bail!("media integrity check failed");
-        }
-        private_output(&path, &bytes)?;
+        let max_bytes = if asset["kind"] == "file" {
+            wechat_core::MAX_SOURCE_BYTES
+        } else {
+            128 * 1024 * 1024
+        };
+        super::private_media_output(
+            &path,
+            response,
+            max_bytes,
+            asset["byteLength"].as_u64(),
+            asset["sha256"].as_str(),
+        )
+        .await?;
         let mut asset = asset;
         asset["output"] = json!(path);
         return Ok(asset);
@@ -565,9 +573,78 @@ pub async fn media(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn streamed_media_output_requires_complete_digest_and_preserves_existing_files() {
+        use axum::{body::Body, routing::get, Router};
+        let payload = b"synthetic streamed attachment";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/",
+                    get(|| async {
+                        Body::from_stream(futures_util::stream::iter([
+                            Ok::<_, std::io::Error>(b"synthetic streamed ".as_slice()),
+                            Ok(b"attachment".as_slice()),
+                        ]))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("saved.bin");
+        let hash = format!("{:x}", Sha256::digest(payload));
+        for (size, digest) in [
+            (payload.len() as u64 + 1, hash.as_str()),
+            (
+                payload.len() as u64,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        ] {
+            let response = client
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                crate::private_media_output(&output, response, 1024, Some(size), Some(digest))
+                    .await
+                    .is_err()
+            );
+            assert!(!output.exists());
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
+        for succeeds in [true, false] {
+            let response = client
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                crate::private_media_output(
+                    &output,
+                    response,
+                    1024,
+                    Some(payload.len() as u64),
+                    Some(&hash)
+                )
+                .await
+                .is_ok(),
+                succeeds
+            );
+            assert_eq!(std::fs::read(&output).unwrap(), payload);
+        }
+        server.abort();
+    }
+
     #[test]
     fn selected_payload_flag_controls_source_read_bound() {
-        assert_eq!(send_kind_source_limit("file").unwrap(), 33_554_432);
+        assert_eq!(send_kind_source_limit("file").unwrap(), 536_870_912);
         for kind in ["image", "video", "voice"] {
             assert_eq!(send_kind_source_limit(kind).unwrap(), 26_214_383);
         }

@@ -613,6 +613,53 @@ fn private_output(path: &Path, bytes: &[u8]) -> Result<()> {
     wechat_platform::sync_dir(parent)?;
     Ok(())
 }
+async fn private_media_output(
+    path: &Path,
+    response: reqwest::Response,
+    limit: usize,
+    expected_bytes: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> Result<()> {
+    use futures_util::StreamExt;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let expected = expected_bytes
+        .filter(|n| *n > 0 && *n <= limit as u64)
+        .context("invalid media size")?;
+    let expected_sha256 = expected_sha256
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .context("invalid media digest")?;
+    if response.content_length().is_some_and(|n| n != expected) {
+        bail!("media integrity check failed");
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temp = wechat_platform::private_tempfile_in(parent, ".wx-media-output-")?;
+    let mut stream = response.bytes_stream();
+    let mut hash = Sha256::new();
+    let mut size = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        size = size
+            .checked_add(chunk.len() as u64)
+            .context("media size overflow")?;
+        if size > expected {
+            bail!("media integrity check failed");
+        }
+        hash.update(&chunk);
+        temp.write_all(&chunk)?;
+    }
+    if size != expected || !format!("{:x}", hash.finalize()).eq_ignore_ascii_case(expected_sha256) {
+        bail!("media integrity check failed");
+    }
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(path)
+        .map_err(|_| anyhow::anyhow!("output already exists or cannot be installed"))?;
+    wechat_platform::sync_dir(parent)?;
+    Ok(())
+}
 #[tokio::main]
 async fn main() {
     let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -743,10 +790,22 @@ impl Remote {
         body: Option<Value>,
         key: Option<&str>,
     ) -> Result<reqwest::Response> {
+        self.response_with_timeout(method, path, body, key, Duration::from_secs(65))
+            .await
+    }
+    async fn response_with_timeout(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        key: Option<&str>,
+        timeout: Duration,
+    ) -> Result<reqwest::Response> {
         let mut request = self
             .http
             .request(method, self.base.join(path)?)
-            .bearer_auth(&self.token);
+            .bearer_auth(&self.token)
+            .timeout(timeout);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -800,14 +859,15 @@ impl Remote {
         self.request(reqwest::Method::POST, path, Some(body), None)
             .await
     }
-    async fn upload(&self, bytes: &[u8], name: &str) -> Result<Value> {
-        let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+    async fn upload(&self, bytes: Vec<u8>, name: &str) -> Result<Value> {
+        let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(name.to_string())
             .mime_str("application/octet-stream")?;
         let response = self
             .http
             .post(self.base.join(&self.path("uploads")?)?)
             .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(3600))
             .multipart(reqwest::multipart::Form::new().part("file", part))
             .send()
             .await?;

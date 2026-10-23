@@ -163,7 +163,7 @@ Native text/media sends retain daemon intent/job identity and caller idempotency
 
 `channels.agent-wechat.mediaMaxMb` limits both incoming retained attachments and
 outgoing sources in MiB. Outgoing sources must also fit the selected kind's
-native limit: ordinary files have an initial 32 MiB ceiling (33,554,432 bytes);
+native limit: ordinary files have a 512 MiB ceiling (536,870,912 bytes);
 images, video and voice retain 26,214,383 bytes. The native daemon's 32 MiB File
 Transfer PDF passed acceptance, recipient opening and cold byte verification;
 see the [native capability checklist](../native-client-rust/FEATURES.md).
@@ -172,7 +172,7 @@ before staging, using the local extension or HTTP content type. Ordinary audio
 is a file unless `audioAsVoice` selects voice.
 
 For ordinary files above 26,214,383 bytes, the adapter polls the same submitted
-job for up to five minutes, allowing upload and exact readback before final
+job for up to an hour, allowing upload and exact readback before final
 message submission. A timeout or status-poll failure preserves the job ID and idempotency key and never
 automatically sends another copy. Unsupported cache-hit responses or uncertain
 reservations/submissions require inspection. See [Send attachments](https://thisnick.github.io/agent-wechat/use/media/)

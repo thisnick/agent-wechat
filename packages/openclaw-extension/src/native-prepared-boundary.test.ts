@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { NativeMessage } from "@agent-wechat/shared";
-import { NativeConsumerState } from "./native-consumer-state.ts";
+import { NativeConsumerState, type NativeSuppliedAsset } from "./native-consumer-state.ts";
 import { invalidateNativePreparedInputs, nativeDispatchManifest, observeNativeModelCall, observeNativePreparedInput, registerNativePreparedBoundary, trackNativePreparedText } from "./native-prepared-boundary.ts";
 
 function fixture(t: any, options: { access?: boolean; policy?: "never" | "on_model_dispatch" } = {}) {
@@ -22,6 +22,19 @@ function fixture(t: any, options: { access?: boolean; policy?: "never" | "on_mod
   const model: any = { runId: manifest.runId, callId: "call", sessionId: "transcript", sessionKey: "session", provider: "fixture", model: "local" };
   return { state, manifest, input, context, model, stop };
 }
+test("prepared asset manifests admit exactly 512 MiB files and retain 128 MiB non-file limits", () => {
+  const message = { id: "m", accountId: "a", threadId: "peer", type: 49, appMessageType: 6 } as NativeMessage;
+  for (const kind of ["file", "image", "audio", "video"] as const) {
+    const maxBytes = (kind === "file" ? 512 : 128) * 1024 * 1024;
+    const asset: NativeSuppliedAsset = { id: "asset", sha256: "0".repeat(64), byteLength: maxBytes, path: "/managed/attachment.bin", mime: "application/octet-stream",
+      kind, role: "file_reference", runtimeMedia: false, contextRole: "trigger" };
+    const params = { message, inputBody: "[Local file: </managed/attachment.bin>]", sessionKey: "session", agentId: "agent", channelAccountId: "default", assets: [asset] };
+    const manifest = nativeDispatchManifest(params);
+    assert.equal(manifest.assets[0].byteLength, maxBytes); assert.ok(Object.isFrozen(manifest.assets[0]));
+    assert.throws(() => nativeDispatchManifest({ ...params, assets: [{ ...asset, byteLength: maxBytes + 1 }] }), /Invalid native supplied asset manifest/);
+    if (kind === "file") assert.throws(() => nativeDispatchManifest({ ...params, assets: [{ ...asset, role: "model_image", runtimeMedia: true }] }), /Invalid native supplied asset manifest/);
+  }
+});
 test("released host needs both exact prepared input and correlated model start", t => {
   const f = fixture(t); assert.ok(Object.isFrozen(f.manifest)); assert.ok(Object.isFrozen(f.manifest.messageIds));
   observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, undefined);

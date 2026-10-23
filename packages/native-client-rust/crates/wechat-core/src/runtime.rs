@@ -46,6 +46,23 @@ use tokio::sync::Mutex as AsyncMutex;
 use wechat_protocol::{AccountState, DeviceProfile, LoginStatus, NativeClient, NativeOptions};
 use wechat_store::{vault::Vault, Operation, SendIntent, Store};
 
+pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
+    // Cookies can change on ordinary RPCs. A renewed key, account, device or
+    // routing generation requires a new authenticated persistent connection.
+    Ok(Sha256::digest(serde_json::to_vec(&(
+        state.uin,
+        &state.own_username,
+        &state.device,
+        &state.session_key,
+        &state.request_key,
+        &state.response_key,
+        &state.auto_auth_key,
+        &state.long_host,
+        &state.short_host,
+    ))?)
+    .into())
+}
+
 pub struct Core {
     pub store: Arc<Store>,
     pub ownership_generation: String,
@@ -57,6 +74,7 @@ pub struct Core {
     bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     startup_profiles_recovered: AtomicBool,
     gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     workers: Mutex<std::collections::BTreeSet<String>>,
     push_health: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
@@ -237,6 +255,7 @@ impl Core {
             startup_profiles_recovered: AtomicBool::new(false),
             ownership_generation: uuid::Uuid::new_v4().to_string(),
             gates: Mutex::new(BTreeMap::new()),
+            media_gates: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(std::collections::BTreeSet::new()),
             push_health: Mutex::new(BTreeMap::new()),
@@ -286,6 +305,20 @@ impl Core {
     }
     pub async fn lock_account(&self, account: &str) -> Result<tokio::sync::OwnedMutexGuard<()>> {
         Ok(self.gate(account)?.lock_owned().await)
+    }
+    pub(crate) async fn lock_media_job(
+        &self,
+        account: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        self.store.account(account)?;
+        let gate = self
+            .media_gates
+            .lock()
+            .map_err(|_| anyhow::anyhow!("media manager unavailable"))?
+            .entry(account.into())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        Ok(gate.lock_owned().await)
     }
     fn state_unfenced(&self, account: &str) -> Result<AccountState> {
         let encrypted = self

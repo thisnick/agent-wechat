@@ -1792,8 +1792,8 @@ mod tests {
             format!("{:x}", Sha256::digest(content.as_bytes()))
         );
         assert!(!String::from_utf8_lossy(&body).contains(content));
-        let oversized = "x".repeat(wechat_core::MAX_SOURCE_BYTES + 1);
-        let body=format!("--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"large\"\r\n\r\n{oversized}\r\n--test-boundary--\r\n");
+        // A second part is rejected before either source is published.
+        let body="--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"first\"\r\n\r\na\r\n--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"second\"\r\n\r\nb\r\n--test-boundary--\r\n";
         let response = app
             .oneshot(
                 Request::builder()
@@ -1809,7 +1809,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
     #[tokio::test]
     async fn unauthenticated_logout_still_has_a_durable_receipt_and_fence() {

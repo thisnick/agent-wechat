@@ -1,28 +1,28 @@
 ---
-title: Send attachments
+title: Send and download attachments
 description: File, image, video and voice limits, longer sends, and the CLI, API and SDK interfaces.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Send attachments through the CLI, HTTP API or OpenClaw. The initial ordinary-file source limit is **32 MiB (33,554,432 bytes)**. Other send kinds keep their existing limit:
+Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source limit is **512 MiB (536,870,912 bytes)**. Other send kinds keep their existing limit:
 
 | Send kind | Maximum source size |
 | --- | --- |
-| Ordinary file | 33,554,432 bytes |
+| Ordinary file | 536,870,912 bytes |
 | Image, video or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
 | Sticker | Sending unavailable |
 
 ## CLI
 
-1. Send a file and allow five minutes for upload, download verification and submission:
+1. Send a file and allow an hour for upload, download verification and submission:
 
    ```bash
-   wx messages send filehelper --file ./report.pdf --wait 300 \
+   wx messages send filehelper --file ./report.pdf --wait 3600 \
      --idempotency-key report-2026-10
    ```
 
-   `--wait` is in seconds; its default is 30 and maximum is 900. `--detach` returns the job immediately.
+   `--wait` is in seconds; its default is 30 and attachment jobs allow up to 3,600. `--detach` returns the job immediately.
 
 2. If the wait ends, inspect the returned job:
 
@@ -44,9 +44,9 @@ Send attachments through the CLI, HTTP API or OpenClaw. The initial ordinary-fil
 
    ```json
    {
-     "mediaUploadMaxBytes": 33554432,
+     "mediaUploadMaxBytes": 536870912,
      "mediaSendMaxBytes": {
-       "file": 33554432,
+       "file": 536870912,
        "image": 26214383,
        "video": 26214383,
        "voice": 26214383
@@ -67,9 +67,9 @@ Send attachments through the CLI, HTTP API or OpenClaw. The initial ordinary-fil
      "$WX/accounts/$ACCOUNT/sends"
    ```
 
-   Here, `WX` ends in `/v1`. The send returns HTTP 202 with a job. Poll `GET /jobs/{id}`; allow several minutes for larger files.
+   Here, `WX` ends in `/v1`. The send returns HTTP 202 with a job. Poll `GET /jobs/{id}`; allow up to an hour for larger files.
 
-   The internal TypeScript SDK exposes the same workflow:
+   The TypeScript SDK exposes the same workflow:
 
    ```ts
    const source = await client.upload(accountId, bytes, "report.pdf");
@@ -81,17 +81,27 @@ Send attachments through the CLI, HTTP API or OpenClaw. The initial ordinary-fil
    const progress = await client.job(accountId, job.id);
    ```
 
-   `NATIVE_MAX_SOURCE_BYTES` is the 32 MiB staging ceiling. `NATIVE_MAX_ORDINARY_SOURCE_BYTES` is 26,214,383. Both are exported by `@agent-wechat/shared`; use the daemon's capabilities when connecting to another version.
+   SDK uploads accept bytes or a `Blob`; Node’s `openAsBlob` avoids loading the source into memory. `NATIVE_MAX_SOURCE_BYTES`, exported by `@agent-wechat/shared`, is the staging ceiling.
+
+## Download files
+
+Ordinary-file downloads also support up to 512 MiB:
+
+```bash
+wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
+```
+
+The CLI verifies size and SHA-256 before publishing the output. SDK clients can use `mediaContentStream` with `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`; the default retrieval bound is 128 MiB. Check the selected asset’s size and SHA-256 when saving the stream.
 
 ## OpenClaw
 
-Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `32` permits files up to 32 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend image, video or voice limits.
+Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `512` permits files up to 512 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend image, video or voice limits.
 
-Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary files get up to five minutes of job polling. If polling ends, retain the reported job ID and inspect it instead of starting another send.
+Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary files get up to an hour of job polling. If polling ends, retain the reported job ID and inspect it instead of starting another send.
 
 <Aside title="Good to know">
 - See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
 - Reusing an existing uploaded copy offered by WeChat is not supported yet. That response, or an uncertain upload reservation or send, becomes `needs_review` and is never automatically repeated.
-- Use the same idempotency key to inspect the original intent after a lost response. See [Sends and recovery](/how-it-works/sends/).
+- Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
 </Aside>

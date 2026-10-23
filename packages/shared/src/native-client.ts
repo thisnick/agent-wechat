@@ -7,7 +7,10 @@ export type NativeListOptions = { cursor?: string; limit?: number; query?: strin
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 function listQuery(input?: string | NativeListOptions): string { const options = typeof input === "string" ? { cursor: input } : input; if (!options) return ""; if (options.limit != null && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200)) throw new Error("Invalid native page limit"); const query = new URLSearchParams(); for (const [key, value] of Object.entries(options)) if (value != null) query.set(key, String(value)); return query.size ? `?${query}` : ""; }
 export type NativeLoginOptions = Partial<Omit<LoginRequest, "qrRefresh">> & { qrRefresh?: Partial<QrRefresh> };
-export type NativeClientOptions = { baseUrl: string; token: string; fetch?: typeof fetch; timeoutMs?: number; streamIdleTimeoutMs?: number };
+export type NativeClientOptions = { baseUrl: string; token: string; fetch?: typeof fetch; timeoutMs?: number; mediaTimeoutMs?: number; streamIdleTimeoutMs?: number };
+export type NativeMediaContentOptions = { maxBytes?: number; range?: string; representation?: "original" | "preview"; signal?: AbortSignal };
+export type NativeMediaContentMetadata = { contentType: string; etag: string | null; contentRange: string | null; sourceSha256: string | null; status: number };
+export type NativeMediaContentStream = NativeMediaContentMetadata & { stream: AsyncIterable<Uint8Array>; cancel: () => Promise<void> };
 export class NativeApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -38,6 +41,7 @@ export class NativeWeChatClient {
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly mediaTimeoutMs: number;
   private readonly streamIdleTimeoutMs: number;
   constructor(options: NativeClientOptions) {
     this.baseUrl = validateNativeBaseUrl(options.baseUrl);
@@ -45,13 +49,15 @@ export class NativeWeChatClient {
     if (this.baseUrl.protocol === "https:" && nodeEnvironment?.NODE_TLS_REJECT_UNAUTHORIZED === "0") throw new Error("Native API refuses HTTPS with TLS verification disabled");
     if (typeof options.token !== "string" || !options.token || /[\r\n]/.test(options.token)) throw new Error("Native API bearer token is required");
     this.token = options.token; this.fetchImpl = options.fetch ?? fetch; this.timeoutMs = options.timeoutMs ?? 30000;
+    this.mediaTimeoutMs = options.mediaTimeoutMs ?? 60 * 60000;
+    if (!Number.isInteger(this.mediaTimeoutMs) || this.mediaTimeoutMs < 1 || this.mediaTimeoutMs > 60 * 60000) throw new Error("Invalid native media timeout");
     this.streamIdleTimeoutMs = options.streamIdleTimeoutMs ?? 45000;
     if (!Number.isInteger(this.streamIdleTimeoutMs) || this.streamIdleTimeoutMs < 1 || this.streamIdleTimeoutMs > 300000) throw new Error("Invalid native stream idle timeout");
   }
-  private async response(path: string, init: RequestInit = {}, stream = false): Promise<Response> {
+  private async response(path: string, init: RequestInit = {}, stream = false, timeoutMs = this.timeoutMs): Promise<Response> {
     const headers = new Headers(init.headers); headers.set("Authorization", `Bearer ${this.token}`);
     if (init.body != null && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-    const timeout = stream ? undefined : AbortSignal.timeout(this.timeoutMs);
+    const timeout = stream ? undefined : AbortSignal.timeout(timeoutMs);
     const signal = init.signal && timeout ? AbortSignal.any([init.signal, timeout]) : init.signal ?? timeout;
     const response = await this.fetchImpl(new URL(path, this.baseUrl), { ...init, headers, redirect: "error", signal });
     if (!response.ok) {
@@ -191,10 +197,14 @@ export class NativeWeChatClient {
   }
   sendByKey(accountId: string, key: string): Promise<NativeSendIntent | MediaJob> { if (!key || key.length > 200) throw new Error("Invalid idempotency key"); return this.request(`v1/accounts/${id(accountId)}/sends/by-idempotency-key?key=${encodeURIComponent(key)}`); }
   cancelSend(accountId: string, sendId: string): Promise<NativeSendIntent | MediaJob> { return this.request(`v1/accounts/${id(accountId)}/sends/${id(sendId)}/cancel`, { method: "POST", body: "{}" }); }
-  async upload(accountId: string, bytes: Uint8Array, name: string, contentType = "application/octet-stream", signal?: AbortSignal): Promise<OwnedMediaSource> {
-    if (!bytes.length || bytes.length > NATIVE_MAX_SOURCE_BYTES || !name || name.length > 255 || /[\r\n/\\]/.test(name)) throw new Error("Invalid bounded media upload");
-    const form = new FormData(); form.set("file", new Blob([new Uint8Array(bytes).buffer], { type: contentType }), name);
-    return this.request(`v1/accounts/${id(accountId)}/uploads`, { method: "POST", body: form, signal });
+  /** A disk-backed Blob avoids holding the source in memory before staging. */
+  async upload(accountId: string, bytes: Uint8Array | Blob, name: string, contentType = "application/octet-stream", signal?: AbortSignal): Promise<OwnedMediaSource> {
+    const size = bytes instanceof Blob ? bytes.size : bytes.byteLength;
+    if (!size || size > NATIVE_MAX_SOURCE_BYTES || !name || name.length > 255 || /[\r\n/\\]/.test(name)) throw new Error("Invalid bounded media upload");
+    const part = bytes instanceof Blob ? bytes.slice(0, bytes.size, contentType) : new Blob([bytes.buffer instanceof ArrayBuffer ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes)], { type: contentType });
+    const form = new FormData(); form.set("file", part, name);
+    const response = await this.response(`v1/accounts/${id(accountId)}/uploads`, { method: "POST", body: form, signal }, false, this.mediaTimeoutMs);
+    return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as OwnedMediaSource;
   }
   sendMedia(accountId: string, input: MediaSendRequest, key: string): Promise<MediaJob> { if (!key || /[\r\n]/.test(key)) throw new Error("An idempotency key is required"); return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(input) }); }
   mediaAssets(accountId: string, messageId: string): Promise<{ items: MediaAsset[] }> { return this.request(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/media`); }
@@ -207,13 +217,38 @@ export class NativeWeChatClient {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid media writeback limit");
     return this.request(`v1/accounts/${id(accountId)}/media-writeback/repair`, { method: "POST", body: JSON.stringify({ limit }) });
   }
-  async mediaContent(accountId: string, assetId: string, options: { maxBytes?: number; range?: string; representation?: "original" | "preview"; signal?: AbortSignal } = {}): Promise<{ bytes: Uint8Array; contentType: string; etag: string | null; contentRange: string | null; sourceSha256: string | null; status: number }> {
+  /** Consume the bounded stream once, or cancel it; this never starts a CDN transfer. */
+  async mediaContentStream(accountId: string, assetId: string, options: NativeMediaContentOptions = {}): Promise<NativeMediaContentStream> {
     const max = options.maxBytes ?? 128 * 1024 * 1024;
-    if (!Number.isInteger(max) || max < 1 || max > 128 * 1024 * 1024 || (options.range && !/^bytes=(?:\d+-\d*|-\d+)$/.test(options.range)) || (options.representation != null && !["original", "preview"].includes(options.representation))) throw new Error("Invalid bounded content request");
+    if (!Number.isInteger(max) || max < 1 || max > Math.max(128 * 1024 * 1024, NATIVE_MAX_SOURCE_BYTES) || (options.range && !/^bytes=(?:\d+-\d*|-\d+)$/.test(options.range)) || (options.representation != null && !["original", "preview"].includes(options.representation))) throw new Error("Invalid bounded content request");
     const query = options.representation === "preview" ? "?representation=preview" : "";
-    const response = await this.response(`v1/accounts/${id(accountId)}/media/${id(assetId)}/content${query}`, { signal: options.signal, headers: options.range ? { Range: options.range } : {} });
+    const cancellation = new AbortController();
+    const response = await this.response(`v1/accounts/${id(accountId)}/media/${id(assetId)}/content${query}`, { signal: options.signal ? AbortSignal.any([options.signal, cancellation.signal]) : cancellation.signal, headers: options.range ? { Range: options.range } : {} }, false, this.mediaTimeoutMs);
     const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native media response exceeds its bound"); }
-    return { bytes: await this.readBounded(response, max), contentType: response.headers.get("content-type") ?? "application/octet-stream", etag: response.headers.get("etag"), contentRange: response.headers.get("content-range"), sourceSha256: response.headers.get("x-source-sha256"), status: response.status };
+    if (!response.body && length && Number(length) > 0) throw new Error("Native media response length mismatch");
+    let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const iterate = async function* () {
+      cancellation.signal.throwIfAborted(); options.signal?.throwIfAborted();
+      const reader = response.body?.getReader(); if (!reader) return; activeReader = reader;
+      let size = 0;
+      try {
+        while (true) { cancellation.signal.throwIfAborted(); options.signal?.throwIfAborted(); const { value, done } = await reader.read(); cancellation.signal.throwIfAborted(); options.signal?.throwIfAborted(); if (done) break; size += value.byteLength; if (size > max) throw new Error("Native media response exceeds its bound"); yield value; }
+        if (length && size !== Number(length)) throw new Error("Native media response length mismatch");
+      } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); activeReader = undefined; }
+    };
+    let claimed = false;
+    const stream: AsyncIterable<Uint8Array> = { [Symbol.asyncIterator]() {
+      if (claimed) throw new Error("Native media stream was already consumed");
+      claimed = true; return iterate();
+    } };
+    return { stream, cancel: async () => { cancellation.abort(); await (activeReader ? activeReader.cancel() : response.body?.cancel())?.catch(() => {}); }, contentType: response.headers.get("content-type") ?? "application/octet-stream", etag: response.headers.get("etag"), contentRange: response.headers.get("content-range"), sourceSha256: response.headers.get("x-source-sha256"), status: response.status };
+  }
+  async mediaContent(accountId: string, assetId: string, options: NativeMediaContentOptions = {}): Promise<NativeMediaContentMetadata & { bytes: Uint8Array }> {
+    const { stream, cancel: _cancel, ...metadata } = await this.mediaContentStream(accountId, assetId, options);
+    const chunks: Uint8Array[] = []; let size = 0;
+    for await (const chunk of stream) { chunks.push(chunk); size += chunk.byteLength; }
+    const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return { ...metadata, bytes };
   }
   markRead(accountId: string, threadId: string, expectedVersion: string): Promise<unknown> {
     if (typeof expectedVersion !== "string" || !expectedVersion || expectedVersion.length > 128) throw new Error("Read version is required");

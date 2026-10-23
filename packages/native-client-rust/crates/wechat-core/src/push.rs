@@ -9,22 +9,6 @@ struct Fence {
     authorization: [u8; 32],
     logout_epoch: Option<Vec<u8>>,
 }
-fn authorization(state: &AccountState) -> Result<[u8; 32]> {
-    // Cookies can change on ordinary RPCs. A renewed key, account, device or
-    // routing generation requires a new authenticated persistent connection.
-    Ok(Sha256::digest(serde_json::to_vec(&(
-        state.uin,
-        &state.own_username,
-        &state.device,
-        &state.session_key,
-        &state.request_key,
-        &state.response_key,
-        &state.auto_auth_key,
-        &state.long_host,
-        &state.short_host,
-    ))?)
-    .into())
-}
 fn heartbeat_interval(heartbeat: &Heartbeat) -> Duration {
     Duration::from_secs((heartbeat.next_interval as u64).clamp(30, 180))
 }
