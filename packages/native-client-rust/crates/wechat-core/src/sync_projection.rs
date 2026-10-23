@@ -429,10 +429,28 @@ impl Core {
                 return Ok(());
             }
             if let Some(read) =
+                super::read_control::parse_remote_thread_entry_read(&message, &state.own_username)
+            {
+                self.retain_control_raw(account, command, receipt)?;
+                self.apply_partial_thread_read(
+                    account,
+                    &read,
+                    receipt,
+                    super::read_control::PartialThreadRead::Entry,
+                )?;
+                // Entry also prepares sessions and notifies observers. Keep
+                // the full control blocked after its once-only unread effect.
+            }
+            if let Some(read) =
                 super::read_control::parse_remote_thread_exit_read(&message, &state.own_username)
             {
                 self.retain_control_raw(account, command, receipt)?;
-                self.apply_partial_thread_exit_read(account, &read, receipt)?;
+                self.apply_partial_thread_read(
+                    account,
+                    &read,
+                    receipt,
+                    super::read_control::PartialThreadRead::Exit,
+                )?;
                 // Session exit has additional observer and auto-dismiss
                 // behavior. Retain the full command as blocked below, even
                 // after its independently journaled unread component is done.
@@ -1573,6 +1591,22 @@ mod encrypted_roundtrip {
     }
     #[test]
     fn exit_control_partial_read_is_guarded_once_and_never_completes_the_full_control() {
+        partial_read_fixture(5, "peer", "partial-thread-exit-read", "remote_exit_read");
+    }
+
+    #[test]
+    fn entry_control_partial_read_is_guarded_once_for_direct_and_group_sessions() {
+        for peer in ["peer", "room@chatroom"] {
+            partial_read_fixture(2, peer, "partial-thread-entry-read", "remote_entry_read");
+        }
+    }
+
+    fn partial_read_fixture(
+        operation: u32,
+        ordinary_peer: &str,
+        marker_prefix: &str,
+        origin: &str,
+    ) {
         use base64::Engine;
         let temporary = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
@@ -1603,11 +1637,17 @@ mod encrypted_roundtrip {
             rusqlite::Connection::open(location.root().join("db_storage/session/session.db"))
                 .unwrap();
         sessions.execute_batch(&format!("PRAGMA key=\"x'{hex}'\";PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;")).unwrap();
-        sessions.execute_batch("INSERT INTO Name2Id(rowid,user_name)VALUES(1,'peer');
-            INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('peer',3,0,120,0),('hidden',4,1,100,0),('brandsessionholder',5,0,100,0),('uncertain',8,0,100,0);
+        sessions
+            .execute(
+                "INSERT INTO Name2Id(rowid,user_name)VALUES(1,?1)",
+                [ordinary_peer],
+            )
+            .unwrap();
+        sessions.execute("INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp,draft,sort_timestamp,status)VALUES(?1,3,0,120,0,'preserved draft',130,7)", [ordinary_peer]).unwrap();
+        sessions.execute_batch("INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('hidden',4,1,100,0),('brandsessionholder',5,0,100,0),('uncertain',8,0,100,0);
             INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,9,1,95),(1,2,2,120);").unwrap();
         let peers = [
-            "peer",
+            ordinary_peer,
             "hidden",
             "absent",
             "brandsessionholder",
@@ -1615,7 +1655,7 @@ mod encrypted_roundtrip {
         ];
         let commands: Vec<_> = peers.iter().enumerate().map(|(index, peer)| {
             add(51, "synthetic_self", peer,
-                format!("<msg><op id=\"5\"><username>{peer}</username><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"1700000000123\"}}]]></arg></op></msg>").as_bytes(),
+                format!("<msg><op id=\"{operation}\"><username>{peer}</username><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"1700000000123\"}}]]></arg></op></msg>").as_bytes(),
                 900 + index as u64, 100)
         }).collect();
         // Simulate a crash after durable admission and before its outcome was
@@ -1623,22 +1663,22 @@ mod encrypted_roundtrip {
         store
             .put_runtime(
                 "one",
-                "partial-thread-exit-read:projected:exit-read-fixture:4",
+                &format!("{marker_prefix}:projected:partial-read-fixture:4"),
                 br#"{"outcome":"needs_review","completeControl":false}"#,
             )
             .unwrap();
         for (index, command) in commands.iter().enumerate() {
-            let receipt = format!("projected:exit-read-fixture:{index}");
+            let receipt = format!("projected:partial-read-fixture:{index}");
             let error = core
                 .apply_sync_command("one", command, &receipt, "live")
                 .unwrap_err();
             assert_eq!(
                 projection_blocker(&error).unwrap()["operationIds"],
-                json!([5])
+                json!([operation])
             );
             assert!(store.runtime("one", &receipt).unwrap().is_none());
             let marker = store
-                .runtime("one", &format!("partial-thread-exit-read:{receipt}"))
+                .runtime("one", &format!("{marker_prefix}:{receipt}"))
                 .unwrap()
                 .unwrap();
             let marker: Value = serde_json::from_slice(&marker).unwrap();
@@ -1653,8 +1693,18 @@ mod encrypted_roundtrip {
                 ][index]
             );
         }
-        let row = sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username='peer'", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap();
+        let row = sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username=?1", [ordinary_peer], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap();
         assert_eq!(row, (2, 100));
+        let preserved = sessions.query_row("SELECT draft,sort_timestamp,status,is_hidden,last_timestamp FROM SessionTable WHERE username=?1", [ordinary_peer], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?,row.get::<_,i64>(4)?))).unwrap();
+        assert_eq!(preserved, ("preserved draft".into(), 130, 7, 0, 120));
+        for (index, command) in commands.iter().enumerate() {
+            let key = format!("sync-control:projected:partial-read-fixture:{index}");
+            let sealed = store.runtime("one", &key).unwrap().unwrap();
+            assert_eq!(
+                *core.vault.open_record("one", &key, &sealed).unwrap(),
+                command.payload
+            );
+        }
         assert_eq!(
             sessions
                 .query_row(
@@ -1667,7 +1717,8 @@ mod encrypted_roundtrip {
         );
         // Local changes after evaluation must survive recovery of this still
         // blocked batch, including a previously missing/hidden session.
-        sessions.execute_batch("UPDATE SessionTable SET unread_count=7,last_clear_unread_timestamp=50 WHERE username='peer';
+        sessions.execute("UPDATE SessionTable SET unread_count=7,last_clear_unread_timestamp=50 WHERE username=?1", [ordinary_peer]).unwrap();
+        sessions.execute_batch("
             INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,10,3,96);
             UPDATE SessionTable SET is_hidden=0 WHERE username='hidden';
             INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('absent',6,0,100,0);").unwrap();
@@ -1681,12 +1732,12 @@ mod encrypted_roundtrip {
         store
             .stage_sync(
                 "one",
-                "exit-read-fixture",
+                "partial-read-fixture",
                 &core
                     .vault
                     .seal(
                         "one",
-                        "apply:exit-read-fixture",
+                        "apply:partial-read-fixture",
                         &serde_json::to_vec(&batch).unwrap(),
                     )
                     .unwrap(),
@@ -1710,7 +1761,7 @@ mod encrypted_roundtrip {
             store.runtime("one", "projected-cursor").unwrap(),
             projected_before
         );
-        assert_eq!(sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username='peer'", [], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap(), (7, 50));
+        assert_eq!(sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username=?1", [ordinary_peer], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap(), (7, 50));
         for (peer, count) in [
             ("hidden", 4),
             ("absent", 6),
@@ -1733,7 +1784,8 @@ mod encrypted_roundtrip {
             events
                 .iter()
                 .filter(|event| event.kind == "thread.read-state"
-                    && event.data["origin"] == "remote_exit_read")
+                    && event.data["origin"] == origin
+                    && event.data["completeControl"] == false)
                 .count(),
             1
         );

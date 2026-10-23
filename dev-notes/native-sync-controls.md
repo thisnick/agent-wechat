@@ -20,7 +20,7 @@ payloads, identities, binary extracts and analysis exports are not checked in.
 | Control | Established effect and current policy |
 | --- | --- |
 | Status 1 / supported `lastMessage` | Apply the supported remote unread clear. |
-| Status 2 | Reaches unread/session updates and observers. Keep blocked until the complete effect is mapped. |
+| Status 2 / supported `lastMessage` | Apply the once-only unread component for existing visible ordinary sessions. Session preparation, entered-session observers and recent handling remain unresolved, so the complete control stays blocked. |
 | Status 3 / self-to-self, own username only | No registered handler in this build. Complete only this exact form. |
 | Status 4 | Reads history settings and schedules work with chat/read maps. Keep blocked. |
 | Status 5 / supported `lastMessage` | Apply the existing once-only unread component. Session-exit observers and auto-dismiss work remain unresolved, so the complete control stays blocked. |
@@ -46,8 +46,17 @@ Opcode 2 reads and normalizes the target chat, obtains or prepares session state
 emits an entered-session observer notification, and reaches the shared unread/session
 update path using the outer AddMsg timestamp. It does not parse `lastMessage` JSON.
 A notification within about 30 seconds also enables recent-session handling;
-special peers have separate branches. A read-only subset would still leave the
-rest of the control unfinished, so opcode 2 currently remains blocked.
+special peers have separate branches. The implemented subset applies only the
+unread clear through that timestamp, using the existing conservative partial-read
+writer. It never creates or unhides a session. Missing, hidden and excluded sessions
+are recorded as evaluated without changing their unread state; `fmessage` remains
+outside the entry classifier because it has a separate official path.
+
+Applied entry reads emit `thread.read-state` with `origin: remote_entry_read` and
+`completeControl: false`. A separate entry-read marker prevents repeated writes
+after restart, including a previous uncertain attempt. Existing exit-read markers
+keep their original keys. Neither partial effect records full command completion
+or advances the complete official checkpoint. No read notification is sent back.
 
 ## Timestamp fix
 
@@ -63,8 +72,9 @@ still honors the previous partial-attempt marker, including uncertain attempts.
 Synthetic encrypted-profile tests cover unchanged unread/session/draft state for
 no-effect controls, encrypted original-byte retention, event/receipt deduplication,
 restart, mixed unknown batches, and progress of later messages. Wide timestamp
-fixtures verify the notification cutoff and ensure an opcode-5 partial read never
-finishes its full control or clears newer state during recovery.
+fixtures verify the notification cutoff and ensure opcode-2/5 partial reads never
+finish their full control or clear newer state during recovery. Encrypted direct
+and group entry fixtures also preserve draft, ordering, visibility and status fields.
 
 Group recall tests verify the incoming account/chat/sender envelope, explicit target
 server identity, preservation of the original message identity, suppression after

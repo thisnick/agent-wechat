@@ -61,6 +61,8 @@ Text goes straight to WeChat. Media is first prepared (images checked, video and
 
 **Read state.** Marking a chat read clears its unread count in the profile and sends WeChat a read notice, so your phone and other devices can clear it too. Reading history doesn't do this; only an explicit read does.
 
+Supported read, chat-open and chat-exit notices from another device also update local unread counts. Chat-open and chat-exit handling covers existing visible ordinary chats and preserves messages newer than the notice. It does not send a read notice back.
+
 ## Clients
 
 Clients only see the HTTP API and events. Each decides what to do with a message:
@@ -71,7 +73,7 @@ Clients only see the HTTP API and events. Each decides what to do with a message
 
 <Aside title="Good to know">
 - **Changes the daemon doesn't understand are kept, not skipped.** They stay saved and hold back the sync checkpoint, so nothing is silently lost.
-- **Some status updates aren't handled yet.** When you open or read a chat on your phone, WeChat sends a status notification. The daemon saves it and emits `projection.blocked`. New messages still arrive normally.
+- **Some status updates are only partly handled.** A supported chat-open or chat-exit notice can clear unread state while its remaining session changes still hold back the sync checkpoint and emit `projection.blocked`. New messages still arrive normally.
 - **Messages you send from your phone arrive too,** as `outgoing` messages from your own WeChat ID. Clients that reply to messages should skip them.
 - **Recalls arrive as changes too.** The stored message becomes "[Message recalled]" and a `message.recalled` event goes out.
 - **Your phone stays in charge.** The daemon is one more logged-in device; messages it sends show up on your phone like any other device's.

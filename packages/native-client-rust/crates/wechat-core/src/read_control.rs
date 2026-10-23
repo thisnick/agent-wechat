@@ -11,6 +11,29 @@ pub(super) struct RemoteThreadRead {
     pub through_time: i64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PartialThreadRead {
+    Entry,
+    Exit,
+}
+
+impl PartialThreadRead {
+    fn marker_prefix(self) -> &'static str {
+        match self {
+            Self::Entry => "partial-thread-entry-read",
+            // Preserve existing exit receipts across upgrades.
+            Self::Exit => "partial-thread-exit-read",
+        }
+    }
+
+    fn origin(self) -> &'static str {
+        match self {
+            Self::Entry => "remote_entry_read",
+            Self::Exit => "remote_exit_read",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LastMessage {
@@ -22,12 +45,24 @@ struct LastMessage {
 
 /// Return only the observed own-account -> peer opcode 1 lastMessage form.
 /// Missing, ambiguous, foreign-account and other opcode controls remain blocked
-/// by the caller; in particular opcode 5 is not an alias for opcode 1.
+/// by the caller; opcodes 2 and 5 are not aliases for opcode 1.
 pub(super) fn parse_remote_thread_read(
     message: &AddMessage,
     own_username: &str,
 ) -> Option<RemoteThreadRead> {
     parse_thread_control(message, own_username, "1")
+}
+
+/// Project only the shared unread component for the strict own-to-peer entry
+/// form. Linux 4.1.13.26's 0x61f92c0 -> 0x638ce60 -> 0x638dd10 uses the outer
+/// AddMsg time. Session preparation, recent handling and observers stay pending.
+pub(super) fn parse_remote_thread_entry_read(
+    message: &AddMessage,
+    own_username: &str,
+) -> Option<RemoteThreadRead> {
+    let read = parse_thread_control(message, own_username, "2")?;
+    // Friend-request sessions take a separate official entry path.
+    (read.thread != "fmessage").then_some(read)
 }
 
 /// Opcode 5 includes a bounded unread-clear side effect, plus distinct session
@@ -139,16 +174,17 @@ fn parse_thread_control(
 }
 
 impl Core {
-    /// Apply the supported read component once, even while the complete exit
+    /// Apply the supported read component once, even while the complete entry/exit
     /// control remains blocked. Evaluated no-ops are durable too: a later local
     /// session change must not make an older blocked control apply anew.
-    pub(super) fn apply_partial_thread_exit_read(
+    pub(super) fn apply_partial_thread_read(
         &self,
         account: &str,
         read: &RemoteThreadRead,
         receipt: &str,
+        kind: PartialThreadRead,
     ) -> Result<()> {
-        let partial = format!("partial-thread-exit-read:{receipt}");
+        let partial = format!("{}:{receipt}", kind.marker_prefix());
         if self.store.runtime(account, &partial)?.is_some() {
             return Ok(());
         }
@@ -162,6 +198,8 @@ impl Core {
             &partial,
             &serde_json::to_vec(&json!({"outcome":"needs_review","completeControl":false}))?,
         )?;
+        // Reuse the conservative exit-read writer for both partial effects:
+        // existing visible ordinary sessions only; never create or unhide one.
         let result = wechat_profile::mark_read_thread_exit(
             &location,
             &keys,
@@ -174,7 +212,7 @@ impl Core {
                 account,
                 &partial,
                 "thread.read-state",
-                &json!({"threadId":read.thread,"readScope":"thread","origin":"remote_exit_read","throughTime":read.through_time,"projection":result.projection,"completeControl":false}),
+                &json!({"threadId":read.thread,"readScope":"thread","origin":kind.origin(),"throughTime":read.through_time,"projection":result.projection,"completeControl":false}),
             )?;
         }
         self.store
@@ -243,10 +281,72 @@ mod tests {
     }
 
     #[test]
+    fn entry_read_is_partial_and_bound_to_an_ordinary_peer_or_group() {
+        let original = String::from_utf8(message().content)
+            .unwrap()
+            .replace("id=\"1\"", "id=\"2\"");
+        let mut value = message();
+        value.content = original.as_bytes().to_vec();
+        assert_eq!(
+            parse_remote_thread_entry_read(&value, "self"),
+            Some(RemoteThreadRead {
+                thread: "peer".into(),
+                through_time: 100,
+            })
+        );
+        assert!(parse_remote_thread_read(&value, "self").is_none());
+        assert!(parse_remote_thread_exit_read(&value, "self").is_none());
+        for peer in ["room@chatroom", "fmessage", "self"] {
+            value.to = peer.into();
+            value.peer = peer.into();
+            value.content = original
+                .replace(
+                    "<username>peer</username>",
+                    &format!("<username>{peer}</username>"),
+                )
+                .into_bytes();
+            assert_eq!(
+                parse_remote_thread_entry_read(&value, "self").is_some(),
+                peer == "room@chatroom"
+            );
+        }
+        for mutation in 0..7 {
+            let mut invalid = message();
+            invalid.content = original.as_bytes().to_vec();
+            match mutation {
+                0 => invalid.from = "foreign".into(),
+                1 => invalid.outgoing = false,
+                2 => invalid.peer = "other".into(),
+                3 => invalid.created_at = 0,
+                4 => invalid.message_type = 1,
+                5 => {
+                    invalid.content = original
+                        .replace("<username>peer</username>", "<username>other</username>")
+                        .into_bytes()
+                }
+                _ => {
+                    invalid.content = original
+                        .replace("</msg>", "<op id='5'/></msg>")
+                        .into_bytes()
+                }
+            }
+            assert!(parse_remote_thread_entry_read(&invalid, "self").is_none());
+        }
+        for opcode in ["1", "3", "5", "11"] {
+            value.to = "peer".into();
+            value.peer = "peer".into();
+            value.content = original
+                .replace("id=\"2\"", &format!("id=\"{opcode}\""))
+                .into_bytes();
+            assert!(parse_remote_thread_entry_read(&value, "self").is_none());
+        }
+    }
+
+    #[test]
     fn wide_last_message_times_do_not_replace_the_notification_cutoff() {
         let original = String::from_utf8(message().content).unwrap();
         for timestamp in ["4294967296", "1700000000123", "18446744073709551615"] {
-            for operation in ["1", "5"] {
+            for operation in ["1", "2", "5"] {
                 let mut value = message();
                 value.content = original
                     .replace("id=\"1\"", &format!("id=\"{operation}\""))
@@ -255,10 +355,10 @@ mod tests {
                         &format!("MsgCreateTime\":\"{timestamp}"),
                     )
                     .into_bytes();
-                let read = if operation == "1" {
-                    parse_remote_thread_read(&value, "self")
-                } else {
-                    parse_remote_thread_exit_read(&value, "self")
+                let read = match operation {
+                    "1" => parse_remote_thread_read(&value, "self"),
+                    "2" => parse_remote_thread_entry_read(&value, "self"),
+                    _ => parse_remote_thread_exit_read(&value, "self"),
                 }
                 .unwrap();
                 assert_eq!(read.thread, "peer");
@@ -290,7 +390,12 @@ mod tests {
             assert!(parse_remote_thread_read(&value, "self").is_none());
             value.content = String::from_utf8(value.content)
                 .unwrap()
-                .replace("id=\"1\"", "id=\"5\"")
+                .replace("id=\"1\"", "id=\"2\"")
+                .into_bytes();
+            assert!(parse_remote_thread_entry_read(&value, "self").is_none());
+            value.content = String::from_utf8(value.content)
+                .unwrap()
+                .replace("id=\"2\"", "id=\"5\"")
                 .into_bytes();
             assert!(parse_remote_thread_exit_read(&value, "self").is_none());
         }
