@@ -25,6 +25,7 @@ export type NativeRecallRequest = { serverId: string, };
 export type NativeReadRequest = { expectedVersion: string, };
 export type NativeForgetRequest = { confirm: boolean, };
 export type NativeMediaWritebackRequest = { limit: number, };
+export type NativeMediaJobRetryRequest = { reuseCompletedUpload?: boolean, };
 export type OfficialProfileRequest = { path: string | null, accountId: string | null, };
 export type OfficialProfileSelection = { accountId: string, profilePath: string, storageMode: string, savedDeviceLoginAvailable: boolean, };
 export type LoginStrategy = "auto" | "saved-device" | "qr";

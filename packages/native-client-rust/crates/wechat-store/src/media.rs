@@ -42,6 +42,15 @@ pub struct MediaAssetRecord {
     /// Present on writes and `media_asset_with_payload`; metadata reads omit it.
     pub payload: Option<Vec<u8>>,
 }
+pub struct CompletedUploadRetry<'a> {
+    pub expected: &'a MediaJobRecord,
+    pub source: &'a OwnedMediaSource,
+    pub request_hash: &'a str,
+    pub expected_authorization: &'a [u8],
+    pub expected_logout_epoch: Option<&'a [u8]>,
+    pub ownership_generation: &'a str,
+    pub payload: &'a [u8],
+}
 fn read_job(db: &Connection, id: &str) -> Result<MediaJobRecord> {
     let row=db.query_row("SELECT id,kind,state,phase,attempts,cancel_requested,retryable,error_code,data_json,payload,created_at,updated_at FROM media_jobs WHERE id=?1",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,u32>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?,r.get::<_,Option<String>>(7)?,r.get::<_,String>(8)?,r.get::<_,Vec<u8>>(9)?,r.get::<_,String>(10)?,r.get::<_,String>(11)?)))?;
     Ok(MediaJobRecord {
@@ -376,6 +385,48 @@ impl Store {
             tx.commit()?;Ok(row)
         })
     }
+    /// Queue only a core-validated, completed upload before its first business
+    /// submission. The exact old row and authorization must still be current.
+    pub fn retry_media_job_completed_upload(
+        &self,
+        account: &str,
+        retry: CompletedUploadRetry<'_>,
+    ) -> Result<MediaJobRecord> {
+        self.control(account, |db| {
+            let tx=db.transaction()?;
+            let old=read_job(&tx,&retry.expected.id)?;
+            let expected=retry.expected;
+            if old.kind!="send" || old.state!="unsupported" || old.phase!="readback" || old.attempts>=3 || old.cancel_requested || old.error_code.as_deref()!=Some("unsupported_media")
+                || !old.data.is_object() || !(old.data["result"].is_null() || old.data["result"].is_object())
+                || !old.data["serverMessageId"].is_null() || !old.data["result"]["nativeReceipt"].is_null()
+                || !(old.data["result"]["messageIds"].is_null() || old.data["result"]["messageIds"].as_array().is_some_and(|ids|ids.is_empty()))
+                || old.state!=expected.state || old.phase!=expected.phase || old.attempts!=expected.attempts
+                || old.error_code!=expected.error_code || old.payload!=expected.payload || old.data!=expected.data
+                || old.updated_at!=expected.updated_at {
+                bail!("completed_upload_retry_not_admitted");
+            }
+            let hash:String=tx.query_row("SELECT request_hash FROM media_jobs WHERE id=?1",[&old.id],|r|r.get(0))?;
+            if hash!=retry.request_hash {bail!("completed_upload_retry_not_admitted");}
+            let source:(String,u64,String)=tx.query_row("SELECT name,byte_length,sha256 FROM media_sources WHERE id=?1",[&retry.source.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            if source.0!=retry.source.name || source.1!=retry.source.byte_length || source.2!=retry.source.sha256 {bail!("completed_upload_retry_not_admitted");}
+            let value=|key:&str|->Result<Option<Vec<u8>>>{Ok(tx.query_row("SELECT value FROM runtime WHERE key=?1",[key],|r|r.get(0)).optional()?)};
+            let accepted=format!("{:x}",Sha256::digest(retry.expected_authorization));
+            if value("logged-out")?.is_some() || value("logout-epoch")?.as_deref()!=retry.expected_logout_epoch
+                || value("account-state")?.as_deref()!=Some(retry.expected_authorization)
+                || value("saved-login-accepted-state-generation")?.as_deref()!=Some(accepted.as_bytes())
+                || value("desired")?.as_deref()!=Some(b"connected")
+                || value("validated-generation")?.as_deref()!=Some(retry.ownership_generation.as_bytes()) {bail!("authorization_generation_changed");}
+            let queued:u32=tx.query_row("SELECT count(*) FROM media_jobs WHERE state IN ('queued','running')",[],|r|r.get(0))?;
+            if queued>=100 {bail!("media_queue_full");}
+            let mut data=old.data.clone();
+            data["result"]["completedUploadReuse"]=json!({"requestedAt":chrono::Utc::now().to_rfc3339(),"previousReason":old.error_code});
+            tx.execute("UPDATE media_jobs SET state='queued',cancel_requested=0,error_code=NULL,retryable=0,data_json=?2,payload=?3,updated_at=?4 WHERE id=?1",params![old.id,serde_json::to_string(&data)?,retry.payload,chrono::Utc::now().to_rfc3339()])?;
+            let row=read_job(&tx,&old.id)?;
+            job_event(&tx,account,&row)?;
+            tx.commit()?;
+            Ok(row)
+        })
+    }
     pub fn recover_media_jobs(&self, account: &str) -> Result<usize> {
         self.control(account,|db|{
             let tx=db.transaction()?;
@@ -456,6 +507,130 @@ mod tests {
         let s = Store::open(&t.path().join("data")).unwrap();
         s.create_account("test").unwrap();
         (t, s)
+    }
+    #[test]
+    fn completed_upload_retry_cas_rejects_job_source_and_authorization_races() {
+        for change in [
+            "none",
+            "payload",
+            "data",
+            "phase",
+            "attempts",
+            "source",
+            "request",
+            "authorization",
+            "epoch",
+            "accepted",
+            "ownership",
+            "receipt",
+            "malformed_root",
+            "malformed_result",
+        ] {
+            let (_dir, s) = setup();
+            let authorization = b"accepted encrypted credentials";
+            let accepted = format!("{:x}", Sha256::digest(authorization));
+            for (key, value) in [
+                ("account-state", authorization.as_slice()),
+                ("saved-login-accepted-state-generation", accepted.as_bytes()),
+                ("desired", b"connected".as_slice()),
+                ("validated-generation", b"owner".as_slice()),
+            ] {
+                s.put_runtime("test", key, value).unwrap();
+            }
+            s.create_media_source(
+                "test",
+                "source",
+                "file.bin",
+                "application/octet-stream",
+                16,
+                &"a".repeat(64),
+                b"sealed source",
+            )
+            .unwrap();
+            let source = s.media_source_metadata("test", "source").unwrap();
+            s.create_media_job(
+                "test",
+                "job",
+                "send:key",
+                &"b".repeat(64),
+                "send",
+                &json!({"result":{"cdnDownloadFailure":{"kind":"unknown_field"}}}),
+                b"original sealed plan",
+            )
+            .unwrap();
+            assert!(s.claim_media_job("test", "job").unwrap());
+            let mut row = s.media_job("test", "job").unwrap();
+            row.state = "unsupported".into();
+            row.phase = "readback".into();
+            row.error_code = Some("unsupported_media".into());
+            let expected = s.save_media_job("test", &row).unwrap();
+            match change {
+                "none"=>{},
+                "authorization"=>s.put_runtime("test","account-state",b"changed accepted credentials").unwrap(),
+                "epoch"=>s.put_runtime("test","logout-epoch",b"new login").unwrap(),
+                "accepted"=>s.put_runtime("test","saved-login-accepted-state-generation",b"different").unwrap(),
+                "ownership"=>s.put_runtime("test","validated-generation",b"different owner").unwrap(),
+                _=>s.control("test",|db|{
+                    let sql=match change {
+                        "payload"=>"UPDATE media_jobs SET payload=x'01' WHERE id='job'",
+                        "data"=>"UPDATE media_jobs SET data_json='{}' WHERE id='job'",
+                        "phase"=>"UPDATE media_jobs SET phase='submitting' WHERE id='job'",
+                        "attempts"=>"UPDATE media_jobs SET attempts=attempts+1 WHERE id='job'",
+                        "source"=>"UPDATE media_sources SET sha256='changed' WHERE id='source'",
+                        "request"=>"UPDATE media_jobs SET request_hash='changed' WHERE id='job'",
+                        "receipt"=>r#"UPDATE media_jobs SET data_json='{"serverMessageId":"accepted"}' WHERE id='job'"#,
+                        "malformed_root"=>"UPDATE media_jobs SET data_json='[]' WHERE id='job'",
+                        "malformed_result"=>r#"UPDATE media_jobs SET data_json='{"result":"unexpected"}' WHERE id='job'"#,
+                        _=>unreachable!(),
+                    };
+                    db.execute(sql,[])?;Ok(())
+                }).unwrap(),
+            }
+            // Give malformed rows a current snapshot, so their rejection tests
+            // shape admission rather than only the stale-row comparison.
+            let expected = if change.starts_with("malformed_") {
+                s.media_job("test", "job").unwrap()
+            } else {
+                expected
+            };
+            let request_hash = "b".repeat(64);
+            let retry = || CompletedUploadRetry {
+                expected: &expected,
+                source: &source,
+                request_hash: &request_hash,
+                expected_authorization: authorization,
+                expected_logout_epoch: None,
+                ownership_generation: "owner",
+                payload: b"new protected reuse plan",
+            };
+            let before = s.events("test", 0, 100).unwrap().len();
+            let outcome = s.retry_media_job_completed_upload("test", retry());
+            if change == "none" {
+                let queued = outcome.unwrap();
+                assert_eq!(queued.state, "queued");
+                assert_eq!(queued.phase, "readback");
+                assert_eq!(queued.attempts, 1);
+                assert_eq!(queued.payload, b"new protected reuse plan");
+                assert_eq!(
+                    queued.data["result"]["cdnDownloadFailure"]["kind"],
+                    "unknown_field"
+                );
+                assert_eq!(s.events("test", 0, 100).unwrap().len(), before + 1);
+                assert!(s.retry_media_job_completed_upload("test", retry()).is_err());
+                assert_eq!(s.events("test", 0, 100).unwrap().len(), before + 1);
+                assert!(s.claim_media_job("test", "job").unwrap());
+                assert!(!s.claim_media_job("test", "job").unwrap());
+                assert_eq!(s.media_job("test", "job").unwrap().attempts, 2);
+            } else {
+                assert!(outcome.is_err(), "{change}");
+                assert_ne!(
+                    s.media_job("test", "job").unwrap().state,
+                    "queued",
+                    "{change}"
+                );
+                assert_eq!(s.events("test", 0, 100).unwrap().len(), before, "{change}");
+            }
+        }
     }
     #[test]
     fn local_writeback_candidates_are_bounded_and_require_cached_or_accepted_bytes() {

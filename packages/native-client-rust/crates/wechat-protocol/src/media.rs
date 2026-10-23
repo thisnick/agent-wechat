@@ -637,17 +637,19 @@ impl CdnClient {
             }
             position += data.len();
             encrypted.extend(data);
-            for (key, target) in [
-                ("substituteftype", &mut substituted_filetype),
-                ("rsppicformat", &mut picture_format),
-            ] {
-                if reply.contains_key(key) {
-                    let value = u32::try_from(integer(&reply, key)?)?;
-                    ensure!(
-                        target.is_none_or(|previous| previous == value),
-                        "CDN representation changed during transfer"
-                    );
-                    *target = Some(value);
+            if !large {
+                for (key, target) in [
+                    ("substituteftype", &mut substituted_filetype),
+                    ("rsppicformat", &mut picture_format),
+                ] {
+                    if reply.contains_key(key) {
+                        let value = u32::try_from(integer(&reply, key)?)?;
+                        ensure!(
+                            target.is_none_or(|previous| previous == value),
+                            "CDN representation changed during transfer"
+                        );
+                        *target = Some(value);
+                    }
                 }
             }
             progress(position as u64, Some(total as u64))?;
@@ -751,6 +753,39 @@ impl CdnClient {
         })
     }
 }
+/// Only these fixed, nonsecret numeric controls can enter a stored diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LargeFileDownloadControl {
+    Version,
+    VideoFormat,
+}
+impl LargeFileDownloadControl {
+    pub const fn field_name(self) -> &'static str {
+        match self {
+            Self::Version => "ver",
+            Self::VideoFormat => "videoformat",
+        }
+    }
+}
+/// Strict rejection details. Unknown keys and response bytes are never retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LargeFileDownloadError {
+    UnknownField,
+    FixedControlMismatch {
+        control: LargeFileDownloadControl,
+        actual: i64,
+    },
+}
+impl fmt::Display for LargeFileDownloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnknownField => "Unsupported large-file download response field",
+            Self::FixedControlMismatch { .. } => "Unsupported large-file download control",
+        })
+    }
+}
+impl std::error::Error for LargeFileDownloadError {}
+
 fn validate_large_download_reply(
     reply: &CdnFields,
     descriptor: &MediaDescriptor,
@@ -777,26 +812,39 @@ fn validate_large_download_reply(
         "videoformat",
         "x-ClientIp",
     ];
-    ensure!(
-        reply.keys().all(|key| FIELDS.contains(&key.as_str())),
-        "Unsupported large-file download response field"
-    );
-    for (key, expected) in [
-        ("ver", 0),
-        ("retrysec", 0),
-        ("isretry", 0),
-        ("isoverload", 0),
-        ("isgetcdn", 0),
-        ("istrans", 999),
-        ("backsrcnum", 0),
-        ("substituteftype", 7),
-        ("rsppicformat", 0),
-        ("videoformat", 0),
+    if !reply.keys().all(|key| FIELDS.contains(&key.as_str())) {
+        return Err(LargeFileDownloadError::UnknownField.into());
+    }
+    use LargeFileDownloadControl as Control;
+    for (control, expected) in [(Control::Version, 0), (Control::VideoFormat, 0)] {
+        let actual = integer(reply, control.field_name())?;
+        if actual != expected {
+            return Err(LargeFileDownloadError::FixedControlMismatch { control, actual }.into());
+        }
+    }
+    // Linux 4.1.13.26's file7 pipeline (0x8d12d60 -> 0x8ce3000 ->
+    // 0x8ca0ec0) does not consume these on a valid retcode-zero response.
+    // The first four are optional template values; the remaining four never
+    // enter its response template. They do not trigger retries or substitution.
+    for key in [
+        "retrysec",
+        "isretry",
+        "isoverload",
+        "isgetcdn",
+        "istrans",
+        "backsrcnum",
+        "substituteftype",
+        "rsppicformat",
     ] {
-        ensure!(
-            integer(reply, key)? == expected,
-            "Unsupported large-file download control"
-        );
+        if let Some(raw) = reply.get(key) {
+            // Keep the existing 16-byte integer parser bound, with unsigned
+            // syntax. This is a native parsing policy, not a service limit.
+            ensure!(
+                raw.iter().all(u8::is_ascii_digit),
+                "Invalid large-file metadata integer"
+            );
+            integer(reply, key)?;
+        }
     }
     ensure!(
         u64::try_from(integer(reply, "rawfilesize")?)? == descriptor.expected_bytes.unwrap_or(0),
@@ -1416,25 +1464,68 @@ mod tests {
         );
         assert_eq!(downloaded.sha256, hex::encode(sha256(&raw)));
         assert_eq!(downloaded.requested_quality, MediaQuality::LargeFile);
-        assert_eq!(downloaded.substituted_filetype, Some(7));
+        assert_eq!(downloaded.substituted_filetype, None);
+        assert_eq!(downloaded.picture_format, None);
         assert_eq!(downloaded.advertised_size_matches, Some(true));
     }
     #[test]
-    fn large_download_rejects_correlation_routing_unknown_fields_and_ranges() {
+    fn large_download_rejections_expose_only_typed_static_control_details() {
+        use LargeFileDownloadControl as Control;
+        let (descriptor, _, ciphertext) =
+            download_fixture(512 * 1024 + 17, MediaQuality::LargeFile);
+        for (control, actual) in [(Control::Version, 1), (Control::VideoFormat, 1)] {
+            let mut calls = 0;
+            let error = client()
+                .download_with_transport(
+                    &descriptor,
+                    |_, _| Ok(()),
+                    |_, fields| {
+                        calls += 1;
+                        let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                        put(&mut reply, control.field_name(), actual);
+                        Ok(reply)
+                    },
+                )
+                .err()
+                .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(
+                error.downcast_ref::<LargeFileDownloadError>(),
+                Some(&LargeFileDownloadError::FixedControlMismatch { control, actual })
+            );
+            assert_eq!(error.to_string(), "Unsupported large-file download control");
+        }
+        let secret = "private-response-token-and-file-id";
+        let error = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    reply.insert(secret.into(), secret.as_bytes().to_vec());
+                    Ok(reply)
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.downcast_ref::<LargeFileDownloadError>(),
+            Some(&LargeFileDownloadError::UnknownField)
+        );
+        assert_eq!(
+            error.to_string(),
+            "Unsupported large-file download response field"
+        );
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    #[test]
+    fn large_download_rejects_correlation_format_unknown_fields_and_ranges() {
         let (descriptor, _, ciphertext) =
             download_fixture(512 * 1024 + 17, MediaQuality::LargeFile);
         for (key, value) in [
             ("seq", 2),
             ("ver", 1),
             ("retcode", -1),
-            ("isretry", 1),
-            ("retrysec", 1),
-            ("isoverload", 1),
-            ("isgetcdn", 1),
-            ("istrans", 0),
-            ("backsrcnum", 1),
-            ("substituteftype", 5),
-            ("rsppicformat", 1),
             ("videoformat", 1),
             ("rangestart", 1),
             ("rangeend", 512 * 1024),
@@ -1456,7 +1547,7 @@ mod tests {
             assert!(outcome.is_err(), "Accepted invalid {key}");
             assert_eq!(requests, 1);
         }
-        for missing in ["seq", "isgetcdn", "rawfilemd5", "filedata"] {
+        for missing in ["seq", "ver", "videoformat", "rawfilemd5", "filedata"] {
             assert!(
                 client()
                     .download_with_transport(
@@ -1472,6 +1563,164 @@ mod tests {
                 "Accepted missing {missing}"
             );
         }
+    }
+    #[test]
+    fn file7_success_metadata_is_optional_and_does_not_change_verified_bytes() {
+        // These eight names come from the reference template/consumer join,
+        // independently of the native validator's allowlist.
+        let metadata = [
+            "isretry",
+            "retrysec",
+            "isoverload",
+            "isgetcdn",
+            "istrans",
+            "backsrcnum",
+            "substituteftype",
+            "rsppicformat",
+        ];
+        let (descriptor, raw, ciphertext) = download_fixture(1024 * 1024, MediaQuality::LargeFile);
+        assert_eq!(ciphertext.len(), 1024 * 1024 + 16);
+        // Each field may be absent or vary independently on the first, middle,
+        // and final padding-only ranges, without creating another request.
+        for selected in metadata.into_iter().map(Some).chain([None]) {
+            for omit in [false, true] {
+                let mut requests = 0;
+                let result = client()
+                    .download_with_transport(
+                        &descriptor,
+                        |_, _| Ok(()),
+                        |path, fields| {
+                            requests += 1;
+                            assert_eq!(path, "/downloadbig");
+                            assert_eq!(integer(fields, "seq")?, requests);
+                            let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                            for key in metadata {
+                                if selected.is_none_or(|selected| selected == key) {
+                                    if omit {
+                                        reply.remove(key);
+                                    } else {
+                                        put(
+                                            &mut reply,
+                                            key,
+                                            match requests {
+                                                1 => 1,
+                                                2 => 999,
+                                                3 => 9_999_999_999_999_999i64,
+                                                _ => panic!("Unexpected retry or extra range"),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(reply)
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(requests, 3);
+                assert_eq!(result.bytes, raw);
+                assert_eq!(result.md5, descriptor.expected_md5.as_deref().unwrap());
+                assert_eq!(result.sha256, hex::encode(sha256(&raw)));
+                assert_eq!(result.requested_quality, MediaQuality::LargeFile);
+                assert_eq!(result.substituted_filetype, None);
+                assert_eq!(result.picture_format, None);
+            }
+        }
+    }
+    #[test]
+    fn file7_metadata_parser_bounds_and_errors_remain_strict() {
+        let (descriptor, _, ciphertext) = download_fixture(512 * 1024, MediaQuality::LargeFile);
+        for key in [
+            "isretry",
+            "retrysec",
+            "isoverload",
+            "isgetcdn",
+            "istrans",
+            "backsrcnum",
+            "substituteftype",
+            "rsppicformat",
+        ] {
+            for malformed in [
+                b"".as_slice(),
+                b"-1",
+                b"-0",
+                b"+1",
+                b" 1",
+                b"1x",
+                b"99999999999999999",
+                b"\xff",
+            ] {
+                let mut requests = 0;
+                assert!(
+                    client()
+                        .download_with_transport(
+                            &descriptor,
+                            |_, _| Ok(()),
+                            |_, fields| {
+                                requests += 1;
+                                let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                                reply.insert(key.into(), malformed.to_vec());
+                                Ok(reply)
+                            },
+                        )
+                        .is_err(),
+                    "Accepted malformed {key}"
+                );
+                assert_eq!(requests, 1);
+            }
+        }
+        let mut requests = 0;
+        let error = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    requests += 1;
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    for key in ["isretry", "retrysec", "isoverload", "isgetcdn"] {
+                        put(&mut reply, key, 1);
+                    }
+                    put(&mut reply, "retcode", -1);
+                    Ok(reply)
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "CDN download returned -1");
+        assert_eq!(requests, 1);
+    }
+    #[test]
+    fn normal_download_keeps_representation_metadata_and_consistency_checks() {
+        let (descriptor, raw, ciphertext) = download_fixture(65536, MediaQuality::File);
+        let result = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |path, fields| {
+                    assert_eq!(path, "/download");
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    put(&mut reply, "substituteftype", 5);
+                    put(&mut reply, "rsppicformat", 3);
+                    Ok(reply)
+                },
+            )
+            .unwrap();
+        assert_eq!(result.bytes, raw);
+        assert_eq!(result.substituted_filetype, Some(5));
+        assert_eq!(result.picture_format, Some(3));
+        let mut requests = 0;
+        assert!(client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    requests += 1;
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    put(&mut reply, "rsppicformat", requests);
+                    Ok(reply)
+                },
+            )
+            .is_err());
+        assert_eq!(requests, 2);
     }
     #[test]
     fn download_refuses_truncated_overlong_and_changing_source_bytes() {

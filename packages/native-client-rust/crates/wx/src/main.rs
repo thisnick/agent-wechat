@@ -240,6 +240,9 @@ enum ResourceAction {
     },
     Retry {
         id: String,
+        /// Reuse a completed file upload whose message submission never started.
+        #[arg(long)]
+        reuse_completed_upload: bool,
     },
 }
 #[derive(Subcommand)]

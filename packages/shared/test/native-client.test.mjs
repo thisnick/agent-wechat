@@ -290,3 +290,33 @@ test('quoted originals are parent-bound with embedded fallback and no caller-sel
   const embedded=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'embedded',message:null,embeddedText:'inside quote'})});
   assert.equal((await embedded.quotedMessage('a','parent')).embeddedText,'inside quote');
 });
+
+test('completed upload reuse is an explicit option on the original job retry', async () => {
+  const bodies = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(String(url), 'http://127.0.0.1:6174/v1/accounts/a/jobs/original-job/' + (body.reuseCompletedUpload ? 'retry-completed-upload' : 'retry'));
+    assert.equal(init.method, 'POST'); bodies.push(body);
+    return Response.json({ id: 'original-job', state: 'queued', attempts: 1 });
+  } });
+  await client.retryJob('a', 'original-job');
+  await client.retryJob('a', 'original-job', { reuseCompletedUpload: true });
+  assert.deepEqual(bodies, [{}, { reuseCompletedUpload: true }]);
+});
+
+test('an older daemon cannot turn completed-upload reuse into a normal retry', async () => {
+  let calls = 0;
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    calls++; assert.ok(String(url).endsWith('/jobs/original-job/retry-completed-upload'));
+    return Response.json({ error: { code: 'not_found', retryable: false } }, { status: 404 });
+  } });
+  await assert.rejects(client.retryJob('a', 'original-job', { reuseCompletedUpload: true }), error => error instanceof NativeApiError && error.status === 404);
+  assert.equal(calls, 1);
+});
+
+test('invalid retry options never fall back to an ordinary job retry', () => {
+  const client = new NativeWeChatClient({ ...options, fetch: async () => assert.fail('An invalid operator option must not start work') });
+  for (const invalid of [null, [], { reuseCompletedUpload: 1 }, { reuseCompletedUpload: 'true' }, { reuseCompletedUpload: null }, { skipReadback: true }]) {
+    assert.throws(() => client.retryJob('a', 'original-job', invalid), /Invalid media retry options/);
+  }
+});

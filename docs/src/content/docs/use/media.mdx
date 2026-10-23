@@ -102,6 +102,7 @@ Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary 
 <Aside title="Good to know">
 - See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
-- Reusing an existing uploaded copy offered by WeChat is not supported yet. That response, or an uncertain upload reservation or send, becomes `needs_review` and is never automatically repeated.
+- Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.
+- After a job stops during verification, `wx jobs retry JOB_ID --reuse-completed-upload` can reuse its saved object. This requires proof that submission never started; API clients use `POST /jobs/{id}/retry-completed-upload` with `reuseCompletedUpload: true`; the SDK accepts this option on `retryJob`.
 - Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
 </Aside>

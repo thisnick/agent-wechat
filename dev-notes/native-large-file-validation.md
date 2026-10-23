@@ -89,9 +89,10 @@ That is not a profile-handoff or FTS-compatibility test.
 | Actual Rust readback | Exact 536,870,912 bytes, full source/saved-byte equality and SHA-256 matched in 569.92 seconds; process peak RSS 1,060,332 KiB |
 | Rolling acknowledgements | Service accepted 16-, 32- and 48-byte windows, including boundaries at blocks 128, 256, 384 and 512 |
 | Real OpenClaw storage | Pinned Node 24.21.0/OpenClaw 2026.10.2 streamed all 512 MiB, fsynced and independently re-read the saved file with exact SHA-256; process peak RSS 249,148 KiB; no API or send |
-| Account sync during native upload | Succeeded in 1.58 seconds while the same file job remained uploading with one attempt; no extra message |
-| Built native file message | In progress; upload and readback precede final submission |
-| Recipient opening, cold API/CLI/SDK and database/cache checks | Pending final message |
+| Account sync during native upload/readback | Succeeded in 1.58 seconds during upload and 1.55 seconds during readback while the same file job remained running with one attempt; no extra message |
+| Built native file message | First worker attempt completed upload, then stopped at 357,040,128 readback bytes with `unsupported_media`; no final business-message submission. The exact rejected response was not retained |
+| Retained PDF object | A separate full read-only capture checked all 1,025 ranges and matched every source byte and SHA-256 in 524.49 seconds; no upload or message |
+| Recipient opening, cold API/CLI/SDK and database/cache checks | Pending investigation of the failed final-client readback |
 
 The fixed 128-block limit belonged to the initial native implementation. The
 reference uses a rolling window of the current 128-block group and its two
@@ -135,12 +136,32 @@ readback. Uncertain reservation, upload and final submission states require
 review; recovery never automatically resends a possibly accepted message.
 Cancellation, logout and account-generation checks remain between exchanges.
 
-Server cache hits, requested retries, alternate routing and unrecognized
-response controls stop the transfer. Existing-ciphertext key recovery is not
+Non-success service responses, server cache hits, unclassified routing/format
+controls and unknown response fields stop the transfer. Existing-ciphertext key recovery is not
 implemented. The validated path is a fresh cache miss, with bounded advertised
 512 KiB or 1 MiB blocks and checked acknowledgements, offsets and final metadata.
 No group, forwarding, large image/video/voice, live ARM64 or arbitrary official
 build compatibility is implied.
+
+The matching Linux file7 success handler does not consume eight named response
+metadata fields: `retrysec`, `isretry`, `isoverload`, `isgetcdn`, `istrans`,
+`backsrcnum`, `substituteftype` and `rsppicformat`. The native client accepts these
+optionally as unsigned decimal values within its 16-byte parser bound. They do
+not trigger a retry or change the requested file representation. Version and
+video-format values, unknown fields and all integrity checks remain strict.
+This static classification does not identify the original unrecorded failure.
+New failures report only a known numeric control or a generic unknown-field
+classification, excluding response payloads, keys and object identifiers.
+
+An operator can request `--reuse-completed-upload` on an unsupported file job
+that stopped in readback before final submission. Its separate API endpoint
+prevents older servers from interpreting this as an ordinary retry. Admission
+atomically binds the unchanged job, source, complete request/reservation/upload
+material and current accepted authorization. The worker takes a separate path
+that cannot reserve or upload, verifies the complete source and readback again,
+and only then journals its first final submission. Cancelled, changed, malformed
+or uncertain submission state remains blocked. Worker attempts and actual
+business-message submissions must be counted separately.
 
 ## Reproduction and checks
 
@@ -163,4 +184,4 @@ Validation gates include the pinned 1.93.1 formatter and warning-denying Clippy,
 the full Rust workspace tests, generated-contract check, workspace build and
 type checks, OpenClaw tests and the repository's AMD64 image build. Synthetic
 tests cover padding boundaries, corrupt and incomplete replies, cancellation,
-reservation/restart uncertainty, idempotency and per-kind admission limits. A paused-transfer fixture also verifies that account work can proceed while a second media job stays serialized; cookie updates resume safely, and cancellation, logout, credential rotation, epoch changes or disconnect stop the next submission while retaining completed upload receipts.
+reservation/restart uncertainty, idempotency and per-kind admission limits. A paused-transfer fixture also verifies that account work can proceed while a second media job stays serialized; cookie updates resume safely, and cancellation, logout, credential rotation, epoch changes or disconnect stop the next submission while retaining completed upload receipts. OpenClaw fixtures retain the same incoming download job after temporary status GET failures across a ten-minute wait and `media.ready`, then dispatch once. Prepared attachment manifests admit exactly 512 MiB ordinary files and reject one byte above, while nonfile bounds remain unchanged.

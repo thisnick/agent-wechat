@@ -33,6 +33,10 @@ pub(super) fn routes() -> Router<App> {
         .route("/v1/accounts/{a}/jobs/{id}/cancel", post(cancel_job))
         .route("/v1/accounts/{a}/jobs/{id}/retry", post(retry_job))
         .route(
+            "/v1/accounts/{a}/jobs/{id}/retry-completed-upload",
+            post(retry_completed_upload),
+        )
+        .route(
             "/v1/accounts/{a}/media-writeback/repair",
             post(repair_writeback),
         )
@@ -184,17 +188,47 @@ async fn retry_job(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
+    request: Option<Json<contracts::NativeMediaJobRetryRequest>>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     c.require(Some(&a), "media")
         .or_else(|_| c.require(Some(&a), "send"))?;
     let job = app.core.media_job(&a, &id)?;
     c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    let reuse = request
+        .and_then(|Json(request)| request.reuse_completed_upload)
+        .unwrap_or(false);
+    if reuse {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "completed_upload_retry_route_required",
+        ));
+    }
+    let retried = app.core.retry_media_job(&a, &id)?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(
-            serde_json::to_value(app.core.retry_media_job(&a, &id)?)
-                .map_err(anyhow::Error::from)?,
-        ),
+        Json(serde_json::to_value(retried).map_err(anyhow::Error::from)?),
+    ))
+}
+async fn retry_completed_upload(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    Json(request): Json<contracts::NativeMediaJobRetryRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "send")?;
+    if request.reuse_completed_upload != Some(true) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "completed_upload_retry_opt_in_required",
+        ));
+    }
+    let retried = app
+        .core
+        .retry_media_job_reuse_completed_upload(&a, &id)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::to_value(retried).map_err(anyhow::Error::from)?),
     ))
 }
 async fn content(
@@ -350,6 +384,22 @@ pub(super) async fn send(
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+    #[test]
+    fn completed_upload_reuse_requires_the_named_boolean_opt_in() {
+        use contracts::NativeMediaJobRetryRequest;
+        let default: NativeMediaJobRetryRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(default.reuse_completed_upload, None);
+        let requested: NativeMediaJobRetryRequest =
+            serde_json::from_value(json!({"reuseCompletedUpload":true})).unwrap();
+        assert_eq!(requested.reuse_completed_upload, Some(true));
+        for invalid in [
+            json!({"reuseCompletedUpload":"true"}),
+            json!({"resume":true}),
+            json!({"reuseCompletedUpload":true,"skipReadback":true}),
+        ] {
+            assert!(serde_json::from_value::<NativeMediaJobRetryRequest>(invalid).is_err());
+        }
+    }
     #[tokio::test]
     async fn range_body_reuses_the_verified_allocation() {
         let bytes = vec![1, 2, 3, 4, 5];

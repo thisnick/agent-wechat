@@ -1,5 +1,5 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -212,7 +212,12 @@ export class NativeWeChatClient {
   mediaAsset(accountId: string, assetId: string): Promise<MediaAsset> { return this.request(`v1/accounts/${id(accountId)}/media/${id(assetId)}`); }
   job(accountId: string, jobId: string, signal?: AbortSignal): Promise<MediaJob> { return this.request(`v1/accounts/${id(accountId)}/jobs/${id(jobId)}`, { signal }); }
   cancelJob(accountId: string, jobId: string): Promise<MediaJob> { return this.request(`v1/accounts/${id(accountId)}/jobs/${id(jobId)}/cancel`, { method: "POST", body: "{}" }); }
-  retryJob(accountId: string, jobId: string): Promise<MediaJob> { return this.request(`v1/accounts/${id(accountId)}/jobs/${id(jobId)}/retry`, { method: "POST", body: "{}" }); }
+  retryJob(accountId: string, jobId: string, options: NativeMediaJobRetryRequest = {}): Promise<MediaJob> {
+    if (!options || typeof options !== "object" || Array.isArray(options) || Object.keys(options).some(key => key !== "reuseCompletedUpload")) throw new Error("Invalid media retry options");
+    const reuse = options.reuseCompletedUpload;
+    if (reuse !== undefined && typeof reuse !== "boolean") throw new Error("Invalid media retry options");
+    return this.request(`v1/accounts/${id(accountId)}/jobs/${id(jobId)}/${reuse === true ? "retry-completed-upload" : "retry"}`, { method: "POST", body: JSON.stringify(reuse === undefined ? {} : { reuseCompletedUpload: reuse }) });
+  }
   repairMediaWriteback(accountId: string, limit = 25): Promise<NativeOperation> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid media writeback limit");
     return this.request(`v1/accounts/${id(accountId)}/media-writeback/repair`, { method: "POST", body: JSON.stringify({ limit }) });

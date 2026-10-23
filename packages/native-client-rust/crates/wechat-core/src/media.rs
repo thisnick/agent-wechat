@@ -41,6 +41,7 @@ impl MediaAccountPermit {
         result
     }
 }
+#[derive(Clone, Serialize, Deserialize)]
 struct MediaAuthorizationFence {
     authorization: [u8; 32],
     logout_epoch: Option<Vec<u8>>,
@@ -117,6 +118,113 @@ struct SendPlan {
     #[serde(default)]
     prepared_video_thumbnail_source_id: Option<String>,
     voice: Vec<VoicePart>,
+    #[serde(default)]
+    reuse_completed_upload: Option<CompletedUploadReuse>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct CompletedUploadReuse {
+    version: u32,
+    source_sha256: String,
+    plan_binding_sha256: String,
+    authorization: MediaAuthorizationFence,
+}
+fn no_final_media_submission(row: &MediaJobRecord) -> bool {
+    row.data.is_object()
+        && (row.data["result"].is_null() || row.data["result"].is_object())
+        && row.data["serverMessageId"].is_null()
+        && row.data["result"]["nativeReceipt"].is_null()
+        && (row.data["result"]["messageIds"].is_null()
+            || row.data["result"]["messageIds"]
+                .as_array()
+                .is_some_and(|ids| ids.is_empty()))
+}
+fn validate_completed_upload_plan(
+    plan: &SendPlan,
+    source: &OwnedMediaSource,
+    source_md5: Option<&str>,
+) -> Result<()> {
+    ensure!(
+        plan.request.kind == MediaKind::File
+            && plan.request.source_id == source.id
+            && plan.request.standard_source_id.is_none()
+            && plan.request.thumbnail_source_id.is_none()
+            && plan.uploaded_image.is_none()
+            && plan.uploaded_video.is_none()
+            && plan.voice.is_empty()
+            && source.byte_length > MAX_ORDINARY_SOURCE_BYTES as u64
+            && source.byte_length <= MAX_SOURCE_BYTES as u64,
+        "completed_upload_retry_not_admitted"
+    );
+    validate_destination(&plan.request.thread_id)?;
+    let uploaded = plan
+        .uploaded_file
+        .as_ref()
+        .context("completed_upload_retry_not_admitted")?;
+    let material = plan
+        .material
+        .as_ref()
+        .context("completed_upload_retry_not_admitted")?;
+    let reservation = plan
+        .reservation
+        .as_ref()
+        .context("completed_upload_retry_not_admitted")?;
+    reservation.validate()?;
+    let progress = plan
+        .file_upload_progress_id
+        .as_deref()
+        .context("completed_upload_retry_not_admitted")?;
+    let prefix = format!("{}_{}_", plan.request.thread_id, plan.created_at);
+    let suffix = progress
+        .strip_prefix(&prefix)
+        .context("completed_upload_retry_not_admitted")?;
+    let local = suffix
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .context("completed_upload_retry_not_admitted")?;
+    ensure!(
+        plan.created_at > 0
+            && suffix == local.to_string()
+            && plan.client_id == format!("{progress}_xwechat_1")
+            && plan.client_id.len() <= 1024
+            && material.task_id != 0
+            && material.key.len() == 16
+            && material.file_key.len() == 32
+            && material.file_key.bytes().all(|b| b.is_ascii_hexdigit())
+            && uploaded.descriptor.aes_key == material.key
+            && uploaded.descriptor.quality == file_upload_quality(source.byte_length as usize)
+            && uploaded.descriptor.strict_size
+            && uploaded.descriptor.expected_bytes == Some(source.byte_length)
+            && uploaded.descriptor.expected_md5.as_deref() == Some(uploaded.md5.as_str())
+            && !uploaded.descriptor.file_id.is_empty()
+            && uploaded.descriptor.file_id.len() <= 8192
+            && !uploaded.descriptor.file_id.chars().any(char::is_control)
+            && uploaded.plaintext_bytes as u64 == source.byte_length
+            && uploaded.file_name == source.name
+            && uploaded.sha256 == source.sha256
+            && source.sha256.len() == 64
+            && source.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            && uploaded.md5.len() == 32
+            && uploaded.md5.bytes().all(|b| b.is_ascii_hexdigit())
+            && source_md5.is_none_or(|value| value == uploaded.md5),
+        "completed_upload_retry_not_admitted"
+    );
+    if let Some(reuse) = &plan.reuse_completed_upload {
+        ensure!(
+            reuse.version == 1
+                && reuse.source_sha256 == source.sha256
+                && reuse.plan_binding_sha256 == completed_upload_binding(plan)?,
+            "completed_upload_retry_not_admitted"
+        );
+    }
+    Ok(())
+}
+fn completed_upload_binding(plan: &SendPlan) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&json!({
+        "request":plan.request,"clientId":plan.client_id,"createdAt":plan.created_at,
+        "material":plan.material,"reservation":plan.reservation,
+        "progressId":plan.file_upload_progress_id,"uploadedFile":plan.uploaded_file
+    }))?))
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -344,6 +452,86 @@ impl Core {
         let row = self.store.retry_media_job(account, id)?;
         self.spawn_media_worker(account, id);
         Ok(public_job(account, &row))
+    }
+    pub async fn retry_media_job_reuse_completed_upload(
+        self: &Arc<Self>,
+        account: &str,
+        id: &str,
+    ) -> Result<MediaJob> {
+        let guard = self.lock_account(account).await?;
+        let core = self.clone();
+        let account = account.to_owned();
+        let id = id.to_owned();
+        let (row, account) = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let row = core.queue_completed_upload_reuse(&account, &id)?;
+            Ok::<_, anyhow::Error>((row, account))
+        })
+        .await
+        .context("media_retry_admission_stopped")??;
+        self.spawn_media_worker(&account, &row.id);
+        Ok(public_job(&account, &row))
+    }
+    fn queue_completed_upload_reuse(&self, account: &str, id: &str) -> Result<MediaJobRecord> {
+        ensure!(
+            !self.media_network_suspended(account)? && !self.stopping.load(Ordering::Acquire),
+            "media_disconnected"
+        );
+        let expected = self.store.media_job(account, id)?;
+        ensure!(
+            expected.kind == "send"
+                && expected.state == "unsupported"
+                && expected.phase == "readback"
+                && expected.error_code.as_deref() == Some("unsupported_media")
+                && expected.attempts < 3
+                && !expected.cancel_requested
+                && no_final_media_submission(&expected),
+            "completed_upload_retry_not_admitted"
+        );
+        let mut plan: SendPlan = serde_json::from_slice(&self.vault.open_record(
+            account,
+            &format!("media-job:{id}"),
+            &expected.payload,
+        )?)?;
+        let source = self
+            .store
+            .media_source_metadata(account, &plan.request.source_id)?;
+        validate_completed_upload_plan(&plan, &source, None)?;
+        let authorization = self.media_authorization_fence(account)?;
+        plan.reuse_completed_upload = Some(CompletedUploadReuse {
+            version: 1,
+            source_sha256: source.sha256.clone(),
+            plan_binding_sha256: completed_upload_binding(&plan)?,
+            authorization: authorization.clone(),
+        });
+        let payload = self.vault.seal(
+            account,
+            &format!("media-job:{id}"),
+            &serde_json::to_vec(&plan)?,
+        )?;
+        let state_cipher = self
+            .store
+            .runtime(account, "account-state")?
+            .context("auth_required")?;
+        let request_hash = media_request_hash(
+            &plan.request,
+            &source.sha256,
+            None,
+            None,
+            Some(&source.name),
+        )?;
+        self.store.retry_media_job_completed_upload(
+            account,
+            wechat_store::CompletedUploadRetry {
+                expected: &expected,
+                source: &source,
+                request_hash: &request_hash,
+                expected_authorization: &state_cipher,
+                expected_logout_epoch: authorization.logout_epoch.as_deref(),
+                ownership_generation: &self.ownership_generation,
+                payload: &payload,
+            },
+        )
     }
     pub fn resume_media_jobs(self: &Arc<Self>) -> Result<usize> {
         let mut n = 0;
@@ -766,6 +954,7 @@ impl Core {
             uploaded_video: None,
             prepared_video_thumbnail_source_id: None,
             voice: vec![],
+            reuse_completed_upload: None,
         };
         initialize_file_upload_ids(&mut plan, source.byte_length as usize)?;
         let payload = self.vault.seal(
@@ -923,18 +1112,35 @@ impl Core {
                 core.perform_media_send_guarded(&account, &id, Some(&mut permit))
             };
             if let Err(error) = outcome {
-                let mut row = core.store.media_job(&account, &id)?;
-                if let Some((stage, code)) = service_diagnostic(&error) {
-                    row.data["result"]["serviceStage"] = stage.into();
-                    row.data["result"]["serviceCode"] = code.into();
-                    core.store.save_media_job(&account, &row)?;
-                }
+                core.record_media_failure_diagnostics(&account, &id, &error)?;
                 core.fail_media_job(&account, &id, &classify_error(&error))?;
             }
             Ok(())
         })
         .await
         .context("media_worker_stopped")?
+    }
+    fn record_media_failure_diagnostics(
+        &self,
+        account: &str,
+        id: &str,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        let service = service_diagnostic(error);
+        let cdn = cdn_download_failure(error);
+        if service.is_none() && cdn.is_none() {
+            return Ok(());
+        }
+        let mut row = self.store.media_job(account, id)?;
+        if let Some((stage, code)) = service {
+            row.data["result"]["serviceStage"] = stage.into();
+            row.data["result"]["serviceCode"] = code.into();
+        }
+        if let Some(detail) = cdn {
+            row.data["result"]["cdnDownloadFailure"] = detail;
+        }
+        self.store.save_media_job(account, &row)?;
+        Ok(())
     }
     fn progress_media(&self, account: &str, id: &str, done: u64, total: Option<u64>) -> Result<()> {
         let mut row = self.active_media_job(account, id)?;
@@ -1506,6 +1712,18 @@ impl Core {
 
 // Only a whole numeric suffix on these fixed library messages may cross the
 // protected boundary. General error strings can contain URLs or account data.
+fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
+    use wechat_protocol::media::LargeFileDownloadError;
+    let failure = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<LargeFileDownloadError>())?;
+    Some(match failure {
+        LargeFileDownloadError::UnknownField => json!({"kind":"unknown_field"}),
+        LargeFileDownloadError::FixedControlMismatch { control, actual } => {
+            json!({"kind":"fixed_control_mismatch","field":control.field_name(),"actual":actual})
+        }
+    })
+}
 fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
     for cause in error.chain() {
         let message = cause.to_string();
@@ -2096,6 +2314,46 @@ impl Core {
                 "file_reservation_needs_review"
             );
         }
+        if plan.reuse_completed_upload.is_some() {
+            // This protected mode branches before every material, reservation
+            // and upload path. Authenticate the source before any network I/O.
+            let source_md5 = hex_string(&wechat_protocol::crypto::md5(&bytes));
+            drop(bytes);
+            let native = NativeClient::new(NativeOptions::default())?;
+            return self.perform_reused_file_send(
+                account,
+                id,
+                &plan,
+                (&source, &source_md5),
+                |uploaded, state| {
+                    let conf = if uploaded.descriptor.quality == MediaQuality::LargeFile {
+                        native.large_cdn_config(state, LargeCdnRoute::Download)?
+                    } else {
+                        native.cdn_config(state)?
+                    };
+                    self.save_state(account, state)?;
+                    let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
+                    let fence = self.media_authorization_fence(account)?;
+                    let downloaded = cdn_transfer(permit, self, account, || {
+                        cdn.download_with_progress(&uploaded.descriptor, |n, t| {
+                            self.progress_media(account, id, n, t)
+                        })
+                    })?;
+                    *state = self.resume_media_state(account, id, &fence)?;
+                    Ok(downloaded.sha256)
+                },
+                |plan, state| {
+                    native.send_file_with_reservation(
+                        state,
+                        &plan.request.thread_id,
+                        &plan.client_id,
+                        plan.created_at,
+                        plan.uploaded_file.as_ref().unwrap(),
+                        plan.reservation.as_ref(),
+                    )
+                },
+            );
+        }
         let native = NativeClient::new(NativeOptions::default())?;
         let mut state = self.account_state(account)?;
         if plan.request.kind == MediaKind::Video && plan.request.play_seconds.is_none() {
@@ -2438,6 +2696,57 @@ impl Core {
             _ => bail!("unsupported_media_send"),
         };
         match result {
+            Ok(receipt) => {
+                self.finish_media_send(account, id, receipt)?;
+                self.save_state(account, &state)
+            }
+            Err(error) => {
+                let _ = self.save_state(account, &state);
+                Err(error)
+            }
+        }
+    }
+    /// A completed upload can only pass through readback and its first final
+    /// submission. This path has no reservation or upload transport callbacks.
+    fn perform_reused_file_send(
+        &self,
+        account: &str,
+        id: &str,
+        plan: &SendPlan,
+        source: (&OwnedMediaSource, &str),
+        readback: impl FnOnce(&UploadedMedia, &mut wechat_protocol::AccountState) -> Result<String>,
+        submit: impl FnOnce(
+            &SendPlan,
+            &mut wechat_protocol::AccountState,
+        ) -> Result<wechat_protocol::media_send::MediaSendResult>,
+    ) -> Result<()> {
+        let row = self.active_media_job(account, id)?;
+        ensure!(
+            row.kind == "send"
+                && row.state == "running"
+                && row.phase == "readback"
+                && row.attempts <= 3
+                && no_final_media_submission(&row),
+            "completed_upload_retry_not_admitted"
+        );
+        validate_completed_upload_plan(plan, source.0, Some(source.1))?;
+        let mode = plan
+            .reuse_completed_upload
+            .as_ref()
+            .context("completed_upload_retry_not_admitted")?;
+        let mut state = self.resume_media_state(account, id, &mode.authorization)?;
+        let uploaded = plan.uploaded_file.as_ref().unwrap();
+        let verified = readback(uploaded, &mut state)?;
+        ensure!(verified == uploaded.sha256, "media_integrity_failed");
+        // Re-read current accepted cookies and check cancellation/logout before
+        // crossing the journalled first business-submission boundary.
+        state = self.resume_media_state(account, id, &mode.authorization)?;
+        let mut row = self.store.media_job(account, id)?;
+        row.data["result"]["uploadReadbackVerified"] = true.into();
+        row.data["result"]["verifiedSha256"] = json!([verified]);
+        self.store.save_media_job(account, &row)?;
+        self.phase_media(account, id, "submitting")?;
+        match submit(plan, &mut state) {
             Ok(receipt) => {
                 self.finish_media_send(account, id, receipt)?;
                 self.save_state(account, &state)
@@ -3049,6 +3358,424 @@ fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persisted_cdn_download_diagnostics_ignore_response_context_and_preserve_reason() {
+        use wechat_protocol::media::{
+            LargeFileDownloadControl as Control, LargeFileDownloadError as Failure,
+        };
+        for (index, failure, expected) in [
+            (0, Failure::UnknownField, json!({"kind":"unknown_field"})),
+            (
+                1,
+                Failure::FixedControlMismatch {
+                    control: Control::Version,
+                    actual: 1,
+                },
+                json!({"kind":"fixed_control_mismatch","field":"ver","actual":1}),
+            ),
+        ] {
+            let (_dir, core) = test_core();
+            let id = format!("diagnostic-{index}");
+            plan_job(&core, &id, &file_plan());
+            let mut row = core.store.media_job("one", &id).unwrap();
+            row.phase = "readback".into();
+            let payload = row.payload.clone();
+            core.store.save_media_job("one", &row).unwrap();
+            let secret = "private raw body route file-id auth-key value";
+            let error = anyhow::Error::new(failure).context(secret);
+            core.record_media_failure_diagnostics("one", &id, &error)
+                .unwrap();
+            core.fail_media_job("one", &id, &classify_error(&error))
+                .unwrap();
+            let saved = core.store.media_job("one", &id).unwrap();
+            assert_eq!(saved.data["result"]["cdnDownloadFailure"], expected);
+            assert_eq!(saved.error_code.as_deref(), Some("unsupported_media"));
+            assert_eq!(saved.state, "unsupported");
+            assert!(!saved.retryable);
+            assert_eq!(saved.payload, payload);
+            assert!(!serde_json::to_string(&saved.data).unwrap().contains(secret));
+            assert!(
+                !serde_json::to_string(&core.store.events("one", 0, 100).unwrap())
+                    .unwrap()
+                    .contains(secret)
+            );
+        }
+        assert!(cdn_download_failure(&anyhow::anyhow!(
+            "Unsupported large-file download response field with private details"
+        ))
+        .is_none());
+    }
+    // Large metadata with a tiny sealed fixture keeps admission tests from
+    // allocating hundreds of MiB. Full worker source authentication is tested
+    // separately; the readback/submit seam receives that authenticated proof.
+    fn completed_retry_fixture(core: &Core, id: &str) -> (SendPlan, OwnedMediaSource) {
+        core.save_state("one", &accepted_media_state()).unwrap();
+        core.store
+            .put_runtime("one", "desired", b"connected")
+            .unwrap();
+        core.store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        let bytes = b"owned fixture";
+        let source_id = format!("source-{id}");
+        let payload = core
+            .vault
+            .seal_media("one", &format!("source:{source_id}"), bytes)
+            .unwrap();
+        core.store
+            .create_media_source(
+                "one",
+                &source_id,
+                "fixture.bin",
+                "application/octet-stream",
+                (MAX_ORDINARY_SOURCE_BYTES + 1) as u64,
+                &digest(bytes),
+                &payload,
+            )
+            .unwrap();
+        let source = core.store.media_source_metadata("one", &source_id).unwrap();
+        let mut plan = file_plan();
+        plan.request.source_id = source_id;
+        initialize_file_upload_ids(&mut plan, source.byte_length as usize).unwrap();
+        plan.material = Some(UploadMaterial {
+            key: vec![4; 16],
+            file_key: "5".repeat(32),
+            task_id: 17,
+        });
+        plan.reservation = Some(reservation());
+        plan.uploaded_file = Some(UploadedMedia {
+            descriptor: MediaDescriptor {
+                file_id: "synthetic-owned-object".into(),
+                aes_key: vec![4; 16],
+                quality: file_upload_quality(source.byte_length as usize),
+                expected_bytes: Some(source.byte_length),
+                expected_md5: Some(hex_string(&wechat_protocol::crypto::md5(bytes))),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: source.byte_length as u32,
+            md5: hex_string(&wechat_protocol::crypto::md5(bytes)),
+            sha256: source.sha256.clone(),
+            file_name: source.name.clone(),
+            width: None,
+            height: None,
+        });
+        let payload = core
+            .vault
+            .seal(
+                "one",
+                &format!("media-job:{id}"),
+                &serde_json::to_vec(&plan).unwrap(),
+            )
+            .unwrap();
+        let hash = media_request_hash(
+            &plan.request,
+            &source.sha256,
+            None,
+            None,
+            Some(&source.name),
+        )
+        .unwrap();
+        core.store.create_media_job("one",id,&format!("send:{id}"),&hash,"send",
+            &json!({"sourceId":source.id,"threadId":"filehelper","result":{"cdnDownloadFailure":{"kind":"unknown_field"}}}),&payload).unwrap();
+        assert!(core.store.claim_media_job("one", id).unwrap());
+        let mut row = core.store.media_job("one", id).unwrap();
+        row.state = "unsupported".into();
+        row.phase = "readback".into();
+        row.error_code = Some("unsupported_media".into());
+        core.store.save_media_job("one", &row).unwrap();
+        (plan, source)
+    }
+    #[test]
+    fn completed_upload_retry_admission_rejects_unsafe_or_changed_proof() {
+        for case in [
+            "needs_review",
+            "unknown",
+            "submitting",
+            "server",
+            "receipt",
+            "message",
+            "malformed_messages",
+            "malformed_root",
+            "malformed_result",
+            "attempts",
+            "missing_material",
+            "missing_reservation",
+            "changed_aes",
+            "changed_source",
+            "changed_md5",
+            "missing_upload",
+            "wrong_request",
+            "malformed_client_id",
+        ] {
+            let (_dir, core) = test_core();
+            let (mut plan, _source) = completed_retry_fixture(&core, "retry");
+            let mut row = core.store.media_job("one", "retry").unwrap();
+            match case {
+                "needs_review" | "unknown" => row.state = case.into(),
+                "submitting" => row.phase = "submitting".into(),
+                "server" => row.data["serverMessageId"] = "123".into(),
+                "receipt" => row.data["result"]["nativeReceipt"] = json!({"status":"needs_review"}),
+                "message" => row.data["result"]["messageIds"] = json!(["local-message"]),
+                "malformed_messages" => {
+                    row.data["result"]["messageIds"] = json!({"unexpected":true})
+                }
+                "malformed_root" => row.data = json!(["unexpected"]),
+                "malformed_result" => row.data["result"] = json!("unexpected"),
+                "attempts" => {
+                    // Attempts are immutable through save_media_job.
+                    for _ in 0..2 {
+                        let mut queued = core.store.media_job("one", "retry").unwrap();
+                        queued.state = "queued".into();
+                        core.store.save_media_job("one", &queued).unwrap();
+                        assert!(core.store.claim_media_job("one", "retry").unwrap());
+                    }
+                }
+                "missing_material" => plan.material = None,
+                "missing_reservation" => plan.reservation = None,
+                "changed_aes" => plan.material.as_mut().unwrap().key[0] ^= 1,
+                "changed_source" => plan.uploaded_file.as_mut().unwrap().sha256 = "f".repeat(64),
+                "changed_md5" => {
+                    plan.uploaded_file.as_mut().unwrap().descriptor.expected_md5 =
+                        Some("f".repeat(32))
+                }
+                "missing_upload" => plan.uploaded_file = None,
+                "wrong_request" => plan.request.thread_id = "different_destination".into(),
+                "malformed_client_id" => plan.client_id.push_str("_unknown"),
+                _ => unreachable!(),
+            }
+            row.payload = core
+                .vault
+                .seal(
+                    "one",
+                    "media-job:retry",
+                    &serde_json::to_vec(&plan).unwrap(),
+                )
+                .unwrap();
+            core.store.save_media_job("one", &row).unwrap();
+            assert!(
+                core.queue_completed_upload_reuse("one", "retry").is_err(),
+                "{case}"
+            );
+            assert_ne!(
+                core.store.media_job("one", "retry").unwrap().state,
+                "queued",
+                "{case}"
+            );
+        }
+    }
+    #[test]
+    fn completed_upload_retry_preserves_identity_and_diagnostic_and_binds_every_saved_input() {
+        let (_dir, core) = test_core();
+        let (original, source) = completed_retry_fixture(&core, "retry");
+        assert!(core.retry_media_job("one", "retry").is_err());
+        let queued = core.queue_completed_upload_reuse("one", "retry").unwrap();
+        assert_eq!(queued.state, "queued");
+        assert_eq!(queued.phase, "readback");
+        assert_eq!(queued.attempts, 1);
+        assert_eq!(
+            queued.data["result"]["cdnDownloadFailure"]["kind"],
+            "unknown_field"
+        );
+        assert_eq!(
+            queued.data["result"]["completedUploadReuse"]["previousReason"],
+            "unsupported_media"
+        );
+        assert!(core.queue_completed_upload_reuse("one", "retry").is_err());
+        let saved = saved_plan(&core, "retry");
+        assert_eq!(saved.client_id, original.client_id);
+        assert_eq!(
+            saved.file_upload_progress_id,
+            original.file_upload_progress_id
+        );
+        assert_eq!(
+            completed_upload_binding(&saved).unwrap(),
+            completed_upload_binding(&original).unwrap()
+        );
+        for case in ["file_key", "task_id", "reservation", "client_id", "source"] {
+            let mut altered = saved.clone();
+            match case {
+                "file_key" => altered.material.as_mut().unwrap().file_key = "6".repeat(32),
+                "task_id" => altered.material.as_mut().unwrap().task_id += 1,
+                "reservation" => altered.reservation.as_mut().unwrap().overwrite_newmsgid -= 1,
+                "client_id" => altered.client_id.push('x'),
+                "source" => altered.request.source_id.push('x'),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_completed_upload_plan(&altered, &source, None).is_err(),
+                "{case}"
+            );
+        }
+        // Even a valid AEAD record must authenticate the original byte count and
+        // source hash before this queued mode can reach any network call.
+        assert!(core.store.claim_media_job("one", "retry").unwrap());
+        assert!(core
+            .perform_media_send("one", "retry")
+            .unwrap_err()
+            .to_string()
+            .contains("source_integrity_failed"));
+        assert_eq!(
+            core.store.media_job("one", "retry").unwrap().phase,
+            "readback"
+        );
+    }
+    #[test]
+    fn completed_upload_worker_checks_saved_proof_and_login_before_readback() {
+        use std::cell::Cell;
+        for case in [
+            "missing_material",
+            "changed_reservation",
+            "keys",
+            "epoch",
+            "logout",
+        ] {
+            let (_dir, core) = test_core();
+            let (_original, source) = completed_retry_fixture(&core, "retry");
+            core.queue_completed_upload_reuse("one", "retry").unwrap();
+            assert!(core.store.claim_media_job("one", "retry").unwrap());
+            let mut plan = saved_plan(&core, "retry");
+            let md5 = plan.uploaded_file.as_ref().unwrap().md5.clone();
+            match case {
+                "missing_material" => plan.material = None,
+                "changed_reservation" => plan.reservation.as_mut().unwrap().overwrite_newmsgid -= 1,
+                "keys" => {
+                    let mut state = core.account_state("one").unwrap();
+                    state.request_key[0] ^= 1;
+                    core.save_state("one", &state).unwrap();
+                }
+                "epoch" => core
+                    .store
+                    .put_runtime("one", "logout-epoch", b"new epoch")
+                    .unwrap(),
+                "logout" => core
+                    .store
+                    .put_runtime("one", "logged-out", b"logged out")
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            let readbacks = Cell::new(0);
+            let submissions = Cell::new(0);
+            let result = core.perform_reused_file_send(
+                "one",
+                "retry",
+                &plan,
+                (&source, &md5),
+                |_, _| {
+                    readbacks.set(readbacks.get() + 1);
+                    Ok(source.sha256.clone())
+                },
+                |_, _| {
+                    submissions.set(submissions.get() + 1);
+                    bail!("unexpected submission")
+                },
+            );
+            assert!(result.is_err(), "{case}");
+            assert_eq!(readbacks.get(), 0, "{case}");
+            assert_eq!(submissions.get(), 0, "{case}");
+            assert_eq!(
+                core.store.media_job("one", "retry").unwrap().phase,
+                "readback"
+            );
+        }
+    }
+    #[test]
+    fn completed_upload_worker_requires_full_strict_readback_before_first_submission() {
+        use std::cell::Cell;
+        for case in [
+            "verified", "cookie", "unknown", "checksum", "cancel", "keys",
+        ] {
+            let (_dir, core) = test_core();
+            let (_plan, source) = completed_retry_fixture(&core, "retry");
+            core.queue_completed_upload_reuse("one", "retry").unwrap();
+            assert!(core.store.claim_media_job("one", "retry").unwrap());
+            let plan = saved_plan(&core, "retry");
+            let binding = completed_upload_binding(&plan).unwrap();
+            let readbacks = Cell::new(0);
+            let submissions = Cell::new(0);
+            let outcome = core.perform_reused_file_send(
+                "one",
+                "retry",
+                &plan,
+                (&source, &plan.uploaded_file.as_ref().unwrap().md5),
+                |uploaded, _state| {
+                    readbacks.set(readbacks.get() + 1);
+                    if case == "unknown" {
+                        return Err(anyhow::Error::new(
+                            wechat_protocol::media::LargeFileDownloadError::UnknownField,
+                        ));
+                    }
+                    if case == "checksum" {
+                        return Ok("f".repeat(64));
+                    }
+                    if case == "cookie" {
+                        let mut state = core.account_state("one").unwrap();
+                        state.cookie = vec![7, 8, 9];
+                        core.save_state("one", &state).unwrap();
+                    }
+                    if case == "cancel" {
+                        core.store.cancel_media_job("one", "retry").unwrap();
+                    }
+                    if case == "keys" {
+                        let mut state = core.account_state("one").unwrap();
+                        state.request_key[0] ^= 1;
+                        core.save_state("one", &state).unwrap();
+                    }
+                    Ok(uploaded.sha256.clone())
+                },
+                |submitted, state| {
+                    if case == "cookie" {
+                        assert_eq!(state.cookie, vec![7, 8, 9]);
+                    }
+                    submissions.set(submissions.get() + 1);
+                    assert_eq!(completed_upload_binding(submitted).unwrap(), binding);
+                    let row = core.store.media_job("one", "retry").unwrap();
+                    assert_eq!(row.phase, "submitting");
+                    assert_eq!(row.data["result"]["uploadReadbackVerified"], true);
+                    Ok(wechat_protocol::media_send::MediaSendResult {
+                        status: wechat_protocol::media_send::SendStatus::Rejected,
+                        service_code: -1,
+                        server_message_id: None,
+                        client_id_matches: Some(true),
+                    })
+                },
+            );
+            assert_eq!(readbacks.get(), 1, "{case}");
+            assert_eq!(
+                submissions.get(),
+                u32::from(matches!(case, "verified" | "cookie")),
+                "{case}"
+            );
+            assert_eq!(
+                outcome.is_ok(),
+                matches!(case, "verified" | "cookie"),
+                "{case}"
+            );
+            let saved = saved_plan(&core, "retry");
+            assert_eq!(completed_upload_binding(&saved).unwrap(), binding);
+            if case == "unknown" {
+                core.record_media_failure_diagnostics(
+                    "one",
+                    "retry",
+                    outcome.as_ref().unwrap_err(),
+                )
+                .unwrap();
+                core.fail_media_job(
+                    "one",
+                    "retry",
+                    &classify_error(outcome.as_ref().unwrap_err()),
+                )
+                .unwrap();
+                let row = core.store.media_job("one", "retry").unwrap();
+                assert_eq!(row.state, "unsupported");
+                assert_eq!(row.phase, "readback");
+                assert_eq!(
+                    row.data["result"]["cdnDownloadFailure"],
+                    json!({"kind":"unknown_field"})
+                );
+            }
+        }
+    }
     fn accepted_media_state() -> wechat_protocol::AccountState {
         wechat_protocol::AccountState {
             schema: 1,
@@ -3266,6 +3993,7 @@ mod tests {
             uploaded_video: None,
             prepared_video_thumbnail_source_id: None,
             voice: vec![],
+            reuse_completed_upload: None,
         }
     }
     fn plan_job(core: &Core, id: &str, plan: &SendPlan) {

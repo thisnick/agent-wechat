@@ -122,11 +122,24 @@ pub async fn resource(r: &Remote, kind: &str, command: ResourceAction) -> Result
                 .await
             }
         }
-        ResourceAction::Retry { id } => {
+        ResourceAction::Retry {
+            id,
+            reuse_completed_upload,
+        } => {
             if kind != "jobs" {
                 bail!("unsupported_capability: an operation cannot be implicitly restarted");
             }
-            r.post(&r.path(&format!("jobs/{}/retry", encode(&id)))?, json!({}))
+            let body = if reuse_completed_upload {
+                json!({"reuseCompletedUpload":true})
+            } else {
+                json!({})
+            };
+            let action = if reuse_completed_upload {
+                "retry-completed-upload"
+            } else {
+                "retry"
+            };
+            r.post(&r.path(&format!("jobs/{}/{action}", encode(&id)))?, body)
                 .await
         }
     }

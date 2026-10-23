@@ -249,6 +249,14 @@ pub fn checked<T: serde::de::DeserializeOwned>(value: Value) -> anyhow::Result<V
     Ok(value)
 }
 
+#[derive(Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeMediaJobRetryRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reuse_completed_upload: Option<bool>,
+}
+
 pub fn typescript() -> String {
     let declarations = [
         NativeMentions::decl(),
@@ -275,6 +283,7 @@ pub fn typescript() -> String {
         NativeReadRequest::decl(),
         NativeForgetRequest::decl(),
         NativeMediaWritebackRequest::decl(),
+        NativeMediaJobRetryRequest::decl(),
         wechat_core::OfficialProfileRequest::decl(),
         wechat_core::OfficialProfileSelection::decl(),
         wechat_core::LoginStrategy::decl(),
