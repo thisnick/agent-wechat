@@ -334,6 +334,46 @@ try {
       s.snapshot().messages.some((m) => m.body === "A real incoming push"),
     ),
   );
+  const quoteTarget = a
+    .snapshot()
+    .messages.find((message) => message.body === "A real incoming push");
+  await a.send("A native quoted reply", quoteTarget);
+  await wait(
+    "both clients render the native quote and exact target identity",
+    () =>
+      [a, b].every((session) =>
+        session
+          .snapshot()
+          .messages.some(
+            (message) =>
+              message.body === "A native quoted reply" &&
+              message.type === 49 &&
+              message.appMessageType === 57 &&
+              message.quote?.serverId === quoteTarget.serverId,
+          ),
+      ),
+  );
+  const quotedReply = a
+    .snapshot()
+    .messages.find((message) => message.body === "A native quoted reply");
+  const resolved = await client.quotedMessage(
+    a.snapshot().account,
+    quotedReply.id,
+  );
+  assert.equal(resolved.state, "resolved");
+  assert.equal(resolved.message.id, quoteTarget.id);
+  await a.send("Reply to the reply", quotedReply);
+  await wait("nested reply references the immediate parent", () =>
+    [a, b].every((session) =>
+      session
+        .snapshot()
+        .messages.some(
+          (message) =>
+            message.body === "Reply to the reply" &&
+            message.quote?.serverId === quotedReply.serverId,
+        ),
+    ),
+  );
   // Incoming fixture time is independent of wall-clock outgoing sends. Use a
   // different conversation to check its latest local message.
   await control({
@@ -592,6 +632,7 @@ try {
         "real session model with two hub clients",
         "automatic QR renewal with fresh PNG and expiration timestamp",
         "canonical incoming and outgoing content",
+        "native quoted replies, exact reference resolution and replies to replies",
         "phone-originated self-send",
         "accepted/rejected/uncertain send states",
         "status lookup without resubmission",

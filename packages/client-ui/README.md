@@ -127,7 +127,15 @@ keep the actions accessible. The menu offers copying text or opening a photo;
 own messages also offer **Recall**. Recall keeps its admission key and operation
 receipt across reloads. Unknown outcomes offer a status check instead of starting
 another attempt. The hub decides whether the exact message can be recalled.
-The hub supports sending native quoted text replies; a quoted-reply composer is not yet connected in this UI.
+The **Reply** action selects a supported message for the text composer. Its preview
+can jump to the original or be dismissed without losing the draft. Text and quote
+selections are scoped to each account and chat. Sending passes only the stored
+message ID and exact server ID to the native quoted-text API. Pending and uncertain
+sends retain that reference; checking status does not submit another send. A known
+recalled or changed source blocks sending until the quote is removed or replaced.
+Attachments require cancelling the selected text reply. The simulator exercises the
+same daemon admission, projection, event stream and quote lookup; official endpoint
+acceptance and recipient rendering remain separate final checks.
 
 Incoming images automatically load standard quality. Clicking a photo or video opens a
 shared viewer with previous/next controls, a thumbnail strip, and **Show message**.

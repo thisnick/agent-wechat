@@ -462,6 +462,51 @@ input:focus-visible {
   gap: 8px;
   padding: 8px 12px 0;
 }
+.composer-reply {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.composer-reply > .icon {
+  width: 17px;
+  height: 17px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.reply-source,
+.pending-quote {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  text-align: left;
+  font-size: 11px;
+}
+.reply-source {
+  flex: 1;
+  padding: 0;
+}
+.reply-source strong,
+.pending-quote strong {
+  font-weight: 500;
+  color: var(--ink);
+}
+.reply-source span,
+.pending-quote span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.pending-quote {
+  border-left: 2px solid var(--accent);
+  padding-left: 9px;
+  margin-bottom: 8px;
+}
 .composer-tools .field-help {
   margin: 0;
   line-height: 1.5;

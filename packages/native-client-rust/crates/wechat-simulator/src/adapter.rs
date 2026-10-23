@@ -330,6 +330,37 @@ impl Upstream for SimulatorUpstream {
             returned_client_id_matches: true,
         })
     }
+    fn send_quote(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        client_id: &str,
+        created_at: u32,
+        content: &str,
+    ) -> Result<wechat_protocol::media_send::MediaSendResult> {
+        let parsed = client_id.parse::<u32>()?;
+        ensure!(
+            parsed > 0 && parsed.to_string() == client_id,
+            "invalid_simulator_quote_client_id"
+        );
+        let reply: SendReply = self.rpc(&Request::SendQuote {
+            session: self.session(state)?,
+            destination: destination.into(),
+            content: content.into(),
+            created_at,
+            client_id: parsed,
+        })?;
+        Ok(wechat_protocol::media_send::MediaSendResult {
+            status: if reply.accepted {
+                wechat_protocol::media_send::SendStatus::ServerAccepted
+            } else {
+                wechat_protocol::media_send::SendStatus::Rejected
+            },
+            service_code: if reply.accepted { 0 } else { -1 },
+            server_message_id: reply.server_id,
+            client_id_matches: Some(true),
+        })
+    }
     fn push_connection(&self, state: &AccountState) -> Result<Box<dyn PushConnection>> {
         Ok(Box::new(SimulatorPush {
             upstream: self.clone(),

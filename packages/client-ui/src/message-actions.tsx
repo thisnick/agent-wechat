@@ -4,6 +4,8 @@ import type { Connection } from "./connection.ts";
 import { canRecall } from "./message-recall.ts";
 import { messagePresentation } from "./message-presentation.ts";
 import { useMediaViewer } from "./media-viewer-context.ts";
+import { useReply } from "./reply-context.ts";
+import { canReply } from "./reply.ts";
 import { Button, Icon } from "./ui.tsx";
 
 export function MessageActions({
@@ -14,6 +16,7 @@ export function MessageActions({
   connection: Connection;
 }) {
   const gallery = useMediaViewer();
+  const composer = useReply();
   const presentation = messagePresentation(message);
   const copyable =
     ["text", "reply", "forwarded", "link"].includes(presentation) &&
@@ -43,6 +46,13 @@ export function MessageActions({
         role="toolbar"
         aria-label="Message actions"
       >
+        {composer?.enabled && canReply(message) && (
+          <Button
+            icon="reply"
+            label="Reply"
+            onClick={() => composer.reply(message)}
+          />
+        )}
         {canRecall(message) && (
           <RecallButton message={message} connection={connection} />
         )}

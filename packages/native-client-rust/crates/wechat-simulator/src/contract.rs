@@ -48,6 +48,13 @@ pub enum Request {
         created_at: u32,
         client_id: u32,
     },
+    SendQuote {
+        session: Session,
+        destination: String,
+        content: String,
+        created_at: u32,
+        client_id: u32,
+    },
     Poll {
         session: Session,
         after: u64,

@@ -566,6 +566,80 @@ test("uncertain sends retain their key and check status without resubmitting", a
   assert.equal(hub.snapshot().sends[0].intent.state, "needs_review");
 });
 
+test("quoted sends retain exact references and their preview across an uncertain response without resubmitting", async (t) => {
+  const calls = [];
+  const target = { ...message("target"), serverId: "18446744073709551615" };
+  const hub = session(t, {
+    capabilities: async () => ({ quotedTextSend: true }),
+    messages: async () => page([target]),
+    sendText: async (...args) => {
+      calls.push(args);
+      throw new Error("lost response");
+    },
+    sendByKey: async () => receipt("needs_review"),
+  });
+  await hub.activate("a");
+  await eventually(() => hub.snapshot().capabilities.quotedTextSend === true);
+  assert.equal(await hub.send("A reply", target), true);
+  const pending = hub.snapshot().sends[0];
+  assert.deepEqual(calls[0].slice(0, 3), ["a", "peer", "A reply"]);
+  assert.deepEqual(calls[0][4], {
+    messageId: target.id,
+    serverId: target.serverId,
+  });
+  assert.deepEqual(pending.quote, calls[0][4]);
+  assert.equal(pending.quotePreview.text, "target");
+  await hub.checkSend(pending.key);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(hub.snapshot().sends[0].quote, pending.quote);
+});
+
+test("quoted send rejects foreign, recalled and changed targets instead of silently sending ordinary text", async (t) => {
+  let posts = 0;
+  let current = { ...message("target"), serverId: "99" };
+  const hub = session(t, {
+    capabilities: async () => ({ quotedTextSend: true }),
+    messages: async () => page([current]),
+    sendText: async () => {
+      posts++;
+      throw new Error("must not post");
+    },
+  });
+  await hub.activate("a");
+  await eventually(() => hub.snapshot().capabilities.quotedTextSend === true);
+  const target = { ...current };
+  for (const change of [
+    { accountId: "b" },
+    { threadId: "another" },
+    { serverId: "100" },
+  ])
+    assert.equal(await hub.send("Reply", { ...target, ...change }), false);
+  current = { ...current, recall: { observedAt: "now" } };
+  await hub.select("peer");
+  assert.equal(await hub.send("Reply", target), false);
+  assert.equal(posts, 0);
+  assert.equal(hub.snapshot().sends.length, 0);
+});
+
+test("definitive quote admission errors preserve the draft without an uncertain receipt or retry", async (t) => {
+  let posts = 0;
+  const target = { ...message("target"), serverId: "99" };
+  const hub = session(t, {
+    capabilities: async () => ({ quotedTextSend: true }),
+    messages: async () => page([target]),
+    sendText: async () => {
+      posts++;
+      throw new NativeApiError(404, "quote_target_unavailable", false);
+    },
+  });
+  await hub.activate("a");
+  await eventually(() => hub.snapshot().capabilities.quotedTextSend === true);
+  assert.equal(await hub.send("Keep this draft", target), false);
+  assert.equal(posts, 1);
+  assert.equal(hub.snapshot().sends.length, 0);
+  assert.match(hub.snapshot().error, /no longer available to quote/);
+});
+
 test("switching accounts during a send retains its receipt only for the original account", async (t) => {
   const admission = deferred();
   const hub = session(t, {

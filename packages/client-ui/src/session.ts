@@ -9,9 +9,12 @@ import {
   type NativePage,
   type NativeSendIntent,
   type NativeThread,
+  type QuoteSendReference,
+  type NativeThreadMessage,
 } from "@agent-wechat/shared";
 import { HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
+import { canReply } from "./reply.ts";
 
 export type Account = {
   id: string;
@@ -24,6 +27,8 @@ export type PendingSend = {
   key: string;
   text: string;
   threadId: string;
+  quote?: QuoteSendReference;
+  quotePreview?: NativeThreadMessage;
   intent?: NativeSendIntent;
   uncertain?: boolean;
   error?: string;
@@ -73,6 +78,20 @@ export function readableError(error: unknown): string {
           read_state_conflict:
             "The conversation changed. Refresh it and try again.",
           idempotency_conflict: "This send key is already in use.",
+          quote_target_unavailable:
+            "That message is no longer available to quote.",
+          quote_target_mismatch: "The quoted message changed. Select it again.",
+          quote_target_ambiguous:
+            "That message cannot be identified reliably. Choose another message.",
+          quote_content_unavailable:
+            "The content of that message cannot be quoted.",
+          quote_sender_unavailable:
+            "The sender of that message is unavailable.",
+          unsupported_quote_type: "This message type cannot be quoted yet.",
+          invalid_quote_reference:
+            "Select the message you want to reply to again.",
+          invalid_quote_request:
+            "Select the message you want to reply to again.",
           unsupported_simulator_operation:
             "This action isn't available on the simulator.",
           unsupported_application_media:
@@ -848,25 +867,67 @@ export class HubSession {
       await pause(1500, signal);
     }
   }
-  async send(text: string): Promise<void> {
+  async send(text: string, replyTo?: NativeMessage): Promise<boolean> {
     const account = this.value.account,
       threadId = this.value.selected,
       generation = this.generation;
-    if (!account || !threadId || !text.trim()) return;
+    if (!account || !threadId || !text.trim()) return false;
     if (this.value.selectedGroup?.isInGroup === false) {
       this.publish({
         error:
           "You are no longer in this group. Cached history is still available.",
       });
-      return;
+      return false;
     }
+    const target =
+      replyTo &&
+      (this.value.messages.find((message) => message.id === replyTo.id) ??
+        replyTo);
+    if (
+      target &&
+      (replyTo?.accountId !== account ||
+        replyTo?.threadId !== threadId ||
+        target.accountId !== account ||
+        target.threadId !== threadId ||
+        target.serverId !== replyTo?.serverId ||
+        !canReply(target) ||
+        this.value.capabilities.quotedTextSend !== true)
+    ) {
+      this.publish({
+        error:
+          "This message can’t be quoted. Choose another message or remove the reply.",
+      });
+      return false;
+    }
+    const quote = target
+      ? { messageId: target.id, serverId: target.serverId! }
+      : undefined;
+    const quotePreview = target
+      ? messageSummary(
+          target,
+          target.direction === "outgoing"
+            ? "You"
+            : (this.value.contacts.find(
+                (contact) => contact.id === target.senderId,
+              )?.displayName ?? target.senderId),
+        )
+      : undefined;
     const key = crypto.randomUUID();
     this.publish({
-      sends: [...this.value.sends, { key, text, threadId }],
+      sends: [
+        ...this.value.sends,
+        { key, text, threadId, ...(quote && { quote, quotePreview }) },
+      ],
       error: null,
     });
     try {
-      const intent = await this.client.sendText(account, threadId, text, key);
+      const intent = await this.client.sendText(
+        account,
+        threadId,
+        text,
+        key,
+        quote,
+      );
       if (this.current(account, generation)) {
         await this.acceptReceipt(intent, account, generation, key);
         // Re-read after admission: send.updated can beat the POST response.
@@ -884,6 +945,37 @@ export class HubSession {
         this.receipts?.write(account, sends);
       }
     } catch (error) {
+      if (
+        quote &&
+        error instanceof NativeApiError &&
+        !error.retryable &&
+        [
+          "invalid_quote_reference",
+          "invalid_quote_request",
+          "unsupported_quote_type",
+          "quote_target_unavailable",
+          "quote_target_mismatch",
+          "quote_target_ambiguous",
+          "quote_content_unavailable",
+          "quote_sender_unavailable",
+        ].includes(error.code)
+      ) {
+        // These admission errors occur before an intent exists. Preserve the
+        // composer's text/reference instead of showing an uncertain send.
+        if (this.current(account, generation))
+          this.publish({
+            sends: this.value.sends.filter((send) => send.key !== key),
+            error: readableError(error),
+          });
+        else {
+          const sends = (this.pending.get(account) ?? []).filter(
+            (send) => send.key !== key,
+          );
+          this.pending.set(account, sends);
+          this.receipts?.write(account, sends);
+        }
+        return false;
+      }
       const update = (sends: PendingSend[]) =>
         sends.map((send) =>
           send.key === key
@@ -898,6 +990,7 @@ export class HubSession {
         this.receipts?.write(account, sends);
       }
     }
+    return true;
   }
   async checkSend(key: string): Promise<void> {
     const account = this.value.account,

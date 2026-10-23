@@ -10,6 +10,7 @@ import { AvatarCache } from "./avatar-cache.ts";
 import { MediaInbox } from "./media-inbox.ts";
 import { MessageRecall } from "./message-recall.ts";
 import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
+import { validQuoteReference } from "./reply.ts";
 export type Connection = {
   session: HubSession;
   simulator: boolean;
@@ -46,7 +47,8 @@ export async function connect(
                 (s: PendingSend) =>
                   typeof s.key === "string" &&
                   typeof s.text === "string" &&
-                  typeof s.threadId === "string",
+                  typeof s.threadId === "string" &&
+                  (s.quote === undefined || validQuoteReference(s.quote)),
               )
               .slice(-50)
           : [];

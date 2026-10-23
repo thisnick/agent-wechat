@@ -128,6 +128,11 @@ impl Engine {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?;
+        let send_kind = if matches!(&request, Request::SendQuote { .. }) {
+            49
+        } else {
+            1
+        };
         match request {
             Request::GroupMutation { session, request } => Ok(serde_json::to_value(
                 groups::mutate(&mut db, &session, &request)?,
@@ -339,19 +344,37 @@ impl Engine {
                 content,
                 created_at,
                 client_id,
+            }
+            | Request::SendQuote {
+                session,
+                destination,
+                content,
+                created_at,
+                client_id,
             } => {
                 check_session(&db, &session)?;
                 validate_destination(&db, &session.account, &destination)?;
                 ensure!(
                     !content.is_empty()
-                        && content.len() <= 64 * 1024
+                        && content.len()
+                            <= if send_kind == 49 {
+                                128 * 1024
+                            } else {
+                                64 * 1024
+                            }
                         && created_at > 0
                         && client_id > 0,
                     "invalid_send"
                 );
+                ensure!(
+                    send_kind != 49
+                        || (content.contains("<type>57</type>") && content.contains("<refermsg>")),
+                    "invalid_quote_send"
+                );
                 let hash = format!(
                     "{:x}",
                     Sha256::digest(serde_json::to_vec(&(
+                        send_kind,
                         destination.as_str(),
                         content.as_str(),
                         created_at
@@ -381,7 +404,7 @@ impl Engine {
                     let (sid, _) = store_message(
                         &tx,
                         &session.account,
-                        1,
+                        send_kind,
                         &own(&session.account),
                         &destination,
                         content.as_bytes(),
@@ -1039,6 +1062,61 @@ mod tests {
             engine.snapshot().unwrap()["accounts"][0]["acceptedSends"],
             1
         );
+    }
+
+    #[test]
+    fn quoted_sends_keep_application_type_on_echo_and_do_not_replay_as_plain_text() {
+        let scratch = wechat_platform::private_tempdir("simulator-quote-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        let session = login(&engine, "personal");
+        let before = engine.snapshot().unwrap()["accounts"][0]["head"]
+            .as_u64()
+            .unwrap();
+        let xml = "<msg><appmsg><title>A reply</title><type>57</type><refermsg><type>1</type><svrid>123</svrid><content>Original</content></refermsg></appmsg></msg>";
+        let quote = || Request::SendQuote {
+            session: session.clone(),
+            destination: "sim_mei".into(),
+            content: xml.into(),
+            created_at: INITIAL_TIME,
+            client_id: 777,
+        };
+        let accepted = engine.request(quote()).unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(engine.request(quote()).unwrap(), accepted);
+        assert!(engine
+            .request(Request::SendText {
+                session: session.clone(),
+                destination: "sim_mei".into(),
+                content: xml.into(),
+                created_at: INITIAL_TIME,
+                client_id: 777
+            })
+            .is_err());
+        assert_eq!(
+            engine.snapshot().unwrap()["accounts"][0]["acceptedSends"],
+            1
+        );
+        engine
+            .control(Control::EchoSend {
+                account: "personal".into(),
+                client_id: 777,
+            })
+            .unwrap();
+        let batch: SyncBatch = serde_json::from_value(
+            engine
+                .request(Request::Sync {
+                    session,
+                    cursor: encode_cursor(before).unwrap(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(batch.commands.len(), 1);
+        let message =
+            wechat_protocol::wire::decode_add_message(&batch.commands[0].payload, &own("personal"))
+                .unwrap();
+        assert_eq!(message.message_type, 49);
+        assert_eq!(message.content_text.as_deref(), Some(xml));
     }
     #[test]
     fn named_fixture_ids_timestamps_and_cursors_are_reproducible() {
