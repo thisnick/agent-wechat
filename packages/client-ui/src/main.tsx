@@ -1621,9 +1621,6 @@ function Details({
   threadId: string;
   name: string;
 }) {
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false),
-    [notice, setNotice] = useState("");
   const state = connection.session.snapshot();
   return (
     <aside className="detail-panel" aria-label="Conversation details">
@@ -1649,56 +1646,9 @@ function Details({
       </div>
       <div className="detail-section">
         <div className="section-head">Conversation</div>
-        <p className="peer-id">{threadId}</p>
-        <p className="field-help">
-          History contains the messages available on this agent-wechat hub.
+        <p className="peer-id" title="Internal ID">
+          {threadId}
         </p>
-        <div className="detail-actions">
-          <button
-            disabled={
-              busy ||
-              !state.threads.find((thread) => thread.id === threadId)
-                ?.unreadCount
-            }
-            onClick={() => {
-              setBusy(true);
-              setError("");
-              void connection.session
-                .markRead(threadId)
-                .then((result) => {
-                  setNotice(
-                    (result as { phoneReceiptSent?: boolean }).phoneReceiptSent
-                      ? "Marked as read."
-                      : "Marked read on this agent-wechat hub. Phone confirmation is unavailable.",
-                  );
-                })
-                .catch((error) => setError(readableError(error)))
-                .finally(() => setBusy(false));
-            }}
-          >
-            Mark as read
-          </button>
-          <button
-            disabled={busy}
-            onClick={() => {
-              if (!state.account) return;
-              setBusy(true);
-              setError("");
-              void connection.avatars
-                .refresh(state.account, threadId)
-                .then(() => setNotice("Avatar refreshed."))
-                .catch((error) => setError(readableError(error)))
-                .finally(() => setBusy(false));
-            }}
-          >
-            Refresh avatar
-          </button>
-        </div>
-        {notice && (
-          <p className="account-notice" role="status">
-            {notice}
-          </p>
-        )}
       </div>
       {state.account && threadId.endsWith("@chatroom") && (
         <GroupSettings
@@ -1707,7 +1657,6 @@ function Details({
           groupId={threadId}
         />
       )}
-      {error && <p>{error}</p>}
     </aside>
   );
 }

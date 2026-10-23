@@ -173,6 +173,10 @@ export function AttachmentPicker({
                   onClick={() => {
                     const target = review;
                     setReview(null);
+                    void connection.session.readOnReply(
+                      account,
+                      target.threadId,
+                    );
                     void outbox
                       .send(target.threadId, target.file, target.kind)
                       .catch((error) => setError(error.message));
@@ -722,7 +726,9 @@ function MediaDownloadAction({
   const label = saving
     ? "Saving…"
     : working
-      ? "Downloading…"
+      ? original
+        ? "Getting original…"
+        : "Downloading…"
       : ready
         ? "Download"
         : original && canRetrieve(asset)
@@ -779,7 +785,11 @@ function MediaDownloadAction({
         disabled={saving || working || (!ready && !canRetrieve(asset))}
         onClick={() => void save()}
       >
-        <Icon name="download" />
+        {working ? (
+          <span className="media-spinner" aria-hidden="true" />
+        ) : (
+          <Icon name={original && !ready ? "cloud-download" : "download"} />
+        )}
         <span>{label}</span>
       </button>
       <span className="download-disclosure" id={id} role="tooltip">
@@ -797,16 +807,30 @@ function MediaDownloadAction({
       </span>
       {working && (
         <>
-          <progress aria-label="Download progress" value={progress} max={100} />
+          <progress
+            aria-label={
+              original ? "Original download progress" : "Download progress"
+            }
+            value={progress}
+            max={100}
+          />
           {progress !== undefined && (
             <span className="download-percent">{progress}%</span>
           )}
-          <Button
-            icon="close"
-            label="Cancel download"
-            disabled={job?.cancelRequested}
-            onClick={() => void model.cancel(asset)}
-          />
+          <button
+            className="media-transfer-cancel"
+            aria-label={
+              original ? "Cancel original download" : "Cancel download"
+            }
+            disabled={!job || job.cancelRequested}
+            onClick={() => {
+              void model
+                .cancel(asset)
+                .catch((error) => setError(readableError(error)));
+            }}
+          >
+            {job?.cancelRequested ? "Cancelling…" : "Cancel"}
+          </button>
         </>
       )}
       {error && (

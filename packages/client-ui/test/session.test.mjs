@@ -216,6 +216,205 @@ test("a repeated read conflict reloads history before retrying and leaves the ne
   assert.match(hub.snapshot().error, /clear unread/);
 });
 
+for (const quoted of [false, true]) {
+  test(`${quoted ? "a quoted group reply" : "a text reply"} clears unread arrivals in an already open chat`, async (t) => {
+    const threadId = quoted ? "room@chatroom" : "peer";
+    let unread = 0,
+      version = "1",
+      posts = 0;
+    const marks = [];
+    const thread = () => ({
+      id: threadId,
+      accountId: "a",
+      unreadCount: unread,
+      readStateVersion: version,
+    });
+    const target = message("1", "a", threadId);
+    const intent = receipt("queued", { destination: threadId });
+    const hub = session(t, {
+      threads: async () => page([thread()]),
+      thread: async () => thread(),
+      capabilities: async () => ({ quotedTextSend: true }),
+      messages: async () => page([target]),
+      message: async () => message("2", "a", threadId),
+      markRead: async (...args) => {
+        marks.push(args);
+        unread = 0;
+        version = "3";
+        return {};
+      },
+      sendText: async (...args) => {
+        posts++;
+        assert.deepEqual(
+          args[4],
+          quoted ? { messageId: "1", serverId: "1" } : undefined,
+        );
+        return intent;
+      },
+      send: async () => intent,
+    });
+    await hub.activate("a");
+    await eventually(() => hub.snapshot().capabilities.quotedTextSend === true);
+    unread = 3;
+    version = "2";
+    await hub.consume(
+      { kind: "message.committed", data: { messageId: "2" } },
+      "a",
+    );
+    assert.equal(hub.snapshot().threads[0].unreadCount, 3);
+    assert.equal(await hub.send("A reply", quoted ? target : undefined), true);
+    await eventually(() => hub.snapshot().threads[0].unreadCount === 0);
+    assert.deepEqual(marks, [["a", threadId, "2"]]);
+    assert.equal(posts, 1);
+  });
+}
+
+test("a reply read conflict keeps newer arrivals unread and never retries the reply or a newer version", async (t) => {
+  const reading = deferred(),
+    marks = [];
+  let unread = 0,
+    version = "1",
+    posts = 0;
+  const thread = () => ({
+    id: "peer",
+    unreadCount: unread,
+    readStateVersion: version,
+  });
+  const hub = session(t, {
+    threads: async () => page([thread()]),
+    thread: async () => thread(),
+    messages: async () => page([message("1")]),
+    markRead: async (...args) => {
+      marks.push(args);
+      await reading.promise;
+      throw new NativeApiError(409, "read_state_conflict");
+    },
+    sendText: async () => {
+      posts++;
+      return receipt();
+    },
+    send: async () => receipt(),
+  });
+  await hub.activate("a");
+  unread = 2;
+  version = "2";
+  await hub.refresh();
+  assert.equal(await hub.send("Reply while new messages arrive"), true);
+  unread = 3;
+  version = "3";
+  reading.resolve();
+  await eventually(() => hub.snapshot().threads[0].readStateVersion === "3");
+  assert.deepEqual(marks, [["a", "peer", "2"]]);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 3);
+  assert.equal(hub.snapshot().error, null);
+  assert.equal(posts, 1);
+});
+
+test("reply read acknowledgments deduplicate the same view and stay scoped across an account switch", async (t) => {
+  const reading = deferred(),
+    marks = [],
+    reads = [];
+  let unread = 0;
+  const thread = (account) => ({
+    id: "peer",
+    accountId: account,
+    unreadCount: account === "a" ? unread : 0,
+    readStateVersion: account === "a" ? "2" : "b-version",
+  });
+  const hub = session(t, {
+    threads: async (account) => page([thread(account)]),
+    thread: async (account) => {
+      reads.push(account);
+      return thread(account);
+    },
+    markRead: async (...args) => {
+      marks.push(args);
+      await reading.promise;
+      unread = 0;
+      return {};
+    },
+  });
+  await hub.activate("a");
+  unread = 4;
+  await hub.refresh();
+  const first = hub.readOnReply("a", "peer");
+  await hub.readOnReply("a", "peer");
+  await hub.readOnReply("b", "peer");
+  await hub.readOnReply("a", "another-chat");
+  await hub.activate("b");
+  const before = reads.length;
+  reading.resolve();
+  await first;
+  assert.deepEqual(marks, [["a", "peer", "2"]]);
+  assert.equal(reads.length, before);
+  assert.equal(hub.snapshot().account, "b");
+  assert.equal(hub.snapshot().threads[0].readStateVersion, "b-version");
+});
+
+test("reply read failures leave unread status intact without blocking or resubmitting the send", async (t) => {
+  let unread = 0,
+    posts = 0,
+    marks = 0;
+  const thread = () => ({
+    id: "peer",
+    unreadCount: unread,
+    readStateVersion: "1",
+  });
+  const hub = session(t, {
+    threads: async () => page([thread()]),
+    thread: async () => thread(),
+    markRead: async () => {
+      marks++;
+      throw Error("offline");
+    },
+    sendText: async () => {
+      posts++;
+      return receipt();
+    },
+    send: async () => receipt(),
+  });
+  await hub.activate("a");
+  unread = 2;
+  await hub.refresh();
+  assert.equal(await hub.send("A reply"), true);
+  await eventually(() => !!hub.snapshot().error);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 2);
+  assert.equal(hub.snapshot().sends[0].intent.state, "queued");
+  assert.match(hub.snapshot().error, /clear unread/);
+  assert.equal(posts, 1);
+  assert.equal(marks, 1);
+});
+
+test("replying while history is loading leaves read admission to the completed open", async (t) => {
+  const history = deferred(),
+    marks = [];
+  let unread = 3;
+  const thread = () => ({
+    id: "peer",
+    unreadCount: unread,
+    readStateVersion: "1",
+  });
+  const hub = session(t, {
+    threads: async () => page([thread()]),
+    thread: async () => thread(),
+    messages: async () => history.promise,
+    markRead: async (...args) => {
+      marks.push(args);
+      unread = 0;
+      return {};
+    },
+    sendText: async () => receipt(),
+    send: async () => receipt(),
+  });
+  const opening = hub.activate("a");
+  await eventually(() => hub.snapshot().selected === "peer");
+  await hub.send("Reply before the history finishes loading");
+  assert.deepEqual(marks, []);
+  history.resolve(page([message("1")]));
+  await opening;
+  assert.deepEqual(marks, [["a", "peer", "1"]]);
+});
+
 test("media readiness reaches subscribers only for the active account", async (t) => {
   const hub = session(t),
     seen = [];

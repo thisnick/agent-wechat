@@ -5,6 +5,7 @@ import {
   useState,
   useSyncExternalStore,
   type ReactNode,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -189,7 +190,7 @@ export function PhotoViewer({
               centerOnInit
               centerZoomedOut
               smooth={!reducedMotion}
-              doubleClick={{ mode: "toggle", step: 1, animationTime }}
+              doubleClick={{ disabled: true }}
               zoomAnimation={{ disabled: reducedMotion, animationTime }}
               autoAlignment={{
                 animationTime,
@@ -237,7 +238,10 @@ export function PhotoViewer({
                 </div>
               </div>
               <div className="photo-viewer-body">
-                <PhotoCanvas image={current.type === 3}>
+                <PhotoCanvas
+                  image={current.type === 3}
+                  animationTime={animationTime}
+                >
                   <MediaCard
                     key={current.id}
                     message={current}
@@ -350,12 +354,34 @@ function ResetPhotoZoom({ messageId }: { messageId: string }) {
 
 function PhotoCanvas({
   image,
+  animationTime,
   children,
 }: {
   image: boolean;
+  animationTime: number;
   children: ReactNode;
 }) {
   const zoomed = useTransformComponent(isZoomed);
+  const { state, resetTransform, zoomToPoint } = useControls();
+  const gesture = useRef<{
+    id: number;
+    x: number;
+    y: number;
+    moved: boolean;
+  } | null>(null);
+  function moved(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = gesture.current;
+    if (
+      start &&
+      (event.pointerId !== start.id ||
+        Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5)
+    )
+      start.moved = true;
+  }
+  function toggle(clientX: number, clientY: number) {
+    if (state.scale > 1.001) void resetTransform(animationTime);
+    else void zoomToPoint(2, clientX, clientY, animationTime);
+  }
   return (
     <TransformComponent
       wrapperClass={`photo-stage${image ? " photo-image-stage" : ""}${zoomed ? " is-zoomed" : ""}`}
@@ -363,6 +389,45 @@ function PhotoCanvas({
       wrapperProps={{
         tabIndex: image ? 0 : undefined,
         "aria-label": image ? "Image canvas" : undefined,
+        onPointerDown: (event) => {
+          if (!event.isPrimary) {
+            if (gesture.current) gesture.current.moved = true;
+          } else
+            gesture.current = {
+              id: event.pointerId,
+              x: event.clientX,
+              y: event.clientY,
+              moved: false,
+            };
+        },
+        onPointerMove: moved,
+        onPointerUp: moved,
+        onPointerCancel: () => {
+          if (gesture.current) gesture.current.moved = true;
+        },
+        onDragStart: (event) => {
+          if (image) event.preventDefault();
+        },
+        onClick: (event) => {
+          if (
+            image &&
+            event.button === 0 &&
+            !gesture.current?.moved &&
+            event.target instanceof HTMLImageElement
+          )
+            toggle(event.clientX, event.clientY);
+        },
+        onKeyDown: (event) => {
+          if (
+            !image ||
+            event.target !== event.currentTarget ||
+            !["Enter", " "].includes(event.key)
+          )
+            return;
+          event.preventDefault();
+          const bounds = event.currentTarget.getBoundingClientRect();
+          toggle(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        },
       }}
     >
       {children}

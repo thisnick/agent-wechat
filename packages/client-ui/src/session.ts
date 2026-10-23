@@ -200,6 +200,7 @@ export class HubSession {
   private catalogRequest = 0;
   private detailsRequest = 0;
   private threadRequests = new Map<string, number>();
+  private replyReads = new Set<string>();
   private catalogFlight: {
     account: string;
     generation: number;
@@ -584,6 +585,44 @@ export class HubSession {
       await this.refreshThread(account, threadId, generation);
     return result;
   }
+  async readOnReply(account: string, threadId: string): Promise<void> {
+    if (
+      this.stopped ||
+      account !== this.value.account ||
+      threadId !== this.value.selected ||
+      !this.historyLoaded ||
+      this.value.opening
+    )
+      return;
+    const thread = this.value.threads.find((item) => item.id === threadId);
+    if (!thread?.readStateVersion || (thread.unreadCount ?? 0) <= 0) return;
+    const generation = this.generation;
+    const version = thread.readStateVersion;
+    const key = JSON.stringify([account, threadId, version]);
+    if (this.replyReads.has(key)) return;
+    this.replyReads.add(key);
+    try {
+      // Replying acknowledges the current view, never a newer unseen version.
+      await this.client.markRead(account, threadId, version);
+    } catch (error) {
+      if (
+        this.current(account, generation) &&
+        this.value.selected === threadId &&
+        !this.value.error &&
+        !(
+          error instanceof NativeApiError &&
+          error.code === "read_state_conflict"
+        )
+      )
+        this.publish({
+          error: `Couldn’t clear unread status. ${readableError(error)}`,
+        });
+    } finally {
+      this.replyReads.delete(key);
+      if (this.current(account, generation))
+        await this.refreshThread(account, threadId, generation).catch(() => {});
+    }
+  }
   private loadCatalog(account: string, generation: number): Promise<void> {
     if (
       this.catalogFlight?.account === account &&
@@ -920,6 +959,7 @@ export class HubSession {
       ],
       error: null,
     });
+    void this.readOnReply(account, threadId);
     try {
       const intent = await this.client.sendText(
         account,

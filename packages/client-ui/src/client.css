@@ -1096,6 +1096,16 @@ input:focus-visible {
   width: 24px;
   height: 24px;
 }
+.media-transfer-cancel {
+  padding: 5px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.media-transfer-cancel:hover {
+  color: var(--ink);
+  background: #ffffff0b;
+}
 .download-percent {
   font-size: 10px;
   color: var(--muted);
@@ -1345,6 +1355,49 @@ input:focus-visible {
 .recall-action {
   display: flex;
 }
+.recall-confirm {
+  width: min(420px, calc(100vw - 32px));
+  margin: auto;
+  padding: 24px;
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.recall-confirm::backdrop {
+  background: #14151499;
+  backdrop-filter: blur(3px);
+}
+.recall-confirm h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+.recall-confirm > p {
+  margin: 10px 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.recall-preview {
+  margin: 0;
+  padding: 12px 14px;
+  border-left: 2px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bubble);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.recall-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+.recall-confirm-actions button {
+  padding: 9px 16px;
+  border-radius: 6px;
+}
 .recall-error {
   position: absolute;
   top: calc(100% + 5px);
@@ -1422,13 +1475,22 @@ input:focus-visible {
   height: 100%;
 }
 .photo-image-stage {
-  cursor: zoom-in;
   touch-action: none;
+}
+.photo-image-stage .media-preview {
+  pointer-events: auto;
+  cursor: zoom-in;
 }
 .photo-image-stage.is-zoomed {
   cursor: grab;
 }
+.photo-image-stage.is-zoomed .media-preview {
+  cursor: grab;
+}
 .photo-image-stage.is-zoomed:active {
+  cursor: grabbing;
+}
+.photo-image-stage.is-zoomed:active .media-preview {
   cursor: grabbing;
 }
 .photo-stage .bubble.viewer-media {

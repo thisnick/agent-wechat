@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { createPortal } from "react-dom";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { canRecall } from "./message-recall.ts";
@@ -6,6 +13,7 @@ import { messagePresentation } from "./message-presentation.ts";
 import { useMediaViewer } from "./media-viewer-context.ts";
 import { useReply } from "./reply-context.ts";
 import { canReply } from "./reply.ts";
+import { messageSummary } from "./thread-preview.ts";
 import { Button, Icon } from "./ui.tsx";
 
 export function MessageActions({
@@ -118,6 +126,7 @@ function RecallButton({
 }) {
   const model = connection.messageRecall(message);
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
+  const [confirming, setConfirming] = useState(false);
   useEffect(() => {
     if (state.operation?.state === "succeeded")
       void connection.session
@@ -135,18 +144,95 @@ function RecallButton({
       ? "Check recall"
       : "Recall";
   return (
-    <span className="recall-action">
-      <Button
-        icon="recall"
-        label={label}
-        disabled={state.busy || (!!state.operation && !state.uncertain)}
-        onClick={() => void (state.operation ? model.check() : model.recall())}
-      />
-      {state.error && (
-        <span className="recall-error" role="status">
-          {state.error}
-        </span>
+    <>
+      <span className="recall-action">
+        <Button
+          icon="recall"
+          label={label}
+          disabled={state.busy || (!!state.operation && !state.uncertain)}
+          onClick={() => {
+            if (state.operation) void model.check();
+            else setConfirming(true);
+          }}
+        />
+        {state.error && (
+          <span className="recall-error" role="status">
+            {state.error}
+          </span>
+        )}
+      </span>
+      {confirming && (
+        <RecallConfirmation
+          message={message}
+          close={() => setConfirming(false)}
+          confirm={() => {
+            setConfirming(false);
+            const current = connection.session.snapshot();
+            const target = current.messages.find(
+              (item) => item.id === message.id,
+            );
+            if (
+              current.account === message.accountId &&
+              current.selected === message.threadId &&
+              target &&
+              target.serverId === message.serverId &&
+              canRecall(target)
+            )
+              void model.recall();
+          }}
+        />
       )}
-    </span>
+    </>
+  );
+}
+
+function RecallConfirmation({
+  message,
+  close,
+  confirm,
+}: {
+  message: NativeMessage;
+  close: () => void;
+  confirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const heading = useId();
+  const description = useId();
+  useEffect(() => {
+    const target = dialog.current;
+    const focused = document.activeElement;
+    target?.showModal();
+    return () => {
+      target?.close();
+      if (focused instanceof HTMLElement && focused.isConnected)
+        focused.focus();
+    };
+  }, []);
+  return createPortal(
+    <dialog
+      ref={dialog}
+      className="modal recall-confirm"
+      aria-labelledby={heading}
+      aria-describedby={description}
+      onCancel={(event) => {
+        event.preventDefault();
+        close();
+      }}
+    >
+      <h2 id={heading}>Recall this message?</h2>
+      <p id={description}>This can’t be undone.</p>
+      <blockquote className="recall-preview">
+        {messageSummary(message, "You").text.slice(0, 240)}
+      </blockquote>
+      <div className="recall-confirm-actions">
+        <button className="secondary" autoFocus onClick={close}>
+          Cancel
+        </button>
+        <button className="primary" onClick={confirm}>
+          Recall
+        </button>
+      </div>
+    </dialog>,
+    document.body,
   );
 }

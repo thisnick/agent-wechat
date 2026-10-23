@@ -1,10 +1,11 @@
 import {
   Settings,
   ImageOff,
-  Undo2,
+  MessageSquareX,
   ZoomIn,
   ZoomOut,
   Focus,
+  CloudDownload,
 } from "lucide-react";
 import type { ReactNode } from "react";
 const icons: Record<string, string> = {
@@ -42,11 +43,12 @@ const icons: Record<string, string> = {
 export function Icon({ name }: { name: string }) {
   const component = (
     {
-      recall: Undo2,
+      recall: MessageSquareX,
       "zoom-in": ZoomIn,
       "zoom-out": ZoomOut,
       "reset-zoom": Focus,
-    } as Record<string, typeof Undo2>
+      "cloud-download": CloudDownload,
+    } as Record<string, typeof MessageSquareX>
   )[name];
   if (component) {
     const Component = component;

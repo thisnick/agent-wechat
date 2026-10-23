@@ -315,10 +315,6 @@ export function GroupSettings({
             {refreshing ? "Refreshing…" : "Refresh group"}
           </button>
         </div>
-        <p className="field-help">
-          Saved on this agent-wechat hub. Refresh to check changes from other
-          devices.
-        </p>
         {group?.isInGroup === false ? (
           <p className="group-membership">You are no longer in this group.</p>
         ) : (
@@ -419,7 +415,7 @@ export function GroupSettings({
       <div className="detail-section group-settings">
         <div className="group-section-head">
           <div className="section-head">
-            Members <small>{members.length} saved</small>
+            Members <small>{members.length}</small>
           </div>
           <div className="group-member-actions">
             <button
@@ -440,7 +436,6 @@ export function GroupSettings({
             </button>
           </div>
         </div>
-        <p className="field-help">The saved member list may be incomplete.</p>
         {members.map((member) => (
           <div key={member.id} className="member">
             <HubAvatar

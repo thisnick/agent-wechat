@@ -124,7 +124,9 @@ hover or keyboard focus. Sent messages have no sender label; received messages
 keep the sender name. Timestamps sit to the left of sent bubbles and to the right
 of received bubbles. Touch devices
 keep the actions accessible. The menu offers copying text or opening a photo;
-own messages also offer **Recall**. Recall keeps its admission key and operation
+own messages also offer **Recall** with a distinct message-removal icon. It opens a
+confirmation dialog showing the selected message; Cancel and Escape send no request.
+Recall keeps its admission key and operation
 receipt across reloads. Unknown outcomes offer a status check instead of starting
 another attempt. The hub decides whether the exact message can be recalled.
 The **Reply** action selects a supported message for the text composer. Its preview
@@ -141,12 +143,15 @@ Incoming images automatically load standard quality. Clicking a photo or video o
 shared viewer with previous/next controls, a thumbnail strip, and **Show message**.
 Images zoom and pan on the full viewer canvas, behind the fixed navigation arrows
 and thumbnail tray. Animated zoom, drag panning, wheel and pinch gestures use
-`react-zoom-pan-pinch`; **Reset zoom** returns to the centered fit view. Double-click
-toggles zoom, and `+`, `-`, and `0` zoom in, out, and reset. Reduced-motion preferences
+`react-zoom-pan-pinch`; **Reset zoom** returns to the centered fit view. A single image
+click toggles zoom; dragging pans without toggling. Enter or Space on the image canvas
+also toggles zoom, and `+`, `-`, and `0` zoom in, out, and reset. Reduced-motion preferences
 disable zoom animation and pan inertia. Videos have native playback controls. Video thumbnails
 load separately from playback, so browsing the strip does not fetch full videos.
 Earlier photos and videos load through the conversation's history cursor as needed. The
 viewer keeps **Download** available beside **Get original** and its transfer progress.
+**Get original** uses a cloud-download icon, then a spinner and **Getting original…**.
+Its progress has a **Cancel** text action; the close icon closes the viewer.
 Once the original is cached, **Download** saves that original to this device. Quality
 and size appear only when the download control is hovered or focused, as
 “Smaller copy” or “Original.” When no original source is provided, only standard can
@@ -216,6 +221,9 @@ chat. It fetches a fresh read version before loading; a conflict reloads both
 version and history once before trying again. It never retries against unseen
 messages by swapping in a newer version alone. Repeated conflicts report an error.
 Failed loads and responses from a previously selected chat do not clear badges.
+Text replies, quoted replies, and attachment sends also acknowledge the loaded chat's
+current read version. That acknowledgment runs separately from sending; read failures
+never resubmit a reply. A conflict refreshes the badge and keeps newer arrivals unread.
 Cross-device read synchronization is handled by the hub.
 
 Message events refresh the changed message and thread only. Read-state events
@@ -236,7 +244,7 @@ avatars for visible message senders and the header collage; opening its member
 list does the same for visible rows. These requests use the existing per-person
 avatar refresh operation, with deduplication and at most four refreshes at once.
 The client does not download the entire roster on group open. Missing or unavailable
-photos keep initials; **Refresh avatar** remains available for direct contacts.
+photos keep initials.
 
 ## New chats and groups
 
@@ -283,11 +291,10 @@ start OpenClaw agent turns.
 
 Settings can rename the selected account and sign it out, with confirmation and
 same-operation status recovery after a lost response or reload. Sign-out keeps
-history. Conversation details provide **Mark as read** with the hub's version
-check and phone-notification receipt, plus **Refresh avatar**. Cached avatars
-replace initials; absent avatars keep initials. A successful receipt reports
-server acceptance, not observation of a real phone badge. Group details load all
-roster pages.
+history. Conversation details show the internal conversation ID with a hover label,
+group settings, and members. Read acknowledgments and visible avatar refreshes run
+automatically. Cached avatars replace initials; absent avatars keep initials.
+Group details load all roster pages.
 
 | Area             | Current browser behavior                                                                                      |
 | ---------------- | ------------------------------------------------------------------------------------------------------------- |
