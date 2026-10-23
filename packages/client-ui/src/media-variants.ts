@@ -5,6 +5,8 @@ export const standardImage = (assets: MediaAsset[]): MediaAsset | undefined =>
   assets.find((asset) => asset.variant === "standard");
 export const cachedVariant = (asset: MediaAsset): boolean =>
   asset.state === "available" && asset.actualVariant === asset.variant;
+export const cachedOriginal = (assets: MediaAsset[]): MediaAsset | undefined =>
+  assets.find((asset) => asset.variant === "original" && cachedVariant(asset));
 export const canRetrieve = (asset: MediaAsset): boolean =>
   asset.retryable &&
   !["available", "expired", "unsupported"].includes(asset.state);

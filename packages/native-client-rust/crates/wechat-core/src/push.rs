@@ -238,7 +238,7 @@ impl Core {
         )?;
         self.store
             .put_runtime(account, &format!("apply-origin:{id}"), origin.as_bytes())?;
-        let projection = self.project_pending(account)?;
+        let projection = self.project_pending_with_media(account, true)?;
         if !batch.continuation {
             self.store.put_runtime(account, "history-caught-up", b"1")?;
         }

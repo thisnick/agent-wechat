@@ -134,13 +134,18 @@ then **Download original** to save the cached full-quality image to this device.
 When there is no original source, it offers **Download standard** instead. Size
 appears only when the download control is hovered or focused; transfer progress
 and cancellation appear while it runs. The conversation keeps displaying standard
-quality even after an original is downloaded. An unavailable image shows an icon.
+quality even after an original is downloaded. The carousel first shows standard,
+then replaces it with a verified cached original after its bytes load and decode.
+A failed upgrade leaves the standard visible. Opening the carousel does not
+request an original from WeChat. An unavailable image shows an icon.
 
 Clicking a resolved quote loads any intervening history pages and scrolls to its
 source message. Missing or recalled originals retain their state. Searches can
 jump back into the conversation without losing its loaded history.
 
-Visible voice notes automatically load into browser playback controls. Files and
+The wx daemon downloads new voice notes on receipt, independently of the browser.
+Visible voice notes load those bytes into browser playback controls; older notes
+still have a lazy download fallback. Files and
 videos use the same compact download action and transfer jobs. Unsupported,
 pending and expired assets retain their actual state; raw XML is never an
 attachment. The conversation and viewer share transfer state, so opening a viewer

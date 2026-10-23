@@ -95,3 +95,21 @@ test("downloads prefer the advertised original and never substitute standard byt
     ["photo"],
   );
 });
+
+test("carousel upgrades accept only verified cached originals", async () => {
+  const { cachedOriginal } = await import("../src/media-variants.ts");
+  const original = {
+    id: "o",
+    variant: "original",
+    actualVariant: "original",
+    state: "available",
+  };
+  assert.equal(cachedOriginal([original]), original);
+  for (const change of [
+    { state: "pending" },
+    { state: "expired" },
+    { actualVariant: "standard" },
+    { variant: "standard" },
+  ])
+    assert.equal(cachedOriginal([{ ...original, ...change }]), undefined);
+});

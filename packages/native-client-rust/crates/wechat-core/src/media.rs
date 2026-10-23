@@ -20,6 +20,8 @@ use wechat_protocol::{
     NativeOptions,
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
+#[path = "media_auto.rs"]
+mod automatic;
 #[path = "media_identity.rs"]
 mod identity;
 #[path = "media_video.rs"]
@@ -898,6 +900,8 @@ impl Core {
                 &serde_json::to_value(&metadata)?,
                 None,
             )?;
+        }
+        if row.state == "queued" {
             self.spawn_media_worker(account, &row.id);
         }
         Ok(public_job(account, &row))

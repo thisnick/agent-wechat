@@ -360,6 +360,25 @@ impl Core {
         receipt: &str,
         origin: &str,
     ) -> Result<()> {
+        self.apply_sync_command_with_media(account, command, receipt, origin, false)
+    }
+    pub(crate) fn apply_received_sync_command(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+    ) -> Result<()> {
+        self.apply_sync_command_with_media(account, command, receipt, origin, true)
+    }
+    fn apply_sync_command_with_media(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+        download_voice: bool,
+    ) -> Result<()> {
         if command.id == 4 {
             // Native DelContact handler 0x6228370 calls 0x786f830. Lookup
             // 0x786e260 returning no Contact jumps to 0x786fe54 without mutation.
@@ -698,6 +717,9 @@ impl Core {
             &options,
         )?;
         let id = crate::message_id(&source)?;
+        if download_voice && message.message_type == 34 && origin != "profile_import" {
+            self.queue_received_voice(account, &id)?;
+        }
         self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
@@ -2366,3 +2388,219 @@ impl Core {
 #[cfg(test)]
 #[path = "incoming_recall_tests.rs"]
 mod recall_tests;
+
+#[cfg(test)]
+mod automatic_voice_tests {
+    use super::encrypted_roundtrip::{add, state};
+    use super::*;
+    fn fixture() -> (tempfile::TempDir, Arc<Store>, Arc<Core>) {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        (temporary, store, core)
+    }
+    fn voice(server: u64) -> SyncCommand {
+        add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg length='32' voicelength='1000'/></msg>",
+            server,
+            100,
+        )
+    }
+    #[test]
+    fn received_voice_queues_one_bound_playback_download_without_a_client() {
+        let (_temporary, store, core) = fixture();
+        core.apply_received_sync_command("one", &voice(200), "voice-first", "live")
+            .unwrap();
+        core.apply_received_sync_command("one", &voice(200), "voice-replay", "catchup")
+            .unwrap();
+        let queued = store.runtime_prefix("one", "received-voice:", 100).unwrap();
+        assert_eq!(queued.len(), 1);
+        let value: Value = serde_json::from_slice(&queued[0].1).unwrap();
+        assert_eq!(value["request"]["quality"], "normal");
+        let id = value["request"]["assetId"].as_str().unwrap();
+        let asset = core.media_asset("one", id).unwrap();
+        assert_eq!(asset.kind, crate::MediaKind::Voice);
+        assert_eq!(asset.variant, crate::MediaVariant::Normal);
+        assert!(store.queued_media_jobs("one").unwrap().is_empty());
+    }
+    #[test]
+    fn local_repair_profile_import_and_non_voice_messages_do_not_queue_network_work() {
+        let (_temporary, store, core) = fixture();
+        core.apply_sync_command("one", &voice(200), "voice-repair", "live")
+            .unwrap();
+        core.apply_received_sync_command("one", &voice(201), "voice-import", "profile_import")
+            .unwrap();
+        core.apply_received_sync_command(
+            "one",
+            &add(1, "peer", "synthetic_self", b"Text", 202, 100),
+            "text",
+            "live",
+        )
+        .unwrap();
+        assert!(store
+            .runtime_prefix("one", "received-voice:", 100)
+            .unwrap()
+            .is_empty());
+    }
+    #[test]
+    fn automatic_voice_queue_survives_restart_and_cancelled_jobs_are_not_restarted() {
+        let (temporary, store, core) = fixture();
+        core.apply_received_sync_command("one", &voice(200), "voice-first", "live")
+            .unwrap();
+        let queued = store.runtime_prefix("one", "received-voice:", 100).unwrap();
+        let value: Value = serde_json::from_slice(&queued[0].1).unwrap();
+        let asset = value["request"]["assetId"].as_str().unwrap().to_owned();
+        let key = format!("download:{asset}");
+        let (mut row, _) = store
+            .create_media_job(
+                "one",
+                "cancelled-voice",
+                &key,
+                &format!("{:x}", Sha256::digest(asset.as_bytes())),
+                "download",
+                &json!({"assetId":asset}),
+                b"",
+            )
+            .unwrap();
+        row.state = "cancelled".into();
+        row.cancel_requested = true;
+        store.save_media_job("one", &row).unwrap();
+        drop(core);
+        drop(store);
+        let reopened = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        let core = Core::new(reopened.clone(), None).unwrap();
+        assert_eq!(
+            reopened
+                .runtime_prefix("one", "received-voice:", 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        reopened
+            .put_runtime("one", "desired", b"connected")
+            .unwrap();
+        reopened
+            .put_runtime(
+                "one",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(core.admit_received_voice("one").unwrap(), 1);
+        assert_eq!(
+            reopened.media_job("one", "cancelled-voice").unwrap().state,
+            "cancelled"
+        );
+        assert!(reopened
+            .runtime_prefix("one", "received-voice:", 100)
+            .unwrap()
+            .is_empty());
+    }
+    #[tokio::test]
+    async fn automatic_voice_waits_for_queue_capacity_and_keeps_the_pending_receipt() {
+        let (_temporary, store, core) = fixture();
+        core.apply_received_sync_command("one", &voice(200), "voice-first", "live")
+            .unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .put_runtime(
+                "one",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+        for index in 0..100 {
+            store
+                .create_media_job(
+                    "one",
+                    &format!("full-{index}"),
+                    &format!("full-{index}"),
+                    &"0".repeat(64),
+                    "download",
+                    &Value::Null,
+                    b"",
+                )
+                .unwrap();
+        }
+        assert_eq!(core.admit_received_voice("one").unwrap(), 0);
+        assert_eq!(
+            store
+                .runtime_prefix("one", "received-voice:", 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.queued_media_jobs("one").unwrap().len(), 100);
+    }
+    #[test]
+    fn recalled_voice_and_disconnected_accounts_never_start_automatic_transfers() {
+        let (_temporary, store, core) = fixture();
+        core.apply_received_sync_command("one", &voice(200), "voice-first", "live")
+            .unwrap();
+        store
+            .put_runtime("one", "desired", b"disconnected")
+            .unwrap();
+        assert_eq!(core.admit_received_voice("one").unwrap(), 0);
+        assert_eq!(
+            store
+                .runtime_prefix("one", "received-voice:", 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        core.apply_sync_command("one", &add(10002, "peer", "synthetic_self", b"<sysmsg type='revokemsg'><revokemsg><session>peer</session><msgid>12</msgid><newmsgid>200</newmsgid><replacemsg>Recalled</replacemsg><revoketime>0</revoketime></revokemsg></sysmsg>", 999, 110), "voice-recall", "live").unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .put_runtime(
+                "one",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(core.admit_received_voice("one").unwrap(), 0);
+        }
+        assert!(store.queued_media_jobs("one").unwrap().is_empty());
+        assert!(store
+            .runtime_prefix("one", "received-voice:", 100)
+            .unwrap()
+            .is_empty());
+    }
+    #[test]
+    fn malformed_voice_metadata_does_not_block_projection_or_create_network_work() {
+        let (_temporary, store, core) = fixture();
+        core.apply_received_sync_command(
+            "one",
+            &add(
+                34,
+                "peer",
+                "synthetic_self",
+                b"<msg><voicemsg length='0'/></msg>",
+                200,
+                100,
+            ),
+            "bad-voice",
+            "live",
+        )
+        .unwrap();
+        assert!(store
+            .runtime_prefix("one", "received-voice:", 100)
+            .unwrap()
+            .is_empty());
+        assert!(store.runtime("one", "bad-voice").unwrap().is_some());
+        assert!(store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(
+                |event| event.kind == "media.auto-download" && event.data["state"] == "unavailable"
+            ));
+    }
+}

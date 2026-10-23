@@ -16,22 +16,50 @@ export async function mediaJourney({ client, control, wait, state, account }) {
         (message) => message.id,
       ),
     );
+    const receiptCursor = (await client.threads(account, { limit: 1 }))
+      .asOfEventCursor;
     await control({ op: "receive_media", account, peer: "sim_mei", kind });
     const message = await wait(`incoming ${kind} fixture`, async () =>
       (await client.messages(account, "sim_mei", { limit: 200 })).items.find(
         (message) => message.type === type && !before.has(message.id),
       ),
     );
+    let automaticVoice;
+    if (kind === "voice") {
+      assert.ok(receiptCursor);
+      // No UI, media discovery, or transfer request starts this download.
+      automaticVoice = await wait(
+        "daemon downloads received voice",
+        async () => {
+          const events = await client.events(account, receiptCursor, 200);
+          for (const event of events.items.filter(
+            (event) => event.kind === "media.ready",
+          )) {
+            const cached = await client.mediaAsset(account, event.data.assetId);
+            if (
+              cached.messageId === message.id &&
+              cached.variant === "normal" &&
+              cached.actualVariant === "normal" &&
+              cached.state === "available"
+            )
+              return cached;
+          }
+        },
+      );
+      assert.ok(automaticVoice.jobId);
+    }
     const assets = await client.mediaAssets(account, message.id);
     const asset =
       assets.items.find((asset) => asset.variant === variant) ??
       assets.items[0];
     assert.ok(asset, `missing ${kind} asset`);
-    const transfer = await client.transferMedia(account, {
-      messageId: message.id,
-      assetId: asset.id,
-      quality: asset.variant,
-    });
+    const transfer = automaticVoice
+      ? await client.job(account, automaticVoice.jobId)
+      : await client.transferMedia(account, {
+          messageId: message.id,
+          assetId: asset.id,
+          quality: asset.variant,
+        });
     const completed = await wait(`${kind} transfer`, async () => {
       const job = await client.job(account, transfer.id);
       assert.ok(

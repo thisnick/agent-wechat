@@ -11,13 +11,22 @@ import { Aside } from '@astrojs/starlight/components';
 | Image | Downloadable image, best quality available | Shown to the model |
 | File (PDF, etc.) | Downloadable file | File path |
 | Video | Downloadable MP4 | File path |
-| Voice | Downloadable audio | File path, plus a transcript if configured |
+| Voice | Automatically cached audio | File path, plus a transcript if configured |
 | Animated sticker | Original sticker bytes | Image |
 | Quote reply | Comment in `body`, plus the quote embedded in the reply | Comment and a labeled quote |
 | Forwarded chat | Readable list of who said what | Same text |
 | Link card (article, music, video) | Title, description, URL, source, optional thumbnail | Card text and thumbnail |
 | Recalled message | `[Message recalled]` | Removed from pending work |
 | Anything else | Marked unsupported | Not sent to the agent |
+
+## Voice notes
+
+The `wx` daemon automatically downloads newly received voice notes and prepares
+playable audio. This runs without an open browser or OpenClaw session. Downloads
+use the normal media jobs, resume after a daemon restart, and pause while the
+account is disconnected. Cancelled or failed jobs can be inspected through the
+media API; they are not silently resubmitted. Local repair does not download new
+media.
 
 ## Quotes
 

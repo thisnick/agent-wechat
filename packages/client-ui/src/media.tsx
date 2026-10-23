@@ -21,6 +21,7 @@ import {
   cachedVariant,
   canRetrieve,
   downloadAsset,
+  cachedOriginal,
 } from "./media-variants.ts";
 import { useVisible } from "./visible.tsx";
 import { usePhotoViewer } from "./photo-viewer.tsx";
@@ -345,8 +346,12 @@ export function MediaCard({
   const sticker = message.type === 47;
   const voice = message.type === 34;
   const visual = image || sticker;
+  const standard = standardImage(state.assets);
+  const original = viewer ? cachedOriginal(state.assets) : undefined;
   const asset = image
-    ? standardImage(state.assets)
+    ? viewer && (!standard || !cachedVariant(standard)) && original
+      ? original
+      : standard
     : (state.assets.find(
         (asset) => asset.variant === (voice ? "normal" : "standard"),
       ) ?? state.assets[0]);
@@ -376,6 +381,7 @@ export function MediaCard({
         <AssetContent
           key={`${asset.id}:${asset.sha256}`}
           asset={asset}
+          upgrade={original?.id !== asset.id ? original : undefined}
           connection={connection}
           open={
             image && !previewOnly && !viewer && gallery
@@ -440,13 +446,18 @@ export function AssetContent({
   asset,
   connection,
   open,
+  upgrade,
 }: {
   asset: MediaAsset;
   connection: Connection;
   open?: () => void;
+  upgrade?: MediaAsset;
 }) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
+  const [baseReady, setBaseReady] = useState(false);
+  const [shownVariant, setShownVariant] = useState(asset.variant);
+  const baseUrl = useRef("");
   const preview = asset.preview;
   const type = preview?.contentType ?? asset.contentType ?? "";
   const inline =
@@ -470,7 +481,9 @@ export function AssetContent({
             type: content.contentType,
           }),
         );
+        baseUrl.current = objectUrl;
         setUrl(objectUrl);
+        setBaseReady(true);
       })
       .catch((error) => {
         if (!controller.signal.aborted) setError(readableError(error));
@@ -480,10 +493,45 @@ export function AssetContent({
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [asset.accountId, asset.id, asset.sha256]);
+  useEffect(() => {
+    if (!baseReady || !upgrade || !cachedVariant(upgrade)) return;
+    const controller = new AbortController();
+    let objectUrl = "";
+    void connection.session.client
+      .mediaContent(upgrade.accountId, upgrade.id, {
+        representation: upgrade.preview ? "preview" : "original",
+        maxBytes: NATIVE_MAX_SOURCE_BYTES,
+        signal: controller.signal,
+      })
+      .then(async (content) => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(
+          new Blob([new Uint8Array(content.bytes).buffer], {
+            type: content.contentType,
+          }),
+        );
+        const decoded = new Image();
+        decoded.src = objectUrl;
+        await decoded.decode();
+        if (controller.signal.aborted) return;
+        setUrl(objectUrl);
+        setShownVariant(upgrade.variant);
+      })
+      .catch(() => {
+        /* A failed original preview keeps the visible standard image. */
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setUrl(baseUrl.current);
+      setShownVariant(asset.variant);
+    };
+  }, [baseReady, upgrade?.accountId, upgrade?.id, upgrade?.sha256]);
   const image = (
     <img
       className="media-preview"
       src={url}
+      data-media-variant={shownVariant}
       alt={
         asset.kind === "sticker" ? "Sticker" : asset.filename || "Shared image"
       }

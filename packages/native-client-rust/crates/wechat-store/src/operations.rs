@@ -307,6 +307,22 @@ impl Store {
             Ok(())
         })
     }
+    pub fn runtime_prefix(
+        &self,
+        account: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        anyhow::ensure!(
+            !prefix.is_empty() && prefix.len() <= 100 && (1..=100).contains(&limit),
+            "invalid_runtime_query"
+        );
+        self.control(account, |db| {
+            let mut query = db.prepare("SELECT key,value FROM runtime WHERE substr(key,1,length(?1))=?1 ORDER BY key LIMIT ?2")?;
+            let rows = query.query_map(params![prefix, limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
     pub fn append_event(&self, id: &str, kind: &str, data: &Value) -> Result<Event> {
         self.control(id, |db| {
             let tx = db.transaction()?;
@@ -908,5 +924,33 @@ mod tests {
             .is_err());
         assert!(store.revoke_token(&grant.id).unwrap());
         assert!(store.access_tokens().unwrap()[0].revoked);
+    }
+}
+
+#[cfg(test)]
+mod runtime_prefix_tests {
+    use super::*;
+    #[test]
+    fn runtime_prefix_is_bounded_literal_and_account_scoped() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        for key in ["queue:1", "queue:2", "other", "literal%key"] {
+            store.put_runtime("one", key, key.as_bytes()).unwrap();
+        }
+        store
+            .put_runtime("two", "queue:1", b"another-account")
+            .unwrap();
+        assert_eq!(
+            store.runtime_prefix("one", "queue:", 1).unwrap(),
+            vec![("queue:1".into(), b"queue:1".to_vec())]
+        );
+        assert_eq!(
+            store.runtime_prefix("one", "literal%", 100).unwrap().len(),
+            1
+        );
+        assert!(store.runtime_prefix("one", "", 1).is_err());
+        assert!(store.runtime_prefix("one", "queue:", 101).is_err());
     }
 }

@@ -1384,6 +1384,9 @@ impl Core {
         self.project_pending(account)
     }
     fn project_pending(&self, account: &str) -> Result<Value> {
+        self.project_pending_with_media(account, false)
+    }
+    fn project_pending_with_media(&self, account: &str, download_voice: bool) -> Result<Value> {
         let mut projected = 0;
         let mut unsupported = 0;
         self.account_state(account)?;
@@ -1407,7 +1410,11 @@ impl Core {
                 if self.store.runtime(account, &receipt)?.is_some() {
                     continue;
                 }
-                let outcome = self.apply_sync_command(account, command, &receipt, &origin);
+                let outcome = if download_voice {
+                    self.apply_received_sync_command(account, command, &receipt, &origin)
+                } else {
+                    self.apply_sync_command(account, command, &receipt, &origin)
+                };
                 match outcome {
                     Ok(()) => projected += 1,
                     Err(error) => {
@@ -1626,6 +1633,7 @@ impl Core {
             }
             self.store.clear_runtime(&account.id, "history-caught-up")?;
             self.start_push_worker(&account.id)?;
+            self.start_received_voice_worker(&account.id);
             let core = self.clone();
             tokio::spawn(async move {
                 let mut delay = 1;
