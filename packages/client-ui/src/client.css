@@ -443,16 +443,64 @@ input:focus-visible {
   font-size: 12px;
 }
 
-.new-chat {
+.modal.new-chat,
+.modal.group-edit {
   width: min(480px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid var(--line);
+  max-height: calc(100dvh - 32px);
+}
+.new-chat .modal-head,
+.group-edit .modal-head {
+  padding: 0 0 20px;
+  border: 0;
+  gap: 16px;
+}
+.new-chat .modal-head h2,
+.group-edit .modal-head h2 {
+  font-weight: 650;
+  letter-spacing: -0.4px;
+}
+.modal.new-chat .search,
+.modal.group-edit .search {
+  min-height: 42px;
+  background: var(--canvas);
+  border-color: var(--line);
+}
+.modal.new-chat .search:focus-within,
+.modal.group-edit .search:focus-within {
+  border-color: var(--accent);
+}
+.modal.new-chat .search input,
+.modal.group-edit .search input {
+  background: transparent;
+  padding: 0;
+  line-height: 20px;
+  font-size: 13px;
+}
+.new-chat > .field-help,
+.group-edit > .field-help {
+  margin: 16px 0 0;
+  line-height: 1.6;
+  font-size: 11px;
+}
+.group-edit .group-name .field-help {
+  margin: 0;
+  line-height: 1.5;
+}
+.modal .group-name input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .new-chat-tabs {
   display: flex;
   gap: 8px;
-  margin: 12px 0 20px;
+  margin: 0 0 20px;
   border-bottom: 1px solid var(--line);
 }
 .new-chat-tabs button {
+  flex: 1;
   padding: 10px 12px;
   color: var(--muted);
   border-bottom: 2px solid transparent;
@@ -478,7 +526,9 @@ input:focus-visible {
 .new-chat-contacts {
   max-height: min(320px, 40vh);
   overflow-y: auto;
-  margin-top: 12px;
+  margin: 12px 0;
+  display: grid;
+  gap: 4px;
 }
 .new-chat-contact {
   display: flex;
@@ -493,8 +543,23 @@ input:focus-visible {
 .new-chat-contact:hover {
   background: var(--canvas);
 }
-.new-chat-contact span {
+.new-chat-contact > span:not(.avatar) {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.new-chat-contact > .avatar {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+.new-chat-contact:has(input:checked) {
+  background: var(--accent-soft);
+}
+.new-chat-contact:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .new-chat-contact input {
   accent-color: var(--accent);
@@ -506,8 +571,13 @@ input:focus-visible {
   gap: 16px;
   align-items: center;
   justify-content: space-between;
-  padding-top: 20px;
+  padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+.new-chat-footer .primary {
+  flex-shrink: 0;
+  padding: 11px 16px;
+  border-radius: 7px;
 }
 .new-chat-footer small {
   color: var(--muted);
