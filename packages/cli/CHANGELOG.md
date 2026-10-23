@@ -1,5 +1,33 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.12
+
+### Minor Changes
+
+- [#257](https://github.com/thisnick/agent-wechat/pull/257) [`2d0b57c`](https://github.com/thisnick/agent-wechat/commit/2d0b57c3f2f5141aa85515a29384e50668c8928d) Thanks [@thisnick](https://github.com/thisnick)! - Add admin-scoped native group creation, rename, membership, own display name, announcement clearing, leave and group notification operations with stable idempotency keys and retained uncertain outcomes. Split member list and exact lookup, refresh server group details, and expose matching API/SDK methods.
+
+  Add the owner-only `wechat_group_info` OpenClaw tool. Recognized incoming group metadata updates are saved before events; unknown sync controls remain pending. Automatic propagation of every edit made on another device is not established.
+
+- [#255](https://github.com/thisnick/agent-wechat/pull/255) [`673c2c3`](https://github.com/thisnick/agent-wechat/commit/673c2c3c41e96d5d76b42682ab88b79348963a70) Thanks [@thisnick](https://github.com/thisnick)! - Add native ordinary-file transfers up to 512 MiB, including large-file routing, upload completion receipts, verified download readback, and persisted file-message reservations. Apply the file limit consistently in the daemon, CLI, SDK, and OpenClaw while retaining the existing image, video, and voice limits. Stream large file retrievals in the CLI and OpenClaw without base64 conversion. Keep ordinary-file transfers from blocking account heartbeats and incoming sync. An operator can request full verification of a completed upload on the original job only when message submission has never started. Interrupted or uncertain message reservations require review before another send.
+
+  Keep the submitted OpenClaw job ID and idempotency key available when status polling times out or fails, without repeating the send.
+
+- [#261](https://github.com/thisnick/agent-wechat/pull/261) [`e12e189`](https://github.com/thisnick/agent-wechat/commit/e12e1899910641730927fb8f5d603d2f3f2c61f5) Thanks [@thisnick](https://github.com/thisnick)! - Add native quoted text replies through the send API, TypeScript SDK and `wx messages send` quote flags. Resolve the original from saved history using its local message ID and exact server ID, retain encrypted reference material for idempotent sends, and write accepted replies into supported profiles.
+
+  Resolve saved quote targets for voice, video, files, link cards and quoted replies in addition to text and images. Initial quote sending has static and synthetic coverage; live server acceptance and recipient rendering remain unverified.
+
+- [#255](https://github.com/thisnick/agent-wechat/pull/255) [`673c2c3`](https://github.com/thisnick/agent-wechat/commit/673c2c3c41e96d5d76b42682ab88b79348963a70) Thanks [@thisnick](https://github.com/thisnick)! - Add normal/original video sends for MP4 sources through 50 MiB. Prepare and verify a compressed playback copy before uploading; original mode also uploads and verifies the unchanged source. Save prepared bytes and separate upload identities for recovery, preserve uncertain send handling, and expose videoQuality through the HTTP API, SDK, CLI --video-quality and OpenClaw message channelData. Honor OpenClaw forceDocument/asDocument to send media as ordinary files.
+
+### Patch Changes
+
+- [#259](https://github.com/thisnick/agent-wechat/pull/259) [`940719e`](https://github.com/thisnick/agent-wechat/commit/940719e22847a953d5d45427a066df723821ce46) Thanks [@thisnick](https://github.com/thisnick)! - Accept 64-bit last-message timestamps in incoming read controls while retaining the notification timestamp as the unread cutoff. Preserve the once-only partial unread effect and the remaining session-exit checkpoint barrier.
+
+  Apply the supported unread-clear portion of incoming opcode-2 chat-entry controls once for existing visible ordinary chats. Preserve newer unread messages, uncertain-attempt markers and the complete-control checkpoint barrier. Report successful entry read changes through `thread.read-state` with `origin: remote_entry_read` and `completeControl: false`.
+
+  Recognize narrowly verified Linux control forms without local profile effects: status opcodes 3, 15 and 16, system ClientCheckGetExtInfo and mmchatroombarannouncememt entries, and self-to-self type-10002 appmsg subtype 35. Preserve encrypted original bytes and deduplicated classification receipts. Normalize validated incoming group sender prefixes before parsing supported recalls; unsupported recall fields and other controls remain pending.
+
+- [#262](https://github.com/thisnick/agent-wechat/pull/262) [`c1147ed`](https://github.com/thisnick/agent-wechat/commit/c1147edca08fc2cdb126ac591a54b67b75077f37) Thanks [@thisnick](https://github.com/thisnick)! - Match official recall rows and notices, derive API sender and direction from existing message and receipt evidence without new author columns, and remove recalled entries from supported official message search indexes. Keep unknown authors unset and leave unsupported index layouts pending for repair.
+
 ## 1.0.0-beta.11
 
 ### Patch Changes
