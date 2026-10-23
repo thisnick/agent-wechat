@@ -11,6 +11,7 @@ import {
   type NativeThread,
 } from "@agent-wechat/shared";
 import { HistoryCache } from "./history-cache.ts";
+import { messageSummary } from "./thread-preview.ts";
 
 export type Account = {
   id: string;
@@ -38,6 +39,7 @@ export type SessionState = {
   selectedGroup: NativeGroup | null;
   nextMessages: string | null;
   loading: boolean;
+  opening: boolean;
   connected: boolean;
   error: string | null;
   capabilities: Record<string, unknown>;
@@ -53,6 +55,7 @@ const initial = (): SessionState => ({
   selectedGroup: null,
   nextMessages: null,
   loading: false,
+  opening: false,
   connected: false,
   error: null,
   capabilities: {},
@@ -176,6 +179,13 @@ export class HubSession {
   private threadGeneration = 0;
   private accountRequest = 0;
   private catalogRequest = 0;
+  private detailsRequest = 0;
+  private threadRequests = new Map<string, number>();
+  private catalogFlight: {
+    account: string;
+    generation: number;
+    promise: Promise<void>;
+  } | null = null;
   private stream?: AbortController;
   private cursor = "0";
   private pending = new Map<string, PendingSend[]>();
@@ -279,13 +289,14 @@ export class HubSession {
       selectedGroup: null,
       nextMessages: null,
       loading: true,
+      opening: false,
       connected: false,
       error: null,
       capabilities: {},
     });
     const controller = (this.stream = new AbortController());
     try {
-      const boundary = await this.refresh(account, generation);
+      const boundary = await this.refresh(account, generation, false);
       if (!this.current(account, generation)) return;
       this.cursor = boundary;
       if (this.value.threads[0]) await this.select(this.value.threads[0].id);
@@ -296,6 +307,7 @@ export class HubSession {
     }
     if (this.current(account, generation)) {
       void this.watch(account, generation, controller.signal);
+      void this.loadCatalog(account, generation).catch(() => {});
       for (const send of sends) void this.checkSend(send.key);
     }
   }
@@ -304,7 +316,6 @@ export class HubSession {
     if (!account) return;
     this.remember();
     const cached = this.histories.get(account, threadId);
-    const restored = cached?.messages ?? [];
     this.historyLoaded = !!cached;
     this.historySource = cached?.sourceGeneration ?? "";
     const previousGroup =
@@ -313,63 +324,79 @@ export class HubSession {
         : (cached?.group ?? null);
     const generation = this.generation,
       selected = ++this.threadGeneration;
-    // Capture before loading history. A newer unread version must not be cleared
-    // by an older snapshot, even when a message arrives during this request.
-    const readBoundary = this.value.threads.find(
-      (thread) => thread.id === threadId,
-    );
+    const current = () =>
+      this.current(account, generation) && selected === this.threadGeneration;
     this.publish({
       selected: threadId,
       selectedGroup: previousGroup,
-      messages: restored,
+      messages: cached?.messages ?? [],
       nextMessages: cached?.nextMessages ?? null,
       loading: true,
+      opening: true,
       error: null,
     });
+    if (threadId.endsWith("@chatroom"))
+      void this.refreshGroup(account, threadId, generation, selected).catch(
+        () => {},
+      );
     try {
-      const [page, group] = await Promise.all([
-        this.client.messages(account, threadId, { limit: 100 }),
-        threadId.endsWith("@chatroom")
-          ? this.client.group(account, threadId).catch(() => previousGroup)
-          : null,
-      ]);
-      if (
-        !this.current(account, generation) ||
-        selected !== this.threadGeneration
-      )
-        return;
-      const latest = (
-        page.items.filter((item) => !isNativeTombstone(item)) as NativeMessage[]
-      ).reduce(mergeMessage, []);
-      // Preserve older loaded pages, replace the current server range, and apply
-      // only events received after this request on top of its snapshot.
-      const older =
-        page.nextCursor && latest.length
-          ? restored.filter((item) => compareMessages(item, latest[0]) < 0)
-          : [];
-      const arrivals = this.value.messages.filter(
-        (item) => !restored.includes(item),
-      );
-      const removed = new Set(
-        page.items.filter(isNativeTombstone).map((item) => item.id),
-      );
-      const messages = arrivals
-        .reduce(mergeMessage, latest.reduce(mergeMessage, older))
-        .filter((item) => !removed.has(item.id));
-      const sameSource = cached?.sourceGeneration === page.sourceGeneration;
-      this.historyLoaded = true;
-      this.historySource = page.sourceGeneration;
-      this.publish({
-        messages,
-        selectedGroup: group,
-        nextMessages:
-          page.nextCursor && sameSource
-            ? cached!.nextMessages
-            : page.nextCursor,
-        loading: false,
-      });
-      this.remember();
-      if (readBoundary && (readBoundary.unreadCount ?? 0) > 0) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const baseline =
+          attempt === 0 ? (cached?.messages ?? []) : this.value.messages;
+        // A list entry can be minutes old. Fetch the version for this open.
+        const readBoundary = await this.refreshThread(
+          account,
+          threadId,
+          generation,
+        );
+        if (!current()) return;
+        if (
+          attempt === 0 &&
+          cached &&
+          this.value.connected &&
+          readBoundary.unreadCount === 0
+        ) {
+          this.publish({ loading: false });
+          return; // The continuous event stream already maintains this cache.
+        }
+        const page = await this.client.messages(account, threadId, {
+          limit: 40,
+        });
+        if (!current()) return;
+        const latest = (
+          page.items.filter(
+            (item) => !isNativeTombstone(item),
+          ) as NativeMessage[]
+        ).reduce(mergeMessage, []);
+        // Preserve older loaded pages, replace the current server range, and apply
+        // only events received after this request on top of its snapshot.
+        const older =
+          page.nextCursor && latest.length
+            ? baseline.filter((item) => compareMessages(item, latest[0]) < 0)
+            : [];
+        const arrivals = this.value.messages.filter(
+          (item) => !baseline.includes(item),
+        );
+        const removed = new Set(
+          page.items.filter(isNativeTombstone).map((item) => item.id),
+        );
+        const messages = arrivals
+          .reduce(mergeMessage, latest.reduce(mergeMessage, older))
+          .filter((item) => !removed.has(item.id));
+        const sameSource = this.historySource === page.sourceGeneration;
+        this.historyLoaded = true;
+        this.historySource = page.sourceGeneration;
+        this.publish({
+          messages,
+
+          nextMessages:
+            page.nextCursor && sameSource
+              ? this.value.nextMessages
+              : page.nextCursor,
+          loading: false,
+        });
+        this.remember();
+        if ((readBoundary.unreadCount ?? 0) <= 0) return;
         try {
           await this.client.markRead(
             account,
@@ -377,23 +404,29 @@ export class HubSession {
             readBoundary.readStateVersion,
           );
           if (this.current(account, generation))
-            await this.refresh(account, generation);
+            await this.refreshThread(account, threadId, generation);
+          return;
         } catch (error) {
+          if (!current()) return;
+          // A conflict admits no read. Reload both version and history once;
+          // never clear unseen messages by retrying only with a newer version.
           if (
-            this.current(account, generation) &&
-            selected === this.threadGeneration
+            error instanceof NativeApiError &&
+            error.code === "read_state_conflict" &&
+            attempt === 0
           )
-            this.publish({
-              error: `Couldn’t clear unread status. ${readableError(error)}`,
-            });
+            continue;
+          this.publish({
+            error: `Couldn’t clear unread status. ${readableError(error)}`,
+          });
+          return;
         }
       }
     } catch (error) {
-      if (
-        this.current(account, generation) &&
-        selected === this.threadGeneration
-      )
+      if (current())
         this.publish({ error: readableError(error), loading: false });
+    } finally {
+      if (current()) this.publish({ opening: false });
     }
   }
   async older(): Promise<void> {
@@ -431,61 +464,147 @@ export class HubSession {
         this.publish({ loading: false, error: readableError(error) });
     }
   }
+  private async refreshThread(
+    account: string,
+    threadId: string,
+    generation: number,
+  ): Promise<NativeThread> {
+    const key = JSON.stringify([account, threadId]);
+    const request = (this.threadRequests.get(key) ?? 0) + 1;
+    this.threadRequests.set(key, request);
+    let thread: NativeThread;
+    try {
+      thread = await this.client.thread(account, threadId);
+    } catch (error) {
+      if (!(error instanceof NativeApiError) || error.status !== 404)
+        throw error;
+      // A new direct conversation has no session row until its first message.
+      return {
+        id: threadId,
+        accountId: account,
+        peerId: threadId,
+        kind: threadId.endsWith("@chatroom") ? "group" : "direct",
+        displayName: null,
+        unreadCount: 0,
+        readStateVersion: "",
+        history: {},
+      };
+    }
+    if (
+      this.current(account, generation) &&
+      this.threadRequests.get(key) === request
+    ) {
+      const found = this.value.threads.some((item) => item.id === threadId);
+      this.publish({
+        threads: found
+          ? this.value.threads.map((item) =>
+              item.id === threadId ? { ...item, ...thread } : item,
+            )
+          : [thread, ...this.value.threads],
+      });
+    }
+    return thread;
+  }
+  private async refreshGroup(
+    account: string,
+    thread: string,
+    generation: number,
+    selected: number,
+  ): Promise<void> {
+    const group = await this.client.group(account, thread);
+    if (
+      this.current(account, generation) &&
+      selected === this.threadGeneration &&
+      thread === this.value.selected
+    ) {
+      this.publish({ selectedGroup: group });
+      this.remember();
+    }
+  }
   async markRead(threadId: string): Promise<unknown> {
     const account = this.value.account,
       generation = this.generation;
-    const thread = this.value.threads.find((thread) => thread.id === threadId);
-    if (!account || !thread) throw new Error("Select a conversation first.");
+    if (!account) throw new Error("Select a conversation first.");
+    const thread = await this.refreshThread(account, threadId, generation);
     const result = await this.client.markRead(
       account,
       threadId,
       thread.readStateVersion,
     );
     if (this.current(account, generation))
-      await this.refresh(account, generation);
+      await this.refreshThread(account, threadId, generation);
     return result;
   }
-  async refresh(
-    account = this.value.account,
-    generation = this.generation,
-  ): Promise<string> {
-    if (!account) return "0";
-    const request = ++this.catalogRequest;
-    const selected = this.value.selected,
-      threadGeneration = this.threadGeneration;
-    const [threads, contacts, capabilities, accounts, group] =
-      await Promise.all([
-        inventory((cursor) =>
-          this.client.threads(account, { cursor, limit: 200 }),
-        ),
+  private loadCatalog(account: string, generation: number): Promise<void> {
+    if (
+      this.catalogFlight?.account === account &&
+      this.catalogFlight.generation === generation
+    )
+      return this.catalogFlight.promise;
+    const request = ++this.detailsRequest;
+    const promise = (async () => {
+      const [contacts, capabilities, accounts] = await Promise.all([
         inventory((cursor) =>
           this.client.contacts(account, { cursor, limit: 200 }),
         ),
         this.client.capabilities(account),
         this.client.accounts(),
-        selected?.endsWith("@chatroom")
-          ? this.client.group(account, selected).catch(() => undefined)
-          : null,
       ]);
+      if (this.current(account, generation) && request === this.detailsRequest)
+        this.publish({
+          contacts: contacts.items,
+          capabilities,
+          accounts: accounts.items.filter(
+            (item) => typeof item.id === "string",
+          ) as Account[],
+        });
+    })().finally(() => {
+      if (this.catalogFlight?.promise === promise) this.catalogFlight = null;
+    });
+    this.catalogFlight = { account, generation, promise };
+    return promise;
+  }
+  async refresh(
+    account = this.value.account,
+    generation = this.generation,
+    catalog = true,
+  ): Promise<string> {
+    if (!account) return "0";
+    const request = ++this.catalogRequest;
+    const revisions = new Map(this.threadRequests);
+    const threads = await inventory((cursor) =>
+      this.client.threads(account, { cursor, limit: 200 }),
+    );
     if (this.current(account, generation) && request === this.catalogRequest)
       this.publish({
-        ...(threadGeneration === this.threadGeneration && group !== undefined
-          ? { selectedGroup: group }
-          : {}),
-        threads: threads.items,
-        contacts: contacts.items,
-        capabilities,
-        accounts: accounts.items.filter(
-          (item) => typeof item.id === "string",
-        ) as Account[],
+        threads: threads.items.map((thread) => {
+          const key = JSON.stringify([account, thread.id]);
+          return revisions.get(key) !== this.threadRequests.get(key)
+            ? (this.value.threads.find((item) => item.id === thread.id) ??
+                thread)
+            : thread;
+        }),
       });
+    if (catalog && this.current(account, generation)) {
+      await Promise.all([
+        this.loadCatalog(account, generation),
+        this.value.selected?.endsWith("@chatroom")
+          ? this.refreshGroup(
+              account,
+              this.value.selected,
+              generation,
+              this.threadGeneration,
+            ).catch(() => {})
+          : null,
+      ]);
+    }
     return threads.cursor;
   }
   private async canonical(
     account: string,
     messageId: string,
     generation: number,
-  ): Promise<void> {
+  ): Promise<NativeMessage | undefined> {
     const message = await this.client.message(account, messageId);
     if (!this.current(account, generation)) return;
     if (message.threadId === this.value.selected) {
@@ -505,6 +624,29 @@ export class HubSession {
           send.intent?.localMessageId !== message.id &&
           !(message.serverId && send.intent?.serverId === message.serverId),
       ),
+    });
+    this.updatePreview(message);
+    return message;
+  }
+  private updatePreview(message: NativeMessage): void {
+    const senderName =
+      this.value.contacts.find((item) => item.id === message.senderId)
+        ?.displayName ?? null;
+    this.publish({
+      threads: this.value.threads.map((thread) => {
+        if (thread.id !== message.threadId) return thread;
+        const last = thread.lastMessage;
+        if (
+          last &&
+          last.id !== message.id &&
+          (timestamp(last.createdAt) > timestamp(message.createdAt) ||
+            (timestamp(last.createdAt) === timestamp(message.createdAt) &&
+              last.id.localeCompare(message.id, undefined, { numeric: true }) >=
+                0))
+        )
+          return thread;
+        return { ...thread, lastMessage: messageSummary(message, senderName) };
+      }),
     });
   }
   private async acceptReceipt(
@@ -567,9 +709,15 @@ export class HubSession {
         event.kind === "message.recalled") &&
       typeof event.data.messageId === "string"
     ) {
-      await this.canonical(account, event.data.messageId, generation);
-      if (this.current(account, generation))
-        await this.refresh(account, generation);
+      const message = await this.canonical(
+        account,
+        event.data.messageId,
+        generation,
+      );
+      if (message && this.current(account, generation)) {
+        await this.refreshThread(account, message.threadId, generation);
+        if (this.current(account, generation)) this.updatePreview(message);
+      }
     } else if (
       event.kind === "send.updated" &&
       typeof event.data.id === "string"
@@ -579,20 +727,36 @@ export class HubSession {
         account,
         generation,
       );
+    } else if (["thread.read", "thread.read-state"].includes(event.kind)) {
+      if (typeof event.data.threadId === "string")
+        await this.refreshThread(account, event.data.threadId, generation);
+      else await this.refresh(account, generation, false);
+    } else if (event.kind === "group.updated") {
+      if (typeof event.data.groupId === "string") {
+        await this.refreshThread(account, event.data.groupId, generation).catch(
+          () => this.refresh(account, generation, false),
+        );
+        if (event.data.groupId === this.value.selected)
+          await this.refreshGroup(
+            account,
+            event.data.groupId,
+            generation,
+            this.threadGeneration,
+          ).catch(() => {});
+      } else await this.refresh(account, generation, false);
     } else if (
-      [
-        "account.updated",
-        "account.connection",
-        "auth.updated",
-        "sync.completed",
-        "thread.read",
-        "thread.read-state",
-        "metadata.changed",
-        "contacts.updated",
-        "group.updated",
-      ].includes(event.kind)
+      ["account.updated", "account.connection", "auth.updated"].includes(
+        event.kind,
+      )
     ) {
-      await this.refresh(account, generation);
+      await this.accounts();
+    } else if (
+      event.kind === "contacts.updated" ||
+      (event.kind === "metadata.changed" && event.data.kind !== "avatar")
+    ) {
+      void this.loadCatalog(account, generation).catch(() => {});
+    } else if (event.kind === "sync.completed") {
+      await this.refresh(account, generation, false);
     }
     // Push hints and control diagnostics carry no conversation content.
   }

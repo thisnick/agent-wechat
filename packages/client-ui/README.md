@@ -112,15 +112,20 @@ when connecting this preview to an explicitly selected native daemon.
 
 ## Attachments and stickers
 
-Quoted replies and forwarded chat history render the hub's normalized text. They
-are application messages, not downloadable file attachments. Unknown message
-types show an unsupported-content label instead of entering the media flow.
+Replies show the quoted sender and content above the comment. Loaded history is
+used first; visible replies otherwise use the parent-bound quote endpoint. Image
+quotes show a small standard preview. Recalled or unavailable originals keep a
+status label. Forwarded history renders normalized text. Unknown message types
+show an unsupported-content label instead of entering the media flow.
 
 Incoming images automatically download standard quality to the hub and render
 inline without a quality picker. **Download original** separately keeps the full
 image on the agent-wechat hub; **Save original** then saves those cached bytes to
 the browser's device. **Save image** saves the standard image. An original becoming
 available never replaces the standard image in the conversation.
+Images without an advertised original show why no download is offered; expired
+originals are labelled separately. Avatar reads, media discovery and quote lookups
+start near the viewport, so offscreen history does not flood the hub on open.
 
 Files, videos and voice messages use **Load attachment** and real hub transfer
 jobs. Progress, cancellation and retry use the job API. Videos and decoded voice
@@ -152,16 +157,26 @@ acceptance or recipient playback.
 
 Recent chat history stays in session memory across conversation and account
 switches: up to 20 chats and 5,000 messages total, evicting the least recently
-used chats. Reopening shows saved pages immediately and refreshes the latest
-page in the background. Events update cached chats too. History is not written to
+used chats. Reopening shows saved pages immediately. With a continuous event
+stream and no unread messages, it reuses those pages without fetching history
+again. Otherwise it refreshes history. Events update cached chats too. History is not written to
 browser storage; disconnecting or reloading drops it. An expired event stream
 invalidates that account's cache so missed recalls are not kept in old pages.
 
 The client marks unread history as read after it successfully loads the selected
-chat. It sends the read version captured before loading; a conflict keeps newer
-unread counts and reports an error instead of retrying against unseen messages.
+chat. It fetches a fresh read version before loading; a conflict reloads both
+version and history once before trying again. It never retries against unseen
+messages by swapping in a newer version alone. Repeated conflicts report an error.
 Failed loads and responses from a previously selected chat do not clear badges.
 Cross-device read synchronization is handled by the hub.
+
+Message events refresh the changed message and thread only. Read-state events
+refresh that thread's badge, including remote reads, and group updates refresh
+the affected group. Avatar metadata events do not reload contact inventories.
+Contact/capability loading and group details do not block the initial history.
+The first page contains 40 messages; older pages contain 100. The current hub
+pagination builds a complete conversation snapshot before slicing a page, so
+cold opens still include that server-side cost.
 
 The conversation uses the headless shadcn Message Scroller. Opening a chat starts
 at the bottom and follows images and other content as they load. Scrolling away

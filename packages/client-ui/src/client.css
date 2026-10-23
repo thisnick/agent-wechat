@@ -343,6 +343,41 @@
 .original-image-actions > button {
   justify-self: start;
 }
+.original-download {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+}
+.quote-preview {
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: #00000012;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.quote-preview strong {
+  font-size: 11px;
+  color: var(--ink);
+}
+.quote-preview p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.quote-preview .media-card {
+  padding: 0;
+  min-width: 72px;
+  max-width: 120px;
+  background: transparent;
+}
+.quote-preview .media-preview {
+  max-height: 84px;
+}
 .original-image-actions small {
   color: var(--muted);
   line-height: 1.45;

@@ -11,6 +11,7 @@ import { pause, readableError } from "./session.ts";
 import { Avatar, Button, Icon } from "./ui.tsx";
 import type { PendingMedia } from "./media-outbox.ts";
 import { standardImage, cachedVariant, canRetrieve } from "./media-variants.ts";
+import { useVisible } from "./visible.tsx";
 
 const ended = new Set([
   "available",
@@ -311,10 +312,17 @@ function committed(item: PendingMedia, messages: NativeMessage[]): boolean {
 export function MediaCard({
   message,
   connection,
+  previewOnly = false,
 }: {
   message: NativeMessage;
   connection: Connection;
+  previewOnly?: boolean;
 }) {
+  const { element, visible } = useVisible<HTMLDivElement>();
+  const opening = useSyncExternalStore(
+    connection.session.subscribe,
+    connection.session.snapshot,
+  ).opening;
   const client = connection.session.client;
   const [assets, setAssets] = useState<MediaAsset[]>([]);
   const [selected, setSelected] = useState("");
@@ -346,24 +354,27 @@ export function MediaCard({
     }
   };
   useEffect(() => {
+    if (!visible) return;
     void reload().catch((error) => {
       if (!lifetime.current.signal.aborted) {
         setError(readableError(error));
         setLoading(false);
       }
     });
-    return () => lifetime.current.abort();
-  }, [message.accountId, message.id]);
+  }, [message.accountId, message.id, visible]);
+  useEffect(() => () => lifetime.current.abort(), []);
   useEffect(
     () =>
-      connection.session.onMediaReady((assetId) => {
-        if (
-          !currentAssets.current.length ||
-          currentAssets.current.some((asset) => asset.id === assetId)
-        )
-          void reload().catch(() => {});
-      }),
-    [connection.session, message.accountId, message.id],
+      visible
+        ? connection.session.onMediaReady((assetId) => {
+            if (
+              !currentAssets.current.length ||
+              currentAssets.current.some((asset) => asset.id === assetId)
+            )
+              void reload().catch(() => {});
+          })
+        : undefined,
+    [connection.session, message.accountId, message.id, visible],
   );
   useEffect(() => {
     if (!job || ended.has(job.state)) return;
@@ -391,7 +402,7 @@ export function MediaCard({
     })();
     return () => controller.abort();
   }, [job?.id, job?.state]);
-  const image = message.type === 3;
+  const image = previewOnly || message.type === 3;
   const asset = image
     ? standardImage(assets)
     : assets.find((asset) => asset.id === selected);
@@ -415,6 +426,7 @@ export function MediaCard({
   useEffect(() => {
     if (
       (image || message.type === 47) &&
+      !opening &&
       asset &&
       canRetrieve(asset) &&
       !working &&
@@ -423,36 +435,39 @@ export function MediaCard({
       automaticallyRequested.current.add(asset.id);
       void retrieve();
     }
-  }, [message.type, asset?.id, asset?.state, working]);
+  }, [message.type, asset?.id, asset?.state, working, opening]);
   return (
     <div
+      ref={element}
       className={`bubble media-card${
         message.type === 47 ? " sticker-card" : ""
       }`}
     >
-      <div className="attachment-file">
-        <Icon
-          name={message.type === 3 || message.type === 47 ? "image" : "file"}
-        />
-        <span>
-          <strong>
-            {asset?.filename ||
-              (message.type === 3
-                ? "Image"
-                : message.type === 43
-                  ? "Video"
-                  : message.type === 34
-                    ? "Voice message"
-                    : message.type === 47
-                      ? "Sticker"
-                      : "Attachment")}
-          </strong>
-          <small>
-            {asset?.byteLength ? `${size(asset.byteLength)} · ` : ""}
-            {loading ? "Loading…" : asset?.state || "Unavailable"}
-          </small>
-        </span>
-      </div>
+      {!previewOnly && (
+        <div className="attachment-file">
+          <Icon
+            name={message.type === 3 || message.type === 47 ? "image" : "file"}
+          />
+          <span>
+            <strong>
+              {asset?.filename ||
+                (message.type === 3
+                  ? "Image"
+                  : message.type === 43
+                    ? "Video"
+                    : message.type === 34
+                      ? "Voice message"
+                      : message.type === 47
+                        ? "Sticker"
+                        : "Attachment")}
+            </strong>
+            <small>
+              {asset?.byteLength ? `${size(asset.byteLength)} · ` : ""}
+              {loading ? "Loading…" : asset?.state || "Unavailable"}
+            </small>
+          </span>
+        </div>
+      )}
       {!image && assets.length > 1 && (
         <select
           aria-label="Attachment quality"
@@ -476,7 +491,9 @@ export function MediaCard({
           key={`${asset.accountId}:${asset.id}:${asset.sha256}`}
           asset={asset}
           connection={connection}
-          saveLabel={image ? "Save image" : "Save attachment"}
+          saveLabel={
+            previewOnly ? undefined : image ? "Save image" : "Save attachment"
+          }
         />
       ) : (
         asset && (
@@ -502,7 +519,7 @@ export function MediaCard({
       {image && !loading && !asset && (
         <small>Standard image is unavailable.</small>
       )}
-      {image && (
+      {image && !previewOnly && !loading && (
         <OriginalImage
           asset={assets.find((asset) => asset.variant === "original")}
           connection={connection}
@@ -562,7 +579,7 @@ function AssetContent({
 }: {
   asset: MediaAsset;
   connection: Connection;
-  saveLabel: string;
+  saveLabel?: string;
 }) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
@@ -628,14 +645,16 @@ function AssetContent({
             preload="metadata"
           />
         ))}
-      <SaveAsset
-        asset={asset}
-        connection={connection}
-        label={saveLabel}
-        representation={
-          preview && asset.kind === "image" ? "preview" : "original"
-        }
-      />
+      {saveLabel && (
+        <SaveAsset
+          asset={asset}
+          connection={connection}
+          label={saveLabel}
+          representation={
+            preview && asset.kind === "image" ? "preview" : "original"
+          }
+        />
+      )}
       {error && (
         <small className="attachment-error" role="alert">
           {error}
@@ -744,7 +763,13 @@ function OriginalImage({
     });
     return () => controller.abort();
   }, [client, message.accountId, job?.id, job?.state]);
-  if (!asset) return null;
+  if (!asset)
+    return (
+      <small className="original-image-actions">
+        Only standard quality is available for this message. No original
+        download source was provided.
+      </small>
+    );
   const working = starting || (!!job && !ended.has(job.state));
   async function retrieve() {
     if (!asset || working) return;
@@ -784,6 +809,7 @@ function OriginalImage({
       ) : (
         <>
           <button
+            className="secondary original-download"
             disabled={working || (!canRetrieve(asset) && !job?.retryable)}
             onClick={() => void retrieve()}
           >
@@ -791,7 +817,11 @@ function OriginalImage({
               ? "Downloading original…"
               : job?.retryable
                 ? "Retry original download"
-                : "Download original"}
+                : canRetrieve(asset)
+                  ? "Download original"
+                  : asset.state === "expired"
+                    ? "Original expired"
+                    : "Original unavailable"}
           </button>
           {job && working && (
             <button

@@ -35,6 +35,7 @@ import { threadPreview } from "./thread-preview.ts";
 import { messagePresentation } from "./message-presentation.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
+import { QuotedReply } from "./quoted-reply.tsx";
 import {
   ConversationScroll,
   ConversationItem,
@@ -819,7 +820,7 @@ function Chats({
               account={state.account}
               username={state.selected}
               name={selectedName}
-              downloadMissing
+              downloadMissing={!state.opening}
               members={
                 state.threads.find((thread) => thread.id === state.selected)
                   ?.avatarMembers
@@ -1388,7 +1389,10 @@ function Message({
         account={m.accountId}
         username={m.senderId || (!own ? m.threadId : null)}
         name={own ? "You" : name(m.senderId || m.threadId)}
-        downloadMissing={m.threadId.endsWith("@chatroom")}
+        downloadMissing={
+          m.threadId.endsWith("@chatroom") &&
+          !connection.session.snapshot().opening
+        }
       />
       <div className="message-body">
         <div className="message-meta">
@@ -1405,10 +1409,14 @@ function Message({
           </div>
         ) : presentation === "reply" || presentation === "forwarded" ? (
           <div className={`bubble ${presentation}-message`}>
-            <div className="message-context">
-              <Icon name={presentation === "reply" ? "reply" : "chat"} />
-              {presentation === "reply" ? "Reply" : "Forwarded messages"}
-            </div>
+            {presentation === "reply" ? (
+              <QuotedReply message={m} connection={connection} name={name} />
+            ) : (
+              <div className="message-context">
+                <Icon name="chat" />
+                Forwarded messages
+              </div>
+            )}
             <p>
               {m.body ||
                 (presentation === "reply"
@@ -1458,7 +1466,7 @@ function Details({
           account={state.account!}
           username={threadId}
           name={name}
-          downloadMissing
+          downloadMissing={!state.opening}
           members={
             state.threads.find((thread) => thread.id === threadId)
               ?.avatarMembers

@@ -10,6 +10,8 @@ export class AvatarCache {
   private refreshing = new Map<string, Promise<void>>();
   private queue: (() => void)[] = [];
   private active = 0;
+  private reading = 0;
+  private reads: (() => void)[] = [];
   private generations = new Map<string, number>();
   private listeners = new Set<() => void>();
   private controller = new AbortController();
@@ -36,10 +38,8 @@ export class AvatarCache {
     this.generations.set(key, generation);
     const request = (async () => {
       try {
-        const content = await this.client.avatar(
-          account,
-          username,
-          this.controller.signal,
+        const content = await this.read(() =>
+          this.client.avatar(account, username, this.controller.signal),
         );
         if (
           this.controller.signal.aborted ||
@@ -111,6 +111,24 @@ export class AvatarCache {
   }
   private drain(): void {
     while (this.active < 4 && this.queue.length) this.queue.shift()!();
+  }
+  private async read<T>(fetch: () => Promise<T>): Promise<T> {
+    await new Promise<void>((resolve) => {
+      const start = () => {
+        this.reading++;
+        resolve();
+      };
+      if (this.reading < 2) start();
+      else this.reads.push(start);
+    });
+    try {
+      if (this.controller.signal.aborted)
+        throw new Error("Avatar cache closed");
+      return await fetch();
+    } finally {
+      this.reading--;
+      this.reads.shift()?.();
+    }
   }
   private async download(account: string, username: string): Promise<void> {
     const operation = await this.client.refreshAvatar(account, username);

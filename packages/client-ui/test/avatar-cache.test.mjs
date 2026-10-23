@@ -116,3 +116,23 @@ test("authorization and connection errors do not trigger avatar downloads", asyn
   await cache.ensure("a", "member");
   assert.equal(downloads, 0);
 });
+test("cached avatar reads cannot flood the hub while a conversation loads", async () => {
+  const gate = deferred();
+  let calls = 0;
+  const cache = new AvatarCache({
+    avatar: async () => {
+      calls++;
+      await gate.promise;
+      return response("photo");
+    },
+  });
+  const requests = Array.from({ length: 20 }, (_, n) =>
+    cache.load("a", `member-${n}`),
+  );
+  await new Promise((done) => setTimeout(done, 0));
+  assert.equal(calls, 2);
+  cache.close();
+  gate.resolve();
+  await Promise.all(requests);
+  assert.equal(calls, 2);
+});

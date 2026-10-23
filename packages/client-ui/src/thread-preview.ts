@@ -1,4 +1,42 @@
-import type { NativeThread } from "@agent-wechat/shared";
+import type {
+  NativeThread,
+  NativeMessage,
+  NativeThreadMessage,
+} from "@agent-wechat/shared";
+import { messagePresentation } from "./message-presentation.ts";
+
+export function messageSummary(
+  message: NativeMessage,
+  senderName: string | null,
+): NativeThreadMessage {
+  const kind = messagePresentation(message);
+  const text =
+    kind === "recalled"
+      ? "Message recalled"
+      : ["text", "reply", "forwarded"].includes(kind)
+        ? message.body || "Message"
+        : kind === "link"
+          ? message.link?.title || "Link"
+          : (
+              {
+                3: "Image",
+                34: "Voice message",
+                43: "Video",
+                47: "Sticker",
+                49: "Attachment",
+                62: "Video",
+              } as Record<number, string>
+            )[message.type] || "Unsupported message";
+  return {
+    id: message.id,
+    senderId: message.senderId,
+    senderName,
+    direction: message.direction,
+    type: kind === "recalled" ? 10000 : message.type,
+    text: text.replace(/\s+/g, " ").slice(0, 240),
+    createdAt: message.createdAt,
+  };
+}
 
 export function threadPreview(thread: NativeThread): string {
   const message = thread.lastMessage;

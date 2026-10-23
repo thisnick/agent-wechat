@@ -84,16 +84,14 @@ export function HubAvatar({
   );
   useEffect(() => {
     if (!username) return;
-    if (!downloadMissing) {
-      void cache.load(account, username);
-      return;
-    }
     const target = element.current;
     if (!target) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         observer.disconnect();
-        void cache.ensure(account, username);
+        void (downloadMissing
+          ? cache.ensure(account, username)
+          : cache.load(account, username));
       }
     });
     observer.observe(target);

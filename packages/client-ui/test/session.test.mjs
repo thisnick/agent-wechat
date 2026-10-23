@@ -76,6 +76,16 @@ function client(overrides = {}) {
           history: {},
         },
       ]),
+    thread: async (account, id) => ({
+      id,
+      accountId: account,
+      peerId: id,
+      kind: id.endsWith("@chatroom") ? "group" : "direct",
+      displayName: "Peer",
+      unreadCount: 0,
+      readStateVersion: "1",
+      history: {},
+    }),
     contacts: async () => page([]),
     capabilities: async () => ({ mediaKinds: [] }),
     accounts: async () => ({
@@ -126,6 +136,11 @@ test("opening a chat clears unread status only after history loads, at its captu
   const hub = session(t, {
     threads: async () =>
       page([{ id: "peer", unreadCount: unread, readStateVersion: version }]),
+    thread: async () => ({
+      id: "peer",
+      unreadCount: unread,
+      readStateVersion: version,
+    }),
     messages: async () => history.promise,
     markRead: async (...args) => {
       seen.push(args);
@@ -158,6 +173,11 @@ test("failed or superseded history never clears unread status", async (t) => {
   const hub = session(t, {
     threads: async () =>
       page([{ id: "peer", unreadCount: 3, readStateVersion: "1" }]),
+    thread: async (_account, id) => ({
+      id,
+      unreadCount: id === "peer" ? 3 : 0,
+      readStateVersion: "1",
+    }),
     messages: async (_account, thread) =>
       thread === "peer" ? late.promise : page([]),
     markRead: async (...args) => {
@@ -177,11 +197,12 @@ test("failed or superseded history never clears unread status", async (t) => {
   assert.deepEqual(seen, []);
 });
 
-test("a conflicting read version leaves the newer unread count intact and does not retry", async (t) => {
+test("a repeated read conflict reloads history before retrying and leaves the newer unread count intact", async (t) => {
   let calls = 0;
   const hub = session(t, {
     threads: async () =>
       page([{ id: "peer", unreadCount: 2, readStateVersion: "1" }]),
+    thread: async () => ({ id: "peer", unreadCount: 2, readStateVersion: "1" }),
     messages: async () => page([message("loaded")]),
     markRead: async () => {
       calls++;
@@ -189,7 +210,7 @@ test("a conflicting read version leaves the newer unread count intact and does n
     },
   });
   await hub.activate("a");
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(hub.snapshot().threads[0].unreadCount, 2);
   assert.equal(hub.snapshot().messages[0].id, "loaded");
   assert.match(hub.snapshot().error, /clear unread/);
@@ -357,6 +378,7 @@ test("inventories follow every page and remove tombstones", async (t) => {
         : page([{ id: "first" }, { id: "gone" }], "20", "page2"),
   });
   await hub.activate("a");
+  await eventually(() => hub.snapshot().contacts.length === 2);
   assert.deepEqual(
     hub.snapshot().contacts.map((c) => c.id),
     ["first", "second"],
@@ -374,9 +396,12 @@ test("late account activation and account-list responses cannot overwrite anothe
       ++accountCalls === 1 ? oldAccounts.promise : { items: [{ id: "b" }] },
   });
   const first = hub.activate("a");
+  const listing = hub.accounts();
   await hub.activate("b");
+  await eventually(() => hub.snapshot().accounts.some((a) => a.id === "b"));
   late.resolve(page([{ id: "a-peer" }], "30"));
   oldAccounts.resolve({ items: [{ id: "a" }] });
+  await listing;
   await first;
   assert.equal(hub.snapshot().account, "b");
   assert.deepEqual(
@@ -652,4 +677,146 @@ test("a temporary group lookup failure does not erase a confirmed leave", async 
   assert.equal(hub.snapshot().selectedGroup.isInGroup, false);
   await hub.select("room@chatroom");
   assert.equal(hub.snapshot().selectedGroup.isInGroup, false);
+});
+
+test("chat content does not wait for contacts or group details", async (t) => {
+  const contacts = deferred(),
+    group = deferred();
+  const hub = session(t, {
+    threads: async () =>
+      page([{ id: "room@chatroom", unreadCount: 0, readStateVersion: "1" }]),
+    contacts: async () => contacts.promise,
+    group: async () => group.promise,
+    messages: async () => page([message("ready", "a", "room@chatroom")]),
+  });
+  await hub.activate("a");
+  assert.equal(hub.snapshot().messages[0].id, "ready");
+  assert.equal(hub.snapshot().loading, false);
+  group.resolve({ id: "room@chatroom", isInGroup: true });
+  contacts.resolve(page([]));
+});
+
+test("SSE updates affected messages and read badges without reloading inventories", async (t) => {
+  let lists = 0,
+    contacts = 0,
+    unread = 2;
+  const targets = [];
+  const hub = session(t, {
+    threads: async () => {
+      lists++;
+      return page([{ id: "peer", unreadCount: 0, readStateVersion: "1" }]);
+    },
+    contacts: async () => {
+      contacts++;
+      return page([]);
+    },
+    thread: async (_a, id) => {
+      targets.push(id);
+      return { id, unreadCount: unread, readStateVersion: String(unread) };
+    },
+    messages: async () => page([]),
+    markRead: async () => {
+      unread = 0;
+      return {};
+    },
+    message: async () => message("new"),
+  });
+  await hub.activate("a");
+  await eventually(() => contacts === 1);
+  const before = { lists, contacts };
+  targets.length = 0;
+  await hub.consume(
+    { kind: "message.committed", data: { messageId: "new", threadId: "peer" } },
+    "a",
+  );
+  await hub.consume(
+    { kind: "thread.read-state", data: { threadId: "peer" } },
+    "a",
+  );
+  await hub.consume(
+    { kind: "metadata.changed", data: { kind: "avatar" } },
+    "a",
+  );
+  assert.deepEqual({ lists, contacts }, before);
+  assert.deepEqual(targets, ["peer", "peer"]);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 0);
+  assert.equal(hub.snapshot().messages[0].id, "new");
+  assert.equal(hub.snapshot().threads[0].lastMessage.text, "new");
+});
+
+test("continuous SSE lets a read cached chat reopen without another history request", async (t) => {
+  let reads = 0;
+  const hub = session(t, {
+    messages: async (a, id) => {
+      reads++;
+      return page([message(id, a, id)]);
+    },
+    async *watch(_a, _cursor, signal, options) {
+      options.onActivity();
+      await new Promise((done) =>
+        signal.addEventListener("abort", done, { once: true }),
+      );
+    },
+  });
+  await hub.activate("a");
+  await hub.select("other");
+  const before = reads;
+  await hub.select("peer");
+  assert.equal(reads, before);
+  assert.equal(hub.snapshot().messages[0].id, "peer");
+});
+
+test("read conflicts fetch a fresh version and reload history before a second admission", async (t) => {
+  const calls = [];
+  let version = 2,
+    unread = 1;
+  const hub = session(t, {
+    threads: async () =>
+      page([{ id: "peer", unreadCount: 1, readStateVersion: "stale-list" }]),
+    thread: async () => {
+      calls.push(`thread:${version}`);
+      return {
+        id: "peer",
+        unreadCount: unread,
+        readStateVersion: String(version),
+      };
+    },
+    messages: async () => {
+      calls.push(`history:${version}`);
+      return page([message(`loaded-${version}`)]);
+    },
+    markRead: async (_a, _t, v) => {
+      calls.push(`read:${v}`);
+      if (version === 2) {
+        version = 3;
+        throw new NativeApiError(409, "read_state_conflict");
+      }
+      unread = 0;
+      return {};
+    },
+  });
+  await hub.activate("a");
+  assert.deepEqual(calls, [
+    "thread:2",
+    "history:2",
+    "read:2",
+    "thread:3",
+    "history:3",
+    "read:3",
+    "thread:3",
+  ]);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 0);
+  assert.equal(hub.snapshot().messages[0].id, "loaded-3");
+});
+
+test("a new direct chat can open before the hub has a session row", async (t) => {
+  const hub = session(t, {
+    thread: async () => {
+      throw new NativeApiError(404, "not_found");
+    },
+  });
+  await hub.activate("a");
+  await hub.select("new-person");
+  assert.equal(hub.snapshot().selected, "new-person");
+  assert.equal(hub.snapshot().error, null);
 });
