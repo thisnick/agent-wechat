@@ -23,8 +23,6 @@ wx groups members list 'family@chatroom'
 
 ```bash
 wx messages send CHAT_ID --text "On my way"
-wx messages send CHAT_ID --text "Agreed" \
-  --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID
 wx messages send CHAT_ID --image ./photo.jpg
 wx messages send CHAT_ID --file ./report.pdf
 wx messages send CHAT_ID --video ./clip.mp4
@@ -35,7 +33,25 @@ wx messages send CHAT_ID --share https://example.com/post --title "Worth a read"
 Sends wait up to 30 seconds for WeChat to accept them. Use `--detach` to return right away.
 For larger files, use `--wait 3600` to allow an hour. See [attachment limits and progress](/use/media/).
 
-To quote a message, copy its `id` and `serverId` from `wx messages list CHAT_ID`. Both quote flags are required with `--text`; the source must belong to that same chat. See [Quoted replies](/use/quoted-replies/) for supported originals, permissions and validation limits.
+### Quoted replies
+
+1. Copy `id` and `serverId` from `wx messages list CHAT_ID`; keep both as strings.
+2. Send a text reply with both quote flags:
+
+   ```bash
+   wx messages send CHAT_ID --text "Agreed" \
+     --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID --detach
+   ```
+
+   A queued reply includes `id`, `"state":"queued"` and `receiptPath`. Check `wx messages sends get SEND_ID`.
+
+Requires `read` and `send`, and an original saved in the same chat. See the [API and SDK example](/use/api/#send).
+
+| Original | Can be quoted |
+| --- | --- |
+| Text, image, voice, video, shared link or file | Supported saved forms |
+| Existing quoted reply | Its own comment is quoted |
+| Sticker, forwarded history, system or unknown message | Rejected |
 
 ## Download media
 
@@ -75,5 +91,6 @@ wx config server use box
 - **A lost response doesn't mean a lost send.** Before sending, `wx` saves a receipt with an idempotency key. If the network drops, check with `wx messages sends lookup --idempotency-key KEY` instead of sending again. See [Sends and recovery](/how-it-works/sends/).
 - **Voice** is encoded by `wx` itself. A note can be up to 60 seconds; longer audio is split into equal notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
 - **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the 512 MiB file limit, video, image and voice limits and current validation status. Stickers can't be sent.
+- **Quoted replies are experimental.** Server acceptance and phone rendering remain unverified. Missing, recalled or mismatched sources are rejected. Only text replies accept quotes: non-whitespace text up to 16 KiB and escaped messages up to 256 KiB. Quoting media doesn't ensure it can be downloaded.
 - **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
 </Aside>

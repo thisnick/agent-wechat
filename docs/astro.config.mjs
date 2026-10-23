@@ -26,6 +26,7 @@ const moved = {
   'operations/data': 'how-it-works/storage',
   'operations/restarting': 'how-it-works/sends',
   'reference/api': 'use/api',
+  'use/quoted-replies': 'use/cli',
   'reference/environment-vars': 'reference/configuration',
 };
 
@@ -60,7 +61,6 @@ export default defineConfig({
         ] },
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
-          { label: 'Quoted replies', slug: 'use/quoted-replies' },
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Video quality', slug: 'use/video' },
