@@ -119,7 +119,12 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
-        if message == "unsupported_simulator_operation" { return Self(StatusCode::NOT_IMPLEMENTED, "unsupported_simulator_operation"); }
+        if message == "unsupported_simulator_operation" {
+            return Self(
+                StatusCode::NOT_IMPLEMENTED,
+                "unsupported_simulator_operation",
+            );
+        }
         for code in [
             "invalid_group_identity",
             "invalid_group_text",

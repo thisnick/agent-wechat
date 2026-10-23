@@ -21,6 +21,7 @@ subtle = "2"
 fs2.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+wechat-profile = { path = "../wechat-profile" }
 wechat-core = { path = "../wechat-core" }
 wechat-api = { path = "../wechat-api" }
 wechat-store = { path = "../wechat-store" }
@@ -28,6 +29,7 @@ wechat-protocol = { path = "../wechat-protocol" }
 wechat-platform = { path = "../wechat-platform" }
 qrcodegen = "1.8.0"
 base64.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 rqrr = { version = "0.11.0", default-features = false }

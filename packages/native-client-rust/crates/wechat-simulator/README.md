@@ -141,7 +141,7 @@ phone read-state synchronization for these controls is not implemented here.
 - The mock uses decoded sync batches and existing command codecs. It does not
   implement WeChat wire encryption or establish protocol compatibility.
 - Supported operations are synthetic QR/saved-session login, heartbeat, sync,
-  text/media sends, group creation/rosters, push hints, read notifications, contact/avatar refresh and
+  text/media sends, group creation/settings/member changes and rosters, push hints, read notifications, contact/avatar refresh and
   logout. Incoming fixture kinds are image, file, video, voice and animated sticker.
   Outgoing kinds are image, file, video and voice. Sources, preparation, jobs,
   readback and history still use the production hub pipeline. Media objects and
@@ -200,3 +200,12 @@ and OpenClaw tests. The complete simulator journey also passed in a read-only,
 non-root validation image with `--network none`; a connection-only system trace
 recorded only loopback addresses. Linux ARM64, macOS ARM64 and Windows x64/ARM64
 runtime checks are configured in CI but have not been run in this workspace.
+
+The group simulator now substitutes raw local replies at the merged native group
+RPC boundary, using the checked-in Linux codec fixtures as the response shape.
+The real Core still validates ordinary contacts/membership, records stable keys,
+seals requests/replies, projects known results and handles uncertain outcomes.
+Create, rename, own display name, add/remove, announcement clear, mute/unmute and
+three-step leave are exercised through the public SDK. Native large-file/video
+paths keep their reservation, progress, readback and authorization fences;
+unsupported large simulator routes fail before any native network transport.

@@ -141,7 +141,11 @@ impl MediaTransport for SimulatorMedia {
             Some(&p.thumbnail),
             Some((p.thumbnail.width, p.thumbnail.height)),
         )?;
-        Ok(UploadedVideo { video, thumbnail })
+        Ok(UploadedVideo {
+            video,
+            thumbnail,
+            original: None,
+        })
     }
 }
 pub(super) fn submit(
@@ -151,11 +155,17 @@ pub(super) fn submit(
 ) -> Result<MediaSendResult> {
     let own = format!("sim_{}", session.account);
     let (message_type, content, voice) = match input.body {
-        MediaBody::File(upload) => (
-            49,
-            wechat_protocol::media_send::local_file_xml(&own, upload)?,
-            None,
-        ),
+        MediaBody::File {
+            upload,
+            reservation,
+        } => {
+            ensure!(reservation.is_none(), "unsupported_simulator_operation");
+            (
+                49,
+                wechat_protocol::media_send::local_file_xml(&own, upload)?,
+                None,
+            )
+        }
         MediaBody::Image(upload) => (
             3,
             wechat_protocol::media_send::local_image_xml(upload)?,

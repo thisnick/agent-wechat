@@ -3,6 +3,7 @@ import {
   NativeWeChatClient,
   isNativeTombstone,
   type NativeContact,
+  type NativeGroup,
   type NativeEvent,
   type NativeMessage,
   type NativePage,
@@ -33,6 +34,7 @@ export type SessionState = {
   messages: NativeMessage[];
   sends: PendingSend[];
   selected: string | null;
+  selectedGroup: NativeGroup | null;
   nextMessages: string | null;
   loading: boolean;
   connected: boolean;
@@ -47,6 +49,7 @@ const initial = (): SessionState => ({
   messages: [],
   sends: [],
   selected: null,
+  selectedGroup: null,
   nextMessages: null,
   loading: false,
   connected: false,
@@ -70,8 +73,18 @@ export function readableError(error: unknown): string {
             "This action isn't available on the simulator.",
           unsupported_group_creation:
             "Group creation isn't available on this agent-wechat hub yet.",
-          invalid_group_creation:
-            "Choose a group name and at least two distinct contacts.",
+          invalid_group_members:
+            "Choose distinct contacts; group creation needs at least two.",
+          ordinary_contact_required:
+            "One of these contacts cannot be added to an ordinary group.",
+          ordinary_group_required:
+            "Refresh this group and check that you are still a member.",
+          group_state_incomplete:
+            "Refresh the group before changing its settings.",
+          operation_cannot_cancel:
+            "This change has started and can no longer be cancelled.",
+          invalid_group_text:
+            "Use a name of at most 512 UTF-8 bytes without control characters.",
           pagination_cursor_expired:
             "This history view expired. Reopen the conversation.",
         } as Record<string, string>
@@ -244,6 +257,7 @@ export class HubSession {
       messages: [],
       sends,
       selected: null,
+      selectedGroup: null,
       nextMessages: null,
       loading: true,
       connected: false,
@@ -269,19 +283,25 @@ export class HubSession {
   async select(threadId: string): Promise<void> {
     const account = this.value.account;
     if (!account) return;
+    const previousGroup =
+      this.value.selected === threadId ? this.value.selectedGroup : null;
     const generation = this.generation,
       selected = ++this.threadGeneration;
     this.publish({
       selected: threadId,
+      selectedGroup: previousGroup,
       messages: [],
       nextMessages: null,
       loading: true,
       error: null,
     });
     try {
-      const page = await this.client.messages(account, threadId, {
-        limit: 100,
-      });
+      const [page, group] = await Promise.all([
+        this.client.messages(account, threadId, { limit: 100 }),
+        threadId.endsWith("@chatroom")
+          ? this.client.group(account, threadId).catch(() => previousGroup)
+          : null,
+      ]);
       if (
         !this.current(account, generation) ||
         selected !== this.threadGeneration
@@ -295,7 +315,12 @@ export class HubSession {
           ) as NativeMessage[]
         ).reduce(mergeMessage, []),
       );
-      this.publish({ messages, nextMessages: page.nextCursor, loading: false });
+      this.publish({
+        messages,
+        selectedGroup: group,
+        nextMessages: page.nextCursor,
+        loading: false,
+      });
     } catch (error) {
       if (
         this.current(account, generation) &&
@@ -357,18 +382,27 @@ export class HubSession {
   ): Promise<string> {
     if (!account) return "0";
     const request = ++this.catalogRequest;
-    const [threads, contacts, capabilities, accounts] = await Promise.all([
-      inventory((cursor) =>
-        this.client.threads(account, { cursor, limit: 200 }),
-      ),
-      inventory((cursor) =>
-        this.client.contacts(account, { cursor, limit: 200 }),
-      ),
-      this.client.capabilities(account),
-      this.client.accounts(),
-    ]);
+    const selected = this.value.selected,
+      threadGeneration = this.threadGeneration;
+    const [threads, contacts, capabilities, accounts, group] =
+      await Promise.all([
+        inventory((cursor) =>
+          this.client.threads(account, { cursor, limit: 200 }),
+        ),
+        inventory((cursor) =>
+          this.client.contacts(account, { cursor, limit: 200 }),
+        ),
+        this.client.capabilities(account),
+        this.client.accounts(),
+        selected?.endsWith("@chatroom")
+          ? this.client.group(account, selected).catch(() => undefined)
+          : null,
+      ]);
     if (this.current(account, generation) && request === this.catalogRequest)
       this.publish({
+        ...(threadGeneration === this.threadGeneration && group !== undefined
+          ? { selectedGroup: group }
+          : {}),
         threads: threads.items,
         contacts: contacts.items,
         capabilities,
@@ -477,6 +511,7 @@ export class HubSession {
         "thread.read-state",
         "metadata.changed",
         "contacts.updated",
+        "group.updated",
       ].includes(event.kind)
     ) {
       await this.refresh(account, generation);
@@ -540,6 +575,13 @@ export class HubSession {
       threadId = this.value.selected,
       generation = this.generation;
     if (!account || !threadId || !text.trim()) return;
+    if (this.value.selectedGroup?.isInGroup === false) {
+      this.publish({
+        error:
+          "You are no longer in this group. Cached history is still available.",
+      });
+      return;
+    }
     const key = crypto.randomUUID();
     this.publish({
       sends: [...this.value.sends, { key, text, threadId }],

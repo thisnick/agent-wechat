@@ -1,3 +1,4 @@
+import { GroupSettings } from "./group-settings.tsx";
 import { createRoot } from "react-dom/client";
 import {
   useEffect,
@@ -10,7 +11,6 @@ import {
 import {
   type NativeMessage,
   type NativeOperation,
-  type NativeGroupMember,
   isNativeTombstone,
 } from "@agent-wechat/shared";
 import {
@@ -613,7 +613,8 @@ function Chats({
     const box = messages.current;
     if (box) box.scrollTop = box.scrollHeight;
   }, [state.selected, state.messages.at(-1)?.id, state.sends.length]);
-  const active = account?.authenticated !== false;
+  const leftGroup = state.selectedGroup?.isInGroup === false;
+  const active = account?.authenticated !== false && !leftGroup;
   async function simulate(op: Record<string, unknown>) {
     try {
       await control({ account: state.account, ...op });
@@ -877,7 +878,12 @@ function Chats({
             </button>
           </div>
         )}
-        {!active && (
+        {leftGroup && (
+          <div className="banner">
+            You are no longer in this group. Cached history is still available.
+          </div>
+        )}
+        {account?.authenticated === false && (
           <div className="banner">
             Sign in to WeChat again to send messages.
             <button onClick={switchAccount}>Sign in</button>
@@ -1395,36 +1401,10 @@ function Details({
   threadId: string;
   name: string;
 }) {
-  const [members, setMembers] = useState<NativeGroupMember[]>([]),
-    [error, setError] = useState("");
+  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false),
     [notice, setNotice] = useState("");
   const state = connection.session.snapshot();
-  useEffect(() => {
-    let active = true;
-    const account = state.account;
-    if (account && threadId.endsWith("@chatroom"))
-      void inventory((cursor) =>
-        connection.session.client.groupMembers(account, threadId, {
-          limit: 200,
-          cursor,
-        }),
-      )
-        .then((r) => {
-          if (active)
-            setMembers(
-              r.items.filter(
-                (x) => !isNativeTombstone(x),
-              ) as NativeGroupMember[],
-            );
-        })
-        .catch((e) => {
-          if (active) setError(readableError(e));
-        });
-    return () => {
-      active = false;
-    };
-  }, [state.account, threadId]);
   return (
     <aside className="detail-panel" aria-label="Conversation details">
       <div className="detail-profile">
@@ -1496,21 +1476,12 @@ function Details({
           </p>
         )}
       </div>
-      {members.length > 0 && (
-        <div className="detail-section">
-          <div className="section-head">Members</div>
-          {members.map((m) => (
-            <div key={m.id} className="member">
-              <HubAvatar
-                connection={connection}
-                account={state.account!}
-                username={m.username || m.id}
-                name={m.displayName || m.id}
-              />
-              <span>{m.roomDisplayName || m.displayName || m.username}</span>
-            </div>
-          ))}
-        </div>
+      {state.account && threadId.endsWith("@chatroom") && (
+        <GroupSettings
+          connection={connection}
+          account={state.account}
+          groupId={threadId}
+        />
       )}
       {error && <p>{error}</p>}
     </aside>

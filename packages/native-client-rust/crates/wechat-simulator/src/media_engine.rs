@@ -293,6 +293,7 @@ pub(super) fn receive(db: &mut Connection, account: &str, peer: &str, kind: &str
                     &UploadedVideo {
                         video: primary,
                         thumbnail,
+                        original: None,
                     },
                     1,
                 )?,

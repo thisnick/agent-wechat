@@ -107,8 +107,8 @@ it never fetches the synthetic sticker URL. Native sticker downloads keep their
 restricted source, integrity, size and frame checks. Sticker sending, packs,
 favorites and an outgoing sticker picker are not implemented.
 
-**Attach file** opens a review with the recipient and attachment type. The hub
-accepts sources up to 25 MiB. Choose file, image, video or voice; voice preparation
+**Attach file** opens a review with the recipient and attachment type. The browser preview
+accepts sources up to 25 MiB; the native backend has separate per-kind limits. Choose file, image, video or voice; voice preparation
 and splitting happen in the existing Rust job pipeline. The client retains only
 source IDs, filenames and job receipts across reload, never file bytes. Rejected,
 partial and uncertain outcomes remain distinct. **Check status** only reads the
@@ -123,24 +123,35 @@ acceptance or recipient playback.
 ## New chats and groups
 
 **New conversation** opens a contact picker for a direct message. **New group**
-lets you enter a name, select at least two other contacts and review the selected
-count before creating a synthetic group. The current simulator accepts up to
-39 invitees; this is a development limit, not a claim about WeChat's service limits.
-The account's own contact and File Transfer are excluded from group selection.
+lets you optionally enter a name and select 2–40 other contacts. Your own contact
+and File Transfer are excluded. The UI uses the hub's `groupMutations`
+capabilities and existing admin-scoped group API.
 
-Creation uses an admin-only operation and a stable request key. After a lost
-response or reload, the client checks the same operation/key without creating
-again. The store checks authorization and logout state atomically before its one
-submission. Interrupted submissions become `needs_review`; queued requests that
-never reached submission fail without being replayed. The created group, system
-notice, roster and messages use the real hub profile and event pipeline.
+**Conversation details** shows saved group information and all saved member pages.
+Use it to rename a group, edit your own display name, add/remove members,
+mute/unmute notifications, clear an announcement or leave. Leaving asks for
+confirmation, preserves cached history and disables new sends after membership
+is confirmed ended. WeChat checks permissions and returns
+member results separately. General announcement editing, ownership transfer and
+invitations beyond the merged ordinary-group API are not offered.
 
-This is enabled only for the simulator. Native capabilities report
-`groupCreation: false` and reject creation before any service call. Creating a
-real WeChat group, its per-member results and any required invitations still need
-a native implementation and separately authorized final testing. The UI does
-not present these as supported. System notices render as text and do not start
-OpenClaw agent turns.
+Each change keeps a stable key and operation receipt, scoped to the server,
+account and group. Reload and **Check status** only read that receipt/key. Unknown
+or `needs_review` outcomes are retained and never resubmitted automatically.
+Partial member results and unconfirmed members remain visible. Cancellation is
+available only before the backend's first submission step.
+
+**Refresh group** requests current group details and members, then reloads the
+saved view. `group.updated` events also refresh it. Other-device updates are
+partial, so automatic delivery of every phone edit is not promised. Unknown
+membership stays unknown and edits require confirmed current membership.
+
+The development preview implements these requests in the local simulator through
+the same Core admission, one-attempt operation journal, codec validation and
+profile projection as the native backend. Only local fixture replies are
+substituted. No official endpoint has been used to validate this UI. Synthetic
+notices make new mock groups visible as conversations; system notices do not
+start OpenClaw agent turns.
 
 ## Accounts and conversation details
 
@@ -156,7 +167,7 @@ roster pages.
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Hub and accounts | Simulator bootstrap, bearer connection, account creation/switching, rename and logout                                   |
 | Sign-in          | QR PNG, countdown, automatic renewal, phone approval and automatic chat entry                                           |
-| Conversations    | Contacts, thread filters, paginated history/search, full group roster, read-state, avatars and simulator group creation |
+| Conversations    | Contacts, thread filters, paginated history/search, full group roster, read-state, avatars and group controls |
 | Messaging        | Text and attachment composer, progress, receipt status, uncertainty, self-sends and SSE replay                          |
 | Media            | Image/video/voice previews, downloads, incoming animated stickers and outgoing file/image/video/voice jobs              |
 | Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                             |
@@ -187,19 +198,15 @@ Pinned Rust format/Clippy, native tests and generated contracts are required for
 changes to the decoded transport. Browser checks exercise the same Rust simulator;
 no live endpoint is used.
 
-Linux x64 validation of this pass: 422 native tests across 20 executables passed
-in a non-root, read-only container with external networking disabled. Rust doc
-tests, pinned format/Clippy and generated contracts passed. The client passed
-28 model tests, the SDK 30 and OpenClaw 211; workspace build/typecheck passed.
-The 17-check client journey passed in the isolated container. Browser checks
-confirmed automatic incoming sticker rendering, attachment review and an
-accepted outgoing file appearing in canonical history. Desktop packaging and
-live endpoint testing remain unverified.
+Linux x64 validation after rebasing onto the merged group API: 524 Rust tests
+passed across 20 executables in a non-root, read-only container with external
+networking disabled. Rust doc tests, pinned format/Clippy and generated contracts
+passed. The client passed 41 model tests, the SDK 41 and OpenClaw 239; workspace
+build/typecheck passed. Both complete simulator journeys passed.
 
-After the group-creation addition and rebase onto `main`, 425 native tests passed
-across the isolated workspace executables. The client passed 32 model tests,
-the SDK 31 and OpenClaw 211. Both simulator journeys passed (18 check groups each),
-including group identity/roster projection, account isolation and recovery of a
-lost group response without another creation. Browser validation created a
-synthetic group with two selected contacts, opened its three-member roster and
-sent a synthetic group message. UI copy now says **agent-wechat hub** throughout.
+The group journey checks create/rename, own display name, mute/unmute, add/remove,
+announcement clearing, refresh and three-step leave with retained history. It also
+checks partial member acceptance, service rejection, a lost admission response,
+a lost upstream acknowledgment, same-key status recovery and account isolation.
+The browser was checked against this simulator; live endpoint testing and desktop
+packaging remain unverified.

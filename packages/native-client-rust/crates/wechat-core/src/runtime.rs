@@ -7,7 +7,7 @@ mod incoming_groups;
 #[path = "logout.rs"]
 mod logout;
 #[path = "metadata.rs"]
-mod metadata;
+pub(crate) mod metadata;
 #[path = "outgoing_recall.rs"]
 mod outgoing_recall;
 pub use wechat_protocol::GroupMutation;
@@ -492,7 +492,7 @@ impl Core {
             "disconnected"
         };
         Ok(
-            json!({"id":record.id,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingRecallProjections":self.store.pending_recall_projections(account)?,"pendingMessageRecalls":self.store.pending_message_recalls(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
+            json!({"id":record.id,"ownUsername":self.profile_username(account)?,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingRecallProjections":self.store.pending_recall_projections(account)?,"pendingMessageRecalls":self.store.pending_message_recalls(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Connection } from "./connection.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Button } from "./ui.tsx";
+import { groupEnded } from "./group-creation.ts";
+import { GroupResult } from "./group-settings.tsx";
 import { pause, readableError } from "./session.ts";
 
 export function NewChat({
@@ -49,7 +51,12 @@ export function NewChat({
       .includes(query.toLowerCase()),
   );
   const operation = result.receipt?.operation;
-  const roomId = (operation?.result as { roomId?: string })?.roomId;
+  const roomId = (operation?.result as { groupId?: string })?.groupId;
+  const canCreate =
+    Array.isArray(state.capabilities.groupMutations) &&
+    state.capabilities.groupMutations.includes("create");
+  const receiptInput =
+    result.receipt?.input.action === "create" ? result.receipt.input : null;
   async function openCreated() {
     if (!roomId || !roomId.endsWith("@chatroom")) return;
     setOpening(true);
@@ -118,37 +125,33 @@ export function NewChat({
           <button
             role="tab"
             aria-selected={group}
-            disabled={state.capabilities.groupCreation !== true}
+            disabled={!canCreate}
             onClick={() => setGroup(true)}
           >
             New group
           </button>
         </div>
-        {state.capabilities.groupCreation !== true && (
+        {!canCreate && (
           <p className="field-help">
             Group creation is not available on this agent-wechat hub yet.
           </p>
         )}
         {group && result.receipt ? (
           <div className="group-result">
-            <h3>{result.receipt.input.name}</h3>
-            <p>{result.receipt.input.members.length} contacts selected</p>
-            <p role="status">
-              {operation?.state === "succeeded"
-                ? "Group created."
-                : operation?.state === "needs_review"
-                  ? "Creation could not be confirmed. Check your conversations before creating another group."
-                  : operation?.state === "failed"
-                    ? "Group creation failed."
-                    : "Checking group creation…"}
-            </p>
-            {roomId && operation?.state === "succeeded" ? (
+            <h3>{receiptInput?.name || "New group"}</h3>
+            <p>{receiptInput?.members.length} contacts selected</p>
+            <GroupResult model={creation} />
+            {roomId ? (
               <button
                 className="primary"
                 disabled={opening}
                 onClick={() => void openCreated()}
               >
-                {opening ? "Opening…" : "Open group"}
+                {opening
+                  ? "Opening…"
+                  : operation?.state === "succeeded"
+                    ? "Open group"
+                    : "Inspect group"}
               </button>
             ) : (
               <button
@@ -159,7 +162,18 @@ export function NewChat({
                 Check status
               </button>
             )}
-            {operation?.state === "failed" && (
+            {operation && !groupEnded(operation) && (
+              <button
+                className="text-button"
+                disabled={result.busy}
+                onClick={() => void creation.cancel()}
+              >
+                Cancel if not started
+              </button>
+            )}
+            {(result.receipt.notAdmitted ||
+              operation?.state === "failed" ||
+              operation?.state === "cancelled") && (
               <button className="text-button" onClick={() => creation.clear()}>
                 Start again
               </button>
@@ -174,7 +188,7 @@ export function NewChat({
           <>
             {group && (
               <label className="group-name" htmlFor="new-group-name">
-                Group name
+                Group name (optional)
                 <input
                   id="new-group-name"
                   maxLength={80}
@@ -209,7 +223,7 @@ export function NewChat({
                       aria-label={`Select ${contact.displayName || contact.id}`}
                       checked={selected.includes(contact.id)}
                       disabled={
-                        !selected.includes(contact.id) && selected.length >= 39
+                        !selected.includes(contact.id) && selected.length >= 40
                       }
                       onChange={() =>
                         setSelected((current) =>
@@ -247,7 +261,7 @@ export function NewChat({
                 </small>
                 <button
                   className="primary"
-                  disabled={!name.trim() || selected.length < 2 || result.busy}
+                  disabled={selected.length < 2 || result.busy}
                   onClick={() =>
                     void creation.create({ name, members: selected })
                   }

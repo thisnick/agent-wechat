@@ -4,6 +4,6 @@
 "@agent-wechat/cli": patch
 ---
 
-Add a New chat dialog with direct-message contact selection and a simulator-backed group creation flow. Retain creation keys and receipts across reload, recover lost responses through status lookup, and keep uncertain or interrupted requests from creating a second group. Project synthetic group identity, notices and member rosters through the real hub, with account-scoped text and media destinations.
+Add a New chat dialog and group management through the native group operation API. Create groups with an optional name, rename, add/remove members, change your display name, mute/unmute notifications, clear announcements and leave while keeping cached history. Disable new text and attachment sends after a confirmed leave. Show partial member acceptance and uncertain outcomes, retain account/target-scoped keys across reload and recover status without resubmitting a change.
 
-Expose a typed group request and admin-only operation API. Native group creation remains disabled and advertises no support until its service implementation is validated. Existing native roster refresh continues to use its original protocol path. Use “agent-wechat hub” throughout browser connection screens, settings, status labels and errors.
+Refresh cached group details and rosters from conversation details and group events. Extend the isolated simulator at the native RPC boundary so the same admission, journal, response validation and profile projection run in preview tests. Preserve the native large-file/video transfer paths when adapting the simulator transport. No official endpoint is used for UI validation. Use “agent-wechat hub” throughout browser connection screens, settings, status labels and errors.

@@ -1,5 +1,5 @@
 //! Decoded media transport keeps preparation, receipts and writeback in Core.
-use anyhow::Result;
+use anyhow::{bail, Result};
 use wechat_protocol::media::{
     CdnClient, DownloadedMedia, MediaDescriptor, PreparedImageUpload, PreparedUpload,
     PreparedVideoUpload, UploadedImage, UploadedMedia, UploadedVideo,
@@ -8,6 +8,9 @@ use wechat_protocol::media::{
 pub type Progress<'a> = &'a dyn Fn(u64, Option<u64>) -> Result<()>;
 
 pub trait MediaTransport {
+    fn native(&self) -> Result<&CdnClient> {
+        bail!("unsupported_simulator_operation")
+    }
     fn download(
         &self,
         descriptor: &MediaDescriptor,
@@ -22,6 +25,9 @@ pub trait MediaTransport {
     ) -> Result<UploadedVideo>;
 }
 impl MediaTransport for CdnClient {
+    fn native(&self) -> Result<&CdnClient> {
+        Ok(self)
+    }
     fn download(
         &self,
         descriptor: &MediaDescriptor,
@@ -45,7 +51,10 @@ impl MediaTransport for CdnClient {
 }
 
 pub enum MediaBody<'a> {
-    File(&'a UploadedMedia),
+    File {
+        upload: &'a UploadedMedia,
+        reservation: Option<&'a wechat_protocol::file_upload::FileUploadReservation>,
+    },
     Image(&'a UploadedImage),
     Video {
         upload: &'a UploadedVideo,

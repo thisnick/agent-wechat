@@ -50,16 +50,26 @@ pub trait PushConnection: Send {
 /// operations fail closed through `native`, including secondary media paths.
 pub trait Upstream: Send + Sync {
     fn kind(&self) -> UpstreamKind;
-    fn can_create_groups(&self) -> bool {
-        false
-    }
-    fn create_group(
+    fn group_mutation_raw(
         &self,
-        _state: &mut AccountState,
-        _input: &crate::GroupCreateRequest,
-        _key: &str,
-    ) -> Result<String> {
-        bail!("unsupported_group_creation")
+        state: &mut AccountState,
+        request: &wechat_protocol::GroupRpc,
+    ) -> Result<Vec<u8>> {
+        self.native(NativeOptions::default())?
+            .group_mutation_raw(state, request)
+    }
+    fn group_detail_raw(&self, state: &mut AccountState, room: &str) -> Result<Vec<u8>> {
+        self.native(NativeOptions::default())?
+            .group_detail_raw(state, room)
+    }
+    fn lookup_room_raw(
+        &self,
+        state: &mut AccountState,
+        room: &str,
+        version: u32,
+    ) -> Result<Vec<u8>> {
+        self.native(NativeOptions::default())?
+            .lookup_room_raw(state, room, version)
     }
     fn lookup_room_receipt(
         &self,
@@ -69,6 +79,12 @@ pub trait Upstream: Send + Sync {
     ) -> Result<wechat_protocol::MetadataReply<wechat_protocol::RoomRoster>> {
         self.native(NativeOptions::default())?
             .lookup_room_receipt(state, room, version)
+    }
+    fn contact_patch(
+        &self,
+        record: &wechat_protocol::ContactRecord,
+    ) -> Result<wechat_profile::ContactProjection> {
+        native_contact_patch(record)
     }
     fn validate_state(&self, state: &AccountState) -> Result<()> {
         state.validate()
@@ -167,20 +183,27 @@ pub trait Upstream: Send + Sync {
             content,
         )
     }
-    fn media_transport(&self, state: &mut AccountState) -> Result<Box<dyn media::MediaTransport>> {
+    fn media_transport_route(
+        &self,
+        state: &mut AccountState,
+        route: Option<wechat_protocol::media::LargeCdnRoute>,
+    ) -> Result<Box<dyn media::MediaTransport>> {
         let native = self.native(NativeOptions::default())?;
-        let conf = match native.cdn_config(state) {
+        let load = |state: &mut AccountState| match route {
+            Some(route) => native.large_cdn_config(state, route),
+            None => native.cdn_config(state),
+        };
+        let mut conf = match load(state) {
             Ok(conf) => conf,
             Err(error) if crate::media::is_media_auth_rejected(&error) => {
                 *state = native.renew_session(state, "agent-wechat media")?;
-                native.cdn_config(state)?
+                load(state)?
             }
             Err(error) => return Err(error),
         };
-        Ok(Box::new(wechat_protocol::media::CdnClient::new(
-            conf,
-            Duration::from_secs(25),
-        )?))
+        let cdn = wechat_protocol::media::CdnClient::new(conf.clone(), Duration::from_secs(25))?;
+        conf.auth_key.fill(0);
+        Ok(Box::new(cdn))
     }
     fn submit_media(
         &self,
@@ -189,12 +212,16 @@ pub trait Upstream: Send + Sync {
     ) -> Result<MediaSendResult> {
         let native = self.native(NativeOptions::default())?;
         match input.body {
-            media::MediaBody::File(upload) => native.send_file(
+            media::MediaBody::File {
+                upload,
+                reservation,
+            } => native.send_file_with_reservation(
                 state,
                 input.destination,
                 input.client_id,
                 input.created_at,
                 upload,
+                reservation,
             ),
             media::MediaBody::Image(upload) => {
                 native.send_image(state, input.destination, input.client_id, upload)
@@ -357,4 +384,11 @@ pub(crate) fn validate_profile_path(root: &Path, profile: &Path) -> Result<()> {
         "simulator_requires_isolated_profiles"
     );
     Ok(())
+}
+
+/// Decode known contact fields without inventing local deletion state.
+pub fn native_contact_patch(
+    record: &wechat_protocol::ContactRecord,
+) -> Result<wechat_profile::ContactProjection> {
+    crate::runtime::metadata::contact_patch(record)
 }

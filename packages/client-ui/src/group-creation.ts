@@ -1,28 +1,100 @@
-import type {
-  GroupCreateRequest,
-  NativeOperation,
-  NativeWeChatClient,
+import {
+  NativeApiError,
+  type NativeGroupCreateRequest,
+  type NativeOperation,
+  type NativeWeChatClient,
 } from "@agent-wechat/shared";
 import { pause, readableError } from "./session.ts";
+export type GroupAction =
+  | { action: "create"; members: string[]; name?: string }
+  | { action: "rename"; groupId: string; name: string }
+  | { action: "leave" | "clear_announcement"; groupId: string }
+  | {
+      action: "add_members" | "remove_members";
+      groupId: string;
+      members: string[];
+    }
+  | { action: "my_name"; groupId: string; displayName: string }
+  | { action: "mute"; groupId: string; muted: boolean };
 export type GroupReceipt = {
   key: string;
-  input: GroupCreateRequest;
+  input: GroupAction;
   operation?: NativeOperation;
+  notAdmitted?: boolean;
 };
+export function validGroupReceipt(
+  value: unknown,
+  target: string,
+): value is GroupReceipt {
+  if (!value || typeof value !== "object") return false;
+  const receipt = value as GroupReceipt;
+  const input = receipt.input;
+  if (
+    typeof receipt.key !== "string" ||
+    !receipt.key ||
+    receipt.key.length > 200 ||
+    /[\r\n]/.test(receipt.key) ||
+    !input ||
+    typeof input !== "object"
+  )
+    return false;
+  if (
+    ![
+      "create",
+      "rename",
+      "leave",
+      "add_members",
+      "remove_members",
+      "my_name",
+      "clear_announcement",
+      "mute",
+    ].includes(input.action)
+  )
+    return false;
+  if (
+    input.action === "create" ? target !== "create" : input.groupId !== target
+  )
+    return false;
+  if (
+    ["create", "add_members", "remove_members"].includes(input.action) &&
+    !("members" in input)
+  )
+    return false;
+  if (
+    "members" in input &&
+    (!Array.isArray(input.members) ||
+      input.members.length > 40 ||
+      input.members.some(
+        (member) =>
+          typeof member !== "string" || !member || member.length > 256,
+      ))
+  )
+    return false;
+  if (
+    (input.action === "create" &&
+      input.name !== undefined &&
+      typeof input.name !== "string") ||
+    (input.action === "rename" && typeof input.name !== "string") ||
+    (input.action === "my_name" && typeof input.displayName !== "string") ||
+    (input.action === "mute" && typeof input.muted !== "boolean")
+  )
+    return false;
+  return true;
+}
 type Storage = {
   read(): GroupReceipt | null;
   write(value: GroupReceipt | null): void;
 };
 type Snapshot = { receipt: GroupReceipt | null; busy: boolean; error: string };
-const ended = new Set([
-  "succeeded",
-  "failed",
-  "needs_review",
-  "cancelled",
-  "rejected",
-]);
-/** Status recovery never repeats an uncertain group-creation request. */
-export class GroupCreation {
+export const groupEnded = (operation?: NativeOperation): boolean =>
+  !!operation &&
+  ["succeeded", "failed", "needs_review", "cancelled", "rejected"].includes(
+    operation.state,
+  );
+export const groupTarget = (input: GroupAction): string | null =>
+  input.action === "create" ? null : input.groupId;
+/** Each account/target retains its admission key. Recovery only reads status. */
+export class GroupMutations {
   private value: Snapshot;
   private listeners = new Set<() => void>();
   private controller = new AbortController();
@@ -34,8 +106,12 @@ export class GroupCreation {
     this.client = client;
     this.account = account;
     this.storage = storage;
-    this.value = { receipt: storage.read(), busy: false, error: "" };
-    if (this.value.receipt) queueMicrotask(() => void this.check());
+    const receipt = storage.read();
+    if (receipt?.operation && !this.matches(receipt.operation, receipt))
+      delete receipt.operation;
+    this.value = { receipt, busy: false, error: "" };
+    if (this.value.receipt && !this.value.receipt.notAdmitted)
+      queueMicrotask(() => void this.check());
   }
   snapshot = (): Snapshot => this.value;
   subscribe = (listener: () => void): (() => void) => {
@@ -50,46 +126,134 @@ export class GroupCreation {
     this.storage.write(this.value.receipt);
     for (const listener of this.listeners) listener();
   }
-  private accept(operation: NativeOperation, key: string): void {
-    if (this.value.receipt?.key !== key || this.controller.signal.aborted)
-      return;
-    if (
-      operation.accountId !== this.account ||
-      operation.kind !== "group_create"
-    )
-      throw new Error("Invalid group creation receipt");
-    this.publish({ receipt: { ...this.value.receipt!, operation }, error: "" });
+  private matches(operation: NativeOperation, receipt: GroupReceipt): boolean {
+    const result = operation?.result as Record<string, unknown> | null;
+    return (
+      !!operation &&
+      operation.accountId === this.account &&
+      operation.kind === "group_mutation" &&
+      typeof operation.id === "string" &&
+      !!operation.id &&
+      !!result &&
+      result.action === receipt.input.action &&
+      result.targetId === groupTarget(receipt.input)
+    );
   }
-  async create(input: GroupCreateRequest): Promise<void> {
+  private accept(operation: NativeOperation, key: string): void {
+    const receipt = this.value.receipt;
+    if (receipt?.key !== key || this.controller.signal.aborted) return;
+    if (!this.matches(operation, receipt))
+      throw new Error("Invalid group operation receipt");
+    this.publish({ receipt: { ...receipt, operation }, error: "" });
+  }
+  async create(input: NativeGroupCreateRequest): Promise<void> {
+    await this.run({ action: "create", ...input });
+  }
+  async run(input: GroupAction): Promise<void> {
     if (this.value.receipt || this.controller.signal.aborted) return;
+    const request = structuredClone(input);
+    if ("members" in request) request.members.sort();
     const key = crypto.randomUUID();
-    this.publish({
-      receipt: {
-        key,
-        input: { name: input.name.trim(), members: [...input.members].sort() },
-      },
-      busy: true,
-      error: "",
-    });
+    this.publish({ receipt: { key, input: request }, busy: true, error: "" });
+    const client = this.client,
+      account = this.account,
+      signal = this.controller.signal;
     try {
-      this.accept(
-        await this.client.createGroup(
-          this.account,
-          this.value.receipt!.input,
-          key,
-        ),
-        key,
-      );
+      let operation: NativeOperation;
+      switch (request.action) {
+        case "create":
+          operation = await client.createGroup(
+            account,
+            {
+              members: request.members,
+              ...(request.name?.trim() ? { name: request.name.trim() } : {}),
+            },
+            key,
+            signal,
+          );
+          break;
+        case "rename":
+          operation = await client.renameGroup(
+            account,
+            request.groupId,
+            request.name.trim(),
+            key,
+            signal,
+          );
+          break;
+        case "leave":
+          operation = await client.leaveGroup(
+            account,
+            request.groupId,
+            key,
+            signal,
+          );
+          break;
+        case "add_members":
+          operation = await client.addGroupMembers(
+            account,
+            request.groupId,
+            request.members,
+            key,
+            signal,
+          );
+          break;
+        case "remove_members":
+          operation = await client.removeGroupMembers(
+            account,
+            request.groupId,
+            request.members,
+            key,
+            signal,
+          );
+          break;
+        case "my_name":
+          operation = await client.setMyGroupName(
+            account,
+            request.groupId,
+            request.displayName,
+            key,
+            signal,
+          );
+          break;
+        case "clear_announcement":
+          operation = await client.clearGroupAnnouncement(
+            account,
+            request.groupId,
+            key,
+            signal,
+          );
+          break;
+        case "mute":
+          operation = await client.setThreadMuted(
+            account,
+            request.groupId,
+            request.muted,
+            key,
+            signal,
+          );
+          break;
+      }
+      this.accept(operation, key);
       void this.watch();
     } catch (error) {
-      this.publish({ error: readableError(error) });
+      // These admission errors cannot have submitted a group operation. A lost
+      // response, conflict or server error remains recoverable by the same key.
+      const notAdmitted =
+        error instanceof NativeApiError &&
+        [400, 401, 403, 404, 422].includes(error.status);
+      this.publish({
+        receipt: { ...this.value.receipt!, notAdmitted },
+        error: readableError(error),
+      });
     } finally {
       this.publish({ busy: false });
     }
   }
   async check(): Promise<void> {
     const receipt = this.value.receipt;
-    if (!receipt || this.controller.signal.aborted) return;
+    if (!receipt || receipt.notAdmitted || this.controller.signal.aborted)
+      return;
     this.publish({ busy: true, error: "" });
     try {
       this.accept(
@@ -99,7 +263,11 @@ export class GroupCreation {
               receipt.operation.id,
               this.controller.signal,
             )
-          : await this.client.groupCreationByKey(this.account, receipt.key),
+          : await this.client.groupMutationByKey(
+              this.account,
+              receipt.key,
+              this.controller.signal,
+            ),
         receipt.key,
       );
       void this.watch();
@@ -114,9 +282,9 @@ export class GroupCreation {
     this.watching = true;
     try {
       while (!this.controller.signal.aborted) {
-        const receipt = this.value.receipt;
-        const operation = receipt?.operation;
-        if (!operation || ended.has(operation.state)) return;
+        const receipt = this.value.receipt,
+          operation = receipt?.operation;
+        if (!operation || groupEnded(operation)) return;
         await pause(800, this.controller.signal);
         if (this.controller.signal.aborted) return;
         this.accept(
@@ -134,11 +302,33 @@ export class GroupCreation {
       this.watching = false;
     }
   }
-  clear(): void {
+  async cancel(): Promise<void> {
+    const receipt = this.value.receipt;
     if (
-      this.value.receipt?.operation &&
-      ended.has(this.value.receipt.operation.state) &&
-      this.value.receipt.operation.state !== "needs_review"
+      !receipt?.operation ||
+      groupEnded(receipt.operation) ||
+      this.controller.signal.aborted
+    )
+      return;
+    this.publish({ busy: true });
+    try {
+      this.accept(
+        await this.client.cancelOperation(this.account, receipt.operation.id),
+        receipt.key,
+      );
+    } catch (error) {
+      this.publish({ error: readableError(error) });
+      await this.check();
+    } finally {
+      this.publish({ busy: false });
+    }
+  }
+  clear(): void {
+    const receipt = this.value.receipt;
+    if (
+      receipt?.notAdmitted ||
+      (groupEnded(receipt?.operation) &&
+        receipt?.operation?.state !== "needs_review")
     )
       this.publish({ receipt: null, error: "", busy: false });
   }

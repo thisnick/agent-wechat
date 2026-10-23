@@ -92,31 +92,54 @@ impl SimulatorUpstream {
     }
 }
 impl Upstream for SimulatorUpstream {
-    fn can_create_groups(&self) -> bool {
-        true
+    fn contact_patch(
+        &self,
+        record: &wechat_protocol::ContactRecord,
+    ) -> Result<wechat_profile::ContactProjection> {
+        // Synthetic fixtures describe active contacts. The production mapper
+        // deliberately preserves unknown local deletion state.
+        let mut patch = wechat_core::upstream::native_contact_patch(record)?;
+        patch.fields.insert(
+            "delete_flag".into(),
+            wechat_profile::SqlValue::Integer("0".into()),
+        );
+        Ok(patch)
     }
-    fn create_group(
+
+    fn group_mutation_raw(
         &self,
         state: &mut AccountState,
-        input: &wechat_core::GroupCreateRequest,
-        key: &str,
-    ) -> Result<String> {
-        self.rpc(&Request::CreateGroup {
+        request: &wechat_protocol::GroupRpc,
+    ) -> Result<Vec<u8>> {
+        self.rpc(&Request::GroupMutation {
             session: self.session(state)?,
-            input: input.clone(),
-            key: key.into(),
+            request: request.clone(),
+        })
+    }
+    fn group_detail_raw(&self, state: &mut AccountState, room: &str) -> Result<Vec<u8>> {
+        self.rpc(&Request::GroupDetail {
+            session: self.session(state)?,
+            room: room.into(),
+        })
+    }
+    fn lookup_room_raw(
+        &self,
+        state: &mut AccountState,
+        room: &str,
+        _version: u32,
+    ) -> Result<Vec<u8>> {
+        self.rpc(&Request::Room {
+            session: self.session(state)?,
+            room: room.into(),
         })
     }
     fn lookup_room_receipt(
         &self,
         state: &mut AccountState,
         room: &str,
-        _version: u32,
+        version: u32,
     ) -> Result<wechat_protocol::MetadataReply<wechat_protocol::RoomRoster>> {
-        let raw: Vec<u8> = self.rpc(&Request::Room {
-            session: self.session(state)?,
-            room: room.into(),
-        })?;
+        let raw = self.lookup_room_raw(state, room, version)?;
         Ok(wechat_protocol::MetadataReply {
             value: wechat_protocol::wire::decode_room(&raw, room)?,
             raw,
@@ -151,10 +174,12 @@ impl Upstream for SimulatorUpstream {
             username: username.into(),
         })
     }
-    fn media_transport(
+    fn media_transport_route(
         &self,
         state: &mut AccountState,
+        route: Option<wechat_protocol::media::LargeCdnRoute>,
     ) -> Result<Box<dyn wechat_core::upstream::media::MediaTransport>> {
+        ensure!(route.is_none(), "unsupported_simulator_operation");
         Ok(Box::new(media::SimulatorMedia::new(
             self.clone(),
             self.session(state)?,

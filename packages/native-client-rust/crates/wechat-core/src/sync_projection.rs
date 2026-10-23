@@ -514,7 +514,7 @@ impl Core {
                 wechat_profile::apply_contact_patch(
                     &location,
                     &keys,
-                    &super::metadata::contact_patch(&contact)?,
+                    &self.upstream.contact_patch(&contact)?,
                     &options,
                 )?;
                 if contact.username.ends_with("@chatroom") {

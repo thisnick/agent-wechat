@@ -1,5 +1,6 @@
 //! Server-owned media transfers and one-shot outgoing media jobs.
 use crate::media_types::*;
+use crate::upstream::media::{MediaBody, MediaSubmission};
 use crate::{source_message_id, Core};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1324,7 +1325,6 @@ impl Core {
         if asset.state == "available" {
             return self.complete_download(account, id, &asset);
         }
-        crate::upstream::require_native(self.upstream.kind())?;
         let plan = self.asset_plan(account, &stored)?.plan;
         let link_thumbnail = matches!(&plan, DownloadPlan::LinkThumbnail { .. });
         let progress = |n, t: Option<u64>| {
@@ -1344,30 +1344,19 @@ impl Core {
                 source: crate::links::LinkThumbnail::Cdn(descriptor),
             } => {
                 let mut state = self.account_state(account)?;
-                let native = self.upstream.native(NativeOptions::default())?;
-                let load_config = |state: &mut wechat_protocol::AccountState| {
-                    if descriptor.quality == MediaQuality::LargeFile {
-                        native.large_cdn_config(state, LargeCdnRoute::Download)
-                    } else if descriptor.quality == MediaQuality::Video
-                        && descriptor
-                            .expected_bytes
-                            .is_some_and(|size| size > 25 * 1024 * 1024)
-                    {
-                        native.large_cdn_config(state, LargeCdnRoute::VideoDownload)
-                    } else {
-                        native.cdn_config(state)
-                    }
+                let route = if descriptor.quality == MediaQuality::LargeFile {
+                    Some(LargeCdnRoute::Download)
+                } else if descriptor.quality == MediaQuality::Video
+                    && descriptor
+                        .expected_bytes
+                        .is_some_and(|size| size > 25 * 1024 * 1024)
+                {
+                    Some(LargeCdnRoute::VideoDownload)
+                } else {
+                    None
                 };
-                let conf = match load_config(&mut state) {
-                    Ok(conf) => conf,
-                    Err(error) if is_media_auth_rejected(&error) => {
-                        state = native.renew_session(&state, "agent-wechat media")?;
-                        load_config(&mut state)?
-                    }
-                    Err(error) => return Err(error),
-                };
+                let cdn = self.upstream.media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
-                let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
                 let unlocked =
                     permit.is_some() && matches!(asset.kind, MediaKind::File | MediaKind::Video);
                 let fence = unlocked
@@ -1375,7 +1364,7 @@ impl Core {
                     .transpose()?;
                 let media =
                     cdn_transfer(if unlocked { permit } else { None }, self, account, || {
-                        cdn.download_with_progress(&descriptor, progress)
+                        cdn.download(&descriptor, &progress)
                     })?;
                 if let Some(fence) = fence {
                     self.resume_media_state(account, id, &fence)?;
@@ -1414,14 +1403,18 @@ impl Core {
             DownloadPlan::LinkThumbnail {
                 source: crate::links::LinkThumbnail::Http(url),
             } => {
+                crate::upstream::require_native(self.upstream.kind())?;
                 let bytes = wechat_protocol::media::fetch_link_thumbnail(&url, progress)?;
                 let (mime, frames) =
                     validate_asset_bytes(MediaKind::Image, MediaVariant::Thumbnail, &bytes)?;
                 (bytes, mime, Some(MediaVariant::Thumbnail), frames)
             }
             DownloadPlan::Sticker { descriptor } => {
-                let (bytes, inspection) =
-                    wechat_protocol::media::fetch_sticker(&descriptor, progress)?;
+                let (bytes, inspection) = self.upstream.download_sticker(
+                    &mut self.account_state(account)?,
+                    &descriptor,
+                    &progress,
+                )?;
                 (
                     bytes,
                     inspection.content_type,
@@ -1440,11 +1433,10 @@ impl Core {
                     .unwrap_or_default();
                 if bytes.is_empty() {
                     let mut state = self.account_state(account)?;
-                    let native = self.upstream.native(NativeOptions::default())?;
                     let mut renewed = false;
                     while bytes.len() < length as usize {
                         progress(bytes.len() as u64, Some(length as u64))?;
-                        let reply = native.download_voice_chunk(
+                        let reply = self.upstream.download_voice(
                             &mut state,
                             server_id,
                             length,
@@ -1454,7 +1446,8 @@ impl Core {
                         let chunk = match reply {
                             Ok(chunk) => chunk,
                             Err(error) if !renewed && is_media_auth_rejected(&error) => {
-                                state = native.renew_session(&state, "agent-wechat media")?;
+                                state =
+                                    self.upstream.renew_session(&state, "agent-wechat media")?;
                                 self.save_state(account, &state)?;
                                 renewed = true;
                                 continue;
@@ -1777,7 +1770,7 @@ fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
     }
     None
 }
-fn is_media_auth_rejected(error: &anyhow::Error) -> bool {
+pub(crate) fn is_media_auth_rejected(error: &anyhow::Error) -> bool {
     matches!(
         service_diagnostic(error),
         Some((
@@ -2399,7 +2392,6 @@ impl Core {
                 },
             );
         }
-        let native = self.upstream.native(NativeOptions::default())?;
         let mut state = self.account_state(account)?;
         if plan.request.kind == MediaKind::Video {
             if plan.request.video_quality.is_some() && plan.prepared_video_source_id.is_none() {
@@ -2467,13 +2459,17 @@ impl Core {
                 plan.voice[index].status = "submitting".into();
                 self.save_send_plan(account, id, &plan)?;
                 let part = &plan.voice[index];
-                let result = native.send_voice(
+                let result = self.upstream.submit_media(
                     &mut state,
-                    &plan.request.thread_id,
-                    &part.client_id,
-                    plan.created_at,
-                    part.duration_ms,
-                    &part.encoded,
+                    MediaSubmission {
+                        destination: &plan.request.thread_id,
+                        client_id: &part.client_id,
+                        created_at: plan.created_at,
+                        body: MediaBody::Voice {
+                            encoded: &part.encoded,
+                            duration_ms: part.duration_ms,
+                        },
+                    },
                 );
                 let receipt = match result {
                     Ok(receipt) => receipt,
@@ -2524,38 +2520,26 @@ impl Core {
         }
         self.ensure_upload_material(account, id, &mut plan)?;
         let modern_file = plan.request.kind == MediaKind::File && file_uses_multiphase(bytes.len());
-        let load_config = |state: &mut wechat_protocol::AccountState, route| {
-            if let Some(route) = route {
-                native.large_cdn_config(state, route)
-            } else {
-                native.cdn_config(state)
-            }
-        };
         let upload_route = modern_file.then_some(LargeCdnRoute::Upload);
-        let mut conf = match load_config(&mut state, upload_route) {
-            Ok(conf) => conf,
-            Err(error) if is_media_auth_rejected(&error) => {
-                state = native.renew_session(&state, "agent-wechat media")?;
-                load_config(&mut state, upload_route)?
-            }
-            Err(e) => return Err(e),
-        };
+        let mut cdn = self
+            .upstream
+            .media_transport_route(&mut state, upload_route)?;
         self.save_state(account, &state)?;
-        let mut cdn = CdnClient::new(conf.clone(), Duration::from_secs(25))?;
-        conf.auth_key.fill(0);
         let destination = plan.request.thread_id.clone();
         let progress_id = plan.file_upload_progress_id.clone();
         if self.reserve_media_file_upload(account, id, &mut plan, bytes.len(), || {
-            native.reserve_file_upload(
-                &mut state,
-                &destination,
-                progress_id
-                    .as_deref()
-                    .context("file_reservation_needs_review")?,
-                &source.name,
-                bytes.len(),
-                &hex_string(&wechat_protocol::crypto::md5(&bytes)),
-            )
+            self.upstream
+                .native(NativeOptions::default())?
+                .reserve_file_upload(
+                    &mut state,
+                    &destination,
+                    progress_id
+                        .as_deref()
+                        .context("file_reservation_needs_review")?,
+                    &source.name,
+                    bytes.len(),
+                    &hex_string(&wechat_protocol::crypto::md5(&bytes)),
+                )
         })? {
             self.save_state(account, &state)?;
         }
@@ -2579,13 +2563,13 @@ impl Core {
                         .transpose()?;
                     let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
                         if modern_file {
-                            cdn.upload_large_file_with_progress(
+                            cdn.native()?.upload_large_file_with_progress(
                                 &prepared,
                                 material.task_id,
                                 callback,
                             )
                         } else {
-                            cdn.upload_with_progress(&prepared, callback)
+                            cdn.upload(&prepared, &callback)
                         }
                     })?;
                     if let Some(current) = self.complete_file_cdn_upload(
@@ -2686,7 +2670,7 @@ impl Core {
                     self.phase_media(account, id, "uploading")?;
                     let fence = self.media_authorization_fence(account)?;
                     let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                        cdn.upload_video_with_progress(&prepared, callback)
+                        cdn.upload_video(&prepared, &callback)
                     })?;
                     plan.uploaded_video = Some(uploaded);
                     // Retain accepted CDN objects before a late cancellation or logout check.
@@ -2709,13 +2693,12 @@ impl Core {
                         &raw_material.file_key,
                     )?;
                     let route = file_uses_multiphase(bytes.len()).then_some(LargeCdnRoute::Upload);
-                    let raw_conf = load_config(&mut state, route)?;
+                    let raw_cdn = self.upstream.media_transport_route(&mut state, route)?;
                     self.save_state(account, &state)?;
-                    let raw_cdn = CdnClient::new(raw_conf, Duration::from_secs(25))?;
                     self.phase_media(account, id, "uploading")?;
                     let fence = self.media_authorization_fence(account)?;
                     let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                        raw_cdn.upload_video_original_with_progress(
+                        raw_cdn.native()?.upload_video_original_with_progress(
                             &prepared,
                             raw_material.task_id,
                             callback,
@@ -2748,16 +2731,10 @@ impl Core {
                 .context("missing_uploaded_file")?;
             let download_route = (uploaded.descriptor.quality == MediaQuality::LargeFile)
                 .then_some(LargeCdnRoute::Download);
-            let conf = match load_config(&mut state, download_route) {
-                Ok(conf) => conf,
-                Err(error) if is_media_auth_rejected(&error) => {
-                    state = native.renew_session(&state, "agent-wechat media")?;
-                    load_config(&mut state, download_route)?
-                }
-                Err(error) => return Err(error),
-            };
+            cdn = self
+                .upstream
+                .media_transport_route(&mut state, download_route)?;
             self.save_state(account, &state)?;
-            cdn = CdnClient::new(conf, Duration::from_secs(25))?;
         }
         let mut verified = vec![];
         if let Some(u) = &plan.uploaded_file {
@@ -2766,7 +2743,7 @@ impl Core {
                 .then(|| self.media_authorization_fence(account))
                 .transpose()?;
             let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                cdn.download_with_progress(&u.descriptor, callback)
+                cdn.download(&u.descriptor, &callback)
             })?;
             if let Some(fence) = fence {
                 state = self.resume_media_state(account, id, &fence)?;
@@ -2776,7 +2753,7 @@ impl Core {
         }
         if let Some(u) = &plan.uploaded_image {
             for variant in [&u.original, &u.standard, &u.thumbnail] {
-                let downloaded = cdn.download_with_progress(&variant.descriptor, callback)?;
+                let downloaded = cdn.download(&variant.descriptor, &callback)?;
                 ensure!(
                     downloaded.sha256 == variant.sha256,
                     "media_integrity_failed"
@@ -2796,12 +2773,11 @@ impl Core {
                         .expected_bytes
                         .is_some_and(|length| length > 25 * 1024 * 1024))
                 .then_some(LargeCdnRoute::VideoDownload);
-                let download_conf = load_config(&mut state, route)?;
+                let download_cdn = self.upstream.media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
-                let download_cdn = CdnClient::new(download_conf, Duration::from_secs(25))?;
                 let fence = self.media_authorization_fence(account)?;
                 let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                    download_cdn.download_with_progress(&variant.descriptor, callback)
+                    download_cdn.download(&variant.descriptor, &callback)
                 })?;
                 state = self.resume_media_state(account, id, &fence)?;
                 ensure!(
@@ -2816,33 +2792,31 @@ impl Core {
         row.data["result"]["verifiedSha256"] = verified.into();
         self.store.save_media_job(account, &row)?;
         self.phase_media(account, id, "submitting")?;
-        let result = match plan.request.kind {
-            MediaKind::File => native.send_file_with_reservation(
-                &mut state,
-                &plan.request.thread_id,
-                &plan.client_id,
-                plan.created_at,
-                plan.uploaded_file.as_ref().unwrap(),
-                plan.reservation.as_ref(),
-            ),
-            MediaKind::Image => native.send_image(
-                &mut state,
-                &plan.request.thread_id,
-                &plan.client_id,
-                plan.uploaded_image.as_ref().unwrap(),
-            ),
-            MediaKind::Video => native.send_video(
-                &mut state,
-                &plan.request.thread_id,
-                &plan.client_id,
-                plan.uploaded_video.as_ref().unwrap(),
-                plan.request
+        let body = match plan.request.kind {
+            MediaKind::File => MediaBody::File {
+                upload: plan.uploaded_file.as_ref().unwrap(),
+                reservation: plan.reservation.as_ref(),
+            },
+            MediaKind::Image => MediaBody::Image(plan.uploaded_image.as_ref().unwrap()),
+            MediaKind::Video => MediaBody::Video {
+                upload: plan.uploaded_video.as_ref().unwrap(),
+                seconds: plan
+                    .request
                     .play_seconds
                     .filter(|s| *s > 0)
                     .context("video_duration_required")?,
-            ),
+            },
             _ => bail!("unsupported_media_send"),
         };
+        let result = self.upstream.submit_media(
+            &mut state,
+            MediaSubmission {
+                destination: &plan.request.thread_id,
+                client_id: &plan.client_id,
+                created_at: plan.created_at,
+                body,
+            },
+        );
         match result {
             Ok(receipt) => {
                 self.finish_media_send(account, id, receipt)?;

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { GroupCreation } from "../packages/client-ui/src/group-creation.ts";
-export async function groupJourney({ client, wait, account }) {
-  assert.equal((await client.capabilities(account)).groupCreation, true);
+import { GroupMutations } from "../packages/client-ui/src/group-creation.ts";
+export async function groupJourney({ client, wait, account, control, state }) {
+  const capability = await client.capabilities(account);
+  assert.ok(capability.groupMutations.includes("create"));
+  assert.equal(capability.groupMutationMaxSelectedMembers, 40);
   const input = {
     name: "Simulator project",
-    members: ["sim_mei", "sim_daniel"],
+    members: ["sim_daniel", "sim_mei"],
   };
   const original = client.createGroup.bind(client);
   let submissions = 0,
@@ -21,7 +23,14 @@ export async function groupJourney({ client, wait, account }) {
     await original(...args);
     throw Error("Lost group admission response");
   };
-  const creation = new GroupCreation(dropped, account, storage);
+  const creation = new GroupMutations(dropped, account, storage);
+  const finish = async (label, operation) =>
+    wait(label, async () => {
+      const item = await client.operation(account, operation.id);
+      if (["failed", "needs_review", "cancelled"].includes(item.state))
+        throw Error(`${label}: ${JSON.stringify(item)}`);
+      return item.state === "succeeded" && item;
+    });
   let room;
   try {
     await creation.create(input);
@@ -34,17 +43,12 @@ export async function groupJourney({ client, wait, account }) {
         creation.snapshot().receipt.operation?.state === "succeeded" &&
         creation.snapshot().receipt.operation,
     );
+    assert.equal(operation.kind, "group_mutation");
     assert.equal(submissions, 1);
-    room = operation.result.roomId;
+    room = operation.result.groupId;
     assert.match(room, /^simroom_[a-f0-9]+@chatroom$/);
     assert.equal(
-      (
-        await client.createGroup(
-          account,
-          { ...input, members: [...input.members].reverse() },
-          key,
-        )
-      ).id,
+      (await client.createGroup(account, input, key)).id,
       operation.id,
     );
     await assert.rejects(
@@ -58,16 +62,9 @@ export async function groupJourney({ client, wait, account }) {
         "invalid-duplicate",
       ),
     );
-    await assert.rejects(
-      client.createGroup(
-        account,
-        { ...input, members: ["sim_mei", "filehelper"] },
-        "invalid-helper",
-      ),
-    );
-    await assert.rejects(client.groupCreationByKey("work", key));
+    await assert.rejects(client.groupMutationByKey("work", key));
     creation.close();
-    const reopened = new GroupCreation(client, account, storage);
+    const reopened = new GroupMutations(client, account, storage);
     try {
       await reopened.check();
       assert.equal(reopened.snapshot().receipt.operation.id, operation.id);
@@ -75,23 +72,24 @@ export async function groupJourney({ client, wait, account }) {
     } finally {
       reopened.close();
     }
-    const thread = await wait("created group thread projection", async () => {
-      const result = await client.thread(account, room);
-      return result.displayName === input.name && result;
+    const thread = await wait("created group thread", async () => {
+      const value = await client.thread(account, room);
+      return value.displayName === input.name && value;
     });
     assert.equal(thread.kind, "group");
-    const members = await client.refreshGroupMembers(account, room);
-    await wait("created group roster projection", async () => {
-      const operation = await client.operation(account, members.id);
-      assert.notEqual(operation.state, "failed");
-      return operation.state === "succeeded";
-    });
-    const roster = (await client.groupMembers(account, room)).items;
-    assert.equal(roster.length, 3);
-    assert.ok(roster.some((member) => member.id === "sim_mei"));
-    assert.ok(roster.some((member) => member.id === "sim_daniel"));
-    assert.ok(roster.some((member) => member.id === `sim_${account}`));
-    const message = await client.sendText(
+    await finish(
+      "group detail refresh",
+      await client.refreshGroup(account, room),
+    );
+    await finish(
+      "group roster refresh",
+      await client.refreshGroupMembers(account, room),
+    );
+    const info = await client.group(account, room);
+    assert.equal(info.isInGroup, true);
+    assert.equal(info.muted, false);
+    assert.equal((await client.groupMembers(account, room)).items.length, 3);
+    const text = await client.sendText(
       account,
       room,
       "Synthetic group message",
@@ -99,23 +97,189 @@ export async function groupJourney({ client, wait, account }) {
     );
     await wait(
       "group text acceptance",
-      async () => (await client.send(account, message.id)).state === "accepted",
+      async () => (await client.send(account, text.id)).state === "accepted",
     );
     await wait("group text history", async () =>
       (await client.messages(account, room)).items.some(
-        (item) =>
-          item.body === "Synthetic group message" &&
-          item.direction === "outgoing",
+        (item) => item.body === "Synthetic group message",
+      ),
+    );
+    const rename = await finish(
+      "rename group",
+      await client.renameGroup(account, room, "Design team", "group-rename"),
+    );
+    assert.equal(rename.result.remoteOutcome, "accepted");
+    assert.equal((await client.group(account, room)).name, "Design team");
+    await finish(
+      "my group name",
+      await client.setMyGroupName(account, room, "Team lead", "group-my-name"),
+    );
+    assert.equal(
+      (await client.group(account, room)).myDisplayName,
+      "Team lead",
+    );
+    await finish(
+      "mute group",
+      await client.setThreadMuted(account, room, true, "group-mute"),
+    );
+    assert.equal((await client.group(account, room)).muted, true);
+    await finish(
+      "unmute group",
+      await client.setThreadMuted(account, room, false, "group-unmute"),
+    );
+    assert.equal((await client.group(account, room)).muted, false);
+    await finish(
+      "remove member",
+      await client.removeGroupMembers(
+        account,
+        room,
+        ["sim_mei"],
+        "group-remove",
+      ),
+    );
+    assert.ok(
+      !(await client.groupMembers(account, room)).items.some(
+        (member) => member.id === "sim_mei",
+      ),
+    );
+    await finish(
+      "refresh removed roster",
+      await client.refreshGroupMembers(account, room),
+    );
+    assert.ok(
+      !(await client.groupMembers(account, room)).items.some(
+        (member) => member.id === "sim_mei",
+      ),
+    );
+    await finish(
+      "add member",
+      await client.addGroupMembers(account, room, ["sim_mei"], "group-add"),
+    );
+    assert.ok(
+      (await client.groupMembers(account, room)).items.some(
+        (member) => member.id === "sim_mei",
+      ),
+    );
+    await finish(
+      "clear announcement",
+      await client.clearGroupAnnouncement(account, room, "group-clear"),
+    );
+    assert.equal((await client.group(account, room)).announcement, "");
+    await finish(
+      "refresh edited group",
+      await client.refreshGroup(account, room),
+    );
+    await finish(
+      "refresh edited members",
+      await client.refreshGroupMembers(account, room),
+    );
+    const refreshed = await client.group(account, room);
+    assert.equal(refreshed.name, "Design team");
+    assert.equal(refreshed.myDisplayName, "Team lead");
+    assert.equal(refreshed.muted, false);
+    assert.equal((await client.groupMembers(account, room)).items.length, 3);
+    await assert.rejects(
+      client.renameGroup("work", room, "Foreign group", "foreign-rename"),
+    );
+    await assert.rejects(client.groupMutationByKey("work", "group-rename"));
+    const leave = await finish(
+      "leave group",
+      await client.leaveGroup(account, room, "group-leave"),
+    );
+    assert.equal(leave.result.steps.length, 3);
+    assert.equal((await client.group(account, room)).isInGroup, false);
+    assert.ok(
+      (await client.messages(account, room)).items.some(
+        (item) => item.body === "Synthetic group message",
       ),
     );
     await assert.rejects(
-      client.refreshGroupMembers("work", room).then(async (operation) => {
-        const final = await wait("foreign group lookup", async () => {
-          const item = await client.operation("work", operation.id);
-          return ["succeeded", "failed"].includes(item.state) && item;
-        });
-        if (final.state === "failed") throw Error("foreign group refused");
-      }),
+      client.renameGroup(account, room, "After leaving", "after-leave"),
+      (error) => error.code === "ordinary_group_required",
+    );
+
+    // Partial member results come from the simulator RPC; the actual Core
+    // decoder/projector must preserve a nonzero member status without assuming acceptance.
+    await control({ op: "group_fault", account, fault: "partial_members" });
+    const partial = await finish(
+      "partial group creation",
+      await client.createGroup(
+        account,
+        { ...input, name: "Partial group" },
+        "partial-group",
+      ),
+    );
+    assert.equal(partial.result.memberOutcome, "partial");
+    assert.deepEqual(
+      partial.result.members.map((member) => member.status),
+      [0, 4],
+    );
+    const partialRoom = partial.result.groupId;
+    assert.deepEqual(
+      (await client.groupMembers(account, partialRoom)).items
+        .map((member) => member.id)
+        .sort(),
+      [`sim_${account}`, "sim_daniel"].sort(),
+    );
+    await finish(
+      "partial roster refresh",
+      await client.refreshGroupMembers(account, partialRoom),
+    );
+    assert.equal(
+      (await client.groupMembers(account, partialRoom)).items.length,
+      2,
+    );
+    await control({ op: "group_fault", account, fault: "reject" });
+    const rejected = await client.renameGroup(
+      account,
+      partialRoom,
+      "Rejected name",
+      "group-reject",
+    );
+    const rejection = await wait("group rejection", async () => {
+      const value = await client.operation(account, rejected.id);
+      return value.state === "failed" && value;
+    });
+    assert.equal(rejection.result.remoteOutcome, "rejected");
+    assert.equal(
+      (await client.group(account, partialRoom)).name,
+      "Partial group",
+    );
+    const before = (await state()).accounts.find(
+      (item) => item.id === account,
+    ).groupCount;
+    await control({ op: "group_fault", account, fault: "lost_acknowledgment" });
+    const uncertain = await client.createGroup(
+      account,
+      { ...input, name: "Uncertain group" },
+      "uncertain-group",
+    );
+    const review = await wait("uncertain group outcome", async () => {
+      const value = await client.operation(account, uncertain.id);
+      return value.state === "needs_review" && value;
+    });
+    assert.equal(review.result.remoteOutcome, "unknown");
+    assert.equal(
+      (await state()).accounts.find((item) => item.id === account).groupCount,
+      before + 1,
+    );
+    assert.equal(
+      (await client.groupMutationByKey(account, "uncertain-group")).id,
+      uncertain.id,
+    );
+    assert.equal(
+      (
+        await client.createGroup(
+          account,
+          { ...input, name: "Uncertain group" },
+          "uncertain-group",
+        )
+      ).id,
+      uncertain.id,
+    );
+    assert.equal(
+      (await state()).accounts.find((item) => item.id === account).groupCount,
+      before + 1,
     );
   } finally {
     creation.close();

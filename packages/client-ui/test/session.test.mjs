@@ -406,3 +406,61 @@ test("expired event cursors rebuild the snapshot and reconnect from its boundary
   assert.deepEqual(starts, ["20", "50"]);
   assert.equal(hub.snapshot().selected, "peer");
 });
+
+test("group.updated refreshes membership and a confirmed leave blocks new sends", async (t) => {
+  let joined = true,
+    sends = 0;
+  const room = "room@chatroom";
+  const hub = session(t, {
+    group: async () => ({ id: room, roomId: room, isInGroup: joined }),
+    sendText: async () => {
+      sends++;
+      throw Error("should not send after leave");
+    },
+  });
+  await hub.activate("a");
+  await hub.select(room);
+  assert.equal(hub.snapshot().selectedGroup.isInGroup, true);
+  joined = false;
+  await hub.consume(
+    {
+      accountId: "a",
+      kind: "group.updated",
+      data: { groupId: room },
+      cursor: "21",
+    },
+    "a",
+  );
+  assert.equal(hub.snapshot().selectedGroup.isInGroup, false);
+  await hub.send("After leaving");
+  assert.equal(sends, 0);
+  assert.match(hub.snapshot().error, /no longer in this group/);
+});
+test("a late group-info response cannot replace another conversation's membership", async (t) => {
+  const late = deferred();
+  const hub = session(t, { group: async () => late.promise });
+  await hub.activate("a");
+  const old = hub.select("room@chatroom");
+  await hub.select("peer");
+  late.resolve({ id: "room@chatroom", isInGroup: false });
+  await old;
+  assert.equal(hub.snapshot().selected, "peer");
+  assert.equal(hub.snapshot().selectedGroup, null);
+});
+
+test("a temporary group lookup failure does not erase a confirmed leave", async (t) => {
+  let failed = false;
+  const hub = session(t, {
+    group: async () => {
+      if (failed) throw Error("offline");
+      return { id: "room@chatroom", isInGroup: false };
+    },
+  });
+  await hub.activate("a");
+  await hub.select("room@chatroom");
+  failed = true;
+  await hub.refresh();
+  assert.equal(hub.snapshot().selectedGroup.isInGroup, false);
+  await hub.select("room@chatroom");
+  assert.equal(hub.snapshot().selectedGroup.isInGroup, false);
+});

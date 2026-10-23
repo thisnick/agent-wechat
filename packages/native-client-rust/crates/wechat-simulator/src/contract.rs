@@ -68,10 +68,13 @@ pub enum Request {
         session: Session,
         username: String,
     },
-    CreateGroup {
+    GroupMutation {
         session: Session,
-        input: wechat_core::GroupCreateRequest,
-        key: String,
+        request: wechat_protocol::GroupRpc,
+    },
+    GroupDetail {
+        session: Session,
+        room: String,
     },
     Room {
         session: Session,
@@ -141,6 +144,15 @@ pub enum SendFault {
     LostAcknowledgment,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupFault {
+    None,
+    Reject,
+    PartialMembers,
+    LostAcknowledgment,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
@@ -159,6 +171,10 @@ pub enum Control {
         self_sent: bool,
         #[serde(default = "yes")]
         notify: bool,
+    },
+    GroupFault {
+        account: String,
+        fault: GroupFault,
     },
     SendFault {
         account: String,

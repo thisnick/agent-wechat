@@ -2439,9 +2439,11 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "uuid",
  "wechat-api",
  "wechat-core",
  "wechat-platform",
+ "wechat-profile",
  "wechat-protocol",
  "wechat-store",
 ]

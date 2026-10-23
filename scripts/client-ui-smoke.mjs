@@ -108,10 +108,12 @@ async function login(account) {
       (await client.operation(account, op.id)).state === "awaiting_scan",
   );
   await control({ op: "login", account, status: "approved" });
-  await wait(
-    "login",
-    async () => (await client.operation(account, op.id)).state === "succeeded",
-  );
+  await wait("login", async () => {
+    const current = await client.operation(account, op.id);
+    if (["failed", "needs_review", "cancelled"].includes(current.state))
+      throw new Error(`Sign-in ended: ${JSON.stringify(current)}`);
+    return current.state === "succeeded";
+  });
   await wait(
     "baseline",
     async () => (await client.messages(account, "sim_mei")).items.length === 1,
@@ -543,7 +545,13 @@ try {
     token,
   });
   await login("group-controls");
-  await groupJourney({ client, wait, account: "group-controls" });
+  await groupJourney({
+    client,
+    wait,
+    account: "group-controls",
+    control,
+    state,
+  });
   await launcherCheck();
   console.log(
     JSON.stringify({
@@ -564,7 +572,7 @@ try {
         "outgoing media preparation, upload, readback and committed history",
         "media rejection, uncertainty and receipt recovery without resubmission",
         "account alias, read-state CAS, cached avatars and recoverable logout",
-        "group creation, roster, text, account isolation and lost admission recovery",
+        "group creation/settings, members, leave/history, partial/rejected/uncertain outcomes and account isolation",
         "UI launcher authentication and origin checks",
         "UI launcher owned-child and disposable-state cleanup",
       ],

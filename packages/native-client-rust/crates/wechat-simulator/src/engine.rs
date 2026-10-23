@@ -69,6 +69,58 @@ impl Engine {
             CREATE TABLE IF NOT EXISTS read_receipts(account TEXT NOT NULL,client_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,client_id));
             CREATE TABLE IF NOT EXISTS group_creations(account TEXT NOT NULL,key TEXT NOT NULL,hash TEXT NOT NULL,room TEXT NOT NULL,name TEXT NOT NULL,members TEXT NOT NULL,PRIMARY KEY(account,key),UNIQUE(account,room));",
         )?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS groups(account TEXT NOT NULL,room TEXT NOT NULL,name TEXT NOT NULL,members TEXT NOT NULL,my_name TEXT NOT NULL DEFAULT '',muted INTEGER NOT NULL DEFAULT 0,joined INTEGER NOT NULL DEFAULT 1,announcement TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,room));
+        CREATE TABLE IF NOT EXISTS group_faults(account TEXT PRIMARY KEY, fault TEXT NOT NULL);
+        INSERT OR IGNORE INTO groups(account,room,name,members) SELECT account,room,name,members FROM group_creations;")?;
+        // Upgrade only synthetic fixture snapshots from the earlier UI preview.
+        // Existing messages, group identities and membership stay intact.
+        if db
+            .query_row(
+                "SELECT value FROM meta WHERE key='group-fixtures'",
+                [],
+                |r| r.get::<_, u32>(0),
+            )
+            .optional()?
+            != Some(2)
+        {
+            let accounts = db
+                .prepare("SELECT id FROM accounts")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for account in accounts {
+                for username in [
+                    own(&account),
+                    "sim_mei".into(),
+                    "sim_daniel".into(),
+                    "filehelper".into(),
+                ] {
+                    append(
+                        &db,
+                        &account,
+                        &SyncCommand {
+                            id: 2,
+                            payload: groups::contact(&db, &account, &username)?,
+                        },
+                    )?;
+                }
+                let rooms = db
+                    .prepare("SELECT room FROM groups WHERE account=?1")?
+                    .query_map([&account], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for room in rooms {
+                    append(
+                        &db,
+                        &account,
+                        &SyncCommand {
+                            id: 2,
+                            payload: groups::contact(&db, &account, &room)?,
+                        },
+                    )?;
+                }
+                notify(&db, &account, 1)?;
+            }
+            db.execute("INSERT OR REPLACE INTO meta VALUES('group-fixtures',2)", [])?;
+        }
         Ok(Self { db: Mutex::new(db) })
     }
     pub(crate) fn request(&self, request: Request) -> Result<Value> {
@@ -77,11 +129,12 @@ impl Engine {
             .lock()
             .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?;
         match request {
-            Request::CreateGroup {
-                session,
-                input,
-                key,
-            } => groups::create(&mut db, &session, input, &key),
+            Request::GroupMutation { session, request } => Ok(serde_json::to_value(
+                groups::mutate(&mut db, &session, &request)?,
+            )?),
+            Request::GroupDetail { session, room } => {
+                Ok(serde_json::to_value(groups::detail(&db, &session, &room)?)?)
+            }
             Request::Room { session, room } => {
                 Ok(serde_json::to_value(groups::roster(&db, &session, &room)?)?)
             }
@@ -125,32 +178,13 @@ impl Engine {
             }
             Request::Contacts { session, ids } => {
                 check_session(&db, &session)?;
-                ensure!(!ids.is_empty() && ids.len() <= 2, "invalid_contact_batch");
+                ensure!(!ids.is_empty() && ids.len() <= 200, "invalid_contact_batch");
                 let mut fields = vec![p::bytes(1, &p::uint(1, 0)), p::uint(2, ids.len() as u64)];
                 for username in &ids {
                     validate_destination(&db, &session.account, username)?;
-                    let label = match username.as_str() {
-                        "sim_mei" => "Mei Chen".to_string(),
-                        "sim_daniel" => "Daniel Park".to_string(),
-                        "filehelper" => "File Transfer".to_string(),
-                        _ => db.query_row(
-                            "SELECT name FROM group_creations WHERE account=?1 AND room=?2",
-                            params![session.account, username],
-                            |r| r.get::<_, String>(0),
-                        )?,
-                    };
                     fields.push(p::bytes(
                         3,
-                        &p::message(&[
-                            p::bytes(1, &p::bytes(1, username.as_bytes())),
-                            p::bytes(2, &p::bytes(1, label.as_bytes())),
-                            p::uint(7, 3),
-                            p::uint(8, 1),
-                            p::bytes(
-                                40,
-                                format!("agentwechat-simulator://avatar/{username}").as_bytes(),
-                            ),
-                        ])?,
+                        &groups::contact(&db, &session.account, username)?,
                     ));
                     fields.push(p::uint(4, 0));
                 }
@@ -392,6 +426,14 @@ impl Engine {
             .lock()
             .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?;
         match control {
+            Control::GroupFault { account, fault } => {
+                seed(&mut db, &account)?;
+                db.execute(
+                    "INSERT OR REPLACE INTO group_faults VALUES(?1,?2)",
+                    params![account, serde_json::to_string(&fault)?],
+                )?;
+            }
+
             Control::ReceiveMedia {
                 account,
                 peer,
@@ -578,7 +620,7 @@ impl Engine {
                 [&id],
                 |r| r.get(0),
             )?;
-            accounts.push(json!({"id":id,"generation":generation,"revoked":revoked,"notifications":notification,"head":head(&db,&id)?,"acceptedSends":accepted,"acceptedMediaSends":media_accepted}));
+            accounts.push(json!({"id":id,"generation":generation,"revoked":revoked,"notifications":notification,"head":head(&db,&id)?,"acceptedSends":accepted,"acceptedMediaSends":media_accepted,"groupCount":db.query_row("SELECT COUNT(*) FROM groups WHERE account=?1",[&id],|r|r.get::<_,u64>(0))?}));
         }
         Ok(json!({"scenario":"basic","clock":clock(&db)?,"accounts":accounts}))
     }
@@ -611,7 +653,7 @@ fn validate_destination(db: &Connection, account: &str, peer: &str) -> Result<()
     }
     ensure!(
         db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM group_creations WHERE account=?1 AND room=?2)",
+            "SELECT EXISTS(SELECT 1 FROM groups WHERE account=?1 AND room=?2 AND joined=1)",
             params![account, peer],
             |r| r.get::<_, bool>(0)
         )?,
@@ -697,8 +739,8 @@ fn seed(db: &mut Connection, account: &str) -> Result<()> {
                 payload: p::message(&[
                     p::bytes(1, &p::bytes(1, id.as_bytes())),
                     p::bytes(2, &p::bytes(1, name.as_bytes())),
-                    p::uint(7, 3),
-                    p::uint(8, 1),
+                    p::uint(7, u32::MAX.into()),
+                    p::uint(8, if id == "filehelper" { 0 } else { 1 }),
                 ])?,
             },
         )?;

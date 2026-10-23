@@ -333,7 +333,7 @@ impl Core {
             wechat_profile::apply_contact_patch(
                 &location,
                 &keys,
-                &contact_patch(record)?,
+                &self.upstream.contact_patch(record)?,
                 &options,
             )?;
             if record.username.ends_with("@chatroom") {
@@ -613,7 +613,7 @@ impl Core {
                 let profile_revision = self.group_revision(account, &group_id)?;
                 let epoch = self.store.runtime(account, "logout-epoch")?;
                 let raw = self.group_read(account, epoch.as_deref(), |state| {
-                    client()?.group_detail_raw(state, &group_id)
+                    self.upstream.group_detail_raw(state, &group_id)
                 })?;
                 let id = self.stage_metadata_body(
                     account,
@@ -632,7 +632,9 @@ impl Core {
                 self.metadata_contact_lookup(account, std::slice::from_ref(&group_id))?;
                 let mut state = self.account_state(account)?;
                 let profile_revision = self.group_revision(account, &group_id)?;
-                let reply = client()?.lookup_room_receipt(&mut state, &group_id, version)?;
+                let reply = self
+                    .upstream
+                    .lookup_room_receipt(&mut state, &group_id, version)?;
                 self.save_state(account, &state)?;
                 let complete = reply.value.full_member_ids.is_some();
                 let id = self.stage_metadata_body(

@@ -13,7 +13,12 @@ export type PendingMedia = {
   kind: MediaKind;
   size: number;
   stage:
-    "uploading" | "submitting" | "checking" | "failed" | "cancelled" | "job";
+    | "uploading"
+    | "submitting"
+    | "checking"
+    | "failed"
+    | "cancelled"
+    | "job";
   sourceId?: string;
   job?: MediaJob;
   uncertain?: boolean;
@@ -92,7 +97,10 @@ export class MediaOutbox {
     kind: MediaKind,
   ): Promise<void> {
     if (this.controller.signal.aborted) return;
-    if (!file.size || file.size > NATIVE_MAX_SOURCE_BYTES)
+    if (
+      !file.size ||
+      file.size > Math.min(NATIVE_MAX_SOURCE_BYTES, 25 * 1024 * 1024 - 17)
+    )
       throw new Error("Choose a file smaller than 25 MB.");
     if (!threadId || !["file", "image", "video", "voice"].includes(kind))
       throw new Error("Choose a conversation and attachment type.");
