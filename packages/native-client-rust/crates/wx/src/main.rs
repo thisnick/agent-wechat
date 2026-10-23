@@ -466,6 +466,9 @@ enum MessageCommand {
         file: Option<PathBuf>,
         #[arg(long, group = "payload")]
         video: Option<PathBuf>,
+        /// Prepare normal playback, or include the unchanged original video too.
+        #[arg(long, requires = "video", value_parser = ["normal", "original"])]
+        video_quality: Option<String>,
         #[arg(long, group = "payload")]
         voice: Option<PathBuf>,
         #[arg(long)]
@@ -1479,6 +1482,7 @@ async fn run(cli: Cli) -> Result<()> {
                 image,
                 file,
                 video,
+                video_quality,
                 voice,
                 detach,
                 wait,
@@ -1496,6 +1500,7 @@ async fn run(cli: Cli) -> Result<()> {
                     image,
                     file,
                     video,
+                    video_quality,
                     voice,
                     idempotency_key,
                     detach,

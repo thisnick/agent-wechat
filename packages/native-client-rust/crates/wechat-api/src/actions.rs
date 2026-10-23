@@ -358,7 +358,8 @@ mod tests {
                 .unwrap();
         assert_eq!(body["mediaUploadMaxBytes"], 536_870_912);
         assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
-        for kind in ["image", "video", "voice"] {
+        assert_eq!(body["mediaSendMaxBytes"]["video"], 52_428_800);
+        for kind in ["image", "voice"] {
             assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
         }
         assert!(body["mediaSendMaxBytes"].get("sticker").is_none());

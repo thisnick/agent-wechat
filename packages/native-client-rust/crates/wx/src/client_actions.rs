@@ -194,6 +194,19 @@ fn receipt(
     key: &str,
     server_id: Option<&str>,
 ) -> Result<(PathBuf, Value)> {
+    receipt_with_video_quality(config, r, target, kind, hash, key, server_id, None)
+}
+#[allow(clippy::too_many_arguments)]
+fn receipt_with_video_quality(
+    config: &settings::File,
+    r: &Remote,
+    target: &str,
+    kind: &str,
+    hash: &str,
+    key: &str,
+    server_id: Option<&str>,
+    video_quality: Option<&str>,
+) -> Result<(PathBuf, Value)> {
     if key.is_empty() || key.len() > 200 || key.chars().any(char::is_control) {
         bail!("invalid idempotency key");
     }
@@ -219,6 +232,9 @@ fn receipt(
     };
     let mut value = json!({"schemaVersion":1,"endpoint":r.base.as_str(),"accountId":r.account()?,"kind":kind,"sourceSha256":hash,"idempotencyKey":key,"state":"prepared"});
     value[target_field] = json!(target);
+    if let Some(quality) = video_quality {
+        value["videoQuality"] = json!(quality);
+    }
     if let Some(server_id) = server_id {
         value["serverId"] = json!(server_id);
     }
@@ -232,6 +248,7 @@ fn receipt(
             "sourceSha256",
             "idempotencyKey",
             "serverId",
+            "videoQuality",
         ] {
             if existing[field] != value[field] {
                 bail!("idempotency_conflict: receipt input changed");
@@ -339,6 +356,7 @@ pub async fn send(
     image: Option<PathBuf>,
     file: Option<PathBuf>,
     video: Option<PathBuf>,
+    video_quality: Option<String>,
     voice: Option<PathBuf>,
     key: Option<String>,
     detach: bool,
@@ -402,7 +420,17 @@ pub async fn send(
     };
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let key = key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let (path, mut receipt) = receipt(config, r, &thread, kind, &hash, &key, None)?;
+    let video_quality = (kind == "video").then(|| video_quality.unwrap_or_else(|| "normal".into()));
+    let (path, mut receipt) = receipt_with_video_quality(
+        config,
+        r,
+        &thread,
+        kind,
+        &hash,
+        &key,
+        None,
+        video_quality.as_deref(),
+    )?;
     eprintln!("Submission receipt: {}", path.display());
     if receipt["resourceId"].is_string() {
         let value = r
@@ -455,7 +483,13 @@ pub async fn send(
             r.request(
                 reqwest::Method::POST,
                 &r.path("sends")?,
-                Some(json!({"threadId":thread,"kind":kind,"sourceId":source_id})),
+                Some({
+                    let mut request = json!({"threadId":thread,"kind":kind,"sourceId":source_id});
+                    if let Some(quality) = video_quality {
+                        request["videoQuality"] = quality.into();
+                    }
+                    request
+                }),
                 Some(&key),
             )
             .await
@@ -656,9 +690,45 @@ mod tests {
     }
 
     #[test]
+    fn video_receipt_binds_quality_before_any_network_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote = Remote {
+            http: reqwest::Client::new(),
+            base: reqwest::Url::parse("http://127.0.0.1:1/").unwrap(),
+            token: "synthetic-token".into(),
+            account: Some("synthetic".into()),
+        };
+        let config = settings::File {
+            path: temp.path().join("client.toml"),
+            settings: Default::default(),
+        };
+        let make = |quality| {
+            receipt_with_video_quality(
+                &config,
+                &remote,
+                "filehelper",
+                "video",
+                "source-sha",
+                "quality-key",
+                None,
+                quality,
+            )
+        };
+        let (_, original) = make(Some("normal")).unwrap();
+        assert_eq!(original["sourceSha256"], "source-sha");
+        assert!(make(Some("normal")).is_ok());
+        assert!(make(Some("original"))
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(make(None).is_err());
+    }
+
+    #[test]
     fn selected_payload_flag_controls_source_read_bound() {
         assert_eq!(send_kind_source_limit("file").unwrap(), 536_870_912);
-        for kind in ["image", "video", "voice"] {
+        assert_eq!(send_kind_source_limit("video").unwrap(), 52_428_800);
+        for kind in ["image", "voice"] {
             assert_eq!(send_kind_source_limit(kind).unwrap(), 26_214_383);
         }
         for unsupported in ["sticker", "text", "share", "unknown"] {
@@ -685,6 +755,10 @@ mod tests {
             settings: Default::default(),
         };
         for kind in ["image", "video", "voice"] {
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(send_kind_source_limit(kind).unwrap() as u64 + 1)
+                .unwrap();
             let error = send(
                 &remote,
                 &config,
@@ -697,6 +771,7 @@ mod tests {
                 (kind == "image").then(|| path.clone()),
                 None,
                 (kind == "video").then(|| path.clone()),
+                None,
                 (kind == "voice").then(|| path.clone()),
                 Some("synthetic-key".into()),
                 false,

@@ -2,18 +2,18 @@ import { randomUUID } from "node:crypto";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-outbound";
-import type { ResolvedWeChatAccount } from "./types.js";
-import { resolveWeChatAccount } from "./types.js";
-import { getWeChatRuntime } from "./runtime.js";
+import type { ResolvedWeChatAccount } from "./types.ts";
+import { resolveWeChatAccount } from "./types.ts";
+import { getWeChatRuntime } from "./runtime.ts";
 
-import { collectWeChatStatusIssues } from "./status.js";
+import { collectWeChatStatusIssues } from "./status.ts";
 import { isNativeTombstone, type NativeContact, type NativeGroup } from "@agent-wechat/shared";
-import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
-import { sendWeChatMedia } from "./outbound-media.js";
-import { nativeConfigSchema } from "./native-config.js";
-import { ensureNativeHost } from "./native-host.js";
-import { startNativeMonitor } from "./native-monitor.js";
-import { nativeLoginStart, nativeLoginWait, sendNativeText, createNativeLoginTool } from "./native-login.js";
+import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.ts";
+import { createWeChatMediaHandlers, wechatMediaActions } from "./outbound-options.ts";
+import { nativeConfigSchema } from "./native-config.ts";
+import { ensureNativeHost } from "./native-host.ts";
+import { startNativeMonitor } from "./native-monitor.ts";
+import { nativeLoginStart, nativeLoginWait, sendNativeText, createNativeLoginTool } from "./native-login.ts";
 
 async function sendWeChatText(cfg: unknown, to: string, text: string) {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
@@ -21,6 +21,7 @@ async function sendWeChatText(cfg: unknown, to: string, text: string) {
   return sendNativeText(account, to, text);
 }
 
+const mediaHandlers = createWeChatMediaHandlers();
 const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
   id: "agent-wechat",
   capabilities: {
@@ -33,10 +34,7 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
       channel: "agent-wechat",
       ...await sendWeChatText(cfg, to, text),
     }),
-    sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
-      channel: "agent-wechat",
-      ...await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
-    }),
+    ...mediaHandlers,
   },
 });
 
@@ -64,6 +62,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   },
 
   reload: { configPrefixes: ["channels.agent-wechat"] },
+  actions: wechatMediaActions,
 
   configSchema: {
     uiHints: { "native.token": { sensitive: true } },
@@ -194,10 +193,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       channel: "agent-wechat" as const,
       ...await sendWeChatText(cfg, to, text),
     }),
-    sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
-      channel: "agent-wechat" as const,
-      ...await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice),
-    }),
+    ...mediaHandlers,
   },
 
   message: wechatMessageAdapter,

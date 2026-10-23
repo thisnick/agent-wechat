@@ -5,15 +5,16 @@ description: File, image, video and voice limits, longer sends, and the CLI, API
 
 import { Aside } from '@astrojs/starlight/components';
 
-Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source limit is **512 MiB (536,870,912 bytes)**. Other send kinds keep their existing limit:
+Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source limit is **512 MiB (536,870,912 bytes)**. Limits depend on the selected send kind:
 
 | Send kind | Maximum source size |
 | --- | --- |
 | Ordinary file | 536,870,912 bytes |
-| Image, video or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
+| Video source | 52,428,800 bytes (50 MiB) |
+| Image or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
 | Sticker | Sending unavailable |
 
-File attachments preserve source bytes. Image sends can resize/re-encode them. Outgoing video has no normal/original selector; `--quality` selects a retrieved variant.
+File attachments preserve source bytes. Image sends can resize/re-encode them. [Video sends](/use/video/) offer normal playback or playback plus an unchanged original.
 
 ## CLI
 
@@ -50,7 +51,7 @@ File attachments preserve source bytes. Image sends can resize/re-encode them. O
      "mediaSendMaxBytes": {
        "file": 536870912,
        "image": 26214383,
-       "video": 26214383,
+       "video": 52428800,
        "voice": 26214383
      }
    }
@@ -97,11 +98,11 @@ The CLI verifies size and SHA-256 before publishing the output. SDK clients can 
 
 ## OpenClaw
 
-Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `512` permits files up to 512 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend image, video or voice limits.
+Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `512` permits files up to 512 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend the daemon’s per-kind limits.
 
 Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary files get up to an hour of job polling. If polling ends, retain the reported job ID and inspect it instead of starting another send.
 
-The WeChat adapter does not currently forward OpenClaw's `asDocument`/`forceDocument` option. Use CLI `--file` or API `kind: "file"` to select a file attachment.
+Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinary file. Video quality options apply only to video sends.
 
 <Aside title="Good to know">
 - See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.

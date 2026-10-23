@@ -26,6 +26,10 @@ impl CdnClient {
         task_id: u64,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
+        ensure!(
+            matches!(prepared.kind, MediaQuality::File | MediaQuality::LargeFile),
+            "Expected an ordinary file upload"
+        );
         upload_large_file(
             &self.config,
             prepared,
@@ -33,6 +37,43 @@ impl CdnClient {
             |path, fields| self.post(path, fields),
             progress,
         )
+    }
+
+    /// Upload the unmodified original as a separate type-4 object. The normal
+    /// rendition and thumbnail use their own paired upload and final metadata.
+    /// Persist the task ID and prepared material before calling this method.
+    pub fn upload_video_original_with_progress(
+        &self,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        upload_video_original(
+            self,
+            prepared,
+            task_id,
+            |path, fields| self.post(path, fields),
+            progress,
+        )
+    }
+}
+
+fn upload_video_original(
+    client: &CdnClient,
+    prepared: &PreparedUpload,
+    task_id: u64,
+    post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<UploadedMedia> {
+    ensure!(
+        prepared.kind == MediaQuality::Video && task_id != 0,
+        "Expected an original video upload and task ID"
+    );
+    prepared.validate()?;
+    if prepared.encrypted.len() < MAX_CDN_TRANSFER_BYTES {
+        client.upload_with_transport(prepared, progress, post)
+    } else {
+        upload_large_file(&client.config, prepared, task_id, post, progress)
     }
 }
 
@@ -129,7 +170,10 @@ fn upload_large_file(
             && prepared.plaintext_bytes as usize <= MAX_CDN_TRANSFER_BYTES)
             || (prepared.kind == MediaQuality::LargeFile
                 && prepared.plaintext_bytes as usize > MAX_CDN_TRANSFER_BYTES
-                && prepared.plaintext_bytes as usize <= MAX_LARGE_FILE_BYTES))
+                && prepared.plaintext_bytes as usize <= MAX_LARGE_FILE_BYTES)
+            || (prepared.kind == MediaQuality::Video
+                && prepared.plaintext_bytes as usize > MAX_NATIVE_UPLOAD_BYTES
+                && prepared.plaintext_bytes as usize <= wechat_media::MAX_VIDEO_SOURCE_BYTES))
             && prepared.encrypted.len() >= MAX_CDN_TRANSFER_BYTES
             && task_id != 0,
         "Unsupported large-file upload profile"
@@ -443,7 +487,15 @@ mod tests {
                         i64::from(self.prepared.plaintext_bytes)
                     );
                     assert_eq!(fields["rawfilemd5_0"], self.prepared.md5.as_bytes());
-                    assert_eq!(fields["ext_0"], b"bin");
+                    assert_eq!(
+                        fields["ext_0"],
+                        self.prepared
+                            .file_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap()
+                            .as_bytes()
+                    );
                     assert_eq!(
                         fields["chatid"],
                         encrypt_recipient("filehelper")?.as_bytes()
@@ -551,6 +603,145 @@ mod tests {
             assert_eq!(result.descriptor.aes_key, prepared.aes_key);
             assert_eq!(result.md5, prepared.md5);
             assert_eq!(result.sha256, prepared.sha256);
+        }
+    }
+
+    #[test]
+    fn standalone_original_video_uses_type_four_without_thumbnail() {
+        let mut raw = prepared().clone();
+        raw.kind = MediaQuality::Video;
+        raw.file_name = "original.mp4".into();
+        let cdn = CdnClient::new(config(), Duration::from_secs(1)).unwrap();
+        let cancelled = std::cell::Cell::new(false);
+        let mut peer = Peer::new(&raw, 1024 * 1024);
+        let result = upload_video_original(
+            &cdn,
+            &raw,
+            987654321,
+            |path, fields| {
+                assert!(!fields.contains_key("thumbdata"));
+                assert!(!fields.contains_key("type_1"));
+                let response = peer.respond(path, fields)?;
+                if path.ends_with("/complete") {
+                    cancelled.set(true);
+                }
+                Ok(response)
+            },
+            |_, _| {
+                ensure!(!cancelled.get(), "cancelled");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(cancelled.get());
+        assert_eq!(result.descriptor.quality, MediaQuality::Video);
+        assert_eq!(
+            result.descriptor.expected_bytes,
+            Some(u64::from(raw.plaintext_bytes))
+        );
+        assert_eq!(result.descriptor.aes_key, raw.aes_key);
+        assert_eq!(result.md5, raw.md5);
+        assert_eq!(result.sha256, raw.sha256);
+        assert_eq!(peer.requests, peer.blocks() + 3);
+        assert!(cdn
+            .upload_large_file_with_progress(&raw, 987654321, |_, _| {
+                panic!("Video admitted by ordinary-file interface")
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn small_original_video_uses_standalone_legacy_and_rejects_bad_material_locally() {
+        let raw = PreparedUpload::with_material(
+            b"\0\0\0\x0cftypisom",
+            MediaQuality::Video,
+            "original.mp4",
+            "filehelper",
+            &[0x31; 16],
+            "00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
+        let cdn = CdnClient::new(config(), Duration::from_secs(1)).unwrap();
+        let mut calls = 0;
+        let result = upload_video_original(
+            &cdn,
+            &raw,
+            987654321,
+            |path, fields| {
+                calls += 1;
+                assert_eq!(path, "/uploadv3");
+                assert_eq!(integer(fields, "filetype")?, 4);
+                assert!(!fields.contains_key("thumbdata"));
+                assert_eq!(integer(fields, "hasthumb")?, 0);
+                let mut reply = CdnFields::new();
+                put(&mut reply, "retcode", 0);
+                for key in ["seq", "rangestart", "rangeend"] {
+                    reply.insert(key.into(), fields[key].clone());
+                }
+                reply.insert("fileid".into(), b"small-original".to_vec());
+                Ok(reply)
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result.descriptor.quality, MediaQuality::Video);
+        let mut over = raw.clone();
+        over.plaintext_bytes = wechat_media::MAX_VIDEO_SOURCE_BYTES as u32 + 1;
+        let mut wrong = raw.clone();
+        wrong.kind = MediaQuality::File;
+        let mut corrupt = raw.clone();
+        corrupt.encrypted[0] ^= 1;
+        for (value, task) in [
+            (&over, 987654321),
+            (&wrong, 987654321),
+            (&corrupt, 987654321),
+            (&raw, 0),
+        ] {
+            assert!(upload_video_original(
+                &cdn,
+                value,
+                task,
+                |_, _| { panic!("Invalid original video reached transport") },
+                |_, _| Ok(())
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn original_video_padding_boundary_selects_one_carrier_without_fallback() {
+        let cdn = CdnClient::new(config(), Duration::from_secs(1)).unwrap();
+        for (size, expected_path) in [
+            (MAX_NATIVE_UPLOAD_BYTES, "/uploadv3"),
+            (MAX_NATIVE_UPLOAD_BYTES + 1, "/cdn/12345/1/4/apply"),
+        ] {
+            let raw = PreparedUpload::with_material(
+                &vec![0x5a; size],
+                MediaQuality::Video,
+                "original.mp4",
+                "filehelper",
+                &[0x31; 16],
+                "00112233445566778899aabbccddeeff",
+            )
+            .unwrap();
+            let mut calls = 0;
+            let error = upload_video_original(
+                &cdn,
+                &raw,
+                987654321,
+                |path, fields| {
+                    calls += 1;
+                    assert_eq!(path, expected_path);
+                    assert_eq!(integer(fields, "filetype")?, 4);
+                    bail!("isolated transport failure")
+                },
+                |_, _| Ok(()),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.to_string(), "isolated transport failure");
+            assert_eq!(calls, 1);
         }
     }
 

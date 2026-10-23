@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { getImageMetadata, resizeToJpeg, IMAGE_REDUCE_QUALITY_STEPS } from "openclaw/plugin-sdk/media-runtime";
 import { saveMediaStream } from "openclaw/plugin-sdk/media-store";
-import { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NativeApiError } from "@agent-wechat/shared";
+import { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES, NativeApiError } from "@agent-wechat/shared";
 import type { MediaAsset, MediaJob, MediaSendRequest, MediaVariant, NativeMessage, NativeWeChatClient } from "@agent-wechat/shared";
 import { saveManagedAttachment, saveManagedAttachmentBytes, saveVerifiedManagedAttachmentStream } from "./attachment-store.ts";
 import { renderAttachmentBody, type WeChatAttachment } from "./media-delivery.ts";
@@ -358,14 +358,25 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
     mediaPath: attachmentKind === "image" || attachmentKind === "video" ? suppliedPath : undefined, mediaMime: suppliedMime, pending: false };
 }
 
-function outboundMediaKind(mime: string, audioAsVoice: boolean): MediaSendRequest["kind"] {
+export type NativeMediaSendOptions = { forceDocument?: boolean; videoQuality?: "normal" | "original" };
+export function validateNativeMediaSendOptions(options: NativeMediaSendOptions, audioAsVoice = false): void {
+  if (options.forceDocument != null && typeof options.forceDocument !== "boolean") throw new Error("Invalid WeChat document option");
+  if (options.videoQuality != null && !["normal", "original"].includes(options.videoQuality)) throw new Error("Invalid WeChat video quality");
+  if (options.forceDocument && (audioAsVoice || options.videoQuality != null)) throw new Error("Document sending cannot also request voice or video quality");
+}
+function outboundMediaKind(mime: string, audioAsVoice: boolean, options: NativeMediaSendOptions): MediaSendRequest["kind"] {
+  if (options.forceDocument) return "file";
   if (audioAsVoice && !mime.startsWith("audio/")) throw new Error("Voice sending requires an explicit audio attachment");
-  return audioAsVoice ? "voice" : mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "file";
+  const selected = audioAsVoice ? "voice" : mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : "file";
+  if (options.videoQuality != null && selected !== "video") throw new Error("Video quality requires a video attachment");
+  return selected;
 }
 function outboundSourceLimit(account: ResolvedWeChatAccount, selectedKind: MediaSendRequest["kind"]): number {
-  return Math.min(account.mediaMaxMb * 1024 * 1024, selectedKind === "file" ? NATIVE_MAX_SOURCE_BYTES : NATIVE_MAX_ORDINARY_SOURCE_BYTES);
+  return Math.min(account.mediaMaxMb * 1024 * 1024, selectedKind === "file" ? NATIVE_MAX_SOURCE_BYTES : selectedKind === "video" ? NATIVE_MAX_VIDEO_SOURCE_BYTES : NATIVE_MAX_ORDINARY_SOURCE_BYTES);
 }
-export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>): Promise<NativeOutboundDelivery> {
+export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>, options: NativeMediaSendOptions = {}): Promise<NativeOutboundDelivery> {
+  validateNativeMediaSendOptions(options, audioAsVoice);
+  await beforeSend?.();
   let filename: string, mime: string, selectedKind: MediaSendRequest["kind"], sourceBytes: number, source: Awaited<ReturnType<NativeWeChatClient["upload"]>>;
   let temporary: string | undefined;
   const accountId = account.native!.accountId;
@@ -374,7 +385,7 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
     if (/^https?:/.test(mediaUrl)) {
       const response = await fetch(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(60 * 60000) }); if (!response.ok) throw new Error(`Native outbound source unavailable (${response.status})`);
       filename = basename(new URL(mediaUrl).pathname) || "attachment"; mime = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "application/octet-stream";
-      try { selectedKind = outboundMediaKind(mime, audioAsVoice); } catch (error) { await response.body?.cancel(); throw error; }
+      try { selectedKind = outboundMediaKind(mime, audioAsVoice, options); } catch (error) { await response.body?.cancel(); throw error; }
       const max = outboundSourceLimit(account, selectedKind);
       const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native outbound source exceeds configured size"); }
       const reader = response.body?.getReader(); if (!reader) throw new Error("Native outbound source has no bytes");
@@ -388,7 +399,7 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
     } else {
       const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl;
       filename = basename(path instanceof URL ? path.pathname : path); const extension = extname(filename).toLowerCase(); mime = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension) ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}` : extension === ".mp4" ? "video/mp4" : [".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac"].includes(extension) ? `audio/${extension.slice(1)}` : "application/octet-stream";
-      selectedKind = outboundMediaKind(mime, audioAsVoice); const max = outboundSourceLimit(account, selectedKind), file = await open(path, "r");
+      selectedKind = outboundMediaKind(mime, audioAsVoice, options); const max = outboundSourceLimit(account, selectedKind), file = await open(path, "r");
       let size: number;
       try { const stat = await file.stat(); if (!stat.isFile() || !stat.size || stat.size > max) throw new Error("Native outbound source must be a bounded regular file"); size = stat.size; } finally { await file.close(); }
       blob = await openAsBlob(path, { type: mime });
@@ -399,9 +410,10 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
     await beforeSend?.();
     source = await client.upload(accountId, blob, filename, mime);
   } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
-  const input: MediaSendRequest = { threadId, kind: selectedKind, sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null };
+  const input: MediaSendRequest = { threadId, kind: selectedKind, sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null,
+    ...(selectedKind === "video" ? { videoQuality: options.videoQuality ?? "normal" } : {}) };
   await beforeSend?.();
-  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "file" && sourceBytes > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 60 * 60000 : 65000;
+  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "video" || selectedKind === "file" && sourceBytes > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 60 * 60000 : 65000;
   const submitted = await client.sendMedia(accountId, input, key);
   let job: MediaJob;
   try { job = await waitNativeMediaJob(client, accountId, submitted, waitMs); }

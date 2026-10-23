@@ -12,6 +12,7 @@ const MAX_RULES: usize = 512;
 pub enum LargeCdnRoute {
     Upload,
     Download,
+    VideoDownload,
 }
 
 /// Decode the safe C2C routing table in an authenticated GetCDNDns response.
@@ -65,17 +66,24 @@ pub fn decode_large_cdn_config(
             "Unsupported CDN routing predicate"
         );
         let sequence = number(&rule, 1)? as i32;
-        // Upload routing uses type 7 even when the file request itself uses
-        // type 5. Upload and download have separate operation predicates.
+        // Uploadbig promotes routing type to 7, independently of the actual
+        // request type. Video download retains actual type 4 and operation 2.
         let predicates = [
             (number(&rule, 2)?, 1),
             (number(&rule, 3)?, 1),
-            (number(&rule, 4)?, 7),
+            (
+                number(&rule, 4)?,
+                if route == LargeCdnRoute::VideoDownload {
+                    4
+                } else {
+                    7
+                },
+            ),
             (
                 number(&rule, 5)?,
                 match route {
                     LargeCdnRoute::Upload => 1,
-                    LargeCdnRoute::Download => 2,
+                    LargeCdnRoute::Download | LargeCdnRoute::VideoDownload => 2,
                 },
             ),
         ];
@@ -346,6 +354,29 @@ mod tests {
         assert_eq!(download.front_id, 1002);
         assert_eq!(upload.auth_key, vec![1; 73]);
         assert_eq!(download.auth_key, vec![2; 73]);
+    }
+
+    #[test]
+    fn video_download_selects_type_four_without_file_seven_fallback() {
+        let configs = [
+            config(1, [8, 8, 8, 8], &[1; 73]),
+            config(2, [9, 9, 9, 9], &[2; 73]),
+        ];
+        let input = bootstrap(&[rule(1, 1, 1, 7, 2, 1), rule(2, 1, 1, 4, 2, 2)], &configs);
+        let video =
+            decode_large_cdn_config(&input, &state(), LargeCdnRoute::VideoDownload).unwrap();
+        let file = decode_large_cdn_config(&input, &state(), LargeCdnRoute::Download).unwrap();
+        assert_eq!(video.front_id, 1002);
+        assert_eq!(video.auth_key, vec![2; 73]);
+        assert_eq!(file.front_id, 1001);
+        for wrong in [rule(1, 1, 1, 7, 2, 1), rule(1, 1, 1, 4, 1, 1)] {
+            assert!(decode_large_cdn_config(
+                &bootstrap(&[wrong], &configs),
+                &state(),
+                LargeCdnRoute::VideoDownload
+            )
+            .is_err());
+        }
     }
 
     #[test]

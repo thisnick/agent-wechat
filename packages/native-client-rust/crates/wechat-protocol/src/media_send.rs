@@ -263,33 +263,47 @@ pub fn local_video_xml(video: &UploadedVideo, seconds: u32) -> Result<String> {
     descriptor(&video.video, MediaQuality::Video)?;
     descriptor(&video.thumbnail, MediaQuality::Thumbnail)?;
     ensure!(seconds > 0, "Invalid video duration");
-    Ok(local_element(
-        "videomsg",
-        vec![
-            ("aeskey", hex::encode(&video.video.descriptor.aes_key)),
-            ("cdnvideourl", video.video.descriptor.file_id.clone()),
-            ("length", video.video.plaintext_bytes.to_string()),
-            ("md5", hex32(&video.video.md5)?),
-            ("playlength", seconds.to_string()),
-            ("cdnthumburl", video.thumbnail.descriptor.file_id.clone()),
+    let mut fields = vec![
+        ("aeskey", hex::encode(&video.video.descriptor.aes_key)),
+        ("cdnvideourl", video.video.descriptor.file_id.clone()),
+        ("length", video.video.plaintext_bytes.to_string()),
+        ("md5", hex32(&video.video.md5)?),
+        ("playlength", seconds.to_string()),
+        ("cdnthumburl", video.thumbnail.descriptor.file_id.clone()),
+        (
+            "cdnthumbaeskey",
+            hex::encode(&video.thumbnail.descriptor.aes_key),
+        ),
+        (
+            "cdnthumblength",
+            video.thumbnail.plaintext_bytes.to_string(),
+        ),
+        (
+            "cdnthumbwidth",
+            video.thumbnail.width.unwrap_or(0).to_string(),
+        ),
+        (
+            "cdnthumbheight",
+            video.thumbnail.height.unwrap_or(0).to_string(),
+        ),
+    ];
+    if let Some(original) = &video.original {
+        descriptor_bound(
+            original,
+            MediaQuality::Video,
+            wechat_media::MAX_VIDEO_SOURCE_BYTES,
+        )?;
+        fields.extend([
+            ("cdnrawvideourl", original.descriptor.file_id.clone()),
             (
-                "cdnthumbaeskey",
-                hex::encode(&video.thumbnail.descriptor.aes_key),
+                "cdnrawvideoaeskey",
+                hex::encode(&original.descriptor.aes_key),
             ),
-            (
-                "cdnthumblength",
-                video.thumbnail.plaintext_bytes.to_string(),
-            ),
-            (
-                "cdnthumbwidth",
-                video.thumbnail.width.unwrap_or(0).to_string(),
-            ),
-            (
-                "cdnthumbheight",
-                video.thumbnail.height.unwrap_or(0).to_string(),
-            ),
-        ],
-    ))
+            ("rawlength", original.plaintext_bytes.to_string()),
+            ("rawmd5", hex32(&original.md5)?),
+        ]);
+    }
+    Ok(local_element("videomsg", fields))
 }
 pub fn local_voice_xml(encoded_bytes: usize, duration_ms: u32) -> Result<String> {
     ensure!(
@@ -452,7 +466,7 @@ pub fn video_send_request(
         width > 0 && height > 0 && width <= 8192 && height <= 8192,
         "Invalid video thumbnail dimensions"
     );
-    p::message(&[
+    let mut fields = vec![
         p::bytes(1, &base_request(&state.device, state.uin, 0)?),
         p::bytes(2, client_id.as_bytes()),
         p::bytes(3, state.own_username.as_bytes()),
@@ -479,7 +493,23 @@ pub fn video_send_request(
         p::bytes(26, hex32(&v.md5)?.as_bytes()),
         p::bytes(37, &[]),
         p::uint(38, 0),
-    ])
+    ];
+    if let Some(original) = &video.original {
+        descriptor_bound(
+            original,
+            MediaQuality::Video,
+            wechat_media::MAX_VIDEO_SOURCE_BYTES,
+        )?;
+        // Linux 4.1.13.26 CGI149's generated M7 serializer emits these
+        // separately from the normal rendition (0x7d094d8..0x7d0954a).
+        fields.extend([
+            p::bytes(48, hex32(&original.md5)?.as_bytes()),
+            p::bytes(49, original.descriptor.file_id.as_bytes()),
+            p::bytes(50, hex::encode(&original.descriptor.aes_key).as_bytes()),
+            p::uint(51, u64::from(original.plaintext_bytes)),
+        ]);
+    }
+    p::message(&fields)
 }
 /// Encoded SILK bytes carried by one `uploadvoice` request. A short-link
 /// request travels in one MMTLS record of at most 65,519 plaintext bytes,
@@ -1119,6 +1149,96 @@ mod tests {
         );
     }
     #[test]
+    fn video_original_metadata_is_independent_and_old_plans_still_decode() {
+        use crate::media::MediaDescriptor;
+        let uploaded = |quality, id: &str, key: u8, size: u32, digest: &str| UploadedMedia {
+            descriptor: MediaDescriptor {
+                file_id: id.into(),
+                aes_key: vec![key; 16],
+                quality,
+                expected_bytes: Some(u64::from(size)),
+                expected_md5: Some(digest.into()),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: size,
+            md5: digest.into(),
+            sha256: "c".repeat(64),
+            file_name: "synthetic.mp4".into(),
+            width: Some(16),
+            height: Some(12),
+        };
+        let mut video = UploadedVideo {
+            video: uploaded(MediaQuality::Video, "normal-object", 1, 30, &"1".repeat(32)),
+            thumbnail: uploaded(
+                MediaQuality::Thumbnail,
+                "thumbnail-object",
+                2,
+                20,
+                &"2".repeat(32),
+            ),
+            original: None,
+        };
+        let mut old_plan = serde_json::to_value(&video).unwrap();
+        old_plan.as_object_mut().unwrap().remove("original");
+        let cold: UploadedVideo = serde_json::from_value(old_plan).unwrap();
+        assert!(cold.original.is_none());
+        let normal =
+            video_send_request(&synthetic_state(), "filehelper", "client", &cold, 4).unwrap();
+        let normal = p::decode(&normal).unwrap();
+        for number in 48..=51 {
+            assert!(!normal.iter().any(|field| field.number == number));
+        }
+        video.original = Some(uploaded(
+            MediaQuality::Video,
+            "raw-object",
+            3,
+            wechat_media::MAX_VIDEO_SOURCE_BYTES as u32,
+            &"A".repeat(32),
+        ));
+        let request =
+            video_send_request(&synthetic_state(), "filehelper", "client", &video, 4).unwrap();
+        let fields = p::decode(&request).unwrap();
+        assert_eq!(p::data(&fields, 16).unwrap(), b"normal-object");
+        assert_eq!(p::data(&fields, 17).unwrap(), "01".repeat(16).as_bytes());
+        assert_eq!(p::scalar(&fields, 8).unwrap(), 30);
+        assert_eq!(p::data(&fields, 26).unwrap(), "1".repeat(32).as_bytes());
+        assert_eq!(p::data(&fields, 48).unwrap(), "a".repeat(32).as_bytes());
+        assert_eq!(p::data(&fields, 49).unwrap(), b"raw-object");
+        assert_eq!(p::data(&fields, 50).unwrap(), "03".repeat(16).as_bytes());
+        assert_eq!(p::scalar(&fields, 51).unwrap(), 52_428_800);
+        let xml = local_video_xml(&video, 4).unwrap();
+        for expected in [
+            "cdnvideourl=\"normal-object\"",
+            "length=\"30\"",
+            "cdnrawvideourl=\"raw-object\"",
+            "rawlength=\"52428800\"",
+            "rawmd5=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        ] {
+            assert!(xml.contains(expected));
+        }
+        assert!(xml.contains(&format!("cdnrawvideoaeskey=\"{}\"", "03".repeat(16))));
+        for corruption in 0..4 {
+            let mut altered = video.clone();
+            let original = altered.original.as_mut().unwrap();
+            match corruption {
+                0 => original.descriptor.quality = MediaQuality::LargeFile,
+                1 => original.descriptor.expected_md5 = Some("0".repeat(32)),
+                2 => {
+                    original.plaintext_bytes += 1;
+                    original.descriptor.expected_bytes = Some(u64::from(original.plaintext_bytes));
+                }
+                _ => original.descriptor.expected_bytes = None,
+            }
+            assert!(
+                video_send_request(&synthetic_state(), "filehelper", "client", &altered, 4)
+                    .is_err()
+            );
+            assert!(local_video_xml(&altered, 4).is_err());
+        }
+    }
+
+    #[test]
     fn metadata_matches_independent_synthetic_wire_vectors() {
         use crate::media::MediaDescriptor;
         let state = synthetic_state();
@@ -1190,6 +1310,7 @@ mod tests {
         let video = UploadedVideo {
             video: descriptor(MediaQuality::Video, "video.mp4"),
             thumbnail: descriptor(MediaQuality::Thumbnail, "thumb.jpg"),
+            original: None,
         };
         assert_eq!(
             hex::encode(

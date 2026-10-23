@@ -21,13 +21,15 @@ use wechat_protocol::{
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 #[path = "media_identity.rs"]
 mod identity;
+#[path = "media_video.rs"]
+mod video;
 
 struct MediaAccountPermit {
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     runtime: tokio::runtime::Handle,
 }
 impl MediaAccountPermit {
-    /// Only CDN I/O runs without the account mutation guard. The independent
+    /// Video preparation and CDN I/O run without the account mutation guard. The independent
     /// media-job guard remains held, so another queued file cannot start.
     fn transfer<T>(
         &mut self,
@@ -117,6 +119,10 @@ struct SendPlan {
     uploaded_video: Option<UploadedVideo>,
     #[serde(default)]
     prepared_video_thumbnail_source_id: Option<String>,
+    #[serde(default)]
+    prepared_video_source_id: Option<String>,
+    #[serde(default)]
+    original_video_material: Option<UploadMaterial>,
     voice: Vec<VoicePart>,
     #[serde(default)]
     reuse_completed_upload: Option<CompletedUploadReuse>,
@@ -236,6 +242,10 @@ fn validate_send_source_sizes(
     thumbnail: Option<u64>,
 ) -> Result<()> {
     ensure!(
+        request.kind == MediaKind::Video || request.video_quality.is_none(),
+        "invalid_video_quality"
+    );
+    ensure!(
         request.kind == MediaKind::Image || standard.is_none(),
         "unsupported_standard_variant"
     );
@@ -295,7 +305,10 @@ fn media_request_hash(
     thumbnail: Option<&str>,
     filename: Option<&str>,
 ) -> Result<String> {
-    let normalized = json!({"threadId":request.thread_id,"kind":request.kind,"playSeconds":request.play_seconds,"durationMs":request.duration_ms,"filename":filename,"sourceHashes":{"primary":primary,"standard":standard,"thumbnail":thumbnail}});
+    let mut normalized = json!({"threadId":request.thread_id,"kind":request.kind,"playSeconds":request.play_seconds,"durationMs":request.duration_ms,"filename":filename,"sourceHashes":{"primary":primary,"standard":standard,"thumbnail":thumbnail}});
+    if let Some(quality) = request.video_quality {
+        normalized["videoQuality"] = serde_json::to_value(quality)?;
+    }
     Ok(digest(&serde_json::to_vec(&normalized)?))
 }
 fn public_job(account: &str, row: &MediaJobRecord) -> MediaJob {
@@ -892,8 +905,15 @@ impl Core {
         self: &Arc<Self>,
         account: &str,
         key: &str,
-        request: MediaSendRequest,
+        mut request: MediaSendRequest,
     ) -> Result<MediaJob> {
+        ensure!(
+            request.kind == MediaKind::Video || request.video_quality.is_none(),
+            "invalid_video_quality"
+        );
+        if request.kind == MediaKind::Video {
+            request.video_quality = Some(request.video_quality.unwrap_or_default());
+        }
         self.account_state(account)?;
         if self.store.send_by_key(account, key).is_ok() {
             bail!("idempotency_conflict");
@@ -953,6 +973,8 @@ impl Core {
             uploaded_image: None,
             uploaded_video: None,
             prepared_video_thumbnail_source_id: None,
+            prepared_video_source_id: None,
+            original_video_material: None,
             voice: vec![],
             reuse_completed_upload: None,
         };
@@ -1325,6 +1347,12 @@ impl Core {
                 let load_config = |state: &mut wechat_protocol::AccountState| {
                     if descriptor.quality == MediaQuality::LargeFile {
                         native.large_cdn_config(state, LargeCdnRoute::Download)
+                    } else if descriptor.quality == MediaQuality::Video
+                        && descriptor
+                            .expected_bytes
+                            .is_some_and(|size| size > 25 * 1024 * 1024)
+                    {
+                        native.large_cdn_config(state, LargeCdnRoute::VideoDownload)
                     } else {
                         native.cdn_config(state)
                     }
@@ -1339,7 +1367,8 @@ impl Core {
                 };
                 self.save_state(account, &state)?;
                 let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
-                let unlocked = permit.is_some() && asset.kind == MediaKind::File;
+                let unlocked =
+                    permit.is_some() && matches!(asset.kind, MediaKind::File | MediaKind::Video);
                 let fence = unlocked
                     .then(|| self.media_authorization_fence(account))
                     .transpose()?;
@@ -2216,7 +2245,7 @@ impl Core {
         Ok(())
     }
     fn ensure_upload_material(&self, account: &str, id: &str, plan: &mut SendPlan) -> Result<()> {
-        let changed = if let Some(material) = plan.material.as_mut() {
+        let mut changed = if let Some(material) = plan.material.as_mut() {
             if material.task_id == 0 {
                 material.task_id = new_upload_task_id()?;
                 true
@@ -2231,6 +2260,21 @@ impl Core {
             });
             true
         };
+        if plan.request.video_quality == Some(VideoSendQuality::Original) {
+            if let Some(material) = plan.original_video_material.as_mut() {
+                if material.task_id == 0 {
+                    material.task_id = new_upload_task_id()?;
+                    changed = true;
+                }
+            } else {
+                plan.original_video_material = Some(UploadMaterial {
+                    key: wechat_protocol::crypto::random::<16>()?.to_vec(),
+                    file_key: hex_string(&wechat_protocol::crypto::random::<16>()?),
+                    task_id: new_upload_task_id()?,
+                });
+                changed = true;
+            }
+        }
         if changed {
             self.save_send_plan(account, id, plan)?;
         }
@@ -2356,11 +2400,39 @@ impl Core {
         }
         let native = NativeClient::new(NativeOptions::default())?;
         let mut state = self.account_state(account)?;
-        if plan.request.kind == MediaKind::Video && plan.request.play_seconds.is_none() {
-            plan.request.play_seconds = Some(video_duration(&bytes, || {
-                self.progress_media(account, id, 0, None)
-            })?);
-            self.save_send_plan(account, id, &plan)?;
+        if plan.request.kind == MediaKind::Video {
+            if plan.request.video_quality.is_some() && plan.prepared_video_source_id.is_none() {
+                ensure!(plan.uploaded_video.is_none(), "video_preparation_missing");
+                let fence = self.media_authorization_fence(account)?;
+                let (seconds, normal) = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                    let seconds =
+                        video_duration(&bytes, || self.progress_media(account, id, 0, None))?;
+                    let normal = video::prepare_normal(&bytes, seconds, || {
+                        self.progress_media(account, id, 0, None)
+                    })?;
+                    Ok((seconds, normal))
+                })?;
+                state = self.resume_media_state(account, id, &fence)?;
+                let prepared =
+                    self.upload_source(account, "video-normal.mp4", "video/mp4", &normal)?;
+                plan.request.play_seconds = Some(seconds);
+                plan.prepared_video_source_id = Some(prepared.id);
+                self.save_send_plan(account, id, &plan)?;
+                let mut row = self.store.media_job(account, id)?;
+                row.data["result"]["videoPreparation"] = json!({
+                    "quality": plan.request.video_quality,
+                    "sourceSha256": source.sha256,
+                    "normalSha256": digest(&normal),
+                    "normalBytes": normal.len(),
+                    "originalIncluded": plan.request.video_quality == Some(VideoSendQuality::Original)
+                });
+                self.store.save_media_job(account, &row)?;
+            } else if plan.request.play_seconds.is_none() {
+                plan.request.play_seconds = Some(video_duration(&bytes, || {
+                    self.progress_media(account, id, 0, None)
+                })?);
+                self.save_send_plan(account, id, &plan)?;
+            }
         }
         if plan.request.kind == MediaKind::Voice {
             if plan.voice.is_empty() {
@@ -2564,35 +2636,46 @@ impl Core {
                 }
             }
             MediaKind::Video => {
+                let normal = if let Some(source_id) = &plan.prepared_video_source_id {
+                    self.source_bytes(account, source_id)?.1
+                } else {
+                    ensure!(
+                        plan.request.video_quality.is_none(),
+                        "video_preparation_missing"
+                    );
+                    bytes.clone()
+                };
+                ensure!(
+                    normal.len() <= MAX_ORDINARY_SOURCE_BYTES,
+                    "source_size_limit"
+                );
                 if plan.uploaded_video.is_none() {
                     ensure!(
-                        bytes.len() >= 12 && bytes[4..8] == *b"ftyp",
+                        normal.len() >= 12 && normal[4..8] == *b"ftyp",
                         "unsupported_video_container"
                     );
-                    let thumb = if let Some(id) = plan
+                    let thumb = if let Some(source_id) = plan
                         .request
                         .thumbnail_source_id
                         .as_ref()
                         .or(plan.prepared_video_thumbnail_source_id.as_ref())
                     {
-                        self.source_bytes(account, id)?.1
+                        self.source_bytes(account, source_id)?.1
                     } else {
-                        let bytes =
-                            video_thumbnail(&bytes, || self.progress_media(account, id, 0, None))?;
+                        let thumbnail =
+                            video_thumbnail(&normal, || self.progress_media(account, id, 0, None))?;
                         let source = self.upload_source(
                             account,
                             "video-thumbnail.jpg",
                             "image/jpeg",
-                            &bytes,
+                            &thumbnail,
                         )?;
                         plan.prepared_video_thumbnail_source_id = Some(source.id);
-                        // Retain the exact prepared bytes before any upload. Recovery
-                        // never depends on regenerating a codec's thumbnail output.
                         self.save_send_plan(account, id, &plan)?;
-                        bytes
+                        thumbnail
                     };
                     let prepared = PreparedVideoUpload::with_material(
-                        &bytes,
+                        &normal,
                         &thumb,
                         &source.name,
                         &plan.request.thread_id,
@@ -2600,9 +2683,57 @@ impl Core {
                         &material.file_key,
                     )?;
                     self.phase_media(account, id, "uploading")?;
-                    let uploaded = cdn.upload_video_with_progress(&prepared, callback)?;
+                    let fence = self.media_authorization_fence(account)?;
+                    let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                        cdn.upload_video_with_progress(&prepared, callback)
+                    })?;
                     plan.uploaded_video = Some(uploaded);
+                    // Retain accepted CDN objects before a late cancellation or logout check.
                     self.save_send_plan(account, id, &plan)?;
+                    state = self.resume_media_state(account, id, &fence)?;
+                }
+                if plan.request.video_quality == Some(VideoSendQuality::Original)
+                    && plan.uploaded_video.as_ref().unwrap().original.is_none()
+                {
+                    let raw_material = plan
+                        .original_video_material
+                        .as_ref()
+                        .context("video_preparation_missing")?;
+                    let prepared = PreparedUpload::with_material(
+                        &bytes,
+                        MediaQuality::Video,
+                        &source.name,
+                        &plan.request.thread_id,
+                        &raw_material.key,
+                        &raw_material.file_key,
+                    )?;
+                    let route = file_uses_multiphase(bytes.len()).then_some(LargeCdnRoute::Upload);
+                    let raw_conf = load_config(&mut state, route)?;
+                    self.save_state(account, &state)?;
+                    let raw_cdn = CdnClient::new(raw_conf, Duration::from_secs(25))?;
+                    self.phase_media(account, id, "uploading")?;
+                    let fence = self.media_authorization_fence(account)?;
+                    let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                        raw_cdn.upload_video_original_with_progress(
+                            &prepared,
+                            raw_material.task_id,
+                            callback,
+                        )
+                    })?;
+                    plan.uploaded_video.as_mut().unwrap().original = Some(uploaded);
+                    self.save_send_plan(account, id, &plan)?;
+                    state = self.resume_media_state(account, id, &fence)?;
+                    ensure!(
+                        plan.uploaded_video
+                            .as_ref()
+                            .unwrap()
+                            .original
+                            .as_ref()
+                            .unwrap()
+                            .sha256
+                            == source.sha256,
+                        "media_integrity_failed"
+                    );
                 }
             }
             _ => bail!("unsupported_media_send"),
@@ -2633,7 +2764,7 @@ impl Core {
                 .is_some()
                 .then(|| self.media_authorization_fence(account))
                 .transpose()?;
-            let downloaded = cdn_transfer(permit, self, account, || {
+            let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
                 cdn.download_with_progress(&u.descriptor, callback)
             })?;
             if let Some(fence) = fence {
@@ -2654,8 +2785,24 @@ impl Core {
             }
         }
         if let Some(u) = &plan.uploaded_video {
-            for variant in [&u.video, &u.thumbnail] {
-                let downloaded = cdn.download_with_progress(&variant.descriptor, callback)?;
+            for variant in [&u.video, &u.thumbnail]
+                .into_iter()
+                .chain(u.original.as_ref())
+            {
+                let route = (variant.descriptor.quality == MediaQuality::Video
+                    && variant
+                        .descriptor
+                        .expected_bytes
+                        .is_some_and(|length| length > 25 * 1024 * 1024))
+                .then_some(LargeCdnRoute::VideoDownload);
+                let download_conf = load_config(&mut state, route)?;
+                self.save_state(account, &state)?;
+                let download_cdn = CdnClient::new(download_conf, Duration::from_secs(25))?;
+                let fence = self.media_authorization_fence(account)?;
+                let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                    download_cdn.download_with_progress(&variant.descriptor, callback)
+                })?;
+                state = self.resume_media_state(account, id, &fence)?;
                 ensure!(
                     downloaded.sha256 == variant.sha256,
                     "media_integrity_failed"
@@ -2984,10 +3131,24 @@ impl Core {
                                 (raw.into(), uploaded.thumbnail.sha256.clone(), "image/jpeg")
                             } else if asset.variant == MediaVariant::Normal {
                                 (
-                                    bytes.clone().into(),
+                                    if let Some(source_id) = &plan.prepared_video_source_id {
+                                        self.source_bytes(account, source_id)?.1.into()
+                                    } else {
+                                        ensure!(
+                                            plan.request.video_quality.is_none(),
+                                            "video_preparation_missing"
+                                        );
+                                        bytes.clone().into()
+                                    },
                                     uploaded.video.sha256.clone(),
                                     "video/mp4",
                                 )
+                            } else if asset.variant == MediaVariant::Original {
+                                let original = uploaded
+                                    .original
+                                    .as_ref()
+                                    .context("uploaded_media_missing")?;
+                                (bytes.clone().into(), original.sha256.clone(), "video/mp4")
                             } else {
                                 continue;
                             }
@@ -3982,6 +4143,7 @@ mod tests {
                 thumbnail_source_id: None,
                 play_seconds: None,
                 duration_ms: None,
+                video_quality: None,
             },
             client_id: "persisted-client-id".into(),
             created_at: 123,
@@ -3992,6 +4154,8 @@ mod tests {
             uploaded_image: None,
             uploaded_video: None,
             prepared_video_thumbnail_source_id: None,
+            prepared_video_source_id: None,
+            original_video_material: None,
             voice: vec![],
             reuse_completed_upload: None,
         }
@@ -4080,7 +4244,7 @@ mod tests {
             .is_ok());
             assert!(validate_send_source_sizes(
                 &plan.request,
-                MAX_ORDINARY_SOURCE_BYTES as u64 + 1,
+                kind.max_source_bytes() as u64 + 1,
                 None,
                 None
             )
@@ -4157,6 +4321,88 @@ mod tests {
             .open_record("two", "media-job:legacy-plan", &sealed)
             .is_err());
     }
+    #[test]
+    fn video_material_and_prepared_sources_survive_replay_without_rotation() {
+        let (_dir, core) = test_core();
+        let mut plan = file_plan();
+        plan.request.kind = MediaKind::Video;
+        plan.request.video_quality = Some(VideoSendQuality::Original);
+        let normal = core
+            .upload_source("one", "normal.mp4", "video/mp4", b"owned normal bytes")
+            .unwrap();
+        plan.prepared_video_source_id = Some(normal.id.clone());
+        plan_job(&core, "video-original-material", &plan);
+        core.ensure_upload_material("one", "video-original-material", &mut plan)
+            .unwrap();
+        let before = saved_plan(&core, "video-original-material");
+        let main = before.material.as_ref().unwrap();
+        let raw = before.original_video_material.as_ref().unwrap();
+        assert_ne!(main.key, raw.key);
+        assert_ne!(main.file_key, raw.file_key);
+        assert_ne!(main.task_id, raw.task_id);
+        core.ensure_upload_material("one", "video-original-material", &mut plan)
+            .unwrap();
+        let after = saved_plan(&core, "video-original-material");
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+        assert_eq!(
+            core.source_bytes("one", after.prepared_video_source_id.as_ref().unwrap())
+                .unwrap()
+                .1,
+            b"owned normal bytes"
+        );
+        let mut legacy = serde_json::to_value(file_plan()).unwrap();
+        for key in ["prepared_video_source_id", "original_video_material"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        legacy["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("videoQuality");
+        let legacy: SendPlan = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.request.video_quality.is_none());
+        assert!(legacy.prepared_video_source_id.is_none());
+        assert!(legacy.original_video_material.is_none());
+    }
+
+    #[test]
+    fn video_quality_is_bound_to_content_and_rejected_on_other_kinds() {
+        let mut plan = file_plan();
+        plan.request.kind = MediaKind::Video;
+        plan.request.video_quality = Some(VideoSendQuality::Normal);
+        let normal = media_request_hash(&plan.request, "source", None, None, None).unwrap();
+        plan.request.video_quality = Some(VideoSendQuality::Original);
+        assert_ne!(
+            normal,
+            media_request_hash(&plan.request, "source", None, None, None).unwrap()
+        );
+        assert!(validate_send_source_sizes(
+            &plan.request,
+            MAX_VIDEO_SOURCE_BYTES as u64,
+            None,
+            None
+        )
+        .is_ok());
+        assert!(validate_send_source_sizes(
+            &plan.request,
+            MAX_VIDEO_SOURCE_BYTES as u64 + 1,
+            None,
+            None
+        )
+        .is_err());
+        for kind in [MediaKind::File, MediaKind::Image, MediaKind::Voice] {
+            plan.request.kind = kind;
+            assert_eq!(
+                validate_send_source_sizes(&plan.request, 1, None, None)
+                    .unwrap_err()
+                    .to_string(),
+                "invalid_video_quality"
+            );
+        }
+    }
+
     #[test]
     fn file_progress_and_final_ids_are_generated_once_and_never_rebuilt_from_receipts() {
         let mut small = file_plan();
@@ -4449,6 +4695,7 @@ mod tests {
             thumbnail_source_id: None,
             play_seconds: None,
             duration_ms: None,
+            video_quality: None,
         };
         let before = media_request_hash(
             &request,

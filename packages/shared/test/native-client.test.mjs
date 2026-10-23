@@ -4,8 +4,20 @@ import { openAsBlob } from 'node:fs';
 import { mkdtemp, writeFile, truncate, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES } from '../src/native-client.ts';
+import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from '../src/native-client.ts';
 const options = { baseUrl: 'http://127.0.0.1:6174', token: 'fixture-secret' };
+test('video send quality and its separate 50 MiB source bound are exposed without changing other source limits', async () => {
+  assert.equal(NATIVE_MAX_VIDEO_SOURCE_BYTES, 50 * 1024 * 1024); assert.equal(NATIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024);
+  assert.equal(NATIVE_MAX_ORDINARY_SOURCE_BYTES, 25 * 1024 * 1024 - 17);
+  const seen = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    assert.equal(new URL(url).pathname, '/v1/accounts/a/sends'); assert.equal(init.method, 'POST');
+    const body = JSON.parse(init.body); assert.equal(init.headers.get('Idempotency-Key'), `video-key-${body.videoQuality}`); seen.push(body);
+    return Response.json({ id: 'video-job', state: 'queued' }, { status: 202 });
+  } });
+  for (const videoQuality of ['normal', 'original']) await client.sendMedia('a', { threadId: 'peer', kind: 'video', sourceId: 'owned', videoQuality }, `video-key-${videoQuality}`);
+  assert.deepEqual(seen.map(value => value.videoQuality), ['normal', 'original']);
+});
 test('native transport rejects plaintext remote URLs and embedded credentials', () => {
   for (const url of ['http://example.net', 'https://user:secret@example.net', 'https://example.net?token=x', 'file:///tmp/store']) assert.throws(() => validateNativeBaseUrl(url));
   assert.equal(validateNativeBaseUrl('https://example.net/prefix').pathname, '/prefix/');

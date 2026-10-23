@@ -104,6 +104,31 @@ test("native outbound ordinary audio stays file and explicit voice stays voice",
   const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return sendJob({result:{messageIds:["msg"],chunks:[{state:"accepted",serverMessageId:"18446744073709551614"}]}});}}as unknown as NativeWeChatClient;
   await sendNativeAttachment(client,account,"filehelper",path,false,"stable-key");await sendNativeAttachment(client,account,"filehelper",path,true,"stable-key");assert.deepEqual(kinds,["file","voice"]);assert.equal(submissions,2);
 });
+test("video quality reaches the native request, 50 MiB admission is separate, and document mode preserves file selection", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-video-options-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "source.mp4"); await writeFile(path, new Uint8Array(1)); await truncate(path, 50 * 1024 * 1024);
+  const selected: any[] = []; let uploads = 0;
+  const client = { upload: async (_a: string, source: Blob) => { uploads++; assert.ok(source instanceof Blob); assert.equal(source.size, 50 * 1024 * 1024); return { id: "source" }; },
+    sendMedia: async (_a: string, input: any) => { selected.push(input); return sendJob({ result: { messageIds: ["stored"] } }); },
+    message: async () => ({ id: "stored", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
+  } as unknown as NativeWeChatClient;
+  for (const videoQuality of [undefined, "normal", "original"] as const) await sendNativeAttachment(client, account, "filehelper", path, false, `video-${videoQuality}`, undefined, { videoQuality });
+  assert.deepEqual(selected.map(request => [request.kind, request.videoQuality]), [["video", "normal"], ["video", "normal"], ["video", "original"]]);
+  await sendNativeAttachment(client, account, "filehelper", path, false, "document", undefined, { forceDocument: true });
+  assert.equal(selected[3].kind, "file"); assert.equal(selected[3].videoQuality, undefined);
+  await truncate(path, 50 * 1024 * 1024 + 1);
+  await assert.rejects(sendNativeAttachment(client, { ...account, mediaMaxMb: 512 }, "filehelper", path, false, "too-large"), /bounded regular file/);
+  assert.equal(uploads, 4);
+});
+test("document/quality conflicts and quality on a non-video fail before staging", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-invalid-video-options-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "image.png"); await writeFile(path, bytes); let uploads = 0;
+  const client = { upload: async () => { uploads++; assert.fail("Invalid options must not stage a source"); } } as unknown as NativeWeChatClient;
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "invalid", undefined, { videoQuality: "original" }), /requires a video attachment/);
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "invalid", undefined, { videoQuality: "original", forceDocument: true }), /cannot also request/);
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, true, "invalid", undefined, { forceDocument: true }), /cannot also request/);
+  assert.equal(uploads, 0);
+});
 test("only selected file sends accept the exact 512 MiB file limit without reading it into memory", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-file-size-")); t.after(() => rm(directory, { recursive: true, force: true }));
   let uploads = 0, sends = 0;
@@ -120,7 +145,7 @@ test("only selected file sends accept the exact 512 MiB file limit without readi
   await truncate(file, 512 * 1024 * 1024 + 1);
   await assert.rejects(sendNativeAttachment(client, { ...largeAccount, mediaMaxMb: 1024 }, "filehelper", file), /bounded regular file/);
   for (const [extension, voice] of [["jpg", false], ["mp4", false], ["wav", true]] as const) {
-    const path = join(directory, `synthetic.${extension}`); await writeFile(path, new Uint8Array(1)); await truncate(path, 25 * 1024 * 1024 - 16);
+    const path = join(directory, `synthetic.${extension}`); await writeFile(path, new Uint8Array(1)); await truncate(path, extension === "mp4" ? 50 * 1024 * 1024 + 1 : 25 * 1024 * 1024 - 16);
     await assert.rejects(sendNativeAttachment(client, largeAccount, "filehelper", path, voice), /bounded regular file/);
   }
   assert.equal(uploads, 1); assert.equal(sends, 1);

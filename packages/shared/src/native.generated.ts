@@ -1,6 +1,7 @@
 // Generated from wechat-api/src/contracts.rs. Do not edit.
 export const NATIVE_MAX_SOURCE_BYTES = 536870912 as const;
 export const NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const;
+export const NATIVE_MAX_VIDEO_SOURCE_BYTES = 52428800 as const;
 export type NativeMentions = { state: string, userIds: Array<string>, self: boolean | null, all: boolean | null, source: string | null, };
 export type NativeQuoteReference = { serverId: string, type: number, };
 export type LinkCard = { title: string | null, description: string | null, url: string | null, sourceName: string | null, };
@@ -34,8 +35,9 @@ export type QrRefresh = { mode: QrRefreshMode, maxRefreshes: number, };
 export type LoginRequest = { strategy: LoginStrategy, qrRefresh: QrRefresh, allowQr: boolean, forceQr: boolean, timeoutSeconds: number, computerName: string, };
 export type MediaKind = "image" | "file" | "video" | "voice" | "sticker";
 export type MediaVariant = "best" | "thumbnail" | "standard" | "original" | "normal" | "encoded";
+export type VideoSendQuality = "normal" | "original";
 export type MediaTransferRequest = { messageId: string, assetId: string | null, quality: MediaVariant, };
-export type MediaSendRequest = { threadId: string, kind: MediaKind, sourceId: string, standardSourceId: string | null, thumbnailSourceId: string | null, playSeconds: number | null, durationMs: number | null, };
+export type MediaSendRequest = { threadId: string, kind: MediaKind, sourceId: string, standardSourceId: string | null, thumbnailSourceId: string | null, playSeconds: number | null, durationMs: number | null, videoQuality?: VideoSendQuality, };
 export type MediaImagePreview = { sourceSha256: string, contentType: string, byteLength: number, sha256: string, filename: string, contentUrl: string, };
 export type MediaAsset = { id: string, accountId: string, messageId: string | null, kind: MediaKind, variant: MediaVariant, actualVariant: MediaVariant | null, state: string, contentType: string | null, byteLength: number | null, sha256: string | null, filename: string | null, expiresAt: number | null, reason: string | null, retryable: boolean, jobId: string | null, contentUrl: string | null, animationFrames: number | null, officialWriteback: string, preview?: MediaImagePreview, };
 export type MediaJob = { id: string, accountId: string, kind: string, state: string, phase: string, attempts: number, cancelRequested: boolean, retryable: boolean, reason: string | null, assetId: string | null, sourceId: string | null, threadId: string | null, serverMessageId: string | null, completedBytes: number, totalBytes: number | null, result: unknown, createdAt: string, updatedAt: string, };

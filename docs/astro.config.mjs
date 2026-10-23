@@ -61,6 +61,7 @@ export default defineConfig({
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
           { label: 'Send attachments', slug: 'use/media' },
+          { label: 'Video quality', slug: 'use/video' },
           { label: 'OpenClaw', items: [
             { label: 'Quick setup', slug: 'openclaw/setup' },
             { label: 'Managed or external', slug: 'openclaw/modes' },

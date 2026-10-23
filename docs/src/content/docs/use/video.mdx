@@ -1,0 +1,78 @@
+---
+title: Send normal or original video
+description: Choose a compressed playback copy or include the unchanged original video.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Choose how the daemon prepares an MP4 video before uploading it:
+
+| Mode | What is sent |
+| --- | --- |
+| `normal` (default) | A compressed playback copy and a thumbnail |
+| `original` | The same playback copy and thumbnail, plus the unchanged source video |
+| Ordinary file | The source bytes as a file attachment, without video preparation |
+
+Video sources can be up to **50 MiB (52,428,800 bytes)**. Normal playback uses our encoding policy: H.264 Main, at most 720 pixels on the longest edge and 30 frames per second, with AAC audio when present. The daemon checks the complete output before uploading. It rejects videos that cannot fit the playback limit; it does not shorten them.
+
+## CLI
+
+1. Send the normal playback copy:
+
+   ```bash
+   wx messages send filehelper --video ./clip.mp4 --video-quality normal \
+     --idempotency-key clip-normal --wait 3600
+   ```
+
+2. Include the unchanged original:
+
+   ```bash
+   wx messages send filehelper --video ./clip.mp4 --video-quality original \
+     --idempotency-key clip-original --wait 3600
+   ```
+
+   Both commands return a job. Wait for `state: "accepted"` and inspect `result.uploadReadbackVerified`. `--detach` returns immediately; `wx jobs get JOB_ID` checks progress.
+
+3. For an ordinary file instead, select `--file ./clip.mp4`. The [file attachment limit](/use/media/) applies.
+
+## API and SDK
+
+Stage the source with `POST /uploads`, then send its ID:
+
+```json
+{
+  "threadId": "filehelper",
+  "kind": "video",
+  "sourceId": "SOURCE_ID",
+  "videoQuality": "original"
+}
+```
+
+Submit to `POST /sends` with an `Idempotency-Key` header. The SDK’s `sendMedia` takes the same `videoQuality` field. Omit it for normal mode. `NATIVE_MAX_VIDEO_SOURCE_BYTES` reports the source ceiling.
+
+Preparation, upload and verification run in the background. Keep the job ID when an HTTP request or polling wait ends. Reusing a key with a different quality raises an idempotency conflict.
+
+## OpenClaw
+
+The regular message tool accepts per-send options in `channelData`:
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "to": "CHAT_ID",
+  "media": "/absolute/path/clip.mp4",
+  "channelData": {
+    "agent-wechat": { "videoQuality": "original" }
+  }
+}
+```
+
+Use one video per quality-selected send. Set `mediaMaxMb` to at least the intended source size. To send it as an ordinary attachment, use `asDocument: true` without `videoQuality`.
+
+<Aside title="Good to know">
+- Original mode preserves the source as a separate video object. The playback copy is still compressed; recipient applications decide which copy to play or download.
+- This encoding policy is ours. It does not claim to reproduce the official app’s quality preset.
+- `--quality` on media retrieval selects a received variant; `--video-quality` selects outgoing preparation.
+- Server acceptance, recipient playback and original-byte equality are separate checks. See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for current live validation.
+</Aside>
