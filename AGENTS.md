@@ -19,6 +19,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 
 - Use neutral, accurate technical language in code, comments, docs, commits, and PRs. Do not imply unauthorized access or conceal how a feature works.
 - Keep account credentials, tokens, private infrastructure details, and research-only material out of this public repository. Do not link to private research repositories from public docs.
+- WeChat protocol, profile-format and reverse-engineering research findings are not kept in this repository. If a dedicated internal research/documentation repository is available, read and record those findings there instead; do not add `dev-notes/`-style research or validation notes here.
 - Use an isolated test container and test account for behavior changes. Do not send messages to a live bot or modify a production container unless the task explicitly calls for it. Confirm the intended destination before any send.
 - Preserve existing container data, official profiles and backups unless removal is explicitly requested. Retiring runtime source does not authorize deleting deployed containers, registry tags or volumes.
 - Use one writer per official profile. Stop the official app before takeover; a caller assertion is not proof that an unmanaged app stopped. Do not infer arbitrary official-build or live ARM64 compatibility from synthetic tests.
@@ -33,7 +34,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Write plain sentences for a reader who hasn't seen the code. Avoid "explicit", "bounded", "durable", "custody", "projection" and similar internal terms unless the page defines them.
 - Prefer a table, diagram (a `mermaid` code block, rendered at build time) or example over a paragraph.
 - Keep task pages short, roughly 600 words; split a page that grows past that.
-- Test evidence, CI scripts and release mechanics belong in `FEATURES.md`, `dev-notes/` or `deploy/native/README.md`, not in the site.
+- Internal test evidence, CI scripts and release mechanics belong in `FEATURES.md`, `RELEASING.md`, `PLATFORM-ACCEPTANCE.md` or `deploy/native/README.md`, not in the `docs/` site.
 - Moving or renaming a page needs an entry in `moved` in `docs/astro.config.mjs` so old links keep working.
 
 ## Runtime boundaries

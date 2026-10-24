@@ -49,7 +49,7 @@ See the [native guide](packages/native-client-rust/README.md) for configuration,
 
 ## Distribution and migration
 
-Linux x64/ARM64 is validated with glibc 2.36+. macOS ARM64 and Windows x64/ARM64 have candidate build/install/lifecycle workflows; see the [platform acceptance checklist](dev-notes/native-platform-acceptance.md). The native-only container remains Linux. The npm CLI installs the matching executable; OpenClaw is a separate npm plugin. The Rust crates and TypeScript SDK are internal source libraries, not new registry publications. See the [distribution matrix and release sequence](deploy/native/README.md).
+Linux x64/ARM64 is validated with glibc 2.36+. macOS ARM64 and Windows x64/ARM64 have candidate build/install/lifecycle workflows; see the [platform acceptance checklist](PLATFORM-ACCEPTANCE.md). The native-only container remains Linux. The npm CLI installs the matching executable; OpenClaw is a separate npm plugin. The Rust crates and TypeScript SDK are internal source libraries, not new registry publications. See the [distribution matrix and release sequence](deploy/native/README.md).
 
 This major release retires the old UI server/image, `wx-legacy` and Wechaty puppet/gateway integrations. Existing installations and volumes are not removed. Stop the old owner, preserve a backup and select its complete official profile with the native login command. Old `/api` clients and inline-token OpenClaw configurations require migration to native `/v1`; see the [migration guide](https://thisnick.github.io/agent-wechat/setup/migrate/).
 

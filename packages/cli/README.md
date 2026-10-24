@@ -104,4 +104,4 @@ Deployment examples and the deliberate release preparation sequence are in [depl
 
 `native-check-package.mjs` is the prepack/prepublish gate. It checks version/source/target/checksum metadata; before publication it additionally requires both architecture assets to exist and match the package's manifest. A local pack smoke can use one architecture fragment; publication requires the complete matrix. These helpers belong to the existing CLI package, not additional npm packages.
 
-Candidate platform validation and remaining profile boundaries are tracked in [the acceptance checklist](../../dev-notes/native-platform-acceptance.md). Windows executables are named `wx.exe`; the npm launcher chooses the OS/CPU-specific asset. A native ARM64 Node installation selects the native Windows ARM64 executable.
+Candidate platform validation and remaining profile boundaries are tracked in [the acceptance checklist](../../PLATFORM-ACCEPTANCE.md). Windows executables are named `wx.exe`; the npm launcher chooses the OS/CPU-specific asset. A native ARM64 Node installation selects the native Windows ARM64 executable.
