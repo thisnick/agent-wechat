@@ -310,7 +310,7 @@ test("a reply read conflict keeps newer arrivals unread and never retries the re
   assert.equal(posts, 1);
 });
 
-test("reply read acknowledgments deduplicate the same view and stay scoped across an account switch", async (t) => {
+test("composer read acknowledgments deduplicate focus and reply actions and stay scoped across an account switch", async (t) => {
   const reading = deferred(),
     marks = [],
     reads = [];
@@ -337,10 +337,10 @@ test("reply read acknowledgments deduplicate the same view and stay scoped acros
   await hub.activate("a");
   unread = 4;
   await hub.refresh();
-  const first = hub.readOnReply("a", "peer");
-  await hub.readOnReply("a", "peer");
-  await hub.readOnReply("b", "peer");
-  await hub.readOnReply("a", "another-chat");
+  const first = hub.readOnInteraction("a", "peer");
+  await hub.readOnInteraction("a", "peer");
+  await hub.readOnInteraction("b", "peer");
+  await hub.readOnInteraction("a", "another-chat");
   await hub.activate("b");
   const before = reads.length;
   reading.resolve();
@@ -1184,4 +1184,67 @@ test("deactivating a profile clears its messages and fences a late chat-open res
   assert.deepEqual(session.snapshot().messages, []);
   assert.equal(session.snapshot().connected, false);
   session.close();
+});
+
+test("recall events invalidate preview bytes before a canonical lookup completes", async () => {
+  const late = deferred();
+  const session = new HubSession(client({ message: () => late.promise }));
+  await session.activate("a");
+  const invalidations = [];
+  const stop = session.onMediaInvalidated((account, messageId) =>
+    invalidations.push([account, messageId]),
+  );
+  const consuming = session.consume(
+    { kind: "message.recalled", data: { messageId: "photo" } },
+    "a",
+  );
+  assert.deepEqual(invalidations, [["a", "photo"]]);
+  late.resolve({
+    ...message("photo"),
+    recall: { observedAt: "11" },
+    type: 10000,
+  });
+  await consuming;
+  stop();
+  await session.consume(
+    { kind: "message.recalled", data: { messageId: "foreign" } },
+    "b",
+  );
+  assert.ok(
+    invalidations.every(([account, id]) => account === "a" && id === "photo"),
+  );
+  session.close();
+});
+
+test("composer acknowledgments stay deduplicated while the updated unread badge is loading", async (t) => {
+  const refreshed = deferred();
+  let unread = 0,
+    posts = 0,
+    refreshing = false;
+  const view = (count) => ({
+    id: "peer",
+    accountId: "a",
+    unreadCount: count,
+    readStateVersion: "2",
+  });
+  const hub = session(t, {
+    threads: async () => page([view(unread)]),
+    thread: async () => (refreshing ? refreshed.promise : view(unread)),
+    markRead: async () => {
+      posts++;
+      refreshing = true;
+      return {};
+    },
+  });
+  await hub.activate("a");
+  unread = 3;
+  await hub.refresh();
+  const focusing = hub.readOnInteraction("a", "peer");
+  await eventually(() => refreshing);
+  const clicking = hub.readOnInteraction("a", "peer");
+  await Promise.resolve();
+  assert.equal(posts, 1);
+  refreshed.resolve(view(0));
+  await Promise.all([focusing, clicking]);
+  assert.equal(hub.snapshot().threads[0].unreadCount, 0);
 });

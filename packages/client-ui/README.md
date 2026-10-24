@@ -123,6 +123,10 @@ when connecting this preview to an explicitly selected native daemon.
 
 ## Attachments and stickers
 
+Focusing or clicking the message composer clears the selected thread’s unread count
+against its displayed read-state version. Concurrent focus and reply actions share
+one request, and a conflict never clears a newer arrival automatically.
+
 Replies show the quoted sender and content above the comment. Loaded history is
 used first; visible replies otherwise use the parent-bound quote endpoint. Image
 quotes show a small standard preview. Recalled or unavailable originals keep a
@@ -171,15 +175,24 @@ viewer keeps **Download** available beside **Get original** and its transfer pro
 Its progress has a **Cancel** text action; the close icon closes the viewer.
 Once the original is cached, **Download** saves that original to this device. Quality
 and size appear only when the download control is hovered or focused, as
-“Smaller copy” or “Original.” When no original source is provided, only standard can
+“Compressed” or “Original.” When no original source is provided, only standard can
 be downloaded; the download tooltip explains this. Transfer progress
 and cancellation appear while it runs. The conversation keeps displaying standard
 quality even after an original is downloaded. The carousel first shows standard,
 then replaces it with a verified cached original after its bytes load and decode.
 A failed upgrade leaves the standard visible. Opening the carousel does not
 request an original from WeChat. An unavailable image shows an icon.
+
+Chat messages, the main viewer and its strip share one connection-local preview
+cache. Requests for the same account, asset, quality and source hash are deduplicated.
+Idle previews are retained within a 64 MiB / 128-entry budget; visible previews stay
+pinned until their consumers close. Reopening a chat or viewer reuses retained blob
+URLs immediately. Recalls invalidate the message's preview entries, and sign-out or
+disconnect clears the relevant account or connection. This cache lives in browser
+memory, so a page reload still reads media from the hub.
+
 Files show their filename and an always-visible download control. **Get original**
-keeps an uncached file on the hub, then **Download** saves it to the device. Generic
+makes the original available for download, then **Download** saves it to the device. Generic
 files, including PDFs, do not render an image placeholder or an inline PDF viewer.
 
 Clicking a resolved quote loads any intervening history pages and scrolls to its

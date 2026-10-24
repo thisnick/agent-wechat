@@ -36,6 +36,7 @@ export function AccountSettings({
     setNotice("");
     try {
       await connection.session.client.removeAccount(account.id, account.id);
+      connection.incomingMedia.clear(account.id);
       connection.session.deactivate(account.id);
       await connection.session.accounts();
       if (!lifetime.current.signal.aborted) removed();
@@ -85,6 +86,7 @@ export function AccountSettings({
           lifetime.current.signal,
         );
         if (current.state === "succeeded") {
+          connection.incomingMedia.clear(account.id);
           await connection.session.accounts();
           if (!lifetime.current.signal.aborted) signedOut();
           return;

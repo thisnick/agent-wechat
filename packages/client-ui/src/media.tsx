@@ -13,6 +13,7 @@ import {
   type NativeMessage,
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { mediaPreviewIdentity } from "./media-preview-cache.ts";
 import { readableError } from "./session.ts";
 import { Avatar, Button, Icon } from "./ui.tsx";
 import type { PendingMedia } from "./media-outbox.ts";
@@ -173,7 +174,7 @@ export function AttachmentPicker({
                   onClick={() => {
                     const target = review;
                     setReview(null);
-                    void connection.session.readOnReply(
+                    void connection.session.readOnInteraction(
                       account,
                       target.threadId,
                     );
@@ -505,80 +506,64 @@ export function AssetContent({
   open?: () => void;
   upgrade?: MediaAsset;
 }) {
-  const [url, setUrl] = useState("");
+  const cache = connection.incomingMedia.previews;
+  const cached = cache.peek(asset);
+  const [url, setUrl] = useState(cached?.url ?? "");
   const [error, setError] = useState("");
-  const [baseReady, setBaseReady] = useState(false);
+  const [baseReady, setBaseReady] = useState(!!cached);
   const [shownVariant, setShownVariant] = useState(asset.variant);
-  const baseUrl = useRef("");
-  const preview = asset.preview;
-  const type = preview?.contentType ?? asset.contentType ?? "";
+  const baseUrl = useRef(cached?.url ?? "");
+  const type = asset.preview?.contentType ?? asset.contentType ?? "";
+  const identity = mediaPreviewIdentity(asset);
+  const upgradeIdentity = upgrade ? mediaPreviewIdentity(upgrade) : "";
   const inline =
     /^image\/(jpeg|png|gif|webp)$/.test(type) ||
     /^video\/mp4$/.test(type) ||
     /^audio\/(wav|mpeg|ogg)$/.test(type);
   useEffect(() => {
     if (!inline) return;
-    const controller = new AbortController();
-    let objectUrl = "";
-    void connection.session.client
-      .mediaContent(asset.accountId, asset.id, {
-        representation: preview ? "preview" : "original",
-        maxBytes: NATIVE_MAX_SOURCE_BYTES,
-        signal: controller.signal,
-      })
+    let active = true;
+    const lease = cache.acquire(asset);
+    void lease.ready
       .then((content) => {
-        if (controller.signal.aborted) return;
-        objectUrl = URL.createObjectURL(
-          new Blob([new Uint8Array(content.bytes).buffer], {
-            type: content.contentType,
-          }),
-        );
-        baseUrl.current = objectUrl;
-        setUrl(objectUrl);
+        if (!active) return;
+        baseUrl.current = content.url;
+        setUrl(content.url);
         setBaseReady(true);
+        setError("");
       })
       .catch((error) => {
-        if (!controller.signal.aborted) setError(readableError(error));
+        if (active) setError(readableError(error));
       });
     return () => {
-      controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      active = false;
+      lease.release();
     };
-  }, [asset.accountId, asset.id, asset.sha256]);
+  }, [cache, identity, inline]);
   useEffect(() => {
     if (!baseReady || !upgrade || !cachedVariant(upgrade)) return;
-    const controller = new AbortController();
-    let objectUrl = "";
-    void connection.session.client
-      .mediaContent(upgrade.accountId, upgrade.id, {
-        representation: upgrade.preview ? "preview" : "original",
-        maxBytes: NATIVE_MAX_SOURCE_BYTES,
-        signal: controller.signal,
-      })
+    let active = true;
+    const lease = cache.acquire(upgrade);
+    void lease.ready
       .then(async (content) => {
-        if (controller.signal.aborted) return;
-        objectUrl = URL.createObjectURL(
-          new Blob([new Uint8Array(content.bytes).buffer], {
-            type: content.contentType,
-          }),
-        );
+        if (!active) return;
         const decoded = new Image();
-        decoded.src = objectUrl;
+        decoded.src = content.url;
         await decoded.decode();
-        if (controller.signal.aborted) return;
-        setUrl(objectUrl);
+        if (!active) return;
+        setUrl(content.url);
         setShownVariant(upgrade.variant);
       })
       .catch(() => {
         /* A failed original preview keeps the visible standard image. */
       });
     return () => {
-      controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      active = false;
+      lease.release();
       setUrl(baseUrl.current);
       setShownVariant(asset.variant);
     };
-  }, [baseReady, upgrade?.accountId, upgrade?.id, upgrade?.sha256]);
+  }, [cache, baseReady, upgradeIdentity]);
   const image = (
     <img
       className="media-preview"
@@ -796,14 +781,18 @@ function MediaDownloadAction({
         {quality
           ? quality === "original"
             ? "Original"
-            : "Smaller copy"
+            : "Compressed"
           : asset.filename || "File"}
         {downloadBytes ? ` · ${size(downloadBytes)}` : " · Size unknown"}
         {quality === "standard" &&
         !state.assets.some((item) => item.variant === "original")
           ? " · Original unavailable"
           : ""}
-        {!ready && canRetrieve(asset) ? " · Keep on agent-wechat hub" : ""}
+        {!ready && canRetrieve(asset)
+          ? original
+            ? " · Make original available for download"
+            : " · Make available for download"
+          : ""}
       </span>
       {working && (
         <>

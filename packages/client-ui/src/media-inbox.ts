@@ -4,6 +4,7 @@ import type {
   NativeWeChatClient,
 } from "@agent-wechat/shared";
 import { canRetrieve } from "./media-variants.ts";
+import { MediaPreviewCache } from "./media-preview-cache.ts";
 import { pause, readableError } from "./session.ts";
 
 export const mediaJobEnded = (job: MediaJob): boolean =>
@@ -162,8 +163,10 @@ export class IncomingMedia {
 export class MediaInbox {
   private entries = new Map<string, IncomingMedia>();
   private client: NativeWeChatClient;
+  readonly previews: MediaPreviewCache;
   constructor(client: NativeWeChatClient) {
     this.client = client;
+    this.previews = new MediaPreviewCache(client);
   }
   get(account: string, messageId: string): IncomingMedia {
     const key = JSON.stringify([account, messageId]);
@@ -185,8 +188,23 @@ export class MediaInbox {
       if (entry.snapshot().assets.some((asset) => asset.id === assetId))
         void entry.load(true);
   }
+  invalidateMessage(account: string, messageId: string): void {
+    this.previews.invalidateMessage(account, messageId);
+    const key = JSON.stringify([account, messageId]);
+    this.entries.get(key)?.close();
+    this.entries.delete(key);
+  }
+  clear(account: string): void {
+    for (const [key, entry] of this.entries)
+      if (entry.account === account) {
+        entry.close();
+        this.entries.delete(key);
+      }
+    this.previews.clear(account);
+  }
   close(): void {
     for (const entry of this.entries.values()) entry.close();
     this.entries.clear();
+    this.previews.close();
   }
 }

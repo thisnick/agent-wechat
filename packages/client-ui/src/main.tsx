@@ -716,6 +716,10 @@ function Chats({
         );
     });
   }
+  function acknowledgeComposer() {
+    if (state.account && state.selected)
+      void session.readOnInteraction(state.account, state.selected);
+  }
   function clearReply() {
     setReplyDrafts((replies) => {
       const updated = { ...replies };
@@ -1217,6 +1221,8 @@ function Chats({
                       <textarea
                         ref={messageInput}
                         aria-label="Message"
+                        onFocus={acknowledgeComposer}
+                        onClick={acknowledgeComposer}
                         rows={2}
                         placeholder={
                           state.selected

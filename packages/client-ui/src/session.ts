@@ -190,6 +190,21 @@ export async function inventory<T>(
 export class HubSession {
   private value = initial();
   private listeners = new Set<() => void>();
+  private mediaInvalidationListeners = new Set<
+    (account: string, messageId: string) => void
+  >();
+  onMediaInvalidated = (
+    listener: (account: string, messageId: string) => void,
+  ): (() => void) => {
+    this.mediaInvalidationListeners.add(listener);
+    return () => {
+      this.mediaInvalidationListeners.delete(listener);
+    };
+  };
+  private invalidateMedia(account: string, messageId: string): void {
+    for (const listener of this.mediaInvalidationListeners)
+      listener(account, messageId);
+  }
   private mediaListeners = new Set<(assetId: string) => void>();
   onMediaReady = (listener: (assetId: string) => void): (() => void) => {
     this.mediaListeners.add(listener);
@@ -203,7 +218,7 @@ export class HubSession {
   private catalogRequest = 0;
   private detailsRequest = 0;
   private threadRequests = new Map<string, number>();
-  private replyReads = new Set<string>();
+  private interactionReads = new Set<string>();
   private catalogFlight: {
     account: string;
     generation: number;
@@ -290,6 +305,7 @@ export class HubSession {
     this.publish(initial());
     this.stopped = true;
     this.mediaListeners.clear();
+    this.mediaInvalidationListeners.clear();
     this.histories.clear();
   }
   deactivate(account = this.value.account): void {
@@ -600,7 +616,7 @@ export class HubSession {
       await this.refreshThread(account, threadId, generation);
     return result;
   }
-  async readOnReply(account: string, threadId: string): Promise<void> {
+  async readOnInteraction(account: string, threadId: string): Promise<void> {
     if (
       this.stopped ||
       account !== this.value.account ||
@@ -614,10 +630,10 @@ export class HubSession {
     const generation = this.generation;
     const version = thread.readStateVersion;
     const key = JSON.stringify([account, threadId, version]);
-    if (this.replyReads.has(key)) return;
-    this.replyReads.add(key);
+    if (this.interactionReads.has(key)) return;
+    this.interactionReads.add(key);
     try {
-      // Replying acknowledges the current view, never a newer unseen version.
+      // Focusing or replying acknowledges this view, never a newer unseen version.
       await this.client.markRead(account, threadId, version);
     } catch (error) {
       if (
@@ -633,9 +649,9 @@ export class HubSession {
           error: `Couldn’t clear unread status. ${readableError(error)}`,
         });
     } finally {
-      this.replyReads.delete(key);
       if (this.current(account, generation))
         await this.refreshThread(account, threadId, generation).catch(() => {});
+      this.interactionReads.delete(key);
     }
   }
   private loadCatalog(account: string, generation: number): Promise<void> {
@@ -714,6 +730,7 @@ export class HubSession {
   ): Promise<NativeMessage | undefined> {
     const message = await this.client.message(account, messageId);
     if (!this.current(account, generation)) return;
+    if (message.recall) this.invalidateMedia(account, messageId);
     if (message.threadId === this.value.selected) {
       this.publish({ messages: mergeMessage(this.value.messages, message) });
       this.remember();
@@ -805,6 +822,11 @@ export class HubSession {
     generation = this.generation,
   ): Promise<void> {
     if (!this.current(account, generation)) return;
+    if (
+      event.kind === "message.recalled" &&
+      typeof event.data.messageId === "string"
+    )
+      this.invalidateMedia(account, event.data.messageId);
     if (
       event.kind === "media.ready" &&
       typeof event.data.assetId === "string"
@@ -974,7 +996,7 @@ export class HubSession {
       ],
       error: null,
     });
-    void this.readOnReply(account, threadId);
+    void this.readOnInteraction(account, threadId);
     try {
       const intent = await this.client.sendText(
         account,

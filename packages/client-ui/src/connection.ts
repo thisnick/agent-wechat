@@ -78,6 +78,9 @@ export async function connect(
   const incomingMedia = new MediaInbox(client);
   const recalls = new Map<string, MessageRecall>();
   const stopMedia = session.onMediaReady((id) => incomingMedia.ready(id));
+  const stopMediaInvalidation = session.onMediaInvalidated(
+    (account, messageId) => incomingMedia.invalidateMessage(account, messageId),
+  );
   const groups = new Map<string, GroupMutations>();
   const logouts = new Map<string, SavedLogin>();
   const logoutKey = (account: string) =>
@@ -102,6 +105,7 @@ export async function connect(
       for (const queue of media.values()) queue.close();
       avatars.close();
       stopMedia();
+      stopMediaInvalidation();
       incomingMedia.close();
       for (const recall of recalls.values()) recall.close();
       for (const group of groups.values()) group.close();

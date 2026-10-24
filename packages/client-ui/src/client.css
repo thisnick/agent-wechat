@@ -515,8 +515,13 @@ input:focus-visible {
 .qr-expiry {
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.5;
   text-align: center;
   margin: 14px 0 0;
+}
+.onboarding-center > .field-help {
+  margin: 12px 0 0;
+  text-align: center;
 }
 .attachment-input {
   display: none;
