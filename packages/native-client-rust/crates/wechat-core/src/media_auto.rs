@@ -117,7 +117,7 @@ impl Core {
         let account = account.to_owned();
         tokio::spawn(async move {
             loop {
-                if core.stopping.load(Ordering::SeqCst) {
+                if core.stopping.load(Ordering::SeqCst) || core.store.account(&account).is_err() {
                     break;
                 }
                 if let Ok(guard) = core.lock_account(&account).await {

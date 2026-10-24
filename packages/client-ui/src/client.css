@@ -625,7 +625,8 @@ input:focus-visible {
   gap: 8px;
   margin: 9px 0;
 }
-.account-name input {
+.account-name input,
+.profile-removal input {
   flex: 1;
   min-width: 0;
   padding: 9px 10px;
@@ -1655,4 +1656,106 @@ input:focus-visible {
   width: 300px;
   max-width: 100%;
   display: block;
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.profile-row .login-account {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.profile-row .login-account > span {
+  min-width: 0;
+}
+.profile-manage,
+.profile-close {
+  display: grid;
+  place-items: center;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+}
+.profile-manage {
+  margin-right: 8px;
+}
+.profile-manage:hover,
+.profile-close:hover {
+  background: var(--bubble);
+  color: var(--ink);
+}
+.profile-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+}
+.profile-dialog > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.profile-dialog > header p {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+.profile-dialog .account-settings {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+.profile-removal {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  margin-top: 8px;
+}
+.profile-removal h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.profile-removal p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.profile-removal input {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+}
+.profile-removal small {
+  display: block;
+  margin-top: 8px;
+}
+.danger-text {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: #e58c7c;
+}
+.danger {
+  background: #b34132;
+  color: white;
+  border: 1px solid transparent;
+}
+.danger:disabled,
+.danger-text:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

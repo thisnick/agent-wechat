@@ -177,6 +177,8 @@ impl Core {
                 self.leases
                     .lock()
                     .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+                    .entry(account.into())
+                    .or_default()
                     .push(wechat_store::profile_lease(location.root())?);
                 held.insert(account.into());
             }

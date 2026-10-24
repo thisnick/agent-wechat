@@ -77,7 +77,7 @@ pub struct Core {
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub store: Arc<Store>,
     pub ownership_generation: String,
-    leases: Mutex<Vec<wechat_store::Lease>>,
+    leases: Mutex<BTreeMap<String, Vec<wechat_store::Lease>>>,
     pub(crate) vault: Arc<Vault>,
     pub(crate) cursor_vault: Arc<Vault>,
     password_proofs: Mutex<BTreeMap<String, String>>,
@@ -323,8 +323,58 @@ impl Core {
         self.leases
             .lock()
             .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+            .entry(account.id.clone())
+            .or_default()
             .push(wechat_store::profile_lease(&account.profile_path)?);
         Ok(account)
+    }
+    /// Remove only an idle, signed-out registration. Local profile files remain.
+    pub async fn remove_account(&self, account: &str) -> Result<()> {
+        let gate = self.gate(account)?;
+        let _guard = gate
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("operation_in_progress"))?;
+        let media_gate = self
+            .media_gates
+            .lock()
+            .map_err(|_| anyhow::anyhow!("media manager unavailable"))?
+            .entry(account.into())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        let _media = media_gate
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("operation_in_progress"))?;
+        // Login/logout admission shares this lock, including before its worker owns
+        // the account gate. Sidecar admission is serialized by the registry lock.
+        let cancels = self
+            .cancels
+            .lock()
+            .map_err(|_| anyhow::anyhow!("operation manager unavailable"))?;
+        if cancels.contains_key(&format!("login-active:{account}"))
+            || cancels.contains_key(&format!("logout-active:{account}"))
+        {
+            bail!("operation_in_progress");
+        }
+        self.store.remove_account(account)?;
+        // Keep the existing gates: requests already waiting on one must never
+        // acquire a new gate for the same identity. Removed IDs cannot be reused.
+        self.leases
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+            .remove(account);
+        self.bootstrap_leases
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+            .remove(account);
+        self.password_proofs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+            .remove(account);
+        self.recall_sync_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recall cache unavailable"))?
+            .remove(account);
+        Ok(())
     }
     fn gate(&self, account: &str) -> Result<Arc<AsyncMutex<()>>> {
         self.store.account(account)?;
@@ -1639,7 +1689,9 @@ impl Core {
                 let mut delay = 1;
                 loop {
                     tokio::time::sleep(Duration::from_secs(delay)).await;
-                    if core.stopping.load(Ordering::SeqCst) {
+                    if core.stopping.load(Ordering::SeqCst)
+                        || core.store.account(&account.id).is_err()
+                    {
                         break;
                     }
                     let desired = core.store.runtime(&account.id, "desired").ok().flatten();

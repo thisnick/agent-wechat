@@ -272,6 +272,8 @@ impl Core {
             self.leases
                 .lock()
                 .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+                .entry(account.id.clone())
+                .or_default()
                 .push(lease);
             self.bootstrap_leases
                 .lock()

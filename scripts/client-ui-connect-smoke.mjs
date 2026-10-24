@@ -96,9 +96,20 @@ try {
   const config = await response.json();
   assert.equal(config.simulator, false);
   assert.equal(config.endpoint, ready.origin);
-  assert.equal(config.token, token);
-  assert.equal(config.accountCreation, false);
-  const beforeCreate = paths.length;
+  assert.equal(config.token, ready.key);
+  assert.notEqual(config.token, token, "the daemon key stays server-side");
+  for (const [path, method] of [
+    ["/v1/accounts", "POST"],
+    ["/v1/accounts/other/auth/login", "POST"],
+    ["/v1/accounts/other/auth/logout", "POST"],
+    ["/v1/accounts/other", "DELETE"],
+  ]) {
+    assert.equal(
+      (await fetch(ready.origin + path, { method, headers })).status,
+      200,
+    );
+  }
+  const beforeRejected = paths.length;
   assert.equal(
     (
       await fetch(ready.origin + "/v1/accounts", {
@@ -106,13 +117,18 @@ try {
         headers: { Authorization: `Bearer ${token}` },
       })
     ).status,
-    403,
+    401,
   );
   assert.equal(
-    paths.length,
-    beforeCreate,
-    "restricted account creation never reaches the daemon",
+    (
+      await fetch(ready.origin + "/v1/accounts", {
+        method: "POST",
+        headers: { ...headers, Origin: "https://untrusted.example" },
+      })
+    ).status,
+    401,
   );
+  assert.equal(paths.length, beforeRejected);
   assert.equal(
     (await fetch(ready.origin + "/__dev/control", { method: "POST", headers }))
       .status,
@@ -121,16 +137,16 @@ try {
   assert.equal(
     (
       await fetch(ready.origin + "/v1/accounts/other/threads", {
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       })
     ).status,
-    403,
+    200,
   );
   assert.equal(
     (
       await fetch(ready.origin + "/v1/tokens", {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       })
     ).status,
     403,
@@ -142,106 +158,23 @@ try {
   assert.equal(
     (
       await fetch(ready.origin + "/v1/accounts/test-account/threads", {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-    ).status,
-    200,
-  );
-  child.kill("SIGTERM");
-  await new Promise((done) => child.once("exit", done));
-  child = spawn(
-    process.execPath,
-    [
-      resolve("packages/client-ui/scripts/connect.mjs"),
-      "--server",
-      `http://127.0.0.1:${backend.address().port}`,
-      "--all-accounts",
-      "--token-file",
-      tokenFile,
-      "--state-dir",
-      data,
-    ],
-    {
-      env: {
-        ...process.env,
-        CLIENT_UI_PORT: String(port),
-        CLIENT_UI_ORIGIN: "",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  let managerOutput = "";
-  const manager = await new Promise((done, reject) => {
-    const timer = setTimeout(
-      () => reject(Error("Account-management launcher startup timed out")),
-      15000,
-    );
-    child.once("exit", () => {
-      clearTimeout(timer);
-      reject(Error("Account-management launcher exited"));
-    });
-    child.stdout.on("data", (part) => {
-      managerOutput += part;
-      const match = managerOutput.match(
-        /(http:\/\/127\.0\.0\.1:\d+)\/#dev=([a-f0-9]{64})/,
-      );
-      if (match) {
-        clearTimeout(timer);
-        done({ origin: match[1], key: match[2] });
-      }
-    });
-  });
-  const managerConfig = await (
-    await fetch(manager.origin + "/__dev/session", {
-      headers: { Authorization: `Bearer ${manager.key}` },
-    })
-  ).json();
-  assert.equal(managerConfig.accountCreation, true);
-  assert.equal(
-    (
-      await fetch(manager.origin + "/v1/accounts", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       })
     ).status,
     200,
   );
   assert.equal(
     (
-      await fetch(manager.origin + "/v1/accounts/new-account/auth/login", {
+      await fetch(ready.origin + "/v1/daemon/shutdown", {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
       })
     ).status,
-    200,
+    403,
   );
-  assert.equal(
-    (await fetch(manager.origin + "/v1/accounts/other/threads")).status,
-    401,
-    "the daemon still requires bearer auth in account-management mode",
-  );
-  for (const path of ["/v1/tokens", "/v1/daemon/shutdown"])
-    assert.equal(
-      (
-        await fetch(manager.origin + path, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        })
-      ).status,
-      403,
-    );
-  assert.equal(
-    (
-      await fetch(manager.origin + "/__dev/control", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${manager.key}` },
-      })
-    ).status,
-    404,
-  );
-  child.kill("SIGTERM");
-  await new Promise((done) => child.once("exit", done));
   assert.ok(!paths.includes("/v1/daemon/shutdown"));
+  child.kill("SIGTERM");
+  await new Promise((done) => child.once("exit", done));
   assert.equal(
     (
       await fetch(`http://127.0.0.1:${backend.address().port}/v1/status`, {
@@ -257,9 +190,7 @@ try {
         "explicit native target",
         "private bootstrap and origin checks",
         "no simulator controls",
-        "account-only proxy",
-        "account creation denied by default",
-        "opt-in account management retains bearer and owner-route restrictions",
+        "profile management with server-side daemon key",
         "owner routes denied",
         "bearer required",
         "leaves daemon running",

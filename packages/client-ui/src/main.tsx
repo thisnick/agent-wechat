@@ -37,7 +37,7 @@ import {
   orderThreads,
 } from "./thread-preview.ts";
 import { messagePresentation, recallText } from "./message-presentation.ts";
-import { AccountSettings } from "./account-settings.tsx";
+import { AccountSettings, ProfileDialog } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import { QuotedReply } from "./quoted-reply.tsx";
 import { PhotoViewer } from "./photo-viewer.tsx";
@@ -248,6 +248,7 @@ function Client({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const adding = useRef(false);
+  const [managed, setManaged] = useState<string | null>(null);
   useEffect(() => {
     document.body.classList.toggle("onboarding-active", screen !== "chats");
   }, [screen]);
@@ -274,19 +275,21 @@ function Client({
     setBusy(true);
     setError("");
     try {
-      if (!connection.accountCreation) {
-        setError(
-          "Adding a WeChat account requires an administrator connection. This preview is restricted to one account.",
-        );
-        setScreen("accounts");
-        return;
-      }
       const id = simulator
         ? `account-${crypto.randomUUID().slice(0, 8)}`
         : undefined;
+      let number = 1;
+      while (
+        state.accounts.some(
+          (item) =>
+            item.alias === `account-${number}` ||
+            item.id === `account-${number}`,
+        )
+      )
+        number++;
       const result = await session.client.createAccount({
         id,
-        alias: `account-${state.accounts.length + 1}`,
+        alias: `account-${number}`,
       });
       await session.accounts();
       setLoginAccount(result as Account);
@@ -334,23 +337,53 @@ function Client({
         </div>
         <div className="login-accounts">
           {state.accounts.map((a) => (
-            <button
-              key={a.id}
-              className="login-account"
-              disabled={busy}
-              onClick={() => void open(a)}
-            >
-              <Avatar name={a.alias || a.id} />
-              <span>
-                <strong>{a.alias || a.id}</strong>
-                <small>
-                  {a.authenticated ? "Open chats" : "Sign in to WeChat"}
-                </small>
-              </span>
-              <Icon name="chevron" />
-            </button>
+            <div className="profile-row" key={a.id}>
+              <button
+                className="login-account"
+                disabled={busy}
+                onClick={() => void open(a)}
+              >
+                <Avatar name={a.alias || a.id} />
+                <span>
+                  <strong>{a.alias || a.id}</strong>
+                  <small>
+                    {a.authenticated ? "Open chats" : "Sign in to WeChat"}
+                  </small>
+                </span>
+                <Icon name="chevron" />
+              </button>
+              <button
+                className="profile-manage"
+                aria-label={`Manage ${a.alias || a.id}`}
+                title="Manage profile"
+                disabled={busy}
+                onClick={() => setManaged(a.id)}
+              >
+                <Icon name="settings" />
+              </button>
+            </div>
           ))}
         </div>
+        {managed && state.accounts.some((a) => a.id === managed) && (
+          <ProfileDialog
+            connection={connection}
+            account={state.accounts.find((a) => a.id === managed)!}
+            close={() => setManaged(null)}
+            signedOut={() => {
+              session.deactivate(managed);
+              setManaged(null);
+            }}
+            removed={() => {
+              session.deactivate(managed);
+              setManaged(null);
+            }}
+            signedIn={() => {
+              const a = state.accounts.find((a) => a.id === managed);
+              setManaged(null);
+              if (a) void open(a);
+            }}
+          />
+        )}
         {error && <ErrorNotice>{error}</ErrorNotice>}
         <button
           className="continue-button"
@@ -1349,6 +1382,12 @@ function Chats({
                   connection={connection}
                   account={account}
                   signedOut={() => {
+                    session.deactivate(account.id);
+                    setSettings(false);
+                    switchAccount();
+                  }}
+                  removed={() => {
+                    session.deactivate(account.id);
                     setSettings(false);
                     switchAccount();
                   }}

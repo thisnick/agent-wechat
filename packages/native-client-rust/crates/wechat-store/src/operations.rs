@@ -204,6 +204,7 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        Self::require_registered(&db, id)?;
         db.execute("INSERT INTO account_settings(account_id,keys_file) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET keys_file=excluded.keys_file",params![id,path.to_str().context("keys path must be UTF-8")?])?;
         Ok(())
     }
@@ -214,10 +215,12 @@ impl Store {
     ) -> Result<T> {
         self.account(id)?;
         // Serialize sidecar operations through the store lock as well as SQLite.
-        let _guard = self
+        let guard = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        // Recheck after taking the registry lock: a removal may have raced admission.
+        Self::require_registered(&guard, id)?;
         let path = self.account_dir(id)?.join("agent/control.sqlite");
         let m = fs::symlink_metadata(&path)?;
         if !m.is_file() || !wechat_platform::private_path(&path)? {
@@ -236,7 +239,7 @@ impl Store {
         }
         result
     }
-    fn prepare_account(db: &mut Connection) -> Result<()> {
+    pub(crate) fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !(1..=7).contains(&version) {

@@ -428,3 +428,17 @@ test('SSE activity starts on actual frames, including keepalive comments', async
   assert.equal(activity,2); assert.equal(events.length,1);
 });
 
+
+test('profile removal sends a confirmed DELETE and refuses a mismatched identity before transport', async () => {
+  const requests = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    requests.push({ url: String(url), init });
+    return Response.json({ accountId: 'profile-1', removed: true, filesRetained: true });
+  }});
+  assert.throws(() => client.removeAccount('profile-1', 'profile-2'), /confirmation/);
+  assert.equal(requests.length, 0);
+  assert.equal((await client.removeAccount('profile-1', 'profile-1')).filesRetained, true);
+  assert.match(requests[0].url, /\/v1\/accounts\/profile-1$/);
+  assert.equal(requests[0].init.method, 'DELETE');
+  assert.deepEqual(JSON.parse(requests[0].init.body), { confirmAccountId: 'profile-1' });
+});

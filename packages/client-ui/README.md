@@ -83,21 +83,24 @@ pnpm --filter @agent-wechat/client-ui connect \
   --state-dir /absolute/private/browser-preview
 ```
 
-Use an owner-only, account-scoped token file. This launcher checks the daemon's
-native identity and selected account before listening, proxies only that account
-plus status/account-list reads, and omits simulator controls. It accepts the same
-`CLIENT_UI_PORT` and HTTPS `CLIENT_UI_ORIGIN` settings. The printed fragment link
-bootstraps the browser session; keep it private. Closing the launcher leaves the
-external daemon running. `node scripts/client-ui-connect-smoke.mjs` checks these
-boundaries against a local HTTP fixture without contacting WeChat.
+Use an owner-only file containing the existing daemon connection key. The key stays
+in the launcher; the browser uses the private preview key. The launcher checks the
+native daemon identity before listening. `--account` optionally checks that a
+starting account exists; it does not restrict profile management. Account creation,
+sign-in, sign-out and confirmed removal use the normal account API. The daemon's
+existing token checks still apply; no frontend role or special management mode is
+introduced. Token and daemon-management routes remain blocked by the proxy.
 
-To manage multiple accounts, replace `--account ACCOUNT_ID` with `--all-accounts`
-and use a hub administrator key in the private token file. This mode permits account
-creation and account routes through the preview; the daemon still enforces the key's
-permissions. Global token and daemon-management routes remain blocked. It is opt-in:
-the default single-account preview explains the restriction when **Add WeChat account**
-is selected. Account-creation errors return to the account chooser so they are visible,
-and repeated clicks do not submit concurrent creations.
+The launcher accepts `CLIENT_UI_PORT` and HTTPS `CLIENT_UI_ORIGIN`. Keep the printed
+fragment link private. Closing the launcher leaves the external daemon running.
+`node scripts/client-ui-connect-smoke.mjs` checks the proxy with a local HTTP fixture.
+
+**Manage accounts** opens the chooser, where each profile has a settings button.
+Signed-out profiles can sign in or be removed. Removal requires typing the profile's
+current name and sends its canonical ID as confirmation. The backend rejects active
+work and signed-in profiles, unregisters the profile, and retains all local files and
+recovery records. Removed IDs and profile paths stay reserved; this is not a delete
+of the stored WeChat data or a one-click restore feature.
 
 The simulator launcher advances its clock once per second, so QR expiry
 and renewal occur naturally. The standalone simulator retains its controlled

@@ -74,7 +74,10 @@ export function readableError(error: unknown): string {
           forbidden: "This access key doesn't allow that action.",
           auth_required: "Sign in to WeChat again.",
           operation_in_progress:
-            "A sign-in is already running for this account. Finish it in the original tab, or try again after it expires.",
+            "This profile has an operation in progress. Wait for it to finish, then try again.",
+          account_sign_out_required: "Sign out before removing this profile.",
+          account_confirmation_mismatch:
+            "The profile confirmation does not match.",
           read_state_conflict:
             "The conversation changed. Refresh it and try again.",
           idempotency_conflict: "This send key is already in use.",
@@ -288,6 +291,18 @@ export class HubSession {
     this.stopped = true;
     this.mediaListeners.clear();
     this.histories.clear();
+  }
+  deactivate(account = this.value.account): void {
+    if (account) this.histories.clear(account);
+    if (this.value.account !== account) return;
+    this.generation++;
+    this.threadGeneration++;
+    this.catalogRequest++;
+    this.stream?.abort();
+    this.historyLoaded = false;
+    this.historySource = "";
+    this.cursor = "0";
+    this.publish({ ...initial(), accounts: this.value.accounts });
   }
   async activate(account: string): Promise<void> {
     this.remember();

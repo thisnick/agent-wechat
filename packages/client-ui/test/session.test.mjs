@@ -1159,3 +1159,29 @@ test("a quote navigation stops on account/chat change and does not follow anothe
     false,
   );
 });
+
+test("deactivating a profile clears its messages and fences a late chat-open response", async () => {
+  const pending = deferred();
+  const session = new HubSession(
+    client({ threads: async () => pending.promise }),
+  );
+  const activating = session.activate("a");
+  session.deactivate("a");
+  pending.resolve(
+    page([
+      {
+        id: "peer",
+        accountId: "a",
+        peerId: "peer",
+        kind: "direct",
+        history: {},
+      },
+    ]),
+  );
+  await activating;
+  assert.equal(session.snapshot().account, null);
+  assert.deepEqual(session.snapshot().threads, []);
+  assert.deepEqual(session.snapshot().messages, []);
+  assert.equal(session.snapshot().connected, false);
+  session.close();
+});

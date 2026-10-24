@@ -10,7 +10,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
         db.query_row(
-            "SELECT account_id FROM account_settings WHERE alias=?1",
+            "SELECT s.account_id FROM account_settings s JOIN accounts a ON a.id=s.account_id WHERE s.alias=?1 AND a.removed_at IS NULL",
             [value],
             |r| r.get(0),
         )
@@ -49,11 +49,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        Self::require_registered(&db, account)?;
         let tx = db.transaction()?;
         use rusqlite::OptionalExtension;
         let existing: Option<String> = tx
             .query_row(
-                "SELECT account_id FROM account_settings WHERE alias=?1",
+                "SELECT s.account_id FROM account_settings s JOIN accounts a ON a.id=s.account_id WHERE s.alias=?1 AND a.removed_at IS NULL",
                 [alias],
                 |r| r.get(0),
             )

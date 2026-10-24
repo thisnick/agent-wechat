@@ -24,10 +24,9 @@ process.once("SIGINT", () => void stop());
 process.once("SIGTERM", () => void stop());
 try {
   const endpoint = argument("--server");
-  const allAccounts = process.argv.includes("--all-accounts");
-  if (allAccounts && process.argv.includes("--account"))
-    throw new Error("Choose --account or --all-accounts, not both");
-  const account = allAccounts ? null : argument("--account");
+  const account = process.argv.includes("--account")
+    ? argument("--account")
+    : null;
   const tokenFile = resolve(argument("--token-file"));
   const state = resolve(argument("--state-dir"));
   if (account !== null && !/^[a-zA-Z0-9_.-]{1,128}$/.test(account))
@@ -45,7 +44,7 @@ try {
       "Expected an existing native WeChat hub; use dev for the simulator",
     );
   const accounts = await client.accounts();
-  if (!allAccounts && !accounts.items.some((item) => item.id === account))
+  if (account && !accounts.items.some((item) => item.id === account))
     throw new Error("Account not available with this token");
   await mkdir(state, { recursive: true, mode: 0o700 });
   const secretFile = join(state, "ui-connect-secret");
@@ -135,13 +134,21 @@ try {
               return res.end(
                 JSON.stringify({
                   endpoint: origin,
-                  token,
+                  token: secret,
                   simulator: false,
-                  accountCreation: allAccounts,
                 }),
               );
             }
             if (path.startsWith("/v1")) {
+              // The browser uses the preview key; the daemon key stays server-side.
+              if (
+                req.headers.host !== new URL(origin).host ||
+                (req.headers.origin && req.headers.origin !== origin) ||
+                !equal(req.headers.authorization?.replace(/^Bearer /, ""))
+              ) {
+                res.statusCode = 401;
+                return res.end();
+              }
               let parts;
               try {
                 parts = path.split("/").map(decodeURIComponent);
@@ -156,17 +163,13 @@ try {
               const read = req.method === "GET" || req.method === "HEAD";
               const allowed =
                 (read && (path === "/v1/status" || path === "/v1/accounts")) ||
-                (allAccounts &&
-                  path === "/v1/accounts" &&
-                  req.method === "POST") ||
-                (parts[1] === "v1" &&
-                  parts[2] === "accounts" &&
-                  !!parts[3] &&
-                  (allAccounts || parts[3] === account));
+                (path === "/v1/accounts" && req.method === "POST") ||
+                (parts[1] === "v1" && parts[2] === "accounts" && !!parts[3]);
               if (!safe || !allowed) {
                 res.statusCode = 403;
                 return res.end();
               }
+              req.headers.authorization = `Bearer ${token}`;
             }
             next();
           });
@@ -177,7 +180,7 @@ try {
   await vite.listen();
   origin ??= `http://127.0.0.1:${vite.httpServer.address().port}`;
   console.log(
-    `\nAgentWechat connected to an existing native hub\n${origin}/#dev=${secret}\n\n${allAccounts ? "Account management is enabled; the access key's permissions still apply." : "Only the configured account is proxied."} Closing this launcher leaves the daemon running.\n`,
+    `\nAgentWechat connected to an existing native hub\n${origin}/#dev=${secret}\n\nProfile management uses the existing connection key. Closing this launcher leaves the daemon running.\n`,
   );
 } catch (error) {
   console.error(error.message);

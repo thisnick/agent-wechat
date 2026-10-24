@@ -644,7 +644,7 @@ try {
         "incoming image/file/video/voice/sticker bytes, animation, hashes, ranges and account isolation",
         "outgoing media preparation, upload, readback and committed history",
         "media rejection, uncertainty and receipt recovery without resubmission",
-        "account alias, read-state CAS, cached avatars and recoverable logout",
+        "account alias, read-state CAS, cached avatars, recoverable logout and confirmed profile removal",
         "group creation/settings, members, leave/history, partial/rejected/uncertain outcomes and account isolation",
         "UI launcher authentication and origin checks",
         "UI launcher owned-child and disposable-state cleanup",

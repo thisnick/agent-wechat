@@ -1,4 +1,5 @@
 //! Official-format profiles remain opaque here; only our sidecar schema is migrated.
+mod account_removal;
 mod admission;
 mod authorization;
 mod checkpoint;
@@ -185,7 +186,7 @@ impl Store {
     fn prepare_registry(db: &mut Connection, initialize: bool) -> Result<String> {
         db.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(0..=2).contains(&version) {
+        if !(0..=3).contains(&version) {
             bail!("unsupported registry schema version");
         }
         if version == 0 {
@@ -211,6 +212,11 @@ impl Store {
         if version < 2 {
             operations::migrate(db)?;
         }
+        if version < 3 {
+            db.execute_batch(include_str!(
+                "../migrations/registry/V003__removed_accounts.sql"
+            ))?;
+        }
         let server_id = db.query_row(
             "SELECT value FROM metadata WHERE key='server_id'",
             [],
@@ -218,13 +224,24 @@ impl Store {
         )?;
         Ok(server_id)
     }
+    pub(crate) fn require_registered(db: &Connection, id: &str) -> Result<()> {
+        let active: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1 AND removed_at IS NULL)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !active {
+            bail!("account not found");
+        }
+        Ok(())
+    }
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
         let mut q = db.prepare(
-            "SELECT id,storage_mode,profile_path,schema_compatibility FROM accounts ORDER BY id",
+            "SELECT id,storage_mode,profile_path,schema_compatibility FROM accounts WHERE removed_at IS NULL ORDER BY id",
         )?;
         let rows = q.query_map([], |r| {
             Ok(Account {
@@ -347,7 +364,7 @@ impl Store {
         }
         let path = profile.to_str().context("profile path is not UTF-8")?;
         tx.execute(
-            "INSERT INTO accounts VALUES(?1,?2,?3,'unverified')",
+            "INSERT INTO accounts(id,storage_mode,profile_path,schema_compatibility) VALUES(?1,?2,?3,'unverified')",
             params![id, mode, path],
         )?;
         if let Some(alias) = alias {
@@ -410,10 +427,10 @@ impl Store {
             copy::copy_profile(&account.profile_path, destination, source_stopped)
         }
     }
-    pub fn profile_leases(&self) -> Result<Vec<Lease>> {
+    pub fn profile_leases(&self) -> Result<std::collections::BTreeMap<String, Vec<Lease>>> {
         self.accounts()?
             .into_iter()
-            .map(|a| profile_lease(&a.profile_path))
+            .map(|a| Ok((a.id, vec![profile_lease(&a.profile_path)?])))
             .collect()
     }
 }

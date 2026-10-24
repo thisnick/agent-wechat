@@ -15,7 +15,6 @@ export type Connection = {
   session: HubSession;
   simulator: boolean;
   endpoint: string;
-  accountCreation: boolean;
   loginAttempt: (account: string) => LoginAttempt;
   mediaOutbox: (account: string) => MediaOutbox;
   close: () => void;
@@ -30,7 +29,6 @@ export async function connect(
   endpoint: string,
   token: string,
   simulator = false,
-  accountCreation = true,
 ): Promise<Connection> {
   const client = new NativeWeChatClient({ baseUrl: endpoint, token });
   const status = await client.status();
@@ -98,7 +96,6 @@ export async function connect(
   return {
     session,
     simulator,
-    accountCreation,
     endpoint: client.baseUrl.origin,
     close() {
       session.close();
@@ -284,12 +281,7 @@ export async function bootstrap(): Promise<Connection | null> {
   )
     return null;
   const data = await response.json();
-  return connect(
-    data.endpoint,
-    data.token,
-    data.simulator === true,
-    data.accountCreation !== false,
-  );
+  return connect(data.endpoint, data.token, data.simulator === true);
 }
 export async function control(body: Record<string, unknown>): Promise<void> {
   const response = await fetch("/__dev/control", {

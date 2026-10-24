@@ -10,6 +10,16 @@ export async function accountJourney({
   token,
 }) {
   const other = await client.account("work");
+  await wait("signed-in profile cannot be removed", async () => {
+    try {
+      await client.removeAccount(account, account);
+      assert.fail("signed-in profile was removed");
+    } catch (error) {
+      if (error.code === "operation_in_progress") return false;
+      assert.equal(error.code, "account_sign_out_required");
+      return true;
+    }
+  });
   await client.updateAccount(account, { alias: "ui-personal" });
   assert.equal(
     (await client.accounts()).items.find((item) => item.id === account).alias,
@@ -106,6 +116,22 @@ export async function accountJourney({
         "must not send after logout",
         "after-logout",
       ),
+    );
+    const removal = await wait("signed-out idle profile removal", () =>
+      client.removeAccount(account, account),
+    );
+    assert.equal(removal.filesRetained, true);
+    assert.equal(removal.removed, true);
+    assert.ok(
+      !(await client.accounts()).items.some((item) => item.id === account),
+    );
+    await assert.rejects(
+      client.account(account),
+      (error) => error.code === "account_not_found",
+    );
+    assert.equal(
+      (await client.account("work")).authenticated,
+      other.authenticated,
     );
   } finally {
     connection.close();

@@ -65,7 +65,7 @@ impl Core {
         let account = account.to_owned();
         tokio::spawn(async move {
             let mut backoff = 1;
-            while !core.stopping.load(Ordering::SeqCst) {
+            while !core.stopping.load(Ordering::SeqCst) && core.store.account(&account).is_ok() {
                 if core.push_allowed(&account).unwrap_or(false) {
                     let result = core.push_session(&account, &ready).await;
                     let was_ready = ready.swap(false, Ordering::AcqRel);

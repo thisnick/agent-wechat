@@ -343,6 +343,19 @@ pub struct NativeMediaJobRetryRequest {
     pub reuse_completed_upload: Option<bool>,
 }
 
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeAccountRemovalRequest {
+    pub confirm_account_id: String,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAccountRemoval {
+    pub account_id: String,
+    pub removed: bool,
+    pub files_retained: bool,
+}
+
 pub fn typescript() -> String {
     let declarations = [
         NativeMentions::decl(),
@@ -370,6 +383,8 @@ pub fn typescript() -> String {
         NativeEvent::decl(),
         NativeIdentity::decl(),
         NativeStatus::decl(),
+        NativeAccountRemovalRequest::decl(),
+        NativeAccountRemoval::decl(),
         wechat_core::QuoteSendReference::decl(),
         NativeTextSendRequest::decl(),
         wechat_core::ShareSendRequest::decl(),
