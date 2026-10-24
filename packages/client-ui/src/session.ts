@@ -15,6 +15,7 @@ import {
 import { HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
+import { quoteTargetMatches } from "./quote-preview.ts";
 
 export type Account = {
   id: string;
@@ -130,8 +131,25 @@ const compareMessages = (a: NativeMessage, b: NativeMessage): number =>
   a.id.localeCompare(b.id, undefined, { numeric: true });
 export function mergeMessage(
   messages: NativeMessage[],
-  message: NativeMessage,
+  message: NativeMessage
 ): NativeMessage[] {
+  const recalled = new Set(
+    messages
+      .filter(
+        (item) =>
+          item.recall &&
+          item.accountId === message.accountId &&
+          item.threadId === message.threadId
+      )
+      .map((item) => item.serverId)
+      .filter(Boolean)
+  );
+  if (message.recall)
+    recalled.add(
+      message.serverId ??
+        messages.find((item) => item.id === message.id)?.serverId ??
+        null
+    );
   return [
     ...messages.filter(
       (item) =>
@@ -140,14 +158,30 @@ export function mergeMessage(
           message.serverId &&
           item.threadId === message.threadId &&
           item.serverId === message.serverId
-        ),
+        )
     ),
     message,
-  ].sort(compareMessages);
+  ]
+    .map((item) =>
+      item.accountId === message.accountId &&
+      item.threadId === message.threadId &&
+      item.quote &&
+      recalled.has(item.quote.serverId)
+        ? {
+            ...item,
+            quote: {
+              serverId: item.quote.serverId,
+              type: item.quote.type,
+              state: "recalled",
+            },
+          }
+        : item
+    )
+    .sort(compareMessages);
 }
 export function pause(
   milliseconds: number,
-  signal: AbortSignal,
+  signal: AbortSignal
 ): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) {
@@ -164,7 +198,7 @@ export function pause(
   });
 }
 export async function inventory<T>(
-  read: (cursor?: string) => Promise<NativePage<T>>,
+  read: (cursor?: string) => Promise<NativePage<T>>
 ): Promise<{ items: T[]; cursor: string }> {
   const items = new Map<string, T>();
   let next: string | undefined,
@@ -194,7 +228,7 @@ export class HubSession {
     (account: string, messageId: string) => void
   >();
   onMediaInvalidated = (
-    listener: (account: string, messageId: string) => void,
+    listener: (account: string, messageId: string) => void
   ): (() => void) => {
     this.mediaInvalidationListeners.add(listener);
     return () => {
@@ -241,7 +275,7 @@ export class HubSession {
     receipts?: {
       read(account: string): PendingSend[];
       write(account: string, sends: PendingSend[]): void;
-    },
+    }
   ) {
     this.client = client;
     this.receipts = receipts;
@@ -288,7 +322,7 @@ export class HubSession {
       generation = this.generation;
     const result = await this.client.accounts();
     const accounts = result.items.filter(
-      (item) => typeof item.id === "string",
+      (item) => typeof item.id === "string"
     ) as Account[];
     if (
       !this.stopped &&
@@ -372,7 +406,7 @@ export class HubSession {
     const previousGroup =
       this.value.selected === threadId
         ? this.value.selectedGroup
-        : (cached?.group ?? null);
+        : cached?.group ?? null;
     const generation = this.generation,
       selected = ++this.threadGeneration;
     const current = () =>
@@ -388,17 +422,17 @@ export class HubSession {
     });
     if (threadId.endsWith("@chatroom"))
       void this.refreshGroup(account, threadId, generation, selected).catch(
-        () => {},
+        () => {}
       );
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         const baseline =
-          attempt === 0 ? (cached?.messages ?? []) : this.value.messages;
+          attempt === 0 ? cached?.messages ?? [] : this.value.messages;
         // A list entry can be minutes old. Fetch the version for this open.
         const readBoundary = await this.refreshThread(
           account,
           threadId,
-          generation,
+          generation
         );
         if (!current()) return;
         if (
@@ -416,7 +450,7 @@ export class HubSession {
         if (!current()) return;
         const latest = (
           page.items.filter(
-            (item) => !isNativeTombstone(item),
+            (item) => !isNativeTombstone(item)
           ) as NativeMessage[]
         ).reduce(mergeMessage, []);
         // Preserve older loaded pages, replace the current server range, and apply
@@ -426,10 +460,10 @@ export class HubSession {
             ? baseline.filter((item) => compareMessages(item, latest[0]) < 0)
             : [];
         const arrivals = this.value.messages.filter(
-          (item) => !baseline.includes(item),
+          (item) => !baseline.includes(item)
         );
         const removed = new Set(
-          page.items.filter(isNativeTombstone).map((item) => item.id),
+          page.items.filter(isNativeTombstone).map((item) => item.id)
         );
         const messages = arrivals
           .reduce(mergeMessage, latest.reduce(mergeMessage, older))
@@ -452,7 +486,7 @@ export class HubSession {
           await this.client.markRead(
             account,
             threadId,
-            readBoundary.readStateVersion,
+            readBoundary.readStateVersion
           );
           if (this.current(account, generation))
             await this.refreshThread(account, threadId, generation);
@@ -500,9 +534,9 @@ export class HubSession {
         mergeMessage,
         (
           page.items.filter(
-            (item) => !isNativeTombstone(item),
+            (item) => !isNativeTombstone(item)
           ) as NativeMessage[]
-        ).reduce(mergeMessage, []),
+        ).reduce(mergeMessage, [])
       );
       this.publish({ messages, nextMessages: page.nextCursor, loading: false });
       this.historySource = page.sourceGeneration;
@@ -530,7 +564,7 @@ export class HubSession {
           (message) =>
             message.id === id &&
             message.accountId === account &&
-            message.threadId === selected,
+            message.threadId === selected
         )
       )
         return true;
@@ -545,10 +579,43 @@ export class HubSession {
     }
     return false;
   }
+  async revealQuote(
+    parent: NativeMessage,
+    signal: AbortSignal
+  ): Promise<NativeMessage | undefined> {
+    const { account, selected } = this.value;
+    const generation = this.generation,
+      threadGeneration = this.threadGeneration;
+    if (
+      !parent.quote ||
+      parent.accountId !== account ||
+      parent.threadId !== selected
+    )
+      return;
+    const current = () =>
+      !signal.aborted &&
+      !!account &&
+      this.current(account, generation) &&
+      threadGeneration === this.threadGeneration;
+    while (current()) {
+      const matches = this.value.messages.filter((message) =>
+        quoteTargetMatches(parent, message)
+      );
+      if (matches.length) return matches.length === 1 ? matches[0] : undefined;
+      if (this.value.loading) {
+        await pause(50, signal);
+        continue;
+      }
+      const cursor = this.value.nextMessages;
+      if (!cursor) return;
+      await this.older();
+      if (this.value.nextMessages === cursor) return;
+    }
+  }
   private async refreshThread(
     account: string,
     threadId: string,
-    generation: number,
+    generation: number
   ): Promise<NativeThread> {
     const key = JSON.stringify([account, threadId]);
     const request = (this.threadRequests.get(key) ?? 0) + 1;
@@ -579,7 +646,7 @@ export class HubSession {
       this.publish({
         threads: found
           ? this.value.threads.map((item) =>
-              item.id === threadId ? { ...item, ...thread } : item,
+              item.id === threadId ? { ...item, ...thread } : item
             )
           : [thread, ...this.value.threads],
       });
@@ -590,7 +657,7 @@ export class HubSession {
     account: string,
     thread: string,
     generation: number,
-    selected: number,
+    selected: number
   ): Promise<void> {
     const group = await this.client.group(account, thread);
     if (
@@ -610,7 +677,7 @@ export class HubSession {
     const result = await this.client.markRead(
       account,
       threadId,
-      thread.readStateVersion,
+      thread.readStateVersion
     );
     if (this.current(account, generation))
       await this.refreshThread(account, threadId, generation);
@@ -664,7 +731,7 @@ export class HubSession {
     const promise = (async () => {
       const [contacts, capabilities, accounts] = await Promise.all([
         inventory((cursor) =>
-          this.client.contacts(account, { cursor, limit: 200 }),
+          this.client.contacts(account, { cursor, limit: 200 })
         ),
         this.client.capabilities(account),
         this.client.accounts(),
@@ -674,7 +741,7 @@ export class HubSession {
           contacts: contacts.items,
           capabilities,
           accounts: accounts.items.filter(
-            (item) => typeof item.id === "string",
+            (item) => typeof item.id === "string"
           ) as Account[],
         });
     })().finally(() => {
@@ -686,21 +753,20 @@ export class HubSession {
   async refresh(
     account = this.value.account,
     generation = this.generation,
-    catalog = true,
+    catalog = true
   ): Promise<string> {
     if (!account) return "0";
     const request = ++this.catalogRequest;
     const revisions = new Map(this.threadRequests);
     const threads = await inventory((cursor) =>
-      this.client.threads(account, { cursor, limit: 200 }),
+      this.client.threads(account, { cursor, limit: 200 })
     );
     if (this.current(account, generation) && request === this.catalogRequest)
       this.publish({
         threads: threads.items.map((thread) => {
           const key = JSON.stringify([account, thread.id]);
           return revisions.get(key) !== this.threadRequests.get(key)
-            ? (this.value.threads.find((item) => item.id === thread.id) ??
-                thread)
+            ? this.value.threads.find((item) => item.id === thread.id) ?? thread
             : thread;
         }),
       });
@@ -712,7 +778,7 @@ export class HubSession {
               account,
               this.value.selected,
               generation,
-              this.threadGeneration,
+              this.threadGeneration
             ).catch(() => {})
           : null,
       ]);
@@ -726,11 +792,29 @@ export class HubSession {
   private async canonical(
     account: string,
     messageId: string,
-    generation: number,
+    generation: number
   ): Promise<NativeMessage | undefined> {
     const message = await this.client.message(account, messageId);
     if (!this.current(account, generation)) return;
-    if (message.recall) this.invalidateMedia(account, messageId);
+    if (message.recall) {
+      this.invalidateMedia(account, messageId);
+      const messages =
+        message.threadId === this.value.selected
+          ? this.value.messages
+          : this.histories.get(account, message.threadId)?.messages ?? [];
+      const server =
+        message.serverId ??
+        messages.find((item) => item.id === message.id)?.serverId;
+      for (const quoted of messages) {
+        if (
+          server &&
+          quoted.accountId === account &&
+          quoted.threadId === message.threadId &&
+          quoted.quote?.serverId === server
+        )
+          this.invalidateMedia(account, quoted.id);
+      }
+    }
     if (message.threadId === this.value.selected) {
       this.publish({ messages: mergeMessage(this.value.messages, message) });
       this.remember();
@@ -746,7 +830,7 @@ export class HubSession {
       sends: this.value.sends.filter(
         (send) =>
           send.intent?.localMessageId !== message.id &&
-          !(message.serverId && send.intent?.serverId === message.serverId),
+          !(message.serverId && send.intent?.serverId === message.serverId)
       ),
     });
     this.updatePreview(message);
@@ -777,17 +861,17 @@ export class HubSession {
     intent: NativeSendIntent,
     account: string,
     generation: number,
-    key?: string,
+    key?: string
   ): Promise<void> {
     if (!this.current(account, generation) || intent.accountId !== account)
       return;
     let sends = this.value.sends;
     if (key && sends.some((send) => send.key === key))
       sends = sends.filter(
-        (send) => send.key === key || send.intent?.id !== intent.id,
+        (send) => send.key === key || send.intent?.id !== intent.id
       );
     const known = sends.some(
-      (send) => send.key === key || send.intent?.id === intent.id,
+      (send) => send.key === key || send.intent?.id === intent.id
     );
     if (!known && !key && !intent.localMessageId)
       sends = [
@@ -803,7 +887,7 @@ export class HubSession {
       sends: sends.map((send) =>
         send.key === key || send.intent?.id === intent.id
           ? { ...send, intent, uncertain: false, error: undefined }
-          : send,
+          : send
       ),
     });
     if (intent.localMessageId) {
@@ -811,7 +895,7 @@ export class HubSession {
       if (this.current(account, generation))
         this.publish({
           sends: this.value.sends.filter(
-            (send) => send.key !== key && send.intent?.id !== intent.id,
+            (send) => send.key !== key && send.intent?.id !== intent.id
           ),
         });
     }
@@ -819,7 +903,7 @@ export class HubSession {
   async consume(
     event: NativeEvent,
     account: string,
-    generation = this.generation,
+    generation = this.generation
   ): Promise<void> {
     if (!this.current(account, generation)) return;
     if (
@@ -841,7 +925,7 @@ export class HubSession {
       const message = await this.canonical(
         account,
         event.data.messageId,
-        generation,
+        generation
       );
       if (message && this.current(account, generation)) {
         await this.refreshThread(account, message.threadId, generation);
@@ -854,7 +938,7 @@ export class HubSession {
       await this.acceptReceipt(
         await this.client.send(account, event.data.id),
         account,
-        generation,
+        generation
       );
     } else if (["thread.read", "thread.read-state"].includes(event.kind)) {
       if (typeof event.data.threadId === "string")
@@ -863,19 +947,19 @@ export class HubSession {
     } else if (event.kind === "group.updated") {
       if (typeof event.data.groupId === "string") {
         await this.refreshThread(account, event.data.groupId, generation).catch(
-          () => this.refresh(account, generation, false),
+          () => this.refresh(account, generation, false)
         );
         if (event.data.groupId === this.value.selected)
           await this.refreshGroup(
             account,
             event.data.groupId,
             generation,
-            this.threadGeneration,
+            this.threadGeneration
           ).catch(() => {});
       } else await this.refresh(account, generation, false);
     } else if (
       ["account.updated", "account.connection", "auth.updated"].includes(
-        event.kind,
+        event.kind
       )
     ) {
       await this.accounts();
@@ -901,7 +985,7 @@ export class HubSession {
   private async watch(
     account: string,
     generation: number,
-    signal: AbortSignal,
+    signal: AbortSignal
   ): Promise<void> {
     while (!signal.aborted && this.current(account, generation)) {
       try {
@@ -918,7 +1002,7 @@ export class HubSession {
               )
                 this.publish({ connected: true, error: null });
             },
-          },
+          }
         )) {
           if (signal.aborted || !this.current(account, generation)) return;
           await this.consume(event, account, generation);
@@ -983,9 +1067,9 @@ export class HubSession {
           target,
           target.direction === "outgoing"
             ? "You"
-            : (this.value.contacts.find(
-                (contact) => contact.id === target.senderId,
-              )?.displayName ?? target.senderId),
+            : this.value.contacts.find(
+                (contact) => contact.id === target.senderId
+              )?.displayName ?? target.senderId
         )
       : undefined;
     const key = crypto.randomUUID();
@@ -1003,7 +1087,7 @@ export class HubSession {
         threadId,
         text,
         key,
-        quote,
+        quote
       );
       if (this.current(account, generation)) {
         await this.acceptReceipt(intent, account, generation, key);
@@ -1012,11 +1096,11 @@ export class HubSession {
           await this.client.send(account, intent.id),
           account,
           generation,
-          key,
+          key
         );
       } else {
         const sends = (this.pending.get(account) ?? []).map((send) =>
-          send.key === key ? { ...send, intent } : send,
+          send.key === key ? { ...send, intent } : send
         );
         this.pending.set(account, sends);
         this.receipts?.write(account, sends);
@@ -1046,7 +1130,7 @@ export class HubSession {
           });
         else {
           const sends = (this.pending.get(account) ?? []).filter(
-            (send) => send.key !== key,
+            (send) => send.key !== key
           );
           this.pending.set(account, sends);
           this.receipts?.write(account, sends);
@@ -1057,7 +1141,7 @@ export class HubSession {
         sends.map((send) =>
           send.key === key
             ? { ...send, uncertain: true, error: readableError(error) }
-            : send,
+            : send
         );
       if (this.current(account, generation))
         this.publish({ sends: update(this.value.sends) });
@@ -1086,7 +1170,7 @@ export class HubSession {
           sends: this.value.sends.map((send) =>
             send.key === key
               ? { ...send, uncertain: true, error: readableError(error) }
-              : send,
+              : send
           ),
         });
     }

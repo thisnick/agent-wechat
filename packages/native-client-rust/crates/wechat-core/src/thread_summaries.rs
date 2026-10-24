@@ -54,7 +54,7 @@ impl Core {
                             .map(|m| m.label.clone())
                             .or_else(|| labels.get(sender).cloned())
                     });
-                    match self.normalize_recalled(account, message, own, reader.generation()) {
+                    match self.normalize_recalled(account, message, own, reader) {
                         Ok(message) => message_summary(&message, sender_name.as_deref()),
                         Err(_) => continue,
                     }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { NativeApiError } from "@agent-wechat/shared";
-import { HubSession } from "../src/session.ts";
+import { HubSession, mergeMessage } from "../src/session.ts";
 
 const page = (items, cursor = "20", nextCursor = null) => ({
   items,
@@ -15,7 +15,7 @@ const message = (
   accountId = "a",
   threadId = "peer",
   createdAt = "10",
-  body = id,
+  body = id
 ) => ({
   id,
   accountId,
@@ -163,7 +163,7 @@ test("opening a chat clears unread status only after history loads, at its captu
   assert.equal(
     seen.length,
     1,
-    "already-read chats do not send another request",
+    "already-read chats do not send another request"
   );
 });
 
@@ -217,7 +217,9 @@ test("a repeated read conflict reloads history before retrying and leaves the ne
 });
 
 for (const quoted of [false, true]) {
-  test(`${quoted ? "a quoted group reply" : "a text reply"} clears unread arrivals in an already open chat`, async (t) => {
+  test(`${
+    quoted ? "a quoted group reply" : "a text reply"
+  } clears unread arrivals in an already open chat`, async (t) => {
     const threadId = quoted ? "room@chatroom" : "peer";
     let unread = 0,
       version = "1",
@@ -247,7 +249,7 @@ for (const quoted of [false, true]) {
         posts++;
         assert.deepEqual(
           args[4],
-          quoted ? { messageId: "1", serverId: "1" } : undefined,
+          quoted ? { messageId: "1", serverId: "1" } : undefined
         );
         return intent;
       },
@@ -259,7 +261,7 @@ for (const quoted of [false, true]) {
     version = "2";
     await hub.consume(
       { kind: "message.committed", data: { messageId: "2" } },
-      "a",
+      "a"
     );
     assert.equal(hub.snapshot().threads[0].unreadCount, 3);
     assert.equal(await hub.send("A reply", quoted ? target : undefined), true);
@@ -446,25 +448,25 @@ test("switching back restores history immediately, revalidates fresh content and
   const reopening = hub.select("peer");
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["old", "recent"],
+    ["old", "recent"]
   );
   late.resolve(
     page(
       [message("recent", "a", "peer", "10", "Updated from server")],
       "21",
-      "older-page",
-    ),
+      "older-page"
+    )
   );
   await reopening;
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["old", "recent"],
+    ["old", "recent"]
   );
   assert.equal(hub.snapshot().messages[1].body, "Updated from server");
   assert.equal(
     hub.snapshot().nextMessages,
     null,
-    "already-loaded history keeps its continuation",
+    "already-loaded history keeps its continuation"
   );
 });
 
@@ -514,7 +516,7 @@ test("recall events retrieve canonical notices and authors for inactive cached c
       kind: "message.recalled",
       data: { messageId: "recent", replacementText: "Stale event notice" },
     },
-    "a",
+    "a"
   );
   refresh = true;
   const reopening = hub.select("peer");
@@ -523,7 +525,7 @@ test("recall events retrieve canonical notices and authors for inactive cached c
   assert.equal(
     hub.snapshot().threads.find((thread) => thread.id === "peer").lastMessage
       .text,
-    "You recalled a message",
+    "You recalled a message"
   );
   late.resolve(page([recalled]));
   await reopening;
@@ -537,8 +539,8 @@ test("revalidation removes missing current-page messages and retains only new in
       thread !== "peer"
         ? page([])
         : refreshed
-          ? late.promise
-          : page([message("deleted")]),
+        ? late.promise
+        : page([message("deleted")]),
     message: async () => message("new"),
   });
   await hub.activate("a");
@@ -547,13 +549,13 @@ test("revalidation removes missing current-page messages and retains only new in
   const reopening = hub.select("peer");
   await hub.consume(
     { kind: "message.committed", data: { messageId: "new" } },
-    "a",
+    "a"
   );
   late.resolve(page([]));
   await reopening;
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["new"],
+    ["new"]
   );
 });
 
@@ -570,19 +572,19 @@ test("history sorts decimal timestamps numerically and continues using the opaqu
               message("middle", "a", "peer", "9"),
             ],
             "20",
-            "opaque",
+            "opaque"
           );
     },
   });
   await hub.activate("a");
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["middle", "new"],
+    ["middle", "new"]
   );
   await hub.older();
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["old", "middle", "new"],
+    ["old", "middle", "new"]
   );
   assert.deepEqual(seen, [undefined, "opaque"]);
 });
@@ -598,7 +600,7 @@ test("inventories follow every page and remove tombstones", async (t) => {
   await eventually(() => hub.snapshot().contacts.length === 2);
   assert.deepEqual(
     hub.snapshot().contacts.map((c) => c.id),
-    ["first", "second"],
+    ["first", "second"]
   );
 });
 
@@ -623,11 +625,11 @@ test("late account activation and account-list responses cannot overwrite anothe
   assert.equal(hub.snapshot().account, "b");
   assert.deepEqual(
     hub.snapshot().threads.map((x) => x.id),
-    ["b-peer"],
+    ["b-peer"]
   );
   assert.deepEqual(
     hub.snapshot().accounts.map((x) => x.id),
-    ["b"],
+    ["b"]
   );
   assert.equal(hub.cursor, "90");
 });
@@ -648,7 +650,7 @@ test("late thread responses cannot replace the selected conversation", async (t)
   assert.equal(hub.snapshot().selected, "current");
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["current"],
+    ["current"]
   );
 });
 
@@ -662,7 +664,7 @@ test("committed events fetch content regardless of origin or sync event order", 
     ].map((kind, i) => [
       String(i),
       { ...message(String(i)), direction: kind.split("/")[0] },
-    ]),
+    ])
   );
   const fetched = [];
   const hub = session(t, {
@@ -680,7 +682,7 @@ test("committed events fetch content regardless of origin or sync event order", 
         data: { messageId: id, direction: m.direction, origin: "live" },
         createdAt: "1",
       },
-      "a",
+      "a"
     );
   await hub.consume(
     {
@@ -689,7 +691,7 @@ test("committed events fetch content regardless of origin or sync event order", 
       data: { messageId: "diagnostic" },
       createdAt: "1",
     },
-    "a",
+    "a"
   );
   assert.equal(hub.snapshot().messages.length, 4);
   assert.deepEqual(fetched, ["0", "1", "2", "3"]);
@@ -711,7 +713,7 @@ test("events received during a history snapshot survive its late response", asyn
       data: { messageId: "7" },
       createdAt: "20",
     },
-    "a",
+    "a"
   );
   late.resolve(page([message("7", "a", "peer", "20", "stale"), message("6")]));
   await selecting;
@@ -739,7 +741,7 @@ test("fast send events before the admission response reconcile without duplicate
       data: { id: "send1" },
       createdAt: "1",
     },
-    "a",
+    "a"
   );
   await hub.consume(
     {
@@ -748,7 +750,7 @@ test("fast send events before the admission response reconcile without duplicate
       data: { messageId: "8" },
       createdAt: "1",
     },
-    "a",
+    "a"
   );
   admission.resolve(receipt());
   await sending;
@@ -756,7 +758,7 @@ test("fast send events before the admission response reconcile without duplicate
   assert.equal(hub.snapshot().sends.length, 0);
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["8"],
+    ["8"]
   );
 });
 
@@ -871,7 +873,7 @@ test("switching accounts during a send retains its receipt only for the original
   assert.equal(hub.snapshot().sends.length, 0);
   await hub.activate("a");
   await eventually(
-    () => hub.snapshot().sends[0]?.intent?.state === "needs_review",
+    () => hub.snapshot().sends[0]?.intent?.state === "needs_review"
   );
   assert.equal(hub.snapshot().sends[0].text, "for a");
 });
@@ -882,7 +884,7 @@ test("a quiet stream stays connecting until a real frame arrives", async (t) => 
     async *watch(_a, _after, signal, options) {
       activity = options.onActivity;
       await new Promise((done) =>
-        signal.addEventListener("abort", done, { once: true }),
+        signal.addEventListener("abort", done, { once: true })
       );
     },
   });
@@ -902,7 +904,7 @@ test("expired event cursors rebuild the snapshot and reconnect from its boundary
       if (starts.length === 1)
         throw new NativeApiError(410, "event_cursor_expired");
       await new Promise((done) =>
-        signal.addEventListener("abort", done, { once: true }),
+        signal.addEventListener("abort", done, { once: true })
       );
     },
   });
@@ -934,7 +936,7 @@ test("group.updated refreshes membership and a confirmed leave blocks new sends"
       data: { groupId: room },
       cursor: "21",
     },
-    "a",
+    "a"
   );
   assert.equal(hub.snapshot().selectedGroup.isInGroup, false);
   await hub.send("After leaving");
@@ -1018,15 +1020,15 @@ test("SSE updates affected messages and read badges without reloading inventorie
   targets.length = 0;
   await hub.consume(
     { kind: "message.committed", data: { messageId: "new", threadId: "peer" } },
-    "a",
+    "a"
   );
   await hub.consume(
     { kind: "thread.read-state", data: { threadId: "peer" } },
-    "a",
+    "a"
   );
   await hub.consume(
     { kind: "metadata.changed", data: { kind: "avatar" } },
-    "a",
+    "a"
   );
   assert.deepEqual({ lists, contacts }, before);
   assert.deepEqual(targets, ["peer", "peer"]);
@@ -1045,7 +1047,7 @@ test("continuous SSE lets a read cached chat reopen without another history requ
     async *watch(_a, _cursor, signal, options) {
       options.onActivity();
       await new Promise((done) =>
-        signal.addEventListener("abort", done, { once: true }),
+        signal.addEventListener("abort", done, { once: true })
       );
     },
   });
@@ -1127,12 +1129,12 @@ test("quote navigation loads intervening history pages until its source is avail
   await hub.activate("a");
   assert.equal(
     await hub.revealMessage("source", new AbortController().signal),
-    true,
+    true
   );
   assert.deepEqual(cursors, [undefined, "p2", "p3"]);
   assert.deepEqual(
     hub.snapshot().messages.map((m) => m.id),
-    ["source", "middle", "new"],
+    ["source", "middle", "new"]
   );
 });
 test("a quote navigation stops on account/chat change and does not follow another chat's cursor", async (t) => {
@@ -1156,14 +1158,150 @@ test("a quote navigation stops on account/chat change and does not follow anothe
   assert.equal(hub.snapshot().selected, "elsewhere");
   assert.equal(
     hub.snapshot().messages.some((m) => m.id === "source"),
-    false,
+    false
+  );
+});
+
+test("embedded quote display needs only the page; original navigation reads history on demand", async (t) => {
+  const cursors = [];
+  const reply = {
+    ...message("reply"),
+    type: 49,
+    appMessageType: 57,
+    quote: {
+      serverId: "18446744073709551615",
+      type: 1,
+      state: "embedded",
+      embeddedText: "Received excerpt",
+    },
+  };
+  const source = {
+    ...message("local-source", "a", "peer", "5", "Stored content differs"),
+    serverId: reply.quote.serverId,
+  };
+  const hub = session(t, {
+    messages: async (_a, _t, options) => {
+      cursors.push(options.cursor);
+      return options.cursor ? page([source]) : page([reply], "20", "older");
+    },
+    quotedMessage: () => assert.fail("The quote endpoint was removed"),
+  });
+  await hub.activate("a");
+  assert.deepEqual(cursors, [undefined]);
+  assert.equal(
+    hub.snapshot().messages[0].quote.embeddedText,
+    "Received excerpt"
+  );
+  assert.equal(
+    (await hub.revealQuote(reply, new AbortController().signal)).id,
+    source.id
+  );
+  assert.deepEqual(cursors, [undefined, "older"]);
+  assert.equal(
+    (await hub.revealQuote(reply, new AbortController().signal)).id,
+    source.id
+  );
+  assert.deepEqual(cursors, [undefined, "older"]);
+  assert.equal(
+    hub.snapshot().messages.find((item) => item.id === reply.id).quote
+      .embeddedText,
+    "Received excerpt"
+  );
+  assert.equal(
+    await hub.revealQuote(
+      { ...reply, accountId: "other" },
+      new AbortController().signal
+    ),
+    undefined
+  );
+  assert.equal(
+    await hub.revealQuote(
+      { ...reply, threadId: "other" },
+      new AbortController().signal
+    ),
+    undefined
+  );
+});
+
+test("quote navigation stops after switching chats", async (t) => {
+  const gate = deferred();
+  const reply = {
+    ...message("reply"),
+    quote: {
+      serverId: "42",
+      type: 1,
+      state: "embedded",
+      embeddedText: "Excerpt",
+    },
+  };
+  let older = 0;
+  const hub = session(t, {
+    messages: async (account, thread, options) => {
+      if (options.cursor) {
+        older++;
+        return gate.promise;
+      }
+      return page(
+        [{ ...reply, accountId: account, threadId: thread }],
+        "20",
+        "older"
+      );
+    },
+  });
+  await hub.activate("a");
+  const finding = hub.revealQuote(reply, new AbortController().signal);
+  await hub.select("elsewhere");
+  gate.resolve(page([{ ...message("source"), serverId: "42" }]));
+  assert.equal(await finding, undefined);
+  assert.equal(older, 1);
+  assert.ok(
+    hub.snapshot().messages.every((item) => item.threadId === "elsewhere")
+  );
+});
+
+test("canonical recalls redact cached excerpts without changing the reply comment", () => {
+  const source = { ...message("source"), serverId: "42" };
+  const reply = {
+    ...message("reply", "a", "peer", "12", "My reply"),
+    quote: {
+      serverId: "42",
+      type: 1,
+      state: "embedded",
+      embeddedText: "Recalled excerpt",
+      senderId: "peer",
+    },
+  };
+  const recalled = {
+    ...source,
+    type: 10000,
+    body: "Message recalled",
+    recall: { observedAt: "11" },
+  };
+  const merged = mergeMessage([source, reply], recalled);
+  const retained = merged.find((item) => item.id === reply.id);
+  assert.equal(retained.body, "My reply");
+  assert.deepEqual(retained.quote, {
+    serverId: "42",
+    type: 1,
+    state: "recalled",
+  });
+  assert.equal(
+    mergeMessage(merged, reply).find((item) => item.id === reply.id).quote
+      .state,
+    "recalled"
+  );
+  const foreign = { ...reply, accountId: "other" };
+  assert.equal(
+    mergeMessage([foreign], recalled).find((item) => item.id === foreign.id)
+      .quote.embeddedText,
+    "Recalled excerpt"
   );
 });
 
 test("deactivating a profile clears its messages and fences a late chat-open response", async () => {
   const pending = deferred();
   const session = new HubSession(
-    client({ threads: async () => pending.promise }),
+    client({ threads: async () => pending.promise })
   );
   const activating = session.activate("a");
   session.deactivate("a");
@@ -1176,7 +1314,7 @@ test("deactivating a profile clears its messages and fences a late chat-open res
         kind: "direct",
         history: {},
       },
-    ]),
+    ])
   );
   await activating;
   assert.equal(session.snapshot().account, null);
@@ -1192,11 +1330,11 @@ test("recall events invalidate preview bytes before a canonical lookup completes
   await session.activate("a");
   const invalidations = [];
   const stop = session.onMediaInvalidated((account, messageId) =>
-    invalidations.push([account, messageId]),
+    invalidations.push([account, messageId])
   );
   const consuming = session.consume(
     { kind: "message.recalled", data: { messageId: "photo" } },
-    "a",
+    "a"
   );
   assert.deepEqual(invalidations, [["a", "photo"]]);
   late.resolve({
@@ -1208,10 +1346,10 @@ test("recall events invalidate preview bytes before a canonical lookup completes
   stop();
   await session.consume(
     { kind: "message.recalled", data: { messageId: "foreign" } },
-    "b",
+    "b"
   );
   assert.ok(
-    invalidations.every(([account, id]) => account === "a" && id === "photo"),
+    invalidations.every(([account, id]) => account === "a" && id === "photo")
   );
   session.close();
 });

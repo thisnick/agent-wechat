@@ -20,7 +20,7 @@ const binary =
   join(
     root,
     "packages/native-client-rust/target/debug",
-    process.platform === "win32" ? "wx-dev.exe" : "wx-dev",
+    process.platform === "win32" ? "wx-dev.exe" : "wx-dev"
   );
 const data = await mkdtemp(join(tmpdir(), "agentwechat-client-test-"));
 const children = new Set(),
@@ -49,7 +49,7 @@ async function start(command, args = []) {
   let diagnostic = "";
   child.stderr.on(
     "data",
-    (data) => (diagnostic = (diagnostic + data).slice(-2000)),
+    (data) => (diagnostic = (diagnostic + data).slice(-2000))
   );
   return new Promise((done, reject) => {
     let output = "";
@@ -100,12 +100,12 @@ async function login(account) {
   const op = await client.login(
     account,
     { strategy: "qr", qrRefresh: { mode: "manual", maxRefreshes: 0 } },
-    `login-${account}`,
+    `login-${account}`
   );
   await wait(
     "QR",
     async () =>
-      (await client.operation(account, op.id)).state === "awaiting_scan",
+      (await client.operation(account, op.id)).state === "awaiting_scan"
   );
   await control({ op: "login", account, status: "approved" });
   await wait("login", async () => {
@@ -116,7 +116,7 @@ async function login(account) {
   });
   await wait(
     "baseline",
-    async () => (await client.messages(account, "sim_mei")).items.length === 1,
+    async () => (await client.messages(account, "sim_mei")).items.length === 1
   );
 }
 function session(api = client) {
@@ -136,7 +136,7 @@ async function stopHub() {
   });
   await wait(
     "owned hub stopped",
-    () => hub.child.exitCode !== null || hub.child.signalCode !== null,
+    () => hub.child.exitCode !== null || hub.child.signalCode !== null
   );
 }
 async function launcherCheck() {
@@ -155,19 +155,19 @@ async function launcherCheck() {
         CLIENT_UI_PORT: String(port),
         CLIENT_UI_ORIGIN: "",
       },
-    },
+    }
   );
   let diagnostics = "",
     output = "";
   child.stderr.on(
     "data",
-    (chunk) => (diagnostics = (diagnostics + chunk).slice(-2000)),
+    (chunk) => (diagnostics = (diagnostics + chunk).slice(-2000))
   );
   try {
     const ready = await new Promise((done, reject) => {
       const timer = setTimeout(
         () => reject(new Error("UI launcher timeout: " + diagnostics)),
-        30000,
+        30000
       );
       child.once("error", (error) => {
         clearTimeout(timer);
@@ -180,7 +180,7 @@ async function launcherCheck() {
       child.stdout.on("data", (chunk) => {
         output += chunk;
         const match = output.match(
-          /(http:\/\/127\.0\.0\.1:\d+)\/#dev=([0-9a-f]{64})/,
+          /(http:\/\/127\.0\.0\.1:\d+)\/#dev=([0-9a-f]{64})/
         );
         if (match) {
           clearTimeout(timer);
@@ -196,7 +196,7 @@ async function launcherCheck() {
           body: "{}",
         })
       ).status,
-      403,
+      403
     );
     const authorization = { Authorization: `Bearer ${ready.key}` };
     assert.equal(
@@ -205,7 +205,7 @@ async function launcherCheck() {
           headers: { ...authorization, Origin: "https://unrelated.example" },
         })
       ).status,
-      403,
+      403
     );
     const response = await fetch(ready.endpoint + "/__dev/session", {
       headers: authorization,
@@ -213,7 +213,7 @@ async function launcherCheck() {
     assert.equal(response.status, 200);
     assert.match(
       response.headers.get("set-cookie"),
-      /HttpOnly; SameSite=Strict/,
+      /HttpOnly; SameSite=Strict/
     );
     const configuration = await response.json();
     const clockUrl = ready.endpoint + "/__dev/state";
@@ -224,8 +224,9 @@ async function launcherCheck() {
     await wait(
       "preview clock advances",
       async () =>
-        (await (await fetch(clockUrl, { headers: authorization })).json())
-          .clock > clock,
+        (
+          await (await fetch(clockUrl, { headers: authorization })).json()
+        ).clock > clock
     );
     assert.equal(configuration.simulator, true);
     const api = new NativeWeChatClient({
@@ -240,13 +241,13 @@ async function launcherCheck() {
     child.kill("SIGTERM");
     await wait(
       "UI launcher shutdown",
-      () => child.exitCode !== null || child.signalCode !== null,
+      () => child.exitCode !== null || child.signalCode !== null
     );
     assert.equal(child.exitCode, 0);
     await assert.rejects(stat(directory), (error) => error.code === "ENOENT");
     assert.throws(
       () => process.kill(status.pid, 0),
-      (error) => error.code === "ESRCH",
+      (error) => error.code === "ESRCH"
     );
     await assert.rejects(fetch(ready.endpoint + "/v1/status"));
   } finally {
@@ -274,7 +275,7 @@ try {
       timeoutSeconds: 900,
       qrRefresh: { mode: "auto", maxRefreshes: 3 },
     },
-    "auto-refresh-qr",
+    "auto-refresh-qr"
   );
   const firstCode = await wait("first QR generation", async () => {
     const op = await client.operation("qr-refresh", renewing.id);
@@ -292,8 +293,9 @@ try {
   await wait(
     "account-scoped QR expiry renews automatically",
     async () =>
-      (await client.operation("qr-refresh", renewing.id)).result
-        .qrGeneration === 3,
+      (
+        await client.operation("qr-refresh", renewing.id)
+      ).result.qrGeneration === 3
   );
   await client.cancelOperation("qr-refresh", renewing.id);
   const a = session(),
@@ -306,10 +308,9 @@ try {
         .snapshot()
         .messages.some(
           (m) =>
-            m.body === "A real session-model send" &&
-            m.direction === "outgoing",
-        ),
-    ),
+            m.body === "A real session-model send" && m.direction === "outgoing"
+        )
+    )
   );
   assert.equal(a.snapshot().sends.length, 0);
   await wait("thread previews include own sends in both clients", () =>
@@ -319,9 +320,9 @@ try {
         .threads.some(
           (thread) =>
             thread.lastMessage?.text === "A real session-model send" &&
-            thread.lastMessage.direction === "outgoing",
-        ),
-    ),
+            thread.lastMessage.direction === "outgoing"
+        )
+    )
   );
   await control({
     op: "inbound",
@@ -331,8 +332,8 @@ try {
   });
   await wait("two session clients render inbound push", () =>
     [a, b].every((s) =>
-      s.snapshot().messages.some((m) => m.body === "A real incoming push"),
-    ),
+      s.snapshot().messages.some((m) => m.body === "A real incoming push")
+    )
   );
   const quoteTarget = a
     .snapshot()
@@ -349,19 +350,21 @@ try {
               message.body === "A native quoted reply" &&
               message.type === 49 &&
               message.appMessageType === 57 &&
-              message.quote?.serverId === quoteTarget.serverId,
-          ),
-      ),
+              message.quote?.serverId === quoteTarget.serverId
+          )
+      )
   );
   const quotedReply = a
     .snapshot()
     .messages.find((message) => message.body === "A native quoted reply");
-  const resolved = await client.quotedMessage(
-    a.snapshot().account,
-    quotedReply.id,
+  assert.equal(quotedReply.quote.state, "embedded");
+  assert.equal(quotedReply.quote.embeddedText, quoteTarget.body);
+  assert.equal(quotedReply.quote.senderId, quoteTarget.senderId);
+  assert.equal(quotedReply.quote.direction, quoteTarget.direction);
+  assert.equal(
+    (await a.revealQuote(quotedReply, new AbortController().signal)).id,
+    quoteTarget.id
   );
-  assert.equal(resolved.state, "resolved");
-  assert.equal(resolved.message.id, quoteTarget.id);
   await a.send("Reply to the reply", quotedReply);
   await wait("nested reply references the immediate parent", () =>
     [a, b].every((session) =>
@@ -370,9 +373,9 @@ try {
         .messages.some(
           (message) =>
             message.body === "Reply to the reply" &&
-            message.quote?.serverId === quotedReply.serverId,
-        ),
-    ),
+            message.quote?.serverId === quotedReply.serverId
+        )
+    )
   );
   // Incoming fixture time is independent of wall-clock outgoing sends. Use a
   // different conversation to check its latest local message.
@@ -391,9 +394,9 @@ try {
           .threads.some(
             (thread) =>
               thread.lastMessage?.text === "Sidebar incoming preview" &&
-              thread.lastMessage.direction === "incoming",
-          ),
-      ),
+              thread.lastMessage.direction === "incoming"
+          )
+      )
   );
   await control({
     op: "inbound",
@@ -407,9 +410,9 @@ try {
       s
         .snapshot()
         .messages.some(
-          (m) => m.body === "A phone self-send" && m.direction === "outgoing",
-        ),
-    ),
+          (m) => m.body === "A phone self-send" && m.direction === "outgoing"
+        )
+    )
   );
 
   await control({
@@ -420,23 +423,23 @@ try {
   await a.send("Accepted upstream, acknowledgment lost");
   await wait("uncertain receipts in both clients", () =>
     [a, b].every((s) =>
-      s.snapshot().sends.some((send) => send.intent?.state === "needs_review"),
-    ),
+      s.snapshot().sends.some((send) => send.intent?.state === "needs_review")
+    )
   );
   const uncertain = a
     .snapshot()
     .sends.find((send) => send.intent?.state === "needs_review");
   const accepted = (await state()).accounts.find(
-    (x) => x.id === "personal",
+    (x) => x.id === "personal"
   ).acceptedSends;
   await a.checkSend(uncertain.key);
   assert.equal(
     (await state()).accounts.find((x) => x.id === "personal").acceptedSends,
-    accepted,
+    accepted
   );
   assert.equal(
     a.snapshot().sends.find((s) => s.key === uncertain.key).intent.state,
-    "needs_review",
+    "needs_review"
   );
 
   await control({ op: "send_fault", account: "personal", fault: "reject" });
@@ -447,8 +450,8 @@ try {
       .sends.some(
         (s) =>
           s.text === "A rejected send" &&
-          ["rejected", "failed"].includes(s.intent?.state),
-      ),
+          ["rejected", "failed"].includes(s.intent?.state)
+      )
   );
   await control({
     op: "advertise_image",
@@ -456,12 +459,12 @@ try {
     peer: "sim_mei",
   });
   const image = await wait("media message", () =>
-    a.snapshot().messages.find((m) => m.type === 3),
+    a.snapshot().messages.find((m) => m.type === 3)
   );
   assert.ok(
     (await client.mediaAssets("personal", image.id)).items.every(
-      (asset) => asset.state !== "available",
-    ),
+      (asset) => asset.state !== "available"
+    )
   );
 
   let release, requested;
@@ -496,7 +499,7 @@ try {
   assert.ok(
     !switching
       .snapshot()
-      .messages.some((m) => m.body === "A real incoming push"),
+      .messages.some((m) => m.body === "A real incoming push")
   );
 
   const originalServer = (await client.status()).serverId;
@@ -522,14 +525,14 @@ try {
       [a, b].every((s) =>
         s
           .snapshot()
-          .messages.some((m) => m.body === "Catch-up after hub restart"),
+          .messages.some((m) => m.body === "Catch-up after hub restart")
       ),
-    60000,
+    60000
   );
   assert.equal(
     a.snapshot().messages.filter((m) => m.body === "A real session-model send")
       .length,
-    1,
+    1
   );
   await control({ op: "advance", seconds: 1 });
   for (let index = 0; index < 110; index++)
@@ -544,7 +547,7 @@ try {
   await wait(
     "search history synchronized",
     async () =>
-      (await client.operation("personal", searchSync.id)).state === "succeeded",
+      (await client.operation("personal", searchSync.id)).state === "succeeded"
   );
   await wait(
     "all search fixtures committed",
@@ -554,18 +557,18 @@ try {
           query: "History pagination fixture",
           limit: 200,
         })
-      ).items.length === 110,
+      ).items.length === 110
   );
   const recent = await client.messages("personal", "sim_mei", { limit: 100 });
   assert.ok(
-    !recent.items.some((message) => message.body === "A real incoming push"),
+    !recent.items.some((message) => message.body === "A real incoming push")
   );
   const historySearch = new HistorySearch(client, "personal", "sim_mei");
   await historySearch.search("A real incoming push");
   assert.equal(historySearch.snapshot().error, null);
   assert.deepEqual(
     historySearch.snapshot().items.map((message) => message.body),
-    ["A real incoming push"],
+    ["A real incoming push"]
   );
   await historySearch.search("History pagination fixture");
   assert.ok(historySearch.snapshot().nextCursor);
@@ -583,18 +586,18 @@ try {
   const admittedLogin = await new LoginAttempt(
     client,
     "login-resume",
-    loginStorage,
+    loginStorage
   ).open();
   await wait(
     "resumable QR ready",
     async () =>
       (await client.operation("login-resume", admittedLogin.id)).state ===
-      "awaiting_scan",
+      "awaiting_scan"
   );
   const resumedLogin = await new LoginAttempt(
     client,
     "login-resume",
-    loginStorage,
+    loginStorage
   ).open();
   assert.equal(resumedLogin.id, admittedLogin.id);
   assert.equal(resumedLogin.state, "awaiting_scan");
@@ -602,8 +605,9 @@ try {
   await wait(
     "resumed phone approval",
     async () =>
-      (await new LoginAttempt(client, "login-resume", loginStorage).open())
-        .state === "awaiting_approval",
+      (
+        await new LoginAttempt(client, "login-resume", loginStorage).open()
+      ).state === "awaiting_approval"
   );
   await client.cancelOperation("login-resume", admittedLogin.id);
   await mediaJourney({ client, control, wait, state, account: "personal" });
@@ -649,7 +653,7 @@ try {
         "UI launcher authentication and origin checks",
         "UI launcher owned-child and disposable-state cleanup",
       ],
-    }),
+    })
   );
 } finally {
   for (const s of sessions) s.close();
@@ -666,8 +670,8 @@ try {
         new Promise((done) => {
           if (child.exitCode !== null || child.signalCode !== null) done();
           else child.once("exit", done);
-        }),
-    ),
+        })
+    )
   );
   await rm(data, { recursive: true, force: true });
 }

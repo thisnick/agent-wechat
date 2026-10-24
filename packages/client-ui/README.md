@@ -127,10 +127,11 @@ Focusing or clicking the message composer clears the selected thread’s unread 
 against its displayed read-state version. Concurrent focus and reply actions share
 one request, and a conflict never clears a newer arrival automatically.
 
-Replies show the quoted sender and content above the comment. Loaded history is
-used first; visible replies otherwise use the parent-bound quote endpoint. Image
-quotes show a small standard preview. Recalled or unavailable originals keep a
-status label. Forwarded history renders normalized text. Unknown message types
+Replies show the sender and embedded excerpt from `message.quote` above the comment.
+Rendering text or link quotes makes no quote-resolution request and never substitutes
+a stored original's content. Image quotes show a small standard preview using the
+parent reply's media identity. Recalled or unavailable quotes keep a short status
+label. Forwarded history renders normalized text. Unknown message types
 show an unsupported-content label instead of entering the media flow.
 
 Images and stickers show their content without a file header or status text.
@@ -157,7 +158,7 @@ message ID and exact server ID to the native quoted-text API. Pending and uncert
 sends retain that reference; checking status does not submit another send. A known
 recalled or changed source blocks sending until the quote is removed or replaced.
 Attachments require cancelling the selected text reply. The simulator exercises the
-same daemon admission, projection, event stream and quote lookup; official endpoint
+same daemon admission, projection, event stream and embedded quote contracts; official endpoint
 acceptance and recipient rendering remain separate final checks.
 
 Incoming images automatically load standard quality. Clicking a photo or video opens a
@@ -195,8 +196,9 @@ Files show their filename and an always-visible download control. **Get original
 makes the original available for download, then **Download** saves it to the device. Generic
 files, including PDFs, do not render an image placeholder or an inline PDF viewer.
 
-Clicking a resolved quote loads any intervening history pages and scrolls to its
-source message. Missing or recalled originals retain their state. Searches can
+Clicking a quote finds its server ID in the same account and conversation, loading
+older history pages only when needed, then scrolls to its source. This navigation
+does not change the displayed embedded excerpt. Missing or recalled originals retain their state. Searches can
 jump back into the conversation without losing its loaded history.
 
 The wx daemon downloads new voice notes on receipt, independently of the browser.
@@ -213,7 +215,7 @@ avatars refresh after one hour since their last successful browser cache read.
 Offscreen avatars do not refresh. Multiple views share each request, and queued
 refreshes are skipped if the last visible view disappears. Group rows show at most
 four member avatars and request only those faces. Refreshes pause while chat-open
-read state is being admitted. Avatar reads, media discovery and quote lookups
+read state is being admitted. Avatar reads and media discovery
 start at the viewport so offscreen history does not flood the hub.
 
 Eligible incoming stickers load automatically when their message is displayed.

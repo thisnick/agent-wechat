@@ -406,7 +406,7 @@ impl ProfileReader {
             name: v.username.clone(),
         })
     }
-    fn labels(&self) -> Result<BTreeMap<String, String>> {
+    pub fn labels(&self) -> Result<BTreeMap<String, String>> {
         // Contact coverage can be unavailable without preventing thread reads.
         let Ok(rel) = self.role("contact.db", "contacts") else {
             return Ok(BTreeMap::new());

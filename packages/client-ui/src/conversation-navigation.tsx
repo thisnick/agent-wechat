@@ -12,6 +12,7 @@ import type { HubSession } from "./session.ts";
 
 const Navigation = createContext<{
   jump: (message: NativeMessage) => Promise<boolean>;
+  jumpQuote: (message: NativeMessage) => Promise<boolean>;
   target: { id: string; sequence: number } | null;
 } | null>(null);
 export const useConversationNavigation = () => useContext(Navigation);
@@ -26,11 +27,14 @@ export function ConversationNavigation({
   children: ReactNode;
 }) {
   const [target, setTarget] = useState<{ id: string; sequence: number } | null>(
-    null,
+    null
   );
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
-  async function jump(message: NativeMessage) {
+  async function navigate(
+    message: NativeMessage,
+    resolve: (signal: AbortSignal) => Promise<string | undefined>
+  ) {
     pending.current?.abort();
     const controller = new AbortController();
     pending.current = controller;
@@ -42,19 +46,25 @@ export function ConversationNavigation({
       return false;
     closeSearch();
     try {
-      if (
-        !(await session.revealMessage(message.id, controller.signal)) ||
-        controller.signal.aborted
-      )
-        return false;
-      setTarget({ id: message.id, sequence: Date.now() });
+      const id = await resolve(controller.signal);
+      if (!id || controller.signal.aborted) return false;
+      setTarget({ id, sequence: Date.now() });
       return true;
     } catch {
       return false;
     }
   }
+  const jump = (message: NativeMessage) =>
+    navigate(message, async (signal) =>
+      (await session.revealMessage(message.id, signal)) ? message.id : undefined
+    );
+  const jumpQuote = (message: NativeMessage) =>
+    navigate(
+      message,
+      async (signal) => (await session.revealQuote(message, signal))?.id
+    );
   return (
-    <Navigation.Provider value={{ jump, target }}>
+    <Navigation.Provider value={{ jump, jumpQuote, target }}>
       {children}
     </Navigation.Provider>
   );
@@ -69,7 +79,7 @@ export function ScrollToQuotedMessage() {
       scrollToMessage(navigation.target!.id, {
         align: "center",
         behavior: "smooth",
-      }),
+      })
     );
     return () => cancelAnimationFrame(id);
   }, [navigation?.target, scrollToMessage]);

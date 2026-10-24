@@ -1,11 +1,7 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
-import type {
-  NativeMessage,
-  NativeQuoteResolution,
-} from "@agent-wechat/shared";
+import { useState, useSyncExternalStore } from "react";
+import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
-import { localQuote, quotedText } from "./quote-preview.ts";
-import { useVisible } from "./visible.tsx";
+import { embeddedQuotePreview, localQuote } from "./quote-preview.ts";
 import { MediaCard } from "./media.tsx";
 import { useConversationNavigation } from "./conversation-navigation.tsx";
 
@@ -18,60 +14,27 @@ export function QuotedReply({
   connection: Connection;
   name: (id: string) => string;
 }) {
-  const { element, visible } = useVisible<HTMLQuoteElement>();
   const state = useSyncExternalStore(
     connection.session.subscribe,
-    connection.session.snapshot,
+    connection.session.snapshot
   );
   const local = localQuote(message, state.messages);
-  const [quote, setQuote] = useState<NativeQuoteResolution | null>(null);
-  const [failed, setFailed] = useState(false);
+  const quote = embeddedQuotePreview(message, local);
   const navigation = useConversationNavigation();
   const [jumping, setJumping] = useState(false);
   const [jumpFailed, setJumpFailed] = useState(false);
-  useEffect(() => {
-    if (!visible || local) return;
-    let cancelled = false;
-    void connection.session.client
-      .quotedMessage(message.accountId, message.id)
-      .then((result) => {
-        if (result.threadId !== message.threadId)
-          throw new Error("Invalid quoted conversation");
-        if (!cancelled) setQuote(result);
-      })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    connection.session,
-    message.accountId,
-    message.threadId,
-    message.id,
-    message.version,
-    visible,
-    local?.id,
-  ]);
-  const original = local ?? quote?.message;
-  const recalled = quote?.state === "recalled" || !!original?.recall;
-  const sender = original?.senderId ?? quote?.senderId;
-  const own = original?.direction === "outgoing";
-  const image = !recalled && (original?.type === 3 || quote?.embeddedImage);
-  const canJump = !!original && !!navigation;
+  const canJump = !!message.quote && !!navigation;
   async function jump() {
-    if (!original || !navigation || jumping) return;
+    if (!navigation || jumping) return;
     setJumping(true);
     setJumpFailed(false);
-    const found = await navigation.jump(original);
+    const found = await navigation.jumpQuote(message);
     setJumping(false);
     setJumpFailed(!found);
   }
   return (
     <blockquote
       className="quote-preview"
-      ref={element}
       aria-label="Quoted message"
       role={canJump ? "button" : undefined}
       tabIndex={canJump ? 0 : undefined}
@@ -85,26 +48,17 @@ export function QuotedReply({
         }
       }}
     >
-      <strong>{own ? "You" : sender ? name(sender) : "Quoted message"}</strong>
-      {image ? (
-        <MediaCard
-          message={original ?? message}
-          connection={connection}
-          previewOnly
-        />
+      <strong>
+        {quote.own
+          ? "You"
+          : quote.senderId
+          ? name(quote.senderId)
+          : "Quoted message"}
+      </strong>
+      {quote.image ? (
+        <MediaCard message={quote.image} connection={connection} previewOnly />
       ) : (
-        <p>
-          {recalled
-            ? "Message recalled"
-            : original
-              ? quotedText(original)
-              : quote?.embeddedText ||
-                (failed
-                  ? "Couldn’t load the quoted message."
-                  : quote
-                    ? "The quoted message is unavailable."
-                    : "Loading quoted message…")}
-        </p>
+        <p>{quote.text}</p>
       )}
       {(jumping || jumpFailed) && (
         <small role="status">
