@@ -5,6 +5,8 @@ mod links;
 pub use links::{LinkCard, ShareSendRequest};
 mod media;
 pub mod media_types;
+#[cfg(test)]
+mod native_compat_tests;
 mod pagination;
 mod profile;
 mod quote_send;

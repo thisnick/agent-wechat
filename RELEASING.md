@@ -44,6 +44,27 @@ pnpm changeset
    Prereleases use their Changesets channel (such as `beta`); stable releases use
    `latest`.
 
+## Upgrade compatibility
+
+Every release must accept the consumer state an earlier release left on disk.
+The baseline is 1.0.0-beta.13: a release may not stop loading or dispatching a
+consumer file written by it. Two tests hold this contract:
+
+- `packages/native-client-rust/crates/wechat-core/src/native_compat_tests.rs`
+  pins the daemon's message JSON in
+  `crates/wechat-core/tests/fixtures/native-compat/messages.json`. Consumers save
+  this JSON when a message arrives and compare it with a fresh read before
+  dispatching, so any change to it (including an added field) is an upgrade risk.
+- `packages/openclaw-extension/src/native-consumer-compat.test.ts` loads the
+  frozen `test/fixtures/native-compat/consumer-state-1.0.0-beta.13.json` and
+  dispatches its buffered group messages against the pinned daemon JSON.
+
+To change the message JSON on purpose, regenerate the pinned file with
+`UPDATE_NATIVE_COMPAT_FIXTURES=1 cargo +1.93.1 test -p wechat-core native_compat`
+and make the extension test pass without touching the frozen consumer file.
+Never regenerate a frozen consumer file. If a later release needs a newer
+baseline as well, add another frozen file beside it.
+
 ## What CI/CD Does
 
 The npm workflow waits until every configured native target, checksum manifest,

@@ -1,0 +1,280 @@
+{
+  "answeredMention": {
+    "accountId": "a",
+    "appMessageType": null,
+    "body": "@Helper when does it open?",
+    "createdAt": "2026-10-24T00:00:01+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiMSJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": true,
+      "source": "msgsource.atuserlist",
+      "state": "known",
+      "userIds": [
+        "self"
+      ]
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1001",
+    "threadId": "room@chatroom",
+    "type": 1
+  },
+  "heldMention": {
+    "accountId": "a",
+    "appMessageType": null,
+    "body": "@Helper please book it",
+    "createdAt": "2026-10-24T00:00:02+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiMiJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": true,
+      "source": "msgsource.atuserlist",
+      "state": "known",
+      "userIds": [
+        "self"
+      ]
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1002",
+    "threadId": "room@chatroom",
+    "type": 1
+  },
+  "image": {
+    "accountId": "a",
+    "appMessageType": null,
+    "body": null,
+    "createdAt": "2026-10-24T00:00:09+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiOSJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1009",
+    "threadId": "room@chatroom",
+    "type": 3
+  },
+  "link": {
+    "accountId": "a",
+    "appMessageType": 5,
+    "body": "[Link] Example Venue\nReserve a table\nhttps://example.com/booking?a=1&b=2",
+    "createdAt": "2026-10-24T00:00:07+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiNyJ9",
+    "link": {
+      "description": "Reserve a table",
+      "sourceName": null,
+      "title": "Example Venue",
+      "url": "https://example.com/booking?a=1&b=2"
+    },
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1007",
+    "threadId": "room@chatroom",
+    "type": 49
+  },
+  "mention": {
+    "accountId": "a",
+    "appMessageType": null,
+    "body": "@Helper can you check this?",
+    "createdAt": "2026-10-24T00:00:10+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiMTAifQ",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": true,
+      "source": "msgsource.atuserlist",
+      "state": "known",
+      "userIds": [
+        "self"
+      ]
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1010",
+    "threadId": "room@chatroom",
+    "type": 1
+  },
+  "quoteImage": {
+    "accountId": "a",
+    "appMessageType": 57,
+    "body": "Is this the place?",
+    "createdAt": "2026-10-24T00:00:05+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiNSJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": {
+      "appMessageType": null,
+      "direction": "incoming",
+      "embeddedImage": true,
+      "embeddedText": null,
+      "senderId": "sender",
+      "serverId": "999",
+      "state": "embedded",
+      "type": 3
+    },
+    "senderId": "sender",
+    "serverId": "1005",
+    "threadId": "room@chatroom",
+    "type": 49
+  },
+  "quoteLink": {
+    "accountId": "a",
+    "appMessageType": 57,
+    "body": "Explain this link",
+    "createdAt": "2026-10-24T00:00:06+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiNiJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": {
+      "appMessageType": 5,
+      "direction": "incoming",
+      "embeddedImage": false,
+      "embeddedText": "[Link] Example Venue\nReserve a table\nhttps://example.com/booking?a=1&b=2",
+      "senderId": "sender",
+      "serverId": "998",
+      "state": "embedded",
+      "type": 49
+    },
+    "senderId": "sender",
+    "serverId": "1006",
+    "threadId": "room@chatroom",
+    "type": 49
+  },
+  "quoteText": {
+    "accountId": "a",
+    "appMessageType": 57,
+    "body": "Sounds good",
+    "createdAt": "2026-10-24T00:00:04+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiNCJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": {
+      "appMessageType": null,
+      "direction": "incoming",
+      "embeddedImage": false,
+      "embeddedText": "Shall we go on Saturday?",
+      "senderId": "sender",
+      "serverId": "1003",
+      "state": "embedded",
+      "type": 1
+    },
+    "senderId": "sender",
+    "serverId": "1004",
+    "threadId": "room@chatroom",
+    "type": 49
+  },
+  "sticker": {
+    "accountId": "a",
+    "appMessageType": null,
+    "body": null,
+    "createdAt": "2026-10-24T00:00:08+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiOCJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1008",
+    "threadId": "room@chatroom",
+    "type": 47
+  },
+  "text": {
+    "accountId": "a",
+    "appMessageType": null,
+    "body": "Shall we go on Saturday?",
+    "createdAt": "2026-10-24T00:00:03+00:00",
+    "direction": "incoming",
+    "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRiIiwidGFibGUiOiJNc2dfNjE0ZjRiMDNlZmFiZGU3ZTQ2Yzk3ZTc0NmFhNTQ3YTAiLCJsb2NhbElkIjoiMyJ9",
+    "link": null,
+    "media": [],
+    "mentions": {
+      "all": null,
+      "self": null,
+      "source": null,
+      "state": "unknown",
+      "userIds": []
+    },
+    "peerId": "room@chatroom",
+    "projection": "official-profile",
+    "quote": null,
+    "senderId": "sender",
+    "serverId": "1003",
+    "threadId": "room@chatroom",
+    "type": 1
+  }
+}

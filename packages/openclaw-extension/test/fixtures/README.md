@@ -14,3 +14,18 @@ The media model harness generates silent PCM WAV and plain-text bytes in memory.
 It starts only owned temporary Gateways and local fixture providers; it does not
 use account credentials or external model services. The transcription CLI emits
 deterministic text after validating the synthetic WAV; it is not a recognizer.
+
+## Upgrade compatibility fixtures
+
+`native-compat/consumer-state-1.0.0-beta.13.json` is a consumer state file written
+by the 1.0.0-beta.13 extension code itself. It holds an answered mention, a mention
+held for review and seven group messages waiting as context (text, three quoted
+replies, a link card, a sticker and an image). It was produced by accepting the
+messages from `packages/native-client-rust/crates/wechat-core/tests/fixtures/native-compat/messages.json`
+in order and dispatching each one with the 1.0.0-beta.13 `dispatchNativeMessage`,
+then copying the file the extension wrote. All identifiers and text are synthetic.
+
+Never regenerate or edit this file: it stands for state already on deployed
+hosts. `src/native-consumer-compat.test.ts` checks that the current extension
+loads it and dispatches its buffered context against the daemon's current
+message JSON.
