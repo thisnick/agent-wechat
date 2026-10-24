@@ -40,6 +40,7 @@ jobs:
             release:
               - '.github/workflows/release.yml'
               - '.github/workflows/native-release.yml'
+              - '.github/workflows/native-image.yml'
               - 'scripts/native-release-notes*.mjs'
               - 'scripts/native-release-policy*.mjs'
               - 'scripts/native-release-orchestration*.mjs'

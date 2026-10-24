@@ -12,6 +12,7 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
   packages: write
@@ -94,7 +95,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   resume:
-    name: Resume npm release after native publication
+    name: Resume npm release after native assets and runtime image
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&

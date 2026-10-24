@@ -157,3 +157,15 @@ jobs:
             gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           fi
           gh release upload "$TAG" artifacts/native/*
+
+  image:
+    needs: [plan, prepare]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/native-image.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+      confirm_publish: true

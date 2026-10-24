@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { assetName, manifestName, releaseRepository, supportedTargets } from '../packages/cli/scripts/native-runtime.mjs';
-import { nativeReleaseReadiness, resumeNpmRelease, nativePublicationSucceeded } from './native-release-orchestration.mjs';
+import { nativeReleaseReadiness, resumeNpmRelease, nativePublicationSucceeded, runtimeImagePublished, npmReleaseReadiness } from './native-release-orchestration.mjs';
 
 const version = '1.0.0-beta.10';
 const sourceCommit = 'a'.repeat(40);
@@ -160,10 +160,55 @@ test('completion retries npm only after the native publication job actually succ
   for (const conclusion of ['success', 'skipped', 'failure', 'cancelled']) {
     const result = await nativePublicationSucceeded({ runId: 123, fetchImpl: async url => {
       assert.ok(url.endsWith('/actions/runs/123/jobs?per_page=100'));
-      return Response.json({ total_count: 1, jobs: [{ name: 'prepare', status: 'completed', conclusion }] });
+      return Response.json({ total_count: 2, jobs: [{ name: 'prepare', status: 'completed', conclusion: 'success' }, { name: 'image / manifest', status: 'completed', conclusion }] });
     } });
     assert.equal(result, conclusion === 'success');
   }
   assert.equal(await nativePublicationSucceeded({ runId: 123, fetchImpl: async () => Response.json({ total_count: 0, jobs: [] }) }), false);
   await assert.rejects(nativePublicationSucceeded({ runId: 123, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
+});
+
+function imageRun(workflow = 'native-release.yml', overrides = {}) {
+  return { ...originalRun(), path: `.github/workflows/${workflow}`, ...overrides };
+}
+
+test('an image must finish its manifest publication for the exact source before npm is ready', async t => {
+  const options = await fixture(t);
+  for (const conclusion of ['success', 'skipped', 'failure']) {
+    const result = await npmReleaseReadiness({ ...options, sourceCommit, fetchImpl: async (url, init) => {
+      if (url === registryUrl) return missing();
+      if (url === releaseUrl) return Response.json(release());
+      if (url.includes('/native-release.yml/runs?')) return Response.json({ total_count: 1, workflow_runs: [imageRun()] });
+      if (url.includes('/native-image.yml/runs?')) return Response.json({ total_count: 0, workflow_runs: [] });
+      assert.ok(url.endsWith('/actions/runs/123/jobs?per_page=100'));
+      assert.equal(init.headers.Authorization, `Bearer ${token}`);
+      return Response.json({ total_count: 1, jobs: [{ name: 'image / manifest', status: 'completed', conclusion }] });
+    } });
+    assert.deepEqual(result, { version, ready: conclusion === 'success', state: conclusion === 'success' ? 'available' : 'image-pending' });
+  }
+});
+
+test('unrelated or unfinished image workflows never unlock npm', async () => {
+  for (const overrides of [{ head_sha: 'b'.repeat(40) }, { head_branch: 'feature' }, { event: 'pull_request' },
+    { repository: { full_name: 'other/repo' } }, { head_repository: { full_name: 'other/repo' } },
+    { status: 'in_progress' }, { conclusion: 'failure' }, { path: '.github/workflows/unrelated.yml' }]) {
+    assert.equal(await runtimeImagePublished({ sourceCommit, fetchImpl: async url => {
+      assert.ok(url.includes('/runs?'), 'must not read jobs for an unrelated run');
+      return Response.json({ total_count: 1, workflow_runs: [imageRun('native-release.yml', overrides)] });
+    } }), false);
+  }
+});
+
+test('manual image recovery also satisfies the exact-source npm gate', async () => {
+  assert.equal(await runtimeImagePublished({ sourceCommit, fetchImpl: async url => {
+    if (url.includes('/native-release.yml/')) return Response.json({ total_count: 0, workflow_runs: [] });
+    if (url.includes('/native-image.yml/')) return Response.json({ total_count: 1, workflow_runs: [imageRun('native-image.yml', { event: 'workflow_dispatch' })] });
+    return Response.json({ total_count: 1, jobs: [{ name: 'manifest', status: 'completed', conclusion: 'success' }] });
+  } }), true);
+});
+
+test('image status errors fail visibly instead of unlocking publication', async () => {
+  await assert.rejects(runtimeImagePublished({ sourceCommit: 'main' }), /full image source commit/);
+  await assert.rejects(runtimeImagePublished({ sourceCommit, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
+  await assert.rejects(runtimeImagePublished({ sourceCommit, fetchImpl: async () => Response.json({ total_count: 101, workflow_runs: [] }) }), /establish/);
 });

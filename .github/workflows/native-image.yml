@@ -1,5 +1,13 @@
 name: Publish native runtime image
 on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      confirm_publish:
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
       version:

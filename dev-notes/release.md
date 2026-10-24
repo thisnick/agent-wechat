@@ -33,7 +33,12 @@ pnpm changeset
    `native-release` environment reviewer requirements still apply. For recovery,
    run the workflow manually on main with the version and `confirm_publish=true`.
 
-6. Successful completion automatically retries the original Release push run for
+6. Successful native asset publication calls **Publish native runtime image** for
+   the same commit/version. It tests and pushes Linux x64/ARM64 images and combines
+   them into the versioned multi-architecture tag. Stable versions also update
+   `latest`. npm waits until image manifest publication succeeds.
+
+7. Successful completion automatically retries the original Release push run for
    the same source commit. That run verifies the native assets, embeds their
    manifest in the CLI package, and publishes both npm packages with provenance.
    Prereleases use their Changesets channel (such as `beta`); stable releases use
@@ -42,7 +47,8 @@ pnpm changeset
 ## What CI/CD Does
 
 The npm workflow waits until every configured native target, checksum manifest,
-and third-party notice is uploaded. Registry/API errors, mismatched source
+and third-party notice is uploaded and the same source commit has a successfully
+published runtime image. Registry/API errors, mismatched source
 commits and invalid checksums remain failures. A published CLI version permits
 extension-only recovery without requiring another native artifact set.
 
