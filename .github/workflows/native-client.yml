@@ -56,7 +56,7 @@ jobs:
       run:
         working-directory: packages/native-client-rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Identify native build dependencies
         id: cache-key
         run: python ../../scripts/native-ci-cache-key.py rust --github-output
@@ -81,7 +81,7 @@ jobs:
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/native-ffmpeg
           key: native-ffmpeg-${{ runner.arch }}-${{ env.FFMPEG_RELEASE }}-${{ matrix.ffmpeg_sha256 }}-${{ matrix.ffprobe_sha256 }}

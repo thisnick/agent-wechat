@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { assetName, manifestName, releaseRepository, supportedTargets } from '../packages/cli/scripts/native-runtime.mjs';
-import { nativeReleaseReadiness, resumeNpmRelease } from './native-release-orchestration.mjs';
+import { nativeReleaseReadiness, resumeNpmRelease, nativePublicationSucceeded } from './native-release-orchestration.mjs';
 
 const version = '1.0.0-beta.10';
 const sourceCommit = 'a'.repeat(40);
@@ -153,4 +153,17 @@ test('resume fails visibly on invalid source, API access errors and rejected rer
   await assert.rejects(resumeNpmRelease({ sourceCommit, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
   await assert.rejects(resumeNpmRelease({ sourceCommit, fetchImpl: async (_url, init) => init.method === 'GET'
     ? Response.json({ total_count: 1, workflow_runs: [originalRun()] }) : new Response(null, { status: 403 }) }), /HTTP 403/);
+});
+
+
+test('completion retries npm only after the native publication job actually succeeds', async () => {
+  for (const conclusion of ['success', 'skipped', 'failure', 'cancelled']) {
+    const result = await nativePublicationSucceeded({ runId: 123, fetchImpl: async url => {
+      assert.ok(url.endsWith('/actions/runs/123/jobs?per_page=100'));
+      return Response.json({ total_count: 1, jobs: [{ name: 'prepare', status: 'completed', conclusion }] });
+    } });
+    assert.equal(result, conclusion === 'success');
+  }
+  assert.equal(await nativePublicationSucceeded({ runId: 123, fetchImpl: async () => Response.json({ total_count: 0, jobs: [] }) }), false);
+  await assert.rejects(nativePublicationSucceeded({ runId: 123, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
 });

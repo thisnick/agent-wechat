@@ -1,5 +1,8 @@
 name: Prepare native release assets
 on:
+  push:
+    branches: [main]
+    paths: [packages/cli/package.json]
   workflow_dispatch:
     inputs:
       version:
@@ -13,10 +16,29 @@ on:
         type: boolean
 permissions:
   contents: read
-concurrency: native-release-${{ inputs.version }}
+concurrency: native-release-${{ github.sha }}
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: plan
+        run: node scripts/native-release-trigger.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
   build:
-    if: inputs.confirm_publish && github.ref == 'refs/heads/main'
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -28,21 +50,21 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
       - uses: docker/setup-buildx-action@v4.4.1
         id: buildx
       - name: Require an unpublished CLI version and exact source tag
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/native-release-preflight.mjs
       - name: Validate versioned Changesets notes before building
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           node --test scripts/native-release-policy.test.mjs
           node scripts/native-release-policy.mjs --check-registry
@@ -69,18 +91,19 @@ jobs:
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
       - run: node scripts/native-package-smoke.mjs artifacts/native
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-release-${{ matrix.arch }}
           path: artifacts/native/*
           if-no-files-found: error
   portable:
-    if: inputs.confirm_publish && github.ref == 'refs/heads/main'
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/native-portable.yml
     with:
       artifact_prefix: native-release
   prepare:
-    needs: [build, portable]
+    needs: [plan, build, portable]
     environment: native-release
     permissions:
       contents: write
@@ -89,11 +112,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-release-*
           path: artifacts/fragments
@@ -104,7 +127,7 @@ jobs:
       - name: Validate release channel and render versioned Changesets notes
         id: release_policy
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           node scripts/native-release-policy.mjs --check-registry --github-output
           node scripts/native-release-notes.mjs --output artifacts/release-notes.md
@@ -114,7 +137,7 @@ jobs:
       - name: Publish new assets without replacing existing release files
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
           RELEASE_IS_PRERELEASE: ${{ steps.release_policy.outputs.prerelease }}
         run: |
           node scripts/native-release-preflight.mjs

@@ -23,11 +23,11 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -98,7 +98,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'workflow_dispatch' &&
+      (github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'push') &&
       github.event.workflow_run.head_repository.full_name == github.repository
     permissions:
       contents: read
@@ -107,11 +107,12 @@ jobs:
     steps:
       # Use trusted default-branch orchestration code. This job only retries the
       # original push run; it never builds or publishes npm from workflow_run.
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: node scripts/native-release-orchestration.mjs resume
         env:
           GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN_ID: ${{ github.event.workflow_run.id }}
           NATIVE_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}

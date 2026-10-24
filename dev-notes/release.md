@@ -25,11 +25,13 @@ pnpm changeset
    reports **Waiting for native release assets** if the matching artifacts have
    not been published. This is an expected waiting state, not a failed build.
 
-5. While main still points to that version commit, run **Prepare native release
-   assets** (`native-release.yml`) on main with the exact CLI version and
-   `confirm_publish=true`. This explicit approval builds and tests the configured
-   native targets, verifies their shared source commit and checksums, and publishes
-   the GitHub release assets. It does not deploy anything.
+5. That merge automatically starts **Prepare native release assets**
+   (`native-release.yml`) for the exact version commit. Only merged PRs from this
+   repository's `changeset-release/main` branch qualify; ordinary pushes do not
+   publish native assets. It builds and tests the configured targets, verifies
+   source and checksums, and publishes the GitHub release assets. Existing
+   `native-release` environment reviewer requirements still apply. For recovery,
+   run the workflow manually on main with the version and `confirm_publish=true`.
 
 6. Successful completion automatically retries the original Release push run for
    the same source commit. That run verifies the native assets, embeds their

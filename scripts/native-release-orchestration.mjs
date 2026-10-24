@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Keep manual native publication separate from npm's original push/OIDC context.
+// Keep native publication separate from npm's original push/OIDC context.
 import { appendFile, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,15 @@ export async function nativeReleaseReadiness({ root = resolve('packages/cli'), t
   const ready = required.every(name => uploaded.has(name));
   // Availability never substitutes for exact source, binary and checksum checks.
   return { version, ready, state: ready ? 'available' : 'uploading' };
+}
+
+export async function nativePublicationSucceeded({ runId, token = process.env.GH_TOKEN, fetchImpl = fetch }) {
+  if (!/^[1-9][0-9]*$/.test(String(runId ?? ''))) throw new Error('A native workflow run ID is required');
+  const response = await githubRequest(`actions/runs/${runId}/jobs?per_page=100`, { token, fetchImpl });
+  if (response.status !== 200) throw new Error(`Cannot check native publication (HTTP ${response.status})`);
+  const result = await response.json();
+  if (!Array.isArray(result.jobs) || result.total_count > 100) throw new Error('Cannot establish native publication');
+  return result.jobs.some(job => job.name === 'prepare' && job.status === 'completed' && job.conclusion === 'success');
 }
 
 export async function resumeNpmRelease({ sourceCommit, token = process.env.GH_TOKEN, fetchImpl = fetch } = {}) {
@@ -64,14 +73,18 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
       const sourceCommit = process.env.GITHUB_SHA;
       if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? '')) throw new Error('A full npm release source commit is required');
       const summary = `## Waiting for native release assets\n\n`
-        + `npm ${result.version} is waiting for the approved native release at commit \`${sourceCommit}\`.\n\n`
-        + `Run **Prepare native release assets** on main with version \`${result.version}\` and \`confirm_publish=true\` while main still points to this commit. `
+        + `npm ${result.version} is waiting for the native release at commit \`${sourceCommit}\`.\n\n`
+        + `Merging the Changesets Version Packages PR starts **Prepare native release assets** automatically. For recovery, run it on main with version \`${result.version}\` and \`confirm_publish=true\` while main still points to this commit. `
         + `After successful native publication, Release automatically retries this original push run and verifies all source and checksum bindings before publishing npm.\n`;
       if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, summary);
       console.error(summary);
     }
     console.log(JSON.stringify(result));
   } else if (process.argv[2] === 'resume') {
+    if (!await nativePublicationSucceeded({ runId: process.env.NATIVE_RUN_ID })) {
+      console.log('Native publication was skipped; no npm retry is needed.');
+      process.exit(0);
+    }
     const result = await resumeNpmRelease({ sourceCommit: process.env.NATIVE_SOURCE_COMMIT });
     const summary = `Resumed [the original npm release run](https://github.com/${releaseRepository}/actions/runs/${result.runId}) at commit \`${result.sourceCommit}\`.\n`;
     if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, summary);

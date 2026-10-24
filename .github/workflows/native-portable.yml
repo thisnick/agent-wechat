@@ -30,7 +30,7 @@ jobs:
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify dependency cache identities
         run: python scripts/native-ci-cache-key.test.py
       - name: Verify compiler completion and failure propagation
@@ -82,7 +82,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Identify installed and native build dependencies
         id: cache-key
         run: python scripts/native-ci-cache-key.py all --github-output
@@ -104,7 +104,7 @@ jobs:
       - name: Restore an executable built from identical Windows inputs
         if: runner.os == 'Windows'
         id: native-executable
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe
           # No fallback keys: all native inputs and the build driver must match.
@@ -125,11 +125,11 @@ jobs:
         shell: pwsh
         run: python scripts/native-ci-build.py start ${{ matrix.target }}
       # Dependency setup is independent of Cargo and can overlap compilation.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: node-modules
         with:
           path: |
@@ -170,7 +170,7 @@ jobs:
           wait "$platform_smoke" || smoke_status=1
           wait "$package_smoke" || smoke_status=1
           exit "$smoke_status"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact_prefix || 'native-validation' }}-${{ matrix.target }}
           path: artifacts/native/*

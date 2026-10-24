@@ -44,9 +44,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -81,9 +81,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -152,7 +152,7 @@ jobs:
           docker compose -f deploy/native/compose.yaml config --quiet
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           python3 scripts/native-service-verify.py "$PWD/artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-linux-${{ matrix.arch }}-gnu-validation
           path: artifacts/native/*
@@ -165,17 +165,17 @@ jobs:
     needs: [package, openclaw-smoke, portable]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: native-*validation*
           path: artifacts/fragments
       - name: Verify complete release matrix without publication
         run: node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-linux-x64-gnu-validation artifacts/fragments/native-linux-arm64-gnu-validation artifacts/fragments/native-validation-*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-release-candidate
           path: artifacts/native/*

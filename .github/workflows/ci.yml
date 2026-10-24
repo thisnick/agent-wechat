@@ -32,7 +32,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       release: ${{ steps.filter.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -43,6 +43,7 @@ jobs:
               - 'scripts/native-release-notes*.mjs'
               - 'scripts/native-release-policy*.mjs'
               - 'scripts/native-release-orchestration*.mjs'
+              - 'scripts/native-release-trigger*.mjs'
               - '.changeset/**'
               - 'scripts/install-ci-npm.sh'
               - 'scripts/verify-ci-publisher*.mjs'
@@ -67,9 +68,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - run: bash -n scripts/install-ci-npm.sh
@@ -80,6 +81,7 @@ jobs:
           node --test scripts/native-release-notes.test.mjs
           node --test scripts/native-release-policy.test.mjs
           node --test scripts/native-release-orchestration.test.mjs
+          node --test scripts/native-release-trigger.test.mjs
           node scripts/verify-ci-publisher.mjs
 
   ts:
@@ -90,13 +92,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -121,13 +123,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
