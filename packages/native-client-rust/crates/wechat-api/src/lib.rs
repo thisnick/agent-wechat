@@ -809,21 +809,6 @@ async fn message(
         .await?,
     )
 }
-async fn quoted_message(
-    State(app): State<App>,
-    Extension(c): Extension<Claims>,
-    Path((a, id)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    c.require(Some(&a), "read")?;
-    let guard = app.core.lock_account(&a).await?;
-    checked::<contracts::NativeQuoteResolution>(
-        work(move || {
-            let _guard = guard;
-            app.core.quoted_message(&a, &id)
-        })
-        .await?,
-    )
-}
 async fn avatar(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -1148,7 +1133,6 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .route("/v1/accounts/{a}/threads/{thread}/messages", get(messages))
         .route("/v1/accounts/{a}/messages", get(archive_messages))
         .route("/v1/accounts/{a}/messages/{id}", get(message))
-        .route("/v1/accounts/{a}/messages/{id}/quote", get(quoted_message))
         .route("/v1/accounts/{a}/avatars/{id}", get(avatar))
         .route("/v1/accounts/{a}/messages/{id}/image", get(image))
         .route("/v1/accounts/{a}/sends", post(media::send))
@@ -1622,7 +1606,7 @@ mod tests {
         assert!(core.store.queued_sends("one").unwrap().is_empty());
     }
     #[tokio::test]
-    async fn quote_lookup_checks_account_read_scope_before_profile_io() {
+    async fn message_read_scope_is_enforced_and_retired_quote_route_is_absent() {
         let (_temp, core, app) = setup();
         let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let media = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1646,7 +1630,7 @@ mod tests {
                 call(
                     app.clone(),
                     "GET",
-                    &format!("/v1/accounts/{account}/messages/parent/quote"),
+                    &format!("/v1/accounts/{account}/messages/parent"),
                     token,
                     None
                 )
@@ -1655,6 +1639,18 @@ mod tests {
                 expected
             );
         }
+        assert_eq!(
+            call(
+                app,
+                "GET",
+                "/v1/accounts/one/messages/parent/quote",
+                Some(OWNER),
+                None
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
     }
     #[tokio::test]
     async fn quoted_text_requires_both_scopes_and_rejects_quote_on_other_send_kinds() {

@@ -49,7 +49,6 @@ test("embedded quoted links reach prepared model input without original resoluti
   const link = "[Link] Article title\nArticle description\nhttps://example.com/article?a=1&b=2";
   Object.assign(value.message, { type: 49, appMessageType: 57, body: "Explain this article",
     quote: { serverId: "42", type: 49, appMessageType: 5, state: "embedded", senderId: "u", embeddedText: link } });
-  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
   assert.equal(await dispatchNativeMessage(value), "completed");
   assert.ok(value.runs[0].ctx.BodyForAgent.includes(link)); assert.ok(value.runs[0].ctx.BodyForAgent.includes("Explain this article"));
   assert.equal(value.state.get("m1")?.readPending, true);
@@ -59,7 +58,6 @@ test("unsupported embedded media quotes dispatch their comment instead of requir
     const value = fixture(t);
     Object.assign(value.message, { type: 49, appMessageType: 57, body: "Explain this attachment",
       quote: { serverId: "42", type, appMessageType: type === 49 ? 6 : undefined, state: "unsupported", senderId: "u" } });
-    value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
     assert.equal(await dispatchNativeMessage(value), "completed");
     assert.match(value.runs[0].ctx.BodyForAgent, /Explain this attachment/);
     assert.match(value.runs[0].ctx.BodyForAgent, /attachment unavailable/);
@@ -69,7 +67,6 @@ test("inline quoted recall prevents stale embedded text from reaching the model"
   const value = fixture(t);
   Object.assign(value.message, { type: 49, appMessageType: 57, body: "Current comment",
     quote: { serverId: "42", type: 1, state: "embedded", senderId: "u", embeddedText: "Stale excerpt" } });
-  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
   let reads = 0;
   value.client.message = async () => ++reads === 1 ? value.message : { ...value.message, quote: { serverId: "42", type: 1, state: "recalled" } };
   await dispatchNativeMessage(value);

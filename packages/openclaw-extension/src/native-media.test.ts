@@ -440,7 +440,6 @@ const quoteCore = { channel: { media: { saveMediaBuffer: async () => ({ path: "/
 function embeddedClient(extra: Partial<MediaAsset> = {}) {
   const calls: string[] = [];
   const client = {
-    quotedMessage: async () => assert.fail("Quotes must not request original resolution"),
     message: async () => assert.fail("Quote rendering must not fetch another message"),
     mediaAssets: async (_account: string, id: string) => { calls.push(`assets:${id}`); return { items: [asset({ messageId: id, ...extra })] }; },
     mediaContent: async () => { calls.push("bytes"); return { bytes, contentType: "image/gif" }; },

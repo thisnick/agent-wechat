@@ -21,11 +21,11 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## Quotes
 
-Incoming quotes use only the content carried inside the received reply. The normal message response includes it in `quote`, so OpenClaw renders text and link-card details without another quote request. A stored original never replaces the quoted excerpt. Local recall checks still suppress recalled content.
+Incoming quotes use only the content carried inside the reply delivered by WeChat's server protocol. Read the reply with `GET /messages/{id}` or the usual message-list routes: its `body` is the current comment and `quote` contains the referenced server ID, sender, type, parsed text and image availability. OpenClaw renders text and link-card details from these fields. A stored original never replaces the quoted excerpt. Local recall checks still suppress recalled content.
 
 Images can be downloaded using metadata embedded in the quote. Missing or expired image data stays visible as a status alongside the comment. Quoted voice, video and files keep the comment and any supported summary, with an unavailable attachment status; their actual attachments aren't retrieved from a stored original.
 
-`GET /messages/{id}/quote` remains available with the same URL and parameters. It returns a structured `message` marked `source: "embedded"`, with the quoted server ID, sender, type, readable body and image availability. This excerpt has no local message ID; image retrieval uses the parent reply ID. The response state is `embedded`, `missing`, `unsupported`, `invalid` or `recalled`; invalid or recalled quotes have `message: null`. It no longer returns a resolved original. See [Send quoted replies](/use/cli/#quoted-replies) for sending a reply that references a saved message.
+An embedded quote can be displayed even when the original isn't stored locally. Image retrieval uses the parent reply ID. To send your own quoted reply, use the normal send endpoint with the stored target's message ID and server ID. See [Send quoted replies](/use/cli/#quoted-replies).
 
 ## Forwarded chats
 

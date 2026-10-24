@@ -2635,10 +2635,7 @@ mod tests {
         assert_eq!(message["appMessageType"], 57);
         assert_eq!(message["body"], "Reply & <text>");
         assert_eq!(message["quote"]["serverId"], target.server_id);
-        assert_eq!(
-            core.quoted_message("one", &projected).unwrap()["state"],
-            "embedded"
-        );
+        assert_eq!(message["quote"]["state"], "embedded");
         core.project_message_send("one", &first.id).unwrap();
         assert_eq!(
             store

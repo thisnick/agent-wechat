@@ -1,5 +1,5 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, NativeQuoteResolution, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -198,21 +198,6 @@ export class NativeWeChatClient {
     if (message.id !== messageId || message.accountId !== accountId || (message.serverId != null && (typeof message.serverId !== "string" || !/^\d+$/.test(message.serverId)))) throw new Error("Invalid native message identity");
     validateMessageRecall(message);
     return message;
-  }
-  /** Read this reply's embedded excerpt. Older daemons may return a stored original. */
-  async quotedMessage(accountId: string, messageId: string): Promise<NativeQuoteResolution> {
-    const quote = await this.request<NativeQuoteResolution>(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/quote`);
-    const message = quote.message;
-    const embedded = message != null && "source" in message;
-    if (quote.accountId !== accountId || quote.messageId !== messageId || typeof quote.threadId !== "string"
-      || !["resolved", "embedded", "missing", "invalid", "unsupported", "ambiguous", "recalled"].includes(quote.state)
-      || (embedded ? !["embedded", "missing", "unsupported"].includes(quote.state) || message.source !== "embedded"
-        || "id" in message || typeof message.serverId !== "string" || !/^[1-9]\d{0,19}$/.test(message.serverId)
-        || BigInt(message.serverId) > 18446744073709551615n || !Number.isInteger(message.type) || message.type <= 0
-        || (message.body != null && (typeof message.body !== "string" || message.body.length > 16384)) || typeof message.embeddedImage !== "boolean"
-        : quote.state === "resolved" ? !message || message.accountId !== accountId || message.threadId !== quote.threadId || message.id === messageId : message != null)) throw new Error("Invalid native quote identity");
-    if (message && !embedded) validateMessageRecall(message);
-    return quote;
   }
   /** Account-wide local search, with the daemon's query-bound opaque cursor. */
   async searchMessages(accountId: string, options: NativeListOptions): Promise<NativePage<NativeMessage>> {

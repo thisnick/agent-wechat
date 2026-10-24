@@ -797,7 +797,7 @@ fn incoming_recall_preserves_identity_and_blocks_replayed_history_quotes_and_cac
     assert_eq!(parent["quote"]["state"], "recalled");
     assert!(parent["quote"]["embeddedText"].is_null());
     assert_eq!(
-        core.quoted_message("one", parent_id).unwrap()["state"],
+        core.message("one", parent_id).unwrap()["quote"]["state"],
         "recalled"
     );
     assert_eq!(
@@ -1028,8 +1028,8 @@ fn native_official_recall_outside_quote_page_is_observed_before_embedded_fallbac
     assert_eq!(page["items"][0]["quote"]["state"], "recalled");
     assert!(page["items"][0]["quote"]["embeddedText"].is_null());
     assert_eq!(
-        core.quoted_message("one", page["items"][0]["id"].as_str().unwrap())
-            .unwrap()["state"],
+        core.message("one", page["items"][0]["id"].as_str().unwrap())
+            .unwrap()["quote"]["state"],
         "recalled"
     );
     assert_eq!(recall_count(&store), 1);
@@ -1120,8 +1120,8 @@ fn retained_search_pages_resolve_current_recall_state_instead_of_retaining_bodie
     assert!(next["items"][1]["recall"].is_object());
     assert!(!next.to_string().contains("original private body"));
     assert_eq!(
-        core.quoted_message("one", next["items"][0]["id"].as_str().unwrap())
-            .unwrap()["state"],
+        core.message("one", next["items"][0]["id"].as_str().unwrap())
+            .unwrap()["quote"]["state"],
         "recalled"
     );
     let fresh = core

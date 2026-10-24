@@ -74,7 +74,7 @@ All account routes start with `/v1/accounts/{account}`.
 | --- | --- |
 | Accounts | `GET /v1/accounts`, `GET /`, `GET /capabilities`, `POST /connect`, `POST /disconnect`, `POST /logout` |
 | Login | `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
-| Chats and messages | `GET /threads`, `GET /threads/{id}/messages`, `GET /messages?query=`, `GET /messages/{id}`, `GET /messages/{id}/quote` |
+| Chats and messages | `GET /threads`, `GET /threads/{id}/messages`, `GET /messages?query=`, `GET /messages/{id}` |
 | Contacts and groups | `GET /contacts`, `GET /groups`, `GET /groups/{id}`, `GET /groups/{id}/members`, `GET /groups/{id}/members/{username}`, `POST /contacts/lookup` |
 | [Group edits](/use/groups/) (admin) | `POST /groups`, `PATCH /groups/{id}`, `POST /groups/{id}/leave`, `POST/DELETE /groups/{id}/members`, `PUT /groups/{id}/my-name`, `DELETE /groups/{id}/announcement`, `PUT /threads/{id}/notifications` |
 | Sending | `POST /uploads`, `POST /sends`, `GET /sends/{id}`, `POST /sends/{id}/cancel`, `POST /messages/{id}/recall` |

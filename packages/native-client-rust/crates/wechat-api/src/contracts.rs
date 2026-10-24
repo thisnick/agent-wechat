@@ -81,49 +81,6 @@ pub struct NativeQuoteReference {
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct NativeQuoteResolution {
-    pub account_id: String,
-    pub message_id: String,
-    pub thread_id: String,
-    pub state: String,
-    pub message: Option<NativeQuotedMessage>,
-    #[serde(default)]
-    #[ts(optional)]
-    pub embedded_text: Option<String>,
-    #[serde(default)]
-    #[ts(optional)]
-    pub embedded_image: Option<bool>,
-    #[serde(default)]
-    #[ts(optional)]
-    pub sender_id: Option<String>,
-}
-#[derive(Serialize, Deserialize, TS)]
-#[serde(untagged)]
-pub enum NativeQuotedMessage {
-    Stored(Box<NativeMessage>),
-    Embedded(NativeEmbeddedQuoteMessage),
-}
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
-pub enum NativeEmbeddedQuoteSource {
-    Embedded,
-}
-/// An excerpt carried by the parent reply, without a local original-message ID.
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeEmbeddedQuoteMessage {
-    pub source: NativeEmbeddedQuoteSource,
-    pub server_id: String,
-    #[serde(rename = "type")]
-    pub message_type: i32,
-    pub sender_id: Option<String>,
-    pub direction: Option<String>,
-    pub app_message_type: Option<i32>,
-    pub body: Option<String>,
-    pub embedded_image: bool,
-}
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
 pub struct NativeThread {
     pub id: String,
     pub account_id: String,
@@ -368,10 +325,6 @@ pub fn typescript() -> String {
         wechat_core::LinkCard::decl(),
         NativeRecallInfo::decl(),
         NativeMessage::decl(),
-        NativeEmbeddedQuoteSource::decl(),
-        NativeEmbeddedQuoteMessage::decl(),
-        NativeQuotedMessage::decl(),
-        NativeQuoteResolution::decl(),
         NativeThread::decl(),
         NativeContact::decl(),
         NativeGroup::decl(),
@@ -497,24 +450,24 @@ mod tests {
 mod read_contract_tests {
     use super::*;
     #[test]
-    fn embedded_quote_message_survives_the_public_contract_without_a_local_id() {
-        let value = serde_json::json!({"accountId":"a","messageId":"parent","threadId":"t","state":"embedded",
-            "message":{"source":"embedded","serverId":"18446744073709551615","type":49,"senderId":"u",
-                "direction":"incoming","appMessageType":5,"body":"[Link] Article\nhttps://example.com/article","embeddedImage":false}});
-        let parsed: NativeQuoteResolution = serde_json::from_value(value.clone()).unwrap();
-        assert!(matches!(
-            parsed.message,
-            Some(NativeQuotedMessage::Embedded(_))
-        ));
+    fn message_contract_keeps_embedded_quote_content_without_an_original_local_id() {
+        let value = serde_json::json!({"id":"reply","accountId":"a","threadId":"t","serverId":"42",
+            "senderId":"u","type":49,"appMessageType":57,"direction":"incoming","body":"Current comment",
+            "createdAt":null,"mentions":{"state":"unknown","userIds":[],"self":null,"all":null,"source":null},"version":"v","media":[],
+            "quote":{"serverId":"18446744073709551615","type":49,"state":"embedded","senderId":"other",
+                "direction":"incoming","appMessageType":5,"embeddedText":"[Link] Article\nhttps://example.com/article","embeddedImage":false}});
+        let parsed: NativeMessage = serde_json::from_value(value.clone()).unwrap();
         let result = serde_json::to_value(parsed).unwrap();
-        assert_eq!(result["message"], value["message"]);
-        assert!(result["message"].get("id").is_none());
-        for state in ["invalid", "recalled"] {
-            let mut suppressed = value.clone();
-            suppressed["state"] = serde_json::json!(state);
-            suppressed["message"] = serde_json::Value::Null;
-            assert!(serde_json::from_value::<NativeQuoteResolution>(suppressed).is_ok());
-        }
+        assert_eq!(result["quote"], value["quote"]);
+        assert!(result["quote"].get("id").is_none());
+        let mut suppressed = value;
+        suppressed["quote"] =
+            serde_json::json!({"serverId":"18446744073709551615","type":49,"state":"recalled"});
+        let parsed: NativeMessage = serde_json::from_value(suppressed).unwrap();
+        let result = serde_json::to_value(parsed).unwrap();
+        assert_eq!(result["body"], "Current comment");
+        assert_eq!(result["quote"]["state"], "recalled");
+        assert!(result["quote"]["embeddedText"].is_null());
     }
     #[test]
     fn thread_read_rejects_retired_message_selection_instead_of_broadening_it() {

@@ -377,7 +377,6 @@ test("link cards remain readable in history and exact lookup without attachment 
 test("embedded quotes are visible in history only after quoted-author admission", async () => {
   const value = fixture();
   const body = "[Link] Article title\nhttps://example.com/article?a=1&b=2";
-  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
   for (const senderId of ["u1", "blocked"]) {
     value.setMessages([{ id: "quote", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 49,
       appMessageType: 57, body: "Explain this", quote: { serverId: "42", type: 49, appMessageType: 5, state: "embedded", senderId, embeddedText: body } }]);
@@ -393,7 +392,6 @@ test("embedded quotes are visible in history only after quoted-author admission"
 });
 test("archive tools display embedded quote text across authors without original resolution", async () => {
   const value = fixture({}, undefined, true);
-  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
   value.setMessages([{ id: "quote", accountId: "a", threadId: "private-peer", senderId: "blocked", direction: "incoming", type: 49,
     appMessageType: 57, body: "Comment", quote: { serverId: "42", type: 1, state: "embedded", senderId: "other", embeddedText: "Quoted excerpt" } }]);
   const result: any = await value.run("wechat_archive_media", { messageId: "quote" });
@@ -405,7 +403,6 @@ test("inline quoted recall during image retrieval prevents saving or exposing st
   const parent = { id: "media-message", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 49,
     appMessageType: 57, body: "Current comment", quote: { serverId: "42", type: 3, state: "embedded", senderId: "u1", embeddedImage: true } };
   value.setMessages([parent]);
-  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
   value.client.mediaContent = async () => {
     value.calls.push(["mediaContent"]);
     value.setMessages([{ ...parent, quote: { serverId: "42", type: 3, state: "recalled" } }]);
