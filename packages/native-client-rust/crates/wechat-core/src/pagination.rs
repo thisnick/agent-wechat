@@ -47,7 +47,14 @@ impl Core {
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
         let member = self
-            .catalog_rows(account, "members", Some(group), &reader, own.as_deref())?
+            .catalog_rows(
+                account,
+                "members",
+                Some(group),
+                &reader,
+                own.as_deref(),
+                None,
+            )?
             .into_iter()
             .find(|m| m["username"] == username);
         // A cached roster can be incomplete. Absence is never an authoritative
@@ -104,7 +111,7 @@ impl Core {
         }
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
-        self.catalog_rows(account, kind, None, &reader, own.as_deref())?
+        self.catalog_rows(account, kind, None, &reader, own.as_deref(), None)?
             .into_iter()
             .find(|r| r["id"] == id)
             .context("no rows")
@@ -202,8 +209,7 @@ impl Core {
                 // after contact/name metadata changes after page one.
                 let id = crate::message_id(&message.id)?;
                 message.peer = Some(peers.get(&id).context("invalid_cursor")?.clone());
-                let value =
-                    self.normalize_recalled(account, message, own.as_deref(), reader.generation())?;
+                let value = self.normalize_recalled(account, message, own.as_deref(), &reader)?;
                 encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&value)?.len());
                 if encoded_bytes > 32 * 1024 * 1024 {
                     bail!("pagination_capacity_exceeded");
@@ -212,7 +218,20 @@ impl Core {
             }
             rows
         } else {
-            self.catalog_rows(account, kind, subject, &reader, own.as_deref())?
+            // An unfiltered first page needs the full membership/order, but
+            // only its delivered rows need content and recall normalization.
+            // Search still requires every normalized body for matching.
+            let message_limit =
+                (kind == "messages" && q.search.is_none() && q.thread_kind.is_none())
+                    .then_some(limit);
+            self.catalog_rows(
+                account,
+                kind,
+                subject,
+                &reader,
+                own.as_deref(),
+                message_limit,
+            )?
         };
         let metadata = json!({"sourceGeneration":reader.generation(),"coverage":reader.coverage(),"order":rows.iter().map(|r|r["id"].clone()).collect::<Vec<_>>()});
         self.paginate_values(account, &query, q, rows, metadata)
@@ -352,10 +371,48 @@ impl Core {
         subject: Option<&str>,
         reader: &ProfileReader,
         own: Option<&str>,
+        message_limit: Option<usize>,
     ) -> Result<Vec<Value>> {
         let mut result = Vec::new();
         let mut cursor = None;
         let mut encoded_bytes = 0usize;
+        if let Some(limit) = message_limit {
+            let references = reader.message_references(subject, MAX_ITEMS).map_err(|e| {
+                if matches!(e, wechat_profile::ProfileError::ResourceLimit) {
+                    anyhow::anyhow!("pagination_capacity_exceeded")
+                } else {
+                    e.into()
+                }
+            })?;
+            let ids = references
+                .iter()
+                .take(limit)
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>();
+            let mut delivered = reader
+                .messages_by_ids(&ids, own)?
+                .into_iter()
+                .map(|m| Ok((crate::message_id(&m.id)?, m)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            for (offset, reference) in references.into_iter().enumerate() {
+                let id = crate::message_id(&reference.id)?;
+                let item = if offset < limit {
+                    let mut message = delivered
+                        .remove(&id)
+                        .context("history row missing from snapshot")?;
+                    message.peer = reference.peer;
+                    self.normalize_recalled(account, message, own, reader)?
+                } else {
+                    json!({"id":id,"threadId":reference.peer})
+                };
+                encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&item)?.len());
+                if encoded_bytes > 32 * 1024 * 1024 {
+                    bail!("pagination_capacity_exceeded");
+                }
+                result.push(item);
+            }
+            return Ok(result);
+        }
         loop {
             let q = ListQuery {
                 limit: Some(200),
@@ -390,7 +447,7 @@ impl Core {
                     (
                         page.items
                             .into_iter()
-                            .map(|m| self.normalize_recalled(account, m, own, reader.generation()))
+                            .map(|m| self.normalize_recalled(account, m, own, reader))
                             .collect::<Result<Vec<_>>>()?,
                         page.next_cursor,
                     )

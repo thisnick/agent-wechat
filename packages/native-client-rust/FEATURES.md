@@ -35,7 +35,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Additional sync-control shapes | Implemented; static evidence and synthetic validation | The matching Linux handler table has no entries for status opcodes 3, 15 and 16; only the recorded own-username, zero/zero `lastMessage` and positive-64-bit `lastMessage` forms are completed. Type-10002 `ClientCheckGetExtInfo` and `mmchatroombarannouncememt` have no matching system handler; self-to-self root `appmsg` subtype 35 has a log-only branch. Strict envelope/XML classifiers retain original bytes and receipt/event deduplication. Other discriminators remain blocked; live backlog recovery is unverified. See sync-control validation |
 | Text, metadata, media and local read-state official writeback | Implemented for supported schemas | Supported encrypted-family fixtures, accepted outgoing history rows and image/voice/file/video cache/resource joins pass, including cold reads. Selective recall deletion supports the verified contentful message-search layout; general index maintenance, external-content indexes, unknown packed resources and arbitrary official schemas remain outside the writers. Existing unknown files are retained |
 | Independent local image keys, DAT encoding and hardlink hashes | Implemented | Identity-derived image keys decrypt all 185 retained image files; native hash rule matches 84 hardlink records; fresh image cache projection also checked |
-| Cursor-bound online resource pagination | Implemented | Persisted signed views, independent key, expiry/mutation tests and typed tombstone contracts |
+| Cursor-bound online resource pagination | Implemented | Persisted signed views, independent key, expiry/mutation tests and typed tombstone contracts. Unfiltered message views retain IDs/order and normalize only delivered rows; search still matches normalized content. Message/quote normalization reuses the request snapshot; a synthetic source-unavailability regression preserves quote resolution and current recall-receipt suppression without reopening the source |
 | Durable event replay/SSE and independent consumer acknowledgements | Implemented | Cursor gap/account scope/restart tests, actual CLI emission checkpoint, real pinned Gateway SSE cancellation |
 | Metadata catalogs distinct from message threads | Implemented | Exact group lookup succeeds without an existing thread and does not fabricate a visible conversation |
 | Known-ID contact/group lookups and roster lookup without messages | Implemented | Controlled native contact/group lookup and seven-member roster retrieval passed, with sparse official-file projection |
@@ -112,6 +112,39 @@ those gaps.
 - WXGF encoding/sending, source animation timing and faithful alpha rendering
   require separate evidence. Current incoming support preserves the container
   and supplies a representative still preview.
+
+## History performance checks
+
+Ordinary workspace tests check the amount of history work without depending on
+runner speed:
+
+- Quote normalization keeps using its captured snapshot when the source becomes
+  unavailable, while still checking current recall receipts.
+- ID-only membership matches full message ordering across shards, timestamp
+  ties and multiple pages, and rejects the existing history capacity limit.
+- Off-page bodies larger than the reader's value limit do not prevent loading
+  page one. Requesting those bodies still reports an error.
+- Search retains normalized content matching. Continuations preserve their
+  original membership while resolving later recalls from fresh profile state.
+
+For a latency gate, use a quiet release builder with temporary files on the
+filesystem being measured:
+
+```bash
+cargo +1.93.1 test --release --locked \
+  --manifest-path packages/native-client-rust/Cargo.toml \
+  -p wechat-core history_latency_benchmark -- --ignored --nocapture
+```
+
+This local-only synthetic benchmark creates an encrypted profile with 2,002
+messages, including quoted replies whose original is outside the first page.
+After one warmup, it reports p50/p95 for 20 first-page reads in each scope
+(one chat and the account). Its default p95 budget is 100 ms; set
+`WECHAT_HISTORY_P95_MS` to an agreed budget for a different builder. Timing is
+opt-in so noisy shared CI cannot produce false failures. This measures core
+history reads, including snapshot capture and saved cursors; HTTP/CLI overhead
+and larger profiles require separate measurement. Content search still scans
+normalized history and does not have the same latency claim.
 
 ## Release gate
 

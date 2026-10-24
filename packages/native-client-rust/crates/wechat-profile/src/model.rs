@@ -62,6 +62,13 @@ pub struct Message {
     pub raw_fields: RawFields,
 }
 
+/// Membership for a history view, without reading or decoding message bodies.
+#[derive(Clone, Debug)]
+pub struct MessageReference {
+    pub id: SourceMessageId,
+    pub peer: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Contact {

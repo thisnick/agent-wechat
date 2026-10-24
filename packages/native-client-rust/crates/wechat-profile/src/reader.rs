@@ -432,6 +432,104 @@ impl ProfileReader {
         }
         Ok(out)
     }
+    /// Capture complete history membership in one pass per shard. This reads
+    /// only IDs/timestamps; callers resolve delivered content with
+    /// `messages_by_ids` against this same snapshot. No state is cached across
+    /// snapshots, and incompatible message tables remain errors.
+    pub fn message_references(
+        &self,
+        chat: Option<&str>,
+        max_items: usize,
+    ) -> Result<Vec<MessageReference>> {
+        if max_items == 0 || max_items > 100_000 {
+            return Err(ProfileError::InvalidQuery);
+        }
+        if let Some(chat) = chat {
+            validate_name(chat)?;
+        }
+        let target = chat.map(|s| format!("Msg_{:x}", Md5::digest(s.as_bytes())));
+        let mut names: BTreeSet<String> = self.labels()?.into_keys().collect();
+        if let Some(chat) = chat {
+            names.insert(chat.to_owned());
+        }
+        let mut records = Vec::new();
+        let mut found = false;
+        for db in self
+            .snapshot
+            .inventory
+            .iter()
+            .filter(|v| shard(&v.relative_path))
+        {
+            if db.state != DatabaseState::Readable {
+                continue;
+            }
+            let schema = self
+                .schemas
+                .iter()
+                .find(|s| s.database == db.relative_path)
+                .ok_or(ProfileError::InvalidMetadata)?;
+            let c = self.snapshot.open(&db.relative_path)?;
+            names.extend(name_map(&c)?.into_values());
+            for table in schema.tables.iter().filter(|t| {
+                message_table(&t.name)
+                    && target
+                        .as_ref()
+                        .is_none_or(|wanted| wanted.eq_ignore_ascii_case(&t.name))
+            }) {
+                require_message_columns(table, &db.relative_path)?;
+                found = true;
+                let sql = format!(
+                    "SELECT local_id,create_time FROM {} LIMIT ?1",
+                    quote_identifier(&table.name)
+                );
+                let mut statement = c.prepare(&sql)?;
+                let mut rows = statement.query([max_items + 1 - records.len()])?;
+                while let Some(row) = rows.next()? {
+                    let local: i64 = row.get(0)?;
+                    let time: i64 = row.get(1)?;
+                    records.push((time, db.relative_path.clone(), table.name.clone(), local));
+                    if records.len() > max_items {
+                        return Err(ProfileError::ResourceLimit);
+                    }
+                }
+            }
+        }
+        if !found
+            && self
+                .snapshot
+                .inventory
+                .iter()
+                .any(|d| shard(&d.relative_path) && d.state != DatabaseState::Readable)
+        {
+            return Err(ProfileError::KeyUnavailable("message shards".into()));
+        }
+        let mut hashes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in names {
+            hashes
+                .entry(format!("{:x}", Md5::digest(name.as_bytes())))
+                .or_default()
+                .push(name);
+        }
+        records.sort_unstable_by(|a, b| b.cmp(a));
+        Ok(records
+            .into_iter()
+            .map(|(_, database, table, local)| {
+                let peer = hashes
+                    .get(&table[4..].to_ascii_lowercase())
+                    .filter(|v| v.len() == 1)
+                    .map(|v| v[0].clone());
+                MessageReference {
+                    id: SourceMessageId {
+                        database,
+                        table,
+                        local_id: local.to_string(),
+                    },
+                    peer,
+                }
+            })
+            .collect())
+    }
+
     pub fn messages(&self, q: &MessageQuery) -> Result<Page<Message>> {
         let n = limit(q.limit)?;
         if let Some(chat) = &q.chat {
@@ -500,23 +598,7 @@ impl ProfileReader {
                         .is_none_or(|wanted| wanted.eq_ignore_ascii_case(&t.name))
             }) {
                 let table_name = &table.name;
-                let required = [
-                    "local_id",
-                    "server_id",
-                    "local_type",
-                    "create_time",
-                    "real_sender_id",
-                    "message_content",
-                    "source",
-                    "WCDB_CT_message_content",
-                    "WCDB_CT_source",
-                ];
-                if !required
-                    .iter()
-                    .all(|n| table.columns.iter().any(|c| c.name == *n))
-                {
-                    return Err(ProfileError::UnsupportedSchema(db.relative_path.clone()));
-                }
+                require_message_columns(table, &db.relative_path)?;
                 found = true;
                 let (max_time, equal_mode, local_bound) =
                     if let Some((time, ref database, ref last_table, local)) = after {
@@ -1015,6 +1097,27 @@ fn message_order(m: &Message) -> (i64, &str, &str, i64) {
         &m.id.table,
         m.id.local_id.parse().unwrap_or(0),
     )
+}
+fn require_message_columns(table: &crate::TableSchema, database: &str) -> Result<()> {
+    let required = [
+        "local_id",
+        "server_id",
+        "local_type",
+        "create_time",
+        "real_sender_id",
+        "message_content",
+        "source",
+        "WCDB_CT_message_content",
+        "WCDB_CT_source",
+    ];
+    if required
+        .iter()
+        .all(|name| table.columns.iter().any(|c| c.name == *name))
+    {
+        Ok(())
+    } else {
+        Err(ProfileError::UnsupportedSchema(database.to_owned()))
+    }
 }
 
 pub(crate) fn protobuf_fields(b: &[u8]) -> Result<Vec<(u32, u8, &[u8])>> {

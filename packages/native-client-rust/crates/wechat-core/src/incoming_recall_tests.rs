@@ -1012,7 +1012,17 @@ fn native_official_recall_outside_quote_page_is_observed_before_embedded_fallbac
     )
     .unwrap();
     assert!(store.recall_marker("one", "peer", "200").unwrap().is_none());
-    let page = core.messages("one", "peer", Some(1), None).unwrap();
+    let page = core
+        .catalog_page(
+            "one",
+            "messages",
+            Some("peer"),
+            &crate::CatalogQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(page["items"][0]["body"], "Current comment");
     assert!(page["items"][0]["quote"].is_null());
     assert_eq!(
@@ -1162,26 +1172,16 @@ fn pending_own_replay_uses_source_tombstone_but_acknowledged_new_identity_remain
         .raw_fields
         .insert("status".into(), SqlValue::Integer("7".into()));
     assert_eq!(
-        core.normalize_recalled(
-            "one",
-            original.clone(),
-            Some("synthetic_self"),
-            reader.generation()
-        )
-        .unwrap()["body"],
+        core.normalize_recalled("one", original.clone(), Some("synthetic_self"), &reader)
+            .unwrap()["body"],
         crate::recalls::RECALLED_BODY
     );
     original
         .raw_fields
         .insert("status".into(), SqlValue::Integer("2".into()));
     assert_eq!(
-        core.normalize_recalled(
-            "one",
-            original.clone(),
-            Some("synthetic_self"),
-            reader.generation()
-        )
-        .unwrap()["body"],
+        core.normalize_recalled("one", original.clone(), Some("synthetic_self"), &reader)
+            .unwrap()["body"],
         "Own message"
     );
     original
@@ -1189,7 +1189,7 @@ fn pending_own_replay_uses_source_tombstone_but_acknowledged_new_identity_remain
         .insert("status".into(), SqlValue::Integer("7".into()));
     original.create_time += 1;
     assert_eq!(
-        core.normalize_recalled("one", original, Some("synthetic_self"), reader.generation())
+        core.normalize_recalled("one", original, Some("synthetic_self"), &reader)
             .unwrap()["body"],
         "Own message"
     );
@@ -1568,4 +1568,243 @@ fn unavailable_optional_author_evidence_still_returns_a_redacted_recall() {
         "Localized recall notice"
     );
     assert!(!value.to_string().contains("private body"));
+}
+
+#[test]
+fn quote_normalization_reuses_the_request_snapshot_and_still_checks_recall_receipts() {
+    let (_temporary, store, core) = fixture();
+    core.apply_sync_command(
+        "one",
+        &add(1, "peer", "synthetic_self", b"Original", 123, 100),
+        "original",
+        "live",
+    )
+    .unwrap();
+    let xml = b"<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>1</type><svrid>123</svrid><content>Original</content></refermsg></appmsg></msg>";
+    core.apply_sync_command(
+        "one",
+        &add(49, "peer", "synthetic_self", xml, 124, 101),
+        "reply",
+        "live",
+    )
+    .unwrap();
+    let reader = core.profile_reader("one").unwrap();
+    let parent = reader
+        .messages_by_server_id("peer", "124", Some("synthetic_self"))
+        .unwrap()
+        .pop()
+        .unwrap();
+    let (location, _) = core.profile_location_keys("one").unwrap();
+    let source = location.root().join("db_storage");
+    let moved = location.root().join("request-source-unavailable");
+    std::fs::rename(&source, &moved).unwrap();
+    // Once captured, this request can resolve quotes without touching the
+    // source again. Recall receipts remain live suppression evidence.
+    let first = core.normalize_recalled("one", parent.clone(), Some("synthetic_self"), &reader);
+    store
+        .record_recall("one", "peer", "123", None, None, None, "live")
+        .unwrap();
+    let recalled = core.normalize_recalled("one", parent, Some("synthetic_self"), &reader);
+    std::fs::rename(moved, source).unwrap();
+    let first = first.unwrap();
+    assert_eq!(first["quote"]["serverId"], "123");
+    assert_eq!(first["version"], reader.generation());
+    let recalled = recalled.unwrap();
+    assert!(recalled["quote"].is_null());
+    assert_eq!(recalled["body"], "Reply");
+}
+
+#[test]
+fn unfiltered_history_keeps_membership_while_search_and_later_pages_resolve_content() {
+    for thread in [Some("peer"), None] {
+        let (_temporary, _store, core) = fixture();
+        for (index, command) in [
+            add(1, "peer", "synthetic_self", b"Original", 123, 100),
+            add(49, "peer", "synthetic_self", b"<msg><appmsg><type>57</type><title>Needle reply</title><refermsg><type>1</type><svrid>123</svrid><content>Original</content></refermsg></appmsg></msg>", 124, 101),
+            add(1, "peer", "synthetic_self", b"Newest", 125, 102),
+        ].iter().enumerate() {
+            core.apply_sync_command("one", command, &format!("seed-{index}"), "live").unwrap();
+        }
+        let first = core
+            .catalog_page(
+                "one",
+                "messages",
+                thread,
+                &crate::CatalogQuery {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(first["items"][0]["serverId"], "125");
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        let search = core
+            .catalog_page(
+                "one",
+                "messages",
+                thread,
+                &crate::CatalogQuery {
+                    limit: Some(1),
+                    search: Some("Needle".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(search["items"][0]["serverId"], "124");
+        assert_eq!(search["items"][0]["body"], "Needle reply");
+        assert_eq!(search["items"][0]["quote"]["serverId"], "123");
+        core.apply_confirmed_recall_with_notice(
+            "one",
+            "peer",
+            "124",
+            None,
+            Some("Server recall notice"),
+            "live",
+            "between-pages",
+        )
+        .unwrap();
+        core.apply_sync_command(
+            "one",
+            &add(1, "peer", "synthetic_self", b"Late arrival", 126, 200),
+            "late",
+            "live",
+        )
+        .unwrap();
+        let next = core
+            .catalog_page(
+                "one",
+                "messages",
+                thread,
+                &crate::CatalogQuery {
+                    limit: Some(2),
+                    cursor: Some(first["nextCursor"].as_str().unwrap().into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(next["items"][0]["serverId"], "124");
+        assert_eq!(next["items"][0]["body"], crate::recalls::RECALLED_BODY);
+        assert_eq!(
+            next["items"][0]["recall"]["replacementText"],
+            "Server recall notice"
+        );
+        assert_eq!(next["items"][1]["serverId"], "123");
+        assert_eq!(next["items"][1]["body"], "Original");
+        assert!(next["nextCursor"].is_null());
+    }
+}
+
+#[test]
+fn history_does_not_load_off_page_bodies() {
+    let (temporary, _store, core) = fixture();
+    for (server, time) in [(123, 100), (124, 101)] {
+        core.apply_sync_command(
+            "one",
+            &add(1, "peer", "synthetic_self", b"body", server, time),
+            &format!("seed-{server}"),
+            "live",
+        )
+        .unwrap();
+    }
+    let newest = first(&core);
+    let source = crate::source_message_id(newest["id"].as_str().unwrap()).unwrap();
+    let db = synthetic_database(&core, &temporary, &source.database);
+    db.execute(
+        &format!(
+            "UPDATE {} SET message_content=zeroblob(17825792) WHERE server_id=123",
+            source.table
+        ),
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let page = core
+        .catalog_page(
+            "one",
+            "messages",
+            None,
+            &crate::CatalogQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(page["items"][0]["serverId"], "124");
+    assert_eq!(page["items"][0]["body"], "body");
+    // The oversized row still fails when actually requested; its contents must
+    // not be silently truncated, dropped from membership, or cached as a body.
+    assert!(core
+        .catalog_page(
+            "one",
+            "messages",
+            None,
+            &crate::CatalogQuery {
+                limit: Some(1),
+                cursor: Some(page["nextCursor"].as_str().unwrap().into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+}
+
+/// Opt-in timing gate for a quiet release builder. Ordinary CI exercises the
+/// deterministic off-page-body and snapshot-reuse regressions above instead.
+#[test]
+#[ignore = "run on a quiet release builder; see FEATURES.md"]
+fn history_latency_benchmark() {
+    if cfg!(debug_assertions) {
+        eprintln!("Use --release for comparable history timings.");
+    }
+    let (temporary, _store, core) = fixture();
+    let quote = b"<msg><appmsg><type>57</type><title>Benchmark reply</title><refermsg><type>1</type><svrid>123</svrid><content>Original</content></refermsg></appmsg></msg>";
+    core.apply_sync_command(
+        "one",
+        &add(1, "peer", "synthetic_self", b"Original", 123, 100),
+        "original",
+        "live",
+    )
+    .unwrap();
+    core.apply_sync_command(
+        "one",
+        &add(49, "peer", "synthetic_self", quote, 124, 101),
+        "quote",
+        "live",
+    )
+    .unwrap();
+    let source = crate::source_message_id(first(&core)["id"].as_str().unwrap()).unwrap();
+    let db = synthetic_database(&core, &temporary, &source.database);
+    db.execute_batch(&format!("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO {}(server_id,local_type,real_sender_id,create_time,message_content,source,WCDB_CT_message_content,WCDB_CT_source) SELECT 1000+x,local_type,real_sender_id,101+x,message_content,source,WCDB_CT_message_content,WCDB_CT_source FROM {},n WHERE server_id=124",source.table,source.table)).unwrap();
+    drop(db);
+    let budget = std::env::var("WECHAT_HISTORY_P95_MS")
+        .map(|s| s.parse::<u128>().expect("millisecond budget"))
+        .unwrap_or(100);
+    for thread in [Some("peer"), None] {
+        let query = crate::CatalogQuery {
+            limit: Some(20),
+            ..Default::default()
+        };
+        core.catalog_page("one", "messages", thread, &query)
+            .unwrap();
+        let mut timings = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let first = core
+                .catalog_page("one", "messages", thread, &query)
+                .unwrap();
+            timings.push(started.elapsed().as_micros());
+            assert_eq!(first["items"].as_array().unwrap().len(), 20);
+            assert_eq!(first["items"][0]["quote"]["serverId"], "123");
+        }
+        timings.sort_unstable();
+        eprintln!(
+            "history scope={} rows=2002 page=20 samples=20 p50_us={} p95_us={}",
+            thread.unwrap_or("account"),
+            timings[9],
+            timings[18]
+        );
+        assert!(
+            timings[18] < budget * 1000,
+            "history p95 exceeded {budget} ms"
+        );
+    }
 }

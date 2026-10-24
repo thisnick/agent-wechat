@@ -237,7 +237,7 @@ impl Core {
         }
         Ok(response(
             "resolved",
-            self.normalize_recalled(account, original, own.as_deref(), reader.generation())?,
+            self.normalize_recalled(account, original, own.as_deref(), &reader)?,
         ))
     }
 }

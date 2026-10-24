@@ -586,20 +586,14 @@ impl Core {
         account: &str,
         mut msg: wechat_profile::Message,
         own: Option<&str>,
-        generation: &str,
+        reader: &wechat_profile::ProfileReader,
     ) -> Result<Value> {
         let recalled = self.observe_profile_recall(account, &msg)?;
         let quoted_recalled = if let (Some(thread), Some((server, _))) = (
             msg.peer.as_deref(),
             crate::quotes::message_app(&msg).and_then(|app| app.reference),
         ) {
-            self.quote_is_recalled(
-                account,
-                thread,
-                &server,
-                &self.profile_reader(account)?,
-                own,
-            )?
+            self.quote_is_recalled(account, thread, &server, reader, own)?
         } else {
             false
         };
@@ -625,7 +619,7 @@ impl Core {
         } else {
             None
         };
-        let mut value = crate::profile::normalized_message(account, msg, own, generation)?;
+        let mut value = crate::profile::normalized_message(account, msg, own, reader.generation())?;
         if let Some(marker) = recalled {
             value["threadId"] = json!(marker.thread_id);
             value["peerId"] = json!(marker.thread_id);

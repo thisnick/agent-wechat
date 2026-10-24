@@ -107,6 +107,83 @@ fn discovers_all_shards_and_uses_each_name_map() {
     assert_ne!(p.items[0].id, p.items[3].id);
     assert_eq!(p.items[0].server_id_signed.as_deref(), Some("103"));
 }
+
+#[test]
+fn history_references_match_full_order_and_never_decode_bodies() {
+    let d = fixture();
+    let table = format!("Msg_{:x}", Md5::digest(b"peer"));
+    let c = Connection::open(d.path().join("account/db_storage/message/message_0.db")).unwrap();
+    // More than a page, including equal timestamps in different shards.
+    c.execute_batch(&format!("WITH RECURSIVE n(x) AS (SELECT 4 UNION ALL SELECT x+1 FROM n WHERE x<450) INSERT INTO {table}(local_id,server_id,local_type,real_sender_id,create_time,message_content) SELECT x,x,1,2,100+x,'body' FROM n")).unwrap();
+    drop(c);
+    let r = reader(d.path());
+    for chat in [None, Some("peer")] {
+        let mut cursor = None;
+        let mut full = Vec::new();
+        loop {
+            let page = r
+                .messages(&MessageQuery {
+                    chat: chat.map(str::to_owned),
+                    cursor,
+                    limit: Some(200),
+                    ..Default::default()
+                })
+                .unwrap();
+            full.extend(page.items.into_iter().map(|m| (m.id, m.peer)));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let references = r.message_references(chat, 453).unwrap();
+        assert_eq!(
+            references
+                .into_iter()
+                .map(|m| (m.id, m.peer))
+                .collect::<Vec<_>>(),
+            full
+        );
+        assert!(matches!(
+            r.message_references(chat, 452),
+            Err(ProfileError::ResourceLimit)
+        ));
+    }
+    assert!(r
+        .message_references(Some("absent"), 453)
+        .unwrap()
+        .is_empty());
+    drop(r);
+
+    // A body larger than the reader's per-value limit must not be touched when
+    // capturing membership. This fails if SELECT * / body decoding returns.
+    let c = Connection::open(d.path().join("account/db_storage/message/message_0.db")).unwrap();
+    c.execute(
+        &format!("UPDATE {table} SET message_content=zeroblob(8192) WHERE local_id=1"),
+        [],
+    )
+    .unwrap();
+    drop(c);
+    let r = ProfileReader::open(
+        ProfileLocation::new(d.path().join("account")).unwrap(),
+        KeyFile::empty("account"),
+        ReadOptions {
+            max_blob_bytes: 4096,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.message_references(None, 453).unwrap().len(), 453);
+    assert!(r
+        .messages_by_ids(
+            &[SourceMessageId {
+                database: "message/message_0.db".into(),
+                table,
+                local_id: "1".into()
+            }],
+            None
+        )
+        .is_err());
+}
 #[test]
 fn server_id_lookup_is_chat_scoped_unsigned_and_reports_ambiguity() {
     let d = fixture();

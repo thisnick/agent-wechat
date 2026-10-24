@@ -169,7 +169,7 @@ impl Core {
         let items = page
             .items
             .into_iter()
-            .map(|msg| self.normalize_recalled(account, msg, own.as_deref(), reader.generation()))
+            .map(|msg| self.normalize_recalled(account, msg, own.as_deref(), &reader))
             .collect::<Result<Vec<_>>>()?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
@@ -182,7 +182,7 @@ impl Core {
             account,
             reader.message(&source_message_id(id)?, own.as_deref())?,
             own.as_deref(),
-            reader.generation(),
+            &reader,
         )
     }
     pub fn image(
