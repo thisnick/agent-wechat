@@ -13,7 +13,7 @@ import { createWeChatMediaHandlers, wechatMediaActions } from "./outbound-option
 import { nativeConfigSchema } from "./native-config.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { startNativeMonitor } from "./native-monitor.ts";
-import { nativeLoginStart, nativeLoginWait, sendNativeText, createNativeLoginTool } from "./native-login.ts";
+import { nativeLoginStart, nativeLoginWait, sendNativeText } from "./native-login.ts";
 
 async function sendWeChatText(cfg: unknown, to: string, text: string) {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
@@ -219,7 +219,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     loginWithQrWait: async ({ accountId, timeoutMs }) => {
       const account = resolveWeChatAccount(getWeChatRuntime().config.current() as Record<string, unknown>, accountId ?? undefined);
       if (!account?.native) return { connected: false, message: "No native daemon configured" };
-      return nativeLoginWait(account.accountId, timeoutMs);
+      return nativeLoginWait(account, timeoutMs);
     },
   },
   auth: {
@@ -242,10 +242,6 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       linked: runtime?.linked ?? false,
     }),
   },
-  agentTools: (({ cfg }: { cfg?: any }) => {
-    const account = resolveWeChatAccount(cfg as Record<string, unknown>);
-    return account?.native ? [createNativeLoginTool(account)] : [];
-  }) as any,
   directory: {
     self: async ({ cfg }) => {
       const account = resolveWeChatAccount(cfg as Record<string, unknown>);

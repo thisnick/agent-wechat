@@ -11,6 +11,7 @@ import { registerNativeHistoryTools } from "./src/native-history-tools.js";
 import { registerNativeShareTools } from "./src/native-share-tool.js";
 import { registerNativeRecallTools } from "./src/native-recall-tools.js";
 import { registerNativeGroupTools } from "./src/native-group-tool.js";
+import { registerNativeLoginTool } from "./src/native-login.js";
 
 const plugin: {
   id: string;
@@ -31,6 +32,7 @@ const plugin: {
     registerNativeShareTools(api);
     registerNativeRecallTools(api);
     registerNativeGroupTools(api);
+    registerNativeLoginTool(api);
     const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
     const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
       ? registerNativePreparedBoundary(api) : () => {};

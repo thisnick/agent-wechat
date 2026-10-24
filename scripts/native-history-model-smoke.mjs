@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
@@ -15,7 +16,7 @@ const { build } = createRequire(join(root, 'packages/openclaw-extension/package.
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
 assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.2');
 const temporary = await mkdtemp(join(tmpdir(), 'native-history-model-'));
-const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0;
+const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0, loginStarts = 0, loginQrReads = 0;
 const token = 'synthetic-native-token-'.repeat(3), assets = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 for (const [id, file, kind, mime] of [['image-a','native-model.png','image','image/png'], ['image-b','native-model-large.png','image','image/png'], ['dm-image','native-model.png','image','image/png'], ['image-file','native-model.png','file','image/png'], ['video','native-model.mp4','video','video/mp4'], ['voice',null,'voice','audio/wav'], ['file',null,'file','text/plain'], ['pending-image','native-model.png','image','image/png'], ['history-image','native-model.png','image','image/png'], ['history-file',null,'file','text/plain']]) {
@@ -25,12 +26,17 @@ for (const [id, file, kind, mime] of [['image-a','native-model.png','image','ima
   else bytes = Buffer.from('Synthetic stored attachment body');
   assets.set(id, { bytes, asset: { id: `asset-${id}`, accountId: 'a', messageId: id, kind, variant: kind === 'image' ? 'original' : 'normal', actualVariant: kind === 'image' ? 'original' : 'normal', state: ['pending-image','history-image'].includes(id) ? 'pending' : 'available', contentType: mime, byteLength: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), filename: `${id}.${mime.split('/')[1]}`, officialWriteback: 'complete', retryable: false } });
 }
+const link = { title:'Article title', description:'Article description', url:'https://example.com/article?a=1&b=2', sourceName:null };
+const linkBody = '[Link] Article title\nArticle description\nhttps://example.com/article?a=1&b=2';
 const quoteScenarios = [
   { id:'quote-text', type:49, appMessageType:57, mention:true, body:'Comment about quoted text', quote:{serverId:'18446744073709551615',type:1} },
   { id:'quote-image', type:49, appMessageType:57, mention:true, body:'Comment about quoted image', quote:{serverId:'9007199254740998',type:3} },
   { id:'quote-embedded-text', type:49, appMessageType:57, threadId:'u1', body:'Embedded text comment', quote:{serverId:'9007199254740997',type:1} },
   { id:'quote-embedded-image', type:49, appMessageType:57, mention:true, body:'Embedded image comment', quote:{serverId:'9007199254740996',type:3} },
   { id:'forwarded-bundle', type:49, appMessageType:19, mention:true, body:'[Chat History] Shared discussion\nAlice: Forwarded text\nBob: [media]\n  Carol: Nested forwarded text' },
+  { id:'link-card', type:49, appMessageType:5, mention:true, body:linkBody, link },
+  { id:'quote-link', type:49, appMessageType:57, mention:true, body:'Explain this linked article', quote:{serverId:'9007199254740995',type:49} },
+  { id:'quote-embedded-link', type:49, appMessageType:57, threadId:'u1', body:'Explain this embedded link', quote:{serverId:'9007199254740994',type:49} },
 ];
 {
   const id='quoted-original-image',source=assets.get('dm-image');
@@ -47,11 +53,20 @@ const quoteScenarios = [
   assets.set(id,{bytes,previewBytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.wxgf`,contentType:'image/x-wxgf',byteLength:bytes.length,sha256,animationFrames:null,
     preview:{sourceSha256:sha256,contentType:'image/jpeg',byteLength:previewBytes.length,sha256:createHash('sha256').update(previewBytes).digest('hex'),filename:`${id}.still.jpg`,contentUrl:`/v1/accounts/a/media/asset-${id}/content?representation=preview`}}});
 }
+{
+  const id='login-qr',source=assets.get('dm-image');
+  const text=Buffer.from(`Comment\0${id}`),chunk=Buffer.alloc(text.length+12);chunk.writeUInt32BE(text.length,0);chunk.write('tEXt',4);text.copy(chunk,8);chunk.writeUInt32BE(crc32(chunk.subarray(4,-4)),chunk.length-4);
+  const bytes=Buffer.concat([source.bytes.subarray(0,-12),chunk,source.bytes.subarray(-12)]);
+  assets.set(id,{bytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.png`,byteLength:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
+  assets.set('link-card',{bytes:Buffer.alloc(0),asset:{...source.asset,id:'asset-link-card',messageId:'link-card',variant:'thumbnail',actualVariant:'thumbnail',state:'unsupported',byteLength:null,sha256:null,reason:'link_thumbnail_missing'}});
+}
 const quoteResolutions = {
   'quote-text':{state:'resolved',message:{id:'quoted-original-text',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'18446744073709551615',direction:'incoming',type:1,body:'Quoted original stored text',version:'v1'}},
   'quote-image':{state:'resolved',message:{id:'quoted-original-image',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'9007199254740998',direction:'incoming',type:3,version:'v1'}},
   'quote-embedded-text':{state:'embedded',message:null,senderId:'u1',embeddedText:'Quoted embedded text with no original row',embeddedImage:false},
   'quote-embedded-image':{state:'embedded',message:null,senderId:'u1',embeddedImage:true},
+  'quote-link':{state:'resolved',message:{id:'quoted-original-link',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'9007199254740995',direction:'incoming',type:49,appMessageType:5,body:linkBody,link,version:'v1'}},
+  'quote-embedded-link':{state:'embedded',message:null,senderId:'u1',embeddedText:linkBody,embeddedImage:false},
 };
 const toolSteps = [
   ['tool_search', { query:'wechat_search search stored WeChat conversation messages', limit:4 }],
@@ -60,7 +75,11 @@ const toolSteps = [
   ['wechat_media', { messageId:'foreign-image' }],
   ['wechat_media', { messageId:'history-image' }],
   ['wechat_media', { messageId:'history-file', download:false }],
+  ['wechat_login', { action:'status' }],
+  ['wechat_login', { action:'start', timeoutMs:5000 }],
+  ['wechat_login', { action:'wait', timeoutMs:1000 }],
 ];
+const loginOperation = () => ({id:'login-operation',accountId:'a',kind:'login',state:loginQrReads?'succeeded':'qr_ready',result:{qrAvailable:!loginQrReads,qrGeneration:1},createdAt:'2026-10-24T12:00:00Z',updatedAt:'2026-10-24T12:00:00Z'});
 const upstream = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://fixture');
@@ -68,6 +87,8 @@ const upstream = createServer(async (req, res) => {
     const json = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
     if (url.pathname === '/v1/status') return json({ serverId: 'fixture', dataDir: '/fixture', pid: process.pid, ownershipGeneration: 'fixture', state: 'running', version: { product: 'agent-wechat', backend: 'native', version: '1.0.0', apiVersion: 1, capabilities: ['serve','events','profile-read','text-send','native-login'] } });
     if (url.pathname === '/v1/accounts/a') return json({ id: 'a', authenticated: true, connection: 'online' });
+    if (url.pathname === '/v1/accounts/a/operations/login-operation') return json(loginOperation());
+    if (url.pathname === '/v1/accounts/a/operations/login-operation/qr') { assert.equal(url.searchParams.get('generation'),'1');loginQrReads++;res.setHeader('content-type','image/png');res.end(assets.get('login-qr').bytes);return; }
     if (url.pathname === '/v1/accounts/a/threads') return json({ items: ['room@chatroom','u1'].map(id => ({ id, readStateVersion: '1' })), nextCursor: null, coverage: {} });
     if (url.pathname === '/v1/accounts/a/events') return json({ items: [], nextCursor: '0' });
     if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
@@ -97,6 +118,7 @@ const upstream = createServer(async (req, res) => {
       else {res.setHeader('content-type',value.asset.contentType);res.end(value.bytes);}return;
     }
     let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 8 * 1024 * 1024); }
+    if (url.pathname === '/v1/accounts/a/auth/login') { loginStarts++;assert.equal(JSON.parse(raw).allowQr,true);assert.ok(req.headers['idempotency-key']);return json(loginOperation()); }
     if (url.pathname.endsWith('/media-transfers')) {
       if(url.pathname.includes('/history-image/')) { transfers.push(JSON.parse(raw)); assets.get('history-image').asset.state='available'; return json({id:'history-transfer',accountId:'a',kind:'download',state:'available',retryable:false}); }
       assert.ok(url.pathname.includes('/pending-image/'),'Only authorized missing media may request a transfer'); return json({ id: 'pending-job', state: 'queued' });
@@ -115,10 +137,18 @@ const upstream = createServer(async (req, res) => {
         if (modelStep === 3) assert.ok(JSON.stringify(body.messages).includes('older-page-2'), 'Continuation result missing from provider request');
         if (modelStep === 4) assert.ok(JSON.stringify(body.messages).includes('outside the permitted conversation'), 'Foreign message lookup was not rejected');
         if (modelStep === 5) assert.ok(JSON.stringify(body.messages).includes('history-image.png'), 'Downloaded image result missing from provider request');
+        if (modelStep === 6) assert.ok(JSON.stringify(body.messages).includes('history-file.plain'), 'Cached file result missing from provider request');
+        if (modelStep === 8) {
+          const expected=assets.get('login-qr').asset.sha256;
+          assert.ok(body.messages.flatMap(message=>Array.isArray(message.content)?message.content:[]).some(block=>{
+            const encoded=block.type==='image_url'&&/^data:([^;]+);base64,(.+)$/.exec(block.image_url.url);
+            return encoded&&createHash('sha256').update(Buffer.from(encoded[2],'base64')).digest('hex')===expected;
+          }),'Exact daemon login QR image missing from provider request');
+        }
         res.write(chunk({ role:'assistant', tool_calls:[{ index:0, id:`fixture-search-${modelStep++}`, type:'function', function:{ name:requestedTool, arguments:JSON.stringify(args) } }] }, null));
         res.write(chunk({}, 'tool_calls'));
       } else {
-        if (modelStep === toolSteps.length) assert.ok(JSON.stringify(body.messages).includes('history-file.plain'), 'Cached file result missing from provider request');
+        if (modelStep === toolSteps.length) assert.ok(JSON.stringify(body.messages).includes('Native login succeeded'), 'Login wait result missing from provider request');
         modelStep++; res.write(chunk({role:'assistant',content:'Located the stored project notes and attachment paths.'}, null)); res.write(chunk({}, 'stop'));
       }
       res.end('data: [DONE]\n\n'); return;
@@ -135,7 +165,8 @@ try {
   const transcriber=join(temporary,'transcribe.mjs'); await writeFile(transcriber, "console.log('Synthetic historical voice transcript');\n");
   const native={mode:'external',accountId:'a',endpoint:`http://127.0.0.1:${apiPort}`,token:{source:'env',provider:'default',id:'AGENT_WECHAT_TOKEN'},consumerStateDir:join(temporary,'consumer'),readPolicy:'on_inbound'};
   const config={gateway:{mode:'local',bind:'loopback',port,auth:{mode:'token',token:'synthetic-gateway-token-'.repeat(3)},controlUi:{enabled:false}},browser:{enabled:false},cron:{enabled:false},discovery:{mdns:{mode:'off'}},update:{checkOnStart:false},session:{dmScope:'per-channel-peer'},
-    models:{mode:'merge',providers:{fixture:{baseUrl:`http://127.0.0.1:${apiPort}/model/v1`,api:'openai-completions',apiKey:'synthetic-model-key',models:[{id:'fixture-model',name:'Fixture',reasoning:false,input:['text','image'],contextWindow:32768,maxTokens:256,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}},
+    // The longer tool/quote transcript must fit without unrelated auto-compaction.
+    models:{mode:'merge',providers:{fixture:{baseUrl:`http://127.0.0.1:${apiPort}/model/v1`,api:'openai-completions',apiKey:'synthetic-model-key',models:[{id:'fixture-model',name:'Fixture',reasoning:false,input:['text','image'],contextWindow:65536,maxTokens:256,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}},
     tools:{media:{models:[{type:'cli',command:process.execPath,args:[transcriber,'{{MediaPath}}'],capabilities:['audio']}],audio:{enabled:true},image:{enabled:false},video:{enabled:false}}},agents:{defaults:{workspace:join(temporary,'workspace'),model:{primary:'fixture/fixture-model',fallbacks:[]}}},
     plugins:{allow:['agent-wechat'],load:{paths:[join(temporary,'plugin')]},entries:{'agent-wechat':{enabled:true,config:{native}}}},channels:{'agent-wechat':{enabled:true,dmPolicy:'allowlist',allowFrom:['u1'],groupPolicy:'allowlist',groupAllowFrom:['u1']}}};
   const scenarios=[{id:'earlier-text',type:1,body:'Earlier group discussion'},...['image-a','file','image-file','video','voice','image-b','pending-image'].map(id=>({id,type:id==='image-file'||id==='file'?49:id.includes('image')?3:id==='video'?43:34,body:'<private transport XML>'})),{id:'trigger',type:1,mention:true,body:'Search earlier-project-note in this conversation.'},{id:'dm-image',type:3,threadId:'u1',body:'<private transport XML>'},...quoteScenarios];
@@ -148,7 +179,8 @@ try {
   if(evidence){await mkdir(evidence,{recursive:true,mode:0o700});await writeFile(join(evidence,'observations.json'),JSON.stringify({result,requests,queries,reads,transfers,lookups,log}),{mode:0o600});}
   assert.ifError(fixtureError); assert.ok(result,`Gateway deadline: ${log}`); assert.equal(result.error,undefined,`${result.error}; ${log}`);
   for(const scenario of scenarios)assert.equal(result.outcomes[scenario.id],['trigger','dm-image',...quoteScenarios.map(value=>value.id)].includes(scenario.id)?'completed':'ignored');
-  assert.equal(requests.length,13); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,7);
+  assert.equal(requests.length,toolSteps.length+2+quoteScenarios.length); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,2+quoteScenarios.length);
+  assert.equal(loginStarts,1);assert.equal(loginQrReads,1);
   assert.deepEqual([...new Set(lookups)],['foreign-image','history-image','history-file']);
   assert.ok(lookups.filter(id=>id==='history-image').length>1,'Media must recheck its exact message after asynchronous retrieval');
   assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
@@ -158,14 +190,16 @@ try {
   const trigger=result.items.find(item=>item.message.id==='trigger'),selected=trigger.dispatchManifest.assets.find(asset=>asset.role==='model_image');assert.equal(selected.messageId,'image-b');assert.equal(selected.contextRole,'history');assert.notEqual(selected.sha256,selected.sourceSha256);assert.equal(group.MediaPath,selected.path);
   const images=request=>request.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='image_url'):[]);
   assert.equal(images(requests[0]).length,1);const image=/^data:([^;]+);base64,(.+)$/.exec(images(requests[0])[0].image_url.url);assert.equal(createHash('sha256').update(Buffer.from(image[2],'base64')).digest('hex'),selected.sha256);
-  assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(requests[7].messages).includes(direct.Attachments[0].path));assert.equal(images(requests[7]).length,1);
+  const directRequest=requests[toolSteps.length+1];
+  assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(directRequest.messages).includes(direct.Attachments[0].path));assert.equal(images(directRequest).length,1);
   assert.equal(images(requests[5]).length,2);const retrieved=/^data:([^;]+);base64,(.+)$/.exec(images(requests[5])[1].image_url.url);assert.ok(retrieved);assert.equal(createHash('sha256').update(Buffer.from(retrieved[2],'base64')).digest('hex'),assets.get('history-image').asset.sha256);
   for(let index=0;index<quoteScenarios.length;index++) {
-    const scenario=quoteScenarios[index],request=requests[8+index];
+    const scenario=quoteScenarios[index],request=requests[toolSteps.length+2+index];
     const providerText=request.messages.flatMap(message=>typeof message.content==='string'?[message.content]:Array.isArray(message.content)?message.content.filter(block=>block.type==='text').map(block=>block.text):[]).join('\n');
     assert.ok(providerText.includes(scenario.body),'Quote comment or forwarded bundle missing from provider');
     if(scenario.id==='quote-text')assert.ok(JSON.stringify(request.messages).includes('Quoted original stored text'));
     if(scenario.id==='quote-embedded-text')assert.ok(JSON.stringify(request.messages).includes('Quoted embedded text with no original row'));
+    if(['link-card','quote-link','quote-embedded-link'].includes(scenario.id))assert.ok(providerText.includes(linkBody),'Link card title, description or URL missing from provider');
     const isImage=['quote-image','quote-embedded-image'].includes(scenario.id);
     const context=result.contexts.find(ctx=>ctx.MessageSid.startsWith(`wechat-native:a:${scenario.id}:`));
     assert.equal(!!context.MediaPath,isImage);
@@ -187,7 +221,7 @@ try {
   }
   const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
-  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,reads:reads.length}));
+  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,ordinaryLinkCardReachedProvider:true,storedAndEmbeddedQuotedLinksReachedProvider:true,loginStatusStartWait:true,loginQrHashReachedProvider:true,loginStarts,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   for(const stream of streams)stream.destroy();await new Promise(resolve=>upstream.close(resolve));upstream.closeAllConnections();await rm(temporary,{recursive:true,force:true});

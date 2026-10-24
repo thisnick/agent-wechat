@@ -166,14 +166,14 @@ async function prepareNativeQuote(params: NativePrepareMediaParams): Promise<Nat
   if (resolution.state === "recalled" || resolution.message && nativeRecallInfo(resolution.message)) return { ...unavailable("recalled"), retryable: false, reason: "message_recalled" };
   if (!message.quote) return unavailable("invalid");
   if (resolution.state === "embedded") {
-    if (resolution.message != null || (message.quote.type === 1 ? typeof resolution.embeddedText !== "string" || resolution.embeddedText.length > 16384
+    if (resolution.message != null || ([1, 49].includes(message.quote.type) ? typeof resolution.embeddedText !== "string" || resolution.embeddedText.length > 16384
       : message.quote.type !== 3 || resolution.embeddedImage !== true)) throw Error("Invalid embedded quote resolution");
     const author = { senderId: resolution.senderId ?? null, direction: null };
     if (params.allowQuotedMessage && !await params.allowQuotedMessage(author)) return unavailable("not permitted");
     guard();
     const quote = { state: "embedded", senderId: resolution.senderId ?? undefined, type: message.quote.type };
-    const prefix = `${comment}${comment ? "\n\n" : ""}[Quoted ${message.quote.type === 3 ? "image" : "text"} from ${resolution.senderId ?? "unknown sender"}; embedded in quote, original not stored]\n`;
-    if (message.quote.type === 1) return { body: `${prefix}${resolution.embeddedText}\n[/Quoted message]`, pending: false, quote };
+    const prefix = `${comment}${comment ? "\n\n" : ""}[Quoted ${message.quote.type === 3 ? "image" : message.quote.type === 49 ? "link" : "text"} from ${resolution.senderId ?? "unknown sender"}; embedded in quote, original not stored]\n`;
+    if (message.quote.type !== 3) return { body: `${prefix}${resolution.embeddedText}\n[/Quoted message]`, pending: false, quote };
     const beforeMediaAccess = async () => {
       await params.beforeMediaAccess?.(); guard();
       if (params.allowQuotedMessage && !await params.allowQuotedMessage(author)) throw Error("Quoted message is no longer permitted");
@@ -191,12 +191,13 @@ async function prepareNativeQuote(params: NativePrepareMediaParams): Promise<Nat
   }
   const original = resolution.message;
   if (!original || original.accountId !== message.accountId || original.threadId !== message.threadId || original.id === message.id
-    || original.serverId !== message.quote.serverId || original.type !== message.quote.type || ![1, 3].includes(original.type)) throw Error("Native quoted original crosses its message boundary");
+    || original.serverId !== message.quote.serverId || original.type !== message.quote.type || ![1, 3, 49].includes(original.type)
+    || (original.type === 49 && (original.appMessageType !== 5 || !original.body))) throw Error("Native quoted original crosses its message boundary");
   if (params.allowQuotedMessage && !await params.allowQuotedMessage(original)) return unavailable("not permitted");
   guard();
   const quote = { state: "resolved", messageId: original.id, senderId: original.senderId ?? undefined, type: original.type };
-  const prefix = `${comment}${comment ? "\n\n" : ""}[Quoted ${original.type === 3 ? "image" : "text"} from ${original.senderId ?? "unknown sender"}; message ${original.id}]\n`;
-  if (original.type === 1) return { body: `${prefix}${(original.body ?? "").slice(0, 16384)}\n[/Quoted message]`, pending: false, quote };
+  const prefix = `${comment}${comment ? "\n\n" : ""}[Quoted ${original.type === 3 ? "image" : original.type === 49 ? "link" : "text"} from ${original.senderId ?? "unknown sender"}; message ${original.id}]\n`;
+  if (original.type !== 3) return { body: `${prefix}${(original.body ?? "").slice(0, 16384)}\n[/Quoted message]`, pending: false, quote };
   const beforeMediaAccess = async () => {
     await params.beforeMediaAccess?.(); guard();
     if (params.allowQuotedMessage && !await params.allowQuotedMessage(original)) throw Error("Quoted message is no longer permitted");

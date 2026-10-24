@@ -18,6 +18,16 @@ Besides replying, the agent gets tools for the **current chat**. They can't see 
 
 For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
 
+## Log in through your agent
+
+`wechat_login` works from another channel while WeChat is offline, if your agent's tool policy allows it:
+
+1. Call `{"action":"status"}` to check the configured account.
+2. Call `{"action":"start"}` and show the returned QR image. Scan it and approve on your phone.
+3. Call `{"action":"wait","timeoutMs":30000}` to check completion. The result includes the operation ID, state and `connected` status.
+
+Repeating `start` follows the current login. For a new login, `force: true` uses a QR instead of saved trust. `disconnect` keeps saved trust; `logout` logs out; `forget` with `confirm: true` removes local authentication but keeps history. The tool needs the `login` [token scope](/reference/tokens/).
+
 ## Group information for the owner
 
 `wechat_group_info` reads a group and one page of cached members, or one exact member with `username`. It requires OpenClaw's trusted owner/admin invocation context and the daemon's `read` scope. Group ownership does not grant this permission. Allow the tool for your owner-facing agent; it cannot create groups or change settings.

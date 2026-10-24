@@ -188,7 +188,7 @@ pub(crate) fn forwarded_body(msg: &wechat_profile::Message) -> Option<String> {
 impl Core {
     /// The parent message fixes the account and conversation. Embedded fromusr,
     /// chatusr fields never broaden lookup. With no local original, bounded
-    /// embedded text or image metadata stays attached to the parent quote.
+    /// embedded text, link cards or image metadata stay attached to the parent quote.
     pub fn quoted_message(&self, account: &str, id: &str) -> Result<Value> {
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
@@ -215,9 +215,24 @@ impl Core {
             return Ok(response("ambiguous", Value::Null));
         }
         let Some(original) = matches.pop() else {
+            let link = (kind == 49)
+                .then(|| {
+                    let content = app.embedded.as_deref()?;
+                    let content = app
+                        .sender_id
+                        .as_ref()
+                        .and_then(|sender| content.strip_prefix(&format!("{sender}:\n")))
+                        .unwrap_or(content);
+                    app_message(content)
+                        .filter(|a| a.subtype == 5)?
+                        .link
+                        .map(|link| link.card.body())
+                })
+                .flatten();
             let text = (kind == 1)
                 .then_some(app.embedded.as_deref())
                 .flatten()
+                .or(link.as_deref())
                 .filter(|s| !s.is_empty() && s.len() <= 16384);
             let image = kind == 3 && quoted_image_content(&parent).is_some();
             if text.is_some() || image {
@@ -245,8 +260,10 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const LINK: &str = "<msg><appmsg><type>5</type><title><![CDATA[Article <title>]]></title><des>A &amp; B</des><url>https://example.com/article?a=1&amp;b=2</url><appattach><cdnattachurl>private-transport</cdnattachurl></appattach></appmsg></msg>";
+
     #[test]
-    fn resolves_text_and_images_from_parent_chat_without_using_embedded_content() {
+    fn resolves_text_images_and_links_from_parent_chat() {
         use md5::Digest;
         use std::sync::Arc;
         let temp = tempfile::tempdir().unwrap();
@@ -296,6 +313,30 @@ mod tests {
             ],
         )
         .unwrap();
+        let insert_app = |local: i64, subtype: i64, content: &str| {
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(?1,?1,?2,?1,3,?3,'',0,0)"),
+                rusqlite::params![local, (subtype << 32) | 49, content],
+            )
+            .unwrap();
+        };
+        insert_app(18, 5, &format!("sender:\n{LINK}"));
+        for (local, server, content) in [
+            (19, 18, "forged embedded text".to_owned()),
+            (20, 997, format!("sender:\n{LINK}")),
+            (
+                23,
+                996,
+                "<msg><appmsg><type>6</type><title>file</title></appmsg></msg>".to_owned(),
+            ),
+        ] {
+            let escaped = content
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            insert_app(local, 57, &format!("<msg><appmsg><type>57</type><title>Explain this link</title><refermsg><type>49</type><svrid>{server}</svrid><fromusr>room@chatroom</fromusr><chatusr>sender</chatusr><content>{escaped}</content></refermsg></appmsg></msg>"));
+        }
+        insert_app(25, 57, "<msg><appmsg><type>57</type><title>Plain URL</title><refermsg><type>1</type><svrid>995</svrid><fromusr>sender</fromusr><content>https://example.com/?a=1&amp;b=2</content></refermsg></appmsg></msg>");
         for (index, kind, subtype, content) in [
             (0, 34, 0, "<msg><voicemsg voiceformat='4'/></msg>"),
             (1, 43, 0, "<msg><videomsg playlength='3'/></msg>"),
@@ -371,6 +412,7 @@ mod tests {
             (13, "invalid"),
             (14, "invalid"),
             (15, "invalid"),
+            (23, "missing"),
         ] {
             let result = core.quoted_message("a", &id(local)).unwrap();
             assert_eq!(result["state"], state);
@@ -399,6 +441,35 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("[Chat History]"));
+        let link = core.message("a", &id(18)).unwrap();
+        assert_eq!(link["appMessageType"], 5);
+        assert_eq!(
+            link["body"],
+            "[Link] Article <title>\nA & B\nhttps://example.com/article?a=1&b=2"
+        );
+        let stored_link = core.quoted_message("a", &id(19)).unwrap();
+        assert_eq!(stored_link["state"], "resolved");
+        assert_eq!(stored_link["message"]["body"], link["body"]);
+        assert!(!stored_link.to_string().contains("forged"));
+        let embedded_link = core.quoted_message("a", &id(20)).unwrap();
+        assert_eq!(embedded_link["state"], "embedded");
+        assert_eq!(embedded_link["embeddedText"], link["body"]);
+        assert_eq!(embedded_link["senderId"], "sender");
+        assert_eq!(embedded_link["embeddedImage"], false);
+        assert!(!embedded_link.to_string().contains("private-transport"));
+        assert_eq!(
+            core.quoted_message("a", &id(25)).unwrap()["embeddedText"],
+            "https://example.com/?a=1&b=2"
+        );
+        for (server, parent) in [("18", 19), ("997", 20)] {
+            core.store
+                .record_recall("a", "room@chatroom", server, None, None, None, "live")
+                .unwrap();
+            let recalled = core.quoted_message("a", &id(parent)).unwrap();
+            assert_eq!(recalled["state"], "recalled");
+            assert!(recalled["message"].is_null());
+            assert!(recalled["embeddedText"].is_null());
+        }
         assert!(core.quoted_message("b", &id(10)).is_err());
     }
     #[test]

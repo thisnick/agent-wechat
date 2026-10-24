@@ -23,6 +23,12 @@ Configure plugin defaults under `plugins.entries.agent-wechat.config` (or the sa
 
 The external service remains independently owned. Plugin stop closes its stream and never stops/logs out the daemon or cancels its sends. Remote endpoints require verified HTTPS or an encrypted tunnel terminating at loopback. Set `AGENT_WECHAT_TOKEN` in the Gateway process environment, or use a configured OpenClaw secret provider. The plugin resolves `native.token` through the pinned OpenClaw SDK; `native.tokenFile` is removed. Tokens contain 32–1024 printable ASCII bytes without spaces. An explicit unresolved reference fails startup without falling back to another token. The API token needs read/media/send/login for the selected account, plus read-state only when automatic whole-thread read marking is enabled; do not grant admin solely to run the plugin. Normal sender/DM/group/mention policy remains in `channels.agent-wechat`; defaults remain closed.
 
+## Login tool
+
+`wechat_login` is available to configured agents through OpenClaw's tool policy, including from other channels while WeChat is offline. Use `{"action":"status"}` to inspect the account, `{"action":"start"}` to start or resume login and display the returned QR image, then `{"action":"wait","timeoutMs":30000}` to check scan/approval completion. Repeated starts reuse the pending operation. For a new operation, `force: true` uses QR instead of saved trust. Waits are bounded and report the operation ID and state. Cancelling a tool call leaves the submitted login operation available for a later call.
+
+The tool also accepts `disconnect` (retain saved trust), `logout` (durable native logout) and `forget` with `confirm: true` (remove local authentication, retain history). It stays bound to the configured daemon/account. Apply OpenClaw tool allow/deny policies to control which agents can manage login. The tool is directly callable so the daemon's PNG reaches the model as image content.
+
 ## Native managed mode
 
 ```json

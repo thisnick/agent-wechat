@@ -21,7 +21,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## Quotes
 
-`GET /messages/{id}/quote` resolves what a reply quoted, looking only in the same chat. If the original isn't stored, you still get the text or image embedded in the quote. Stored originals can resolve as text, images, voice, video, link cards, files or quoted replies. Other card types remain unsupported; an absent original only has the text/image fallback. See [Send quoted replies](/use/cli/#quoted-replies) for sending a text reply that references one of these saved messages.
+`GET /messages/{id}/quote` resolves what a reply quoted, looking only in the same chat. If the original isn't stored, you still get the text, image or link card embedded in the quote. Link cards keep their title, description and URL alongside the reply. Stored originals can resolve as text, images, voice, video, link cards, files or quoted replies. Other card types remain unsupported; an absent original only has the text/image/link fallback. See [Send quoted replies](/use/cli/#quoted-replies) for sending a text reply that references one of these saved messages.
 
 ## Forwarded chats
 
