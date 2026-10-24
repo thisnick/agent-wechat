@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { messageSummary, threadPreview } from "../src/thread-preview.ts";
+import {
+  messageSummary,
+  threadPreview,
+  orderThreads,
+} from "../src/thread-preview.ts";
 
 test("thread previews distinguish incoming, own, group and system messages", () => {
   const message = {
@@ -74,4 +78,48 @@ test("recalled thread previews show the replacement notice without an inferred s
       "Message recalled",
     );
   }
+});
+
+test("chat order follows the latest message time across incoming, own and live updates", () => {
+  const thread = (id, time, direction = "incoming") => ({
+    id,
+    lastMessage: { id: `message-${id}`, createdAt: time, direction },
+  });
+  const threads = [
+    thread("old", "10"),
+    thread("new", "30", "outgoing"),
+    thread("middle", "1970-01-01T00:00:20Z"),
+  ];
+  assert.deepEqual(
+    orderThreads(threads).map((t) => t.id),
+    ["new", "middle", "old"],
+  );
+  assert.deepEqual(
+    threads.map((t) => t.id),
+    ["old", "new", "middle"],
+  );
+  assert.deepEqual(
+    orderThreads([
+      {
+        ...threads[0],
+        lastMessage: { ...threads[0].lastMessage, createdAt: "40" },
+      },
+      ...threads.slice(1),
+    ]).map((t) => t.id),
+    ["old", "new", "middle"],
+  );
+});
+
+test("equal and unknown activity times keep their existing relative order", () => {
+  const threads = [
+    { id: "missing" },
+    { id: "first", lastMessage: { createdAt: "10" } },
+    { id: "invalid", lastMessage: { createdAt: "invalid" } },
+    { id: "second", lastMessage: { createdAt: "10" } },
+    { id: "empty", lastMessage: null },
+  ];
+  assert.deepEqual(
+    orderThreads(threads).map((t) => t.id),
+    ["first", "second", "missing", "invalid", "empty"],
+  );
 });

@@ -31,7 +31,11 @@ import { Avatar, Button, Icon, Logo, Welcome } from "./ui.tsx";
 import { HistorySearch } from "./history-search.ts";
 import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
-import { threadPreview, messageSummary } from "./thread-preview.ts";
+import {
+  threadPreview,
+  messageSummary,
+  orderThreads,
+} from "./thread-preview.ts";
 import { messagePresentation, recallText } from "./message-presentation.ts";
 import { AccountSettings } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
@@ -243,6 +247,7 @@ function Client({
   const [loginAccount, setLoginAccount] = useState<Account | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const adding = useRef(false);
   useEffect(() => {
     document.body.classList.toggle("onboarding-active", screen !== "chats");
   }, [screen]);
@@ -264,9 +269,18 @@ function Client({
     }
   }
   async function add() {
+    if (adding.current) return;
+    adding.current = true;
     setBusy(true);
     setError("");
     try {
+      if (!connection.accountCreation) {
+        setError(
+          "Adding a WeChat account requires an administrator connection. This preview is restricted to one account.",
+        );
+        setScreen("accounts");
+        return;
+      }
       const id = simulator
         ? `account-${crypto.randomUUID().slice(0, 8)}`
         : undefined;
@@ -279,7 +293,9 @@ function Client({
       setScreen("login");
     } catch (e) {
       setError(readableError(e));
+      setScreen("accounts");
     } finally {
+      adding.current = false;
       setBusy(false);
     }
   }
@@ -358,6 +374,7 @@ function Client({
         void session.accounts();
       }}
       addAccount={() => void add()}
+      addingAccount={busy}
     />
   );
 }
@@ -591,12 +608,14 @@ function Chats({
   setTheme,
   switchAccount,
   addAccount,
+  addingAccount,
 }: {
   connection: Connection;
   theme: string;
   setTheme: (t: string) => void;
   switchAccount: () => void;
   addAccount: () => void;
+  addingAccount: boolean;
 }) {
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
@@ -677,7 +696,7 @@ function Chats({
     setInChat("");
     void session.select(id);
   }
-  const threads = state.threads.filter(
+  const threads = orderThreads(state.threads).filter(
     (t) =>
       name(t.id).toLowerCase().includes(query.toLowerCase()) &&
       (filter !== "unread" || !!t.unreadCount) &&
@@ -1255,16 +1274,21 @@ function Chats({
             </button>
           ))}
           <button
-            className="account-option"
+            className="account-option account-action"
+            disabled={addingAccount}
             onClick={() => {
               setAccountMenu(false);
               addAccount();
             }}
           >
-            <Icon name="plus" /> Add WeChat account
+            <Icon name="plus" />{" "}
+            <span>{addingAccount ? "Opening…" : "Add WeChat account"}</span>
           </button>
-          <button className="account-option" onClick={switchAccount}>
-            Choose an account
+          <button
+            className="account-option account-action"
+            onClick={switchAccount}
+          >
+            <Icon name="people" /> <span>Choose an account</span>
           </button>
         </div>
       )}

@@ -91,6 +91,14 @@ bootstraps the browser session; keep it private. Closing the launcher leaves the
 external daemon running. `node scripts/client-ui-connect-smoke.mjs` checks these
 boundaries against a local HTTP fixture without contacting WeChat.
 
+To manage multiple accounts, replace `--account ACCOUNT_ID` with `--all-accounts`
+and use a hub administrator key in the private token file. This mode permits account
+creation and account routes through the preview; the daemon still enforces the key's
+permissions. Global token and daemon-management routes remain blocked. It is opt-in:
+the default single-account preview explains the restriction when **Add WeChat account**
+is selected. Account-creation errors return to the account chooser so they are visible,
+and repeated clicks do not submit concurrent creations.
+
 The simulator launcher advances its clock once per second, so QR expiry
 and renewal occur naturally. The standalone simulator retains its controlled
 virtual clock for repeatable regression tests.
@@ -255,6 +263,9 @@ photos keep initials.
 ## New chats and groups
 
 The conversation list uses `lastMessage` and `avatarMembers` from the threads API.
+Chats are sorted newest message first. Incoming and accepted outgoing updates
+reorder the list through the event stream; equal or missing times retain their
+existing relative order.
 Direct chats show one avatar; groups show a collage of up to four saved members,
 with a group icon when roster data is missing. The second line previews the latest
 saved message, prefixes outgoing text with “You” and names incoming group senders.

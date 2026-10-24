@@ -24,10 +24,13 @@ process.once("SIGINT", () => void stop());
 process.once("SIGTERM", () => void stop());
 try {
   const endpoint = argument("--server");
-  const account = argument("--account");
+  const allAccounts = process.argv.includes("--all-accounts");
+  if (allAccounts && process.argv.includes("--account"))
+    throw new Error("Choose --account or --all-accounts, not both");
+  const account = allAccounts ? null : argument("--account");
   const tokenFile = resolve(argument("--token-file"));
   const state = resolve(argument("--state-dir"));
-  if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(account))
+  if (account !== null && !/^[a-zA-Z0-9_.-]{1,128}$/.test(account))
     throw new Error("Invalid account ID");
   const tokenInfo = await lstat(tokenFile);
   if (!tokenInfo.isFile() || tokenInfo.mode & 0o077)
@@ -41,7 +44,8 @@ try {
     throw new Error(
       "Expected an existing native WeChat hub; use dev for the simulator",
     );
-  if (!(await client.accounts()).items.some((item) => item.id === account))
+  const accounts = await client.accounts();
+  if (!allAccounts && !accounts.items.some((item) => item.id === account))
     throw new Error("Account not available with this token");
   await mkdir(state, { recursive: true, mode: 0o700 });
   const secretFile = join(state, "ui-connect-secret");
@@ -129,7 +133,12 @@ try {
                 `agentwechat-connect=${secret}; HttpOnly; SameSite=Strict; Path=/__dev/${external ? "; Secure" : ""}`,
               );
               return res.end(
-                JSON.stringify({ endpoint: origin, token, simulator: false }),
+                JSON.stringify({
+                  endpoint: origin,
+                  token,
+                  simulator: false,
+                  accountCreation: allAccounts,
+                }),
               );
             }
             if (path.startsWith("/v1")) {
@@ -147,9 +156,13 @@ try {
               const read = req.method === "GET" || req.method === "HEAD";
               const allowed =
                 (read && (path === "/v1/status" || path === "/v1/accounts")) ||
+                (allAccounts &&
+                  path === "/v1/accounts" &&
+                  req.method === "POST") ||
                 (parts[1] === "v1" &&
                   parts[2] === "accounts" &&
-                  parts[3] === account);
+                  !!parts[3] &&
+                  (allAccounts || parts[3] === account));
               if (!safe || !allowed) {
                 res.statusCode = 403;
                 return res.end();
@@ -164,7 +177,7 @@ try {
   await vite.listen();
   origin ??= `http://127.0.0.1:${vite.httpServer.address().port}`;
   console.log(
-    `\nAgentWechat connected to an existing native hub\n${origin}/#dev=${secret}\n\nOnly the configured account is proxied. Closing this launcher leaves the daemon running.\n`,
+    `\nAgentWechat connected to an existing native hub\n${origin}/#dev=${secret}\n\n${allAccounts ? "Account management is enabled; the access key's permissions still apply." : "Only the configured account is proxied."} Closing this launcher leaves the daemon running.\n`,
   );
 } catch (error) {
   console.error(error.message);

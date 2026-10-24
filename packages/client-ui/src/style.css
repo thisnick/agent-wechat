@@ -89,6 +89,7 @@ svg.icon {
   position: relative;
   display: grid;
   place-items: center;
+  padding: 0;
   width: 46px;
   height: 46px;
   border-radius: 12px;
@@ -913,8 +914,16 @@ h1 {
   margin-top: 4px;
 }
 .account-option .icon {
-  margin-left: auto;
+  flex: 0 0 16px;
   width: 16px;
+  height: 16px;
+}
+.account-action {
+  display: grid;
+  grid-template-columns: 43px minmax(0, 1fr);
+}
+.account-action > .icon {
+  justify-self: center;
 }
 .menu-action {
   border-top: 1px solid var(--line);
