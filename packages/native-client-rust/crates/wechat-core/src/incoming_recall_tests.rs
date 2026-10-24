@@ -1700,6 +1700,87 @@ fn unfiltered_history_keeps_membership_while_search_and_later_pages_resolve_cont
 }
 
 #[test]
+fn batch_quotes_use_embedded_excerpts_and_fresh_scoped_recall_evidence() {
+    let (_temp, store, core) = fixture();
+    core.apply_sync_command(
+        "one",
+        &add(
+            1,
+            "peer",
+            "synthetic_self",
+            b"Different stored original",
+            123,
+            100,
+        ),
+        "original",
+        "live",
+    )
+    .unwrap();
+    for n in 0..5 {
+        let xml = format!("<msg><appmsg><type>57</type><title>Comment {n}</title><refermsg><type>1</type><svrid>123</svrid><content>Embedded excerpt</content></refermsg></appmsg></msg>");
+        core.apply_sync_command(
+            "one",
+            &add(
+                49,
+                "peer",
+                "synthetic_self",
+                xml.as_bytes(),
+                124 + n,
+                101 + n as u32,
+            ),
+            &format!("reply-{n}"),
+            "live",
+        )
+        .unwrap();
+    }
+    let reader = core.profile_reader("one").unwrap();
+    let parents: Vec<_> = reader
+        .messages(&wechat_profile::MessageQuery {
+            chat: Some("peer".into()),
+            own_username: Some("synthetic_self".into()),
+            limit: Some(50),
+            ..Default::default()
+        })
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|m| m.message_type == 49)
+        .collect();
+    store
+        .record_recall("one", "other", "123", None, None, None, "live")
+        .unwrap();
+    let batch = core
+        .normalize_recalled_batch("one", parents.clone(), Some("synthetic_self"), &reader)
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(batch.len(), 5);
+    for (parent, message) in parents.iter().zip(&batch) {
+        assert_eq!(
+            message,
+            &core
+                .normalize_recalled("one", parent.clone(), Some("synthetic_self"), &reader)
+                .unwrap()
+        );
+        assert_eq!(message["quote"]["embeddedText"], "Embedded excerpt");
+        assert!(!message.to_string().contains("Different stored original"));
+    }
+    store
+        .record_recall("one", "peer", "123", None, None, None, "live")
+        .unwrap();
+    let next = core
+        .normalize_recalled_batch("one", parents, Some("synthetic_self"), &reader)
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+    for message in next {
+        assert_eq!(message["quote"]["state"], "recalled");
+        assert!(message["quote"]["embeddedText"].is_null());
+        assert!(message["body"].as_str().unwrap().starts_with("Comment "));
+    }
+}
+
+#[test]
 fn history_does_not_load_off_page_bodies() {
     let (temporary, _store, core) = fixture();
     for (server, time) in [(123, 100), (124, 101)] {

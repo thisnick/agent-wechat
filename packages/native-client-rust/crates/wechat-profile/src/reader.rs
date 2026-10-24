@@ -816,6 +816,109 @@ impl ProfileReader {
         Ok(result)
     }
 
+    /// Read quoted originals for one page from this captured snapshot. Group by
+    /// conversation/shard, decode only matching rows, and retain at most two
+    /// observations per identity just like the single-reference lookup. The
+    /// visitor consumes each row before the next, avoiding a page of large bodies.
+    pub fn visit_messages_by_server_ids<E>(
+        &self,
+        targets: &[(String, String)],
+        own_username: Option<&str>,
+        mut visit: impl FnMut(Message) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<ProfileError> + From<rusqlite::Error>,
+    {
+        if targets.len() > 200 {
+            return Err(ProfileError::InvalidQuery.into());
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        if let Some(own) = own_username {
+            validate_name(own)?;
+        }
+        let mut groups: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
+        for (chat, server) in targets {
+            validate_name(chat)?;
+            let number = server
+                .parse::<u64>()
+                .map_err(|_| ProfileError::InvalidQuery)?;
+            if number == 0 || number.to_string() != *server {
+                return Err(ProfileError::InvalidQuery.into());
+            }
+            groups.entry(chat).or_default().insert(number as i64);
+        }
+        let shards: Vec<_> = self.schemas.iter().filter(|s| shard(&s.database)).collect();
+        if shards.len() > 128 {
+            return Err(ProfileError::InvalidQuery.into());
+        }
+        if self
+            .coverage()
+            .databases
+            .iter()
+            .any(|d| shard(&d.relative_path) && d.state != DatabaseState::Readable)
+        {
+            return Err(ProfileError::KeyUnavailable("message shards".into()).into());
+        }
+        let labels = self.labels()?;
+        let mut counts: BTreeMap<(&str, i64), usize> = BTreeMap::new();
+        for schema in shards {
+            let tables: Vec<_> = groups
+                .iter()
+                .filter_map(|(&chat, servers)| {
+                    let table_name = format!("Msg_{:x}", Md5::digest(chat.as_bytes()));
+                    let table = schema.tables.iter().find(|t| t.name == table_name)?;
+                    let pending: Vec<_> = servers
+                        .iter()
+                        .copied()
+                        .filter(|server| counts.get(&(chat, *server)).copied().unwrap_or(0) < 2)
+                        .collect();
+                    (!pending.is_empty()).then_some((chat, table, pending))
+                })
+                .collect();
+            if tables.is_empty() {
+                continue;
+            }
+            let c = self.snapshot.open(&schema.database)?;
+            let names = name_map(&c)?;
+            for (chat, table, servers) in tables {
+                require_message_columns(table, &schema.database)?;
+                let table_name = quote_identifier(&table.name);
+                let placeholders = vec!["?"; servers.len()].join(",");
+                // The window bounds duplicate observations without fetching or
+                // decoding unrelated bodies, even if a profile has duplicate IDs.
+                let sql = format!("SELECT * FROM {table_name} WHERE local_id IN (SELECT local_id FROM (SELECT local_id,ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY local_id) AS quote_rank FROM {table_name} WHERE server_id IN ({placeholders})) WHERE quote_rank<=2) ORDER BY server_id,local_id");
+                let mut statement = c.prepare(&sql)?;
+                #[cfg(test)]
+                batch_lookup_tests::record_batch_query();
+                let mut rows = statement.query(rusqlite::params_from_iter(servers))?;
+                while let Some(row) = rows.next()? {
+                    let server: i64 = row.get("server_id")?;
+                    let count = counts.entry((chat, server)).or_default();
+                    if *count == 2 {
+                        continue;
+                    }
+                    let local: i64 = row.get("local_id")?;
+                    if local <= 0 {
+                        return Err(ProfileError::InvalidQuery.into());
+                    }
+                    let id = SourceMessageId {
+                        database: schema.database.clone(),
+                        table: table.name.clone(),
+                        local_id: local.to_string(),
+                    };
+                    let mut message =
+                        self.message_from_fields(raw(row)?, &id, own_username, &labels, &names)?;
+                    message.peer = Some(chat.into());
+                    visit(message)?;
+                    *count += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn message_from_connection(
         &self,
         c: &Connection,
@@ -859,6 +962,8 @@ impl ProfileReader {
         {
             return Err(ProfileError::UnsupportedSchema(id.database.clone()));
         }
+        #[cfg(test)]
+        batch_lookup_tests::record_point_query();
         let r = c
             .query_row(
                 &format!(
@@ -870,6 +975,17 @@ impl ProfileReader {
             )
             .optional()?
             .ok_or(ProfileError::NotCached)?;
+        self.message_from_fields(r, id, own_username, labels, names)
+    }
+
+    fn message_from_fields(
+        &self,
+        r: RawFields,
+        id: &SourceMessageId,
+        own_username: Option<&str>,
+        labels: &BTreeMap<String, String>,
+        names: &BTreeMap<i64, String>,
+    ) -> Result<Message> {
         let mut candidates = labels
             .keys()
             .cloned()
@@ -1172,6 +1288,7 @@ pub(crate) fn protobuf_fields(b: &[u8]) -> Result<Vec<(u32, u8, &[u8])>> {
     }
     Ok(out)
 }
+
 fn room_displays(b: &[u8]) -> Result<BTreeMap<String, Option<String>>> {
     let mut out = BTreeMap::new();
     for (n, w, v) in protobuf_fields(b)? {
@@ -1204,4 +1321,174 @@ fn room_displays(b: &[u8]) -> Result<BTreeMap<String, Option<String>>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod batch_lookup_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        static BATCH_QUERIES: Cell<usize> = const { Cell::new(0) };
+        static POINT_QUERIES: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(super) fn record_batch_query() {
+        BATCH_QUERIES.with(|n| n.set(n.get() + 1));
+    }
+    pub(super) fn record_point_query() {
+        POINT_QUERIES.with(|n| n.set(n.get() + 1));
+    }
+
+    fn fixture() -> (tempfile::TempDir, ProfileReader) {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("account/db_storage/message");
+        std::fs::create_dir_all(&directory).unwrap();
+        let table = format!("Msg_{:x}", Md5::digest(b"peer"));
+        for shard in 0..2 {
+            let db = Connection::open(directory.join(format!("message_{shard}.db"))).unwrap();
+            db.execute_batch("CREATE TABLE Name2Id(user_name TEXT PRIMARY KEY,is_session INTEGER)")
+                .unwrap();
+            for user in if shard == 0 {
+                ["self", "peer"]
+            } else {
+                ["peer", "self"]
+            } {
+                db.execute("INSERT INTO Name2Id VALUES(?1,1)", [user])
+                    .unwrap();
+            }
+            db.execute_batch(&format!("CREATE TABLE {table}(local_id INTEGER PRIMARY KEY,server_id INTEGER,local_type INTEGER,create_time INTEGER,real_sender_id INTEGER,message_content TEXT,source TEXT,WCDB_CT_message_content INTEGER,WCDB_CT_source INTEGER)")).unwrap();
+            for local in 1..=25 {
+                db.execute(
+                    &format!("INSERT INTO {table} VALUES(?1,?2,1,100,?3,?4,'',0,0)"),
+                    params![
+                        local,
+                        shard * 25 + local,
+                        if shard == 0 { 2 } else { 1 },
+                        format!("Shard {shard} row {local}")
+                    ],
+                )
+                .unwrap();
+            }
+            db.execute(
+                &format!("INSERT INTO {table} VALUES(1000,-1,1,100,1,'Unsigned ID','',0,0)"),
+                [],
+            )
+            .unwrap();
+            for local in 2000..2003 {
+                db.execute(
+                    &format!("INSERT INTO {table} VALUES(?1,99,1,100,1,'Duplicate','',0,0)"),
+                    [local],
+                )
+                .unwrap();
+            }
+        }
+        let reader = ProfileReader::open(
+            ProfileLocation::new(temp.path().join("account")).unwrap(),
+            KeyFile::empty("account"),
+            ReadOptions {
+                allow_plaintext: true,
+                stopped_or_consistent_snapshot: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        (temp, reader)
+    }
+
+    fn collect(
+        reader: &ProfileReader,
+        targets: &[(String, String)],
+        own: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        let mut messages = Vec::new();
+        reader.visit_messages_by_server_ids::<ProfileError>(targets, own, |message| {
+            messages.push(message);
+            Ok(())
+        })?;
+        Ok(messages)
+    }
+
+    #[test]
+    fn a_page_uses_one_bulk_lookup_per_shard_and_no_original_point_reads() {
+        let (_temp, reader) = fixture();
+        let targets: Vec<_> = (1..=50).map(|n| ("peer".into(), n.to_string())).collect();
+        BATCH_QUERIES.with(|n| n.set(0));
+        POINT_QUERIES.with(|n| n.set(0));
+        let batch = collect(&reader, &targets, Some("self")).unwrap();
+        assert_eq!(BATCH_QUERIES.with(Cell::get), 2);
+        assert_eq!(POINT_QUERIES.with(Cell::get), 0);
+        assert_eq!(batch.len(), 50);
+        assert!(batch
+            .iter()
+            .all(|m| m.sender.as_deref() == Some("peer") && m.outgoing == Some(false)));
+        let individual: Vec<_> = targets
+            .iter()
+            .flat_map(|(thread, server)| {
+                reader
+                    .messages_by_server_id(thread, server, Some("self"))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(POINT_QUERIES.with(Cell::get), 50);
+        let by_id = |messages: Vec<Message>| {
+            messages
+                .into_iter()
+                .map(|m| (format!("{:?}", m.id), serde_json::to_value(m).unwrap()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(by_id(batch), by_id(individual));
+    }
+
+    #[test]
+    fn batch_lookup_keeps_unsigned_ids_duplicates_and_conversations_separate() {
+        let (_temp, reader) = fixture();
+        let targets = vec![
+            ("peer".into(), u64::MAX.to_string()),
+            ("peer".into(), "99".into()),
+            ("peer".into(), "99".into()),
+            ("other".into(), "1".into()),
+            ("peer".into(), "99999".into()),
+        ];
+        let found = collect(&reader, &targets, None).unwrap();
+        assert_eq!(found.len(), 4);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|m| m.server_message_id.as_deref() == Some("99"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            found
+                .iter()
+                .filter(|m| m.server_message_id.as_deref() == Some(u64::MAX.to_string().as_str()))
+                .count(),
+            2
+        );
+        assert!(found.iter().all(|m| m.peer.as_deref() == Some("peer")));
+        for invalid in ["0", "01", "-1", "18446744073709551616"] {
+            assert!(matches!(
+                collect(&reader, &[("peer".into(), invalid.into())], None),
+                Err(ProfileError::InvalidQuery)
+            ));
+        }
+        assert!(matches!(
+            collect(&reader, &vec![("peer".into(), "1".into()); 201], None),
+            Err(ProfileError::InvalidQuery)
+        ));
+        assert!(collect(&reader, &[], None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn batch_visitor_stops_on_a_consumer_error_without_buffering_more_originals() {
+        let (_temp, reader) = fixture();
+        let targets: Vec<_> = (1..=50).map(|n| ("peer".into(), n.to_string())).collect();
+        let mut visited = 0;
+        let error = reader.visit_messages_by_server_ids::<ProfileError>(&targets, None, |_| {
+            visited += 1;
+            Err(ProfileError::ResourceLimit)
+        });
+        assert!(matches!(error, Err(ProfileError::ResourceLimit)));
+        assert_eq!(visited, 1);
+    }
 }

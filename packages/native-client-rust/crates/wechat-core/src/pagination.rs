@@ -204,12 +204,17 @@ impl Core {
             }
             let mut rows = Vec::with_capacity(sources.len());
             let mut encoded_bytes = 0usize;
-            for mut message in reader.messages_by_ids(&sources, own.as_deref())? {
+            let mut messages = reader.messages_by_ids(&sources, own.as_deref())?;
+            for message in &mut messages {
                 // The retained query and table hash establish the peer even
                 // after contact/name metadata changes after page one.
                 let id = crate::message_id(&message.id)?;
                 message.peer = Some(peers.get(&id).context("invalid_cursor")?.clone());
-                let value = self.normalize_recalled(account, message, own.as_deref(), &reader)?;
+            }
+            for value in
+                self.normalize_recalled_batch(account, messages, own.as_deref(), &reader)?
+            {
+                let value = value?;
                 encoded_bytes = encoded_bytes.saturating_add(serde_json::to_vec(&value)?.len());
                 if encoded_bytes > 32 * 1024 * 1024 {
                     bail!("pagination_capacity_exceeded");
@@ -389,19 +394,37 @@ impl Core {
                 .take(limit)
                 .map(|m| m.id.clone())
                 .collect::<Vec<_>>();
-            let mut delivered = reader
-                .messages_by_ids(&ids, own)?
-                .into_iter()
-                .map(|m| Ok((crate::message_id(&m.id)?, m)))
+            let peers: BTreeMap<_, _> = references
+                .iter()
+                .take(limit)
+                .map(|reference| Ok((crate::message_id(&reference.id)?, reference.peer.clone())))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            let mut messages = reader.messages_by_ids(&ids, own)?;
+            for message in &mut messages {
+                message.peer = peers
+                    .get(&crate::message_id(&message.id)?)
+                    .context("history row missing from snapshot")?
+                    .clone();
+            }
+            let mut delivered = self
+                .normalize_recalled_batch(account, messages, own, reader)?
+                .map(|message| {
+                    let message = message?;
+                    Ok((
+                        message["id"]
+                            .as_str()
+                            .context("invalid message ID")?
+                            .to_owned(),
+                        message,
+                    ))
+                })
                 .collect::<Result<BTreeMap<_, _>>>()?;
             for (offset, reference) in references.into_iter().enumerate() {
                 let id = crate::message_id(&reference.id)?;
                 let item = if offset < limit {
-                    let mut message = delivered
+                    delivered
                         .remove(&id)
-                        .context("history row missing from snapshot")?;
-                    message.peer = reference.peer;
-                    self.normalize_recalled(account, message, own, reader)?
+                        .context("history row missing from snapshot")?
                 } else {
                     json!({"id":id,"threadId":reference.peer})
                 };
@@ -445,9 +468,7 @@ impl Core {
                         ..Default::default()
                     })?;
                     (
-                        page.items
-                            .into_iter()
-                            .map(|m| self.normalize_recalled(account, m, own, reader))
+                        self.normalize_recalled_batch(account, page.items, own, reader)?
                             .collect::<Result<Vec<_>>>()?,
                         page.next_cursor,
                     )

@@ -166,10 +166,8 @@ impl Core {
             cursor,
             ..Default::default()
         })?;
-        let items = page
-            .items
-            .into_iter()
-            .map(|msg| self.normalize_recalled(account, msg, own.as_deref(), &reader))
+        let items = self
+            .normalize_recalled_batch(account, page.items, own.as_deref(), &reader)?
             .collect::<Result<Vec<_>>>()?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),

@@ -3,6 +3,7 @@
 use crate::*;
 use rusqlite::OptionalExtension;
 use serde_json::json;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +53,28 @@ fn control_key(thread: &str, server: &str) -> Result<String> {
 }
 
 impl Store {
+    /// Look up only the requested page's recall identities in one account DB
+    /// read. This is request-local operational evidence, not a new state cache.
+    pub fn recalled_targets(
+        &self,
+        account: &str,
+        targets: &[(String, String)],
+    ) -> Result<BTreeSet<(String, String)>> {
+        anyhow::ensure!(targets.len() <= 200, "invalid_recall_query");
+        for (thread, server) in targets {
+            control_key(thread, server)?;
+        }
+        if targets.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        self.control(account, |db| {
+            let placeholders = vec!["(?,?)"; targets.len()].join(",");
+            let mut statement = db.prepare(&format!("SELECT thread_id,server_id FROM message_recalls WHERE (thread_id,server_id) IN (VALUES {placeholders})"))?;
+            let rows = statement.query_map(rusqlite::params_from_iter(targets.iter().flat_map(|(thread, server)| [thread, server])), |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
     pub fn recall_marker(
         &self,
         account: &str,
@@ -869,4 +892,41 @@ mod tests {
             .is_none());
         assert_eq!(store.recall_markers("a").unwrap().len(), 1);
     }
+}
+#[test]
+fn page_recall_targets_are_account_and_conversation_scoped() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("data")).unwrap();
+    for account in ["one", "two"] {
+        store.create_account(account).unwrap();
+    }
+    for (account, thread, server) in [
+        ("one", "peer", "42"),
+        ("one", "other", "43"),
+        ("two", "peer", "44"),
+    ] {
+        store
+            .record_recall(account, thread, server, None, None, None, "live")
+            .unwrap();
+    }
+    let targets = vec![
+        ("peer".into(), "42".into()),
+        ("peer".into(), "43".into()),
+        ("peer".into(), "44".into()),
+    ];
+    assert_eq!(
+        store.recalled_targets("one", &targets).unwrap(),
+        BTreeSet::from([("peer".into(), "42".into())])
+    );
+    assert_eq!(
+        store.recalled_targets("two", &targets).unwrap(),
+        BTreeSet::from([("peer".into(), "44".into())])
+    );
+    assert!(store.recalled_targets("one", &[]).unwrap().is_empty());
+    assert!(store
+        .recalled_targets("one", &vec![("peer".into(), "42".into()); 201])
+        .is_err());
+    assert!(store
+        .recalled_targets("one", &[("peer".into(), "01".into())])
+        .is_err());
 }

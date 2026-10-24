@@ -2,6 +2,7 @@
 use crate::{message_id, Core};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use wechat_protocol::wire::AddMessage;
 use wechat_store::RecallMarker;
 
@@ -584,12 +585,79 @@ impl Core {
     pub(crate) fn normalize_recalled(
         &self,
         account: &str,
-        mut msg: wechat_profile::Message,
+        msg: wechat_profile::Message,
         own: Option<&str>,
         reader: &wechat_profile::ProfileReader,
     ) -> Result<Value> {
+        self.normalize_recalled_with_quote_status(account, msg, own, reader, None)
+    }
+
+    pub(crate) fn normalize_recalled_batch<'a>(
+        &'a self,
+        account: &'a str,
+        messages: Vec<wechat_profile::Message>,
+        own: Option<&'a str>,
+        reader: &'a wechat_profile::ProfileReader,
+    ) -> Result<impl Iterator<Item = Result<Value>> + 'a> {
+        ensure!(messages.len() <= 200, "invalid_recall_query");
+        let targets: Vec<_> = messages
+            .iter()
+            .filter_map(|message| {
+                let thread = message.peer.as_ref()?;
+                let (server, _) = crate::quotes::message_app(message)?.reference?;
+                Some((thread.clone(), server))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut recalled = self.store.recalled_targets(account, &targets)?;
+        let missing: Vec<_> = targets
+            .into_iter()
+            .filter(|target| !recalled.contains(target))
+            .collect();
+        reader.visit_messages_by_server_ids::<anyhow::Error>(&missing, own, |original| {
+            // Normal rows need no second per-target journal read. An official
+            // recall or a pending own row still uses the existing observer to
+            // retain repair/dedup evidence and exact-source recall admission.
+            let pending = original.outgoing == Some(true)
+                && matches!(original.raw_fields.get("status"), Some(wechat_profile::SqlValue::Integer(n)) if n == "7");
+            if (official_recall(&original).is_some() || pending)
+                && self.observe_profile_recall(account, &original)?.is_some()
+            {
+                if let (Some(thread), Some(server)) = (original.peer, original.server_message_id) {
+                    recalled.insert((thread, server));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(messages.into_iter().map(move |message| {
+            let quoted_recalled = message
+                .peer
+                .as_ref()
+                .zip(crate::quotes::message_app(&message).and_then(|app| app.reference))
+                .is_some_and(|(thread, (server, _))| recalled.contains(&(thread.clone(), server)));
+            self.normalize_recalled_with_quote_status(
+                account,
+                message,
+                own,
+                reader,
+                Some(quoted_recalled),
+            )
+        }))
+    }
+
+    fn normalize_recalled_with_quote_status(
+        &self,
+        account: &str,
+        mut msg: wechat_profile::Message,
+        own: Option<&str>,
+        reader: &wechat_profile::ProfileReader,
+        quoted_status: Option<bool>,
+    ) -> Result<Value> {
         let recalled = self.observe_profile_recall(account, &msg)?;
-        let quoted_recalled = if let (Some(thread), Some((server, _))) = (
+        let quoted_recalled = if let Some(status) = quoted_status {
+            status
+        } else if let (Some(thread), Some((server, _))) = (
             msg.peer.as_deref(),
             crate::quotes::message_app(&msg).and_then(|app| app.reference),
         ) {
