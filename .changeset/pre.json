@@ -8,7 +8,9 @@
     "@agent-wechat/shared": "0.3.1"
   },
   "changesets": [
+    "batch-local-quote-recalls",
     "declare-wechat-send-share",
+    "history-snapshot-reuse",
     "jpeg-photo-trailers",
     "native-account-archive",
     "native-client-cutover",
@@ -19,9 +21,11 @@
     "native-lan-login-challenge",
     "native-large-file-attachments",
     "native-large-history-pages",
+    "native-login-agent-tool",
     "native-message-recall-cli",
     "native-openclaw-message-recalls",
     "native-platform-candidates",
+    "native-quoted-link-cards",
     "native-quoted-text-replies",
     "native-quotes-and-forwarded-history",
     "native-release-clean-checkout",

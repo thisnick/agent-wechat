@@ -1,5 +1,20 @@
 # @agent-wechat/wechat
 
+## 1.0.0-beta.13
+
+### Patch Changes
+
+- [#271](https://github.com/thisnick/agent-wechat/pull/271) [`083d90d`](https://github.com/thisnick/agent-wechat/commit/083d90d40d47b4589e2e65b13770b95e6fc3b626) Thanks [@thisnick](https://github.com/thisnick)! - Batch local recall checks for quoted originals when reading history pages. Reuse
+  one page-scoped journal lookup and grouped profile queries instead of repeating
+  database reads for every quote. Preserve embedded excerpts, recall suppression,
+  conversation boundaries and fresh checks on subsequent requests.
+
+- [#268](https://github.com/thisnick/agent-wechat/pull/268) [`f31be38`](https://github.com/thisnick/agent-wechat/commit/f31be388fc17807657555a0130df72da85cc79e5) Thanks [@thisnick](https://github.com/thisnick)! - Reuse a history request's captured profile snapshot when checking quoted-message recalls, avoiding repeated full-profile copies and hashing. Capture unfiltered history membership without reading message bodies, then load and normalize only the delivered page. Preserve fresh reads between requests, content search and recall suppression.
+
+- [#270](https://github.com/thisnick/agent-wechat/pull/270) [`621298c`](https://github.com/thisnick/agent-wechat/commit/621298c4143d87d554153587f14452acbb785589) Thanks [@thisnick](https://github.com/thisnick)! - Register wechat_login explicitly for native account login from any OpenClaw channel. Return the daemon's QR as a direct image, reuse pending login operations, and support bounded start/wait polling, status, disconnect, logout and explicitly confirmed credential forgetting. Preserve invocation cancellation and account/configuration boundaries.
+
+- [#270](https://github.com/thisnick/agent-wechat/pull/270) [`621298c`](https://github.com/thisnick/agent-wechat/commit/621298c4143d87d554153587f14452acbb785589) Thanks [@thisnick](https://github.com/thisnick)! - Use only the quoted content embedded in replies delivered by WeChat's server protocol. Include parsed quote text, link-card fields, image availability and sender metadata in normal message responses without substituting a stored original. Remove `GET /messages/{id}/quote`, the SDK's `quotedMessage` method and the separate quote-resolution response types; read quotes through the normal message endpoint and message lists. Keep local recall checks and quoted-author admission. Retrieve images using quote-owned metadata; preserve comments and unavailable status for other quoted media. Sending quoted replies continues through the normal send endpoint with the stored target's message ID and server ID.
+
 ## 1.0.0-beta.12
 
 ### Minor Changes
