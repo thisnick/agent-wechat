@@ -112,17 +112,21 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
     })
 }
 
-pub(crate) fn quoted_image_content(msg: &wechat_profile::Message) -> Option<String> {
-    let app = message_app(msg)?;
+fn embedded_content(app: &AppMessage) -> Option<&str> {
+    let content = app.embedded.as_deref()?;
+    Some(
+        app.sender_id
+            .as_ref()
+            .and_then(|sender| content.strip_prefix(&format!("{sender}:\n")))
+            .unwrap_or(content),
+    )
+}
+
+fn embedded_image_content(app: &AppMessage) -> Option<&str> {
     if app.subtype != 57 || app.reference.as_ref()?.1 != 3 {
         return None;
     }
-    let content = app.embedded?;
-    let content = app
-        .sender_id
-        .as_ref()
-        .and_then(|sender| content.strip_prefix(&format!("{sender}:\n")))
-        .unwrap_or(&content);
+    let content = embedded_content(app)?;
     let doc = roxmltree::Document::parse_with_options(
         content,
         roxmltree::ParsingOptions {
@@ -139,7 +143,47 @@ pub(crate) fn quoted_image_content(msg: &wechat_profile::Message) -> Option<Stri
     {
         return None;
     }
-    Some(content.into())
+    Some(content)
+}
+
+pub(crate) fn quoted_image_content(msg: &wechat_profile::Message) -> Option<String> {
+    embedded_image_content(&message_app(msg)?).map(str::to_owned)
+}
+
+/// Public quote content is derived only from the received parent payload.
+/// Original rows may supply recall evidence, never replacement quote content.
+pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Value> {
+    if app.subtype != 57 {
+        return None;
+    }
+    let (server, kind) = app.reference.as_ref()?;
+    let card = (*kind == 49)
+        .then(|| app_message(embedded_content(app)?))
+        .flatten();
+    let text = if *kind == 1 {
+        app.embedded.clone()
+    } else {
+        card.as_ref().and_then(|card| match card.subtype {
+            5 => card.link.as_ref().map(|link| link.card.body()),
+            6 | 57 => card.title.clone(),
+            _ => None,
+        })
+    }
+    .filter(|s| !s.is_empty() && s.len() <= 16384);
+    let image = embedded_image_content(app).is_some();
+    let supported = matches!(*kind, 1 | 3) || card.as_ref().is_some_and(|c| c.subtype == 5);
+    let state = if !supported {
+        "unsupported"
+    } else if text.is_some() || image {
+        "embedded"
+    } else {
+        "missing"
+    };
+    Some(json!({"serverId":server,"type":kind,"state":state,
+        "senderId":app.sender_id,"direction":app.sender_id.as_deref().zip(own)
+            .map(|(sender, own)| if sender == own { "outgoing" } else { "incoming" }),
+        "appMessageType":card.as_ref().map(|c| c.subtype),
+        "embeddedText":text,"embeddedImage":image}))
 }
 
 pub(crate) fn message_app(msg: &wechat_profile::Message) -> Option<AppMessage> {
@@ -186,9 +230,8 @@ pub(crate) fn forwarded_body(msg: &wechat_profile::Message) -> Option<String> {
 }
 
 impl Core {
-    /// The parent message fixes the account and conversation. Embedded fromusr,
-    /// chatusr fields never broaden lookup. With no local original, bounded
-    /// embedded text, link cards or image metadata stay attached to the parent quote.
+    /// Compatibility endpoint for the same embedded quote included in message
+    /// responses. Local originals are consulted only for recall suppression.
     pub fn quoted_message(&self, account: &str, id: &str) -> Result<Value> {
         let reader = self.profile_reader(account)?;
         let own = self.profile_username(account)?;
@@ -201,59 +244,21 @@ impl Core {
         let Some(app) = message_app(&parent).filter(|a| a.subtype == 57) else {
             return Ok(response("invalid", Value::Null));
         };
-        let Some((server, kind)) = app.reference else {
+        let Some((server, _)) = app.reference.as_ref() else {
             return Ok(response("invalid", Value::Null));
         };
-        if self.quote_is_recalled(account, thread, &server, &reader, own.as_deref())? {
+        if self.quote_is_recalled(account, thread, server, &reader, own.as_deref())? {
             return Ok(response("recalled", Value::Null));
         }
-        if ![1, 3, 34, 43, 49].contains(&kind) {
-            return Ok(response("unsupported", Value::Null));
+        let quote = embedded_quote(&app, own.as_deref()).context("invalid_quote")?;
+        let message = json!({"source":"embedded","serverId":quote["serverId"],"type":quote["type"],
+            "senderId":quote["senderId"],"direction":quote["direction"],"appMessageType":quote["appMessageType"],
+            "body":quote["embeddedText"],"embeddedImage":quote["embeddedImage"]});
+        let mut result = response(quote["state"].as_str().unwrap_or("invalid"), message);
+        for key in ["embeddedText", "embeddedImage", "senderId"] {
+            result[key] = quote[key].clone();
         }
-        let mut matches = reader.messages_by_server_id(thread, &server, own.as_deref())?;
-        if matches.len() > 1 {
-            return Ok(response("ambiguous", Value::Null));
-        }
-        let Some(original) = matches.pop() else {
-            let link = (kind == 49)
-                .then(|| {
-                    let content = app.embedded.as_deref()?;
-                    let content = app
-                        .sender_id
-                        .as_ref()
-                        .and_then(|sender| content.strip_prefix(&format!("{sender}:\n")))
-                        .unwrap_or(content);
-                    app_message(content)
-                        .filter(|a| a.subtype == 5)?
-                        .link
-                        .map(|link| link.card.body())
-                })
-                .flatten();
-            let text = (kind == 1)
-                .then_some(app.embedded.as_deref())
-                .flatten()
-                .or(link.as_deref())
-                .filter(|s| !s.is_empty() && s.len() <= 16384);
-            let image = kind == 3 && quoted_image_content(&parent).is_some();
-            if text.is_some() || image {
-                let mut result = response("embedded", Value::Null);
-                result["embeddedText"] = json!(text);
-                result["embeddedImage"] = json!(image);
-                result["senderId"] = json!(app.sender_id);
-                return Ok(result);
-            }
-            return Ok(response("missing", Value::Null));
-        };
-        if original.id == parent.id || original.message_type != i64::from(kind) {
-            return Ok(response("invalid", Value::Null));
-        }
-        if kind == 49 && !message_app(&original).is_some_and(|a| matches!(a.subtype, 5 | 6 | 57)) {
-            return Ok(response("unsupported", Value::Null));
-        }
-        Ok(response(
-            "resolved",
-            self.normalize_recalled(account, original, own.as_deref(), &reader)?,
-        ))
+        Ok(result)
     }
 }
 
@@ -263,7 +268,7 @@ mod tests {
     const LINK: &str = "<msg><appmsg><type>5</type><title><![CDATA[Article <title>]]></title><des>A &amp; B</des><url>https://example.com/article?a=1&amp;b=2</url><appattach><cdnattachurl>private-transport</cdnattachurl></appattach></appmsg></msg>";
 
     #[test]
-    fn resolves_text_images_and_links_from_parent_chat() {
+    fn quotes_use_embedded_content_even_when_an_original_is_stored() {
         use md5::Digest;
         use std::sync::Arc;
         let temp = tempfile::tempdir().unwrap();
@@ -322,7 +327,7 @@ mod tests {
         };
         insert_app(18, 5, &format!("sender:\n{LINK}"));
         for (local, server, content) in [
-            (19, 18, "forged embedded text".to_owned()),
+            (19, 18, LINK.replace("Article <title>", "Quoted excerpt")),
             (20, 997, format!("sender:\n{LINK}")),
             (
                 23,
@@ -400,28 +405,37 @@ mod tests {
         assert_eq!(parent["quote"]["serverId"], u64::MAX.to_string());
         assert_eq!(parent["mentions"]["self"], Value::Null);
         let original = core.quoted_message("a", &id(10)).unwrap();
-        assert_eq!(original["state"], "resolved");
-        assert_eq!(original["message"]["body"], "original stored text");
-        assert!(!original.to_string().contains("forged"));
+        assert_eq!(original["state"], "embedded");
+        assert_eq!(original["embeddedText"], "forged embedded text");
+        assert_eq!(original["message"]["source"], "embedded");
+        assert_eq!(original["message"]["body"], original["embeddedText"]);
+        assert!(original["message"].get("id").is_none());
+        assert!(!original.to_string().contains("original stored text"));
+        assert_eq!(parent["quote"]["embeddedText"], original["embeddedText"]);
         assert_eq!(
-            core.quoted_message("a", &id(11)).unwrap()["message"]["type"],
-            3
+            core.quoted_message("a", &id(11)).unwrap()["state"],
+            "missing"
         );
         for (local, state) in [
             (12, "embedded"),
             (13, "invalid"),
-            (14, "invalid"),
-            (15, "invalid"),
-            (23, "missing"),
+            (14, "embedded"),
+            (15, "unsupported"),
+            (23, "unsupported"),
         ] {
             let result = core.quoted_message("a", &id(local)).unwrap();
             assert_eq!(result["state"], state);
-            assert!(result["message"].is_null());
+            if state == "invalid" {
+                assert!(result["message"].is_null());
+            } else {
+                assert_eq!(result["message"]["source"], "embedded");
+            }
         }
-        for (index, kind) in [(0, 34), (1, 43), (2, 49), (3, 49), (4, 49)] {
+        for index in 0..5 {
             let resolved = core.quoted_message("a", &id(60 + index)).unwrap();
-            assert_eq!(resolved["state"], "resolved");
-            assert_eq!(resolved["message"]["type"], kind);
+            assert_eq!(resolved["state"], "unsupported");
+            assert_eq!(resolved["message"]["source"], "embedded");
+            assert!(resolved["message"]["body"].is_null());
             assert!(!resolved.to_string().contains("<msg>"));
         }
         let embedded = core.quoted_message("a", &id(16)).unwrap();
@@ -448,9 +462,22 @@ mod tests {
             "[Link] Article <title>\nA & B\nhttps://example.com/article?a=1&b=2"
         );
         let stored_link = core.quoted_message("a", &id(19)).unwrap();
-        assert_eq!(stored_link["state"], "resolved");
-        assert_eq!(stored_link["message"]["body"], link["body"]);
-        assert!(!stored_link.to_string().contains("forged"));
+        assert_eq!(stored_link["state"], "embedded");
+        assert_eq!(stored_link["message"]["source"], "embedded");
+        assert_eq!(stored_link["message"]["body"], stored_link["embeddedText"]);
+        assert!(stored_link["message"].get("id").is_none());
+        assert!(stored_link["embeddedText"]
+            .as_str()
+            .unwrap()
+            .contains("Quoted excerpt"));
+        assert!(!stored_link["embeddedText"]
+            .as_str()
+            .unwrap()
+            .contains("Article <title>"));
+        assert_eq!(
+            core.message("a", &id(19)).unwrap()["quote"]["embeddedText"],
+            stored_link["embeddedText"]
+        );
         let embedded_link = core.quoted_message("a", &id(20)).unwrap();
         assert_eq!(embedded_link["state"], "embedded");
         assert_eq!(embedded_link["embeddedText"], link["body"]);

@@ -199,13 +199,19 @@ export class NativeWeChatClient {
     validateMessageRecall(message);
     return message;
   }
-  /** Resolve only the stored original in this message's own conversation. */
+  /** Read this reply's embedded excerpt. Older daemons may return a stored original. */
   async quotedMessage(accountId: string, messageId: string): Promise<NativeQuoteResolution> {
     const quote = await this.request<NativeQuoteResolution>(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/quote`);
+    const message = quote.message;
+    const embedded = message != null && "source" in message;
     if (quote.accountId !== accountId || quote.messageId !== messageId || typeof quote.threadId !== "string"
       || !["resolved", "embedded", "missing", "invalid", "unsupported", "ambiguous", "recalled"].includes(quote.state)
-      || (quote.state === "resolved" ? !quote.message || quote.message.accountId !== accountId || quote.message.threadId !== quote.threadId || quote.message.id === messageId : quote.message != null)) throw new Error("Invalid native quote identity");
-    if (quote.message) validateMessageRecall(quote.message);
+      || (embedded ? !["embedded", "missing", "unsupported"].includes(quote.state) || message.source !== "embedded"
+        || "id" in message || typeof message.serverId !== "string" || !/^[1-9]\d{0,19}$/.test(message.serverId)
+        || BigInt(message.serverId) > 18446744073709551615n || !Number.isInteger(message.type) || message.type <= 0
+        || (message.body != null && (typeof message.body !== "string" || message.body.length > 16384)) || typeof message.embeddedImage !== "boolean"
+        : quote.state === "resolved" ? !message || message.accountId !== accountId || message.threadId !== quote.threadId || message.id === messageId : message != null)) throw new Error("Invalid native quote identity");
+    if (message && !embedded) validateMessageRecall(message);
     return quote;
   }
   /** Account-wide local search, with the daemon's query-bound opaque cursor. */

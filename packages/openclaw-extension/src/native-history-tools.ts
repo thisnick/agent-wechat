@@ -6,6 +6,7 @@ import { isNativeTombstone, NativeApiError, type NativeMessage } from "@agent-we
 import { resolveWeChatIngress, resolveWeChatPolicyContext } from "./access-control.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { prepareNativeAttachment } from "./native-media.ts";
+import { renderEmbeddedQuote } from "./native-quote.ts";
 import { getWeChatRuntime } from "./runtime.ts";
 import { resolveWeChatAccount } from "./types.ts";
 import { nativeRecallInfo } from "./native-recall-state.ts";
@@ -27,16 +28,18 @@ function string(value: unknown, name: string, max = 4096): string {
 function threadId(value: unknown): string {
   return string(string(value, "thread ID").replace(/^(?:agent-)?wechat:(?:group:)?/i, ""), "thread ID");
 }
-function messageResult(message: NativeMessage, retrievalTool = "wechat_media") {
+function messageResult(message: NativeMessage, retrievalTool = "wechat_media", quotePermitted = false) {
   if (nativeRecallInfo(message)) return { id: message.id, threadId: message.threadId, serverId: message.serverId,
     direction: message.direction, type: 10000, body: "[Message recalled]", status: "recalled", recall: nativeRecallInfo(message) };
   const isQuote = message.type === 49 && message.appMessageType === 57;
   const isForward = message.type === 49 && message.appMessageType === 19;
   const isLink = message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && !!message.link;
   const kind = isQuote ? "quote" : isForward ? "forwarded_history" : isLink ? "link_preview" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
-  const body = message.type === 1 || isForward || isLink ? message.body ?? "" : isQuote ? `${message.body ?? ""}\n[Quoted original not retrieved; use ${retrievalTool} with this message ID]` : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
+  const body = message.type === 1 || isForward || isLink ? message.body ?? "" : isQuote ? renderEmbeddedQuote(message, quotePermitted).body : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
+  const quote = message.quote && { serverId: message.quote.serverId, type: message.quote.type, state: quotePermitted ? message.quote.state : "not permitted",
+    senderId: message.quote.senderId, appMessageType: message.quote.appMessageType, embeddedImage: quotePermitted ? message.quote.embeddedImage : undefined };
   return { id: message.id, threadId: message.threadId, serverId: message.serverId, senderId: message.senderId,
-    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote: message.quote, link: isLink ? message.link : undefined, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
+    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote, link: isLink ? message.link : undefined, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
     attachment: message.type !== 1 && !isForward && kind !== "unsupported" ? { kind, retrievalTool, messageId: message.id } : undefined };
 }
 
@@ -127,6 +130,8 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
       const { client } = await (dependencies.host ?? ensureNativeHost)(native);
       guard();
       const accountId = native.accountId;
+      const visibleMessage = async (message: NativeMessage) => messageResult(message, archive ? "wechat_archive_media" : "wechat_media",
+        !message.quote || archive || message.quote.direction === "outgoing" || !!message.quote.senderId && await allowed(message.quote.senderId));
       let result: unknown;
       if (action === "threads") {
         const page = await client.threads(accountId, { limit: limit as number, cursor, ...(query ? { query } : {}) });
@@ -142,15 +147,15 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
         guard();
         if (!await allowed(requesterSenderId)) throw Error("WeChat conversation access is no longer allowed");
         if (message.id !== messageId || message.accountId !== accountId || (!archive && message.threadId !== conversation) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("Message is outside the permitted conversation or sender policy");
-        result = messageResult(message, archive ? "wechat_archive_media" : "wechat_media");
+        if (action === "message") result = await visibleMessage(message);
         if (action === "media") {
           const checkRecall = async () => {
             guard(); const latest = await client.message(accountId, messageId!); guard();
             if (latest.id !== message.id || latest.accountId !== accountId || latest.threadId !== message.threadId || latest.serverId !== message.serverId) throw Error("Native media message identity changed");
             if (nativeRecallInfo(latest)) throw new NativeApiError(410, "message_recalled", false);
             if (message.quote) {
-              const quote = await client.quotedMessage(accountId, message.id); guard();
-              if (quote.state === "recalled" || quote.message && nativeRecallInfo(quote.message)) throw new NativeApiError(410, "message_recalled", false);
+              if (latest.quote?.state === "recalled") throw new NativeApiError(410, "message_recalled", false);
+              if (!latest.quote || JSON.stringify(latest.quote) !== JSON.stringify(message.quote)) throw new NativeApiError(409, "media_source_changed", false);
             }
           };
           let prepared: Awaited<ReturnType<typeof prepareNativeAttachment>>;
@@ -192,7 +197,7 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
         for (const message of page.items) {
           if (isNativeTombstone(message)) continue;
           if ((conversation && message.threadId !== conversation) || message.accountId !== accountId) throw Error("WeChat history response crosses a conversation boundary");
-          if (message.direction === "outgoing" || await allowed(message.senderId ?? undefined)) items.push(messageResult(message, archive ? "wechat_archive_media" : "wechat_media"));
+          if (message.direction === "outgoing" || await allowed(message.senderId ?? undefined)) items.push(await visibleMessage(message));
         }
         result = { ...page, items, scope: "local_profile", searchMode: action === "search" ? "case_insensitive_substring" : undefined,
           note: archive ? "Account-wide local history may be partial. These reads do not mark threads read or download attachments." : "Local history may be partial. A filtered page can be empty with a nextCursor. These reads do not mark a conversation read or download attachments." };

@@ -16,7 +16,7 @@ const { build } = createRequire(join(root, 'packages/openclaw-extension/package.
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
 assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.2');
 const temporary = await mkdtemp(join(tmpdir(), 'native-history-model-'));
-const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0, loginStarts = 0, loginQrReads = 0;
+const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0, loginStarts = 0, loginQrReads = 0, quoteRequests = 0;
 const token = 'synthetic-native-token-'.repeat(3), assets = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 for (const [id, file, kind, mime] of [['image-a','native-model.png','image','image/png'], ['image-b','native-model-large.png','image','image/png'], ['dm-image','native-model.png','image','image/png'], ['image-file','native-model.png','file','image/png'], ['video','native-model.mp4','video','video/mp4'], ['voice',null,'voice','audio/wav'], ['file',null,'file','text/plain'], ['pending-image','native-model.png','image','image/png'], ['history-image','native-model.png','image','image/png'], ['history-file',null,'file','text/plain']]) {
@@ -37,9 +37,12 @@ const quoteScenarios = [
   { id:'link-card', type:49, appMessageType:5, mention:true, body:linkBody, link },
   { id:'quote-link', type:49, appMessageType:57, mention:true, body:'Explain this linked article', quote:{serverId:'9007199254740995',type:49} },
   { id:'quote-embedded-link', type:49, appMessageType:57, threadId:'u1', body:'Explain this embedded link', quote:{serverId:'9007199254740994',type:49} },
+  { id:'quote-voice', type:49, appMessageType:57, mention:true, body:'Comment about quoted voice', quote:{serverId:'9007199254740993',type:34} },
+  { id:'quote-video', type:49, appMessageType:57, mention:true, body:'Comment about quoted video', quote:{serverId:'9007199254740992',type:43} },
+  { id:'quote-file', type:49, appMessageType:57, mention:true, body:'Comment about quoted file', quote:{serverId:'9007199254740991',type:49} },
 ];
 {
-  const id='quoted-original-image',source=assets.get('dm-image');
+  const id='quote-image',source=assets.get('dm-image');
   const jpeg=await readFile(join(root,'packages/native-client-rust/crates/wechat-media/tests/fixtures/progressive.jpg'));
   const footer=Buffer.alloc(8);footer.writeUInt32LE(0x12345678);
   const bytes=Buffer.concat([jpeg,footer,createHash('md5').update(jpeg).digest()]);
@@ -60,14 +63,18 @@ const quoteScenarios = [
   assets.set(id,{bytes,asset:{...source.asset,id:`asset-${id}`,messageId:id,filename:`${id}.png`,byteLength:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}});
   assets.set('link-card',{bytes:Buffer.alloc(0),asset:{...source.asset,id:'asset-link-card',messageId:'link-card',variant:'thumbnail',actualVariant:'thumbnail',state:'unsupported',byteLength:null,sha256:null,reason:'link_thumbnail_missing'}});
 }
-const quoteResolutions = {
-  'quote-text':{state:'resolved',message:{id:'quoted-original-text',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'18446744073709551615',direction:'incoming',type:1,body:'Quoted original stored text',version:'v1'}},
-  'quote-image':{state:'resolved',message:{id:'quoted-original-image',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'9007199254740998',direction:'incoming',type:3,version:'v1'}},
-  'quote-embedded-text':{state:'embedded',message:null,senderId:'u1',embeddedText:'Quoted embedded text with no original row',embeddedImage:false},
-  'quote-embedded-image':{state:'embedded',message:null,senderId:'u1',embeddedImage:true},
-  'quote-link':{state:'resolved',message:{id:'quoted-original-link',accountId:'a',threadId:'room@chatroom',senderId:'u1',serverId:'9007199254740995',direction:'incoming',type:49,appMessageType:5,body:linkBody,link,version:'v1'}},
-  'quote-embedded-link':{state:'embedded',message:null,senderId:'u1',embeddedText:linkBody,embeddedImage:false},
+const embeddedQuotes = {
+  'quote-text': { embeddedText:'Quoted excerpt carried in the reply' },
+  'quote-image': { embeddedImage:true },
+  'quote-embedded-text': { embeddedText:'Quoted embedded text with no original row' },
+  'quote-embedded-image': { embeddedImage:true },
+  'quote-link': { appMessageType:5, embeddedText:linkBody },
+  'quote-embedded-link': { appMessageType:5, embeddedText:linkBody },
+  'quote-voice': { state:'unsupported' },
+  'quote-video': { state:'unsupported' },
+  'quote-file': { state:'unsupported', appMessageType:6, embeddedText:'report.pdf' },
 };
+for (const scenario of quoteScenarios) if (scenario.quote) Object.assign(scenario.quote, { state:'embedded', senderId:'u1', ...embeddedQuotes[scenario.id] });
 const toolSteps = [
   ['tool_search', { query:'wechat_search search stored WeChat conversation messages', limit:4 }],
   ['tool_call', { id:'wechat_search', args:{ query:'earlier-project-note', limit:2 } }],
@@ -108,7 +115,7 @@ const upstream = createServer(async (req, res) => {
       if (message) return json(message);
     }
     const quoteLookup = /^\/v1\/accounts\/a\/messages\/([^/]+)\/quote$/.exec(url.pathname);
-    if(quoteLookup){const scenario=quoteScenarios.find(value=>value.id===quoteLookup[1]);assert.ok(scenario);return json({accountId:'a',messageId:scenario.id,threadId:scenario.threadId??'room@chatroom',...quoteResolutions[scenario.id]});}
+    if(quoteLookup){quoteRequests++;throw Error('Quote rendering must not request original resolution');}
     const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
     if (media) { assert.notEqual(media[1],'foreign-image','Foreign conversation must be rejected before attachment access'); return json({ items: [assets.get(media[1]).asset] }); }
     const content = /^\/v1\/accounts\/a\/media\/asset-([^/]+)\/content$/.exec(url.pathname);
@@ -180,7 +187,7 @@ try {
   assert.ifError(fixtureError); assert.ok(result,`Gateway deadline: ${log}`); assert.equal(result.error,undefined,`${result.error}; ${log}`);
   for(const scenario of scenarios)assert.equal(result.outcomes[scenario.id],['trigger','dm-image',...quoteScenarios.map(value=>value.id)].includes(scenario.id)?'completed':'ignored');
   assert.equal(requests.length,toolSteps.length+2+quoteScenarios.length); assert.equal(queries.length,2); assert.equal(queries[0].cursor,undefined);assert.equal(queries[1].cursor,'older-matches');assert.equal(reads.length,2+quoteScenarios.length);
-  assert.equal(loginStarts,1);assert.equal(loginQrReads,1);
+  assert.equal(loginStarts,1);assert.equal(loginQrReads,1);assert.equal(quoteRequests,0);
   assert.deepEqual([...new Set(lookups)],['foreign-image','history-image','history-file']);
   assert.ok(lookups.filter(id=>id==='history-image').length>1,'Media must recheck its exact message after asynchronous retrieval');
   assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
@@ -197,20 +204,21 @@ try {
     const scenario=quoteScenarios[index],request=requests[toolSteps.length+2+index];
     const providerText=request.messages.flatMap(message=>typeof message.content==='string'?[message.content]:Array.isArray(message.content)?message.content.filter(block=>block.type==='text').map(block=>block.text):[]).join('\n');
     assert.ok(providerText.includes(scenario.body),'Quote comment or forwarded bundle missing from provider');
-    if(scenario.id==='quote-text')assert.ok(JSON.stringify(request.messages).includes('Quoted original stored text'));
+    if(scenario.id==='quote-text')assert.ok(JSON.stringify(request.messages).includes('Quoted excerpt carried in the reply'));
     if(scenario.id==='quote-embedded-text')assert.ok(JSON.stringify(request.messages).includes('Quoted embedded text with no original row'));
     if(['link-card','quote-link','quote-embedded-link'].includes(scenario.id))assert.ok(providerText.includes(linkBody),'Link card title, description or URL missing from provider');
+    if(['quote-voice','quote-video','quote-file'].includes(scenario.id))assert.ok(providerText.includes('attachment unavailable'),'Quoted media must retain its comment and explicit attachment status');
     const isImage=['quote-image','quote-embedded-image'].includes(scenario.id);
     const context=result.contexts.find(ctx=>ctx.MessageSid.startsWith(`wechat-native:a:${scenario.id}:`));
     assert.equal(!!context.MediaPath,isImage);
     if(isImage) {
-      const sourceAsset=assets.get(scenario.id==='quote-image'?'quoted-original-image':scenario.id).asset;
+      const sourceAsset=assets.get(scenario.id).asset;
       const expected=sourceAsset.preview?.sha256??sourceAsset.sha256;
       const matches=images(request).filter(block=>{const encoded=/^data:([^;]+);base64,(.+)$/.exec(block.image_url.url);return encoded&&createHash('sha256').update(Buffer.from(encoded[2],'base64')).digest('hex')===expected;});
       assert.equal(matches.length,1,'Exact new quoted image must reach provider once, independently of prior history');
       const item=result.items.find(item=>item.message.id===scenario.id);
       assert.equal(item.dispatchManifest.assets[0].messageId,scenario.id);
-      if(scenario.id==='quote-image')assert.equal(item.dispatchManifest.assets[0].sourceMessageId,'quoted-original-image');
+      assert.equal(item.dispatchManifest.assets[0].sourceMessageId,undefined);
       if(scenario.id==='quote-embedded-image') {
         assert.equal(item.dispatchManifest.assets[0].sourceSha256,sourceAsset.sha256);
         assert.equal(item.dispatchManifest.assets[0].sourceMime,'image/x-wxgf');
@@ -221,7 +229,7 @@ try {
   }
   const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
-  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,ordinaryLinkCardReachedProvider:true,storedAndEmbeddedQuotedLinksReachedProvider:true,loginStatusStartWait:true,loginQrHashReachedProvider:true,loginStarts,reads:reads.length}));
+  console.log(JSON.stringify({gatewayVersion:'2026.10.2',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,ordinaryLinkCardReachedProvider:true,embeddedQuotesOnly:true,quoteRequests,loginStatusStartWait:true,loginQrHashReachedProvider:true,loginStarts,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   for(const stream of streams)stream.destroy();await new Promise(resolve=>upstream.close(resolve));upstream.closeAllConnections();await rm(temporary,{recursive:true,force:true});

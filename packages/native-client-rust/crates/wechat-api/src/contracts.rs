@@ -60,6 +60,24 @@ pub struct NativeQuoteReference {
     pub server_id: String,
     #[serde(rename = "type")]
     pub message_type: i32,
+    #[serde(default)]
+    #[ts(optional)]
+    pub state: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub sender_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub app_message_type: Option<i32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub embedded_text: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub embedded_image: Option<bool>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +86,7 @@ pub struct NativeQuoteResolution {
     pub message_id: String,
     pub thread_id: String,
     pub state: String,
-    pub message: Option<NativeMessage>,
+    pub message: Option<NativeQuotedMessage>,
     #[serde(default)]
     #[ts(optional)]
     pub embedded_text: Option<String>,
@@ -78,6 +96,31 @@ pub struct NativeQuoteResolution {
     #[serde(default)]
     #[ts(optional)]
     pub sender_id: Option<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum NativeQuotedMessage {
+    Stored(Box<NativeMessage>),
+    Embedded(NativeEmbeddedQuoteMessage),
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeEmbeddedQuoteSource {
+    Embedded,
+}
+/// An excerpt carried by the parent reply, without a local original-message ID.
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeEmbeddedQuoteMessage {
+    pub source: NativeEmbeddedQuoteSource,
+    pub server_id: String,
+    #[serde(rename = "type")]
+    pub message_type: i32,
+    pub sender_id: Option<String>,
+    pub direction: Option<String>,
+    pub app_message_type: Option<i32>,
+    pub body: Option<String>,
+    pub embedded_image: bool,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -325,6 +368,9 @@ pub fn typescript() -> String {
         wechat_core::LinkCard::decl(),
         NativeRecallInfo::decl(),
         NativeMessage::decl(),
+        NativeEmbeddedQuoteSource::decl(),
+        NativeEmbeddedQuoteMessage::decl(),
+        NativeQuotedMessage::decl(),
         NativeQuoteResolution::decl(),
         NativeThread::decl(),
         NativeContact::decl(),
@@ -450,6 +496,26 @@ mod tests {
 #[cfg(test)]
 mod read_contract_tests {
     use super::*;
+    #[test]
+    fn embedded_quote_message_survives_the_public_contract_without_a_local_id() {
+        let value = serde_json::json!({"accountId":"a","messageId":"parent","threadId":"t","state":"embedded",
+            "message":{"source":"embedded","serverId":"18446744073709551615","type":49,"senderId":"u",
+                "direction":"incoming","appMessageType":5,"body":"[Link] Article\nhttps://example.com/article","embeddedImage":false}});
+        let parsed: NativeQuoteResolution = serde_json::from_value(value.clone()).unwrap();
+        assert!(matches!(
+            parsed.message,
+            Some(NativeQuotedMessage::Embedded(_))
+        ));
+        let result = serde_json::to_value(parsed).unwrap();
+        assert_eq!(result["message"], value["message"]);
+        assert!(result["message"].get("id").is_none());
+        for state in ["invalid", "recalled"] {
+            let mut suppressed = value.clone();
+            suppressed["state"] = serde_json::json!(state);
+            suppressed["message"] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<NativeQuoteResolution>(suppressed).is_ok());
+        }
+    }
     #[test]
     fn thread_read_rejects_retired_message_selection_instead_of_broadening_it() {
         assert!(serde_json::from_value::<NativeReadRequest>(

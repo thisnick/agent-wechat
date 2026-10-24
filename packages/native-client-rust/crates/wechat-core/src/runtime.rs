@@ -2637,7 +2637,7 @@ mod tests {
         assert_eq!(message["quote"]["serverId"], target.server_id);
         assert_eq!(
             core.quoted_message("one", &projected).unwrap()["state"],
-            "resolved"
+            "embedded"
         );
         core.project_message_send("one", &first.id).unwrap();
         assert_eq!(

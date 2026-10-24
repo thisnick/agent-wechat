@@ -364,7 +364,7 @@ test('official profile preparation uses daemon-host paths and a global admin res
   assert.equal((await client.prepareOfficialProfile({ path: '/server/official-home' })).accountId, 'official-fixture');
 });
 
-test('quoted originals are parent-bound with embedded fallback and no caller-selected chat', async () => {
+test('legacy quoted originals remain parent-bound with no caller-selected chat', async () => {
   const original={id:'original',accountId:'a',threadId:'t',serverId:'18446744073709551615',type:3};
   const response={accountId:'a',messageId:'parent',threadId:'t',state:'resolved',message:original};
   const requests=[];
@@ -377,8 +377,27 @@ test('quoted originals are parent-bound with embedded fallback and no caller-sel
   }
   const embedded=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'embedded',message:null,embeddedText:'inside quote'})});
   assert.equal((await embedded.quotedMessage('a','parent')).embeddedText,'inside quote');
+  const excerpt={source:'embedded',serverId:original.serverId,type:49,senderId:'u',direction:'incoming',appMessageType:5,body:'[Link] Article\nhttps://example.com/article',embeddedImage:false};
+  const inline=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'embedded',message:excerpt})});
+  assert.deepEqual((await inline.quotedMessage('a','parent')).message,excerpt);
+  for(const change of [{source:'stored'},{id:'invented-local-id'},{serverId:'18446744073709551616'},{body:'x'.repeat(16385)},{embeddedImage:'true'}]) {
+    const invalid=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'embedded',message:{...excerpt,...change}})});
+    await assert.rejects(invalid.quotedMessage('a','parent'),/identity/);
+  }
   const recalled=new NativeWeChatClient({...options,fetch:async()=>Response.json({...response,state:'recalled',message:null})});
   assert.equal((await recalled.quotedMessage('a','parent')).state,'recalled');
+});
+
+test('normal message reads carry embedded quote content without another request', async () => {
+  const quote={serverId:'18446744073709551615',type:49,state:'embedded',senderId:'u',direction:'incoming',appMessageType:5,
+    embeddedText:'[Link] Article\nhttps://example.com/article',embeddedImage:false};
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url)=>{
+    requests.push(String(url));
+    return Response.json({id:'parent',accountId:'a',threadId:'t',type:49,appMessageType:57,body:'Comment',quote});
+  }});
+  assert.deepEqual((await client.message('a','parent')).quote,quote);
+  assert.deepEqual(requests,['http://127.0.0.1:6174/v1/accounts/a/messages/parent']);
 });
 
 test('completed upload reuse is an explicit option on the original job retry', async () => {

@@ -13,6 +13,7 @@ import type { NativeSuppliedAsset } from "./native-consumer-state.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
 import { nativeOutboundDelivery, type NativeOutboundDelivery } from "./native-send.ts";
 import { nativeRecallInfo } from "./native-recall-state.ts";
+import { renderEmbeddedQuote } from "./native-quote.ts";
 
 function kind(type: number): WeChatAttachment["kind"] | undefined {
   return type === 3 || type === 47 ? "image" : type === 34 ? "audio" : type === 43 ? "video" : type === 49 ? "file" : undefined;
@@ -149,66 +150,24 @@ async function prepareNativeLink(params: NativePrepareMediaParams): Promise<Nati
     ...(prepared.pending ? { attachment: { kind: "image" as const, status: "pending" as const, filename: "link-preview" } } : {}) };
 }
 async function prepareNativeQuote(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
-  const { client, account, message } = params;
+  const { message } = params;
   const guard = () => { params.signal?.throwIfAborted(); params.assertCurrent?.(); }; guard();
-  const comment = (message.body ?? "").slice(0, 16384);
-  const unavailable = (state: string): NativePreparedMedia => ({ body: `${comment}${comment ? "\n\n" : ""}[Quoted message ${state}; original lookup is confined to this chat]`, pending: false, retryable: state === "unavailable", quote: { state } });
-  await params.beforeMediaAccess?.(); guard();
-  let resolution;
-  try { resolution = await client.quotedMessage(account.native!.accountId, message.id); }
-  catch (error) {
-    guard(); if (!(error instanceof NativeApiError)) throw error;
-    if (error.code === "message_recalled") return { ...unavailable("recalled"), retryable: false, reason: "message_recalled" };
-    return terminalIdentityErrors.has(error.code) ? { ...unavailable("unavailable"), retryable: false, reason: error.code } : unavailable("unavailable");
-  }
+  const author = { senderId: message.quote?.senderId ?? null, direction: message.quote?.direction ?? null };
+  const permitted = !message.quote || !params.allowQuotedMessage || await params.allowQuotedMessage(author);
   guard();
-  if (resolution.accountId !== message.accountId || resolution.messageId !== message.id || resolution.threadId !== message.threadId) throw Error("Native quote identity does not match its message");
-  if (resolution.state === "recalled" || resolution.message && nativeRecallInfo(resolution.message)) return { ...unavailable("recalled"), retryable: false, reason: "message_recalled" };
-  if (!message.quote) return unavailable("invalid");
-  if (resolution.state === "embedded") {
-    if (resolution.message != null || ([1, 49].includes(message.quote.type) ? typeof resolution.embeddedText !== "string" || resolution.embeddedText.length > 16384
-      : message.quote.type !== 3 || resolution.embeddedImage !== true)) throw Error("Invalid embedded quote resolution");
-    const author = { senderId: resolution.senderId ?? null, direction: null };
-    if (params.allowQuotedMessage && !await params.allowQuotedMessage(author)) return unavailable("not permitted");
-    guard();
-    const quote = { state: "embedded", senderId: resolution.senderId ?? undefined, type: message.quote.type };
-    const prefix = `${comment}${comment ? "\n\n" : ""}[Quoted ${message.quote.type === 3 ? "image" : message.quote.type === 49 ? "link" : "text"} from ${resolution.senderId ?? "unknown sender"}; embedded in quote, original not stored]\n`;
-    if (message.quote.type !== 3) return { body: `${prefix}${resolution.embeddedText}\n[/Quoted message]`, pending: false, quote };
-    const beforeMediaAccess = async () => {
-      await params.beforeMediaAccess?.(); guard();
-      if (params.allowQuotedMessage && !await params.allowQuotedMessage(author)) throw Error("Quoted message is no longer permitted");
-      guard();
-    };
-    // The daemon owns the quote's media plan. This changes only the renderer;
-    // the API still receives the stored parent ID and re-parses its metadata.
-    const prepared = await prepareNativeAttachment({ ...params, message: { ...message, type: 3, appMessageType: undefined, quote: undefined }, beforeMediaAccess });
-    return { ...prepared, body: `${prefix}${prepared.body}\n[/Quoted message]`, pending: false, quote,
-      ...(prepared.pending ? { attachment: { kind: "image" as const, status: "pending" as const, filename: "quoted-image" } } : {}) };
-  }
-  if (resolution.state !== "resolved") {
-    if (!["missing", "invalid", "unsupported", "ambiguous"].includes(resolution.state) || resolution.message != null) throw Error("Invalid native quote resolution");
-    return unavailable(resolution.state);
-  }
-  const original = resolution.message;
-  if (!original || original.accountId !== message.accountId || original.threadId !== message.threadId || original.id === message.id
-    || original.serverId !== message.quote.serverId || original.type !== message.quote.type || ![1, 3, 49].includes(original.type)
-    || (original.type === 49 && (original.appMessageType !== 5 || !original.body))) throw Error("Native quoted original crosses its message boundary");
-  if (params.allowQuotedMessage && !await params.allowQuotedMessage(original)) return unavailable("not permitted");
-  guard();
-  const quote = { state: "resolved", messageId: original.id, senderId: original.senderId ?? undefined, type: original.type };
-  const prefix = `${comment}${comment ? "\n\n" : ""}[Quoted ${original.type === 3 ? "image" : original.type === 49 ? "link" : "text"} from ${original.senderId ?? "unknown sender"}; message ${original.id}]\n`;
-  if (original.type !== 3) return { body: `${prefix}${(original.body ?? "").slice(0, 16384)}\n[/Quoted message]`, pending: false, quote };
+  const rendered = renderEmbeddedQuote(message, permitted);
+  if (!rendered.image) return { body: rendered.body, quote: rendered.quote, pending: false, retryable: false,
+    ...(rendered.quote.state === "recalled" ? { reason: "message_recalled" } : {}) };
   const beforeMediaAccess = async () => {
     await params.beforeMediaAccess?.(); guard();
-    if (params.allowQuotedMessage && !await params.allowQuotedMessage(original)) throw Error("Quoted message is no longer permitted");
+    if (params.allowQuotedMessage && !await params.allowQuotedMessage(author)) throw Error("Quoted message is no longer permitted");
     guard();
   };
-  const prepared = await prepareNativeAttachment({ ...params, message: original, beforeMediaAccess });
-  // A delayed quoted image must not hide the current comment. Its explicit
-  // status/job remains available through the ordinary media lookup tool.
-  return { ...prepared, body: `${prefix}${prepared.body}\n[/Quoted message]`, pending: false, quote,
-    ...(prepared.pending ? { attachment: { kind: "image" as const, status: "pending" as const, filename: "quoted-image" } } : {}),
-    suppliedAssets: prepared.suppliedAssets?.map(asset => ({ ...asset, sourceMessageId: original.id })) };
+  // The received parent owns the descriptor, cache identity and transfer plan.
+  const prepared = await prepareNativeAttachment({ ...params, message: { ...message, type: 3, appMessageType: undefined, quote: undefined, link: undefined }, beforeMediaAccess });
+  if (prepared.reason === "message_recalled" || terminalIdentityErrors.has(prepared.reason ?? "")) return prepared;
+  return { ...prepared, body: renderEmbeddedQuote(message, true, prepared.body).body, quote: rendered.quote, pending: false,
+    ...(prepared.pending ? { attachment: { kind: "image" as const, status: "pending" as const, filename: "quoted-image" } } : {}) };
 }
 export async function prepareNativeAttachment(params: NativePrepareMediaParams): Promise<NativePreparedMedia> {
   try { return await prepareNativeAttachmentInput(params); }

@@ -240,8 +240,7 @@ pub(crate) fn normalized_message(
     let quote = app
         .as_ref()
         .filter(|a| a.subtype == 57)
-        .and_then(|a| a.reference.as_ref())
-        .map(|(id, kind)| json!({"serverId":id,"type":kind}));
+        .and_then(|a| crate::quotes::embedded_quote(a, own));
     let link = app.as_ref().and_then(|a| a.link.as_ref()).map(|l| &l.card);
     if let Some(link) = link {
         text = Some(link.body());

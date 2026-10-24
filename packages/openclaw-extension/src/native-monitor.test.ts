@@ -44,18 +44,36 @@ test("prepared model harness records exact input custody and read projection sep
   assert.equal(value.runs.length, 1); assert.equal(value.state.get("m1")?.runId, "run_1"); assert.equal(value.state.get("m1")?.readPending, true);
   assert.match(value.runs[0].ctx.MessageSid, /^wechat-native:a:m1:[a-f0-9]{64}$/);
 });
-test("quoted link cards reach the prepared model input with the configured read policy", async t => {
-  for (const state of ["resolved", "embedded"] as const) {
-    const value = fixture(t, { readPolicy: "on_model_dispatch" });
-    Object.assign(value.message, { type: 49, appMessageType: 57, body: "Explain this article", quote: { serverId: "42", type: 49 } });
-    const link = "[Link]\nArticle title\nArticle description\nhttps://example.com/article?a=1&b=2";
-    value.client.quotedMessage = async () => ({ accountId: "a", messageId: "m1", threadId: "u", state,
-      message: state === "resolved" ? { ...value.message, id: "original", serverId: "42", appMessageType: 5, quote: undefined, body: link } : null,
-      embeddedText: state === "embedded" ? link : undefined, senderId: "u" });
+test("embedded quoted links reach prepared model input without original resolution", async t => {
+  const value = fixture(t, { readPolicy: "on_model_dispatch" });
+  const link = "[Link] Article title\nArticle description\nhttps://example.com/article?a=1&b=2";
+  Object.assign(value.message, { type: 49, appMessageType: 57, body: "Explain this article",
+    quote: { serverId: "42", type: 49, appMessageType: 5, state: "embedded", senderId: "u", embeddedText: link } });
+  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  assert.ok(value.runs[0].ctx.BodyForAgent.includes(link)); assert.ok(value.runs[0].ctx.BodyForAgent.includes("Explain this article"));
+  assert.equal(value.state.get("m1")?.readPending, true);
+});
+test("unsupported embedded media quotes dispatch their comment instead of requiring review", async t => {
+  for (const type of [34, 43, 49]) {
+    const value = fixture(t);
+    Object.assign(value.message, { type: 49, appMessageType: 57, body: "Explain this attachment",
+      quote: { serverId: "42", type, appMessageType: type === 49 ? 6 : undefined, state: "unsupported", senderId: "u" } });
+    value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
     assert.equal(await dispatchNativeMessage(value), "completed");
-    assert.ok(value.runs[0].ctx.BodyForAgent.includes(link)); assert.ok(value.runs[0].ctx.BodyForAgent.includes("Explain this article"));
-    assert.equal(value.state.get("m1")?.readPending, true); assert.equal(value.state.get("m1")?.runId, "run_1");
+    assert.match(value.runs[0].ctx.BodyForAgent, /Explain this attachment/);
+    assert.match(value.runs[0].ctx.BodyForAgent, /attachment unavailable/);
   }
+});
+test("inline quoted recall prevents stale embedded text from reaching the model", async t => {
+  const value = fixture(t);
+  Object.assign(value.message, { type: 49, appMessageType: 57, body: "Current comment",
+    quote: { serverId: "42", type: 1, state: "embedded", senderId: "u", embeddedText: "Stale excerpt" } });
+  value.client.quotedMessage = async () => assert.fail("Quote endpoint must not be called");
+  let reads = 0;
+  value.client.message = async () => ++reads === 1 ? value.message : { ...value.message, quote: { serverId: "42", type: 1, state: "recalled" } };
+  await dispatchNativeMessage(value);
+  assert.ok(reads >= 2); assert.equal(value.runs.length, 0); assert.equal(value.state.get("m1")?.dispatchManifest, undefined);
 });
 test("catchup/import messages are not new automatic model turns or read projections", async t => {
   for (const origin of ["catchup", "import", "unknown"]) { const value = fixture(t, { origin }); assert.equal(await dispatchNativeMessage(value), "ignored"); assert.equal(value.runs.length, 0); }

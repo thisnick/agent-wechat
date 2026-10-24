@@ -84,14 +84,14 @@ async function recheckNativeInputs(client: NativeWeChatClient, state: NativeCons
       throw new NativeInputInvalidated();
     }
     if (message.quote) {
-      const quote = await client.quotedMessage(message.accountId, message.id);
-      if (quote.accountId !== message.accountId || quote.threadId !== message.threadId || quote.messageId !== message.id) throw Error("Native quote identity changed");
-      if (quote.state === "recalled" || quote.message && nativeRecallInfo(quote.message)) {
+      const quote = current.quote;
+      if (quote?.state === "recalled") {
         const affected = state.acceptRecall(state.cursor, { threadId: message.threadId, serverId: message.quote.serverId,
-          observedAt: quote.message && nativeRecallInfo(quote.message)?.observedAt || new Date().toISOString() });
+          observedAt: new Date().toISOString() });
         invalidateNativePreparedInputs(message.accountId, affected);
         throw new NativeInputInvalidated();
       }
+      if (!quote || JSON.stringify(quote) !== JSON.stringify(message.quote)) throw Error("Native embedded quote changed; delivery held for review");
     }
     if (!state.isCurrent(message)) throw new NativeInputInvalidated();
   }

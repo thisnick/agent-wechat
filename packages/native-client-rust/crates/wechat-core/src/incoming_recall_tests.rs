@@ -794,7 +794,8 @@ fn incoming_recall_preserves_identity_and_blocks_replayed_history_quotes_and_cac
     let parent = first(&core);
     let parent_id = parent["id"].as_str().unwrap();
     assert_eq!(parent["body"], "Own comment");
-    assert!(parent["quote"].is_null());
+    assert_eq!(parent["quote"]["state"], "recalled");
+    assert!(parent["quote"]["embeddedText"].is_null());
     assert_eq!(
         core.quoted_message("one", parent_id).unwrap()["state"],
         "recalled"
@@ -1024,7 +1025,8 @@ fn native_official_recall_outside_quote_page_is_observed_before_embedded_fallbac
         )
         .unwrap();
     assert_eq!(page["items"][0]["body"], "Current comment");
-    assert!(page["items"][0]["quote"].is_null());
+    assert_eq!(page["items"][0]["quote"]["state"], "recalled");
+    assert!(page["items"][0]["quote"]["embeddedText"].is_null());
     assert_eq!(
         core.quoted_message("one", page["items"][0]["id"].as_str().unwrap())
             .unwrap()["state"],
@@ -1112,7 +1114,8 @@ fn retained_search_pages_resolve_current_recall_state_instead_of_retaining_bodie
         )
         .unwrap();
     assert_eq!(next["items"][0]["body"], "search own comment");
-    assert!(next["items"][0]["quote"].is_null());
+    assert_eq!(next["items"][0]["quote"]["state"], "recalled");
+    assert!(next["items"][0]["quote"]["embeddedText"].is_null());
     assert_eq!(next["items"][1]["body"], crate::recalls::RECALLED_BODY);
     assert!(next["items"][1]["recall"].is_object());
     assert!(!next.to_string().contains("original private body"));
@@ -1143,7 +1146,8 @@ fn retained_search_pages_resolve_current_recall_state_instead_of_retaining_bodie
     .unwrap();
     let parent = first(&core);
     assert!(parent["body"].is_null());
-    assert!(parent["quote"].is_null());
+    assert_eq!(parent["quote"]["state"], "recalled");
+    assert!(parent["quote"]["embeddedText"].is_null());
 }
 
 #[test]
@@ -1610,7 +1614,8 @@ fn quote_normalization_reuses_the_request_snapshot_and_still_checks_recall_recei
     assert_eq!(first["quote"]["serverId"], "123");
     assert_eq!(first["version"], reader.generation());
     let recalled = recalled.unwrap();
-    assert!(recalled["quote"].is_null());
+    assert_eq!(recalled["quote"]["state"], "recalled");
+    assert!(recalled["quote"]["embeddedText"].is_null());
     assert_eq!(recalled["body"], "Reply");
 }
 

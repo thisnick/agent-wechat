@@ -434,151 +434,94 @@ test("foreign account or message asset metadata never reaches content retrieval"
   }
 });
 
-const quoteMessage = { ...message, type: 49, appMessageType: 57, body: "Please explain this", quote: { serverId: "18446744073709551615", type: 3 } } as NativeMessage;
-function quoteClient(original: NativeMessage | null, state = original ? "resolved" : "missing", extra: any = {}) {
+const quoteMessage = { ...message, type: 49, appMessageType: 57, body: "Please explain this",
+  quote: { serverId: "18446744073709551615", type: 3, state: "embedded", senderId: "source-author", embeddedImage: true } } as NativeMessage;
+const quoteCore = { channel: { media: { saveMediaBuffer: async () => ({ path: "/managed/quoted.gif" }) } } };
+function embeddedClient(extra: Partial<MediaAsset> = {}) {
   const calls: string[] = [];
-  return { calls, client: {
-    quotedMessage: async (a: string, id: string) => { calls.push("quote"); assert.equal(a,"a"); assert.equal(id,"m"); return { accountId:"a", messageId:"m", threadId:"u", state, message:original, ...extra }; },
-    mediaAssets: async (_a: string, id: string) => { calls.push(`assets:${id}`); return { items:[asset({messageId:id, ...extra.asset})] }; },
-    transferMedia: async (_a: string, input: any) => { calls.push(`transfer:${input.messageId}`); return { id:"job",state:"queued" }; },
-    mediaContent: async () => { calls.push("bytes"); return { bytes, contentType:"image/gif" }; },
-  } as unknown as NativeWeChatClient };
+  const client = {
+    quotedMessage: async () => assert.fail("Quotes must not request original resolution"),
+    message: async () => assert.fail("Quote rendering must not fetch another message"),
+    mediaAssets: async (_account: string, id: string) => { calls.push(`assets:${id}`); return { items: [asset({ messageId: id, ...extra })] }; },
+    mediaContent: async () => { calls.push("bytes"); return { bytes, contentType: "image/gif" }; },
+    transferMedia: async (_account: string, input: any) => { calls.push(`transfer:${input.messageId}`); return { id: "job", state: "queued" }; },
+  } as unknown as NativeWeChatClient;
+  return { client, calls };
 }
-const quotedOriginal = { ...message, id:"original", serverId:"18446744073709551615", senderId:"source-author", direction:"incoming" } as NativeMessage;
-const quoteCore = { channel:{media:{saveMediaBuffer:async()=>({path:"/managed/quoted.gif"})}} };
-test("resolved text quotes retain the comment and stored original, with no media request", async () => {
-  const f = quoteClient({ ...quotedOriginal, type:1, body:"The stored original text" });
-  const prepared = await prepareNativeAttachment({ client:f.client, account, message:{...quoteMessage,quote:{...quoteMessage.quote!,type:1}}, core:{} });
-  assert.match(prepared.body,/Please explain this/); assert.match(prepared.body,/The stored original text/);
-  assert.match(prepared.body,/Quoted text from source-author/); assert.equal(prepared.quote?.messageId,"original");
-  assert.deepEqual(f.calls,["quote"]);
-});
-test("quoted plain URLs retain query parameters in stored and embedded text", async () => {
-  const url = "https://example.com/article?a=1&b=2";
-  for (const stored of [true, false]) {
-    const f = stored ? quoteClient({ ...quotedOriginal, type: 1, body: url }) : quoteClient(null, "embedded", { senderId: "source-author", embeddedText: url });
-    const result = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: { ...quoteMessage.quote!, type: 1 } }, core: {} });
-    assert.ok(result.body.includes(url)); assert.ok(result.body.includes("Please explain this"));
-    assert.deepEqual(f.calls, ["quote"]);
+test("embedded text and links reach the model with no quote or original lookup", async () => {
+  for (const type of [1, 49]) {
+    const f = embeddedClient(); const text = "https://example.com/article?a=1&b=2";
+    const input = { ...quoteMessage, quote: { ...quoteMessage.quote!, type, appMessageType: type === 49 ? 5 : undefined, embeddedImage: false, embeddedText: text } };
+    const result = await prepareNativeAttachment({ client: f.client, account, message: input, core: {} });
+    assert.ok(result.body.includes(text)); assert.match(result.body, /Please explain this/); assert.match(result.body, /embedded in reply/);
+    assert.equal(result.quote?.state, "embedded"); assert.deepEqual(f.calls, []);
+    const blocked = await prepareNativeAttachment({ client: f.client, account, message: input, core: {}, allowQuotedMessage: async () => false });
+    assert.match(blocked.body, /not permitted/); assert.ok(!blocked.body.includes(text)); assert.deepEqual(f.calls, []);
   }
 });
-const linkBody = "[Link]\nArticle title\nArticle description\nhttps://example.com/article?a=1&b=2";
-test("stored and embedded quoted link cards preserve the comment and link without media transfers", async () => {
-  for (const stored of [true, false]) {
-    const f = stored ? quoteClient({ ...quotedOriginal, type: 49, appMessageType: 5, body: linkBody }) : quoteClient(null, "embedded", { senderId: "source-author", embeddedText: linkBody });
-    const result = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: { ...quoteMessage.quote!, type: 49 } }, core: {} });
-    assert.ok(result.body.includes(linkBody)); assert.match(result.body, /Please explain this/); assert.match(result.body, /Quoted link from source-author/);
-    assert.equal(result.quote?.type, 49); assert.equal(result.quote?.state, stored ? "resolved" : "embedded");
-    assert.equal(result.attachment, undefined); assert.deepEqual(f.calls, ["quote"]);
-    const blocked = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: { ...quoteMessage.quote!, type: 49 } }, core: {}, allowQuotedMessage: async () => false });
-    assert.match(blocked.body, /not permitted/); assert.ok(!blocked.body.includes(linkBody));
-  }
-});
-test("quoted app cards must resolve to links and cannot recurse or masquerade as files", async () => {
-  for (const appMessageType of [6, 19, 57, undefined]) {
-    const f = quoteClient({ ...quotedOriginal, type: 49, appMessageType, body: "must not reach the model" });
-    await assert.rejects(prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: { ...quoteMessage.quote!, type: 49 } }, core: {} }), /boundary/);
-    assert.deepEqual(f.calls, ["quote"]);
-  }
-});
-test("quoted images use verified original assets and retain source message identity", async () => {
-  const f = quoteClient(quotedOriginal);
-  const prepared = await prepareNativeAttachment({client:f.client,account,message:quoteMessage,core:quoteCore});
-  assert.equal(prepared.mediaPath,"/managed/quoted.gif"); assert.equal(prepared.suppliedAssets![0].sha256,hash);
-  assert.equal(prepared.suppliedAssets![0].sourceMessageId,"original"); assert.match(prepared.body,/Please explain this/);
-  assert.deepEqual(f.calls,["quote","assets:original","bytes"]);
+test("embedded quoted images retrieve verified bytes under the parent ID", async () => {
+  const f = embeddedClient();
+  const result = await prepareNativeAttachment({ client: f.client, account, message: quoteMessage, core: quoteCore });
+  assert.equal(result.mediaPath, "/managed/quoted.gif"); assert.equal(result.suppliedAssets![0].sha256, hash);
+  assert.equal(result.suppliedAssets![0].sourceMessageId, undefined); assert.deepEqual(f.calls, ["assets:m", "bytes"]);
   const { buildNativeContext } = await import("./native-history.ts");
   const { nativeDispatchManifest } = await import("./native-prepared-boundary.ts");
-  const context = buildNativeContext([],quoteMessage,prepared);
-  const manifest = nativeDispatchManifest({message:quoteMessage,inputBody:context.inputBody,assets:context.assets,sessionKey:"s",agentId:"agent",channelAccountId:"default"});
-  assert.equal(manifest.assets[0].messageId,"m"); assert.equal(manifest.assets[0].sourceMessageId,"original");
+  const context = buildNativeContext([], quoteMessage, result);
+  const manifest = nativeDispatchManifest({ message: quoteMessage, inputBody: context.inputBody, assets: context.assets, sessionKey: "s", agentId: "agent", channelAccountId: "default" });
+  assert.equal(manifest.assets[0].messageId, "m"); assert.equal(manifest.assets[0].sourceMessageId, undefined);
 });
-test("quote references never cross account/chat, mismatch type/server ID, or recurse", async () => {
-  for (const change of [{accountId:"other"},{threadId:"other"},{id:"m"},{serverId:"2"},{type:49}]) {
-    const f = quoteClient({...quotedOriginal,...change});
-    await assert.rejects(prepareNativeAttachment({client:f.client,account,message:quoteMessage,core:quoteCore}),/boundary/);
-    assert.deepEqual(f.calls,["quote"]);
-  }
-  const f = quoteClient(quotedOriginal,"resolved",{threadId:"foreign"});
-  await assert.rejects(prepareNativeAttachment({client:f.client,account,message:quoteMessage,core:quoteCore}),/identity/);
-});
-test("missing, invalid, unsupported and ambiguous quotes keep current text without file transfers", async () => {
-  for (const state of ["missing","invalid","unsupported","ambiguous"]) {
-    const f = quoteClient(null,state);
-    const result = await prepareNativeAttachment({client:f.client,account,message:quoteMessage,core:{}});
-    assert.match(result.body,/Please explain this/); assert.ok(result.body.includes(state)); assert.equal(result.pending,false);
-    assert.deepEqual(f.calls,["quote"]);
+test("quoted voice, video and files preserve the comment with an unavailable attachment status", async () => {
+  for (const type of [34, 43, 49]) {
+    const f = embeddedClient();
+    const result = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage,
+      quote: { ...quoteMessage.quote!, type, appMessageType: type === 49 ? 6 : undefined, state: "unsupported", embeddedImage: false,
+        embeddedText: type === 49 ? "report.pdf" : undefined } }, core: {} });
+    assert.match(result.body, /Please explain this/); assert.match(result.body, /attachment unavailable/);
+    if (type === 49) assert.match(result.body, /report.pdf/);
+    assert.equal(result.pending, false); assert.equal(result.quote?.state, "unsupported"); assert.deepEqual(f.calls, []);
   }
 });
-test("a terminal quoted recall keeps the parent comment while omitting recalled text and assets", async () => {
-  const client = { quotedMessage: async () => { throw new NativeApiError(410, "message_recalled", false); } } as unknown as NativeWeChatClient;
-  const result = await prepareNativeAttachment({ client, account, message: quoteMessage, core: {} });
-  assert.match(result.body, /Please explain this/); assert.match(result.body, /recalled/);
-  assert.equal(result.quote?.state, "recalled"); assert.equal(result.reason, "message_recalled"); assert.equal(result.retryable, false);
-  assert.equal(result.attachment, undefined); assert.equal(result.suppliedAssets, undefined);
+test("missing, legacy, malformed and recalled embedded quotes never fetch an original", async () => {
+  for (const state of [undefined, "missing", "invalid", "resolved", "recalled"]) {
+    const f = embeddedClient();
+    const result = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage,
+      quote: { ...quoteMessage.quote!, state, embeddedImage: false, embeddedText: "must not escape" } }, core: {} });
+    assert.match(result.body, /Please explain this/); assert.ok(!result.body.includes("must not escape")); assert.equal(result.pending, false);
+    assert.deepEqual(f.calls, []);
+  }
+  const f = embeddedClient();
+  const absent = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: undefined }, core: {} });
+  assert.match(absent.body, /unavailable/); assert.deepEqual(f.calls, []);
 });
-test("a normalized quote with its reference removed still reports recalled without losing the parent comment", async () => {
-  const f = quoteClient(null, "recalled");
-  const result = await prepareNativeAttachment({ client: f.client, account, message: { ...quoteMessage, quote: undefined }, core: {} });
-  assert.equal(result.reason, "message_recalled"); assert.equal(result.quote?.state, "recalled"); assert.equal(result.retryable, false);
-  assert.match(result.body, /Please explain this/); assert.equal(result.suppliedAssets, undefined); assert.deepEqual(f.calls, ["quote"]);
+test("blocked quoted images never reach attachment retrieval", async () => {
+  const f = embeddedClient();
+  const result = await prepareNativeAttachment({ client: f.client, account, message: quoteMessage, core: {}, allowQuotedMessage: async () => false });
+  assert.match(result.body, /not permitted/); assert.deepEqual(f.calls, []);
 });
-test("unavailable quote identity errors keep the parent comment and never suggest another lookup", async () => {
-  for (const code of ["media_identity_unavailable", "media_source_changed"]) {
-    const client = { quotedMessage: async () => { throw new NativeApiError(409, code, false); } } as unknown as NativeWeChatClient;
-    const result = await prepareNativeAttachment({ client, account, message: quoteMessage, core: {} });
-    assert.match(result.body, /Please explain this/); assert.equal(result.quote?.state, "unavailable");
-    assert.equal(result.retryable, false); assert.equal(result.reason, code); assert.equal(result.attachment, undefined);
+test("pending and expired embedded images preserve the current comment", async () => {
+  for (const state of ["pending", "expired"]) {
+    const f = embeddedClient({ state });
+    const result = await prepareNativeAttachment({ client: f.client, account, message: quoteMessage, core: {}, waitMs: 0 });
+    assert.equal(result.pending, false); assert.match(result.body, /Please explain this/); assert.match(result.body, new RegExp(state));
+    assert.equal(result.attachment?.status, state); assert.equal(result.mediaPath, undefined);
+    assert.equal(f.calls.filter(call => call.startsWith("transfer")).length, state === "expired" ? 0 : 1);
   }
 });
-test("blocked quoted authors cannot supply text or image assets", async () => {
-  for(const type of [1,3]) {
-    const f=quoteClient({...quotedOriginal,type,body:"must not reach model"});
-    const result=await prepareNativeAttachment({client:f.client,account,message:{...quoteMessage,quote:{...quoteMessage.quote!,type}},core:{},allowQuotedMessage:async()=>false});
-    assert.match(result.body,/not permitted/); assert.ok(!result.body.includes("must not reach model")); assert.deepEqual(f.calls,["quote"]);
+test("cached quote-owned image bytes remain usable after CDN expiry", async () => {
+  const f = embeddedClient({ expiresAt: 1 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await prepareNativeAttachment({ client: f.client, account, message: quoteMessage, core: quoteCore });
+    assert.equal(result.attachment?.status, "ready"); assert.equal(result.suppliedAssets![0].sourceMessageId, undefined);
   }
-});
-test("pending and expired quoted images preserve the comment and explicit state", async () => {
-  for (const state of ["pending","expired"]) {
-    const f=quoteClient(quotedOriginal,"resolved",{asset:{state}});
-    const result=await prepareNativeAttachment({client:f.client,account,message:quoteMessage,core:{},waitMs:0});
-    assert.equal(result.pending,false); assert.match(result.body,/Please explain this/); assert.match(result.body,new RegExp(state));
-    assert.equal(result.attachment?.status,state); assert.equal(result.mediaPath,undefined);
-    assert.equal(f.calls.filter(call=>call.startsWith("transfer")).length,state==="expired"?0:1);
-  }
-});
-test("embedded text and image remain usable when the original is absent locally", async () => {
-  const text=quoteClient(null,"embedded",{senderId:"source-author",embeddedText:"Text carried inside the quote",embeddedImage:false});
-  const result=await prepareNativeAttachment({client:text.client,account,message:{...quoteMessage,quote:{...quoteMessage.quote!,type:1}},core:{}});
-  assert.match(result.body,/original not stored/); assert.match(result.body,/Text carried inside/); assert.deepEqual(text.calls,["quote"]);
-  const image=quoteClient(null,"embedded",{senderId:"source-author",embeddedImage:true});
-  const prepared=await prepareNativeAttachment({client:image.client,account,message:quoteMessage,core:quoteCore});
-  assert.equal(prepared.mediaPath,"/managed/quoted.gif"); assert.equal(prepared.quote?.state,"embedded");
-  assert.deepEqual(image.calls,["quote","assets:m","bytes"]);
-  const blocked=await prepareNativeAttachment({client:image.client,account,message:quoteMessage,core:{},allowQuotedMessage:async()=>false});
-  assert.match(blocked.body,/not permitted/);
+  assert.deepEqual(f.calls, ["assets:m", "bytes", "assets:m", "bytes"]);
 });
 test("forwarded bundles render stored text and unsupported cards never enter the file pipeline", async () => {
-  for(const type of [19,3,4,33,2000]) {
-    const result=await prepareNativeAttachment({client:{} as NativeWeChatClient,account,message:{...quoteMessage,appMessageType:type,body:"[Chat History] Alice: forwarded text"},core:{}});
-    assert.equal(result.pending,false); assert.equal(result.attachment,undefined);
-    if(type===19)assert.match(result.body,/Alice: forwarded text/);else assert.match(result.body,/Unsupported/);
+  for (const type of [19, 3, 4, 33, 2000]) {
+    const result = await prepareNativeAttachment({ client: {} as NativeWeChatClient, account,
+      message: { ...quoteMessage, appMessageType: type, body: "[Chat History] Alice: forwarded text" }, core: {} });
+    assert.equal(result.pending, false); assert.equal(result.attachment, undefined);
+    if (type === 19) assert.match(result.body, /Alice: forwarded text/); else assert.match(result.body, /Unsupported/);
   }
-});
-
-test("repeated quotes reuse a cached original even after CDN expiry without another transfer", async () => {
-  let transfers=0,contents=0;
-  const client={
-    quotedMessage:async(_a:string,id:string)=>({accountId:"a",messageId:id,threadId:"u",state:"resolved",message:quotedOriginal}),
-    mediaAssets:async(_a:string,id:string)=>{assert.equal(id,"original");return {items:[asset({messageId:"original",expiresAt:1})]};},
-    mediaContent:async()=>{contents++;return {bytes,contentType:"image/gif"};},
-    transferMedia:async()=>{transfers++;throw Error("cached original must not be downloaded again");},
-  } as unknown as NativeWeChatClient;
-  for(const id of ["quote-one","quote-two"]){
-    const result=await prepareNativeAttachment({client,account,message:{...quoteMessage,id},core:quoteCore});
-    assert.equal(result.attachment?.status,"ready");assert.equal(result.suppliedAssets![0].sourceMessageId,"original");
-  }
-  assert.equal(contents,2);assert.equal(transfers,0);
 });
 
 const linkMessage = { ...message, type: 49, appMessageType: 5, body: "[Link] Shared title\nShared description\nhttps://example.invalid/article",

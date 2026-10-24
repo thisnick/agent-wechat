@@ -646,7 +646,10 @@ impl Core {
                 value["recall"]["replacementText"] = json!(notice);
             }
         } else if quoted_recalled {
-            value["quote"] = Value::Null;
+            if let Some(quote) = value["quote"].as_object_mut() {
+                quote.retain(|key, _| matches!(key.as_str(), "serverId" | "type"));
+                quote.insert("state".into(), json!("recalled"));
+            }
         }
         Ok(value)
     }
