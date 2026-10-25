@@ -4,7 +4,7 @@ import type {
   NativeWeChatClient,
 } from "@agent-wechat/shared";
 import type { BrowserCache } from "./browser-cache.ts";
-import { canRetrieve } from "./media-variants.ts";
+import { canAutoRetrieve, canRetrieve } from "./media-variants.ts";
 import { MediaPreviewCache } from "./media-preview-cache.ts";
 import { pause, readableError } from "./session.ts";
 
@@ -38,6 +38,8 @@ export class IncomingMedia {
   private listeners = new Set<() => void>();
   private pending: Promise<void> | undefined;
   private refreshPending = false;
+  private policyGeneration = 0;
+  private pendingPolicyGeneration = 0;
   private requested = new Set<string>();
   private value: MediaState = {
     assets: [],
@@ -71,19 +73,24 @@ export class IncomingMedia {
   }
   load(force = false): Promise<void> {
     if (this.pending) {
-      this.refreshPending ||= force;
+      this.refreshPending ||=
+        force || this.pendingPolicyGeneration !== this.policyGeneration;
       return this.pending;
     }
     if (this.controller.signal.aborted || (this.value.loaded && !force))
       return Promise.resolve();
+    const policyGeneration = this.policyGeneration;
+    this.pendingPolicyGeneration = policyGeneration;
     this.pending = this.client
       .mediaAssets(this.account, this.messageId)
-      .then((response) =>
-        this.publish({ assets: response.items, loaded: true, error: "" }),
-      )
-      .catch((error) =>
-        this.publish({ loaded: true, error: readableError(error) }),
-      )
+      .then((response) => {
+        if (policyGeneration === this.policyGeneration)
+          this.publish({ assets: response.items, loaded: true, error: "" });
+      })
+      .catch((error) => {
+        if (policyGeneration === this.policyGeneration)
+          this.publish({ loaded: true, error: readableError(error) });
+      })
       .finally(() => {
         this.pending = undefined;
         if (this.refreshPending) {
@@ -99,8 +106,26 @@ export class IncomingMedia {
       this.value.starting.includes(asset.id) || (!!job && !mediaJobEnded(job))
     );
   }
+  refreshPolicy(): void {
+    this.policyGeneration++;
+    this.publish({
+      loaded: false,
+      assets: this.value.assets.map((asset) => ({
+        ...asset,
+        autoDownloadAllowed: false,
+      })),
+    });
+    if (this.observed()) void this.load(true);
+  }
   ensure(asset: MediaAsset): void {
-    if (!canRetrieve(asset) || this.requested.has(asset.id)) return;
+    asset =
+      this.value.assets.find((current) => current.id === asset.id) ?? asset;
+    if (
+      !canAutoRetrieve(asset) ||
+      !canRetrieve(asset) ||
+      this.requested.has(asset.id)
+    )
+      return;
     this.requested.add(asset.id);
     void this.retrieve(asset);
   }
@@ -147,6 +172,9 @@ export class IncomingMedia {
       this.publish({ error: readableError(error) });
     }
   }
+  observed(): boolean {
+    return this.listeners.size > 0;
+  }
   idle(): boolean {
     return (
       this.value.loaded &&
@@ -188,6 +216,10 @@ export class MediaInbox {
       }
     }
     return entry;
+  }
+  refreshAccount(account: string): void {
+    for (const entry of this.entries.values())
+      if (entry.account === account) entry.refreshPolicy();
   }
   ready(assetId: string): void {
     for (const entry of this.entries.values())

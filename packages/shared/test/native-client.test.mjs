@@ -442,3 +442,16 @@ test('profile removal sends a confirmed DELETE and refuses a mismatched identity
   assert.equal(requests[0].init.method, 'DELETE');
   assert.deepEqual(JSON.parse(requests[0].init.body), { confirmAccountId: 'profile-1' });
 });
+
+test('account settings read and update the account-scoped API with byte limits', async () => {
+  const calls = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    calls.push([new URL(url).pathname, init.method ?? 'GET', init.body ? JSON.parse(init.body) : null]);
+    return Response.json({ autoDownloadMaxBytes: init.body ? JSON.parse(init.body).autoDownloadMaxBytes : 52428800 });
+  }});
+  assert.equal((await client.accountSettings('personal')).autoDownloadMaxBytes, 52428800);
+  assert.equal((await client.updateAccountSettings('personal', { autoDownloadMaxBytes: 0 })).autoDownloadMaxBytes, 0);
+  assert.deepEqual(calls, [ ['/v1/accounts/personal/settings', 'GET', null], ['/v1/accounts/personal/settings', 'PATCH', { autoDownloadMaxBytes: 0 }] ]);
+  for (const autoDownloadMaxBytes of [-1, 1.5, NaN, 536870913]) assert.throws(() => client.updateAccountSettings('personal', { autoDownloadMaxBytes }), /limit/);
+  assert.equal(calls.length, 2);
+});

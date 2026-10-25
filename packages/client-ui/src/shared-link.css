@@ -1,0 +1,87 @@
+.bubble.shared-link-card {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  width: 360px;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  text-decoration: none;
+  white-space: normal;
+}
+a.shared-link-card:hover {
+  border-color: var(--muted);
+}
+.shared-link-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 100px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--muted);
+  border-right: 1px solid var(--line);
+}
+.shared-link-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.shared-link-art svg {
+  width: 28px;
+  height: 28px;
+}
+.shared-link-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px 14px;
+}
+.shared-link-copy strong,
+.shared-link-description {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.shared-link-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.shared-link-description {
+  color: var(--muted);
+  font-size: 12px;
+}
+.shared-link-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.shared-link-source > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shared-link-source > svg {
+  flex: none;
+}
+@media (max-width: 480px) {
+  .bubble.shared-link-card {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+  .shared-link-copy {
+    padding: 10px 12px;
+  }
+}

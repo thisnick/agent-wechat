@@ -63,6 +63,7 @@ export default defineConfig({
           { label: 'CLI recipes', slug: 'use/cli' },
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
+          { label: 'Automatic downloads', slug: 'use/downloads' },
           { label: 'Video quality', slug: 'use/video' },
           { label: 'OpenClaw', items: [
             { label: 'Quick setup', slug: 'openclaw/setup' },

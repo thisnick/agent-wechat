@@ -93,6 +93,12 @@ try {
   const response = await fetch(session, { headers });
   assert.equal(response.status, 200);
   assert.match(response.headers.get("set-cookie"), /HttpOnly; SameSite=Strict/);
+  assert.match(response.headers.get("set-cookie"), /Max-Age=2592000/);
+  const cookie = response.headers.get("set-cookie").split(";")[0];
+  assert.equal(
+    (await fetch(session, { headers: { Cookie: cookie } })).status,
+    200,
+  );
   const config = await response.json();
   assert.equal(config.simulator, false);
   assert.equal(config.endpoint, ready.origin);

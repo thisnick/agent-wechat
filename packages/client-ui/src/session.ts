@@ -249,6 +249,13 @@ export class HubSession {
     for (const listener of this.mediaInvalidationListeners)
       listener(account, messageId);
   }
+  private settingsListeners = new Set<(account: string) => void>();
+  onAccountSettings = (listener: (account: string) => void): (() => void) => {
+    this.settingsListeners.add(listener);
+    return () => {
+      this.settingsListeners.delete(listener);
+    };
+  };
   private mediaListeners = new Set<(assetId: string) => void>();
   onMediaReady = (listener: (assetId: string) => void): (() => void) => {
     this.mediaListeners.add(listener);
@@ -399,6 +406,7 @@ export class HubSession {
     this.publish(initial());
     this.stopped = true;
     this.mediaListeners.clear();
+    this.settingsListeners.clear();
     this.mediaInvalidationListeners.clear();
     this.signOutListeners.clear();
     this.histories.clear();
@@ -512,7 +520,7 @@ export class HubSession {
           if (!this.current(account, generation)) return;
           this.histories.clear(account);
           this.restored.clear();
-          await this.cache?.clearAccount(account);
+          await this.cache?.clearHistory(account);
           if (!this.current(account, generation)) return;
           this.cursor = boundary;
         }
@@ -1105,6 +1113,8 @@ export class HubSession {
       this.signedOut(account);
       return;
     }
+    if (event.kind === "account.settings_updated")
+      for (const listener of this.settingsListeners) listener(account);
     if (
       event.kind === "message.recalled" &&
       typeof event.data.messageId === "string"
@@ -1177,7 +1187,7 @@ export class HubSession {
     if (!this.current(account, generation)) return;
     this.histories.clear(account);
     this.restored.clear();
-    await this.cache?.clearAccount(account);
+    await this.cache?.clearHistory(account);
     if (!this.current(account, generation)) return;
     this.historyLoaded = false;
     const selected = this.value.selected;

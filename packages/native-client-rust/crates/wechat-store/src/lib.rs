@@ -24,6 +24,7 @@ pub use pagination::*;
 pub use recalls::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+pub use settings::AccountSettings;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
@@ -186,7 +187,7 @@ impl Store {
     fn prepare_registry(db: &mut Connection, initialize: bool) -> Result<String> {
         db.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(0..=3).contains(&version) {
+        if !(0..=4).contains(&version) {
             bail!("unsupported registry schema version");
         }
         if version == 0 {
@@ -215,6 +216,11 @@ impl Store {
         if version < 3 {
             db.execute_batch(include_str!(
                 "../migrations/registry/V003__removed_accounts.sql"
+            ))?;
+        }
+        if version < 4 {
+            db.execute_batch(include_str!(
+                "../migrations/registry/V004__media_download_settings.sql"
             ))?;
         }
         let server_id = db.query_row(

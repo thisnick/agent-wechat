@@ -91,6 +91,14 @@ pub struct MediaAsset {
     pub content_type: Option<String>,
     #[ts(type = "number | null")]
     pub byte_length: Option<u64>,
+    // Sender-advertised source size, separate from verified cached bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub advertised_byte_length: Option<u64>,
+    // Current account policy permits an automatic hub transfer for this variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auto_download_allowed: Option<bool>,
     pub sha256: Option<String>,
     pub filename: Option<String>,
     #[ts(type = "number | null")]

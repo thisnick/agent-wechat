@@ -126,6 +126,7 @@ impl From<anyhow::Error> for ApiError {
             );
         }
         for code in [
+            "invalid_auto_download_limit",
             "invalid_group_identity",
             "invalid_group_text",
             "invalid_group_members",
@@ -2213,6 +2214,93 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+    #[tokio::test]
+    async fn download_settings_require_account_scope_and_validate_without_touching_a_profile() {
+        let (_temp, core, app) = setup();
+        let read = "synthetic-read-policy-token-123456";
+        let media = "synthetic-media-policy-token-123456";
+        for (token, scope) in [(read, "read"), (media, "media")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token)),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        let path = "/v1/accounts/one/settings";
+        let (status, settings) = call(app.clone(), "GET", path, Some(read), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(settings["autoDownloadMaxBytes"], 52_428_800);
+        assert_eq!(
+            call(
+                app.clone(),
+                "GET",
+                "/v1/accounts/two/settings",
+                Some(read),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                app.clone(),
+                "PATCH",
+                path,
+                Some(read),
+                Some(json!({"autoDownloadMaxBytes":0}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, settings) = call(
+            app.clone(),
+            "PATCH",
+            path,
+            Some(media),
+            Some(json!({"autoDownloadMaxBytes":0})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(settings["autoDownloadMaxBytes"], 0);
+        assert_eq!(
+            core.store
+                .account_settings("two")
+                .unwrap()
+                .auto_download_max_bytes,
+            52_428_800
+        );
+        for value in [json!(-1), json!(536_870_913), json!(1.5), json!("50")] {
+            let status = call(
+                app.clone(),
+                "PATCH",
+                path,
+                Some(media),
+                Some(json!({"autoDownloadMaxBytes":value})),
+            )
+            .await
+            .0;
+            assert!(status.is_client_error());
+        }
+        assert_eq!(
+            core.store
+                .account_settings("one")
+                .unwrap()
+                .auto_download_max_bytes,
+            0
+        );
+        assert!(core
+            .store
+            .events("one", 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "account.settings_updated"));
     }
     #[tokio::test]
     async fn authorization_is_required_and_status_identifies_owned_process() {

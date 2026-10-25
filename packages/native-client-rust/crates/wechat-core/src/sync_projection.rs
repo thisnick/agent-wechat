@@ -377,7 +377,7 @@ impl Core {
         command: &SyncCommand,
         receipt: &str,
         origin: &str,
-        download_voice: bool,
+        download_media: bool,
     ) -> Result<()> {
         if command.id == 4 {
             // Native DelContact handler 0x6228370 calls 0x786f830. Lookup
@@ -717,8 +717,11 @@ impl Core {
             &options,
         )?;
         let id = crate::message_id(&source)?;
-        if download_voice && message.message_type == 34 && origin != "profile_import" {
-            self.queue_received_voice(account, &id)?;
+        if download_media
+            && matches!(message.message_type, 3 | 34 | 43 | 47 | 49)
+            && origin != "profile_import"
+        {
+            self.queue_received_media(account, &id)?;
         }
         self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
         self.store.put_runtime(account, receipt, b"1")?;
@@ -2414,6 +2417,75 @@ mod automatic_voice_tests {
         )
     }
     #[test]
+    fn received_media_uses_each_advertised_variant_size_and_keeps_thumbnails_automatic() {
+        let (_temporary, store, core) = fixture();
+        store
+            .set_account_settings(
+                "one",
+                &wechat_store::AccountSettings {
+                    auto_download_max_bytes: 100,
+                },
+            )
+            .unwrap();
+        for (server, kind, content, expected) in [
+            (300, 3, "<msg><img aeskey='09090909090909090909090909090909' cdnmidimgurl='synthetic-standard' length='100' cdnbigimgurl='synthetic-original' hdlength='101' cdnthumburl='synthetic-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec!["standard", "thumbnail"]),
+            (301, 43, "<msg><videomsg aeskey='09090909090909090909090909090909' cdnvideourl='synthetic-video' length='100' cdnrawvideourl='synthetic-original-video' cdnrawvideoaeskey='09090909090909090909090909090909' rawlength='101' cdnthumburl='synthetic-video-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec!["normal", "thumbnail"]),
+            (302, 49, "<msg><appmsg><title>small.txt</title><type>6</type><appattach><totallen>80</totallen><cdnattachurl>synthetic-file</cdnattachurl><aeskey>09090909090909090909090909090909</aeskey></appattach></appmsg></msg>", vec!["original"]),
+            (303, 3, "<msg><img aeskey='09090909090909090909090909090909' cdnmidimgurl='unknown-standard' cdnbigimgurl='unknown-original' cdnthumburl='unknown-thumb' cdnthumbaeskey='09090909090909090909090909090909'/></msg>", vec!["thumbnail"]),
+            (304, 49, "<msg><appmsg><title>unknown.txt</title><type>6</type><appattach><cdnattachurl>unknown-file</cdnattachurl><aeskey>09090909090909090909090909090909</aeskey></appattach></appmsg></msg>", vec![]),
+            (305, 3, "<msg><img aeskey='09090909090909090909090909090909' cdnbigimgurl='small-original' hdlength='100'/></msg>", vec!["original"]),
+            (306, 43, "<msg><videomsg cdnrawvideourl='small-original-video' cdnrawvideoaeskey='09090909090909090909090909090909' rawlength='100'/></msg>", vec!["original"]),
+        ] {
+            core.apply_received_sync_command("one", &add(kind, "peer", "synthetic_self", content.as_bytes(), server, 100), &format!("media-{server}"), "live").unwrap();
+            let mut qualities = store.runtime_prefix("one", "received-media:", 100).unwrap().iter().filter_map(|(_, bytes)| {
+                let pending: Value = serde_json::from_slice(bytes).unwrap();
+                let id = pending["request"]["assetId"].as_str().unwrap();
+                let asset = core.media_asset("one", id).unwrap();
+                let message = core.message("one", asset.message_id.as_deref().unwrap()).unwrap();
+                (message["serverId"].as_str().and_then(|id| id.parse::<u64>().ok()) == Some(server)).then(|| pending["request"]["quality"].as_str().unwrap().to_owned())
+            }).collect::<Vec<_>>();
+            qualities.sort();
+            let mut expected = expected;
+            expected.sort();
+            assert_eq!(qualities, expected, "server {server}");
+        }
+        assert!(store.queued_media_jobs("one").unwrap().is_empty());
+    }
+    #[test]
+    fn lowering_the_limit_before_admission_prevents_a_pending_automatic_transfer() {
+        let (_temporary, store, core) = fixture();
+        core.apply_received_sync_command("one", &add(3, "peer", "synthetic_self", b"<msg><img aeskey='09090909090909090909090909090909' cdnmidimgurl='synthetic-standard' length='100'/></msg>", 300, 100), "lower-limit", "live").unwrap();
+        assert_eq!(
+            store
+                .runtime_prefix("one", "received-media:", 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .set_account_settings(
+                "one",
+                &wechat_store::AccountSettings {
+                    auto_download_max_bytes: 0,
+                },
+            )
+            .unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .put_runtime(
+                "one",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(core.admit_received_media("one").unwrap(), 0);
+        assert!(store
+            .runtime_prefix("one", "received-media:", 100)
+            .unwrap()
+            .is_empty());
+        assert!(store.queued_media_jobs("one").unwrap().is_empty());
+    }
+    #[test]
     fn received_voice_queues_one_bound_playback_download_without_a_client() {
         let (_temporary, store, core) = fixture();
         core.apply_received_sync_command("one", &voice(200), "voice-first", "live")
@@ -2493,7 +2565,12 @@ mod automatic_voice_tests {
                 core.ownership_generation.as_bytes(),
             )
             .unwrap();
-        assert_eq!(core.admit_received_voice("one").unwrap(), 1);
+        assert_eq!(core.admit_received_media("one").unwrap(), 1);
+        assert!(reopened
+            .events("one", 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "media.auto-download" && event.data["kind"] == "voice"));
         assert_eq!(
             reopened.media_job("one", "cancelled-voice").unwrap().state,
             "cancelled"
@@ -2529,7 +2606,7 @@ mod automatic_voice_tests {
                 )
                 .unwrap();
         }
-        assert_eq!(core.admit_received_voice("one").unwrap(), 0);
+        assert_eq!(core.admit_received_media("one").unwrap(), 0);
         assert_eq!(
             store
                 .runtime_prefix("one", "received-voice:", 100)
@@ -2547,7 +2624,7 @@ mod automatic_voice_tests {
         store
             .put_runtime("one", "desired", b"disconnected")
             .unwrap();
-        assert_eq!(core.admit_received_voice("one").unwrap(), 0);
+        assert_eq!(core.admit_received_media("one").unwrap(), 0);
         assert_eq!(
             store
                 .runtime_prefix("one", "received-voice:", 100)
@@ -2565,7 +2642,7 @@ mod automatic_voice_tests {
             )
             .unwrap();
         for _ in 0..3 {
-            assert_eq!(core.admit_received_voice("one").unwrap(), 0);
+            assert_eq!(core.admit_received_media("one").unwrap(), 0);
         }
         assert!(store.queued_media_jobs("one").unwrap().is_empty());
         assert!(store

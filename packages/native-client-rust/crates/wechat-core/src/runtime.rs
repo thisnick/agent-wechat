@@ -1683,7 +1683,7 @@ impl Core {
             }
             self.store.clear_runtime(&account.id, "history-caught-up")?;
             self.start_push_worker(&account.id)?;
-            self.start_received_voice_worker(&account.id);
+            self.start_received_media_worker(&account.id);
             let core = self.clone();
             tokio::spawn(async move {
                 let mut delay = 1;

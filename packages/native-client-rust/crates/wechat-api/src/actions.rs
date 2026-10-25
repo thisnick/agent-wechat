@@ -2,6 +2,10 @@ use super::*;
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .route(
+            "/v1/accounts/{a}/settings",
+            get(account_settings).patch(update_settings),
+        )
+        .route(
             "/v1/accounts/{a}/messages/{id}/recall",
             post(recall_message),
         )
@@ -72,6 +76,30 @@ async fn recall_message(
             serde_json::to_value(operation).map_err(anyhow::Error::from)?,
         )?,
     ))
+}
+async fn account_settings(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+) -> ApiResult<Json<wechat_store::AccountSettings>> {
+    c.require(Some(&a), "read")?;
+    Ok(Json(app.core.store.account_settings(&a)?))
+}
+async fn update_settings(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<wechat_store::AccountSettings>,
+) -> ApiResult<Json<wechat_store::AccountSettings>> {
+    c.require(Some(&a), "media")?;
+    let _guard = app.core.lock_account(&a).await?;
+    app.core.store.set_account_settings(&a, &input)?;
+    app.core.store.append_event(
+        &a,
+        "account.settings_updated",
+        &json!({"accountId":a,"settings":input}),
+    )?;
+    Ok(Json(app.core.store.account_settings(&a)?))
 }
 pub(super) async fn update_account(
     State(app): State<App>,

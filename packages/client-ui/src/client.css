@@ -162,6 +162,43 @@
   border: 1px solid var(--line);
   border-radius: 5px;
 }
+.settings-modal .modal-head {
+  padding: 20px 24px;
+}
+.settings-modal .modal-body {
+  padding: 0 24px 24px;
+}
+.settings-modal .setting {
+  padding: 20px 0;
+  gap: 16px;
+}
+.settings-modal .setting > span {
+  min-width: 0;
+  line-height: 1.45;
+}
+.settings-modal .setting small {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.settings-modal .setting > button,
+.settings-modal .setting > select {
+  flex-shrink: 0;
+}
+.settings-modal .local-cache-setting {
+  flex-wrap: wrap;
+}
+.settings-modal .local-cache-setting > span {
+  flex: 1;
+}
+.settings-modal .local-cache-notice {
+  flex-basis: 100%;
+  margin: 0;
+}
+.settings-modal .account-settings {
+  margin-top: 0;
+  padding-top: 20px;
+  border-top: 0;
+}
 .workspace {
   min-width: 0;
 }
@@ -613,22 +650,34 @@ input:focus-visible {
   width: min(300px, 100%);
 }
 .account-settings {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
   margin-top: 24px;
-  padding-top: 20px;
+  padding-top: 24px;
   border-top: 1px solid var(--line);
 }
+.account-settings > form {
+  display: grid;
+  gap: 8px;
+}
 .account-settings label {
+  display: block;
   font-size: 12px;
   color: var(--muted);
 }
 .account-settings small {
   font-size: 11px;
   color: var(--muted);
+  line-height: 1.5;
+}
+.account-settings > button {
+  justify-self: start;
 }
 .account-name {
   display: flex;
   gap: 8px;
-  margin: 9px 0;
+  margin: 0;
 }
 .account-name input,
 .profile-removal input {
@@ -647,15 +696,21 @@ input:focus-visible {
   border-radius: 6px;
 }
 .signout-button {
-  margin-top: 24px;
+  margin-top: 0;
 }
 .signout-confirm {
-  margin-top: 24px;
   font-size: 13px;
   line-height: 1.6;
 }
+.signout-confirm p {
+  margin: 0;
+}
+.signout-confirm .attachment-actions {
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
 .account-notice {
-  margin-top: 14px;
+  margin: 0;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
@@ -751,11 +806,19 @@ input:focus-visible {
   background: var(--surface);
   color: var(--ink);
 }
+.new-chat .group-name {
+  margin: 0 0 16px;
+}
 .new-chat-contacts {
   max-height: min(320px, 40vh);
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   margin: 12px 0;
+  padding: 4px 0;
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 4px;
 }
 .new-chat-contact {
@@ -763,6 +826,7 @@ input:focus-visible {
   align-items: center;
   gap: 12px;
   width: 100%;
+  min-height: 60px;
   padding: 10px;
   text-align: left;
   border-radius: 8px;
@@ -793,12 +857,15 @@ input:focus-visible {
   accent-color: var(--accent);
   width: 16px;
   height: 16px;
+  flex-shrink: 0;
+  margin: 0;
 }
 .new-chat-footer {
   display: flex;
   gap: 16px;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }
@@ -810,6 +877,21 @@ input:focus-visible {
 .new-chat-footer small {
   color: var(--muted);
   font-size: 11px;
+  line-height: 1.5;
+}
+.member-picker {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.member-picker .new-chat-contacts {
+  margin: 0;
+}
+.member-picker > .member-picker-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 .group-result {
   display: grid;
@@ -839,7 +921,7 @@ input:focus-visible {
   gap: 7px;
 }
 .group-section-head {
-  margin-bottom: 10px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
 }
 .group-section-head small {
@@ -859,12 +941,15 @@ input:focus-visible {
   background: transparent;
 }
 .group-setting-row {
-  padding: 13px 0;
+  padding: 16px 0;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
 .group-setting-row span {
   min-width: 0;
+}
+.group-setting-row > button {
+  flex-shrink: 0;
 }
 .group-setting-row strong {
   display: block;
@@ -912,9 +997,13 @@ input:focus-visible {
   background: white;
 }
 .group-announcement {
-  padding: 18px 0;
+  padding: 16px 0;
+}
+.group-announcement .section-head {
+  margin-bottom: 8px;
 }
 .group-announcement p {
+  margin: 0 0 12px;
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -941,7 +1030,7 @@ input:focus-visible {
   overflow-wrap: anywhere;
 }
 .group-edit .group-name {
-  margin-top: 8px;
+  margin: 0;
 }
 .group-edit-footer {
   display: flex;
@@ -984,6 +1073,11 @@ input:focus-visible {
 .group-settings .member span {
   overflow-wrap: anywhere;
   min-width: 0;
+}
+.group-settings .member {
+  min-height: 45px;
+  margin: 0;
+  padding: 8px 0;
 }
 
 @media (min-width: 1100px) {
@@ -1396,6 +1490,7 @@ input:focus-visible {
 }
 .recall-confirm-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 24px;
@@ -1475,6 +1570,13 @@ input:focus-visible {
   width: 100%;
   height: 100%;
   overflow: hidden;
+}
+.photo-stage {
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
+}
+.photo-stage video {
+  touch-action: auto;
 }
 .photo-stage .photo-transform {
   width: 100%;
@@ -1726,12 +1828,16 @@ input:focus-visible {
 }
 .profile-removal {
   border-top: 1px solid var(--line);
-  padding-top: 18px;
-  margin-top: 8px;
+  padding-top: 20px;
+  margin-top: 0;
 }
 .profile-removal h3 {
   margin: 0 0 8px;
   font-size: 15px;
+}
+.profile-removal h3,
+.profile-removal label {
+  overflow-wrap: anywhere;
 }
 .profile-removal p {
   margin: 0 0 18px;
@@ -1763,4 +1869,27 @@ input:focus-visible {
 .danger-text:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.media-limit-setting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.media-limit-setting input {
+  width: 96px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--canvas);
+}
+.media-limit-setting input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.media-limit-setting button {
+  margin-left: auto;
+  flex: none;
 }

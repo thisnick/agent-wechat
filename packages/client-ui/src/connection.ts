@@ -168,6 +168,9 @@ export async function connect(
     avatars.clear(account);
   });
   const recalls = new Map<string, MessageRecall>();
+  const stopSettings = session.onAccountSettings((account) =>
+    incomingMedia.refreshAccount(account),
+  );
   const stopMedia = session.onMediaReady((id) => incomingMedia.ready(id));
   const stopMediaInvalidation = session.onMediaInvalidated(
     (account, messageId) => incomingMedia.invalidateMessage(account, messageId),
@@ -223,6 +226,7 @@ export async function connect(
       for (const queue of media.values()) queue.close();
       avatars.close();
       stopMedia();
+      stopSettings();
       stopMediaInvalidation();
       incomingMedia.close();
       for (const recall of recalls.values()) recall.close();
@@ -394,9 +398,13 @@ export async function connect(
     },
   };
 }
-export async function bootstrap(): Promise<Connection | null> {
-  const key = new URLSearchParams(location.hash.slice(1)).get("dev");
-  if (key) history.replaceState(null, "", location.pathname + location.search);
+export async function bootstrap(
+  suppliedKey?: string,
+): Promise<Connection | null> {
+  const launchKey = new URLSearchParams(location.hash.slice(1)).get("dev");
+  const key = suppliedKey ?? launchKey;
+  if (launchKey)
+    history.replaceState(null, "", location.pathname + location.search);
   if (!import.meta.env.DEV) return null;
   const response = await fetch("/__dev/session", {
     headers: key ? { Authorization: `Bearer ${key}` } : {},

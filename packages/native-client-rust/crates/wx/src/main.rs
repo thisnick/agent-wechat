@@ -207,6 +207,12 @@ enum AccountCommand {
 #[derive(Subcommand)]
 enum AccountAction {
     Status,
+    /// Read or update this account's hub-side automatic download policy.
+    Settings {
+        /// Maximum automatic download size in MiB (0 keeps thumbnails and voice automatic).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(0..=512))]
+        auto_download_max_mb: Option<u64>,
+    },
     Capabilities,
     Connect {
         #[arg(long)]
@@ -1431,6 +1437,22 @@ async fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Account { command } => match command {
+            AccountAction::Settings {
+                auto_download_max_mb,
+            } => {
+                let path = r.path("settings")?;
+                if let Some(mb) = auto_download_max_mb {
+                    r.request(
+                        Method::PATCH,
+                        &path,
+                        Some(json!({"autoDownloadMaxBytes":mb * 1024 * 1024})),
+                        None,
+                    )
+                    .await?
+                } else {
+                    r.get(&path).await?
+                }
+            }
             AccountAction::Status => r.get(r.path("")?.trim_end_matches('/')).await?,
             AccountAction::Capabilities => r.get(&r.path("capabilities")?).await?,
             AccountAction::Disconnect => r.post(&r.path("disconnect")?, json!({})).await?,

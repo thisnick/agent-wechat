@@ -538,7 +538,7 @@ export function GroupSettings({
                   </label>
                 )}
                 {memberMode && (
-                  <>
+                  <div className="member-picker">
                     <label className="search">
                       <input
                         autoFocus
@@ -583,11 +583,11 @@ export function GroupSettings({
                         </p>
                       )}
                     </div>
-                    <p className="field-help">
+                    <p className="field-help member-picker-help">
                       {selected.length} selected · WeChat checks who can be
                       added or removed. Each member’s result will be shown.
                     </p>
-                  </>
+                  </div>
                 )}
                 {mode === "leave" && (
                   <p>

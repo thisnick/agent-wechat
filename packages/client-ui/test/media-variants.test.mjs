@@ -129,3 +129,37 @@ test("carousel upgrades accept only verified cached originals", async () => {
   ])
     assert.equal(cachedOriginal([{ ...original, ...change }]), undefined);
 });
+
+test("image previews fall back to thumbnails without bypassing the download threshold", async () => {
+  const { imagePreview, canAutoRetrieve } = await import(
+    "../src/media-variants.ts"
+  );
+  const standard = {
+    id: "large",
+    variant: "standard",
+    state: "pending",
+    autoDownloadAllowed: false,
+  };
+  const thumbnail = {
+    id: "thumb",
+    variant: "thumbnail",
+    state: "available",
+    actualVariant: "thumbnail",
+  };
+  assert.equal(imagePreview([standard, thumbnail]), thumbnail);
+  assert.equal(
+    imagePreview([{ ...standard, autoDownloadAllowed: true }, thumbnail]),
+    thumbnail,
+  );
+  assert.equal(
+    imagePreview([
+      { ...standard, state: "available", actualVariant: "standard" },
+      thumbnail,
+    ]).id,
+    "large",
+  );
+  assert.equal(canAutoRetrieve(standard), false);
+  assert.equal(canAutoRetrieve({ variant: "standard" }), false);
+  assert.equal(canAutoRetrieve({ variant: "thumbnail" }), true);
+  assert.equal(canAutoRetrieve({ kind: "voice", variant: "normal" }), true);
+});

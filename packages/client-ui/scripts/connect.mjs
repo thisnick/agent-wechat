@@ -129,7 +129,9 @@ try {
               }
               res.setHeader(
                 "Set-Cookie",
-                `agentwechat-connect=${secret}; HttpOnly; SameSite=Strict; Path=/__dev/${external ? "; Secure" : ""}`,
+                `agentwechat-connect=${secret}; HttpOnly; SameSite=Strict; Path=/__dev/; Max-Age=2592000${
+                  external ? "; Secure" : ""
+                }`,
               );
               return res.end(
                 JSON.stringify({

@@ -1,7 +1,7 @@
 // Real session model + SDK + owned Rust simulator processes; never loads native client defaults.
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { readFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
@@ -649,6 +649,37 @@ try {
       ).state === "awaiting_approval"
   );
   await client.cancelOperation("login-resume", admittedLogin.id);
+  const wx =
+    process.env.WX_BINARY ??
+    join(dirname(binary), process.platform === "win32" ? "wx.exe" : "wx");
+  const settingsArgs = [
+    "--server",
+    hub.endpoint,
+    "--token-file",
+    join(data, "hub-token"),
+    "--account",
+    "personal",
+    "--json",
+    "account",
+    "settings",
+  ];
+  const cliSettings = (...args) =>
+    JSON.parse(
+      execFileSync(wx, [...settingsArgs, ...args], { encoding: "utf8" })
+    );
+  assert.equal(cliSettings().autoDownloadMaxBytes, 50 * 1024 * 1024);
+  assert.equal(
+    cliSettings("--auto-download-max-mb", "0").autoDownloadMaxBytes,
+    0
+  );
+  assert.equal(
+    (await client.accountSettings("personal")).autoDownloadMaxBytes,
+    0
+  );
+  assert.equal(
+    cliSettings("--auto-download-max-mb", "50").autoDownloadMaxBytes,
+    50 * 1024 * 1024
+  );
   await mediaJourney({ client, control, wait, state, account: "personal" });
   await login("account-controls");
   await accountJourney({
@@ -686,6 +717,7 @@ try {
         "conversation search beyond loaded history with paginated matches",
         "reopened QR and phone approval resume the same login operation",
         "incoming image/file/video/voice/sticker bytes, animation, hashes, ranges and account isolation",
+        "per-account CLI/API download limits, automatic image/video thumbnails and manual above-limit retrieval",
         "outgoing media preparation, upload, readback and committed history",
         "media rejection, uncertainty and receipt recovery without resubmission",
         "account alias, read-state CAS, cached avatars, recoverable logout and confirmed profile removal",

@@ -11,6 +11,20 @@ export const canRetrieve = (asset: MediaAsset): boolean =>
   asset.retryable &&
   !["available", "expired", "unsupported"].includes(asset.state);
 
+// Policy comes from the hub; older hubs may only auto-fetch thumbnails and voice.
+export const canAutoRetrieve = (asset: MediaAsset): boolean =>
+  asset.autoDownloadAllowed === true ||
+  (asset.autoDownloadAllowed === undefined &&
+    (asset.variant === "thumbnail" ||
+      (asset.kind === "voice" && asset.variant === "normal")));
+
+export const imagePreview = (assets: MediaAsset[]): MediaAsset | undefined => {
+  const standard = standardImage(assets);
+  return standard && cachedVariant(standard)
+    ? standard
+    : assets.find((asset) => asset.variant === "thumbnail") ?? standard;
+};
+
 // Never silently save standard bytes when an original is advertised.
 export const downloadAsset = (
   assets: MediaAsset[],
@@ -25,8 +39,8 @@ export const videoAsset = (
   viewer: boolean,
 ): MediaAsset | undefined =>
   viewer
-    ? (cachedOriginal(assets) ??
-      assets.find((asset) => asset.variant === "normal"))
+    ? cachedOriginal(assets) ??
+      assets.find((asset) => asset.variant === "normal")
     : assets.find((asset) => asset.variant === "thumbnail");
 
 export const conversationMedia = (

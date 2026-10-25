@@ -19,6 +19,7 @@ import { Avatar, Button, Icon } from "./ui.tsx";
 import type { PendingMedia } from "./media-outbox.ts";
 import {
   standardImage,
+  imagePreview,
   cachedVariant,
   canRetrieve,
   downloadAsset,
@@ -358,7 +359,7 @@ export function MediaCard({
   const asset = image
     ? viewer && (!standard || !cachedVariant(standard)) && original
       ? original
-      : standard
+      : imagePreview(state.assets)
     : video
       ? videoAsset(state.assets, viewer)
       : (state.assets.find(
@@ -374,12 +375,12 @@ export function MediaCard({
       !opening &&
       (visible || viewer) &&
       asset &&
-      // An original video is already cached; only normal playback or a
-      // thumbnail may be fetched automatically.
       (!video || asset.variant !== "original")
-    )
+    ) {
       model.ensure(asset);
-  }, [model, asset, opening, visible, viewer, visual, voice, video]);
+      if (image && standard && standard.id !== asset.id) model.ensure(standard);
+    }
+  }, [model, asset, standard, image, opening, visible, viewer, visual, voice, video]);
   const available = asset && cachedVariant(asset);
   return (
     <div
@@ -434,7 +435,9 @@ export function MediaCard({
           {!state.loaded || working ? (
             <span className="media-spinner" />
           ) : asset && canRetrieve(asset) ? (
-            <button onClick={() => void model.retrieve(asset)}>Retry</button>
+            <button onClick={() => void model.retrieve(asset)}>
+              {asset.state === "pending" ? "Load" : "Retry"}
+            </button>
           ) : null}
         </div>
       ) : null}
@@ -652,7 +655,7 @@ export function MediaDownload({
     (item) =>
       item.kind === asset.kind &&
       item.variant === (asset.kind === "video" ? "normal" : "standard") &&
-      cachedVariant(item),
+      (cachedVariant(item) || canRetrieve(item)),
   );
   const fallback =
     asset.variant === "original" && !cachedVariant(asset)
@@ -702,6 +705,7 @@ function MediaDownloadAction({
       ? asset.preview?.byteLength
       : null) ??
     asset.byteLength ??
+    asset.advertisedByteLength ??
     job?.totalBytes;
   const quality = original
     ? "original"

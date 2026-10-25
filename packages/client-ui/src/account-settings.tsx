@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useId } from "react";
 import { createPortal } from "react-dom";
 import { NativeApiError } from "@agent-wechat/shared";
+import { MediaDownloadSettings } from "./media-download-settings.tsx";
 import { Icon } from "./ui.tsx";
 import { canRemoveProfile, profileRemovalName } from "./profile-removal.ts";
 import type { Connection } from "./connection.ts";
@@ -147,6 +148,7 @@ export function AccountSettings({
         </div>
         <small>Letters, numbers, hyphens and underscores.</small>
       </form>
+      <MediaDownloadSettings connection={connection} account={account.id} />
       {(account.authenticated || signOutRequired) &&
         (confirm ? (
           <div className="signout-confirm">

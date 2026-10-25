@@ -1,0 +1,85 @@
+---
+title: Automatic downloads
+description: Choose how much incoming media the agent-wechat hub downloads automatically for each account.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The agent-wechat hub downloads new attachments without a browser or API client
+being open. Each account has its own size limit, initially **50 MB (52,428,800 bytes)**.
+
+| Content | Automatic download |
+| --- | --- |
+| Image and video thumbnails | Always, when a source is provided |
+| Voice notes | Always, in playback format |
+| Standard and original images | Each version whose advertised size is within the limit |
+| Standard and original videos | Each version whose advertised size is within the limit |
+| Files and stickers | When their advertised size is within the limit |
+| Larger or unknown-size versions | On request |
+
+## Change the limit
+
+1. Select an account and read its settings:
+
+   ```bash
+   wx --account personal --json account settings
+   ```
+
+   ```json
+   { "autoDownloadMaxBytes": 52428800 }
+   ```
+
+2. Set the limit in MB (the CLI uses 1,048,576 bytes per MB):
+
+   ```bash
+   wx --account personal --json account settings --auto-download-max-mb 50
+   ```
+
+   ```json
+   { "autoDownloadMaxBytes": 52428800 }
+   ```
+
+   Set `0` to keep only thumbnails and voice notes automatic. The maximum is
+   `512`, matching the supported file download ceiling. Changes apply to new
+   attachments and automatic work that has not yet been admitted; running
+   transfers and already downloaded files stay intact.
+
+In the browser, open **Settings → Automatic downloads**. This controls media kept
+on the hub. **On this device** describes separate temporary browser copies.
+
+## API and SDK
+
+Read with `GET /v1/accounts/{account}/settings` and update with
+`PATCH /v1/accounts/{account}/settings`:
+
+```json
+{ "autoDownloadMaxBytes": 52428800 }
+```
+
+Reading requires the existing account `read` scope; updating requires `media`.
+The response contains the saved settings, and the account event stream emits
+`account.settings_updated`.
+
+```ts
+const settings = await client.accountSettings(accountId);
+await client.updateAccountSettings(accountId, {
+  autoDownloadMaxBytes: 50 * 1024 * 1024,
+});
+```
+
+Media responses expose `advertisedByteLength` when the sender provided a size and
+`autoDownloadAllowed` for the current account policy. `byteLength` still describes
+verified downloaded bytes. A missing advertised size does not mean an empty file.
+
+<Aside title="Good to know">
+- Settings are stored in the hub's account registry, outside the official WeChat profile.
+- This is hub download policy, separate from the official app's behavior. Existing
+  profile imports and local repairs do not start automatic network transfers.
+- The limit uses advertised sizes before transfer. Actual bytes are checked by
+  the normal download integrity checks; standard-image advertised size can differ
+  from the downloaded representation.
+- Manual [attachment downloads](/use/media/#download-files) remain available
+  above the threshold and when size is unknown, subject to supported media limits.
+- Changing the limit does not scan old history. Opening older messages may request
+  previews permitted by the current policy; other versions remain manual.
+</Aside>

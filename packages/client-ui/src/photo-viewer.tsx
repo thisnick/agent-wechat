@@ -24,6 +24,7 @@ import { MediaCard, MediaDownload } from "./media.tsx";
 import { downloadAsset, standardImage } from "./media-variants.ts";
 import { useConversationNavigation } from "./conversation-navigation.tsx";
 import { Button } from "./ui.tsx";
+import { mediaSwipeDirection } from "./media-swipe.ts";
 
 import { MediaViewerContext } from "./media-viewer-context.ts";
 
@@ -51,8 +52,7 @@ export function PhotoViewer({
   const scoped =
     selected?.accountId === state.account &&
     selected?.threadId === state.selected
-      ? (state.messages.find((message) => message.id === selected.id) ??
-        selected)
+      ? state.messages.find((message) => message.id === selected.id) ?? selected
       : null;
   const active = scoped && !scoped.recall ? scoped : null;
   const photos = active
@@ -216,7 +216,16 @@ export function PhotoViewer({
                       ? "Finding earlier media…"
                       : `${index + 1} / ${photos.length}`}
                     {current.createdAt &&
-                      ` · ${new Date(/^\d+$/.test(current.createdAt) ? Number(current.createdAt) * 1000 : current.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                      ` · ${new Date(
+                        /^\d+$/.test(current.createdAt)
+                          ? Number(current.createdAt) * 1000
+                          : current.createdAt,
+                      ).toLocaleString([], {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}`}
                     {navigation && (
                       <button
                         onClick={() => {
@@ -241,6 +250,7 @@ export function PhotoViewer({
                 <PhotoCanvas
                   image={current.type === 3}
                   animationTime={animationTime}
+                  navigate={(direction) => void move(direction)}
                 >
                   <MediaCard
                     key={current.id}
@@ -284,7 +294,9 @@ export function PhotoViewer({
                   <button
                     key={photo.id}
                     className="photo-thumbnail"
-                    aria-label={`${photo.type === 43 ? "Video" : "Photo"} ${position + 1}`}
+                    aria-label={`${photo.type === 43 ? "Video" : "Photo"} ${
+                      position + 1
+                    }`}
                     aria-current={photo.id === current.id ? "true" : undefined}
                     onClick={() => setSelected(photo)}
                   >
@@ -355,10 +367,12 @@ function ResetPhotoZoom({ messageId }: { messageId: string }) {
 function PhotoCanvas({
   image,
   animationTime,
+  navigate,
   children,
 }: {
   image: boolean;
   animationTime: number;
+  navigate: (direction: -1 | 1) => void;
   children: ReactNode;
 }) {
   const zoomed = useTransformComponent(isZoomed);
@@ -368,6 +382,10 @@ function PhotoCanvas({
     x: number;
     y: number;
     moved: boolean;
+    cancelled: boolean;
+    pointerType: string;
+    startedAt: number;
+    scale: number;
   } | null>(null);
   function moved(event: ReactPointerEvent<HTMLDivElement>) {
     const start = gesture.current;
@@ -384,26 +402,64 @@ function PhotoCanvas({
   }
   return (
     <TransformComponent
-      wrapperClass={`photo-stage${image ? " photo-image-stage" : ""}${zoomed ? " is-zoomed" : ""}`}
+      wrapperClass={`photo-stage${image ? " photo-image-stage" : ""}${
+        zoomed ? " is-zoomed" : ""
+      }`}
       contentClass="photo-transform"
       wrapperProps={{
         tabIndex: image ? 0 : undefined,
         "aria-label": image ? "Image canvas" : undefined,
         onPointerDown: (event) => {
+          // Leave native video controls, buttons and links to their own gestures.
+          if (
+            (event.target as Element).closest("video, button, a, input, select")
+          ) {
+            gesture.current = null;
+            return;
+          }
           if (!event.isPrimary) {
-            if (gesture.current) gesture.current.moved = true;
+            if (gesture.current) {
+              gesture.current.moved = true;
+              gesture.current.cancelled = true;
+            }
           } else
             gesture.current = {
               id: event.pointerId,
               x: event.clientX,
               y: event.clientY,
               moved: false,
+              cancelled: false,
+              pointerType: event.pointerType,
+              startedAt: event.timeStamp,
+              scale: state.scale,
             };
         },
         onPointerMove: moved,
-        onPointerUp: moved,
+        onPointerUp: (event) => {
+          moved(event);
+          const start = gesture.current;
+          if (!start || start.id !== event.pointerId) return;
+          const direction = mediaSwipeDirection({
+            pointerType: start.pointerType,
+            startX: start.x,
+            startY: start.y,
+            endX: event.clientX,
+            endY: event.clientY,
+            elapsed: event.timeStamp - start.startedAt,
+            startScale: start.scale,
+            endScale: state.scale,
+            cancelled: start.cancelled,
+          });
+          if (direction) {
+            start.moved = true;
+            navigate(direction);
+          }
+        },
         onPointerCancel: () => {
-          if (gesture.current) gesture.current.moved = true;
+          if (gesture.current) {
+            gesture.current.moved = true;
+            gesture.current.cancelled = true;
+          }
         },
         onDragStart: (event) => {
           if (image) event.preventDefault();

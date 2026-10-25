@@ -19,7 +19,7 @@ rusqlite.workspace = true
 sha2.workspace = true
 subtle = "2"
 fs2.workspace = true
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 wechat-profile = { path = "../wechat-profile" }
 wechat-core = { path = "../wechat-core" }

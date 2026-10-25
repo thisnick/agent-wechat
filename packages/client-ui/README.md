@@ -61,7 +61,7 @@ the last account, conversation and scroll anchor use local storage.
 
 Returning to a valid web session opens the last signed-in account and conversation
 automatically. Authentication is checked with the hub before restoring its cache.
-Credentials are not copied into either browser store. **Settings → Local cache**
+Credentials are not copied into either browser store. **Settings → On this device**
 shows usage and clears fetched data while preserving drafts and pending receipts.
 If storage is unavailable, the client keeps working with memory and tab storage. The bootstrap secret
 is saved privately inside the simulator workspace so a named preview can restart
@@ -118,7 +118,9 @@ virtual clock for repeatable regression tests.
 
 The printed URL carries a random preview bootstrap secret in its fragment. The
 browser removes it immediately and exchanges it for an HttpOnly, SameSite cookie
-for development endpoints. Host/origin checks and that secret/cookie protect
+for development endpoints. This cookie lasts 30 days and is renewed when the
+connection is restored; manually entering the preview access key establishes the
+same cookie. Host/origin checks and that secret/cookie protect
 bootstrap and simulator controls. The separate simulator control token remains
 in the launcher. The fragment secret and access keys must not be checked in.
 
@@ -169,7 +171,14 @@ Attachments require cancelling the selected text reply. The simulator exercises 
 same daemon admission, projection, event stream and embedded quote contracts; official endpoint
 acceptance and recipient rendering remain separate final checks.
 
-Incoming images automatically load standard quality. Clicking a photo or video opens a
+The daemon automatically downloads image/video thumbnails and received voice
+notes. Other advertised image, video, file and sticker variants follow the
+account's automatic-download limit (50 MB by default). Unknown-size and larger
+versions remain manual. **Settings → Automatic downloads** updates the hub's
+account registry through the same API used by `wx account settings`; it does not
+change the official profile or the browser's separate temporary-storage budget.
+Incoming images show a thumbnail while a permitted standard version downloads,
+then use standard quality once verified. Clicking a photo or video opens a
 shared viewer with previous/next controls, a thumbnail strip, and **Show message**.
 Images zoom and pan on the full viewer canvas, behind the fixed navigation arrows
 and thumbnail tray. Animated zoom, drag panning, wheel and pinch gestures use
@@ -191,6 +200,14 @@ quality even after an original is downloaded. The carousel first shows standard,
 then replaces it with a verified cached original after its bytes load and decode.
 A failed upgrade leaves the standard visible. Opening the carousel does not
 request an original from WeChat. An unavailable image shows an icon.
+
+On touch screens, swipe left or right at fit size to move between items. Zoomed
+images keep their pan and pinch gestures; video controls retain their native touch
+behavior.
+
+Shared links use an attachment card with a thumbnail when the message advertises
+one. Thumbnail downloads use the same verified media flow and device storage as
+chat images; cards without a thumbnail show a link icon.
 
 Chat messages, the main viewer and its strip share one preview cache. Requests for the same account, asset, quality and source hash are deduplicated.
 Idle previews are retained within a 64 MiB / 128-entry budget; visible previews stay
@@ -255,7 +272,9 @@ Recent chat history stays cached across switches and reloads: up to 20 chats and
 sidebars appear while the client checks fresh thread data. On return, it catches
 up missed events before displaying cached message bodies and validates the first
 history page against the current source generation. Source changes, expired event
-cursors and a reset event journal discard old fetched data. Recalls remove cached
+cursors and a reset event journal discard old fetched history while retaining
+verified media and avatars. Fresh authorized media metadata must still match
+before those saved bytes can be displayed. Recalls remove cached
 media and redact cached quote excerpts. Excessive catch-up falls back to fresh pages.
 
 Within a continuous event stream, read cached chats reopen without another history

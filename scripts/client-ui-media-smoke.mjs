@@ -3,6 +3,61 @@ import { createHash } from "node:crypto";
 import { MediaOutbox } from "../packages/client-ui/src/media-outbox.ts";
 
 export async function mediaJourney({ client, control, wait, state, account }) {
+  assert.equal(
+    (await client.accountSettings(account)).autoDownloadMaxBytes,
+    50 * 1024 * 1024
+  );
+  await client.updateAccountSettings(account, { autoDownloadMaxBytes: 0 });
+  assert.equal(
+    (await client.accountSettings("work")).autoDownloadMaxBytes,
+    50 * 1024 * 1024
+  );
+  for (const [kind, type, variant] of [
+    ["image", 3, "standard"],
+    ["video", 43, "normal"],
+    ["file", 49, "original"],
+  ]) {
+    const before = new Set(
+      (await client.messages(account, "sim_mei", { limit: 200 })).items.map(
+        (m) => m.id
+      )
+    );
+    await control({ op: "receive_media", account, peer: "sim_mei", kind });
+    const message = await wait(`thresholded ${kind}`, async () =>
+      (
+        await client.messages(account, "sim_mei", { limit: 200 })
+      ).items.find((m) => m.type === type && !before.has(m.id))
+    );
+    const assets =
+      kind === "file"
+        ? (await client.mediaAssets(account, message.id)).items
+        : await wait(`automatic ${kind} thumbnail`, async () => {
+            const assets = (await client.mediaAssets(account, message.id))
+              .items;
+            return (
+              assets.some(
+                (a) => a.variant === "thumbnail" && a.state === "available"
+              ) && assets
+            );
+          });
+    const full = assets.find((a) => a.variant === variant);
+    assert.equal(full.autoDownloadAllowed, false);
+    assert.ok(full.advertisedByteLength > 0);
+    assert.equal(full.byteLength, null);
+    assert.equal(full.state, "pending");
+    const job = await client.transferMedia(account, {
+      messageId: message.id,
+      assetId: full.id,
+      quality: variant,
+    });
+    await wait(
+      `manual above-threshold ${kind}`,
+      async () => (await client.job(account, job.id)).state === "available"
+    );
+  }
+  await client.updateAccountSettings(account, {
+    autoDownloadMaxBytes: 50 * 1024 * 1024,
+  });
   const contents = new Map();
   for (const [kind, type, variant] of [
     ["image", 3, "standard"],
@@ -13,61 +68,56 @@ export async function mediaJourney({ client, control, wait, state, account }) {
   ]) {
     const before = new Set(
       (await client.messages(account, "sim_mei", { limit: 200 })).items.map(
-        (message) => message.id,
-      ),
+        (message) => message.id
+      )
     );
     const receiptCursor = (await client.threads(account, { limit: 1 }))
       .asOfEventCursor;
     await control({ op: "receive_media", account, peer: "sim_mei", kind });
     const message = await wait(`incoming ${kind} fixture`, async () =>
-      (await client.messages(account, "sim_mei", { limit: 200 })).items.find(
-        (message) => message.type === type && !before.has(message.id),
-      ),
+      (
+        await client.messages(account, "sim_mei", { limit: 200 })
+      ).items.find(
+        (message) => message.type === type && !before.has(message.id)
+      )
     );
-    let automaticVoice;
-    if (kind === "voice") {
+    let automatic;
+    {
       assert.ok(receiptCursor);
       // No UI, media discovery, or transfer request starts this download.
-      automaticVoice = await wait(
-        "daemon downloads received voice",
-        async () => {
-          const events = await client.events(account, receiptCursor, 200);
-          for (const event of events.items.filter(
-            (event) => event.kind === "media.ready",
-          )) {
-            const cached = await client.mediaAsset(account, event.data.assetId);
-            if (
-              cached.messageId === message.id &&
-              cached.variant === "normal" &&
-              cached.actualVariant === "normal" &&
-              cached.state === "available"
-            )
-              return cached;
-          }
-        },
-      );
-      assert.ok(automaticVoice.jobId);
+      automatic = await wait(`daemon downloads received ${kind}`, async () => {
+        const events = await client.events(account, receiptCursor, 200);
+        for (const event of events.items.filter(
+          (event) => event.kind === "media.ready"
+        )) {
+          const cached = await client.mediaAsset(account, event.data.assetId);
+          if (
+            cached.messageId === message.id &&
+            cached.variant === variant &&
+            cached.actualVariant === variant &&
+            cached.state === "available"
+          )
+            return cached;
+        }
+      });
+      if (kind === "voice") assert.ok(automatic.jobId);
+      // Other variants may reuse verified bytes already in the official cache.
     }
     const assets = await client.mediaAssets(account, message.id);
     const asset =
       assets.items.find((asset) => asset.variant === variant) ??
       assets.items[0];
     assert.ok(asset, `missing ${kind} asset`);
-    const transfer = automaticVoice
-      ? await client.job(account, automaticVoice.jobId)
-      : await client.transferMedia(account, {
-          messageId: message.id,
-          assetId: asset.id,
-          quality: asset.variant,
-        });
-    const completed = await wait(`${kind} transfer`, async () => {
-      const job = await client.job(account, transfer.id);
-      assert.ok(
-        !["failed", "cancelled"].includes(job.state),
-        `${kind} transfer failed: ${job.reason}`,
-      );
-      return job.state === "available" && job;
-    });
+    const completed = automatic.jobId
+      ? await wait(`${kind} transfer`, async () => {
+          const job = await client.job(account, automatic.jobId);
+          assert.ok(
+            !["failed", "cancelled"].includes(job.state),
+            `${kind} transfer failed: ${job.reason}`
+          );
+          return job.state === "available" && job;
+        })
+      : { accountId: account, state: "available" };
     assert.equal(completed.accountId, account);
     const cached = await client.mediaAsset(account, asset.id);
     const content = await client.mediaContent(account, asset.id);
@@ -77,12 +127,12 @@ export async function mediaJourney({ client, control, wait, state, account }) {
       assert.equal(cached.animationFrames, 2);
       assert.equal(
         new TextDecoder().decode(content.bytes.slice(0, 6)),
-        "GIF89a",
+        "GIF89a"
       );
     }
     assert.equal(
       createHash("sha256").update(content.bytes).digest("hex"),
-      cached.sha256,
+      cached.sha256
     );
     const ranged = await client.mediaContent(account, asset.id, {
       range: "bytes=0-15",
@@ -95,11 +145,11 @@ export async function mediaJourney({ client, control, wait, state, account }) {
   }
   assert.equal(
     new TextDecoder().decode(contents.get("voice").bytes.slice(0, 4)),
-    "RIFF",
+    "RIFF"
   );
   assert.equal(
     new TextDecoder().decode(contents.get("video").bytes.slice(4, 8)),
-    "ftyp",
+    "ftyp"
   );
 
   let saved = [];
@@ -116,8 +166,16 @@ export async function mediaJourney({ client, control, wait, state, account }) {
       const content = contents.get(kind);
       const file = new File(
         [kind === "file" ? bigFile : content.bytes],
-        `outgoing.${kind === "image" ? "png" : kind === "video" ? "mp4" : kind === "voice" ? "wav" : "txt"}`,
-        { type: content.contentType },
+        `outgoing.${
+          kind === "image"
+            ? "png"
+            : kind === "video"
+            ? "mp4"
+            : kind === "voice"
+            ? "wav"
+            : "txt"
+        }`,
+        { type: content.contentType }
       );
       await outbox.send("sim_mei", file, kind);
       const pending = outbox.snapshot().at(-1);
@@ -129,11 +187,11 @@ export async function mediaJourney({ client, control, wait, state, account }) {
             .find((item) => item.key === pending.key);
           assert.ok(
             !["failed", "cancelled", "needs_review"].includes(item.job?.state),
-            `${kind} send failed: ${item.job?.reason ?? item.error}`,
+            `${kind} send failed: ${item.job?.reason ?? item.error}`
           );
           return item.job?.state === "accepted" && item.job;
         },
-        60000,
+        60000
       );
       assert.equal(completed.retryable, false);
       const projected = await wait(`outgoing ${kind} history`, async () => {
@@ -153,40 +211,40 @@ export async function mediaJourney({ client, control, wait, state, account }) {
     await outbox.send(
       "sim_mei",
       new File(["rejected"], "rejected.txt"),
-      "file",
+      "file"
     );
     const rejectedKey = outbox.snapshot().at(-1).key;
     await wait(
       "media rejection",
       () =>
         outbox.snapshot().find((item) => item.key === rejectedKey).job
-          ?.state === "failed",
+          ?.state === "failed"
     );
     const before = (await state()).accounts.find(
-      (item) => item.id === account,
+      (item) => item.id === account
     ).acceptedMediaSends;
     await control({ op: "send_fault", account, fault: "lost_acknowledgment" });
     await outbox.send(
       "sim_mei",
       new File(["uncertain"], "uncertain.txt"),
-      "file",
+      "file"
     );
     const uncertainKey = outbox.snapshot().at(-1).key;
     await wait(
       "uncertain media outcome",
       () =>
         outbox.snapshot().find((item) => item.key === uncertainKey).job
-          ?.state === "needs_review",
+          ?.state === "needs_review"
     );
     await outbox.check(uncertainKey);
     assert.equal(
       outbox.snapshot().find((item) => item.key === uncertainKey).job.retryable,
-      false,
+      false
     );
     assert.equal(
       (await state()).accounts.find((item) => item.id === account)
         .acceptedMediaSends,
-      before + 1,
+      before + 1
     );
     outbox.close();
     const reopened = new MediaOutbox(client, account, storage);
@@ -195,14 +253,14 @@ export async function mediaJourney({ client, control, wait, state, account }) {
         .snapshot()
         .some(
           (item) =>
-            item.key === uncertainKey && item.job?.state === "needs_review",
-        ),
+            item.key === uncertainKey && item.job?.state === "needs_review"
+        )
     );
     reopened.close();
     assert.equal(
       (await state()).accounts.find((item) => item.id === account)
         .acceptedMediaSends,
-      before + 1,
+      before + 1
     );
   } finally {
     outbox.close();

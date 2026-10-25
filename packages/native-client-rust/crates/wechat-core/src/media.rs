@@ -391,7 +391,18 @@ impl Core {
     pub fn media_asset(&self, account: &str, id: &str) -> Result<MediaAsset> {
         let row = self.store.media_asset(account, id)?;
         self.authorize_media_record(account, &row)?;
-        Ok(serde_json::from_value(row.metadata)?)
+        let mut asset: MediaAsset = serde_json::from_value(row.metadata.clone())?;
+        if row.message_id.is_some() {
+            asset.advertised_byte_length =
+                automatic::advertised_length(&self.asset_plan(account, &row)?.plan);
+        }
+        asset.auto_download_allowed = Some(automatic::allowed(
+            &asset,
+            self.store
+                .account_settings(account)?
+                .auto_download_max_bytes,
+        ));
+        Ok(asset)
     }
     pub fn media_content(&self, account: &str, id: &str) -> Result<MediaContent> {
         let metadata = self.store.media_asset(account, id)?;
@@ -656,6 +667,10 @@ impl Core {
                 }
             }
         }
+        let limit = self
+            .store
+            .account_settings(account)?
+            .auto_download_max_bytes;
         let mut out = vec![];
         for (kind, variant, plan, filename) in plans {
             let identity = digest(&serde_json::to_vec(&(
@@ -684,6 +699,8 @@ impl Core {
                     state: "pending".into(),
                     content_type: None,
                     byte_length: None,
+                    advertised_byte_length: automatic::advertised_length(&plan),
+                    auto_download_allowed: None,
                     sha256: None,
                     filename,
                     expires_at: expires,
@@ -797,6 +814,8 @@ impl Core {
                 asset = self.repair_cached_asset(account, asset)?;
             }
             self.authorize_media_record(account, &self.store.media_asset(account, &id)?)?;
+            asset.advertised_byte_length = automatic::advertised_length(&plan);
+            asset.auto_download_allowed = Some(automatic::allowed(&asset, limit));
             out.push(asset);
         }
         Ok(out)
@@ -4741,6 +4760,8 @@ mod tests {
             state: "pending".into(),
             content_type: None,
             byte_length: None,
+            advertised_byte_length: None,
+            auto_download_allowed: None,
             sha256: None,
             filename: Some("report.txt".into()),
             expires_at: Some(1),

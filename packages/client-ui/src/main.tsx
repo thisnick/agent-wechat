@@ -56,6 +56,7 @@ import {
 import "./style.css";
 import "./onboarding.css";
 import "./client.css";
+import { SharedLink } from "./shared-link.tsx";
 
 function date(value: string | null): Date {
   return new Date(
@@ -169,7 +170,11 @@ function ConnectionForm({
     setBusy(true);
     setError("");
     try {
-      const connection = await connect(endpoint, token);
+      const remembered =
+        import.meta.env.DEV && new URL(endpoint).origin === location.origin
+          ? await bootstrap(token)
+          : null;
+      const connection = remembered ?? (await connect(endpoint, token));
       setToken("");
       onConnect(connection);
     } catch (e) {
@@ -1547,7 +1552,7 @@ function Chats({
       {settings && (
         <div className="overlay-backdrop" onClick={() => setSettings(false)}>
           <section
-            className="modal"
+            className="modal settings-modal"
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
@@ -1585,9 +1590,12 @@ function Chats({
                   account={state.account}
                 />
               )}
-              <button className="secondary" onClick={switchAccount}>
-                Manage accounts
-              </button>
+              <div className="setting settings-accounts">
+                <span>Accounts</span>
+                <button className="secondary" onClick={switchAccount}>
+                  Manage
+                </button>
+              </div>
               {account && (
                 <AccountSettings
                   key={account.id}
@@ -1864,15 +1872,7 @@ function Message({
                 </p>
               </div>
             ) : presentation === "link" && m.link ? (
-              <div className="bubble">
-                <strong>{m.link.title || "Shared link"}</strong>
-                <p>{m.link.description}</p>
-                {m.link.url && /^https?:\/\//i.test(m.link.url) && (
-                  <a href={m.link.url} target="_blank" rel="noreferrer">
-                    Open link
-                  </a>
-                )}
-              </div>
+              <SharedLink message={m} connection={connection} />
             ) : presentation === "media" ? (
               <MediaCard message={m} connection={connection} />
             ) : (

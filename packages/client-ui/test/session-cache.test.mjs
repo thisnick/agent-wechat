@@ -227,6 +227,16 @@ for (const reason of ["expired events", "rewound journal", "changed source"])
   test(`${reason} discards older persisted history before rendering`, async (t) => {
     const persistent = cache(t);
     await seed(persistent, reason === "rewound journal" ? "30" : "10");
+    persistent.saveBlob(
+      "media",
+      "a",
+      "verified-image",
+      {
+        blob: new Blob(["verified image bytes"]),
+        checkedAt: 1,
+      },
+      "original",
+    );
     const hub = session(t, persistent, {
       ...(reason === "expired events"
         ? {
@@ -248,6 +258,10 @@ for (const reason of ["expired events", "rewound journal", "changed source"])
     );
     await persistent.flush();
     assert.equal((await persistent.readAccount("a")).cursor, "20");
+    assert.equal(
+      await (await persistent.blob("media", "a", "verified-image")).blob.text(),
+      "verified image bytes",
+    );
   });
 
 test("an unauthenticated account cannot read its persistent cache", async (t) => {

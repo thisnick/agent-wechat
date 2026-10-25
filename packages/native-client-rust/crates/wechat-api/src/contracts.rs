@@ -383,6 +383,7 @@ pub fn typescript() -> String {
         NativeEvent::decl(),
         NativeIdentity::decl(),
         NativeStatus::decl(),
+        wechat_store::AccountSettings::decl(),
         NativeAccountRemovalRequest::decl(),
         NativeAccountRemoval::decl(),
         wechat_core::QuoteSendReference::decl(),

@@ -479,6 +479,21 @@ export class BrowserCache {
     );
     if (notify) this.channel?.postMessage({ kind: "invalidate", account });
   }
+  async clearHistory(account: string) {
+    const history: Store[] = [
+      "threads",
+      "contacts",
+      "messages",
+      "chatState",
+      "syncState",
+    ];
+    await this.enqueue(() =>
+      this.transaction(history, "readwrite", async (tx) => {
+        for (const name of history) await this.removeScope(tx, name, account);
+      }),
+    );
+    this.channel?.postMessage({ kind: "invalidate", account });
+  }
   async stats(account: string): Promise<{
     bytes: number;
     messages: number;

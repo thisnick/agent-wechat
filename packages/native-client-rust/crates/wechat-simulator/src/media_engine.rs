@@ -285,8 +285,14 @@ pub(super) fn receive(db: &mut Connection, account: &str, peer: &str, kind: &str
                 })?,
             )
         } else if kind == "video" {
-            let thumbnail =
-                fixture_object(&tx, account, &prepared, MediaQuality::Thumbnail, &image)?;
+            let thumbnail_bytes = image_bytes_as(image::ImageFormat::Jpeg)?;
+            let thumbnail = fixture_object(
+                &tx,
+                account,
+                &prepared,
+                MediaQuality::Thumbnail,
+                &thumbnail_bytes,
+            )?;
             (
                 43,
                 wechat_protocol::media_send::local_video_xml(
@@ -362,11 +368,14 @@ fn fixture_object(
     Ok(metadata)
 }
 fn image_bytes() -> Result<Vec<u8>> {
+    image_bytes_as(image::ImageFormat::Png)
+}
+fn image_bytes_as(format: image::ImageFormat) -> Result<Vec<u8>> {
     let image = image::RgbImage::from_fn(256, 160, |x, y| {
         image::Rgb([189, (70 + x / 4) as u8, (25 + y / 2) as u8])
     });
     let mut out = Cursor::new(Vec::new());
-    image.write_to(&mut out, image::ImageFormat::Png)?;
+    image.write_to(&mut out, format)?;
     Ok(out.into_inner())
 }
 fn sticker_url(account: &str) -> String {
