@@ -134,7 +134,7 @@ svg.icon {
   flex-direction: column;
 }
 .side-head {
-  padding: 28px 23px 0;
+  padding: 28px 23px 16px;
 }
 .eyebrow {
   text-transform: uppercase;
@@ -203,7 +203,7 @@ h1 {
 .filters {
   display: flex;
   gap: 7px;
-  margin: 16px 0 22px;
+  margin: 16px 0 0;
 }
 .pill {
   font-size: 11px;
@@ -218,16 +218,6 @@ h1 {
 }
 .pill:hover {
   background: #ececed;
-}
-.list-label {
-  font-size: 9px;
-  letter-spacing: 1.4px;
-  color: #9b9b9c;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 24px;
-  margin-bottom: 10px;
 }
 .chat-list {
   overflow: auto;

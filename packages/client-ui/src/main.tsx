@@ -822,9 +822,6 @@ function Chats({
             </div>
           )}
         </div>
-        <div className="list-label">
-          {section === "chats" ? "CONVERSATIONS" : "CONTACTS"}
-        </div>
         <div className="chat-list">
           {section === "chats"
             ? threads.map((t) => (
