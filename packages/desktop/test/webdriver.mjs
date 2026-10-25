@@ -125,6 +125,12 @@ try {
     (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
   );
   await script(
+    "[...document.querySelectorAll('.desktop-access-key button')].find(button => button.textContent === 'Copy').click(); return true"
+  );
+  await until("return document.body.innerText", (value) =>
+    value.includes("Copied")
+  );
+  await script(
     "document.querySelector('.desktop-access-key button').click(); return true"
   );
   await script(

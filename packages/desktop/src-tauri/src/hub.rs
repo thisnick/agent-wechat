@@ -21,7 +21,9 @@ pub struct OwnedHub {
 }
 pub fn http(connection: &Connection) -> Result<reqwest::Client> {
     config::endpoint(&connection.endpoint)?;
-    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none());
     if let Some(pem) = &connection.certificate {
         builder = builder.add_root_certificate(
             reqwest::Certificate::from_pem(pem.as_bytes())
@@ -31,9 +33,18 @@ pub fn http(connection: &Connection) -> Result<reqwest::Client> {
     Ok(builder.build()?)
 }
 pub async fn identity(connection: &Connection, key: &str) -> Result<Value> {
-    let mut response = http(connection)?.get(format!("{}/v1/status", connection.endpoint.trim_end_matches('/')))
-        .bearer_auth(key).timeout(Duration::from_secs(5)).send().await
-        .map_err(|_| anyhow::anyhow!("Cannot connect to the hub; check its address, certificate and whether it is running"))?;
+    let mut response = http(connection)?
+        .get(format!(
+            "{}/v1/status",
+            connection.endpoint.trim_end_matches('/')
+        ))
+        .bearer_auth(key)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .context(
+            "Cannot connect to the hub; check its address, certificate and whether it is running",
+        )?;
     if !response.status().is_success() {
         bail!("The hub did not accept this access key");
     }
@@ -260,7 +271,7 @@ mod tests {
         assert!(data.join("storage-key").is_file());
         let certificate = std::fs::read_to_string(data.join("network/certificate.pem")).unwrap();
         let secure = Connection {
-            endpoint: format!("https://localhost:{}", config.network_port),
+            endpoint: format!("https://127.0.0.1:{}", config.network_port),
             certificate: Some(certificate),
             ..hub.connection.clone()
         };

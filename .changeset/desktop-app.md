@@ -13,3 +13,5 @@ Handle empty profile directories during fresh initialization on macOS and Window
 Keep group admission and execution under the same account lock so a heartbeat cannot invalidate an already admitted operation before it starts.
 
 Create CLI settings directories with private Windows ownership and protect existing owned directories without reopening them.
+
+Use portable database key names during Windows profile writes so incoming messages can be projected into chat history.

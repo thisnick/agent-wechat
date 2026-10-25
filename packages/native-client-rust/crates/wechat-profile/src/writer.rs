@@ -247,7 +247,7 @@ pub(crate) fn find_database(location: &ProfileLocation, basename: &str) -> Resul
                         .map_err(|_| ProfileError::InvalidProfile)?
                         .to_str()
                         .ok_or(ProfileError::InvalidProfile)?
-                        .into(),
+                        .replace('\\', "/"),
                 );
             }
         }
@@ -669,4 +669,22 @@ pub fn mark_read_messages(
         unread_count_after: after,
         exact_ids_only: true,
     })
+}
+
+#[cfg(test)]
+mod database_path_tests {
+    use super::*;
+    #[test]
+    fn discovered_databases_use_the_key_manifests_portable_names() {
+        let temporary = tempfile::tempdir().unwrap();
+        let account = temporary.path().join("account");
+        let database = account.join("db_storage/nested/session.db");
+        fs::create_dir_all(database.parent().unwrap()).unwrap();
+        fs::write(&database, b"fixture").unwrap();
+        let location = ProfileLocation::new(account).unwrap();
+        assert_eq!(
+            find_database(&location, "session.db").unwrap(),
+            "nested/session.db"
+        );
+    }
 }

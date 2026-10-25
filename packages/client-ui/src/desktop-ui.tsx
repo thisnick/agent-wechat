@@ -360,7 +360,9 @@ export function DesktopPreferences({
                 className="secondary"
                 onClick={() =>
                   void action(async () => {
-                    await navigator.clipboard.writeText(revealed);
+                    await desktopInvoke("desktop_copy_key", {
+                      id: credentialId,
+                    });
                     setNotice("Copied");
                   })
                 }

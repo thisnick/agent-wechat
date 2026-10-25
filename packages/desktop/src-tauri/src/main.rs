@@ -17,6 +17,7 @@ use std::{
     },
 };
 use tauri::{Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -329,6 +330,28 @@ async fn desktop_reveal(state: State<'_, Desktop>, id: String) -> Result<String,
         .ok_or("The saved access key is missing".into())
 }
 #[tauri::command]
+async fn desktop_copy_key(
+    app: tauri::AppHandle,
+    state: State<'_, Desktop>,
+    id: String,
+) -> Result<(), String> {
+    let inner = state.inner.lock().await;
+    if !inner
+        .config
+        .connections
+        .iter()
+        .any(|connection| connection.id == id)
+    {
+        return Err("Saved hub was not found".into());
+    }
+    let key = credentials::read(&inner.config.installation_id, &id)
+        .map_err(|error| error.to_string())?
+        .ok_or("The saved access key is missing")?;
+    app.clipboard()
+        .write_text(key.to_string())
+        .map_err(|_| "Cannot copy the access key".into())
+}
+#[tauri::command]
 async fn desktop_forget(state: State<'_, Desktop>, id: String) -> Result<(), String> {
     let mut inner = state.inner.lock().await;
     if id == "local" {
@@ -463,6 +486,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .setup(|app| {
             let config_file = app.path().app_config_dir()?.join("settings/desktop.json");
@@ -538,6 +562,7 @@ fn main() {
             desktop_settings,
             desktop_save_local,
             desktop_reveal,
+            desktop_copy_key,
             desktop_forget,
             desktop_install_cli,
             desktop_quit,
