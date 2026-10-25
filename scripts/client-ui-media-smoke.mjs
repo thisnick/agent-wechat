@@ -120,7 +120,11 @@ export async function mediaJourney({ client, control, wait, state, account }) {
       : { accountId: account, state: "available" };
     assert.equal(completed.accountId, account);
     const cached = await client.mediaAsset(account, asset.id);
-    const content = await client.mediaContent(account, asset.id);
+    // A ready event does not quiesce concurrent profile writeback. Retry only
+    // this read until a consistent source snapshot admits the retained bytes.
+    const content = await wait(`${kind} readable cached content`, () =>
+      client.mediaContent(account, asset.id)
+    );
     assert.equal(cached.state, "available");
     if (kind === "sticker") {
       assert.equal(cached.contentType, "image/gif");
@@ -134,10 +138,12 @@ export async function mediaJourney({ client, control, wait, state, account }) {
       createHash("sha256").update(content.bytes).digest("hex"),
       cached.sha256
     );
-    const ranged = await client.mediaContent(account, asset.id, {
-      range: "bytes=0-15",
-      maxBytes: 16,
-    });
+    const ranged = await wait(`${kind} cached range`, () =>
+      client.mediaContent(account, asset.id, {
+        range: "bytes=0-15",
+        maxBytes: 16,
+      })
+    );
     assert.equal(ranged.status, 206);
     assert.deepEqual(ranged.bytes, content.bytes.slice(0, 16));
     await assert.rejects(client.mediaContent("work", asset.id));

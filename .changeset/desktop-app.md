@@ -9,3 +9,7 @@ Add a separate AgentWechat desktop package with the existing chat UI, a bundled 
 Build desktop installers through the prerelease version-package flow. Sign Windows binaries before packaging and sign the final installer, and require Apple notarization, stapling and Gatekeeper verification before publishing macOS downloads.
 
 Handle empty profile directories during fresh initialization on macOS and Windows while preserving existing contents and refusing conflicting writers.
+
+Keep group admission and execution under the same account lock so a heartbeat cannot invalidate an already admitted operation before it starts.
+
+Create CLI settings directories with private Windows ownership and protect existing owned directories without reopening them.

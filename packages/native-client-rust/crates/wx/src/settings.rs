@@ -139,7 +139,9 @@ impl File {
     }
     pub fn save(&self) -> Result<()> {
         let parent = self.path.parent().context("invalid client config path")?;
-        std::fs::create_dir_all(parent)?;
+        if !parent.exists() {
+            wechat_platform::private_dir(parent)?;
+        }
         let metadata = std::fs::symlink_metadata(parent)?;
         if !metadata.is_dir() || !wechat_platform::owned_path(parent)? {
             bail!("client config directory must be owned by this user");

@@ -161,22 +161,13 @@ impl Core {
         if self.stopping.load(Ordering::Acquire) {
             bail!("service_stopping");
         }
-        let account = account.to_owned();
-        let key = key.to_owned();
-        let core = self.clone();
-        let guard = self.lock_account(&account).await?;
-        let worker_account = account.clone();
-        let (op, created) = blocking(move || {
-            let _guard = guard;
-            core.admit_group(&account, action, &key)
-        })
-        .await?;
+        let (op, created, guard) = self.admit_group_guarded(account, action, key).await?;
         if created {
+            let worker_account = account.to_owned();
             let core = self.clone();
             let id = op.id.clone();
             tokio::spawn(async move {
                 let result: Result<()> = async {
-                    let guard = core.lock_account(&worker_account).await?;
                     let worker = core.clone();
                     let account = worker_account.clone();
                     let operation = id.clone();
@@ -203,6 +194,24 @@ impl Core {
             });
         }
         Ok(op)
+    }
+    async fn admit_group_guarded(
+        self: &Arc<Self>,
+        account: &str,
+        action: GroupMutation,
+        key: &str,
+    ) -> Result<(Operation, bool, tokio::sync::OwnedMutexGuard<()>)> {
+        let account = account.to_owned();
+        let key = key.to_owned();
+        let core = self.clone();
+        let guard = self.lock_account(&account).await?;
+        blocking(move || {
+            let (operation, created) = core.admit_group(&account, action, &key)?;
+            // Carry ownership into the worker instead of leaving a heartbeat-sized
+            // gap between admission and the operation's credential-generation check.
+            Ok((operation, created, guard))
+        })
+        .await
     }
     fn admit_group(
         &self,
@@ -1003,6 +1012,38 @@ pub(super) mod tests {
             .execute_group("one", &op.id, |_, _| Ok(created(false)))
             .unwrap();
         assert_eq!(done.state, "succeeded");
+    }
+    #[tokio::test]
+    async fn admission_guard_prevents_credential_updates_before_group_execution() {
+        let (_temp, core) = fixture();
+        let (operation, created_operation, guard) = core
+            .admit_group_guarded("one", create(), "held-admission")
+            .await
+            .unwrap();
+        assert!(created_operation);
+        let changed = Arc::new(AtomicUsize::new(0));
+        let other_core = core.clone();
+        let other_changed = changed.clone();
+        let (began, waiting) = tokio::sync::oneshot::channel();
+        let update = tokio::spawn(async move {
+            began.send(()).unwrap();
+            let _guard = other_core.lock_account("one").await.unwrap();
+            let state = other_core.account_state("one").unwrap();
+            other_core.save_state("one", &state).unwrap();
+            other_changed.store(1, Ordering::SeqCst);
+        });
+        waiting.await.unwrap();
+        assert_eq!(changed.load(Ordering::SeqCst), 0);
+        let completed = core
+            .execute_group("one", &operation.id, |_, _| {
+                assert_eq!(changed.load(Ordering::SeqCst), 0);
+                Ok(created(false))
+            })
+            .unwrap();
+        assert_eq!(completed.state, "succeeded");
+        drop(guard);
+        update.await.unwrap();
+        assert_eq!(changed.load(Ordering::SeqCst), 1);
     }
     #[test]
     fn partial_create_retains_identity_and_never_invents_an_omitted_success() {

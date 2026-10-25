@@ -255,7 +255,7 @@ pub fn private_path(path: &Path) -> io::Result<bool> {
 pub fn owned_path(path: &Path) -> io::Result<bool> {
     security(&path_handle(path, false)?, false)
 }
-pub fn protect(file: &File) -> io::Result<()> {
+fn protect_with_handle(file: &File, writable: HANDLE) -> io::Result<()> {
     if !security(file, false)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -272,20 +272,9 @@ pub fn protect(file: &File) -> io::Result<()> {
     {
         return Err(error());
     }
-    let writable = Handle(unsafe {
-        ReOpenFile(
-            file.as_raw_handle(),
-            READ_CONTROL | WRITE_DAC,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_FLAG_BACKUP_SEMANTICS,
-        )
-    });
-    if writable.0 == INVALID_HANDLE_VALUE {
-        return Err(error());
-    }
     let result = unsafe {
         SetSecurityInfo(
-            writable.0,
+            writable,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
@@ -299,8 +288,25 @@ pub fn protect(file: &File) -> io::Result<()> {
     }
     Ok(())
 }
+pub fn protect(file: &File) -> io::Result<()> {
+    let writable = Handle(unsafe {
+        ReOpenFile(
+            file.as_raw_handle(),
+            READ_CONTROL | WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_BACKUP_SEMANTICS,
+        )
+    });
+    if writable.0 == INVALID_HANDLE_VALUE {
+        return Err(error());
+    }
+    protect_with_handle(file, writable.0)
+}
 pub fn protect_path(path: &Path) -> io::Result<()> {
-    protect(&path_handle(path, true)?)
+    // This handle already grants WRITE_DAC. Reopening a directory is unnecessary
+    // and can fail even when the owner can update its security descriptor.
+    let file = path_handle(path, true)?;
+    protect_with_handle(&file, file.as_raw_handle())
 }
 pub fn create_dir(path: &Path) -> io::Result<()> {
     if path.exists() {
@@ -461,5 +467,14 @@ mod tests {
         assert!(!crate::private_file(&file).unwrap());
         crate::protect_path(&path, false).unwrap();
         assert!(crate::private_file(&file).unwrap());
+    }
+    #[test]
+    fn an_owned_directory_acl_can_be_protected_repeatedly() {
+        let root = crate::private_tempdir("directory-acl-").unwrap();
+        assert!(crate::owned_path(root.path()).unwrap());
+        for _ in 0..2 {
+            crate::protect_path(root.path(), true).unwrap();
+            assert!(crate::private_path(root.path()).unwrap());
+        }
     }
 }

@@ -37,12 +37,19 @@ export async function groupJourney({ client, wait, account, control, state }) {
     const key = saved.key;
     assert.ok(creation.snapshot().error);
     await creation.check();
-    const operation = await wait(
-      "created group receipt",
-      () =>
-        creation.snapshot().receipt.operation?.state === "succeeded" &&
-        creation.snapshot().receipt.operation,
-    );
+    const operation = await wait("created group receipt", async () => {
+      // Status recovery is read-only even if a transient read stopped watching.
+      await creation.check();
+      const snapshot = creation.snapshot();
+      if (snapshot.error) throw Error(snapshot.error);
+      const current = snapshot.receipt.operation;
+      if (
+        current &&
+        ["failed", "needs_review", "cancelled"].includes(current.state)
+      )
+        throw Error(JSON.stringify(current));
+      return current?.state === "succeeded" && current;
+    });
     assert.equal(operation.kind, "group_mutation");
     assert.equal(submissions, 1);
     room = operation.result.groupId;

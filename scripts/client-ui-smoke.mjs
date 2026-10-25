@@ -288,11 +288,18 @@ try {
   await login("trusted-sign-in");
   await client.logoutLocal("trusted-sign-in");
   assert.equal((await client.account("trusted-sign-in")).authenticated, false);
-  const trustedLogin = await new LoginAttempt(
-    client,
-    "trusted-sign-in",
-    resumeStorage
-  ).open();
+  let trustedRequest = null;
+  const trustedAttempt = new LoginAttempt(client, "trusted-sign-in", {
+    read: () => trustedRequest,
+    write: (value) => {
+      trustedRequest = value;
+    },
+  });
+  // The completed prior login may still be releasing its account admission.
+  // Keep one idempotency key across this wait, including uncertain responses.
+  const trustedLogin = await wait("trusted-device login admission", () =>
+    trustedAttempt.open()
+  );
   const savedDevice = await wait(
     "auto sign-in uses retained device trust after local logout",
     async () => {

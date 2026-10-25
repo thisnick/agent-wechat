@@ -77,7 +77,7 @@ async function attach() {
   return status;
 }
 async function runCli(args) {
-  const { stdout } = await execute(cliBinary, ["--json", "--config", join(temporary, "client.toml"), ...args], {
+  const { stdout } = await execute(cliBinary, ["--json", "--config", join(temporary, "client", "client.toml"), ...args], {
     timeout: 10000,
     env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("AGENT_WECHAT_"))),
   });
