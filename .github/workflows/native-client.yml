@@ -146,7 +146,9 @@ jobs:
       - name: Check browser-client state models
         if: matrix.suite == 'test'
         working-directory: .
-        run: pnpm --filter @agent-wechat/client-ui test
+        run: |
+          pnpm --filter @agent-wechat/shared build
+          pnpm --filter @agent-wechat/client-ui test
       - name: Exercise the connected session and UI launcher with synthetic accounts
         if: matrix.suite == 'test'
         working-directory: .

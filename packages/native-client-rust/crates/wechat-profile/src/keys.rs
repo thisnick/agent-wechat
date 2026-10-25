@@ -253,10 +253,10 @@ impl KeyFile {
     pub fn write_new(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let parent = path.parent().ok_or(ProfileError::InvalidQuery)?;
-        let m = fs::metadata(parent)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let m = fs::metadata(parent)?;
             if m.mode() & 0o077 != 0 {
                 return Err(ProfileError::InsecureKeysFile);
             }

@@ -39,6 +39,8 @@ jobs:
     timeout-minutes: 90
     env:
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     defaults:
       run:
         shell: bash
@@ -72,7 +74,9 @@ jobs:
             packages/native-client-rust -> target
             packages/desktop/src-tauri -> target
           key: desktop-${{ matrix.target }}-${{ env.RUSTFLAGS }}
+          cache-on-failure: true
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/desktop build
       - run: pnpm --filter @agent-wechat/shared build
       - run: pnpm --filter @agent-wechat/client-ui test
       - run: node --test packages/desktop/test/*.test.mjs
@@ -145,6 +149,9 @@ jobs:
       - name: Build unsigned validation installers
         if: ${{ !inputs.release }}
         run: pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles ${{ runner.os == 'macOS' && 'app' || runner.os == 'Windows' && 'nsis' || 'deb' }}
+      - name: Inspect Linux package layout
+        if: ${{ !inputs.release && runner.os == 'Linux' }}
+        run: node packages/desktop/test/validate-deb.mjs packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
       - name: Stage runnable validation downloads
         if: ${{ !inputs.release }}
         run: |
@@ -164,6 +171,7 @@ jobs:
         if: inputs.release && runner.os == 'Linux'
         run: |
           pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles deb
+          node packages/desktop/test/validate-deb.mjs packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           mkdir -p artifacts/desktop-release
           cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb "artifacts/desktop-release/AgentWechat-v$VERSION-linux-x64.deb"

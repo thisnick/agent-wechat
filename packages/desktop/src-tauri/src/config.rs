@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     #[test]
     fn settings_contain_references_and_survive_reload() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = wechat_platform::private_tempdir("desktop-settings-").unwrap();
         let path = directory.path().join("desktop.json");
         let config = Config::load(&path).unwrap();
         config.save(&path).unwrap();
@@ -179,7 +179,7 @@ mod tests {
     }
     #[test]
     fn invalid_settings_never_overwrite_existing_bytes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = wechat_platform::private_tempdir("desktop-settings-").unwrap();
         let path = directory.path().join("desktop.json");
         let mut config = Config::default();
         config.save(&path).unwrap();

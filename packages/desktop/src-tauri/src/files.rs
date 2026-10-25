@@ -82,9 +82,8 @@ pub async fn desktop_export_key(
         };
         let path = selected.into_path().map_err(|_| "Choose a local file")?;
         let parent = path.parent().ok_or("Choose a valid destination")?;
-        let mut file =
-            tempfile::NamedTempFile::new_in(parent).map_err(|_| "Cannot create the token file")?;
-        wechat_platform::protect(file.as_file()).map_err(|_| "Cannot protect the token file")?;
+        let mut file = wechat_platform::private_tempfile_in(parent, ".agent-wechat-token-")
+            .map_err(|_| "Cannot create the protected token file")?;
         writeln!(file, "{}", key.as_str()).map_err(|_| "Cannot save the token file")?;
         file.as_file()
             .sync_all()

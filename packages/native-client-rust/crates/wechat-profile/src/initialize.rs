@@ -176,7 +176,7 @@ fn sync_created_directories(path: &Path, depth: usize) -> Result<()> {
     Ok(())
 }
 fn publish_directory(source: &Path, target: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         let exists = target.exists();
@@ -191,35 +191,48 @@ fn publish_directory(source: &Path, target: &Path) -> Result<()> {
             .map_err(|_| ProfileError::InvalidProfile)?;
         let b = std::ffi::CString::new(target.as_os_str().as_bytes())
             .map_err(|_| ProfileError::InvalidProfile)?;
-        let flags = if exists {
-            libc::RENAME_EXCHANGE
-        } else {
-            libc::RENAME_NOREPLACE
-        };
-        if unsafe {
+        // Both platforms can exchange an existing empty home atomically.
+        #[cfg(target_os = "linux")]
+        let rename = |exchange| unsafe {
             libc::renameat2(
                 libc::AT_FDCWD,
                 a.as_ptr(),
                 libc::AT_FDCWD,
                 b.as_ptr(),
-                flags,
+                if exchange {
+                    libc::RENAME_EXCHANGE
+                } else {
+                    libc::RENAME_NOREPLACE
+                },
             )
-        } != 0
-        {
+        };
+        #[cfg(target_os = "macos")]
+        let rename = |exchange| unsafe {
+            libc::renamex_np(
+                a.as_ptr(),
+                b.as_ptr(),
+                if exchange {
+                    libc::RENAME_SWAP
+                } else {
+                    libc::RENAME_EXCL
+                },
+            )
+        };
+        if rename(exists) != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        if exists && fs::read_dir(source)?.next().is_some() {
+        let displaced_changed = if exists {
+            let metadata = fs::symlink_metadata(source)?;
+            !metadata.is_dir()
+                || wechat_platform::is_link(&metadata)
+                || fs::read_dir(source)?.next().is_some()
+        } else {
+            false
+        };
+        if displaced_changed {
             // Never remove unexpected data introduced by an unmanaged writer. Restore
             // the source tree before returning; the caller's exclusive lease is required.
-            let rc = unsafe {
-                libc::renameat2(
-                    libc::AT_FDCWD,
-                    a.as_ptr(),
-                    libc::AT_FDCWD,
-                    b.as_ptr(),
-                    libc::RENAME_EXCHANGE,
-                )
-            };
+            let rc = rename(true);
             if rc != 0 {
                 return Err(ProfileError::SourceChanged);
             }
@@ -227,10 +240,76 @@ fn publish_directory(source: &Path, target: &Path) -> Result<()> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
     {
-        wechat_platform::publish_directory(source, target)?;
+        if !target.try_exists()? {
+            wechat_platform::publish_directory(source, target)?;
+            return Ok(());
+        }
+        let metadata = fs::symlink_metadata(target)?;
+        if !metadata.is_dir()
+            || wechat_platform::is_link(&metadata)
+            || fs::read_dir(target)?.next().is_some()
+        {
+            return Err(ProfileError::InvalidProfile);
+        }
+        // Windows cannot exchange directories. Move the empty reservation aside,
+        // then publish without replacing anything created by an unmanaged writer.
+        // Keep displaced bytes on any race or failed restoration.
+        let displaced = wechat_platform::private_tempdir_in(
+            target.parent().ok_or(ProfileError::InvalidProfile)?,
+            ".profile-displaced-",
+        )?
+        .keep();
+        fs::remove_dir(&displaced)?;
+        wechat_platform::publish_directory(target, &displaced)?;
+        let metadata = fs::symlink_metadata(&displaced)?;
+        if !metadata.is_dir()
+            || wechat_platform::is_link(&metadata)
+            || fs::read_dir(&displaced)?.next().is_some()
+        {
+            let _ = wechat_platform::publish_directory(&displaced, target);
+            return Err(ProfileError::SourceChanged);
+        }
+        if let Err(error) = wechat_platform::publish_directory(source, target) {
+            let _ = wechat_platform::publish_directory(&displaced, target);
+            return Err(error.into());
+        }
+        fs::remove_dir(&displaced)?;
         Ok(())
+    }
+}
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn staged_profile_replaces_an_empty_reservation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("staged");
+        let target = temporary.path().join("profile");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(source.join("created"), b"new profile").unwrap();
+        publish_staging(source.clone(), &target).unwrap();
+        assert_eq!(fs::read(target.join("created")).unwrap(), b"new profile");
+        assert!(!source.exists());
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn content_added_after_staging_is_preserved_on_failed_publication() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("staged");
+        let target = temporary.path().join("profile");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(source.join("created"), b"new profile").unwrap();
+        fs::write(target.join("unknown"), b"another writer").unwrap();
+        assert!(publish_staging(source.clone(), &target).is_err());
+        assert_eq!(fs::read(target.join("unknown")).unwrap(), b"another writer");
+        assert_eq!(fs::read(source.join("created")).unwrap(), b"new profile");
+        assert!(!target.join("created").exists());
     }
 }
 /// Observed directory naming in the inspected Linux profile. The suffix is the

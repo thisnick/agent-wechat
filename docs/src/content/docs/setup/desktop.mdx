@@ -7,9 +7,19 @@ import { Aside } from '@astrojs/starlight/components';
 
 The desktop app includes the chat interface, a local agent-wechat hub and the `wx` command-line tool. The standalone npm CLI remains available separately.
 
-1. Open AgentWechat and choose **Use this device** to run a local hub, or **Connect to another hub** to enter its address and access key.
-2. Add a WeChat profile and follow the sign-in instructions.
-3. Open **Settings** to configure network access, install the `wx` command or export an access key for another client.
+1. Download the app for your platform from [GitHub Releases](https://github.com/thisnick/agent-wechat/releases).
+
+   | Platform | Download | Install |
+   | --- | --- | --- |
+   | macOS, Apple silicon | `.dmg` | Drag AgentWechat into Applications. |
+   | Windows, x64 or ARM64 | `-setup.exe` matching your processor | Run the installer for your user. |
+   | Ubuntu 24.04, x64 | `.deb` | Open it with your package installer. |
+
+2. Open AgentWechat and choose **Use this device** to run a local hub, or **Connect to another hub** to enter its address and access key.
+3. Add a WeChat profile and follow the sign-in instructions.
+4. Open **Settings** to configure network access, install the `wx` command or export an access key for another client.
+
+The app runs under your user account. It uses your system credential store and native file dialogs; network access and opening at login are optional settings. Enabling access from other devices may require allowing the hub through your system firewall.
 
 Desktop access keys are saved in your system keyring. Independent CLI installations use protected token files:
 

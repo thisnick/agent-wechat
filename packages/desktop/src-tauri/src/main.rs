@@ -384,7 +384,21 @@ fn install_cli(binaries: &std::path::Path) -> Result<String> {
                 },
             )?;
         }
-        Ok("Installed for this Windows user. Open a new terminal to use wx.".into())
+        let environment_name: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
+        // Notify Explorer so newly launched terminals inherit the updated user PATH.
+        // The UTF-16 string stays alive throughout the synchronous, timed call.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
+                windows_sys::Win32::UI::WindowsAndMessaging::HWND_BROADCAST,
+                windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE,
+                0,
+                environment_name.as_ptr() as isize,
+                windows_sys::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG,
+                1000,
+                std::ptr::null_mut(),
+            );
+        }
+        Ok("Installed for this Windows user. Restart your terminal to use wx.".into())
     }
 }
 #[tauri::command]
@@ -432,7 +446,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .setup(|app| {
-            let config_file = app.path().app_config_dir()?.join("desktop.json");
+            let config_file = app.path().app_config_dir()?.join("settings/desktop.json");
             let config = Config::load(&config_file)?;
             config.save(&config_file)?;
             let data = app.path().app_local_data_dir()?.join("hub");
