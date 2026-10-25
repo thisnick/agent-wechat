@@ -347,7 +347,21 @@ account selection and stops the account's stream, uploads and media requests.
 Returning to the browser also checks account authentication. Fetched browser
 caches are cleared; drafts and pending operation receipts remain available after
 sign-in, without automatically resending. Sign-in starts when you select the
-account. Conversation details show the internal conversation ID with a hover label,
+account, tries saved credentials first, and falls back to QR when the hub cannot
+use saved sign-in. WeChat may require confirmation on your phone. An existing
+pending sign-in resumes the same operation.
+
+| Sign-in situation | Browser behavior |
+| --- | --- |
+| New account or no usable device trust | Show the QR code supplied by the hub |
+| Working session | Resume and open chats |
+| Signed out with accepted saved device trust | Sign in without a QR code |
+| WeChat requires phone approval | Wait for confirmation, then open chats |
+
+Phone approval can follow either QR or saved-device sign-in. The hub checks saved
+credentials with WeChat; retaining them does not guarantee that they remain valid.
+
+Conversation details show the internal conversation ID with a hover label,
 group settings, and members. Read acknowledgments and visible avatar refreshes run
 automatically. Cached avatars replace initials; absent avatars keep initials.
 Group details load all roster pages.

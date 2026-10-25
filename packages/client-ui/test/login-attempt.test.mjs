@@ -18,6 +18,27 @@ const operation = (state = "awaiting_scan", id = "login-1") => ({
   state,
 });
 
+test("sign-in tries saved credentials with QR fallback through the auto strategy", async () => {
+  const saved = storage();
+  let submissions = 0;
+  const client = {
+    login: async (account, options) => {
+      submissions++;
+      assert.equal(account, "a");
+      assert.equal(options.strategy, "auto");
+      assert.deepEqual(options.qrRefresh, { mode: "auto", maxRefreshes: 3 });
+      return operation("awaiting_approval");
+    },
+    operation: async () => operation("awaiting_approval"),
+  };
+  assert.equal(
+    (await new LoginAttempt(client, "a", saved).open()).state,
+    "awaiting_approval"
+  );
+  await new LoginAttempt(client, "a", saved).open();
+  assert.equal(submissions, 1);
+});
+
 test("a reopened page resumes the persisted QR operation without a second login", async () => {
   const saved = storage();
   let submissions = 0;
@@ -66,13 +87,13 @@ test("an ended challenge gets a fresh key, while completed phone approval is res
   };
   assert.equal(
     (await new LoginAttempt(client, "a", saved).open()).id,
-    "login-2",
+    "login-2"
   );
   client.operation = async () => operation("succeeded", "login-2");
   client.login = () => assert.fail("completed approval must not restart login");
   assert.equal(
     (await new LoginAttempt(client, "a", saved).open()).state,
-    "succeeded",
+    "succeeded"
   );
 });
 
@@ -92,7 +113,7 @@ test("missing operations can restart, but a temporary lookup failure keeps the a
   client.login = async () => operation("awaiting_scan", "replacement");
   assert.equal(
     (await new LoginAttempt(client, "a", saved).open()).id,
-    "replacement",
+    "replacement"
   );
 });
 

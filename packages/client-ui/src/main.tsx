@@ -521,9 +521,13 @@ function Login({
             return;
           }
           if (
-            ["failed", "expired", "rejected", "cancelled"].includes(
-              current.state,
-            )
+            [
+              "failed",
+              "expired",
+              "rejected",
+              "cancelled",
+              "needs_login",
+            ].includes(current.state)
           ) {
             login.complete(op.id);
             operationId.current = null;
@@ -561,9 +565,13 @@ function Login({
     };
   }, [account, attempt]);
   const state = operation?.state;
-  const terminal = ["failed", "expired", "rejected", "cancelled"].includes(
-    state ?? "",
-  );
+  const terminal = [
+    "failed",
+    "expired",
+    "rejected",
+    "cancelled",
+    "needs_login",
+  ].includes(state ?? "");
   const expiresAt = (operation?.result as { expiresAt?: number } | null)
     ?.expiresAt;
   const remaining =
@@ -594,12 +602,20 @@ function Login({
             ? "QR code expired"
             : terminal
             ? "Sign-in could not finish"
+            : !qr
+            ? "Signing in…"
             : "Sign in to WeChat"}
         </h1>
         <p>
           {connection.simulator
             ? "Simulator QR only. It cannot sign in to WeChat. Use the phone controls below."
-            : "In WeChat on your phone, tap +, then Scan."}
+            : state === "awaiting_approval"
+            ? "Open WeChat on your phone and confirm sign-in."
+            : qr
+            ? "In WeChat on your phone, tap +, then Scan."
+            : terminal
+            ? "Try signing in again."
+            : "Trying your saved WeChat sign-in."}
         </p>
       </div>
       <div className="account-link-card">
@@ -623,9 +639,7 @@ function Login({
             data-expires-at={expiresAt}
           />
         ) : (
-          <p>
-            {terminal ? "Get a new code to try again." : "Preparing your code…"}
-          </p>
+          <p>{terminal ? "Try again to continue." : "Connecting…"}</p>
         )}
       </div>
       {qr && !terminal && state !== "awaiting_approval" && (
@@ -646,7 +660,7 @@ function Login({
           className="continue-button"
           onClick={() => setAttempt((a) => a + 1)}
         >
-          Get a new code
+          Try again
         </button>
       ) : connection.simulator ? (
         <div className="sim-phone">
@@ -679,9 +693,7 @@ function Login({
           )}
         </div>
       ) : (
-        <p className="field-help">
-          Chats open automatically after you confirm on your phone.
-        </p>
+        <p className="field-help">Chats open automatically after sign-in.</p>
       )}
     </>
   );

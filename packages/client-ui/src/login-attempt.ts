@@ -18,7 +18,7 @@ const terminal = new Set([
   "needs_login",
 ]);
 
-/** Persist only request/operation IDs, so a reload can resume the same QR login. */
+/** Persist request/operation IDs so reloads resume the same sign-in attempt. */
 export class LoginAttempt {
   private client: NativeWeChatClient;
   private account: string;
@@ -57,7 +57,7 @@ export class LoginAttempt {
     const operation = await this.client.login(
       this.account,
       {
-        strategy: "qr",
+        strategy: "auto",
         timeoutSeconds: 900,
         qrRefresh: { mode: "auto", maxRefreshes: 3 },
       },

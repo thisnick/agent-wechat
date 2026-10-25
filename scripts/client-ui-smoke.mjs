@@ -267,6 +267,45 @@ try {
   assert.equal((await client.status()).version.backend, "simulator");
   await login("personal");
   await login("work");
+  const resumeStorage = {
+    read: () => null,
+    write: () => {},
+  };
+  const activeLogin = await new LoginAttempt(
+    client,
+    "personal",
+    resumeStorage
+  ).open();
+  const resumedSession = await wait(
+    "auto sign-in resumes a working session",
+    async () => {
+      const operation = await client.operation("personal", activeLogin.id);
+      assert.notEqual(operation.state, "failed");
+      return operation.state === "succeeded" && operation;
+    }
+  );
+  assert.equal(resumedSession.result.method, "active_or_renewed");
+  await login("trusted-sign-in");
+  await client.logoutLocal("trusted-sign-in");
+  assert.equal((await client.account("trusted-sign-in")).authenticated, false);
+  const trustedLogin = await new LoginAttempt(
+    client,
+    "trusted-sign-in",
+    resumeStorage
+  ).open();
+  const savedDevice = await wait(
+    "auto sign-in uses retained device trust after local logout",
+    async () => {
+      const operation = await client.operation(
+        "trusted-sign-in",
+        trustedLogin.id
+      );
+      assert.notEqual(operation.state, "failed");
+      return operation.state === "succeeded" && operation;
+    }
+  );
+  assert.equal(savedDevice.result.method, "approved_login");
+  assert.equal((await client.account("trusted-sign-in")).authenticated, true);
   await client.createAccount("qr-refresh");
   const renewing = await client.login(
     "qr-refresh",
@@ -635,6 +674,7 @@ try {
       checks: [
         "real session model with two hub clients",
         "automatic QR renewal with fresh PNG and expiration timestamp",
+        "automatic active-session resume and saved-device sign-in after local logout",
         "canonical incoming and outgoing content",
         "native quoted replies, exact reference resolution and replies to replies",
         "phone-originated self-send",
