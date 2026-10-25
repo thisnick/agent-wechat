@@ -16,7 +16,8 @@ use std::{
         Arc,
     },
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -68,6 +69,33 @@ struct Settings {
     cli_path: String,
 }
 impl Desktop {
+    async fn start_local(&self, inner: &mut Inner, key: Zeroizing<String>) -> Result<()> {
+        if inner
+            .hub
+            .as_mut()
+            .is_some_and(|owned| owned.child.try_wait().ok().flatten().is_some())
+        {
+            inner.hub = None;
+        }
+        if inner.hub.is_none() {
+            inner.hub = Some(hub::start(&inner.config, &self.data, &self.binaries, key).await?);
+        }
+        Ok(())
+    }
+    async fn resume_local(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        if !inner
+            .config
+            .connections
+            .iter()
+            .any(|connection| connection.local)
+        {
+            return Ok(());
+        }
+        let key = credentials::read(&inner.config.installation_id, "local")?
+            .context("The local hub access key is missing; restore it before starting this hub")?;
+        self.start_local(&mut inner, key).await
+    }
     async fn activate(&self, id: &str) -> Result<Session> {
         let mut inner = self.inner.lock().await;
         let connection = inner
@@ -85,24 +113,8 @@ impl Desktop {
             connection
         };
         let identity = if connection.local {
-            if inner
-                .hub
-                .as_mut()
-                .is_some_and(|owned| owned.child.try_wait().ok().flatten().is_some())
-            {
-                inner.hub = None;
-            }
-            if inner.hub.is_none() {
-                inner.hub = Some(
-                    hub::start(
-                        &inner.config,
-                        &self.data,
-                        &self.binaries,
-                        Zeroizing::new(key.to_string()),
-                    )
-                    .await?,
-                );
-            }
+            self.start_local(&mut inner, Zeroizing::new(key.to_string()))
+                .await?;
             inner.hub.as_ref().unwrap().identity.clone()
         } else {
             hub::identity(&connection, &key).await?
@@ -142,6 +154,13 @@ impl Desktop {
 #[tauri::command]
 async fn desktop_bootstrap(state: State<'_, Desktop>) -> Result<Option<Session>, String> {
     let id = state.inner.lock().await.config.active.clone();
+    // A configured local hub also serves other clients while this UI uses a remote hub.
+    if id.as_deref() != Some("local") {
+        state
+            .resume_local()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     match id {
         Some(id) => state
             .activate(&id)
@@ -423,10 +442,10 @@ fn request_quit(app: tauri::AppHandle) {
             }
             Err(_) => {
                 state.quit.store(0, Ordering::Release);
-                let _ = app.emit(
-                    "desktop-error",
-                    "The hub is still stopping. Wait and try Quit again.",
-                );
+                app.dialog()
+                    .message("The hub is still stopping. Wait and try Quit again.")
+                    .title("AgentWechat")
+                    .show(|_| {});
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                 }
@@ -540,4 +559,66 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires WX_BINARY and an isolated, unlocked system credential store"]
+    async fn local_hub_resumes_without_changing_the_selected_remote_connection() {
+        let binary = PathBuf::from(std::env::var_os("WX_BINARY").expect("WX_BINARY is required"));
+        let temporary = wechat_platform::private_tempdir("desktop-background-").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = Config {
+            local_port: listener.local_addr().unwrap().port(),
+            active: Some("remote".into()),
+            ..Config::default()
+        };
+        drop(listener);
+        if config.local_port == config.network_port {
+            config.network_port += 1;
+        }
+        config.connections.push(hub::local_connection(&config));
+        config.connections.push(Connection {
+            id: "remote".into(),
+            name: "Fixture remote".into(),
+            endpoint: "http://127.0.0.1:6123".into(),
+            local: false,
+            server_id: None,
+            certificate: None,
+        });
+        let installation = config.installation_id.clone();
+        let key = hub::fresh_key();
+        credentials::write(&installation, "local", &key).unwrap();
+        let config_file = temporary.path().join("desktop.json");
+        config.save(&config_file).unwrap();
+        let desktop = Desktop {
+            inner: Mutex::new(Inner {
+                config,
+                hub: None,
+                active: None,
+            }),
+            config_file,
+            data: temporary.path().join("hub"),
+            binaries: binary.parent().unwrap().to_owned(),
+            uploads: Mutex::new(HashMap::new()),
+            requests: Arc::new(Mutex::new(HashMap::new())),
+            quit: AtomicU8::new(0),
+        };
+        desktop.resume_local().await.unwrap();
+        {
+            let inner = desktop.inner.lock().await;
+            assert_eq!(inner.config.active.as_deref(), Some("remote"));
+            assert!(inner.active.is_none());
+            let hub = inner.hub.as_ref().unwrap();
+            assert_eq!(
+                hub::identity(&hub.connection, &key).await.unwrap()["serverId"],
+                hub.identity["serverId"]
+            );
+        }
+        desktop.stop().await.unwrap();
+        credentials::remove(&installation, "local").unwrap();
+    }
 }

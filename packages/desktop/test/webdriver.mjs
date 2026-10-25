@@ -1,7 +1,8 @@
 // Native-window acceptance against an isolated desktop HOME and fresh local hub.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import https from "node:https";
 const application = process.env.DESKTOP_BINARY;
 if (!application) throw new Error("DESKTOP_BINARY is required");
@@ -11,7 +12,7 @@ const driver = spawn(
   {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, TAURI_WEBVIEW_AUTOMATION: "true" },
-  },
+  }
 );
 let log = "";
 driver.stdout.on("data", (bytes) => (log += bytes));
@@ -58,7 +59,7 @@ async function until(source, expected, timeout = 20000) {
   }
   throw new Error(
     "Native UI did not reach the expected state: " +
-      (await script("return document.body.innerText")),
+      (await script("return document.body.innerText"))
   );
 }
 try {
@@ -78,19 +79,19 @@ try {
   session = created.sessionId;
   console.log("Native WebView session established");
   await until("return document.body.innerText", (value) =>
-    value.includes("Use this device"),
+    value.includes("Use this device")
   );
   assert.equal(
     await script("return Boolean(window.__TAURI_INTERNALS__)"),
-    true,
+    true
   );
   await script(
-    "[...document.querySelectorAll('button')].find(button => button.textContent.includes('Use this device')).click(); return true",
+    "[...document.querySelectorAll('button')].find(button => button.textContent.includes('Use this device')).click(); return true"
   );
   await until(
     "return document.body.innerText",
     (value) => value.includes("Add WeChat account"),
-    40000,
+    40000
   );
   // No account is created and no WeChat endpoint is contacted.
   const text = await script("return document.body.innerText");
@@ -98,31 +99,73 @@ try {
   assert.ok(!text.includes("access key"));
 
   await script(
-    "[...document.querySelectorAll('button')].find(button => button.textContent.includes('Connect to a different')).click(); return true",
+    "[...document.querySelectorAll('button')].find(button => button.textContent.includes('Connect to a different')).click(); return true"
   );
   await until("return document.body.innerText", (value) =>
-    value.includes("Desktop settings"),
+    value.includes("Desktop settings")
   );
   await script(
-    "[...document.querySelectorAll('button')].find(button => button.textContent === 'Desktop settings').click(); return true",
+    "[...document.querySelectorAll('button')].find(button => button.textContent === 'Desktop settings').click(); return true"
   );
   await until("return document.body.innerText", (value) =>
-    value.includes("Export key for CLI"),
+    value.includes("Export key for CLI")
   );
-  // The actual credential is only requested on a deliberate reveal action; this test never reads it.
+  // A key appears only after a deliberate reveal action in this isolated fixture.
   assert.equal(
     await script(
-      "return document.querySelector('input[aria-label=\"Access key\"]') === null",
+      "return document.querySelector('input[aria-label=\"Access key\"]') === null"
     ),
-    true,
+    true
   );
   await script(
-    "[...document.querySelectorAll('.setting')].find(row => row.textContent.includes('Allow network connections')).querySelector('input').click(); [...document.querySelectorAll('button')].find(button => button.textContent === 'Apply').click(); return true",
+    "document.querySelector('.desktop-access-key button').click(); return true"
+  );
+  const fixtureKey = await until(
+    "return document.querySelector('input[aria-label=\"Access key\"]')?.value",
+    (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
+  );
+  await script(
+    "document.querySelector('.desktop-access-key button').click(); return true"
+  );
+  await script(
+    "[...document.querySelectorAll('button')].find(button => button.textContent === 'Install wx').click(); return true"
+  );
+  await until("return document.body.innerText", (value) =>
+    value.includes("Installed in ~/.local/bin")
+  );
+  const tokenFile = join(process.env.HOME, "desktop-cli-token");
+  const clientConfig = join(process.env.HOME, "desktop-cli.toml");
+  await writeFile(tokenFile, fixtureKey, { mode: 0o600, flag: "wx" });
+  const command = join(process.env.HOME, ".local/bin/wx");
+  const runCli = (args) =>
+    JSON.parse(
+      execFileSync(command, ["--json", "--config", clientConfig, ...args], {
+        encoding: "utf8",
+        timeout: 10000,
+      })
+    );
+  runCli([
+    "config",
+    "server",
+    "add",
+    "desktop",
+    "--url",
+    "http://127.0.0.1:6174",
+    "--token-file",
+    tokenFile,
+  ]);
+  const cliStatus = runCli(["--server-name", "desktop", "status"]);
+  assert.equal(cliStatus.version.backend, "native");
+  console.log(
+    "Installed CLI connects with its own saved server and protected token file"
+  );
+  await script(
+    "[...document.querySelectorAll('.setting')].find(row => row.textContent.includes('Allow network connections')).querySelector('input').click(); [...document.querySelectorAll('button')].find(button => button.textContent === 'Apply').click(); return true"
   );
   await until(
     "return document.body.innerText",
     (value) => value.includes("Add WeChat account"),
-    40000,
+    40000
   );
   const settings = await call(`/session/${session}/execute/async`, {
     script:
@@ -140,13 +183,13 @@ try {
           response.statusCode === 200
             ? resolve()
             : reject(new Error("HTTPS health check failed"));
-        },
+        }
       )
       .on("error", reject);
   });
   try {
     await script(
-      "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true",
+      "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"
     );
   } catch {}
   await health(false);
@@ -161,23 +204,23 @@ try {
   await until(
     "return document.body.innerText",
     (value) => value.includes("Add WeChat account"),
-    40000,
+    40000
   );
   await health(true);
   try {
     await script(
-      "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true",
+      "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"
     );
   } catch {}
   await health(false);
   console.log(
-    "Native desktop: keyring setup and persistence, local hub startup, UI transport, HTTPS settings, restart and graceful quit passed",
+    "Native desktop: keyring setup and persistence, local hub startup, UI transport, HTTPS settings, restart and graceful quit passed"
   );
 } finally {
   if (session) {
     try {
       await script(
-        "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true",
+        "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"
       );
     } catch {}
     try {

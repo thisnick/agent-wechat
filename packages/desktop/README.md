@@ -6,7 +6,7 @@ On first launch choose **Use this device** or **Connect to another hub**. Deskto
 
 The app passes a local hub's key through `wx serve --token-stdin`. It brokers API requests and event streams in the native layer, without placing the key in browser storage. The bundled and npm-installed CLI have the same credential behavior; neither accesses the desktop keyring. Independent CLI connections use their own protected token files and saved server settings. **Settings → Export key for CLI** creates a protected file for that setup.
 
-Closing the window keeps the app and its hub in the tray/menu bar. **Quit AgentWechat** requests shutdown of the exact child hub using its PID, hub ID and ownership generation. It never adopts another process, and remote hubs are not stopped. Profiles and encryption keys stay in the app's data folder outside the installation directory.
+Once configured, the local hub starts whenever the app opens, including when the interface reconnects to a remote hub. Closing the window keeps the app and its hub in the tray/menu bar. **Quit AgentWechat** requests shutdown of the exact child hub using its PID, hub ID and ownership generation. It never adopts another process, and remote hubs are not stopped. Profiles and encryption keys stay in the app's data folder outside the installation directory.
 
 ## Build
 
