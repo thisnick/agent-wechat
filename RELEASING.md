@@ -102,3 +102,19 @@ npm trusted publishing lets GitHub Actions publish without a long-lived token. S
 Once configured, delete the `NPM_TOKEN` secret from GitHub repo settings. The workflow uses OIDC automatically (requires npm >= 11.5.1, installed in CI).
 
 **Note**: Trusted publishing can only be configured for packages that already exist on npm. For brand-new packages, the first publish must use a token.
+
+## Desktop installers
+
+`@agent-wechat/desktop` is a separate private workspace package on the native prerelease train. Its version, Rust manifest and Tauri configuration are synchronized by `version-packages`. The npm CLI remains a native executable launcher; it does not contain the desktop UI.
+
+A merged version-package PR starts `native-release.yml`, which also calls `desktop.yml`. Desktop PR and manual validation runs build unsigned installers. Production signing runs only on trusted release refs; pull requests cannot use production signing. Existing `native-release` approval and source/version checks remain in effect. All native and desktop release assets wait for successful desktop signing and notarization before publication.
+
+Windows uses the reusable workflow introduced in PR #278, with GitHub OIDC and the existing `windows-signing` environment. Keep its main/v* environment restrictions and profile-scoped Certificate Profile Signer identity. The environment supplies `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT` and `AZURE_SIGNING_PROFILE`. Application binaries, bundled CLI and media helpers are signed first; installers built from those signed inputs are signed in a second pass. Both passes use an x64 runner, including ARM64 builds, and require the expected publisher, valid signatures and verified timestamps. Installer packaging disables binary patching so it preserves the already signed application payloads, then verifies their signatures again.
+
+macOS uses repository secrets `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID`. The certificate is a base64 PKCS#12 archive. Each signing job creates a temporary keychain, imports the archive, configures unattended codesign access and cleans up in an always-run step. `APPLE_SIGNING_IDENTITY` is the configured Developer ID Application identity, supplied as a workflow environment value. Reusable workflow callers pass secrets with `secrets: inherit`.
+
+Tauri signs nested executables and the app with hardened runtime and timestamps. The release then requires notarization `Accepted`, staples and validates the app, recreates its ZIP, creates and signs the final DMG, and notarizes/staples/validates that DMG. Code signature and Gatekeeper assessments must pass. Rejected notarization retrieves its log and fails the release. Missing credentials are failures, not unsigned-release fallbacks.
+
+Desktop checksums are computed after final signing, notarization, stapling and packaging. The publish job verifies every file against its platform manifest and source commit before combining the final checksum manifest. It never replaces existing release assets.
+
+The first trusted prerelease run must report its CI URL, final artifact names, Windows publisher/signature/timestamp results, Apple `Accepted` results, and successful stapler/Gatekeeper validation. Download and run those exact GitHub assets on real desktops to validate fresh installation, keyring persistence, local and remote connections, CLI setup, restart/quit, WeChat login and media. Unsigned CI builds do not establish those acceptance results.

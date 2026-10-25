@@ -35,8 +35,21 @@ struct Cli {
     data_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     token_file: Option<PathBuf>,
+    /// Read this invocation's API key from a private stdin pipe.
+    #[arg(long, global = true, conflicts_with = "token_file")]
+    token_stdin: bool,
     #[arg(long, global = true)]
     listen: Option<SocketAddr>,
+    /// Additional HTTPS listener for other machines. Requires both TLS files.
+    #[arg(long, global = true)]
+    network_listen: Option<SocketAddr>,
+    #[arg(long, global = true)]
+    tls_cert_file: Option<PathBuf>,
+    #[arg(long, global = true)]
+    tls_key_file: Option<PathBuf>,
+    /// Additional trusted CA for this client invocation; TLS verification stays enabled.
+    #[arg(long, global = true)]
+    ca_cert_file: Option<PathBuf>,
     #[arg(long = "config", alias = "client-config", global = true)]
     client_config: Option<PathBuf>,
     #[arg(
@@ -64,11 +77,7 @@ enum Command {
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
-    Serve {
-        /// Read the API owner token from a private stdin pipe without creating a token file.
-        #[arg(long, conflicts_with = "token_file")]
-        token_stdin: bool,
-    },
+    Serve,
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
@@ -1024,11 +1033,24 @@ async fn run(cli: Cli) -> Result<()> {
     if matches!(cli.command, Command::Version) {
         return output(&wechat_api::version());
     }
+    if cli.token_stdin
+        && matches!(
+            &cli.command,
+            Command::Daemon { .. }
+                | Command::Store { .. }
+                | Command::Config { .. }
+                | Command::Profile { .. }
+                | Command::Version
+                | Command::Licenses
+        )
+    {
+        bail!("--token-stdin is supported by serve and HTTP client commands");
+    }
     let env = wechat_config::Environment::capture();
     let cwd = std::env::current_dir()?;
     if matches!(
         &cli.command,
-        Command::Serve { .. }
+        Command::Serve
             | Command::Daemon { .. }
             | Command::Store { .. }
             | Command::Config {
@@ -1041,12 +1063,15 @@ async fn run(cli: Cli) -> Result<()> {
                 data_dir: cli.data_dir.clone(),
                 token_file: cli.token_file.clone(),
                 listen: cli.listen,
+                network_listen: cli.network_listen,
+                tls_cert_file: cli.tls_cert_file.clone(),
+                tls_key_file: cli.tls_key_file.clone(),
             },
             &env,
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve { token_stdin } => serve(config, token_stdin).await,
+            Command::Serve => serve(config, cli.token_stdin).await,
             Command::Daemon { command } => daemon::run(config, command).await,
             Command::Store { command } => offline(config, cli.account.unwrap_or_default(), command),
             Command::Config {
@@ -1153,6 +1178,9 @@ async fn run(cli: Cli) -> Result<()> {
             data_dir: cli.data_dir.clone(),
             token_file: cli.token_file.clone(),
             listen: cli.listen,
+            network_listen: cli.network_listen,
+            tls_cert_file: cli.tls_cert_file.clone(),
+            tls_key_file: cli.tls_key_file.clone(),
         },
         &env,
         &cwd,
@@ -1176,12 +1204,23 @@ async fn run(cli: Cli) -> Result<()> {
     ) {
         return output(&client);
     }
-    let env_token = if cli.token_file.is_none() {
+    let env_token = if cli.token_stdin {
+        Some(stdin_token().await?)
+    } else if cli.token_file.is_none() {
         std::env::var("AGENT_WECHAT_TOKEN").ok()
     } else {
         None
     };
     let mut r = Remote::with_token(client, env_token)?;
+    if let Some(path) = cli.ca_cert_file {
+        let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)
+            .context("invalid additional CA certificate")?;
+        r.http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(65))
+            .add_root_certificate(certificate)
+            .build()?;
+    }
     if let Command::Auth {
         command: AuthCommand::Login {
             official: Some(path),
@@ -1729,7 +1768,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Version
         | Command::Licenses
         | Command::Config { .. }
-        | Command::Serve { .. }
+        | Command::Serve
         | Command::Store { .. }
         | Command::Profile { .. }
         | Command::Daemon { .. } => {
@@ -1780,14 +1819,47 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result
         core.configure_profile_format_key(&private_input(path, 16)?)?;
     }
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let network = if let Some(address) = config.network_listen {
+        let certificate = private_input(config.tls_cert_file.as_deref().unwrap(), 64 * 1024)?;
+        let key = private_input(config.tls_key_file.as_deref().unwrap(), 64 * 1024)?;
+        let tls = axum_server::tls_openssl::OpenSSLConfig::from_pem(&certificate, &key)?;
+        let socket = std::net::TcpListener::bind(address)?;
+        socket.set_nonblocking(true)?;
+        Some((socket, tls))
+    } else {
+        None
+    };
     core.start_workers()?;
     eprintln!(
         "{}",
         json!({"state":"ready","listen":listener.local_addr()?.to_string(),"serverId":store.server_id,"nativeLogin":true})
     );
-    axum::serve(listener, wechat_api::router(core.clone(), &token))
-        .with_graceful_shutdown(shutdown(core))
-        .await?;
+    let router = wechat_api::router(core.clone(), &token);
+    let local =
+        axum::serve(listener, router.clone()).with_graceful_shutdown(shutdown(core.clone()));
+    if let Some((socket, tls)) = network {
+        let handle = axum_server::Handle::new();
+        let stop_handle = handle.clone();
+        let stopping = core.clone();
+        let watcher = tokio::spawn(async move {
+            while !stopping.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            stop_handle.graceful_shutdown(Some(Duration::from_secs(30)));
+        });
+        let result = tokio::try_join!(
+            async { local.await },
+            axum_server::from_tcp(socket)?
+                .acceptor(axum_server::tls_openssl::OpenSSLAcceptor::new(tls))
+                .handle(handle)
+                .serve(router.into_make_service())
+        );
+        watcher.abort();
+        core.shutdown();
+        result?;
+    } else {
+        local.await?;
+    }
     Ok(())
 }
 async fn wait_operation(r: &Remote, op: Value, wait: u64) -> Result<Value> {

@@ -1,0 +1,21 @@
+{
+  "name": "@agent-wechat/desktop",
+  "version": "1.0.0-beta.13",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/check.mjs",
+    "typecheck": "node scripts/check.mjs",
+    "dev": "tauri dev",
+    "app:build": "tauri build",
+    "app:bundle": "tauri bundle --no-binary-patching",
+    "prepare:sidecars": "node scripts/prepare-sidecars.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@agent-wechat/client-ui": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

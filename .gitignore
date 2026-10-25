@@ -38,3 +38,10 @@ artifacts/native/
 packages/cli/native-release.json
 packages/cli/native/
 deploy/native/secrets/
+
+# Desktop outputs and downloaded sidecars (never account data)
+packages/desktop/src-tauri/target/
+packages/desktop/src-tauri/binaries/
+packages/desktop/src-tauri/resources/
+packages/desktop/src-tauri/gen/
+artifacts/desktop/

@@ -32,6 +32,7 @@ export async function connect(
   endpoint: string,
   token: string,
   simulator = false,
+  transport: typeof fetch = globalThis.fetch.bind(globalThis),
 ): Promise<Connection> {
   let cache: BrowserCache | undefined;
   const client = new NativeWeChatClient({
@@ -40,7 +41,7 @@ export async function connect(
     fetch: async (input, init) => {
       if (init?.method && !["GET", "HEAD"].includes(init.method))
         await cache?.flush();
-      return globalThis.fetch(input, init);
+      return transport(input, init);
     },
   });
   const status = await client.status();

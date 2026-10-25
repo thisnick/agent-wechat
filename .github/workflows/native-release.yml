@@ -102,8 +102,18 @@ jobs:
     uses: ./.github/workflows/native-portable.yml
     with:
       artifact_prefix: native-release
+  desktop:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/desktop.yml
+    with:
+      release: true
+    secrets: inherit
   prepare:
-    needs: [plan, build, portable]
+    needs: [plan, build, portable, desktop]
     environment: native-release
     permissions:
       contents: write
@@ -124,6 +134,12 @@ jobs:
         run: |
           node --test scripts/native-merge-release.test.mjs
           node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-x64 artifacts/fragments/native-release-arm64 artifacts/fragments/native-release-*-*
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-release-*
+          path: artifacts/desktop-fragments
+      - name: Verify final signed desktop packages
+        run: node packages/desktop/scripts/merge-manifests.mjs artifacts/desktop artifacts/desktop-fragments/desktop-release-*
       - name: Validate release channel and render versioned Changesets notes
         id: release_policy
         env:
@@ -133,7 +149,9 @@ jobs:
           node scripts/native-release-notes.mjs --output artifacts/release-notes.md
       - uses: actions/attest-build-provenance@v4.2.2
         with:
-          subject-path: artifacts/native/*
+          subject-path: |
+            artifacts/native/*
+            artifacts/desktop/*
       - name: Publish new assets without replacing existing release files
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,7 +174,7 @@ jobs:
           else
             gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           fi
-          gh release upload "$TAG" artifacts/native/*
+          gh release upload "$TAG" artifacts/native/* artifacts/desktop/*
 
   image:
     needs: [plan, prepare]

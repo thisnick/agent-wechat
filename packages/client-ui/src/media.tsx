@@ -1,3 +1,4 @@
+import { desktop, saveDesktopFile } from "./desktop.ts";
 import {
   useEffect,
   useId,
@@ -747,19 +748,17 @@ function MediaDownloadAction({
         asset.id,
         { representation },
       );
-      const href = URL.createObjectURL(
-        new Blob([new Uint8Array(content.bytes).buffer], {
-          type: content.contentType,
-        }),
-      );
-      const link = document.createElement("a");
-      link.href = href;
-      link.download =
-        (representation === "preview"
-          ? asset.preview?.filename
-          : asset.filename) || "attachment";
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(href), 30000);
+      const blob = new Blob([new Uint8Array(content.bytes).buffer], { type: content.contentType });
+      const filename = (representation === "preview" ? asset.preview?.filename : asset.filename) || "attachment";
+      if (desktop) await saveDesktopFile(blob, filename);
+      else {
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = href;
+        link.download = filename;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(href), 30000);
+      }
     } catch (error) {
       setError(readableError(error));
     } finally {

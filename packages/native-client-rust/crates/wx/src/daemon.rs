@@ -142,6 +142,15 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
             if config.config_present {
                 command.arg("--server-config").arg(&config.config_file);
             }
+            if let Some(address) = config.network_listen {
+                command
+                    .arg("--network-listen")
+                    .arg(address.to_string())
+                    .arg("--tls-cert-file")
+                    .arg(config.tls_cert_file.as_ref().unwrap())
+                    .arg("--tls-key-file")
+                    .arg(config.tls_key_file.as_ref().unwrap());
+            }
             wechat_platform::detach(&mut command);
             let mut child = command.spawn().context("cannot launch native daemon")?;
             let deadline = Instant::now() + Duration::from_secs(20);

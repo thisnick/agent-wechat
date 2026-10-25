@@ -19,6 +19,19 @@ listen = "127.0.0.1:6174"
 | Config file | `--server-config` | `AGENT_WECHAT_SERVER_CONFIG` |
 | `dataDir` | `--data-dir` | `AGENT_WECHAT_DATA_DIR` |
 | `listen` | `--listen` | |
+| `networkListen` | `--network-listen` | |
+| `tlsCertFile` | `--tls-cert-file` | |
+| `tlsKeyFile` | `--tls-key-file` | |
+
+`listen` stays on loopback. To accept HTTPS connections from other devices, set all three network settings:
+
+```toml
+networkListen = "0.0.0.0:7443"
+tlsCertFile = "/srv/secrets/certificate.pem"
+tlsKeyFile = "/srv/secrets/private-key.pem"
+```
+
+Use a separate network port and protect both TLS files so only the server's user can read them. API keys are still required. The CLI trusts normal system CAs; `--ca-cert-file` adds a certificate for one invocation.
 
 Relative paths are resolved from the config file's folder. `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the defaults. Unknown keys are rejected.
 
@@ -51,7 +64,7 @@ Under `channels.agent-wechat` in `openclaw.json`. The `native` block can also go
 
 ## CLI
 
-`~/.config/agent-wechat/client.toml` stores the servers added with `wx config server add` and each server's default account. See [global flags](/reference/cli/#global-flags) for the matching environment variables.
+`~/.config/agent-wechat/client.toml` stores the servers added with `wx config server add` and each server's default account. The CLI reads each saved server's token file independently of the server's own configuration. `--token-stdin` accepts a key through a private pipe for one HTTP client invocation or for `serve`. It cannot be combined with `--token-file`. See [global flags](/reference/cli/#global-flags) for the matching environment variables.
 
 ## Installer
 

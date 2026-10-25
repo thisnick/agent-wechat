@@ -1,0 +1,114 @@
+name: Sign Windows release artifacts
+
+on:
+  workflow_call:
+    inputs:
+      unsigned-artifact:
+        description: Artifact from this workflow run containing files to sign
+        required: true
+        type: string
+      signed-artifact:
+        description: Name for the signed output artifact
+        default: windows-signed
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    if: >-
+      github.repository == 'thisnick/agent-wechat' &&
+      github.event_name != 'pull_request' &&
+      github.event_name != 'pull_request_target' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: windows-2025
+    timeout-minutes: 15
+    environment: windows-signing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+      AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+    steps:
+      - name: Require signing configuration
+        shell: pwsh
+        run: |
+          $required = @(
+            'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID',
+            'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_PROFILE'
+          )
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Configure $name in the windows-signing GitHub environment"
+            }
+          }
+          "SIGNING_DIRECTORY=$env:RUNNER_TEMP\windows-signing" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # Download only an artifact from the calling run; no external run ID or token.
+      - name: Download unsigned release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ${{ inputs.unsigned-artifact }}
+          path: ${{ env.SIGNING_DIRECTORY }}
+      - name: Require Windows files to sign
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath $env:SIGNING_DIRECTORY -Recurse -File |
+            Where-Object { $_.Extension.ToLowerInvariant() -in @('.exe', '.dll', '.msi') })
+          if ($files.Count -eq 0) { throw 'The artifact contains no EXE, DLL, or MSI files' }
+      - name: Authenticate to Azure with GitHub OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign and timestamp Windows files
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ env.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ env.SIGNING_DIRECTORY }}
+          files-folder-filter: exe,dll,msi
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          cache-dependencies: false
+      - name: Verify signatures and timestamps
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath $env:SIGNING_DIRECTORY -Recurse -File |
+            Where-Object { $_.Extension.ToLowerInvariant() -in @('.exe', '.dll', '.msi') })
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $signTool) { throw 'Windows SDK signature verifier is missing' }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid signature for $($file.Name): $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Hao Yu(,|$)') {
+              throw "Unexpected publisher for $($file.Name)"
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "Missing timestamp for $($file.Name)"
+            }
+            & $signTool.FullName verify /pa /all /v /tw $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signature or timestamp verification failed for $($file.Name)" }
+            "$($file.Name): Valid; publisher $($signature.SignerCertificate.Subject); timestamp verified" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+      - name: Upload signed release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ inputs.signed-artifact }}
+          path: ${{ env.SIGNING_DIRECTORY }}\**\*
+          if-no-files-found: error

@@ -56,6 +56,7 @@ export default defineConfig({
           { label: 'What you need', slug: 'setup/requirements' },
           { label: 'Install', slug: 'setup/install' },
           { label: 'Connect your account', slug: 'setup/connect' },
+          { label: 'Desktop app', slug: 'setup/desktop' },
           { label: 'Keep it running', slug: 'setup/run' },
           { label: 'Migrate from the old container', slug: 'setup/migrate' },
         ] },

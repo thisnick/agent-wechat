@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AgentWechat",
+  "mainBinaryName": "agent-wechat",
+  "version": "1.0.0-beta.13",
+  "identifier": "io.github.thisnick.agent-wechat",
+  "build": {
+    "beforeBuildCommand": "pnpm --filter @agent-wechat/client-ui build",
+    "frontendDist": "../../client-ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AgentWechat",
+        "width": 1120,
+        "height": 800,
+        "minWidth": 420,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "nsis",
+      "deb"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/wx",
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
+    ],
+    "resources": [
+      "resources/*"
+    ],
+    "category": "SocialNetworking",
+    "shortDescription": "WeChat desktop client and local agent-wechat hub",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libayatana-appindicator3-1",
+          "libsecret-1-0",
+          "libc6 (>= 2.39)"
+        ]
+      }
+    }
+  }
+}

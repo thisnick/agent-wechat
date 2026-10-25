@@ -1893,3 +1893,17 @@ input:focus-visible {
   margin-left: auto;
   flex: none;
 }
+
+.desktop-choices, .desktop-form, .desktop-connection-details { display: grid; gap: 16px; }
+.desktop-choices > button { width: 100%; }
+.desktop-choices small { display: block; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.desktop-form label { display: grid; gap: 8px; }
+.desktop-form input:not([type="checkbox"]), .desktop-preferences textarea, .desktop-form textarea { width: 100%; min-height: 40px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: inherit; background: var(--panel); }
+.desktop-form textarea, .desktop-preferences textarea { min-height: 104px; font-family: monospace; resize: vertical; }
+.desktop-form details > p, .desktop-help { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.desktop-form summary { cursor: pointer; }
+.desktop-port-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.desktop-preferences > .desktop-form, .desktop-preferences > .desktop-connection-details { padding: 20px 0; border-bottom: 1px solid var(--border); }
+.desktop-access-key { flex-wrap: wrap; }
+.desktop-access-key input { width: 100%; font-family: monospace; }
+.desktop-connection-details code, .desktop-preferences small { overflow-wrap: anywhere; }

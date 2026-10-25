@@ -13,6 +13,9 @@ pub struct Overrides {
     pub data_dir: Option<PathBuf>,
     pub token_file: Option<PathBuf>,
     pub listen: Option<SocketAddr>,
+    pub network_listen: Option<SocketAddr>,
+    pub tls_cert_file: Option<PathBuf>,
+    pub tls_key_file: Option<PathBuf>,
 }
 
 /// Captured once by the executable; pure resolution avoids process-global test state.
@@ -61,6 +64,9 @@ struct FileConfig {
     data_dir: Option<PathBuf>,
     token_file: Option<PathBuf>,
     listen: Option<SocketAddr>,
+    network_listen: Option<SocketAddr>,
+    tls_cert_file: Option<PathBuf>,
+    tls_key_file: Option<PathBuf>,
     storage_key_file: Option<PathBuf>,
     profile_format_key_file: Option<PathBuf>,
 }
@@ -77,6 +83,9 @@ pub struct ServerConfig {
     pub storage_key_file: Option<PathBuf>,
     pub profile_format_key_file: Option<PathBuf>,
     pub listen: SocketAddr,
+    pub network_listen: Option<SocketAddr>,
+    pub tls_cert_file: Option<PathBuf>,
+    pub tls_key_file: Option<PathBuf>,
 }
 
 fn absolute(path: &Path, base: &Path) -> Result<PathBuf> {
@@ -168,7 +177,29 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         .or(file.listen)
         .unwrap_or_else(|| "127.0.0.1:6174".parse().unwrap());
     if !listen.ip().is_loopback() {
-        bail!("this initial server requires a loopback listener");
+        bail!("--listen must be loopback; use --network-listen with TLS for network access");
+    }
+    let network_listen = flags.network_listen.or(file.network_listen);
+    let tls_cert_file = flags
+        .tls_cert_file
+        .as_ref()
+        .map(|p| absolute(p, cwd))
+        .or_else(|| file.tls_cert_file.as_ref().map(|p| absolute(p, base)))
+        .transpose()?;
+    let tls_key_file = flags
+        .tls_key_file
+        .as_ref()
+        .map(|p| absolute(p, cwd))
+        .or_else(|| file.tls_key_file.as_ref().map(|p| absolute(p, base)))
+        .transpose()?;
+    if network_listen.is_some() != (tls_cert_file.is_some() && tls_key_file.is_some())
+        || tls_cert_file.is_some() != tls_key_file.is_some()
+    {
+        bail!("network access requires networkListen, tlsCertFile and tlsKeyFile together");
+    }
+    if network_listen.is_some_and(|address| address.port() == 0 || address.port() == listen.port())
+    {
+        bail!("network listener requires a separate, nonzero port");
     }
     Ok(ServerConfig {
         schema_version: 1,
@@ -180,6 +211,9 @@ pub fn resolve(flags: &Overrides, env: &Environment, cwd: &Path) -> Result<Serve
         storage_key_file,
         profile_format_key_file,
         listen,
+        network_listen,
+        tls_cert_file,
+        tls_key_file,
     })
 }
 
@@ -245,6 +279,30 @@ mod tests {
             assert!(resolve(&flags, &Environment::default(), t.path()).is_err());
         }
         assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 1);
+    }
+    #[test]
+    fn network_listener_requires_complete_tls_and_separate_port() {
+        let temporary = tempfile::tempdir().unwrap();
+        let environment = Environment {
+            home: Some(temporary.path().to_owned()),
+            ..Default::default()
+        };
+        let mut flags = Overrides {
+            network_listen: Some("0.0.0.0:7443".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(resolve(&flags, &environment, temporary.path()).is_err());
+        flags.tls_cert_file = Some("certificate.pem".into());
+        assert!(resolve(&flags, &environment, temporary.path()).is_err());
+        flags.tls_key_file = Some("private-key.pem".into());
+        let resolved = resolve(&flags, &environment, temporary.path()).unwrap();
+        assert_eq!(resolved.listen, "127.0.0.1:6174".parse().unwrap());
+        assert_eq!(
+            resolved.tls_cert_file.unwrap(),
+            temporary.path().join("certificate.pem")
+        );
+        flags.network_listen = Some("0.0.0.0:6174".parse().unwrap());
+        assert!(resolve(&flags, &environment, temporary.path()).is_err());
     }
     #[test]
     fn relative_xdg_is_ignored_and_remote_listener_rejected() {

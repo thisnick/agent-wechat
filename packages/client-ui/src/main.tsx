@@ -1,3 +1,5 @@
+import { desktop, desktopConnect, desktopInvoke, installDesktopLinks, type DesktopSession } from "./desktop.ts";
+import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
 import { LocalCacheSettings } from "./local-cache-settings.tsx";
 import { GroupSettings } from "./group-settings.tsx";
 import { createRoot } from "react-dom/client";
@@ -104,19 +106,20 @@ function ErrorNotice({ children }: { children: ReactNode }) {
   );
 }
 function App() {
+  useEffect(() => desktop ? installDesktopLinks() : undefined, []);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [starting, setStarting] = useState(true);
   const [error, setError] = useState("");
   const [theme, setTheme] = useTheme();
   useEffect(() => {
     let cancelled = false;
-    void bootstrap()
+    void (desktop ? desktopInvoke<DesktopSession | null>("desktop_bootstrap").then((session) => session ? desktopConnect(session) : null) : bootstrap())
       .then((value) => {
         if (cancelled) value?.close();
         else setConnection(value);
       })
       .catch((e) => {
-        if (!cancelled) setError(readableError(e));
+        if (!cancelled) setError(desktop && typeof e === "string" ? e : readableError(e));
       })
       .finally(() => {
         if (!cancelled) setStarting(false);
@@ -141,13 +144,14 @@ function App() {
       </Welcome>
     );
   if (!connection)
-    return <ConnectionForm error={error} onConnect={setConnection} />;
+    return desktop ? <DesktopWelcome error={error} onConnect={setConnection} /> : <ConnectionForm error={error} onConnect={setConnection} />;
   return (
     <Client
       key={connection.endpoint}
       connection={connection}
       theme={theme}
       setTheme={setTheme}
+      onConnect={setConnection}
       disconnect={() => setConnection(null)}
     />
   );
@@ -239,11 +243,13 @@ function Client({
   theme,
   setTheme,
   disconnect,
+  onConnect,
 }: {
   connection: Connection;
   theme: string;
   setTheme: (t: string) => void;
   disconnect: () => void;
+  onConnect: (connection: Connection) => void;
 }) {
   const { session, simulator } = connection;
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
@@ -464,6 +470,8 @@ function Client({
       }}
       addAccount={() => void add()}
       addingAccount={busy}
+      onConnect={onConnect}
+      disconnect={disconnect}
     />
   );
 }
@@ -710,6 +718,8 @@ function Chats({
   switchAccount,
   addAccount,
   addingAccount,
+  onConnect,
+  disconnect,
 }: {
   connection: Connection;
   theme: string;
@@ -717,6 +727,8 @@ function Chats({
   switchAccount: () => void;
   addAccount: () => void;
   addingAccount: boolean;
+  onConnect: (connection: Connection) => void;
+  disconnect: () => void;
 }) {
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
@@ -1584,6 +1596,12 @@ function Chats({
                 </span>
                 {simulator ? "Simulator" : "Connected"}
               </div>
+              {desktop && (
+                <>
+                  <DesktopPreferences onConnection={onConnect} onDisconnect={disconnect} />
+                  <button className="secondary" onClick={disconnect}>Switch hub</button>
+                </>
+              )}
               {state.account && (
                 <LocalCacheSettings
                   connection={connection}

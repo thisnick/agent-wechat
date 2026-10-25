@@ -10,7 +10,8 @@
   "fixed": [
     [
       "@agent-wechat/cli",
-      "@agent-wechat/agent-wechat"
+      "@agent-wechat/agent-wechat",
+      "@agent-wechat/desktop"
     ]
   ],
   "linked": [],

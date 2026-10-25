@@ -1,0 +1,325 @@
+name: Desktop app
+on:
+  pull_request:
+    paths:
+      - 'packages/desktop/**'
+      - 'packages/client-ui/**'
+      - 'packages/shared/**'
+      - 'packages/native-client-rust/**'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/windows-signing.yml'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-arm64
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: windows-x64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows-arm64
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Install Linux desktop prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb webkit2gtk-driver
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+      - name: Select Windows Perl
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path C:\Strawberry\perl\bin\perl.exe)) { choco install strawberryperl --no-progress -y }
+          'C:\Strawberry\perl\bin' | Out-File $env:GITHUB_PATH -Append
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            packages/native-client-rust -> target
+            packages/desktop/src-tauri -> target
+          key: desktop-${{ matrix.target }}-${{ env.RUSTFLAGS }}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/shared build
+      - run: pnpm --filter @agent-wechat/client-ui test
+      - run: node --test packages/desktop/test/*.test.mjs
+      - run: cargo fmt --all --check --manifest-path packages/native-client-rust/Cargo.toml
+      - run: cargo fmt --check --manifest-path packages/desktop/src-tauri/Cargo.toml
+      - name: Build native CLI
+        if: runner.os != 'Windows'
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
+      - name: Build Windows native CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
+      - run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
+      - name: Build desktop executable
+        if: runner.os != 'Windows'
+        run: pnpm --filter @agent-wechat/desktop app:build --target ${{ matrix.target }} --no-bundle
+      - name: Build Windows desktop executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pnpm --filter @agent-wechat/desktop app:build --target ${{ matrix.target }} --no-bundle
+      - name: Check native desktop code
+        if: runner.os != 'Windows'
+        run: |
+          cargo clippy --all-targets --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- -D warnings
+          cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Check Windows desktop code
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo clippy --all-targets --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Exercise native hub lifecycle and Linux keyring
+        if: runner.os == 'Linux'
+        env:
+          WX_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/${{ matrix.target }}/release/wx
+        run: |
+          dbus-run-session -- bash -c 'printf "fixture-password\n" | gnome-keyring-daemon --unlock --components=secrets; cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- --ignored'
+      - name: Exercise native hub lifecycle and macOS keychain
+        if: runner.os == 'macOS'
+        env:
+          WX_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/${{ matrix.target }}/release/wx
+        run: cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- --ignored
+      - name: Exercise native hub lifecycle and Windows credentials
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WX_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe
+        run: cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- --ignored
+      - name: Verify Linux native window, keyring persistence and restart
+        if: runner.os == 'Linux'
+        env:
+          DESKTOP_BINARY: ${{ github.workspace }}/packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat
+        run: |
+          cargo install tauri-driver --version 2.1.0 --locked
+          export HOME=$(mktemp -d)
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          dbus-run-session -- xvfb-run -a bash -c 'printf "fixture-password\n" | gnome-keyring-daemon --unlock --components=secrets; node packages/desktop/test/webdriver.mjs'
+      - name: Stage desktop bundle inputs
+        run: |
+          mkdir -p artifacts/desktop-input/packages/desktop/src-tauri/target/${{ matrix.target }}/release
+          mkdir -p artifacts/desktop-input/packages/desktop/src-tauri
+          cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat${{ runner.os == 'Windows' && '.exe' || '' }} artifacts/desktop-input/packages/desktop/src-tauri/target/${{ matrix.target }}/release/
+          cp -R packages/desktop/src-tauri/binaries packages/desktop/src-tauri/resources artifacts/desktop-input/packages/desktop/src-tauri/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-input-${{ matrix.platform }}
+          path: artifacts/desktop-input/
+          if-no-files-found: error
+      - name: Build unsigned validation installers
+        if: ${{ !inputs.release }}
+        run: pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles ${{ runner.os == 'macOS' && 'app' || runner.os == 'Windows' && 'nsis' || 'deb' }}
+      - name: Stage runnable validation downloads
+        if: ${{ !inputs.release }}
+        run: |
+          mkdir -p artifacts/desktop-validation
+          case "${{ runner.os }}" in
+            macOS) ditto -c -k --keepParent packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/AgentWechat.app artifacts/desktop-validation/AgentWechat-macos-arm64-unsigned.zip ;;
+            Windows) cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe artifacts/desktop-validation/ ;;
+            Linux) cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb artifacts/desktop-validation/ ;;
+          esac
+      - uses: actions/upload-artifact@v7
+        if: ${{ !inputs.release }}
+        with:
+          name: desktop-validation-${{ matrix.platform }}
+          path: artifacts/desktop-validation/
+          if-no-files-found: error
+      - name: Package Linux release
+        if: inputs.release && runner.os == 'Linux'
+        run: |
+          pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles deb
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          mkdir -p artifacts/desktop-release
+          cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb "artifacts/desktop-release/AgentWechat-v$VERSION-linux-x64.deb"
+          node packages/desktop/scripts/manifest.mjs artifacts/desktop-release linux-x64
+      - uses: actions/upload-artifact@v7
+        if: inputs.release && runner.os == 'Linux'
+        with:
+          name: desktop-release-linux-x64
+          path: artifacts/desktop-release/
+          if-no-files-found: error
+
+  sign-windows-binaries:
+    needs: build
+    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/windows-signing.yml
+    with:
+      unsigned-artifact: desktop-input-windows-${{ matrix.arch }}
+      signed-artifact: desktop-signed-windows-${{ matrix.arch }}
+
+  package-windows:
+    needs: sign-windows-binaries
+    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/shared build
+      - run: pnpm --filter @agent-wechat/client-ui build
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-signed-windows-${{ matrix.arch }}
+          path: .
+      - run: pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles nsis --no-sign
+      - name: Require signed application payloads to remain valid after packaging
+        shell: pwsh
+        run: |
+          $files = @(Get-Item 'packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat.exe')
+          $files += @(Get-ChildItem packages/desktop/src-tauri/binaries/*.exe)
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) {
+              throw "Packaging invalidated the signature or timestamp for $($file.Name)"
+            }
+          }
+      - shell: bash
+        run: |
+          mkdir -p artifacts/installers
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe "artifacts/installers/AgentWechat-v$VERSION-windows-${{ matrix.arch }}-setup.exe"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-installers-unsigned-${{ matrix.arch }}
+          path: artifacts/installers/
+          if-no-files-found: error
+
+  sign-windows-installers:
+    needs: package-windows
+    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/windows-signing.yml
+    with:
+      unsigned-artifact: desktop-installers-unsigned-${{ matrix.arch }}
+      signed-artifact: desktop-installers-signed-${{ matrix.arch }}
+
+  finish-windows:
+    needs: sign-windows-installers
+    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-installers-signed-${{ matrix.arch }}
+          path: artifacts/desktop-release/
+      - run: node packages/desktop/scripts/manifest.mjs artifacts/desktop-release windows-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-release-windows-${{ matrix.arch }}
+          path: artifacts/desktop-release/
+          if-no-files-found: error
+
+  sign-macos:
+    needs: build
+    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/shared build
+      - run: pnpm --filter @agent-wechat/client-ui build
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-input-macos-arm64
+          path: .
+      - name: Import Developer ID certificate into a temporary keychain
+        run: bash packages/desktop/scripts/macos-keychain.sh
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      - name: Package and sign nested executables and app
+        run: |
+          chmod +x packages/desktop/src-tauri/target/aarch64-apple-darwin/release/agent-wechat packages/desktop/src-tauri/binaries/*
+          pnpm --filter @agent-wechat/desktop app:bundle --target aarch64-apple-darwin --bundles app
+      - name: Notarize, staple and assess final app and DMG
+        run: |
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
+          bash packages/desktop/scripts/macos-notarize.sh packages/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AgentWechat.app artifacts/desktop-release "$VERSION"
+          node packages/desktop/scripts/manifest.mjs artifacts/desktop-release macos-arm64
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Remove temporary signing credentials
+        if: always()
+        run: bash packages/desktop/scripts/macos-cleanup.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-release-macos-arm64
+          path: artifacts/desktop-release/
+          if-no-files-found: error

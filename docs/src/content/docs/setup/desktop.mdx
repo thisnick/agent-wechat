@@ -1,0 +1,33 @@
+---
+title: Desktop app
+description: Use a local agent-wechat hub or connect the desktop app to another hub.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The desktop app includes the chat interface, a local agent-wechat hub and the `wx` command-line tool. The standalone npm CLI remains available separately.
+
+1. Open AgentWechat and choose **Use this device** to run a local hub, or **Connect to another hub** to enter its address and access key.
+2. Add a WeChat profile and follow the sign-in instructions.
+3. Open **Settings** to configure network access, install the `wx` command or export an access key for another client.
+
+Desktop access keys are saved in your system keyring. Independent CLI installations use protected token files:
+
+```bash
+wx config server add desktop --url http://127.0.0.1:6174 --token-file /path/to/exported-key
+wx --server-name desktop status
+```
+
+The status response identifies the hub and its native backend. Use the address displayed by the desktop app if you changed its port.
+
+Network access uses HTTPS. For a hub with its own certificate, copy its certificate from desktop Settings and trust it for that saved connection. The CLI can trust that certificate for an invocation:
+
+```bash
+wx --server-name desktop --ca-cert-file /path/to/certificate.pem status
+```
+
+Register the HTTPS address as the saved server URL when connecting over the network.
+
+<Aside title="Good to know">
+Closing the window keeps the local hub running in the tray or menu bar. Choose **Quit AgentWechat** to stop it. Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).
+</Aside>

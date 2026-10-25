@@ -77,7 +77,7 @@ On macOS and Windows, Docker Desktop runs the same image. The example uses host 
 
 <Aside title="Good to know">
 - **Stopping keeps you logged in.** History and saved login survive restarts. Use `wx auth logout` to actually log out.
-- **The daemon only listens on localhost** (`127.0.0.1:6174`); it refuses other addresses. To reach it from another machine, put it behind an HTTPS reverse proxy or an SSH or VPN tunnel.
+- **The default listener stays on localhost** (`127.0.0.1:6174`). To connect from another machine, configure an additional [HTTPS listener](/reference/configuration/#daemon), or use an HTTPS reverse proxy or SSH/VPN tunnel.
 - **OpenClaw can also run the daemon for you.** See [managed mode](/openclaw/modes/). Stop any other owner first.
 - Back up both the profile and the daemon's data folder. See [Storage and backups](/how-it-works/storage/).
 </Aside>

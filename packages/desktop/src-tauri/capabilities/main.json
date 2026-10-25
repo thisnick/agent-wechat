@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "The bundled desktop interface can manage its hub and open external links.",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:default", "autostart:default"]
+}
