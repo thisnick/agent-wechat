@@ -3,6 +3,7 @@ import type {
   MediaJob,
   NativeWeChatClient,
 } from "@agent-wechat/shared";
+import type { BrowserCache } from "./browser-cache.ts";
 import { canRetrieve } from "./media-variants.ts";
 import { MediaPreviewCache } from "./media-preview-cache.ts";
 import { pause, readableError } from "./session.ts";
@@ -164,9 +165,14 @@ export class MediaInbox {
   private entries = new Map<string, IncomingMedia>();
   private client: NativeWeChatClient;
   readonly previews: MediaPreviewCache;
-  constructor(client: NativeWeChatClient) {
+  constructor(client: NativeWeChatClient, persistent?: BrowserCache) {
     this.client = client;
-    this.previews = new MediaPreviewCache(client);
+    this.previews = new MediaPreviewCache(
+      client,
+      undefined,
+      undefined,
+      persistent,
+    );
   }
   get(account: string, messageId: string): IncomingMedia {
     const key = JSON.stringify([account, messageId]);

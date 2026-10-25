@@ -3,6 +3,7 @@ import {
   type MediaAsset,
   type NativeWeChatClient,
 } from "@agent-wechat/shared";
+import type { BrowserCache } from "./browser-cache.ts";
 import { cachedVariant } from "./media-variants.ts";
 
 type Preview = { url: string; contentType: string; byteLength: number };
@@ -41,14 +42,17 @@ export class MediaPreviewCache {
   private client: NativeWeChatClient;
   private maxBytes: number;
   private maxEntries: number;
+  private persistent?: BrowserCache;
   constructor(
     client: NativeWeChatClient,
     maxBytes = 64 * 1024 * 1024,
     maxEntries = 128,
+    persistent?: BrowserCache,
   ) {
     this.client = client;
     this.maxBytes = maxBytes;
     this.maxEntries = maxEntries;
+    this.persistent = persistent;
   }
 
   peek(asset: MediaAsset): Preview | undefined {
@@ -73,22 +77,48 @@ export class MediaPreviewCache {
         users: 0,
         controller,
         ready: Promise.resolve()
-          .then(() =>
-            this.client.mediaContent(asset.accountId, asset.id, {
-              representation: asset.preview ? "preview" : "original",
-              maxBytes: NATIVE_MAX_SOURCE_BYTES,
-              signal: controller.signal,
-            }),
-          )
-          .then((content) => {
+          .then(async () => {
+            const verified = !!(asset.preview
+              ? asset.preview.sha256
+              : asset.sha256);
+            const saved =
+              verified && this.persistent
+                ? await this.persistent.blob("media", asset.accountId, key)
+                : undefined;
+            if (this.closed || this.entries.get(key) !== loading)
+              throw new DOMException("Preview was discarded", "AbortError");
+            if (saved) return saved.blob;
+            const content = await this.client.mediaContent(
+              asset.accountId,
+              asset.id,
+              {
+                representation: asset.preview ? "preview" : "original",
+                maxBytes: NATIVE_MAX_SOURCE_BYTES,
+                signal: controller.signal,
+              },
+            );
             if (this.closed || this.entries.get(key) !== loading)
               throw new DOMException("Preview was discarded", "AbortError");
             const blob = new Blob([new Uint8Array(content.bytes).buffer], {
               type: content.contentType,
             });
+            // Signed/temporary content URLs are deliberately not persisted.
+            if (verified)
+              this.persistent?.saveBlob(
+                "media",
+                asset.accountId,
+                key,
+                { blob, checkedAt: Date.now() },
+                asset.messageId ?? undefined,
+              );
+            return blob;
+          })
+          .then((blob) => {
+            if (this.closed || this.entries.get(key) !== loading)
+              throw new DOMException("Preview was discarded", "AbortError");
             loading.value = {
               url: URL.createObjectURL(blob),
-              contentType: content.contentType,
+              contentType: blob.type,
               byteLength: blob.size,
             };
             this.bytes += blob.size;
@@ -121,6 +151,7 @@ export class MediaPreviewCache {
   }
 
   invalidateMessage(account: string, message: string): void {
+    this.persistent?.invalidateMessage(account, message);
     for (const [key, entry] of this.entries)
       if (entry.account === account && entry.message === message)
         this.discard(key, entry);

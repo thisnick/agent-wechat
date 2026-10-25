@@ -1,8 +1,10 @@
 import { NativeApiError, type NativeWeChatClient } from "@agent-wechat/shared";
+import type { BrowserCache } from "./browser-cache.ts";
 import { pause } from "./session.ts";
 
 export class AvatarCache {
   private client: NativeWeChatClient;
+  private persistent?: BrowserCache;
   private values = new Map<string, string>();
   private pending = new Map<string, Promise<void>>();
   private missing = new Set<string>();
@@ -24,8 +26,10 @@ export class AvatarCache {
     client: NativeWeChatClient,
     now = Date.now,
     refreshAllowed = () => true,
+    persistent?: BrowserCache,
   ) {
     this.client = client;
+    this.persistent = persistent;
     this.now = now;
     this.refreshAllowed = refreshAllowed;
     this.timer = setInterval(() => {
@@ -74,25 +78,44 @@ export class AvatarCache {
     this.generations.set(key, generation);
     const request = (async () => {
       try {
-        const content = await this.read(() => {
-          if (visibleOnly && !this.visible.has(key))
-            throw new Error("Avatar is offscreen");
-          return this.client.avatar(account, username, this.controller.signal);
-        });
+        const saved =
+          !force && this.persistent
+            ? await this.persistent.blob("avatars", account, username)
+            : undefined;
+        const content = saved
+          ? undefined
+          : await this.read(() => {
+              if (visibleOnly && !this.visible.has(key))
+                throw new Error("Avatar is offscreen");
+              return this.client.avatar(
+                account,
+                username,
+                this.controller.signal,
+              );
+            });
         if (
           this.controller.signal.aborted ||
           this.generations.get(key) !== generation
         )
           return;
-        const url = URL.createObjectURL(
-          new Blob([new Uint8Array(content.bytes).buffer], {
-            type: content.contentType,
-          }),
-        );
+        const blob =
+          saved?.blob ??
+          new Blob([new Uint8Array(content!.bytes).buffer], {
+            type: content!.contentType,
+          });
+        const url = URL.createObjectURL(blob);
         const old = this.values.get(key);
         if (old) URL.revokeObjectURL(old);
         this.values.set(key, url);
-        this.checkedAt.set(key, this.now());
+        this.checkedAt.set(key, saved?.checkedAt ?? this.now());
+        if (saved?.refreshedAt) this.refreshedAt.set(key, saved.refreshedAt);
+        if (!saved)
+          this.persistent?.saveBlob("avatars", account, username, {
+            blob,
+            checkedAt: this.now(),
+            refreshedAt: this.refreshedAt.get(key),
+            etag: content?.etag,
+          });
         this.missing.delete(key);
         for (const listener of this.listeners) listener();
       } catch (error) {
@@ -124,11 +147,11 @@ export class AvatarCache {
   ): Promise<void> {
     const key = this.key(account, username);
     if (visibleOnly && !this.visible.has(key)) return;
+    if (!this.values.has(key))
+      await this.load(account, username, false, visibleOnly);
     const stale =
       this.values.has(key) &&
       this.now() - (this.checkedAt.get(key) ?? -Infinity) >= 3600000;
-    if (!this.values.has(key))
-      await this.load(account, username, false, visibleOnly);
     if (
       (!this.missing.has(key) && (!this.values.has(key) || !stale)) ||
       this.now() - (this.refreshedAt.get(key) ?? -Infinity) < 3600000 ||
@@ -149,10 +172,12 @@ export class AvatarCache {
     const key = this.key(account, username);
     const pending = this.refreshing.get(key);
     if (pending) return pending;
+    const generation = this.generations.get(key) ?? 0;
     const request = new Promise<void>((resolve, reject) => {
       this.queue.push(() => {
         if (
           this.controller.signal.aborted ||
+          (this.generations.get(key) ?? 0) !== generation ||
           (visibleOnly && (!this.visible.has(key) || !this.refreshAllowed()))
         ) {
           this.refreshedAt.delete(key);
@@ -160,7 +185,7 @@ export class AvatarCache {
           return;
         }
         this.active++;
-        void this.download(account, username)
+        void this.download(account, username, generation)
           .then(resolve, reject)
           .finally(() => {
             this.active--;
@@ -197,7 +222,11 @@ export class AvatarCache {
       this.reads.shift()?.();
     }
   }
-  private async download(account: string, username: string): Promise<void> {
+  private async download(
+    account: string,
+    username: string,
+    generation: number,
+  ): Promise<void> {
     const operation = await this.client.refreshAvatar(account, username);
     const deadline = Date.now() + 125000;
     while (!this.controller.signal.aborted && Date.now() < deadline) {
@@ -207,7 +236,11 @@ export class AvatarCache {
         this.controller.signal,
       );
       if (current.state === "succeeded") {
-        await this.load(account, username, true);
+        if (
+          (this.generations.get(this.key(account, username)) ?? 0) ===
+          generation
+        )
+          await this.load(account, username, true);
         return;
       }
       if (
@@ -218,6 +251,24 @@ export class AvatarCache {
     }
     if (!this.controller.signal.aborted)
       throw new Error("Avatar refresh is taking longer than expected.");
+  }
+  clear(account: string): void {
+    for (const key of new Set([
+      ...this.values.keys(),
+      ...this.pending.keys(),
+      ...this.refreshing.keys(),
+      ...this.generations.keys(),
+    ]))
+      if ((JSON.parse(key) as string[])[0] === account) {
+        const url = this.values.get(key);
+        if (url) URL.revokeObjectURL(url);
+        this.values.delete(key);
+        this.missing.delete(key);
+        this.checkedAt.delete(key);
+        this.refreshedAt.delete(key);
+        this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+      }
+    for (const listener of this.listeners) listener();
   }
   close(): void {
     clearInterval(this.timer);

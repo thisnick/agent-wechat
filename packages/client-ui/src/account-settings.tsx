@@ -37,6 +37,7 @@ export function AccountSettings({
     try {
       await connection.session.client.removeAccount(account.id, account.id);
       connection.incomingMedia.clear(account.id);
+      connection.avatars.clear(account.id);
       connection.session.deactivate(account.id);
       await connection.session.accounts();
       if (!lifetime.current.signal.aborted) removed();
@@ -87,6 +88,7 @@ export function AccountSettings({
         );
         if (current.state === "succeeded") {
           connection.incomingMedia.clear(account.id);
+          connection.avatars.clear(account.id);
           await connection.session.accounts();
           if (!lifetime.current.signal.aborted) signedOut();
           return;
@@ -168,8 +170,8 @@ export function AccountSettings({
                 {busy
                   ? "Signing out…"
                   : uncertain
-                    ? "Check sign-out status"
-                    : "Sign out"}
+                  ? "Check sign-out status"
+                  : "Sign out"}
               </button>
             </div>
           </div>

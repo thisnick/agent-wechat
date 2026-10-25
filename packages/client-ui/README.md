@@ -52,10 +52,18 @@ including messages outside the browser's loaded page. **Load more matches**
 continues the same query using the hub's cursor. Clearing the query restores the
 chat; switching accounts or conversations discards any late search response.
 
-The hub access key stays in memory. Pending send keys/text/receipts are retained
-in this tab's session storage, scoped to the hub's server ID and account, so a
-reload can check an uncertain send. Appearance preferences use local storage.
-History and credentials are not copied into browser storage. The bootstrap secret
+The hub access key stays in memory. IndexedDB retains recent history, contacts,
+verified media bytes, avatars, drafts and pending-operation receipts. Each record
+is scoped to the hub address, its persistent server ID and the account. IDs and
+cursors stay strings, including 64-bit server IDs. Pending sends are checked by
+receipt after a reload and are never automatically resent. Small preferences,
+the last account, conversation and scroll anchor use local storage.
+
+Returning to a valid web session opens the last signed-in account and conversation
+automatically. Authentication is checked with the hub before restoring its cache.
+Credentials are not copied into either browser store. **Settings → Local cache**
+shows usage and clears fetched data while preserving drafts and pending receipts.
+If storage is unavailable, the client keeps working with memory and tab storage. The bootstrap secret
 is saved privately inside the simulator workspace so a named preview can restart
 without invalidating its preview link.
 
@@ -184,13 +192,14 @@ then replaces it with a verified cached original after its bytes load and decode
 A failed upgrade leaves the standard visible. Opening the carousel does not
 request an original from WeChat. An unavailable image shows an icon.
 
-Chat messages, the main viewer and its strip share one connection-local preview
-cache. Requests for the same account, asset, quality and source hash are deduplicated.
+Chat messages, the main viewer and its strip share one preview cache. Requests for the same account, asset, quality and source hash are deduplicated.
 Idle previews are retained within a 64 MiB / 128-entry budget; visible previews stay
 pinned until their consumers close. Reopening a chat or viewer reuses retained blob
 URLs immediately. Recalls invalidate the message's preview entries, and sign-out or
-disconnect clears the relevant account or connection. This cache lives in browser
-memory, so a page reload still reads media from the hub.
+disconnect clears the relevant account or connection. Verified preview bytes also survive reloads in IndexedDB, within a 256 MiB
+least-recently-used budget shared with avatars. The client reads fresh asset metadata
+from the hub before reusing bytes for the same account, message, quality and content
+hash. Blob URLs and temporary content URLs are not persisted.
 
 Files show their filename and an always-visible download control. **Get original**
 makes the original available for download, then **Download** saves it to the device. Generic
@@ -211,7 +220,8 @@ does not start another transfer.
 
 One shared avatar component tracks visibility in lists, group mosaics, details
 and messages. Missing visible avatars are fetched immediately; cached visible
-avatars refresh after one hour since their last successful browser cache read.
+avatars refresh after one hour since their last successful hub read. Reloading
+restores the previous timestamp rather than restarting that hour.
 Offscreen avatars do not refresh. Multiple views share each request, and queued
 refreshes are skipped if the last visible view disappears. Group rows show at most
 four member avatars and request only those faces. Refreshes pause while chat-open
@@ -240,13 +250,19 @@ acceptance or recipient playback.
 
 ## Opening a conversation
 
-Recent chat history stays in session memory across conversation and account
-switches: up to 20 chats and 5,000 messages total, evicting the least recently
-used chats. Reopening shows saved pages immediately. With a continuous event
-stream and no unread messages, it reuses those pages without fetching history
-again. Otherwise it refreshes history. Events update cached chats too. History is not written to
-browser storage; disconnecting or reloading drops it. An expired event stream
-invalidates that account's cache so missed recalls are not kept in old pages.
+Recent chat history stays cached across switches and reloads: up to 20 chats and
+5,000 messages in the working set, evicting the least recently used chats. Cached
+sidebars appear while the client checks fresh thread data. On return, it catches
+up missed events before displaying cached message bodies and validates the first
+history page against the current source generation. Source changes, expired event
+cursors and a reset event journal discard old fetched data. Recalls remove cached
+media and redact cached quote excerpts. Excessive catch-up falls back to fresh pages.
+
+Within a continuous event stream, read cached chats reopen without another history
+request. Returning to a foreground tab also refreshes the selected chat and thread
+badges. Scroll positions restore when their message is still in the retained pages;
+restoring a position does not fetch additional history. Draft text and quote
+references survive reloads; quote references are revalidated before use.
 
 The client marks unread history as read after it successfully loads the selected
 chat. It fetches a fresh read version before loading; a conflict reloads both

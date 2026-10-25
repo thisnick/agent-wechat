@@ -1,3 +1,4 @@
+import { LocalCacheSettings } from "./local-cache-settings.tsx";
 import { GroupSettings } from "./group-settings.tsx";
 import { createRoot } from "react-dom/client";
 import {
@@ -58,7 +59,7 @@ import "./client.css";
 
 function date(value: string | null): Date {
   return new Date(
-    value && /^\d+$/.test(value) ? Number(value) * 1000 : (value ?? 0),
+    value && /^\d+$/.test(value) ? Number(value) * 1000 : value ?? 0,
   );
 }
 function time(value: string | null): string {
@@ -241,17 +242,43 @@ function Client({
 }) {
   const { session, simulator } = connection;
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
-  const [screen, setScreen] = useState<"accounts" | "login" | "chats">(
-    "accounts",
+  const lastAccount = connection.cache.lastAccount();
+  const returning = state.accounts.find(
+    (account) => account.id === lastAccount && account.authenticated === true,
   );
+  const [screen, setScreen] = useState<
+    "accounts" | "login" | "chats" | "restoring"
+  >(returning ? "restoring" : "accounts");
   const [loginAccount, setLoginAccount] = useState<Account | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const adding = useRef(false);
   const [managed, setManaged] = useState<string | null>(null);
   useEffect(() => {
-    document.body.classList.toggle("onboarding-active", screen !== "chats");
-  }, [screen]);
+    if (!returning) return;
+    let cancelled = false;
+    void session
+      .activate(returning.id)
+      .then(() => {
+        if (!cancelled) setScreen("chats");
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(readableError(e));
+          setScreen("accounts");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connection]);
+
+  useEffect(() => {
+    document.body.classList.toggle(
+      "onboarding-active",
+      screen !== "chats" && !(screen === "restoring" && state.account),
+    );
+  }, [screen, state.account]);
   async function open(account: Account) {
     setBusy(true);
     setError("");
@@ -302,6 +329,12 @@ function Client({
       setBusy(false);
     }
   }
+  if (screen === "restoring" && !state.account)
+    return (
+      <Welcome simulator={simulator}>
+        <h1>Opening AgentWechat…</h1>
+      </Welcome>
+    );
   if (screen === "login" && loginAccount)
     return (
       <Welcome simulator={simulator}>
@@ -320,7 +353,7 @@ function Client({
         />
       </Welcome>
     );
-  if (screen !== "chats")
+  if (screen !== "chats" && screen !== "restoring")
     return (
       <Welcome simulator={simulator}>
         <div className="welcome-heading">
@@ -399,10 +432,12 @@ function Client({
     );
   return (
     <Chats
+      key={state.account}
       connection={connection}
       theme={theme}
       setTheme={setTheme}
       switchAccount={() => {
+        connection.cache.rememberAccount(null);
         setScreen("accounts");
         void session.accounts();
       }}
@@ -540,10 +575,10 @@ function Login({
           {state === "awaiting_approval"
             ? "Confirm sign-in in WeChat"
             : state === "expired"
-              ? "QR code expired"
-              : terminal
-                ? "Sign-in could not finish"
-                : "Sign in to WeChat"}
+            ? "QR code expired"
+            : terminal
+            ? "Sign-in could not finish"
+            : "Sign in to WeChat"}
         </h1>
         <p>
           {connection.simulator
@@ -652,18 +687,35 @@ function Chats({
 }) {
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
-  const [section, setSection] = useState<"chats" | "contacts">("chats"),
+  const savedView = state.account ? connection.cache.view(state.account) : {};
+  const [section, setSection] = useState<"chats" | "contacts">(
+      savedView.section === "contacts" ? "contacts" : "chats",
+    ),
     [query, setQuery] = useState(""),
-    [filter, setFilter] = useState("all");
+    [filter, setFilter] = useState(
+      ["all", "unread", "groups"].includes(savedView.filter ?? "")
+        ? savedView.filter!
+        : "all",
+    );
   const [mobile, setMobile] = useState(false),
     [details, setDetails] = useState(false),
     [settings, setSettings] = useState(false),
     [accountMenu, setAccountMenu] = useState(false);
   const [newChat, setNewChat] = useState(false);
+  useEffect(() => {
+    if (state.account)
+      connection.cache.saveView(state.account, { section, filter });
+  }, [state.account, section, filter]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [replyDrafts, setReplyDrafts] = useState<Record<string, NativeMessage>>(
     {},
   );
+  const [draftReady, setDraftReady] = useState("");
+  const [quoteRestoring, setQuoteRestoring] = useState(false);
+  const pendingQuote = useRef<
+    { messageId: string; serverId: string } | undefined
+  >(undefined);
+
   const messageInput = useRef<HTMLTextAreaElement>(null);
   const [simBody, setSimBody] = useState("Hello from the simulated phone."),
     [simStatus, setSimStatus] = useState("");
@@ -681,6 +733,65 @@ function Chats({
   const selectedName = state.selected ? name(state.selected) : "";
   const draftKey = `${state.account}:${state.selected}`,
     draft = drafts[draftKey] ?? "";
+  useEffect(() => {
+    if (!state.account || !state.selected) return;
+    const account = state.account,
+      thread = state.selected;
+    const saved = connection.cache.readState<{
+      text: string;
+      quote?: { messageId: string; serverId: string };
+    }>(account, thread, "drafts");
+    let cancelled = false;
+    setDraftReady("");
+    setReplyDrafts((values) => {
+      const next = { ...values };
+      delete next[draftKey];
+      return next;
+    });
+    pendingQuote.current = saved?.quote;
+    setQuoteRestoring(!!saved?.quote);
+    setDrafts((values) => ({
+      ...values,
+      [draftKey]:
+        typeof saved?.text === "string" ? saved.text : values[draftKey] ?? "",
+    }));
+    setDraftReady(draftKey);
+    if (saved?.quote) {
+      const quote = saved.quote;
+      let resolved = false;
+      const existing = state.messages.find(
+        (message) => message.id === quote.messageId,
+      );
+      void (
+        existing
+          ? Promise.resolve(existing)
+          : session.client.message(account, quote.messageId)
+      )
+        .then((message) => {
+          if (
+            !cancelled &&
+            pendingQuote.current === quote &&
+            message.accountId === account &&
+            message.threadId === thread &&
+            message.serverId === quote.serverId &&
+            canReply(message)
+          ) {
+            resolved = true;
+            setReplyDrafts((values) => ({ ...values, [draftKey]: message }));
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled && pendingQuote.current === quote) {
+            if (resolved) pendingQuote.current = undefined;
+            setQuoteRestoring(false);
+          }
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [state.account, state.selected, connection]);
   const savedReply = replyDrafts[draftKey];
   const reply =
     savedReply &&
@@ -691,6 +802,27 @@ function Chats({
     (!canReply(reply) ||
       reply.serverId !== savedReply?.serverId ||
       state.capabilities.quotedTextSend !== true);
+  useEffect(() => {
+    if (draftReady !== draftKey || !state.account || !state.selected) return;
+    const quote = savedReply?.serverId
+      ? { messageId: savedReply.id, serverId: savedReply.serverId }
+      : pendingQuote.current;
+    connection.cache.writeState(
+      state.account,
+      state.selected,
+      draft || quote ? { text: draft, ...(quote && { quote }) } : null,
+      "drafts",
+    );
+  }, [
+    connection,
+    draftReady,
+    draftKey,
+    draft,
+    savedReply,
+    quoteRestoring,
+    state.account,
+    state.selected,
+  ]);
   const leftGroup = state.selectedGroup?.isInGroup === false;
   const active = account?.authenticated !== false && !leftGroup;
   async function simulate(op: Record<string, unknown>) {
@@ -702,7 +834,21 @@ function Chats({
     }
   }
   function send() {
-    if (!draft.trim() || !state.selected || !active || replyInvalid) return;
+    if (
+      !draft.trim() ||
+      !state.selected ||
+      !active ||
+      replyInvalid ||
+      pendingQuote.current
+    )
+      return;
+    if (state.account)
+      connection.cache.writeState(
+        state.account,
+        state.selected,
+        null,
+        "drafts",
+      );
     setDrafts((d) => ({ ...d, [draftKey]: "" }));
     clearReply();
     void session.send(draft, reply).then((queued) => {
@@ -721,6 +867,8 @@ function Chats({
       void session.readOnInteraction(state.account, state.selected);
   }
   function clearReply() {
+    pendingQuote.current = undefined;
+    setQuoteRestoring(false);
     setReplyDrafts((replies) => {
       const updated = { ...replies };
       delete updated[draftKey];
@@ -810,7 +958,7 @@ function Chats({
           </label>
           {section === "chats" && (
             <div className="filters">
-              {["all", "unread", "groups"].map((f) => (
+              {(["all", "unread", "groups"] as const).map((f) => (
                 <button
                   key={f}
                   className={`pill ${filter === f ? "active" : ""}`}
@@ -925,10 +1073,10 @@ function Chats({
               {state.selected === "filehelper"
                 ? "Notes to yourself"
                 : state.selected
-                  ? state.selected.endsWith("@chatroom")
-                    ? "Group conversation"
-                    : "WeChat conversation"
-                  : "Choose a conversation"}
+                ? state.selected.endsWith("@chatroom")
+                  ? "Group conversation"
+                  : "WeChat conversation"
+                : "Choose a conversation"}
             </p>
           </div>
           <div className="header-actions">
@@ -1089,6 +1237,8 @@ function Chats({
                   !canReply(message)
                 )
                   return;
+                pendingQuote.current = undefined;
+                setQuoteRestoring(false);
                 setReplyDrafts((replies) => ({
                   ...replies,
                   [draftKey]: message,
@@ -1105,6 +1255,15 @@ function Chats({
                       find && inChat.trim()
                     )}`}
                     searching={!!(find && inChat.trim())}
+                    position={
+                      state.account && state.selected
+                        ? {
+                            cache: connection.cache,
+                            account: state.account,
+                            thread: state.selected,
+                          }
+                        : undefined
+                    }
                     history={{
                       hasMore: !!state.nextMessages,
                       loading: state.loading,
@@ -1185,6 +1344,20 @@ function Chats({
                   </ConversationScroll>
                   <div className="composer-wrap">
                     <div className="composer">
+                      {!reply && pendingQuote.current && (
+                        <div className="composer-reply">
+                          <span className="reply-source">
+                            {quoteRestoring
+                              ? "Loading reply…"
+                              : "Quoted message unavailable"}
+                          </span>
+                          <Button
+                            icon="close"
+                            label="Remove reply"
+                            onClick={clearReply}
+                          />
+                        </div>
+                      )}
                       {reply && (
                         <ReplyPreview
                           message={reply}
@@ -1204,6 +1377,7 @@ function Chats({
                             enabled={
                               active &&
                               !reply &&
+                              !pendingQuote.current &&
                               Array.isArray(state.capabilities.mediaKinds) &&
                               state.capabilities.mediaKinds.length > 0
                             }
@@ -1260,6 +1434,7 @@ function Chats({
                             !state.selected ||
                             !draft.trim() ||
                             !active ||
+                            !!pendingQuote.current ||
                             replyInvalid
                           }
                           onClick={send}
@@ -1376,6 +1551,12 @@ function Chats({
                 </span>
                 {simulator ? "Simulator" : "Connected"}
               </div>
+              {state.account && (
+                <LocalCacheSettings
+                  connection={connection}
+                  account={state.account}
+                />
+              )}
               <button className="secondary" onClick={switchAccount}>
                 Manage accounts
               </button>
@@ -1485,12 +1666,12 @@ function Pending({ send, check }: { send: PendingSend; check: () => void }) {
   const label = uncertain
     ? "Couldn't confirm send"
     : state === "rejected" || state === "failed"
-      ? "Send rejected"
-      : state === "cancelled"
-        ? "Send cancelled"
-        : state === "accepted"
-          ? "Accepted · loading message…"
-          : "Queued…";
+    ? "Send rejected"
+    : state === "cancelled"
+    ? "Send cancelled"
+    : state === "accepted"
+    ? "Accepted · loading message…"
+    : "Queued…";
   return (
     <article
       className="message own"
@@ -1606,7 +1787,9 @@ function Message({
     );
   return (
     <article
-      className={`message ${own ? "own" : ""}${navigation?.target?.id === m.id ? " quote-target" : ""}`}
+      className={`message ${own ? "own" : ""}${
+        navigation?.target?.id === m.id ? " quote-target" : ""
+      }`}
       data-message-id={m.id}
       data-direction={m.direction}
     >
@@ -1709,8 +1892,8 @@ function Details({
           {threadId === "filehelper"
             ? "Notes to yourself"
             : threadId.endsWith("@chatroom")
-              ? "Group conversation"
-              : "WeChat contact"}
+            ? "Group conversation"
+            : "WeChat contact"}
         </p>
       </div>
       <div className="detail-section">

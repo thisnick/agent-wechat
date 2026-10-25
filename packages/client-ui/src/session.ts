@@ -12,6 +12,7 @@ import {
   type QuoteSendReference,
   type NativeThreadMessage,
 } from "@agent-wechat/shared";
+import type { BrowserCache } from "./browser-cache.ts";
 import { HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
@@ -131,7 +132,7 @@ const compareMessages = (a: NativeMessage, b: NativeMessage): number =>
   a.id.localeCompare(b.id, undefined, { numeric: true });
 export function mergeMessage(
   messages: NativeMessage[],
-  message: NativeMessage
+  message: NativeMessage,
 ): NativeMessage[] {
   const recalled = new Set(
     messages
@@ -139,16 +140,16 @@ export function mergeMessage(
         (item) =>
           item.recall &&
           item.accountId === message.accountId &&
-          item.threadId === message.threadId
+          item.threadId === message.threadId,
       )
       .map((item) => item.serverId)
-      .filter(Boolean)
+      .filter(Boolean),
   );
   if (message.recall)
     recalled.add(
       message.serverId ??
         messages.find((item) => item.id === message.id)?.serverId ??
-        null
+        null,
     );
   return [
     ...messages.filter(
@@ -158,7 +159,7 @@ export function mergeMessage(
           message.serverId &&
           item.threadId === message.threadId &&
           item.serverId === message.serverId
-        )
+        ),
     ),
     message,
   ]
@@ -175,13 +176,13 @@ export function mergeMessage(
               state: "recalled",
             },
           }
-        : item
+        : item,
     )
     .sort(compareMessages);
 }
 export function pause(
   milliseconds: number,
-  signal: AbortSignal
+  signal: AbortSignal,
 ): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) {
@@ -198,7 +199,7 @@ export function pause(
   });
 }
 export async function inventory<T>(
-  read: (cursor?: string) => Promise<NativePage<T>>
+  read: (cursor?: string) => Promise<NativePage<T>>,
 ): Promise<{ items: T[]; cursor: string }> {
   const items = new Map<string, T>();
   let next: string | undefined,
@@ -228,7 +229,7 @@ export class HubSession {
     (account: string, messageId: string) => void
   >();
   onMediaInvalidated = (
-    listener: (account: string, messageId: string) => void
+    listener: (account: string, messageId: string) => void,
   ): (() => void) => {
     this.mediaInvalidationListeners.add(listener);
     return () => {
@@ -265,6 +266,11 @@ export class HubSession {
   private historyLoaded = false;
   private historySource = "";
   private stopped = false;
+  private cache?: BrowserCache;
+  private restoring = false;
+  private activationRequest = 0;
+  private reconcileFlight?: Promise<void>;
+  private restored = new Set<string>();
   readonly client: NativeWeChatClient;
   private receipts?: {
     read(account: string): PendingSend[];
@@ -275,10 +281,12 @@ export class HubSession {
     receipts?: {
       read(account: string): PendingSend[];
       write(account: string, sends: PendingSend[]): void;
-    }
+    },
+    cache?: BrowserCache,
   ) {
     this.client = client;
     this.receipts = receipts;
+    this.cache = cache;
   }
   snapshot = (): SessionState => this.value;
   subscribe = (listener: () => void): (() => void) => {
@@ -306,6 +314,30 @@ export class HubSession {
   clearError(): void {
     this.publish({ error: null });
   }
+  private persist(): void {
+    const account = this.value.account;
+    if (!account || !this.cache || this.restoring || this.stopped) return;
+    void this.cache.writeAccount(account, {
+      threads: this.value.threads,
+      contacts: this.value.contacts,
+      histories: this.histories.export(account),
+      cursor: this.cursor,
+    });
+  }
+  async clearLocalCache(account = this.value.account): Promise<void> {
+    if (!account) return;
+    this.histories.clear(account);
+    this.restored.clear();
+    await this.cache?.clearAccount(account);
+  }
+  invalidateLocalCache(account: string): void {
+    this.histories.clear(account);
+    this.restored.clear();
+    if (this.value.account === account) {
+      this.historyLoaded = false;
+      this.historySource = "";
+    }
+  }
   private remember(): void {
     const { account, selected, messages, nextMessages, selectedGroup } =
       this.value;
@@ -316,13 +348,14 @@ export class HubSession {
         group: selectedGroup,
         sourceGeneration: this.historySource,
       });
+    this.persist();
   }
   async accounts(): Promise<Account[]> {
     const request = ++this.accountRequest,
       generation = this.generation;
     const result = await this.client.accounts();
     const accounts = result.items.filter(
-      (item) => typeof item.id === "string"
+      (item) => typeof item.id === "string",
     ) as Account[];
     if (
       !this.stopped &&
@@ -333,6 +366,7 @@ export class HubSession {
     return accounts;
   }
   close(): void {
+    this.activationRequest++;
     this.generation++;
     this.threadGeneration++;
     this.stream?.abort();
@@ -343,7 +377,13 @@ export class HubSession {
     this.histories.clear();
   }
   deactivate(account = this.value.account): void {
-    if (account) this.histories.clear(account);
+    this.activationRequest++;
+    if (account) {
+      this.histories.clear(account);
+      if (this.cache?.lastAccount() === account)
+        this.cache.rememberAccount(null);
+      void this.cache?.clearAccount(account);
+    }
     if (this.value.account !== account) return;
     this.generation++;
     this.threadGeneration++;
@@ -355,6 +395,20 @@ export class HubSession {
     this.publish({ ...initial(), accounts: this.value.accounts });
   }
   async activate(account: string): Promise<void> {
+    const activation = ++this.activationRequest;
+    if (this.cache) {
+      const accounts = await this.accounts();
+      if (activation !== this.activationRequest || this.stopped) return;
+      if (
+        !accounts.some(
+          (item) => item.id === account && item.authenticated === true,
+        )
+      ) {
+        this.cache.rememberAccount(null);
+        await this.cache.clearAccount(account);
+        throw new Error("Sign in to WeChat again.");
+      }
+    }
     this.remember();
     this.historyLoaded = false;
     this.stream?.abort();
@@ -380,28 +434,96 @@ export class HubSession {
       capabilities: {},
     });
     const controller = (this.stream = new AbortController());
+    this.restoring = !!this.cache;
+    this.cache?.rememberAccount(account);
     try {
+      const saved = this.cache
+        ? await this.cache.readAccount(account)
+        : undefined;
+      if (!this.current(account, generation)) return;
+      if (saved) {
+        this.cursor = saved.cursor;
+        this.publish({ threads: saved.threads, contacts: saved.contacts });
+        for (const [thread, history] of saved.histories) {
+          this.histories.set(account, thread, history);
+          this.restored.add(JSON.stringify([account, thread]));
+        }
+      }
       const boundary = await this.refresh(account, generation, false);
       if (!this.current(account, generation)) return;
-      this.cursor = boundary;
-      if (this.value.threads[0]) await this.select(this.value.threads[0].id);
+      if (saved) {
+        try {
+          if (BigInt(this.cursor) > BigInt(boundary))
+            throw new Error("Source journal rewound");
+          for (let page = 0; BigInt(this.cursor) < BigInt(boundary); page++) {
+            if (page >= 10) throw new Error("Catch-up exceeds cache limit");
+            const events = await this.client.events(account, this.cursor, 200);
+            if (!events.items.length)
+              throw new Error("Incomplete cache catch-up");
+            for (const event of events.items) {
+              if (!this.current(account, generation)) return;
+              await this.consume(event, account, generation);
+              if (!this.current(account, generation)) return;
+              this.cursor = event.cursor;
+            }
+          }
+        } catch {
+          if (!this.current(account, generation)) return;
+          this.histories.clear(account);
+          this.restored.clear();
+          await this.cache?.clearAccount(account);
+          if (!this.current(account, generation)) return;
+          this.cursor = boundary;
+        }
+      } else this.cursor = boundary;
+      this.restoring = false;
+      const previous = this.cache?.view(account).thread;
+      const target =
+        previous && this.value.threads.some((thread) => thread.id === previous)
+          ? previous
+          : this.value.threads[0]?.id;
+      if (target) await this.select(target);
       else this.publish({ loading: false });
     } catch (error) {
       if (this.current(account, generation))
         this.publish({ error: readableError(error), loading: false });
     }
     if (this.current(account, generation)) {
+      this.restoring = false;
+      this.persist();
       void this.watch(account, generation, controller.signal);
       void this.loadCatalog(account, generation).catch(() => {});
       for (const send of sends) void this.checkSend(send.key);
     }
   }
-  async select(threadId: string): Promise<void> {
+  async reconcile(): Promise<void> {
+    if (this.reconcileFlight) return this.reconcileFlight;
+    const account = this.value.account,
+      generation = this.generation;
+    if (!account || this.value.opening) return;
+    this.reconcileFlight = (async () => {
+      const boundary = await this.refresh(account, generation, false);
+      if (!this.current(account, generation)) return;
+      if (BigInt(this.cursor) > BigInt(boundary))
+        await this.recover(account, generation);
+      else if (this.value.selected)
+        await this.select(this.value.selected, true);
+    })()
+      .catch(() => {})
+      .finally(() => {
+        this.reconcileFlight = undefined;
+      });
+    return this.reconcileFlight;
+  }
+  async select(threadId: string, force = false): Promise<void> {
     const account = this.value.account;
     if (!account) return;
     this.remember();
     const cached = this.histories.get(account, threadId);
-    this.historyLoaded = !!cached;
+    const restoredKey = JSON.stringify([account, threadId]);
+    const fromDisk = this.restored.has(restoredKey);
+    this.cache?.saveView(account, { thread: threadId });
+    this.historyLoaded = !!cached && !fromDisk;
     this.historySource = cached?.sourceGeneration ?? "";
     const previousGroup =
       this.value.selected === threadId
@@ -414,7 +536,7 @@ export class HubSession {
     this.publish({
       selected: threadId,
       selectedGroup: previousGroup,
-      messages: cached?.messages ?? [],
+      messages: fromDisk ? [] : cached?.messages ?? [],
       nextMessages: cached?.nextMessages ?? null,
       loading: true,
       opening: true,
@@ -422,7 +544,7 @@ export class HubSession {
     });
     if (threadId.endsWith("@chatroom"))
       void this.refreshGroup(account, threadId, generation, selected).catch(
-        () => {}
+        () => {},
       );
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -432,12 +554,14 @@ export class HubSession {
         const readBoundary = await this.refreshThread(
           account,
           threadId,
-          generation
+          generation,
         );
         if (!current()) return;
         if (
           attempt === 0 &&
           cached &&
+          !fromDisk &&
+          !force &&
           this.value.connected &&
           readBoundary.unreadCount === 0
         ) {
@@ -450,25 +574,28 @@ export class HubSession {
         if (!current()) return;
         const latest = (
           page.items.filter(
-            (item) => !isNativeTombstone(item)
+            (item) => !isNativeTombstone(item),
           ) as NativeMessage[]
         ).reduce(mergeMessage, []);
         // Preserve older loaded pages, replace the current server range, and apply
         // only events received after this request on top of its snapshot.
         const older =
-          page.nextCursor && latest.length
+          page.nextCursor &&
+          latest.length &&
+          this.historySource === page.sourceGeneration
             ? baseline.filter((item) => compareMessages(item, latest[0]) < 0)
             : [];
         const arrivals = this.value.messages.filter(
-          (item) => !baseline.includes(item)
+          (item) => !baseline.includes(item),
         );
         const removed = new Set(
-          page.items.filter(isNativeTombstone).map((item) => item.id)
+          page.items.filter(isNativeTombstone).map((item) => item.id),
         );
         const messages = arrivals
           .reduce(mergeMessage, latest.reduce(mergeMessage, older))
           .filter((item) => !removed.has(item.id));
         const sameSource = this.historySource === page.sourceGeneration;
+        this.restored.delete(restoredKey);
         this.historyLoaded = true;
         this.historySource = page.sourceGeneration;
         this.publish({
@@ -486,7 +613,7 @@ export class HubSession {
           await this.client.markRead(
             account,
             threadId,
-            readBoundary.readStateVersion
+            readBoundary.readStateVersion,
           );
           if (this.current(account, generation))
             await this.refreshThread(account, threadId, generation);
@@ -534,9 +661,9 @@ export class HubSession {
         mergeMessage,
         (
           page.items.filter(
-            (item) => !isNativeTombstone(item)
+            (item) => !isNativeTombstone(item),
           ) as NativeMessage[]
-        ).reduce(mergeMessage, [])
+        ).reduce(mergeMessage, []),
       );
       this.publish({ messages, nextMessages: page.nextCursor, loading: false });
       this.historySource = page.sourceGeneration;
@@ -546,7 +673,13 @@ export class HubSession {
         this.current(account, generation) &&
         threadGeneration === this.threadGeneration
       )
-        this.publish({ loading: false, error: readableError(error) });
+        if (
+          error instanceof NativeApiError &&
+          error.code === "pagination_cursor_expired"
+        ) {
+          this.histories.clear(account);
+          await this.select(selected);
+        } else this.publish({ loading: false, error: readableError(error) });
     }
   }
   async revealMessage(id: string, signal: AbortSignal): Promise<boolean> {
@@ -564,7 +697,7 @@ export class HubSession {
           (message) =>
             message.id === id &&
             message.accountId === account &&
-            message.threadId === selected
+            message.threadId === selected,
         )
       )
         return true;
@@ -581,7 +714,7 @@ export class HubSession {
   }
   async revealQuote(
     parent: NativeMessage,
-    signal: AbortSignal
+    signal: AbortSignal,
   ): Promise<NativeMessage | undefined> {
     const { account, selected } = this.value;
     const generation = this.generation,
@@ -599,7 +732,7 @@ export class HubSession {
       threadGeneration === this.threadGeneration;
     while (current()) {
       const matches = this.value.messages.filter((message) =>
-        quoteTargetMatches(parent, message)
+        quoteTargetMatches(parent, message),
       );
       if (matches.length) return matches.length === 1 ? matches[0] : undefined;
       if (this.value.loading) {
@@ -615,7 +748,7 @@ export class HubSession {
   private async refreshThread(
     account: string,
     threadId: string,
-    generation: number
+    generation: number,
   ): Promise<NativeThread> {
     const key = JSON.stringify([account, threadId]);
     const request = (this.threadRequests.get(key) ?? 0) + 1;
@@ -646,7 +779,7 @@ export class HubSession {
       this.publish({
         threads: found
           ? this.value.threads.map((item) =>
-              item.id === threadId ? { ...item, ...thread } : item
+              item.id === threadId ? { ...item, ...thread } : item,
             )
           : [thread, ...this.value.threads],
       });
@@ -657,7 +790,7 @@ export class HubSession {
     account: string,
     thread: string,
     generation: number,
-    selected: number
+    selected: number,
   ): Promise<void> {
     const group = await this.client.group(account, thread);
     if (
@@ -677,7 +810,7 @@ export class HubSession {
     const result = await this.client.markRead(
       account,
       threadId,
-      thread.readStateVersion
+      thread.readStateVersion,
     );
     if (this.current(account, generation))
       await this.refreshThread(account, threadId, generation);
@@ -731,19 +864,24 @@ export class HubSession {
     const promise = (async () => {
       const [contacts, capabilities, accounts] = await Promise.all([
         inventory((cursor) =>
-          this.client.contacts(account, { cursor, limit: 200 })
+          this.client.contacts(account, { cursor, limit: 200 }),
         ),
         this.client.capabilities(account),
         this.client.accounts(),
       ]);
-      if (this.current(account, generation) && request === this.detailsRequest)
+      if (
+        this.current(account, generation) &&
+        request === this.detailsRequest
+      ) {
         this.publish({
           contacts: contacts.items,
           capabilities,
           accounts: accounts.items.filter(
-            (item) => typeof item.id === "string"
+            (item) => typeof item.id === "string",
           ) as Account[],
         });
+        this.persist();
+      }
     })().finally(() => {
       if (this.catalogFlight?.promise === promise) this.catalogFlight = null;
     });
@@ -753,13 +891,13 @@ export class HubSession {
   async refresh(
     account = this.value.account,
     generation = this.generation,
-    catalog = true
+    catalog = true,
   ): Promise<string> {
     if (!account) return "0";
     const request = ++this.catalogRequest;
     const revisions = new Map(this.threadRequests);
     const threads = await inventory((cursor) =>
-      this.client.threads(account, { cursor, limit: 200 })
+      this.client.threads(account, { cursor, limit: 200 }),
     );
     if (this.current(account, generation) && request === this.catalogRequest)
       this.publish({
@@ -778,7 +916,7 @@ export class HubSession {
               account,
               this.value.selected,
               generation,
-              this.threadGeneration
+              this.threadGeneration,
             ).catch(() => {})
           : null,
       ]);
@@ -792,7 +930,7 @@ export class HubSession {
   private async canonical(
     account: string,
     messageId: string,
-    generation: number
+    generation: number,
   ): Promise<NativeMessage | undefined> {
     const message = await this.client.message(account, messageId);
     if (!this.current(account, generation)) return;
@@ -830,7 +968,7 @@ export class HubSession {
       sends: this.value.sends.filter(
         (send) =>
           send.intent?.localMessageId !== message.id &&
-          !(message.serverId && send.intent?.serverId === message.serverId)
+          !(message.serverId && send.intent?.serverId === message.serverId),
       ),
     });
     this.updatePreview(message);
@@ -861,17 +999,17 @@ export class HubSession {
     intent: NativeSendIntent,
     account: string,
     generation: number,
-    key?: string
+    key?: string,
   ): Promise<void> {
     if (!this.current(account, generation) || intent.accountId !== account)
       return;
     let sends = this.value.sends;
     if (key && sends.some((send) => send.key === key))
       sends = sends.filter(
-        (send) => send.key === key || send.intent?.id !== intent.id
+        (send) => send.key === key || send.intent?.id !== intent.id,
       );
     const known = sends.some(
-      (send) => send.key === key || send.intent?.id === intent.id
+      (send) => send.key === key || send.intent?.id === intent.id,
     );
     if (!known && !key && !intent.localMessageId)
       sends = [
@@ -887,7 +1025,7 @@ export class HubSession {
       sends: sends.map((send) =>
         send.key === key || send.intent?.id === intent.id
           ? { ...send, intent, uncertain: false, error: undefined }
-          : send
+          : send,
       ),
     });
     if (intent.localMessageId) {
@@ -895,7 +1033,7 @@ export class HubSession {
       if (this.current(account, generation))
         this.publish({
           sends: this.value.sends.filter(
-            (send) => send.key !== key && send.intent?.id !== intent.id
+            (send) => send.key !== key && send.intent?.id !== intent.id,
           ),
         });
     }
@@ -903,7 +1041,7 @@ export class HubSession {
   async consume(
     event: NativeEvent,
     account: string,
-    generation = this.generation
+    generation = this.generation,
   ): Promise<void> {
     if (!this.current(account, generation)) return;
     if (
@@ -925,7 +1063,7 @@ export class HubSession {
       const message = await this.canonical(
         account,
         event.data.messageId,
-        generation
+        generation,
       );
       if (message && this.current(account, generation)) {
         await this.refreshThread(account, message.threadId, generation);
@@ -938,7 +1076,7 @@ export class HubSession {
       await this.acceptReceipt(
         await this.client.send(account, event.data.id),
         account,
-        generation
+        generation,
       );
     } else if (["thread.read", "thread.read-state"].includes(event.kind)) {
       if (typeof event.data.threadId === "string")
@@ -947,19 +1085,19 @@ export class HubSession {
     } else if (event.kind === "group.updated") {
       if (typeof event.data.groupId === "string") {
         await this.refreshThread(account, event.data.groupId, generation).catch(
-          () => this.refresh(account, generation, false)
+          () => this.refresh(account, generation, false),
         );
         if (event.data.groupId === this.value.selected)
           await this.refreshGroup(
             account,
             event.data.groupId,
             generation,
-            this.threadGeneration
+            this.threadGeneration,
           ).catch(() => {});
       } else await this.refresh(account, generation, false);
     } else if (
       ["account.updated", "account.connection", "auth.updated"].includes(
-        event.kind
+        event.kind,
       )
     ) {
       await this.accounts();
@@ -967,7 +1105,7 @@ export class HubSession {
       event.kind === "contacts.updated" ||
       (event.kind === "metadata.changed" && event.data.kind !== "avatar")
     ) {
-      void this.loadCatalog(account, generation).catch(() => {});
+      await this.loadCatalog(account, generation);
     } else if (event.kind === "sync.completed") {
       await this.refresh(account, generation, false);
     }
@@ -977,6 +1115,9 @@ export class HubSession {
     const boundary = await this.refresh(account, generation);
     if (!this.current(account, generation)) return;
     this.histories.clear(account);
+    this.restored.clear();
+    await this.cache?.clearAccount(account);
+    if (!this.current(account, generation)) return;
     this.historyLoaded = false;
     const selected = this.value.selected;
     if (selected) await this.select(selected);
@@ -985,7 +1126,7 @@ export class HubSession {
   private async watch(
     account: string,
     generation: number,
-    signal: AbortSignal
+    signal: AbortSignal,
   ): Promise<void> {
     while (!signal.aborted && this.current(account, generation)) {
       try {
@@ -1002,11 +1143,27 @@ export class HubSession {
               )
                 this.publish({ connected: true, error: null });
             },
-          }
+          },
         )) {
           if (signal.aborted || !this.current(account, generation)) return;
           await this.consume(event, account, generation);
-          if (this.current(account, generation)) this.cursor = event.cursor;
+          if (this.current(account, generation)) {
+            this.cursor = event.cursor;
+            if (
+              [
+                "message.committed",
+                "message.recalled",
+                "group.updated",
+                "sync.completed",
+                "contacts.updated",
+                "metadata.changed",
+                "thread.read",
+                "thread.read-state",
+              ].includes(event.kind)
+            )
+              this.persist();
+            else void this.cache?.checkpoint(account, this.cursor);
+          }
         }
         if (!signal.aborted && this.current(account, generation))
           this.publish({ connected: false });
@@ -1068,8 +1225,8 @@ export class HubSession {
           target.direction === "outgoing"
             ? "You"
             : this.value.contacts.find(
-                (contact) => contact.id === target.senderId
-              )?.displayName ?? target.senderId
+                (contact) => contact.id === target.senderId,
+              )?.displayName ?? target.senderId,
         )
       : undefined;
     const key = crypto.randomUUID();
@@ -1087,7 +1244,7 @@ export class HubSession {
         threadId,
         text,
         key,
-        quote
+        quote,
       );
       if (this.current(account, generation)) {
         await this.acceptReceipt(intent, account, generation, key);
@@ -1096,11 +1253,11 @@ export class HubSession {
           await this.client.send(account, intent.id),
           account,
           generation,
-          key
+          key,
         );
       } else {
         const sends = (this.pending.get(account) ?? []).map((send) =>
-          send.key === key ? { ...send, intent } : send
+          send.key === key ? { ...send, intent } : send,
         );
         this.pending.set(account, sends);
         this.receipts?.write(account, sends);
@@ -1130,7 +1287,7 @@ export class HubSession {
           });
         else {
           const sends = (this.pending.get(account) ?? []).filter(
-            (send) => send.key !== key
+            (send) => send.key !== key,
           );
           this.pending.set(account, sends);
           this.receipts?.write(account, sends);
@@ -1141,7 +1298,7 @@ export class HubSession {
         sends.map((send) =>
           send.key === key
             ? { ...send, uncertain: true, error: readableError(error) }
-            : send
+            : send,
         );
       if (this.current(account, generation))
         this.publish({ sends: update(this.value.sends) });
@@ -1170,7 +1327,7 @@ export class HubSession {
           sends: this.value.sends.map((send) =>
             send.key === key
               ? { ...send, uncertain: true, error: readableError(error) }
-              : send
+              : send,
           ),
         });
     }

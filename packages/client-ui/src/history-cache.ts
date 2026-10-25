@@ -7,7 +7,7 @@ export type CachedHistory = {
   group: NativeGroup | null;
 };
 
-/** Session memory only; account IDs are part of every key. */
+/** Bounded working set; persistence is owned by the connection cache. */
 export class HistoryCache {
   private entries = new Map<
     string,
@@ -42,6 +42,13 @@ export class HistoryCache {
       ) > this.maxMessages
     )
       this.entries.delete(this.entries.keys().next().value!);
+  }
+  export(account: string): [string, CachedHistory][] {
+    return [...this.entries].flatMap(([key, entry]) =>
+      entry.account === account
+        ? [[JSON.parse(key)[1], entry.value] as [string, CachedHistory]]
+        : [],
+    );
   }
   clear(account?: string): void {
     for (const [key, entry] of this.entries)

@@ -3,6 +3,7 @@ import {
   type NativeOperation,
   type NativeMessage,
 } from "@agent-wechat/shared";
+import { BrowserCache } from "./browser-cache.ts";
 import { HubSession, type PendingSend } from "./session.ts";
 import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
 import { MediaOutbox, type PendingMedia } from "./media-outbox.ts";
@@ -13,6 +14,8 @@ import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
 import { validQuoteReference } from "./reply.ts";
 export type Connection = {
   session: HubSession;
+  cache: BrowserCache;
+  clearCache: (account: string) => Promise<void>;
   simulator: boolean;
   endpoint: string;
   loginAttempt: (account: string) => LoginAttempt;
@@ -30,52 +33,140 @@ export async function connect(
   token: string,
   simulator = false,
 ): Promise<Connection> {
-  const client = new NativeWeChatClient({ baseUrl: endpoint, token });
+  let cache: BrowserCache | undefined;
+  const client = new NativeWeChatClient({
+    baseUrl: endpoint,
+    token,
+    fetch: async (input, init) => {
+      if (init?.method && !["GET", "HEAD"].includes(init.method))
+        await cache?.flush();
+      return globalThis.fetch(input, init);
+    },
+  });
   const status = await client.status();
   if (simulator && status.version.backend !== "simulator")
     throw new Error("Expected a simulator");
-  const prefix = `agentwechat-receipts:${status.serverId}:`;
-  const session = new HubSession(client, {
-    read(account) {
+  let preferences: Storage | undefined;
+  try {
+    preferences = globalThis.localStorage;
+  } catch {}
+  cache = new BrowserCache(client.baseUrl.origin, status.serverId, {
+    storage: preferences,
+  });
+  const persistent = cache;
+  const accounts = await client.accounts();
+  await persistent.primeRecovery(
+    accounts.items.flatMap((item) =>
+      typeof item.id === "string" ? [item.id] : [],
+    ),
+  );
+  const storage = (account: string) => ({
+    getItem(key: string): string | null {
+      const value = persistent.readState<string>(account, key);
+      if (typeof value === "string") return value;
       try {
-        const parsed = JSON.parse(
-          sessionStorage.getItem(prefix + account) ?? "[]",
-        );
-        return Array.isArray(parsed)
-          ? parsed
-              .filter(
-                (s: PendingSend) =>
-                  typeof s.key === "string" &&
-                  typeof s.text === "string" &&
-                  typeof s.threadId === "string" &&
-                  (s.quote === undefined || validQuoteReference(s.quote)),
-              )
-              .slice(-50)
-          : [];
+        return globalThis.sessionStorage.getItem(key);
       } catch {
-        return [];
+        return null;
       }
     },
-    write(account, sends) {
+    setItem(key: string, value: string) {
+      persistent.writeState(account, key, value);
       try {
-        sessionStorage.setItem(
-          prefix + account,
-          JSON.stringify(sends.slice(-50)),
-        );
-      } catch {
-        /* Storage can be disabled. */
-      }
+        globalThis.sessionStorage.setItem(key, value);
+      } catch {}
+    },
+    removeItem(key: string) {
+      persistent.writeState(account, key, null);
+      try {
+        globalThis.sessionStorage.removeItem(key);
+      } catch {}
     },
   });
+  const knownSends = new Map<string, Set<string>>();
+  const prefix = `agentwechat-receipts:${status.serverId}:`;
+  const session = new HubSession(
+    client,
+    {
+      read(account) {
+        try {
+          let legacy: unknown = [];
+          try {
+            legacy = JSON.parse(
+              globalThis.sessionStorage?.getItem(prefix + account) ?? "[]",
+            );
+          } catch {}
+          const parsed = [
+            ...(Array.isArray(legacy) ? legacy : []),
+            ...persistent.states<PendingSend>(account, "send:"),
+          ];
+          const unique = [
+            ...new Map(
+              parsed
+                .filter((item) => item && typeof item.key === "string")
+                .map((item) => [item.key, item]),
+            ).values(),
+          ];
+          knownSends.set(account, new Set(unique.map((item) => item.key)));
+          return Array.isArray(unique)
+            ? unique
+                .filter(
+                  (s: PendingSend) =>
+                    typeof s.key === "string" &&
+                    typeof s.text === "string" &&
+                    typeof s.threadId === "string" &&
+                    (s.quote === undefined || validQuoteReference(s.quote)),
+                )
+                .slice(-50)
+            : [];
+        } catch {
+          return [];
+        }
+      },
+      write(account, sends) {
+        const keys = new Set(sends.map((send) => send.key));
+        for (const key of knownSends.get(account) ?? [])
+          if (!keys.has(key))
+            persistent.writeState(account, `send:${key}`, null);
+        for (const send of sends)
+          persistent.writeState(account, `send:${send.key}`, send);
+        knownSends.set(account, keys);
+        try {
+          globalThis.sessionStorage.setItem(
+            prefix + account,
+            JSON.stringify(sends.slice(-50)),
+          );
+        } catch {
+          /* Storage can be disabled. */
+        }
+      },
+    },
+    persistent,
+  );
   await session.accounts();
+  const resume = () => {
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    )
+      void session.reconcile();
+  };
+  globalThis.addEventListener?.("focus", resume);
+  globalThis.document?.addEventListener("visibilitychange", resume);
   const logins = new Map<string, SavedLogin>();
   const media = new Map<string, MediaOutbox>();
   const avatars = new AvatarCache(
     client,
     Date.now,
     () => !session.snapshot().opening,
+    persistent,
   );
-  const incomingMedia = new MediaInbox(client);
+  const incomingMedia = new MediaInbox(client, persistent);
+  const stopCache = persistent.onInvalidated((account) => {
+    session.invalidateLocalCache(account);
+    incomingMedia.clear(account);
+    avatars.clear(account);
+  });
   const recalls = new Map<string, MessageRecall>();
   const stopMedia = session.onMediaReady((id) => incomingMedia.ready(id));
   const stopMediaInvalidation = session.onMediaInvalidated(
@@ -90,18 +181,28 @@ export async function connect(
     else logouts.delete(account);
     try {
       if (value)
-        sessionStorage.setItem(logoutKey(account), JSON.stringify(value));
-      else sessionStorage.removeItem(logoutKey(account));
+        storage(account).setItem(logoutKey(account), JSON.stringify(value));
+      else storage(account).removeItem(logoutKey(account));
     } catch {
       /* Memory fallback remains available. */
     }
   };
   return {
     session,
+    cache: persistent,
+    async clearCache(account) {
+      incomingMedia.clear(account);
+      avatars.clear(account);
+      await session.clearLocalCache(account);
+    },
     simulator,
     endpoint: client.baseUrl.origin,
     close() {
+      stopCache();
+      globalThis.removeEventListener?.("focus", resume);
+      globalThis.document?.removeEventListener("visibilitychange", resume);
       session.close();
+      void persistent.close();
       for (const queue of media.values()) queue.close();
       avatars.close();
       stopMedia();
@@ -124,14 +225,19 @@ export async function connect(
         recall = new MessageRecall(client, message, {
           read() {
             try {
-              return JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
+              return JSON.parse(
+                storage(message.accountId).getItem(storageKey) ?? "null",
+              );
             } catch {
               return null;
             }
           },
           write(receipt) {
             try {
-              sessionStorage.setItem(storageKey, JSON.stringify(receipt));
+              storage(message.accountId).setItem(
+                storageKey,
+                JSON.stringify(receipt),
+              );
             } catch {
               /* Memory keeps the admission key when storage is disabled. */
             }
@@ -150,7 +256,7 @@ export async function connect(
           read() {
             try {
               const saved: unknown = JSON.parse(
-                sessionStorage.getItem(key) ?? "null",
+                storage(account).getItem(key) ?? "null",
               );
               return validGroupReceipt(saved, target) ? saved : null;
             } catch {
@@ -159,8 +265,8 @@ export async function connect(
           },
           write(value) {
             try {
-              if (value) sessionStorage.setItem(key, JSON.stringify(value));
-              else sessionStorage.removeItem(key);
+              if (value) storage(account).setItem(key, JSON.stringify(value));
+              else storage(account).removeItem(key);
             } catch {
               /* Optional metadata-only recovery. */
             }
@@ -177,7 +283,7 @@ export async function connect(
       let saved = logouts.get(account);
       try {
         const item = JSON.parse(
-          sessionStorage.getItem(logoutKey(account)) ?? "null",
+          storage(account).getItem(logoutKey(account)) ?? "null",
         );
         if (
           item &&
@@ -206,7 +312,7 @@ export async function connect(
         outbox = new MediaOutbox(client, account, {
           read() {
             try {
-              const items = JSON.parse(sessionStorage.getItem(key) ?? "[]");
+              const items = JSON.parse(storage(account).getItem(key) ?? "[]");
               return Array.isArray(items)
                 ? items
                     .filter(
@@ -224,7 +330,7 @@ export async function connect(
           },
           write(items) {
             try {
-              sessionStorage.setItem(key, JSON.stringify(items));
+              storage(account).setItem(key, JSON.stringify(items));
             } catch {
               /* Optional receipt storage. */
             }
@@ -239,7 +345,7 @@ export async function connect(
       return new LoginAttempt(client, account, {
         read() {
           try {
-            const saved = JSON.parse(sessionStorage.getItem(key) ?? "null");
+            const saved = JSON.parse(storage(account).getItem(key) ?? "null");
             if (
               saved &&
               typeof saved.key === "string" &&
@@ -261,8 +367,8 @@ export async function connect(
           if (value) logins.set(account, value);
           else logins.delete(account);
           try {
-            if (value) sessionStorage.setItem(key, JSON.stringify(value));
-            else sessionStorage.removeItem(key);
+            if (value) storage(account).setItem(key, JSON.stringify(value));
+            else storage(account).removeItem(key);
           } catch {
             /* The in-memory fallback still supports this page session. */
           }
