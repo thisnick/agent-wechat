@@ -32,9 +32,9 @@ export async function accountJourney({
     body: "Read-state fixture",
   });
   await wait("read fixture committed before marking", async () =>
-    (await client.messages(account, "sim_mei")).items.some(
-      (message) => message.body === "Read-state fixture",
-    ),
+    (
+      await client.messages(account, "sim_mei")
+    ).items.some((message) => message.body === "Read-state fixture"),
   );
   let priorVersion;
   const read = await wait("read stable profile generation", async () => {
@@ -77,6 +77,11 @@ export async function accountJourney({
   );
   const connection = await connect(endpoint, token, true);
   try {
+    await connection.session.activate(account);
+    await wait(
+      "account event stream connected",
+      () => connection.session.snapshot().connected,
+    );
     const real = connection.session.client.logout.bind(
       connection.session.client,
     );
@@ -97,6 +102,12 @@ export async function accountJourney({
     assert.equal((await connection.logout(account)).id, done.id);
     assert.equal(submissions, 2);
     assert.equal((await client.account(account)).authenticated, false);
+    await wait(
+      "sign-out event closes the browser session",
+      () => connection.session.snapshot().signInRequired === account,
+    );
+    assert.equal(connection.session.snapshot().account, null);
+    assert.deepEqual(connection.session.snapshot().messages, []);
     assert.deepEqual(
       (await client.messages(account, "sim_mei")).items.map((item) => item.id),
       history,

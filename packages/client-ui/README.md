@@ -342,7 +342,12 @@ start OpenClaw agent turns.
 
 Settings can rename the selected account and sign it out, with confirmation and
 same-operation status recovery after a lost response or reload. Sign-out keeps
-history. Conversation details show the internal conversation ID with a hover label,
+history on the hub. A signed-out or `auth_required` event returns the browser to
+account selection and stops the account's stream, uploads and media requests.
+Returning to the browser also checks account authentication. Fetched browser
+caches are cleared; drafts and pending operation receipts remain available after
+sign-in, without automatically resending. Sign-in starts when you select the
+account. Conversation details show the internal conversation ID with a hover label,
 group settings, and members. Read acknowledgments and visible avatar refreshes run
 automatically. Cached avatars replace initials; absent avatars keep initials.
 Group details load all roster pages.

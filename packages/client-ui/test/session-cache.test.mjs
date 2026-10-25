@@ -80,6 +80,63 @@ async function seed(cache, cursor = "10") {
   cache.rememberAccount("a");
   cache.saveView("a", { thread: "peer" });
 }
+
+test("sign-out clears fetched cache but preserves drafts and send recovery", async (t) => {
+  const disk = cache(t);
+  await seed(disk);
+  disk.writeState("a", "peer", { text: "unfinished reply" }, "drafts");
+  disk.writeState("a", "send:pending", { key: "pending" });
+  const hub = session(t, disk, {
+    events: async () => page([], { asOfEventCursor: "10" }),
+  });
+  await hub.activate("a");
+  await hub.consume(
+    {
+      cursor: "21",
+      kind: "account.updated",
+      data: { authentication: "logged_out" },
+    },
+    "a",
+  );
+  await disk.flush();
+  assert.equal(disk.lastAccount(), undefined);
+  assert.equal(await disk.readAccount("a"), undefined);
+  assert.deepEqual(disk.readState("a", "peer", "drafts"), {
+    text: "unfinished reply",
+  });
+  assert.deepEqual(disk.readState("a", "send:pending"), { key: "pending" });
+});
+
+test("a missed logout during cache catch-up prevents history restoration", async (t) => {
+  const disk = cache(t);
+  await seed(disk);
+  let historyReads = 0,
+    streams = 0;
+  const hub = session(t, disk, {
+    events: async () =>
+      page([
+        {
+          cursor: "20",
+          kind: "account.updated",
+          data: { authentication: "logged_out" },
+        },
+      ]),
+    messages: async () => {
+      historyReads++;
+      return page([]);
+    },
+    async *watch() {
+      streams++;
+    },
+  });
+  await hub.activate("a");
+  assert.equal(hub.snapshot().signInRequired, "a");
+  assert.deepEqual(hub.snapshot().messages, []);
+  assert.equal(historyReads, 0);
+  assert.equal(streams, 0);
+  await disk.flush();
+  assert.equal(await disk.readAccount("a"), undefined);
+});
 function session(t, cache, overrides = {}) {
   const hub = new HubSession(
     {
@@ -205,7 +262,7 @@ test("an unauthenticated account cannot read its persistent cache", async (t) =>
   const hub = session(t, persistent, {
     accounts: async () => page([{ id: "a", authenticated: false }]),
   });
-  await assert.rejects(hub.activate("a"), /Sign in/);
+  await assert.rejects(hub.activate("a"), { code: "auth_required" });
   assert.equal(reads, 0);
   assert.equal(persistent.lastAccount(), undefined);
   assert.equal(await read("a"), undefined);

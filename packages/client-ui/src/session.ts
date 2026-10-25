@@ -48,6 +48,7 @@ export type SessionState = {
   loading: boolean;
   opening: boolean;
   connected: boolean;
+  signInRequired: string | null;
   error: string | null;
   capabilities: Record<string, unknown>;
 };
@@ -64,6 +65,7 @@ const initial = (): SessionState => ({
   loading: false,
   opening: false,
   connected: false,
+  signInRequired: null,
   error: null,
   capabilities: {},
 });
@@ -225,6 +227,13 @@ export async function inventory<T>(
 export class HubSession {
   private value = initial();
   private listeners = new Set<() => void>();
+  private signOutListeners = new Set<(account: string) => void>();
+  onSignedOut = (listener: (account: string) => void): (() => void) => {
+    this.signOutListeners.add(listener);
+    return () => {
+      this.signOutListeners.delete(listener);
+    };
+  };
   private mediaInvalidationListeners = new Set<
     (account: string, messageId: string) => void
   >();
@@ -362,8 +371,25 @@ export class HubSession {
       request === this.accountRequest &&
       generation === this.generation
     )
-      this.publish({ accounts });
+      this.acceptAccounts(accounts);
     return accounts;
+  }
+  private acceptAccounts(accounts: Account[]): void {
+    const account = this.value.account;
+    if (
+      account &&
+      accounts.some(
+        (item) => item.id === account && item.authenticated === false,
+      )
+    ) {
+      this.value = { ...this.value, accounts };
+      this.signedOut(account);
+    } else this.publish({ accounts });
+  }
+  private signedOut(account: string): void {
+    if (this.value.account !== account) return;
+    this.resetAccount(account, true);
+    for (const listener of this.signOutListeners) listener(account);
   }
   close(): void {
     this.activationRequest++;
@@ -374,9 +400,13 @@ export class HubSession {
     this.stopped = true;
     this.mediaListeners.clear();
     this.mediaInvalidationListeners.clear();
+    this.signOutListeners.clear();
     this.histories.clear();
   }
   deactivate(account = this.value.account): void {
+    this.resetAccount(account, false);
+  }
+  private resetAccount(account: string | null, signedOut: boolean): void {
     this.activationRequest++;
     if (account) {
       this.histories.clear(account);
@@ -391,8 +421,18 @@ export class HubSession {
     this.stream?.abort();
     this.historyLoaded = false;
     this.historySource = "";
+    this.restoring = false;
+    this.restored.clear();
     this.cursor = "0";
-    this.publish({ ...initial(), accounts: this.value.accounts });
+    this.publish({
+      ...initial(),
+      accounts: this.value.accounts.map((item) =>
+        signedOut && item.id === account
+          ? { ...item, authenticated: false, connection: "disconnected" }
+          : item,
+      ),
+      signInRequired: signedOut ? account : null,
+    });
   }
   async activate(account: string): Promise<void> {
     const activation = ++this.activationRequest;
@@ -406,7 +446,7 @@ export class HubSession {
       ) {
         this.cache.rememberAccount(null);
         await this.cache.clearAccount(account);
-        throw new Error("Sign in to WeChat again.");
+        throw new NativeApiError(409, "auth_required");
       }
     }
     this.remember();
@@ -430,6 +470,7 @@ export class HubSession {
       loading: true,
       opening: false,
       connected: false,
+      signInRequired: null,
       error: null,
       capabilities: {},
     });
@@ -502,6 +543,8 @@ export class HubSession {
       generation = this.generation;
     if (!account || this.value.opening) return;
     this.reconcileFlight = (async () => {
+      await this.accounts();
+      if (!this.current(account, generation)) return;
       const boundary = await this.refresh(account, generation, false);
       if (!this.current(account, generation)) return;
       if (BigInt(this.cursor) > BigInt(boundary))
@@ -873,12 +916,15 @@ export class HubSession {
         this.current(account, generation) &&
         request === this.detailsRequest
       ) {
+        this.acceptAccounts(
+          accounts.items.filter(
+            (item) => typeof item.id === "string",
+          ) as Account[],
+        );
+        if (!this.current(account, generation)) return;
         this.publish({
           contacts: contacts.items,
           capabilities,
-          accounts: accounts.items.filter(
-            (item) => typeof item.id === "string",
-          ) as Account[],
         });
         this.persist();
       }
@@ -1045,6 +1091,21 @@ export class HubSession {
   ): Promise<void> {
     if (!this.current(account, generation)) return;
     if (
+      [
+        "account.updated",
+        "account.connection",
+        "auth.updated",
+        "account.push",
+      ].includes(event.kind) &&
+      (event.data.authentication === "logged_out" ||
+        event.data.authenticated === false ||
+        event.data.state === "auth_required" ||
+        event.data.reason === "auth_required")
+    ) {
+      this.signedOut(account);
+      return;
+    }
+    if (
       event.kind === "message.recalled" &&
       typeof event.data.messageId === "string"
     )
@@ -1169,6 +1230,10 @@ export class HubSession {
           this.publish({ connected: false });
       } catch (error) {
         if (signal.aborted || !this.current(account, generation)) return;
+        if (error instanceof NativeApiError && error.code === "auth_required") {
+          this.signedOut(account);
+          return;
+        }
         this.publish({ connected: false, error: readableError(error) });
         if (
           error instanceof NativeApiError &&
@@ -1263,6 +1328,12 @@ export class HubSession {
         this.receipts?.write(account, sends);
       }
     } catch (error) {
+      if (
+        this.current(account, generation) &&
+        error instanceof NativeApiError &&
+        error.code === "auth_required"
+      )
+        this.signedOut(account);
       if (
         quote &&
         error instanceof NativeApiError &&

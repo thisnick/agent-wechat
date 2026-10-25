@@ -254,6 +254,18 @@ function Client({
   const [busy, setBusy] = useState(false);
   const adding = useRef(false);
   const [managed, setManaged] = useState<string | null>(null);
+  const visibleScreen =
+    state.signInRequired && (screen === "chats" || screen === "restoring")
+      ? "accounts"
+      : screen;
+  useEffect(() => {
+    if (!state.signInRequired) return;
+    setScreen((current) =>
+      current === "chats" || current === "restoring" ? "accounts" : current,
+    );
+    setManaged(null);
+    setError("");
+  }, [state.signInRequired]);
   useEffect(() => {
     if (!returning) return;
     let cancelled = false;
@@ -276,9 +288,10 @@ function Client({
   useEffect(() => {
     document.body.classList.toggle(
       "onboarding-active",
-      screen !== "chats" && !(screen === "restoring" && state.account),
+      visibleScreen !== "chats" &&
+        !(visibleScreen === "restoring" && state.account),
     );
-  }, [screen, state.account]);
+  }, [visibleScreen, state.account]);
   async function open(account: Account) {
     setBusy(true);
     setError("");
@@ -329,13 +342,13 @@ function Client({
       setBusy(false);
     }
   }
-  if (screen === "restoring" && !state.account)
+  if (visibleScreen === "restoring" && !state.account)
     return (
       <Welcome simulator={simulator}>
         <h1>Opening AgentWechat…</h1>
       </Welcome>
     );
-  if (screen === "login" && loginAccount)
+  if (visibleScreen === "login" && loginAccount)
     return (
       <Welcome simulator={simulator}>
         <Login
@@ -353,7 +366,7 @@ function Client({
         />
       </Welcome>
     );
-  if (screen !== "chats" && screen !== "restoring")
+  if (visibleScreen !== "chats" && visibleScreen !== "restoring")
     return (
       <Welcome simulator={simulator}>
         <div className="welcome-heading">
@@ -368,6 +381,9 @@ function Client({
             </p>
           )}
         </div>
+        {state.signInRequired && (
+          <ErrorNotice>WeChat signed out. Sign in again.</ErrorNotice>
+        )}
         <div className="login-accounts">
           {state.accounts.map((a) => (
             <div className="profile-row" key={a.id}>

@@ -173,6 +173,22 @@ export async function connect(
     (account, messageId) => incomingMedia.invalidateMessage(account, messageId),
   );
   const groups = new Map<string, GroupMutations>();
+  const stopSignOut = session.onSignedOut((account) => {
+    incomingMedia.clear(account);
+    avatars.clear(account);
+    media.get(account)?.close();
+    media.delete(account);
+    for (const [key, recall] of recalls)
+      if ((JSON.parse(key) as string[])[0] === account) {
+        recall.close();
+        recalls.delete(key);
+      }
+    for (const [key, group] of groups)
+      if ((JSON.parse(key) as string[])[0] === account) {
+        group.close();
+        groups.delete(key);
+      }
+  });
   const logouts = new Map<string, SavedLogin>();
   const logoutKey = (account: string) =>
     `agentwechat-logout:${status.serverId}:${account}`;
@@ -198,6 +214,7 @@ export async function connect(
     simulator,
     endpoint: client.baseUrl.origin,
     close() {
+      stopSignOut();
       stopCache();
       globalThis.removeEventListener?.("focus", resume);
       globalThis.document?.removeEventListener("visibilitychange", resume);

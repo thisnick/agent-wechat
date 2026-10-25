@@ -110,6 +110,183 @@ function session(t, overrides = {}) {
   return hub;
 }
 
+for (const [kind, data] of [
+  [
+    "account.updated",
+    { authentication: "logged_out", autoLoginSuppressed: true },
+  ],
+  [
+    "account.connection",
+    { state: "auth_required", source: "push", serviceCode: -13 },
+  ],
+  ["account.push", { state: "reconnecting", reason: "auth_required" }],
+]) {
+  test(`${kind} signs out immediately without another account request`, async (t) => {
+    let aborted = false,
+      streams = 0,
+      cleanups = 0;
+    const hub = session(t, {
+      messages: async () => page([message("private")]),
+      async *watch(_account, _cursor, signal) {
+        streams++;
+        await new Promise((done) =>
+          signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              done();
+            },
+            { once: true }
+          )
+        );
+      },
+    });
+    await hub.activate("a");
+    await eventually(() => hub.snapshot().accounts.length === 2);
+    hub.onSignedOut((account) => {
+      assert.equal(account, "a");
+      cleanups++;
+    });
+    hub.client.accounts = async () => {
+      throw new Error("offline");
+    };
+    await hub.consume({ cursor: "21", kind, data }, "a");
+    const state = hub.snapshot();
+    assert.equal(state.signInRequired, "a");
+    assert.equal(state.account, null);
+    assert.equal(state.selected, null);
+    assert.equal(state.connected, false);
+    assert.deepEqual(state.messages, []);
+    assert.deepEqual(state.contacts, []);
+    assert.deepEqual(state.threads, []);
+    assert.equal(state.accounts.find((a) => a.id === "a").authenticated, false);
+    assert.equal(state.accounts.find((a) => a.id === "b").authenticated, true);
+    assert.equal(aborted, true);
+    assert.equal(streams, 1);
+    assert.equal(cleanups, 1);
+    assert.equal(await hub.send("must not send"), false);
+    await hub.consume({ cursor: "22", kind, data }, "a");
+    assert.equal(cleanups, 1);
+  });
+}
+
+test("a transient connection failure and old-account logout cannot end the active account", async (t) => {
+  const hub = session(t);
+  await hub.activate("a");
+  await hub.consume(
+    {
+      cursor: "21",
+      kind: "account.connection",
+      data: { state: "connection_unavailable" },
+    },
+    "a"
+  );
+  assert.equal(hub.snapshot().account, "a");
+  await hub.activate("b");
+  await hub.consume(
+    {
+      cursor: "22",
+      kind: "account.connection",
+      data: { state: "auth_required" },
+    },
+    "a"
+  );
+  assert.equal(hub.snapshot().account, "b");
+  assert.equal(hub.snapshot().signInRequired, null);
+});
+
+test("returning to a signed-out account checks auth before reading more chat data", async (t) => {
+  let reads = 0;
+  const hub = session(t, {
+    threads: async () => {
+      reads++;
+      return page([]);
+    },
+  });
+  await hub.activate("a");
+  await eventually(() => hub.snapshot().accounts.length === 2);
+  hub.client.accounts = async () => page([{ id: "a", authenticated: false }]);
+  const before = reads;
+  await hub.reconcile();
+  assert.equal(reads, before);
+  assert.equal(hub.snapshot().signInRequired, "a");
+  hub.client.accounts = async () => page([{ id: "a", authenticated: true }]);
+  await hub.activate("a");
+  assert.equal(hub.snapshot().account, "a");
+  assert.equal(hub.snapshot().signInRequired, null);
+});
+
+test("an auth_required stream error stops reconnecting", async (t) => {
+  let streams = 0;
+  const hub = session(t, {
+    async *watch() {
+      streams++;
+      throw new NativeApiError(409, "auth_required");
+    },
+  });
+  await hub.activate("a");
+  await eventually(() => hub.snapshot().signInRequired === "a");
+  assert.equal(hub.snapshot().account, null);
+  assert.equal(streams, 1);
+});
+
+test("late history cannot restore a chat after a logout event", async (t) => {
+  const history = deferred();
+  const hub = session(t, { messages: async () => history.promise });
+  const opening = hub.activate("a");
+  await eventually(() => hub.snapshot().selected === "peer");
+  await hub.consume(
+    {
+      cursor: "21",
+      kind: "account.updated",
+      data: { authentication: "logged_out" },
+    },
+    "a"
+  );
+  history.resolve(page([message("private late response")]));
+  await opening;
+  assert.equal(hub.snapshot().account, null);
+  assert.equal(hub.snapshot().signInRequired, "a");
+  assert.deepEqual(hub.snapshot().messages, []);
+});
+
+test("a send admitted during sign-out keeps its receipt without resending", async (t) => {
+  const admission = deferred();
+  const saved = new Map();
+  let posts = 0;
+  const hub = new HubSession(
+    client({
+      sendText: async () => {
+        posts++;
+        return admission.promise;
+      },
+      send: async () => receipt(),
+    }),
+    {
+      read: (account) => saved.get(account) ?? [],
+      write: (account, sends) => saved.set(account, sends),
+    }
+  );
+  t.after(() => hub.close());
+  await hub.activate("a");
+  const sending = hub.send("keep this send");
+  const key = hub.snapshot().sends[0].key;
+  await hub.consume(
+    {
+      cursor: "21",
+      kind: "account.connection",
+      data: { state: "auth_required" },
+    },
+    "a"
+  );
+  admission.resolve(receipt());
+  await sending;
+  assert.equal(saved.get("a")[0].key, key);
+  assert.equal(saved.get("a")[0].intent.id, "send1");
+  await hub.activate("a");
+  assert.equal(posts, 1);
+});
+
 test("a late read-state response cannot refresh the wrong account", async (t) => {
   const late = deferred(),
     seen = [];
