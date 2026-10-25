@@ -33,6 +33,9 @@ mod read_control;
 mod read_sync;
 #[path = "saved_login.rs"]
 mod saved_login;
+#[path = "session_auth.rs"]
+mod session_auth;
+use session_auth::{authentication_required, SessionFence};
 #[path = "status_control.rs"]
 mod status_control;
 #[path = "system_control.rs"]
@@ -954,22 +957,19 @@ impl Core {
         }
     }
     pub async fn sync(self: &Arc<Self>, account: &str) -> Result<Value> {
+        self.session_request(account, "sync", |fence| self.sync_session(account, fence))
+            .await
+    }
+    async fn sync_session(self: &Arc<Self>, account: &str, fence: SessionFence) -> Result<Value> {
         let gate = self.gate(account)?;
         let _guard = gate.lock().await;
         let core = self.clone();
         let account = account.to_owned();
         blocking(move || {
-            let mut state = core.account_state(&account)?;
+            let mut state = core.session_state(&account, &fence)?;
             let cursor = core.cursor(&account)?;
             let native = client()?;
-            let batch = match native.sync(&mut state, &cursor) {
-                Ok(batch) => batch,
-                Err(error) if auth_rejected(&error) => {
-                    state = native.renew_session(&state, "agent-wechat")?;
-                    native.sync(&mut state, &cursor)?
-                }
-                Err(e) => return Err(e),
-            };
+            let batch = native.sync(&mut state, &cursor)?;
             core.save_state(&account, &state)?;
             core.store.put_runtime(
                 &account,
@@ -1623,9 +1623,7 @@ impl Core {
                     match core.tick(&account.id).await {
                         Ok(interval) => delay = interval,
                         Err(error) => {
-                            let code = if auth_rejected(&error)
-                                || error.to_string().contains("auth_required")
-                            {
+                            let code = if authentication_required(&error) {
                                 "auth_required"
                             } else {
                                 "connection_unavailable"
@@ -1636,11 +1634,6 @@ impl Core {
                                 "account.connection",
                                 &json!({"state":code}),
                             );
-                            if code == "auth_required" {
-                                let _ =
-                                    core.store
-                                        .put_runtime(&account.id, "desired", b"disconnected");
-                            }
                             delay = (delay * 2).clamp(5, 60);
                         }
                     }
@@ -1650,6 +1643,12 @@ impl Core {
         Ok(())
     }
     async fn tick(self: &Arc<Self>, account: &str) -> Result<u64> {
+        self.session_request(account, "polling", |fence| {
+            self.tick_session(account, fence)
+        })
+        .await
+    }
+    async fn tick_session(self: &Arc<Self>, account: &str, fence: SessionFence) -> Result<u64> {
         if self.push_connected(account) {
             // The persistent connection owns account heartbeats and incoming
             // sync while healthy. Keep local recovery and queued sends moving;
@@ -1679,7 +1678,7 @@ impl Core {
             let core = self.clone();
             let account = account.to_string();
             blocking(move || {
-                let mut state = core.account_state(&account)?;
+                let mut state = core.session_state(&account, &fence)?;
                 let _ = core.recover_text_projections(&account)?;
                 if core.refresh_incoming_groups(&account, true)? > 0 {
                     core.store.retry_blocked(&account)?;
@@ -1690,14 +1689,7 @@ impl Core {
                 }
                 let cursor = core.cursor(&account)?;
                 let native = client()?;
-                let beat = match native.heartbeat(&mut state, &cursor) {
-                    Ok(beat) => beat,
-                    Err(error) if auth_rejected(&error) => {
-                        state = native.renew_session(&state, "agent-wechat")?;
-                        native.heartbeat(&mut state, &cursor)?
-                    }
-                    Err(error) => return Err(error),
-                };
+                let beat = native.heartbeat(&mut state, &cursor)?;
                 core.save_state(&account, &state)?;
                 core.store.put_runtime(
                     &account,

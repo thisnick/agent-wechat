@@ -9,7 +9,9 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## 1. Staying logged in
 
-At login, WeChat issues credentials tied to a device identity, which the daemon stores (encrypted) in its data folder. While connected, the daemon sends the heartbeats WeChat asks for and renews the session when it expires. After a restart it reconnects with the saved credentials; it never starts a new QR login by itself. If WeChat rejects the session, `wx auth login` asks you to approve again.
+At login, WeChat issues credentials tied to a device identity, which the daemon stores (encrypted) in its data folder. While connected, the daemon sends the heartbeats WeChat asks for. After a restart it reconnects with the saved credentials; it never starts a new QR login by itself.
+
+If WeChat rejects the current push, heartbeat or sync session as requiring authentication, the daemon signs out locally and stops reconnecting. Account status reports `authenticated: false` and `connection: "disconnected"`; account events include `auth_required`, the request source and the service code when available. Your profile, history and saved credentials remain. Run `wx auth login` to sign in again. Temporary connection failures continue to retry.
 
 ## 2. Receiving
 

@@ -4,11 +4,6 @@ use wechat_protocol::{
     wire::{Heartbeat, SyncBatch},
 };
 
-#[derive(Clone)]
-struct Fence {
-    authorization: [u8; 32],
-    logout_epoch: Option<Vec<u8>>,
-}
 fn heartbeat_interval(heartbeat: &Heartbeat) -> Duration {
     Duration::from_secs((heartbeat.next_interval as u64).clamp(30, 180))
 }
@@ -30,7 +25,7 @@ impl Core {
                 .as_deref()
                 == Some(self.ownership_generation.as_bytes()))
     }
-    fn push_state(&self, account: &str, fence: &Fence) -> Result<AccountState> {
+    fn push_state(&self, account: &str, fence: &SessionFence) -> Result<AccountState> {
         if !self.push_allowed(account)?
             || self.store.runtime(account, "logout-epoch")? != fence.logout_epoch
         {
@@ -47,7 +42,7 @@ impl Core {
         account: &str,
         state: &AccountState,
         expected: &[u8],
-        fence: &Fence,
+        fence: &SessionFence,
     ) -> Result<()> {
         self.push_state(account, fence)?;
         self.check_state_profile(account, state)?;
@@ -84,7 +79,7 @@ impl Core {
                         if core.push_allowed(&account).unwrap_or(false) {
                             let _ = core.store.append_event_once(&account,
                                 &format!("push:reconnecting:{}", wechat_store::unix_seconds() / 60),
-                                "account.push", &json!({"state":"reconnecting","fallback":"heartbeat_polling","reason":if auth_rejected(&error){"auth_required"}else{"connection_unavailable"}}));
+                                "account.push", &json!({"state":"reconnecting","fallback":"heartbeat_polling","reason":if authentication_required(&error){"auth_required"}else{"connection_unavailable"}}));
                         }
                     }
                     tokio::time::sleep(Duration::from_secs(backoff)).await;
@@ -100,6 +95,17 @@ impl Core {
         Ok(())
     }
     async fn push_session(self: &Arc<Self>, account: &str, ready: &AtomicBool) -> Result<()> {
+        self.session_request(account, "push", |fence| {
+            self.push_session_active(account, ready, fence)
+        })
+        .await
+    }
+    async fn push_session_active(
+        self: &Arc<Self>,
+        account: &str,
+        ready: &AtomicBool,
+        fence: SessionFence,
+    ) -> Result<()> {
         let guard = self.lock_account(account).await?;
         let core = self.clone();
         let owned = account.to_owned();
@@ -108,11 +114,7 @@ impl Core {
             if !core.push_allowed(&owned)? {
                 bail!("push_session_superseded");
             }
-            let mut state = core.account_state(&owned)?;
-            let fence = Fence {
-                authorization: authorization(&state)?,
-                logout_epoch: core.store.runtime(&owned, "logout-epoch")?,
-            };
+            let mut state = core.push_state(&owned, &fence)?;
             let expected = core
                 .store
                 .runtime(&owned, "account-state")?
@@ -184,7 +186,7 @@ impl Core {
         self: &Arc<Self>,
         account: &str,
         mut connection: Connection,
-        fence: &Fence,
+        fence: &SessionFence,
         scene: u32,
         trigger: &str,
     ) -> Result<Connection> {
@@ -286,7 +288,7 @@ mod tests {
         let state = super::super::tests::state();
         core.save_state("one", &state).unwrap();
         store.put_runtime("one", "desired", b"connected").unwrap();
-        let fence = Fence {
+        let fence = SessionFence {
             authorization: authorization(&state).unwrap(),
             logout_epoch: None,
         };
