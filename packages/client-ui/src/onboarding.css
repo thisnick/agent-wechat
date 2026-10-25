@@ -78,7 +78,6 @@ body {
   color: var(--outgoing-ink);
   border-color: transparent;
 }
-.status-dot,
 .count,
 .switch.on {
   background: var(--accent);
