@@ -17,7 +17,7 @@ COMMIT = "a" * 40
 
 
 class ReleaseBuilderTests(unittest.TestCase):
-    def exercise(self, *, cached=True, arch="x86_64", revision=COMMIT, platform="linux/amd64"):
+    def exercise(self, *, cached=True, arch="x86_64", revision=COMMIT, platform="linux/amd64", handoff=False, compiler="rustc 1.93.1 (fixture)"):
         with tempfile.TemporaryDirectory(prefix="native-release-builder-") as temporary:
             directory = Path(temporary)
             binaries = directory / "bin"
@@ -34,7 +34,10 @@ if args[:2] == ["image", "inspect"]:
 elif args[0] == "create":
     print("synthetic-container")
 elif args[0] == "cp":
-    Path(args[-1]).write_text('#!/bin/sh\\nprintf "%s\\\\n" "$FIXTURE_IDENTITY"\\n')
+    if args[1].endswith("/build/rustc-version"):
+        Path(args[-1]).write_text(os.environ["FIXTURE_COMPILER"] + "\\n")
+    else:
+        Path(args[-1]).write_text('#!/bin/sh\\nprintf "%s\\\\n" "$FIXTURE_IDENTITY"\\n')
 '''
             stubs = {
                 "docker": docker,
@@ -64,6 +67,8 @@ elif args[0] == "cp":
                 FIXTURE_REVISION=revision,
                 FIXTURE_PLATFORM=platform,
                 FIXTURE_IDENTITY=identity,
+                FIXTURE_COMPILER=compiler,
+                NATIVE_CI_ARTIFACT="true" if handoff else "false",
             )
             environment.pop("NATIVE_RELEASE_BUILDER_IMAGE", None)
             if cached:
@@ -112,6 +117,18 @@ elif args[0] == "cp":
         self.assertIn("builder", calls[0])
         self.assertFalse(any(call[:2] == ["image", "inspect"] for call in calls))
         self.assertTrue(any(name.endswith("-checksums.json") for name in assets))
+
+    def test_ci_handoff_records_the_compiler_from_the_actual_builder(self):
+        result, calls, assets = self.exercise(handoff=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("native-ci-build.json", assets)
+        self.assertTrue(any(call[0] == "cp" and call[1].endswith("/build/rustc-version") for call in calls))
+
+    def test_ci_handoff_rejects_an_unexpected_builder_compiler(self):
+        result, calls, assets = self.exercise(handoff=True, compiler="rustc 1.94.0 (wrong compiler)")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pinned Rust toolchain", result.stderr)
+        self.assertNotIn("native-ci-build.json", assets)
 
 
 if __name__ == "__main__":

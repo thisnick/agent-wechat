@@ -1,43 +1,37 @@
 name: Desktop app
 on:
-  pull_request:
-    paths:
-      - 'packages/desktop/**'
-      - 'packages/client-ui/**'
-      - 'packages/shared/**'
-      - 'packages/native-client-rust/**'
-      - '.github/workflows/desktop.yml'
-      - '.github/workflows/windows-signing.yml'
-      - 'pnpm-lock.yaml'
   workflow_dispatch:
   workflow_call:
     inputs:
       release:
         type: boolean
         default: false
+      native_artifact_prefix:
+        type: string
+        default: ''
 permissions:
   contents: read
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}-${{ inputs.release && 'release' || 'validation' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  format:
+    if: github.event_name != 'push' || inputs.release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          components: rustfmt
+      - run: cargo fmt --check --manifest-path packages/desktop/src-tauri/Cargo.toml
+
   build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            platform: macos-arm64
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            platform: windows-x64
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            platform: windows-arm64
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            platform: linux-arm64
+        # PRs cover each OS; main runs deferred ARM builds; releases/manual runs cover all five.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"macos-15","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"}]' || (github.event_name == 'push' && !inputs.release) && '[{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","platform":"windows-arm64"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64"}]' || '[{"runner":"macos-15","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","platform":"windows-arm64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -49,11 +43,13 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
-      - uses: pnpm/action-setup@v6
+          node-version: 24.22.1
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        id: rust
         with:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
@@ -71,25 +67,37 @@ jobs:
         run: |
           if (!(Test-Path C:\Strawberry\perl\bin\perl.exe)) { choco install strawberryperl --no-progress -y }
           'C:\Strawberry\perl\bin' | Out-File $env:GITHUB_PATH -Append
+      - name: Restore CLI dependencies only for standalone desktop builds
+        if: inputs.native_artifact_prefix == ''
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          add-rust-environment-hash-key: false
+          key: desktop-cli-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}
+          cache-on-failure: true
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            packages/native-client-rust -> target
-            packages/desktop/src-tauri -> target
-          key: desktop-${{ matrix.target }}-${{ env.RUSTFLAGS }}
+          workspaces: packages/desktop/src-tauri -> target
+          add-rust-environment-hash-key: false
+          key: desktop-v2-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}
           cache-on-failure: true
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --filter @agent-wechat/desktop...
       - run: pnpm --filter @agent-wechat/desktop build
       - run: pnpm --filter @agent-wechat/shared build
-      - run: pnpm --filter @agent-wechat/client-ui test
-      - run: node --test packages/desktop/test/*.test.mjs
-      - run: cargo fmt --all --check --manifest-path packages/native-client-rust/Cargo.toml
-      - run: cargo fmt --check --manifest-path packages/desktop/src-tauri/Cargo.toml
+      - name: Download the CLI already built and validated in this run
+        if: inputs.native_artifact_prefix != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.native_artifact_prefix }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-cli-artifact
+      - name: Require matching CLI source, compiler, target, flags and checksum
+        if: inputs.native_artifact_prefix != ''
+        run: node scripts/native-ci-artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
       - name: Build native CLI
-        if: runner.os != 'Windows'
+        if: inputs.native_artifact_prefix == '' && runner.os != 'Windows'
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
       - name: Build Windows native CLI
-        if: runner.os == 'Windows'
+        if: inputs.native_artifact_prefix == '' && runner.os == 'Windows'
         shell: pwsh
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
       - run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
@@ -103,14 +111,14 @@ jobs:
       - name: Check native desktop code
         if: runner.os != 'Windows'
         run: |
-          cargo clippy --all-targets --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- -D warnings
+          if [ '${{ matrix.platform }}' = linux-x64 ]; then
+            cargo clippy --all-targets --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- -D warnings
+          fi
           cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Check Windows desktop code
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo clippy --all-targets --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
       - name: Exercise native hub lifecycle and Linux keyring
         if: runner.os == 'Linux'
@@ -139,24 +147,26 @@ jobs:
           export XDG_RUNTIME_DIR=$(mktemp -d)
           dbus-run-session -- xvfb-run -a bash -c 'printf "fixture-password\n" | gnome-keyring-daemon --unlock --components=secrets; node packages/desktop/test/webdriver.mjs'
       - name: Stage desktop bundle inputs
+        if: inputs.release
         run: |
           mkdir -p artifacts/desktop-input/packages/desktop/src-tauri/target/${{ matrix.target }}/release
           mkdir -p artifacts/desktop-input/packages/desktop/src-tauri
           cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat${{ runner.os == 'Windows' && '.exe' || '' }} artifacts/desktop-input/packages/desktop/src-tauri/target/${{ matrix.target }}/release/
           cp -R packages/desktop/src-tauri/binaries packages/desktop/src-tauri/resources artifacts/desktop-input/packages/desktop/src-tauri/
       - uses: actions/upload-artifact@v7
+        if: inputs.release
         with:
           name: desktop-input-${{ matrix.platform }}
           path: artifacts/desktop-input/
           if-no-files-found: error
       - name: Build unsigned validation installers
-        if: ${{ !inputs.release }}
+        if: ${{ !inputs.release && github.event_name != 'pull_request' }}
         run: pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles ${{ runner.os == 'macOS' && 'app' || runner.os == 'Windows' && 'nsis' || 'deb' }}
       - name: Inspect Linux package layout
-        if: ${{ !inputs.release && runner.os == 'Linux' }}
+        if: ${{ !inputs.release && github.event_name != 'pull_request' && runner.os == 'Linux' }}
         run: node packages/desktop/test/validate-deb.mjs packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
       - name: Stage runnable validation downloads
-        if: ${{ !inputs.release }}
+        if: ${{ !inputs.release && github.event_name != 'pull_request' }}
         run: |
           mkdir -p artifacts/desktop-validation
           case "${{ runner.os }}" in
@@ -165,7 +175,7 @@ jobs:
             Linux) cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb artifacts/desktop-validation/ ;;
           esac
       - uses: actions/upload-artifact@v7
-        if: ${{ !inputs.release }}
+        if: ${{ !inputs.release && github.event_name != 'pull_request' }}
         with:
           name: desktop-validation-${{ matrix.platform }}
           path: artifacts/desktop-validation/
@@ -215,7 +225,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: pnpm/action-setup@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -275,7 +285,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: actions/download-artifact@v8
         with:
           name: desktop-installers-signed-${{ matrix.arch }}
@@ -296,7 +306,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: pnpm/action-setup@v6
       - uses: dtolnay/rust-toolchain@stable
         with:

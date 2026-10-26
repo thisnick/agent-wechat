@@ -104,7 +104,8 @@ if __name__ == "__main__":
             parser.error("start requires a Rust target")
         root = Path(__file__).resolve().parent.parent
         start_build(state, ["cargo", "build", "--release", "--locked", "--manifest-path",
-                           "packages/native-client-rust/Cargo.toml", "--target", args.target], root)
+                           "packages/native-client-rust/Cargo.toml", "--target", args.target,
+                           "--package", "wx-native"], root)
         print("Native release compiler started; dependency setup can run concurrently.")
     elif args.operation == "_compile":
         compile_build(state)

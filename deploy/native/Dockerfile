@@ -11,25 +11,21 @@ COPY packages/native-client-rust/ ./
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /build/recipe.json recipe.json
-# Keep the exported test cache small. Assertions/checks remain enabled, and the
-# release profile already disables incremental compilation by default.
-ENV CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+# Native client CI owns workspace tests on both Linux architectures. This image
+# builds the shipping CLI; distribution CI exercises the actual binary/container.
+ENV CARGO_INCREMENTAL=0
 # Exportable dependency layers survive source changes and fresh CI workers.
-# Match both profiles used below; no source or host target cache is imported.
-RUN cargo chef cook --workspace --tests --profile test --locked --recipe-path recipe.json
-RUN cargo chef cook --workspace --release --locked --recipe-path recipe.json
+RUN cargo chef cook --package wx-native --release --locked --recipe-path recipe.json
 COPY packages/native-client-rust/ ./
-RUN cargo test --workspace --locked \
-    && cargo build --release --locked
+RUN cargo build --release --locked --package wx-native \
+    && rustc --version > /build/rustc-version
 
 # CI extracts one tested binary. Exporting this stage avoids loading the Rust
 # toolchain and both profiles' compiled dependencies into the Docker daemon.
 FROM scratch AS release-artifact
 COPY --from=builder /build/target/release/wx /build/target/release/wx
+COPY --from=builder /build/rustc-version /build/rustc-version
 # docker create requires a command; this extraction image is never started.
 CMD ["/build/target/release/wx"]
 

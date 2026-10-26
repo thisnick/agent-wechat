@@ -10,7 +10,7 @@ assert.equal(process.env.HOME, join(root, 'home')); assert.equal(process.env.OPE
 let networkCalls = 0;
 globalThis.fetch = async () => { networkCalls++; throw Error('Network forbidden in synthetic option check'); };
 const pkg = await realpath(join(extension, 'node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8')).version, '2026.10.2');
+assert.equal(JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8')).version, '2026.10.7');
 const files = await readdir(join(pkg, 'dist'));
 async function runtime(prefix, functionName) {
   for (const file of files.filter(file => file.startsWith(prefix) && file.endsWith('.mjs'))) {
@@ -65,4 +65,4 @@ await assert.rejects(runMessageAction({ cfg, action: 'send', forceCoreDelivery: 
   params: { channel: 'agent-wechat', to: 'wxid_synthetic_target', media: fixture, asDocument: true, channelData: { 'agent-wechat': { videoQuality: 'original' } } },
   mediaAccess: { localRoots: [join(root, 'workspace')] } }), /cannot also request/);
 assert.equal(calls.length, before); assert.equal(networkCalls, 0);
-await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.2', checks, schemaIncludesQuality: true, queuedConflictRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });
+await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.7', checks, schemaIncludesQuality: true, queuedConflictRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });

@@ -2,6 +2,8 @@ name: Native distribution validation
 on:
   pull_request:
     paths:
+      - 'packages/desktop/**'
+      - 'packages/client-ui/**'
       - 'packages/native-client-rust/**'
       - 'rust-toolchain.toml'
       - 'packages/cli/**'
@@ -10,13 +12,21 @@ on:
       - 'scripts/native-*'
       - 'deploy/native/**'
       - '.github/workflows/native-*'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/windows-signing.yml'
       - '.github/workflows/release.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'turbo.json'
+      - 'tsconfig.json'
+      - '.cargo/config*'
       - '.dockerignore'
   push:
     branches: [main]
     paths:
+      - 'packages/desktop/**'
+      - 'packages/client-ui/**'
       - 'packages/native-client-rust/**'
       - 'rust-toolchain.toml'
       - 'packages/cli/**'
@@ -25,9 +35,15 @@ on:
       - 'scripts/native-*'
       - 'deploy/native/**'
       - '.github/workflows/native-*'
+      - '.github/workflows/desktop.yml'
+      - '.github/workflows/windows-signing.yml'
       - '.github/workflows/release.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'turbo.json'
+      - 'tsconfig.json'
+      - '.cargo/config*'
       - '.dockerignore'
 permissions:
   contents: read
@@ -35,20 +51,100 @@ concurrency:
   group: native-distribution-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      native: ${{ steps.filter.outputs.native }}
+      openclaw: ${{ steps.filter.outputs.openclaw }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            native:
+              - 'packages/native-client-rust/**'
+              - 'packages/cli/**'
+              - 'rust-toolchain.toml'
+              - 'scripts/native-build-release*'
+              - 'scripts/native-ci-*'
+              - 'scripts/native-cli-*'
+              - 'scripts/native-container-smoke.py'
+              - 'scripts/native-export-smoke.py'
+              - 'scripts/native-merge-release*'
+              - 'scripts/native-package-smoke.mjs'
+              - 'scripts/native-platform-smoke.mjs'
+              - 'scripts/native-portable-build.mjs'
+              - 'scripts/native-release-manifest.mjs'
+              - 'scripts/native-release-preflight*'
+              - 'scripts/native-service-verify.py'
+              - 'scripts/native-simulator-smoke.mjs'
+              - 'deploy/native/**'
+              - '.github/workflows/native-client.yml'
+              - '.github/workflows/native-distribution.yml'
+              - '.github/workflows/native-portable.yml'
+              - '.github/workflows/native-release.yml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.cargo/config*'
+              - '.dockerignore'
+            openclaw:
+              - 'packages/openclaw-extension/**'
+              - 'packages/shared/**'
+              - 'scripts/native-gateway-smoke.mjs'
+              - 'scripts/native-model-smoke.mjs'
+              - 'scripts/native-media-model-smoke.mjs'
+              - 'scripts/native-history-model-smoke.mjs'
+              - 'scripts/native-recall-model-smoke.mjs'
+              - 'scripts/native-archive-tools-smoke.mjs'
+              - '.github/workflows/native-distribution.yml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+            desktop:
+              - 'deploy/native/Dockerfile'
+              - 'scripts/native-build-release.sh'
+              - 'scripts/native-portable-build.mjs'
+              - 'scripts/native-release-manifest.mjs'
+              - '.github/workflows/native-portable.yml'
+              - '.github/workflows/native-release.yml'
+              - 'packages/desktop/**'
+              - 'packages/client-ui/**'
+              - 'packages/shared/**'
+              - 'packages/native-client-rust/**'
+              - 'packages/cli/**'
+              - 'scripts/native-ci-*'
+              - '.github/workflows/desktop.yml'
+              - '.github/workflows/windows-signing.yml'
+              - '.github/workflows/native-distribution.yml'
+              - 'rust-toolchain.toml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'turbo.json'
+              - 'tsconfig.json'
+              - '.cargo/config*'
+
   openclaw-smoke:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.openclaw == 'true'
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
         suite: [model, media-model, tools]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/agent-wechat... build
@@ -68,16 +164,12 @@ jobs:
           esac
 
   package:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x64
-            platform: linux/amd64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-            platform: linux/arm64
+        include: ${{ fromJSON(github.event_name == 'push' && '[{"runner":"ubuntu-24.04-arm","arch":"arm64","platform":"linux/arm64","target":"aarch64-unknown-linux-gnu"}]' || '[{"runner":"ubuntu-24.04","arch":"x64","platform":"linux/amd64","target":"x86_64-unknown-linux-gnu"},{"runner":"ubuntu-24.04-arm","arch":"arm64","platform":"linux/arm64","target":"aarch64-unknown-linux-gnu"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -85,20 +177,14 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: pnpm
       - uses: docker/setup-buildx-action@v4.4.1
         id: buildx
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli... build
-      - run: pnpm --filter @agent-wechat/cli test
-      - run: pnpm --filter @agent-wechat/shared test
       - run: pnpm --filter @agent-wechat/agent-wechat... build
-      - run: pnpm --filter @agent-wechat/agent-wechat typecheck
-      - run: pnpm --filter @agent-wechat/agent-wechat test
-      - run: node --test scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
-      - run: python3 scripts/native-build-release.test.py
-      - name: Build and test the native release executable
+      - name: Build the native release executable
         uses: docker/build-push-action@v7.4.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -118,18 +204,23 @@ jobs:
       - run: bash scripts/native-build-release.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
-      - run: node scripts/native-package-smoke.mjs artifacts/native
+          NATIVE_CI_ARTIFACT: true
+      - if: github.event_name == 'pull_request'
+        run: node scripts/native-package-smoke.mjs artifacts/native
       - name: Validate actual CLI lifecycle and account selection without a native login
+        if: github.event_name == 'pull_request'
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           python3 scripts/native-cli-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
           python3 scripts/native-cli-fixture-test.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
           python3 scripts/native-export-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Validate real managed/external OpenClaw hosting without account credentials
+        if: github.event_name == 'pull_request'
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           node --experimental-strip-types scripts/native-openclaw-smoke.mjs "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Build standalone image without publishing or starting a service
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v7.4.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
@@ -143,9 +234,12 @@ jobs:
             type=gha,scope=native-linux-${{ runner.arch }}
           cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
       - name: Check image identity without touching account data
+        if: github.event_name == 'pull_request'
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
-      - run: python3 scripts/native-container-smoke.py agent-wechat-native:ci
+      - if: github.event_name == 'pull_request'
+        run: python3 scripts/native-container-smoke.py agent-wechat-native:ci
       - name: Validate deployment examples without applying them
+        if: github.event_name == 'pull_request'
         run: |
           mkdir -p deploy/native/secrets
           printf 'validation-placeholder-not-a-real-secret\n' > deploy/native/secrets/api-token
@@ -154,27 +248,46 @@ jobs:
           python3 scripts/native-service-verify.py "$PWD/artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - uses: actions/upload-artifact@v7
         with:
-          name: native-linux-${{ matrix.arch }}-gnu-validation
+          name: native-validation-${{ matrix.target }}
           path: artifacts/native/*
           if-no-files-found: error
 
   portable:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     uses: ./.github/workflows/native-portable.yml
+    with:
+      windows_simulator: ${{ github.event_name != 'pull_request' }}
+      main_checks_only: ${{ github.event_name == 'push' }}
+
+  desktop:
+    needs: [changes, package, portable]
+    permissions:
+      contents: read
+      id-token: write
+    if: >-
+      !cancelled() && needs.changes.outputs.desktop == 'true' &&
+      (needs.package.result == 'success' || needs.package.result == 'skipped') &&
+      (needs.portable.result == 'success' || needs.portable.result == 'skipped')
+    uses: ./.github/workflows/desktop.yml
+    with:
+      native_artifact_prefix: ${{ needs.changes.outputs.native == 'true' && 'native-validation' || '' }}
 
   matrix-manifest:
-    needs: [package, openclaw-smoke, portable]
+    needs: [changes, package, portable]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.native == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: actions/download-artifact@v8
         with:
-          pattern: native-*validation*
+          pattern: native-validation-*
           path: artifacts/fragments
       - name: Verify complete release matrix without publication
-        run: node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-linux-x64-gnu-validation artifacts/fragments/native-linux-arm64-gnu-validation artifacts/fragments/native-validation-*
+        run: node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-validation-*
       - uses: actions/upload-artifact@v7
         with:
           name: native-release-candidate

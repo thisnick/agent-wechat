@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 const root=resolve(dirname(new URL(import.meta.url).pathname),'..');
 const sdkRoot=await realpath(join(root,'packages/openclaw-extension/node_modules/openclaw'));
 const version=JSON.parse(await readFile(join(sdkRoot,'package.json'),'utf8')).version;
-if(version!=='2026.10.2')throw Error(`Gateway smoke is pinned to OpenClaw 2026.10.2, got ${version}`);
+if(version!=='2026.10.7')throw Error(`Gateway smoke is pinned to OpenClaw 2026.10.7, got ${version}`);
 async function exercise(location) {
 const temporary=await mkdtemp(join(tmpdir(),'native-gateway-smoke-'));
 let child;let log='';let streamClosed;const closed=new Promise(resolve=>{streamClosed=resolve;});let mediaRequests=0;

@@ -13,10 +13,21 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/release.yml'
       - '.github/workflows/native-release.yml'
+      - '.github/workflows/native-client.yml'
+      - '.github/workflows/native-portable.yml'
+      - '.github/workflows/native-image.yml'
+      - '.github/workflows/native-distribution.yml'
+      - '.github/workflows/desktop.yml'
       - 'scripts/client-ui-smoke.mjs'
       - 'scripts/native-release-notes*.mjs'
       - 'scripts/native-release-policy*.mjs'
       - 'scripts/native-release-orchestration*.mjs'
+      - 'scripts/native-release-trigger*.mjs'
+      - 'scripts/native-ci-*.mjs'
+      - 'scripts/native-ci-*.py'
+      - 'scripts/native-build-release.test.py'
+      - 'scripts/native-release-preflight*.mjs'
+      - 'scripts/native-merge-release*.mjs'
       - '.changeset/**'
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
@@ -28,16 +39,28 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       ts: ${{ steps.filter.outputs.ts }}
       docs: ${{ steps.filter.outputs.docs }}
       release: ${{ steps.filter.outputs.release }}
+      helpers: ${{ steps.filter.outputs.helpers }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
+            helpers:
+              - 'scripts/native-ci-*'
+              - 'scripts/native-build-release*'
+              - 'scripts/native-release-preflight*'
+              - 'scripts/native-merge-release*'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/native-*.yml'
+              - '.github/workflows/desktop.yml'
             release:
               - '.github/workflows/release.yml'
               - '.github/workflows/native-release.yml'
@@ -50,6 +73,7 @@ jobs:
               - 'scripts/install-ci-npm.sh'
               - 'scripts/verify-ci-publisher*.mjs'
             ts:
+              - 'packages/desktop/**'
               - 'packages/cli/**'
               - 'packages/shared/**'
               - 'packages/client-ui/**'
@@ -61,6 +85,8 @@ jobs:
               - 'turbo.json'
               - 'tsconfig.json'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/native-distribution.yml'
+              - '.github/workflows/desktop.yml'
             docs:
               - 'docs/**'
               - 'pnpm-lock.yaml'
@@ -76,7 +102,7 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - run: bash -n scripts/install-ci-npm.sh
       - run: bash scripts/install-ci-npm.sh
       - run: |
@@ -104,7 +130,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: pnpm
 
       - name: Install dependencies
@@ -118,6 +144,23 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
+
+  helpers:
+    needs: changes
+    if: needs.changes.outputs.helpers == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.22.1
+      - name: Check CI build and artifact helpers
+        run: |
+          python3 scripts/native-ci-cache-key.test.py
+          python3 scripts/native-ci-build.test.py
+          python3 scripts/native-build-release.test.py
+          node --test scripts/native-ci-artifact.test.mjs scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
 
   docs:
     needs: changes
@@ -135,7 +178,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: pnpm
 
       - name: Install dependencies

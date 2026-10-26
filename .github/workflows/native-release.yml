@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - id: plan
         run: node scripts/native-release-trigger.mjs
         env:
@@ -45,15 +45,17 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x64
+            target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             arch: arm64
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: pnpm/action-setup@v6
       - uses: docker/setup-buildx-action@v4.4.1
         id: buildx
@@ -73,14 +75,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
-      - run: pnpm --filter @agent-wechat/cli test
-      - name: Build and test the native release executable
+      - name: Build the native release executable
         uses: docker/build-push-action@v7.4.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: deploy/native/Dockerfile
-          target: builder
+          target: release-artifact
           platforms: ${{ matrix.arch == 'x64' && 'linux/amd64' || 'linux/arm64' }}
           load: true
           tags: native-release-builder:ci
@@ -90,10 +91,11 @@ jobs:
       - run: bash scripts/native-build-release.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
+          NATIVE_CI_ARTIFACT: true
       - run: node scripts/native-package-smoke.mjs artifacts/native
       - uses: actions/upload-artifact@v7
         with:
-          name: native-release-${{ matrix.arch }}
+          name: native-release-${{ matrix.target }}
           path: artifacts/native/*
           if-no-files-found: error
   portable:
@@ -103,7 +105,7 @@ jobs:
     with:
       artifact_prefix: native-release
   desktop:
-    needs: plan
+    needs: [plan, build, portable]
     if: needs.plan.outputs.publish == 'true'
     permissions:
       contents: read
@@ -111,9 +113,14 @@ jobs:
     uses: ./.github/workflows/desktop.yml
     with:
       release: true
+      native_artifact_prefix: native-release
     secrets: inherit
+  checks:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    uses: ./.github/workflows/native-client.yml
   prepare:
-    needs: [plan, build, portable, desktop]
+    needs: [plan, checks, build, portable, desktop]
     environment: native-release
     permissions:
       contents: write
@@ -125,7 +132,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.1
       - uses: actions/download-artifact@v8
         with:
           pattern: native-release-*
@@ -133,7 +140,7 @@ jobs:
       - name: Verify and combine independently tested executables
         run: |
           node --test scripts/native-merge-release.test.mjs
-          node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-x64 artifacts/fragments/native-release-arm64 artifacts/fragments/native-release-*-*
+          node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-*
       - uses: actions/download-artifact@v8
         with:
           pattern: desktop-release-*

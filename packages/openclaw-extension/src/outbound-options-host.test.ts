@@ -17,6 +17,6 @@ test("pinned message builder and required queues retain video quality and canoni
   });
   const result = JSON.parse(await readFile(join(root, "result.json"), "utf8"));
   assert.deepEqual(result.checks, ["prepared-normal", "prepared-original", "forced-core-original", "document-alias", "queued-original", "queued-document-alias"]);
-  assert.equal(result.runtime, "2026.10.2"); assert.equal(result.schemaIncludesQuality, true); assert.equal(result.queuedConflictRejected, true);
+  assert.equal(result.runtime, "2026.10.7"); assert.equal(result.schemaIncludesQuality, true); assert.equal(result.queuedConflictRejected, true);
   assert.equal(result.networkCalls, 0); assert.equal(result.providerSends, 0);
 });

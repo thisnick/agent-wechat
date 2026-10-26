@@ -17,7 +17,24 @@ The container packages the same daemon as the executable. It replaces the previo
 
 ## CI build and validation
 
-**Native client** runs format, Clippy, the Rust workspace tests, generated-contract checks and a real daemon smoke on separate x64 and native ARM64 workers. **Native distribution validation** builds each release in Bookworm (glibc 2.36), installs an actual npm tarball from local assets, tests CLI lifecycle/account/receipt behavior, exercises managed/external OpenClaw hosting, builds/runs the container, and validates Compose/service templates. Pinned OpenClaw Gateway/model fixtures use local synthetic data. Native macOS/Windows jobs build actual executables and run verified package, lifecycle and managed/external hosting smoke tests. A final job combines all five independently tested target manifests and checks source/version/hash consistency. These PR jobs do not publish, log into WeChat or deploy.
+PR checks own routine validation; main runs the checks deliberately deferred from PRs. Distribution jobs use separate path filters, so an OpenClaw-only change does not rebuild the Rust CLI or desktop. Tests use local synthetic data and do not publish, log into WeChat or deploy.
+
+| Check | Pull requests | Main after merging | Release preparation |
+| --- | --- | --- | --- |
+| TypeScript, UI and desktop JavaScript tests | Once on Linux x64 | No repeat | Reviewed version commit |
+| Rust format and Clippy | Linux x64; desktop format once | No repeat | Required native checks on the release commit |
+| Rust workspace tests and native daemon/simulator smoke | Linux x64 and ARM64 | No repeat | Both Linux architectures gate publication |
+| Generated TypeScript contracts | Linux x64 | No repeat | Linux x64 |
+| Connected UI/launcher smoke | Linux x64 | No repeat | Linux x64 and ARM64 |
+| Pinned OpenClaw Gateway/model fixtures | Linux x64 only | No repeat | Reviewed version commit |
+| CLI package, lifecycle, platform and container checks | All five CLI targets; containers on both Linux architectures | No full repeat; build only the CLI inputs needed below | All five CLI targets; runtime images tested before publication |
+| Upstream simulator on macOS/Windows | macOS | Windows x64 and ARM64 | All three targets |
+| Desktop native tests and credential stores | Linux x64, Windows x64, macOS ARM64 | Linux ARM64 and Windows ARM64 | All five targets |
+| Desktop installers | Omitted | Unsigned deferred ARM installers | Signed packages; all five targets required |
+
+Linux release binaries are built in Bookworm (glibc 2.36). The Dockerfile builds only `wx-native`; it does not repeat the Rust unit suite or compile the development simulator. Distribution CI still tests the actual packaged executable and container. A complete PR CLI matrix is merged only when native inputs changed; release preparation always requires the complete matrix.
+
+Distribution and release preparation pass their CLI artifacts to desktop within the same workflow run. Desktop verifies the clean source commit, pinned compiler, target, Rust flags, checksum and executable identity before reuse. Standalone desktop runs build their own CLI. Windows dependency caches are restored even when the exact CLI executable is cached, and simulator/test builds omit debug symbols.
 
 CI is the normal build path. An already configured remote Docker builder is also usable without provisioning a local compiler: run Docker against its existing context on a native worker. Do not include private worker addresses or credentials in this repository.
 

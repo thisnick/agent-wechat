@@ -29,7 +29,7 @@ fi
 # newer libc. Only source enters the builder; no account paths are mounted.
 BUILDER_TAG=${NATIVE_RELEASE_BUILDER_IMAGE:-"agent-wechat-native-release-build:local-${COMMIT:0:12}-$$"}
 if [ -n "${NATIVE_RELEASE_BUILDER_IMAGE:-}" ]; then
-  # CI supplies its cached, tested builder. Refuse artifacts from another commit
+  # CI supplies its cached builder. Refuse artifacts from another commit
   # or architecture before attaching the current source identity to them.
   REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$BUILDER_TAG")
   IMAGE_PLATFORM=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$BUILDER_TAG")
@@ -48,5 +48,13 @@ install -m 755 "$BINARY" "$ASSET"
 rm "$BINARY"
 node scripts/native-release-manifest.mjs "$ASSET" "$VERSION" "$COMMIT" "$OUT/wx-v$VERSION-checksums.json" "$DIRTY"
 install -m 644 packages/cli/THIRD_PARTY_NOTICES.txt "$OUT/wx-v$VERSION-THIRD-PARTY-NOTICES.txt"
+# Keep compiler provenance beside CI artifacts so desktop can reuse this binary.
+# Local release builds do not need the additional handoff metadata.
+if [ "${NATIVE_CI_ARTIFACT:-false}" = true ]; then
+  COMPILER_FILE=$(mktemp)
+  docker cp "$CONTAINER:/build/rustc-version" "$COMPILER_FILE"
+  node scripts/native-ci-artifact.mjs record "$OUT" --compiler-file "$COMPILER_FILE"
+  rm "$COMPILER_FILE"
+fi
 python3 packages/native-client-rust/scripts/smoke.py "$ASSET"
 echo "Native artifacts validated at $OUT (not published)"

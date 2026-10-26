@@ -47,7 +47,7 @@ export function nativeDispatchManifest(params: {
     ...(history.length ? { historyInputs: Object.freeze(history.map(message => Object.freeze({ id: message.id, version: message.version ?? "",
       contentSha256: digest(JSON.stringify([message.id, message.version, message.senderId, message.type, message.body, message.mentions, message.serverId, message.appMessageType, message.quote, message.link])), role: "history" as const }))) } : {}),
     assets, policySha256: digest(JSON.stringify(params.policy ?? null)),
-    // Exact released 2026.10.2 source-turn identity. Requiring it in the later
+    // Exact source-turn identity of OpenClaw 2026.10.2 through 2026.10.7. Requiring it in the later
     // snapshot prevents an identical older image/body from proving this input.
     hostSourceTurnId: `channel-user:v1:${digest(JSON.stringify(["agent-wechat", params.channelAccountId, `wechat:${params.message.threadId}`, messageSid]))}` };
   return Object.freeze({ ...manifest, manifestSha256: digest(JSON.stringify(manifest)) });

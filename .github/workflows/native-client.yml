@@ -1,23 +1,12 @@
 name: Native client
 
 on:
+  workflow_call:
   pull_request:
     paths:
       - 'packages/native-client-rust/**'
       - 'rust-toolchain.toml'
-      - 'packages/shared/src/native*'
-      - 'scripts/native-generate-types.sh'
-      - 'scripts/native-simulator-smoke.mjs'
-      - 'scripts/client-ui*-smoke.mjs'
-      - 'packages/client-ui/**'
-      - 'pnpm-lock.yaml'
-      - 'scripts/native-ci-cache-key*.py'
-      - '.github/workflows/native-client.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'packages/native-client-rust/**'
-      - 'rust-toolchain.toml'
+      - '.cargo/config*'
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-simulator-smoke.mjs'
@@ -49,6 +38,9 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         suite: [lint, test]
+        exclude:
+          - runner: ubuntu-24.04-arm
+            suite: lint
         include:
           - runner: ubuntu-24.04
             ffmpeg_arch: x64
@@ -80,8 +72,6 @@ jobs:
           # differ across runner images. Key the compiler we actually select.
           add-rust-environment-hash-key: false
           key: native-${{ matrix.runner }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ steps.cache-key.outputs.rust }}
-      - if: matrix.suite == 'lint'
-        run: python ../../scripts/native-ci-cache-key.test.py
       - if: matrix.suite == 'lint'
         run: cargo fmt --all --check
       - if: matrix.suite == 'lint'
@@ -129,27 +119,21 @@ jobs:
       - if: matrix.suite == 'test'
         uses: actions/setup-node@v4
         with:
-          node-version: '24.19.0'
+          node-version: 24.22.1
       - name: Exercise the real hub through the local upstream simulator
         if: matrix.suite == 'test'
         run: node ../../scripts/native-simulator-smoke.mjs
-      - if: matrix.suite == 'test'
+      - if: matrix.suite == 'test' && runner.arch == 'X64'
         run: bash ../../scripts/native-generate-types.sh --check
       - if: matrix.suite == 'test'
         run: python3 scripts/smoke.py target/debug/wx
-      - if: matrix.suite == 'test'
+      - if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         uses: pnpm/action-setup@v4
       - name: Install browser-client test dependencies
-        if: matrix.suite == 'test'
+        if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui...
-      - name: Check browser-client state models
-        if: matrix.suite == 'test'
-        working-directory: .
-        run: |
-          pnpm --filter @agent-wechat/shared build
-          pnpm --filter @agent-wechat/client-ui test
       - name: Exercise the connected session and UI launcher with synthetic accounts
-        if: matrix.suite == 'test'
+        if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm client:smoke

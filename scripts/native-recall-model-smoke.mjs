@@ -13,7 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.2');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.7');
 const temporary = await mkdtemp(join(tmpdir(), 'native-recall-model-'));
 const token = 'synthetic-native-token-'.repeat(3), serverId = '18446744073709551614';
 const messages = new Map(), journal = [], streams = new Set(), posts = [], sends = [], requests = [], acknowledgements = [];
@@ -197,7 +197,7 @@ try {
   assert.equal((await item(reused.id)).message.body, reused.body);
   const persisted = await readFile(custodyPath, 'utf8');
   assert.ok(!persisted.includes('runtime-recall-blocked-original')); assert.ok(!persisted.includes('Late original must not be delivered'));
-  console.log(JSON.stringify({ gatewayVersion: '2026.10.2', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
+  console.log(JSON.stringify({ gatewayVersion: '2026.10.7', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
     recallPostAttempts: posts.length, nativeRecallAttempts: nativeRecalls, foreignThreadRejected: true, sseRecallWhileModelBlocked: true,
     lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, recycledIdRecallAckPreservesCurrent: true }));
 } finally {
