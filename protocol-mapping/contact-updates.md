@@ -13,7 +13,7 @@ pass; a standalone phone group toggle remains unverified.
 | Official reference | Linux 4.1.13.26 AMD64; SHA-256 `2749535f299ba67feb8ef80cab898bb0531fa8f376b16f8a72db706811c84132` |
 | Released/source comparison | `thisnick/agent-wechat` at `27a8b54`, v1.0.0-beta.15 |
 | New implementation | Branch `codex/thread-mute-state`, following `0527289`: nullable mute reads, independent contact sync, and native desktop notifications |
-| Code verification | Pinned formatting and warning-denying Clippy; metadata, contract and TypeScript checks. 634 workspace tests passed, one benchmark ignored; tests cover uncertain mute reads, direct mutation recovery and group contact-stream mute changes |
+| Code verification | Pinned formatting and warning-denying Clippy; metadata, contract and TypeScript checks. Native workspace and focused protocol tests passed, one benchmark ignored; tests cover uncertain mute reads, direct mutation recovery and group contact-stream mute changes |
 | Isolated runtime verification | Debian-built hub/CLI and real SDK/session simulator smoke passed, including thread detail/list mute assertions after group mute/unmute |
 | Live daemon acceptance of new code | Deployed Linux x64 validation daemon: command356, contact drain, saved mute, SSE and API/CLI state observed |
 | Automatic phone updates | Direct mute and unmute passed without refresh; group mapping fixture tested, phone group toggle pending |
@@ -24,7 +24,7 @@ pass; a standalone phone group toggle remains unverified.
 | --- | --- | --- | --- |
 | Command 24 notification, four-byte big-endian selector | Existing official/native push experiments; observed again in this test | Daemon handles selectors with low three bits set and invokes NewSync CGI138 | This is not the complete incoming notification surface |
 | Message NewSync command list | Audited native message batches contained message commands, with no matching contact update | Encrypted received batches and unresolved commands are retained | Absence of ModContact in this window does not prove absence of all upstream pushes |
-| Unsolicited command356 | Official phone trace; namespace11 / notice2048 / selector0x20004 | Implemented, coalesced separately from message hints | Direct-chat live acceptance passed; phone group toggle pending |
+| Unsolicited command356 | Official phone trace; namespace11 / notice2048 / selector0x20004 | Implemented, coalesced separately from message hints; notices without selectors are ignored without interrupting replies | Direct-chat live acceptance and restart passed; phone group toggle pending |
 | Follow-up CGI8674 | Official trace pairs command356 with CGI8674 | Implemented with account/session/logout fences | Direct-chat live acceptance passed; phone group toggle pending |
 | CGI8674 endpoint | Matching-build implementation and request capture | Uses `/cgi-bin/micromsg-bin/contactsync` | The separate `bypcontactsync` route is not used |
 | Contact-sync request fields | Matching-build drain and captured requests | Implemented: BaseRequest1, scene2=3 initially / 4 for continuation, repeated uint64 selector3, contact cursor4, message context5 | Two captured initial requests serialize byte-for-byte. Continuation has matching static evidence; live multipage acceptance pending |

@@ -41,7 +41,15 @@ fn notification(packet: &Longlink) -> Result<Option<Notification>> {
         if p::scalar(&notice, 1)? != 2048 {
             return Ok(None);
         }
-        let selectors = p::decode(p::data(&notice, 2)?)?;
+        // Some namespace notices have no selector payload. They do not match
+        // the mapped contact hint and must not interrupt an in-flight reply.
+        let Some(raw_selectors) = p::optional_data(&notice, 2)? else {
+            return Ok(None);
+        };
+        let selectors = p::decode(raw_selectors)?;
+        if p::optional(&selectors, 1)?.is_none() {
+            return Ok(None);
+        }
         let selector = u32::try_from(p::scalar(&selectors, 1)?)?;
         return Ok(
             (selector == crate::contact_sync::CONTACT_SELECTOR as u32).then_some(Notification {
@@ -240,6 +248,32 @@ mod tests {
         for invalid in [&[][..], &[6][..], &[0, 0, 6][..], &[0; 5][..]] {
             assert!(notification(&push(0, invalid)).is_err());
         }
+    }
+    #[test]
+    fn unmapped_contact_notices_without_selectors_leave_the_inbox_intact() {
+        use crate::protobuf as p;
+        let mut inbox = Inbox::default();
+        inbox.observe(&push(0, &2u32.to_be_bytes())).unwrap();
+        for notice in [
+            p::uint(1, 2048),
+            p::message(&[p::uint(1, 2048), p::bytes(2, b"")]).unwrap(),
+        ] {
+            inbox
+                .observe(&Longlink {
+                    command: 356,
+                    sequence: 0,
+                    payload: p::message(&[p::uint(2, 11), p::bytes(3, &notice)]).unwrap(),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            inbox.pending.pop_front().unwrap(),
+            Notification {
+                command: 24,
+                selector: 2
+            }
+        );
+        assert!(inbox.pending.is_empty());
     }
     #[test]
     fn contact_hint_coalesces_separately_from_message_work() {
