@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 1.0.0-beta.15
+
+### Patch Changes
+
+- [#280](https://github.com/thisnick/agent-wechat/pull/280) [`063f072`](https://github.com/thisnick/agent-wechat/commit/063f0726bef6f37252b21c5716bd1b31d2344a8a) Thanks [@thisnick](https://github.com/thisnick)! - Validate the OpenClaw integration against 2026.10.7. Source development and CI now use Node 24.22.1 or newer; the standalone CLI's Node requirement is unchanged.
+
 ## 1.0.0-beta.14
 
 ### Minor Changes
