@@ -9,6 +9,7 @@ const site = 'https://thisnick.github.io';
 
 // Pages from the previous layout, kept working for existing links.
 const moved = {
+  'use/video': 'use/quality',
   'getting-started/overview': '',
   'getting-started/quickstart': 'setup/install',
   'getting-started/native-client': 'setup/requirements',
@@ -66,7 +67,7 @@ export default defineConfig({
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Settings', slug: 'use/settings' },
-          { label: 'Video and image quality', slug: 'use/video' },
+          { label: 'Video and image quality', slug: 'use/quality' },
           { label: 'OpenClaw', items: [
             { label: 'Quick setup', slug: 'openclaw/setup' },
             { label: 'Managed or external', slug: 'openclaw/modes' },
