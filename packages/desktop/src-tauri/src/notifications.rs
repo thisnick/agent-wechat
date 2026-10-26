@@ -140,6 +140,11 @@ fn preview(message: &Value) -> Option<String> {
         34 => "Voice message".into(),
         43 => "Video".into(),
         47 => "Sticker".into(),
+        49 if message["appMessageType"] == 57 || message["quote"].is_object() => message["body"]
+            .as_str()
+            .filter(|body| !body.trim().is_empty())
+            .unwrap_or("Reply")
+            .into(),
         49 => match message["appMessageType"].as_u64() {
             Some(5) => "Shared link",
             Some(6) => "File",
@@ -613,6 +618,38 @@ mod tests {
                 .is_none()
         );
         assert!(preview(&json!({"type":1,"body":"secret","direction":"outgoing"})).is_none());
+    }
+    #[test]
+    fn quoted_reply_previews_show_the_comment_instead_of_an_attachment_or_the_quote() {
+        for quote in [
+            Value::Null,
+            json!({"embeddedText":"Original quoted message"}),
+        ] {
+            assert_eq!(
+                preview(
+                    &json!({"type":49,"appMessageType":57,"body":"Yes,\n that works",
+                    "quote":quote,"direction":"incoming"})
+                ),
+                Some("Yes, that works".into())
+            );
+        }
+        // Older hubs may include the quote without an application subtype.
+        assert_eq!(
+            preview(
+                &json!({"type":49,"body":"My reply","quote":{"type":1},"direction":"incoming"})
+            ),
+            Some("My reply".into())
+        );
+        for body in [Value::Null, json!(""), json!(" \n ")] {
+            assert_eq!(
+                preview(&json!({"type":49,"appMessageType":57,"body":body,"direction":"incoming"})),
+                Some("Reply".into())
+            );
+        }
+        assert_eq!(
+            preview(&json!({"type":49,"appMessageType":57,"body":"😀".repeat(200),"direction":"incoming"})).unwrap().chars().count(),
+            180
+        );
     }
     #[test]
     fn durable_claims_never_repeat() {

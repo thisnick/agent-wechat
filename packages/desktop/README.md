@@ -10,6 +10,8 @@ Once configured, the local hub starts whenever the app opens, including when the
 
 Message notifications run in the native app for signed-in profiles on the selected hub, including while the window is hidden. Change **Settings → Message notifications** to turn them off. The app alerts for new incoming messages in chats known to be unmuted, after contact sync is ready. It suppresses the conversation being read in the focused window, history, outgoing messages and duplicate events. Starting the app begins at the current event boundary; it does not replay old alerts. Only message IDs and event cursors are kept in protected notification receipts.
 
+Notifications for quoted replies show the reply text. If that text is unavailable, the preview says “Reply.”
+
 Clicking an alert opens its account and conversation while that hub is selected. Windows clicks are reported while the toast is on screen; Action Center activation remains a platform limitation of the notification plugin. OS notification settings and Do Not Disturb also apply. macOS and Windows delivery need installed-app acceptance.
 
 ## App updates

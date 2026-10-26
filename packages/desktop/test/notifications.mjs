@@ -226,12 +226,30 @@ export async function notificationsAcceptance(invoke) {
     );
     send("after-expiry");
     await wait(async () => (await entries()).length === 3);
+    send("quoted-reply", {
+      message: {
+        type: 49,
+        appMessageType: 57,
+        body: "Yes, that works",
+        quote: {
+          serverId: "42",
+          type: 1,
+          embeddedText: "Original quoted message",
+        },
+      },
+    });
+    const quoted = await wait(async () => (await entries())[3]);
+    assert.equal(
+      quoted.body,
+      "Yes, that works",
+      "quoted reply alerts must show the new comment"
+    );
     await invoke("notifications_enabled", { enabled: false });
     send("disabled");
     await pause(700);
     assert.equal(
       (await entries()).length,
-      3,
+      4,
       "disabled notifications must remain silent"
     );
     await invoke("notifications_enabled", { enabled: true });
