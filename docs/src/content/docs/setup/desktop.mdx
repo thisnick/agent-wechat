@@ -34,7 +34,7 @@ The status response identifies the hub and its native backend. Use the address d
 
 ## Allow network access
 
-Network access uses HTTPS. The desktop generates its own certificate; you do not need to supply TLS files. Standalone `wx serve` supports `--tls-cert-file` and `--tls-key-file` when you want to use an existing certificate, such as one issued for your hub’s LAN hostname. For a hub with its own certificate, copy its certificate from desktop Settings and trust it for that saved connection. The CLI can trust that certificate for an invocation:
+Network access uses HTTPS. The desktop generates its own certificate; you do not need to supply TLS files. Standalone `wx serve` supports `--tls-cert-file` and `--tls-key-file` when you want to use an existing certificate, such as one issued for your hub’s LAN hostname. Publicly trusted HTTPS addresses, including Tailscale Serve addresses, need no extra certificate. For a hub using a private certificate, copy it from the hub's desktop Settings, then paste it under **Advanced → Private certificate (optional)** when connecting from another desktop app. A browser uses its own certificate trust settings. The CLI can trust that certificate for an invocation:
 
 ```bash
 wx --server-name desktop --ca-cert-file /path/to/certificate.pem status

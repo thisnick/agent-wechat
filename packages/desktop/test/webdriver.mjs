@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import https from "node:https";
 import { notificationsAcceptance } from "./notifications.mjs";
+import { interfaceAcceptance } from "./interface.mjs";
 const application = process.env.DESKTOP_BINARY;
 if (!application) throw new Error("DESKTOP_BINARY is required");
 const driver = spawn(
@@ -261,6 +262,13 @@ try {
   console.log(
     "Native update settings and release channel persist across restart"
   );
+  await interfaceAcceptance({
+    script,
+    invoke: invokeNative,
+    until,
+    resize: (width, height) =>
+      call(`/session/${session}/window/rect`, { width, height }),
+  });
   try {
     await script(
       "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"

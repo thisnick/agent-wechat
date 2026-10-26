@@ -110,6 +110,7 @@ function ErrorNotice({ children }: { children: ReactNode }) {
 function App() {
   useEffect(() => desktop ? installDesktopLinks() : undefined, []);
   const [connection, setConnection] = useState<Connection | null>(null);
+  const [changingHub, setChangingHub] = useState(false);
   const [starting, setStarting] = useState(true);
   const [error, setError] = useState("");
   const [theme, setTheme] = useTheme();
@@ -137,35 +138,58 @@ function App() {
     [connection],
   );
   useEffect(() => {
-    document.body.classList.toggle("onboarding-active", !connection);
-  }, [connection]);
+    document.body.classList.toggle(
+      "onboarding-active",
+      !connection || changingHub,
+    );
+  }, [connection, changingHub]);
+  function connected(value: Connection) {
+    setConnection(value);
+    setChangingHub(false);
+  }
   if (starting)
     return (
       <Welcome simulator={false}>
         <h1>Opening AgentWechat…</h1>
       </Welcome>
     );
-  if (!connection)
-    return desktop ? <DesktopWelcome error={error} onConnect={setConnection} /> : <ConnectionForm error={error} onConnect={setConnection} />;
+  if (!connection || changingHub)
+    return desktop ? (
+      <DesktopWelcome error={error} onConnect={connected} />
+    ) : (
+      <ConnectionForm
+        error={error}
+        onConnect={connected}
+        initialEndpoint={connection?.endpoint}
+        onBack={connection ? () => setChangingHub(false) : undefined}
+      />
+    );
   return (
     <Client
       key={connection.endpoint}
       connection={connection}
       theme={theme}
       setTheme={setTheme}
-      onConnect={setConnection}
-      disconnect={() => setConnection(null)}
+      onConnect={connected}
+      disconnect={() => {
+        if (desktop) setConnection(null);
+        else setChangingHub(true);
+      }}
     />
   );
 }
 function ConnectionForm({
   onConnect,
   error: initialError,
+  onBack,
+  initialEndpoint,
 }: {
   onConnect: (c: Connection) => void;
   error: string;
+  onBack?: () => void;
+  initialEndpoint?: string;
 }) {
-  const [endpoint, setEndpoint] = useState(location.origin),
+  const [endpoint, setEndpoint] = useState(initialEndpoint ?? location.origin),
     [token, setToken] = useState("");
   const [error, setError] = useState(initialError),
     [busy, setBusy] = useState(false),
@@ -191,6 +215,16 @@ function ConnectionForm({
   }
   return (
     <Welcome simulator={false}>
+      {onBack && (
+        <button
+          className="step-back"
+          type="button"
+          disabled={busy}
+          onClick={onBack}
+        >
+          <Icon name="back" /> Back
+        </button>
+      )}
       <div className="welcome-heading">
         <h1>Connect to an agent-wechat hub</h1>
         <p>Enter the address and access key for your agent-wechat hub.</p>

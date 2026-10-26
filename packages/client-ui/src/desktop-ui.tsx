@@ -29,11 +29,21 @@ export function DesktopWelcome({
     [endpoint, setEndpoint] = useState("http://127.0.0.1:6174"),
     [key, setKey] = useState("");
   const [certificate, setCertificate] = useState("");
+  const https = endpoint.trim().toLowerCase().startsWith("https://");
   useEffect(() => {
+    if (mode !== "choose") return;
+    let cancelled = false;
     void desktopInvoke<DesktopSettings>("desktop_settings")
-      .then(setSettings)
-      .catch((error) => setError(message(error)));
-  }, []);
+      .then((value) => {
+        if (!cancelled) setSettings(value);
+      })
+      .catch((error) => {
+        if (!cancelled) setError(message(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode]);
   async function open(command: string, args?: Record<string, unknown>) {
     setBusy(true);
     setError("");
@@ -53,13 +63,15 @@ export function DesktopWelcome({
       name,
       endpoint,
       key,
-      certificate: certificate.trim() || null,
+      certificate: https ? certificate.trim() || null : null,
     });
   }
   if (mode === "settings")
     return (
       <Welcome simulator={false}>
-        <h1>Desktop settings</h1>
+        <div className="welcome-heading">
+          <h1>Desktop settings</h1>
+        </div>
         <DesktopPreferences onConnection={onConnect} manageLocal />
         <button className="secondary" onClick={() => setMode("choose")}>
           Back
@@ -144,19 +156,24 @@ export function DesktopWelcome({
               autoComplete="off"
             />
           </label>
-          <details>
-            <summary>Trust a hub certificate</summary>
-            <p>
-              For a hub with its own certificate, paste the certificate supplied
-              by its owner.
-            </p>
-            <textarea
-              value={certificate}
-              onChange={(event) => setCertificate(event.target.value)}
-              placeholder="-----BEGIN CERTIFICATE-----"
-              aria-label="Trusted hub certificate"
-            />
-          </details>
+          {https && (
+            <details className="desktop-certificate">
+              <summary>Advanced</summary>
+              <p>
+                Most hubs need no extra certificate. For a hub using a private
+                certificate, paste the PEM certificate supplied by its owner.
+              </p>
+              <label>
+                Private certificate (optional)
+                <textarea
+                  value={certificate}
+                  onChange={(event) => setCertificate(event.target.value)}
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  spellCheck={false}
+                />
+              </label>
+            </details>
+          )}
           <button className="continue-button" disabled={busy}>
             {busy ? "Connecting…" : "Connect"}
           </button>
@@ -166,6 +183,7 @@ export function DesktopWelcome({
             disabled={busy}
             onClick={() => {
               setKey("");
+              setCertificate("");
               setMode("choose");
             }}
           >

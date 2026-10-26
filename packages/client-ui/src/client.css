@@ -465,7 +465,6 @@ input:focus-visible {
   }
   .product-description {
     font-size: 26px;
-    margin-bottom: 30px;
   }
 
   .onboarding-main {
@@ -1898,18 +1897,18 @@ input:focus-visible {
 .desktop-choices > button { width: 100%; }
 .desktop-choices small { display: block; margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
 .desktop-form label { display: grid; gap: 8px; }
-.desktop-form input:not([type="checkbox"]), .desktop-preferences textarea, .desktop-form textarea { width: 100%; min-height: 40px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; color: inherit; background: var(--panel); }
+.desktop-form input:not([type="checkbox"]), .desktop-preferences textarea, .desktop-form textarea { width: 100%; min-height: 40px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: inherit; background: var(--surface); }
 .desktop-form textarea, .desktop-preferences textarea { min-height: 104px; font-family: monospace; resize: vertical; }
 .desktop-form details > p, .desktop-help { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .desktop-form summary { cursor: pointer; }
 .desktop-port-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
-.desktop-preferences > .desktop-form, .desktop-preferences > .desktop-connection-details { padding: 20px 0; border-bottom: 1px solid var(--border); }
+.desktop-preferences > .desktop-form, .desktop-preferences > .desktop-connection-details { padding: 20px 0; border-bottom: 1px solid var(--line); }
 .desktop-access-key { flex-wrap: wrap; }
 .desktop-access-key input { width: 100%; font-family: monospace; }
 .desktop-connection-details code, .desktop-preferences small { overflow-wrap: anywhere; }
 
-.desktop-update-settings { border-bottom: 1px solid var(--border); padding-bottom: 20px; }
+.desktop-update-settings { border-bottom: 1px solid var(--line); padding-bottom: 20px; }
 .desktop-update-settings .setting { gap: 16px; }
 .desktop-update-settings progress { width: 100%; }
-.desktop-update-notice { position: fixed; z-index: 2000; right: 24px; bottom: 24px; max-width: min(440px, calc(100vw - 48px)); padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 8px 24px #0003; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.desktop-update-notice { position: fixed; z-index: 2000; right: 24px; bottom: 24px; max-width: min(440px, calc(100vw - 48px)); padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 8px 24px #0003; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .desktop-update-notice small { flex-basis: 100%; color: var(--muted); }

@@ -43,6 +43,10 @@ export type SavedBlob = {
   refreshedAt?: number;
   etag?: string | null;
 };
+type StoredBlob = Omit<SavedBlob, "blob"> & {
+  content: ArrayBuffer;
+  contentType: string;
+};
 type Row = {
   key: string[];
   scope: string;
@@ -408,34 +412,64 @@ export class BrowserCache {
   async blob(
     kind: "avatars" | "media",
     account: string,
-    id: string,
+    id: string
   ): Promise<SavedBlob | undefined> {
     await this.flush();
-    return this.transaction([kind], "readwrite", async (tx) => {
+    const data = await this.transaction([kind], "readwrite", async (tx) => {
       const row = await request<Row | undefined>(
-        tx.objectStore(kind).get(this.key(account, id)),
+        tx.objectStore(kind).get(this.key(account, id))
       );
       if (!row) return;
       row.lastUsed = this.now();
       tx.objectStore(kind).put(row);
-      return row.data as SavedBlob;
+      return row.data as StoredBlob | SavedBlob;
     });
+    if (!data) return;
+    try {
+      // WebKit can lose an IndexedDB Blob's backing file after a reload. Store
+      // bytes instead, and recover old Blob entries without trusting their URL.
+      const content =
+        "content" in data ? data.content : await data.blob.arrayBuffer();
+      const contentType =
+        "contentType" in data ? data.contentType : data.blob.type;
+      return {
+        blob: new Blob([content], { type: contentType }),
+        checkedAt: data.checkedAt,
+        refreshedAt: data.refreshedAt,
+        etag: data.etag,
+      };
+    } catch {
+      // Fetch the hub's cached bytes again if a legacy Blob is no longer readable.
+      await this.enqueue(() =>
+        this.transaction([kind], "readwrite", (tx) => {
+          tx.objectStore(kind).delete(this.key(account, id));
+        })
+      );
+      return;
+    }
   }
   saveBlob(
     kind: "avatars" | "media",
     account: string,
     id: string,
     data: SavedBlob,
-    messageId?: string,
+    messageId?: string
   ) {
     if (data.blob.size > this.mediaBudget) return;
-    const row = {
-      ...this.row(account, id, data),
-      bytes: data.blob.size,
-      messageId,
-    };
-    void this.enqueue(() =>
-      this.transaction(["avatars", "media"], "readwrite", async (tx) => {
+    void this.enqueue(async () => {
+      const stored: StoredBlob = {
+        content: await data.blob.arrayBuffer(),
+        contentType: data.blob.type,
+        checkedAt: data.checkedAt,
+        refreshedAt: data.refreshedAt,
+        etag: data.etag,
+      };
+      const row = {
+        ...this.row(account, id, stored),
+        bytes: data.blob.size,
+        messageId,
+      };
+      return this.transaction(["avatars", "media"], "readwrite", async (tx) => {
         tx.objectStore(kind).put(row);
         const entries: { kind: "avatars" | "media"; row: Row }[] = [];
         for (const store of ["avatars", "media"] as const) {
@@ -444,17 +478,17 @@ export class BrowserCache {
         }
         let bytes = entries.reduce(
           (sum, item) => sum + (item.row.bytes ?? 0),
-          0,
+          0
         );
         for (const item of entries.sort(
-          (a, b) => a.row.lastUsed - b.row.lastUsed,
+          (a, b) => a.row.lastUsed - b.row.lastUsed
         )) {
           if (bytes <= this.mediaBudget) break;
           tx.objectStore(item.kind).delete(item.row.key);
           bytes -= item.row.bytes ?? 0;
         }
-      }),
-    );
+      });
+    });
   }
   invalidateMessage(account: string, message: string) {
     void this.enqueue(() =>

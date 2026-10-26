@@ -202,8 +202,10 @@ body {
   padding: var(--story-inset);
   position: relative;
   overflow: hidden;
+  min-height: 0;
 }
 .wordmark {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -232,9 +234,10 @@ body {
   margin: auto 0;
   min-height: 0;
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: clamp(20px, 4dvh, 52px);
   padding: 46px 0 44px;
 }
 .product-description {
@@ -244,10 +247,11 @@ body {
   font-weight: 430;
   letter-spacing: -0.75px;
   max-width: 355px;
-  margin: 0 0 52px;
+  margin: 0;
   color: #edede9;
 }
 .project-links {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 25px;
@@ -276,18 +280,18 @@ body {
   color: #858783;
 }
 .illustration-viewport {
-  width: min(
-    calc(100% + var(--story-inset)),
-    600px,
-    max(180px, calc((100dvh - 420px) * 460 / 282))
-  );
+  height: clamp(100px, calc(100dvh - 440px), 420px);
+  max-height: 100%;
+  width: auto;
   aspect-ratio: 460 / 282;
-  flex-shrink: 0;
+  align-self: center;
+  justify-self: start;
 }
 .app-illustration {
   display: block;
-  width: 100%;
-  height: auto;
+  width: auto;
+  height: 100%;
+  max-width: none;
   aspect-ratio: 460 / 282;
   transform: perspective(1800px) rotateY(-4deg) rotateX(1deg);
   transform-origin: left center;
@@ -299,8 +303,13 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .onboarding-top {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -331,6 +340,7 @@ body {
   width: 12px;
 }
 .onboarding-center {
+  flex-shrink: 0;
   width: min(100%, 352px);
   margin: auto;
   padding: 38px 0 34px;
@@ -459,6 +469,7 @@ body {
   width: 12px;
 }
 .onboarding-footer {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -762,6 +773,7 @@ body {
     height: 23px;
   }
   .story-content {
+    display: block;
     padding: 0;
     margin: 0;
   }
@@ -785,6 +797,8 @@ body {
     padding: 22px 26px;
     flex: 1;
     min-height: 650px;
+    overflow-y: visible;
+    scrollbar-gutter: auto;
   }
   .onboarding-center {
     padding: 35px 0 32px;
