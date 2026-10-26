@@ -32,7 +32,14 @@ if name=='xcrun':
             print(os.environ.get('STAPLE_ERROR','Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."'),file=sys.stderr)
             sys.exit(int(os.environ.get('STAPLE_EXIT','68')))
     if args[:2]==['stapler','validate']:
+        kind='APP' if args[2].endswith('.app') else 'DMG'
+        counter=folder/('validate-'+kind)
+        attempt=int(counter.read_text())+1 if counter.exists() else 1
+        counter.write_text(str(attempt))
         with open(folder/'validations','a') as out: out.write(args[2]+'\\n')
+        if attempt <= int(os.environ.get('VALIDATE_FAILURES_'+kind,'0')):
+            print(os.environ.get('VALIDATE_ERROR','Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."'),file=sys.stderr)
+            sys.exit(int(os.environ.get('VALIDATE_FAILURE_EXIT','68')))
         sys.exit(int(os.environ.get('VALIDATE_EXIT','0')))
     sys.exit(0)
 if name=='sleep':
@@ -117,7 +124,7 @@ for (const [exit, error] of [["68", "Ticket signature is invalid"], ["65", "Erro
     await assert.rejects(access(join(value.directory, "delays")));
     await assert.rejects(access(join(value.directory, "summary")));
   });
-test("ticket validation failures remain required and are never retried", options, async t => {
+test("permanent ticket validation failures stop distribution without retry", options, async t => {
   const value = await fixture(t);
   const result = notarize(value, { VALIDATE_EXIT: "65" });
   assert.equal(result.status, 65, result.stderr);
@@ -239,3 +246,35 @@ test(
     );
   },
 );
+
+
+test("temporary ticket validation failures retry only validation without resubmitting or restapling", options, async t => {
+  const value = await fixture(t);
+  const result = notarize(value, { VALIDATE_FAILURES_APP: "2", VALIDATE_FAILURES_DMG: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  for (const kind of ["APP", "DMG"]) assert.equal(await readFile(join(value.directory, `staple-${kind}`), "utf8"), "1");
+  assert.equal(await readFile(join(value.directory, "validate-APP"), "utf8"), "3");
+  assert.equal(await readFile(join(value.directory, "validate-DMG"), "utf8"), "2");
+  assert.equal(await readFile(join(value.directory, "submissions"), "utf8"), "submit\nsubmit\n");
+  assert.equal(await readFile(join(value.directory, "delays"), "utf8"), "5\n15\n5\n");
+});
+
+test("ticket validation retry exhaustion stops publication", options, async t => {
+  const value = await fixture(t);
+  const result = notarize(value, { VALIDATE_FAILURES_APP: "9" });
+  assert.equal(result.status, 68, result.stderr);
+  assert.equal(await readFile(join(value.directory, "validate-APP"), "utf8"), "4");
+  assert.equal(await readFile(join(value.directory, "submissions"), "utf8"), "submit\n");
+  for (const path of ["summary", "staple-DMG", "output/AgentWechat-v1.0.0-beta.14-macos-arm64.zip"])
+    await assert.rejects(access(join(value.directory, path)));
+});
+
+for (const [exit, error] of [["68", "Ticket signature is invalid"], ["65", "Error Domain=NSURLErrorDomain Code=-1005"]])
+  test(`validation retries exclude permanent and unrelated errors (${exit})`, options, async t => {
+    const value = await fixture(t);
+    const result = notarize(value, { VALIDATE_FAILURES_APP: "1", VALIDATE_FAILURE_EXIT: exit, VALIDATE_ERROR: error });
+    assert.equal(result.status, Number(exit), result.stderr);
+    assert.equal(await readFile(join(value.directory, "validate-APP"), "utf8"), "1");
+    await assert.rejects(access(join(value.directory, "delays")));
+    await assert.rejects(access(join(value.directory, "summary")));
+  });

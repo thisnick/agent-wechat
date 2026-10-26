@@ -31,21 +31,20 @@ PYCODE
   fi
   return 1
 }
-staple_and_validate() {
-  local target="$1" result="$RUNNER_TEMP/stapler-result.log"
+stapler_with_retry() {
+  local operation="$1" target="$2" result="$RUNNER_TEMP/stapler-result.log"
   local delay exit_status
   for delay in 0 5 15 30; do
     if [ "$delay" -gt 0 ]; then
-      printf 'Retrying Apple ticket download in %s seconds.\n' "$delay"
+      printf 'Retrying Apple ticket %s in %s seconds.\n' "$operation" "$delay"
       sleep "$delay"
     fi
     exit_status=0
-    xcrun stapler staple "$target" > "$result" 2>&1 || exit_status=$?
+    xcrun stapler "$operation" "$target" > "$result" 2>&1 || exit_status=$?
     cat "$result"
     if [ "$exit_status" -eq 0 ]; then
       rm -f "$result"
-      xcrun stapler validate "$target"
-      return $?
+      return 0
     fi
     # Error 68 also covers permanent ticket errors. Retry only an identified
     # transient network failure, without resubmitting an accepted notarization.
@@ -56,6 +55,10 @@ staple_and_validate() {
   done
   rm -f "$result"
   return "$exit_status"
+}
+staple_and_validate() {
+  stapler_with_retry staple "$1"
+  stapler_with_retry validate "$1"
 }
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign --display --verbose=4 "$APP"
