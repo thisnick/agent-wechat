@@ -188,7 +188,9 @@ impl Core {
                         bail!("contact_profile_generation_changed");
                     }
                     if prior.as_slice() == cursor {
-                        return Ok(());
+                        return self
+                            .store
+                            .finish_contact_cursor_projection(account, &received, &projected);
                     }
                 }
                 let journal = Publication {
@@ -207,8 +209,13 @@ impl Core {
             }
         };
         anyhow::ensure!(
-            journal.username == identity.username,
-            "account_identity_mismatch"
+            journal.username == identity.username
+                && journal.cursor.as_slice()
+                    == self
+                        .vault
+                        .open_record(account, "contact-received-cursor", &received)?
+                        .as_slice(),
+            "contact_publication_identity_or_generation_mismatch"
         );
         contact_sync::validate_cursor(&journal.cursor)?;
         let staged = wechat_profile::stage_account_contact_sync_key(
@@ -223,14 +230,13 @@ impl Core {
             &self.write_options(account, purpose)?,
             || self.push_state(account, fence).is_ok(),
         )?;
-        self.store.put_runtime(
+        self.store.finish_contact_cursor_projection(
             account,
-            "contact-projected-cursor",
+            &received,
             &self
                 .vault
                 .seal(account, "contact-projected-cursor", &journal.cursor)?,
         )?;
-        self.store.clear_runtime(account, purpose)?;
         Ok(())
     }
 }
@@ -327,7 +333,17 @@ mod tests {
         assert_eq!(muted(&core), Some(false));
         core.commit_contact_batch("one", batch(1, true, false))
             .unwrap();
+        assert!(store.pending_cursor_projection("one").unwrap());
         core.publish_contact_checkpoint("one", &fence).unwrap();
+        assert!(!store.pending_cursor_projection("one").unwrap());
+        // An empty response with an unchanged cursor still gets its own sealed
+        // received generation, without an unnecessary official-file rewrite.
+        let mut repeated = batch(1, true, false);
+        repeated.commands.clear();
+        core.commit_contact_batch("one", repeated).unwrap();
+        assert!(store.pending_cursor_projection("one").unwrap());
+        core.publish_contact_checkpoint("one", &fence).unwrap();
+        assert!(!store.pending_cursor_projection("one").unwrap());
         assert_eq!(muted(&core), Some(true));
         assert_eq!(core.profile_contact_cursor("one").unwrap(), cursor(1));
         assert!(store.runtime("one", "received-cursor").unwrap().is_none());

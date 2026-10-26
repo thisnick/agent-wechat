@@ -8,7 +8,40 @@ impl Store {
         self.control(account, |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key='native-profile-origin') OR EXISTS(SELECT 1 FROM operations WHERE kind='login' AND state='succeeded' AND json_extract(result_json,'$.profile.state')='created')", [], |r| r.get(0))?))
     }
     pub fn pending_cursor_projection(&self, account: &str) -> Result<bool> {
-        self.control(account, |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key IN ('cursor-projection-needed','cursor-publication'))", [], |r| r.get(0))?))
+        self.control(account, |db| {
+            let (pending, received, generation, projected): (bool, Option<Vec<u8>>, Option<Vec<u8>>, bool) = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime WHERE key IN ('cursor-projection-needed','cursor-publication','contact-cursor-publication')), (SELECT value FROM runtime WHERE key='contact-received-cursor'), (SELECT value FROM runtime WHERE key='contact-projected-received-generation'), EXISTS(SELECT 1 FROM runtime WHERE key='contact-projected-cursor' AND length(value)>0)",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            Ok(pending || received.is_some_and(|received| {
+                !projected || generation.as_deref() != Some(format!("{:x}", Sha256::digest(received)).as_bytes())
+            }))
+        })
+    }
+    /// Retire the contact publication with the exact received-generation receipt.
+    pub fn finish_contact_cursor_projection(
+        &self,
+        account: &str,
+        expected_received: &[u8],
+        projected: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !expected_received.is_empty() && !projected.is_empty(),
+            "invalid contact cursor publication"
+        );
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let received: Option<Vec<u8>> = tx.query_row("SELECT value FROM runtime WHERE key='contact-received-cursor'", [], |row| row.get(0)).optional()?;
+            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM apply_intents WHERE stream='contact' AND state!='projected')", [], |row| row.get(0))?;
+            anyhow::ensure!(!pending && received.as_deref() == Some(expected_received), "contact cursor generation changed or commands remain pending");
+            let generation = format!("{:x}", Sha256::digest(expected_received));
+            for (key, value) in [("contact-projected-cursor", projected), ("contact-projected-received-generation", generation.as_bytes())] {
+                tx.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
+            }
+            tx.execute("DELETE FROM runtime WHERE key='contact-cursor-publication'", [])?;
+            tx.commit()?;
+            Ok(())
+        })
     }
     /// A restored received cursor still requires an ordinary-file checkpoint.
     /// The caller seals and validates the cursor before this atomic sidecar step.
@@ -125,6 +158,36 @@ mod tests {
     }
     fn hash() -> String {
         "ab".repeat(32)
+    }
+    #[test]
+    fn contact_cursor_receipts_hold_export_until_the_exact_generation_is_published() {
+        let (dir, store) = fixture();
+        store
+            .stage_contact_sync("one", "contact:first", b"sealed batch", b"received")
+            .unwrap();
+        assert!(store.pending_cursor_projection("one").unwrap());
+        assert!(store
+            .finish_contact_cursor_projection("one", b"received", b"projected")
+            .is_err());
+        store.finish_sync("one", "contact:first").unwrap();
+        assert!(store.pending_cursor_projection("one").unwrap());
+        store
+            .put_runtime("one", "contact-cursor-publication", b"journal")
+            .unwrap();
+        assert!(store
+            .finish_contact_cursor_projection("one", b"wrong generation", b"projected")
+            .is_err());
+        store
+            .finish_contact_cursor_projection("one", b"received", b"projected")
+            .unwrap();
+        assert!(!store.pending_cursor_projection("one").unwrap());
+        // A legacy or interrupted received generation cannot borrow an old receipt.
+        store
+            .put_runtime("one", "contact-received-cursor", b"new generation")
+            .unwrap();
+        drop(store);
+        let store = Store::open_existing(&dir.path().join("data")).unwrap();
+        assert!(store.pending_cursor_projection("one").unwrap());
     }
     #[test]
     fn recall_obligations_block_both_cursor_admission_and_retirement() {

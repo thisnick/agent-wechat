@@ -69,12 +69,16 @@ with tempfile.TemporaryDirectory(prefix="native-export-smoke-") as temporary:
             ("INSERT INTO outgoing_recalls VALUES(?,?,?,?,?)", ("recall", "a" * 64, "b" * 64, phase, b"sealed-request")),
         ]
     cases = [
-        ("sync", "pendingProjectionBatches", [("INSERT INTO apply_intents VALUES(?,?,?,?)", ("sync", b"sealed", "pending", "fixture"))]),
+        ("sync", "pendingProjectionBatches", [("INSERT INTO apply_intents(id,payload,state,created_at) VALUES(?,?,?,?)", ("sync", b"sealed", "pending", "fixture"))]),
+        ("contact-sync", "pendingProjectionBatches", [("INSERT INTO apply_intents(id,payload,state,created_at,stream) VALUES(?,?,?,?,?)", ("contact", b"sealed", "pending", "fixture", "contact"))]),
         ("read", "pendingReadProjections", [(put, ("read-pending:thread", b"{}"))]),
         ("recall-projection", "pendingRecallProjections", [recall_marker]),
         *[("recall-" + phase, "pendingMessageRecalls", outgoing_recall(phase)) for phase in ["queued", "submitting", "accepted", "needs_review"]],
         ("cursor-needed", "pendingCursorProjection", [(put, ("cursor-projection-needed", b"1"))]),
         ("cursor-publication", "pendingCursorProjection", [(put, ("cursor-publication", b"sealed"))]),
+        ("contact-cursor-publication", "pendingCursorProjection", [(put, ("contact-cursor-publication", b"sealed"))]),
+        ("contact-cursor-unpublished", "pendingCursorProjection", [(put, ("contact-received-cursor", b"sealed"))]),
+        ("contact-cursor-stale-receipt", "pendingCursorProjection", [(put, ("contact-received-cursor", b"sealed")), (put, ("contact-projected-cursor", b"prior")), (put, ("contact-projected-received-generation", b"a" * 64))]),
         ("saved-login-needed", "pendingSavedLoginProjection", [(put, ("saved-login-projection-needed", b"1"))]),
         ("saved-login-publication", "pendingSavedLoginProjection", [(put, ("saved-login-publication", b"sealed"))]),
         ("saved-login-state-mismatch", "pendingSavedLoginProjection", [(put, ("account-state", b"sealed-state")), (put, ("saved-login-accepted-state-generation", hashlib.sha256(b"sealed-state").hexdigest().encode())), (put, ("saved-login-projected-state-generation", b"b" * 64))]),
@@ -103,6 +107,9 @@ with tempfile.TemporaryDirectory(prefix="native-export-smoke-") as temporary:
     seed(receipt)
     completed = export("recorded-checkpoint", "--source-stopped")
     assert completed["syncCheckpointProjected"] and completed["syncCheckpointEvidence"] == "durable_projection_receipt"
+    contact_receipt = [(put, ("contact-received-cursor", b"sealed-contact")), (put, ("contact-projected-cursor", b"projected-contact")), (put, ("contact-projected-received-generation", hashlib.sha256(b"sealed-contact").hexdigest().encode()))]
+    seed(receipt + contact_receipt)
+    assert export("recorded-contact-checkpoint", "--source-stopped")["syncCheckpointProjected"]
     for name, extra in [("marker", [recall_marker]), ("uncertain", outgoing_recall("needs_review")), ("accepted", outgoing_recall("accepted"))]:
         seed(receipt + extra)
         export("recall-checkpoint-refused-" + name, "--source-stopped", code=9)

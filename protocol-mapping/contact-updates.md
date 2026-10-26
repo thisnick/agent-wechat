@@ -13,7 +13,7 @@ pass; a standalone phone group toggle remains unverified.
 | Official reference | Linux 4.1.13.26 AMD64; SHA-256 `2749535f299ba67feb8ef80cab898bb0531fa8f376b16f8a72db706811c84132` |
 | Released/source comparison | `thisnick/agent-wechat` at `27a8b54`, v1.0.0-beta.15 |
 | New implementation | Branch `codex/thread-mute-state`, following `0527289`: nullable mute reads, independent contact sync, and native desktop notifications |
-| Code verification | Pinned formatting and warning-denying Clippy; metadata, contract and TypeScript checks. 633 workspace tests passed, one benchmark ignored; tests cover uncertain mute reads, direct mutation recovery and group contact-stream mute changes |
+| Code verification | Pinned formatting and warning-denying Clippy; metadata, contract and TypeScript checks. 634 workspace tests passed, one benchmark ignored; tests cover uncertain mute reads, direct mutation recovery and group contact-stream mute changes |
 | Isolated runtime verification | Debian-built hub/CLI and real SDK/session simulator smoke passed, including thread detail/list mute assertions after group mute/unmute |
 | Live daemon acceptance of new code | Deployed Linux x64 validation daemon: command356, contact drain, saved mute, SSE and API/CLI state observed |
 | Automatic phone updates | Direct mute and unmute passed without refresh; group mapping fixture tested, phone group toggle pending |
@@ -78,7 +78,7 @@ that a blind record replacement would preserve every unrelated preference.
 | `wx contacts refresh ID` / contact refresh API | Existing targeted lookup updated the profile in both native phone tests | Manual refresh remains available alongside the independent contact drain |
 | `wx chats mute/unmute` / `PUT /threads/{id}/notifications` | Ordinary direct contacts and groups; guarded one-attempt mutation journal | Direct lookup supplies the current full ModContact; only bit0x200 changes. Server acceptance and independent contact refresh confirmed both states |
 | Official contact database | Owns the settled preference | Do not duplicate mute preferences in a sidecar; unresolved-work markers can make an API value unknown |
-| Sidecar receipts | Raw received data, application markers and unresolved work | Separate received/applied cursors, phase receipts, restart and logout guards implemented |
+| Sidecar receipts | Raw received data, application markers and unresolved work | Separate received/applied cursors, phase receipts, restart/logout guards and profile-export generation checks implemented |
 | Desktop notification suppression | Implemented in native listener, settings and click navigation | Requires `contactSyncReady` and known unmuted thread. Unit and Linux service acceptance are recorded separately from installed macOS/Windows validation |
 
 ## Evidence and next acceptance
