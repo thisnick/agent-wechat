@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { browserNavigationAcceptance } from "./browser-navigation.mjs";
+import { reloadPage } from "./webdriver-navigation.mjs";
 
 export async function interfaceAcceptance({
   script,
@@ -188,7 +189,7 @@ export async function interfaceAcceptance({
       key: "a".repeat(64),
       certificate: null,
     });
-    await script("window.location.reload(); return true");
+    await reloadPage(script, until);
     await until(
       "return Boolean(document.querySelector('.login-account'))",
       Boolean,
@@ -198,7 +199,7 @@ export async function interfaceAcceptance({
     );
     await until(avatars, imagesReady);
     assert.equal(avatarReads, 2);
-    await script("window.location.reload(); return true");
+    await reloadPage(script, until);
     await until(avatars, imagesReady);
     assert.equal(
       avatarReads,
@@ -224,7 +225,7 @@ export async function interfaceAcceptance({
         tx.onabort = () => reject(tx.error);
       };
     })`);
-    await script("window.location.reload(); return true");
+    await reloadPage(script, until);
     await until(avatars, imagesReady);
     assert.ok(
       avatarReads <= 4,
@@ -363,7 +364,7 @@ export async function interfaceAcceptance({
     );
     await click("Back");
     await invoke("desktop_select", { id: "local" });
-    await script("window.location.reload(); return true");
+    await reloadPage(script, until);
     await until("return document.body.innerText", (text) =>
       text.includes("Add WeChat account"),
     );
