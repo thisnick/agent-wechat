@@ -66,7 +66,7 @@ export default defineConfig({
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Settings', slug: 'use/settings' },
-          { label: 'Video quality', slug: 'use/video' },
+          { label: 'Video and image quality', slug: 'use/video' },
           { label: 'OpenClaw', items: [
             { label: 'Quick setup', slug: 'openclaw/setup' },
             { label: 'Managed or external', slug: 'openclaw/modes' },
