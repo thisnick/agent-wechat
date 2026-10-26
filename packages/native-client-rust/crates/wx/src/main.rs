@@ -1822,7 +1822,7 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result
     let network = if let Some(address) = config.network_listen {
         let certificate = private_input(config.tls_cert_file.as_deref().unwrap(), 64 * 1024)?;
         let key = private_input(config.tls_key_file.as_deref().unwrap(), 64 * 1024)?;
-        let tls = axum_server::tls_openssl::OpenSSLConfig::from_pem(&certificate, &key)?;
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(certificate, key).await?;
         let socket = std::net::TcpListener::bind(address)?;
         socket.set_nonblocking(true)?;
         Some((socket, tls))
@@ -1849,8 +1849,7 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result
         });
         let result = tokio::try_join!(
             async { local.await },
-            axum_server::from_tcp(socket)?
-                .acceptor(axum_server::tls_openssl::OpenSSLAcceptor::new(tls))
+            axum_server::tls_rustls::from_tcp_rustls(socket, tls)?
                 .handle(handle)
                 .serve(router.into_make_service())
         );
