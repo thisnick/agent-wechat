@@ -522,6 +522,8 @@ impl Core {
         if command.id == 2 {
             let contact = wechat_protocol::wire::decode_contact_record(&command.payload)?;
             let fields_applied = format!("contact-fields:{receipt}");
+            let mute_applied = format!("contact-mute:{receipt}");
+            let mute = super::metadata::contact_mute_patch(&contact)?;
             let controlled = wechat_protocol::controlled_contact_fields(&contact.raw)?;
             let wire = wechat_protocol::protobuf::decode(&contact.raw)?;
             let partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
@@ -536,6 +538,23 @@ impl Core {
                     &self.upstream.contact_patch(&contact)?,
                     &options,
                 )?;
+                if let Some(muted) = mute {
+                    if self.store.runtime(account, &mute_applied)?.is_none()
+                        && wechat_profile::apply_contact_mute_patch(
+                            &location,
+                            &keys,
+                            &contact.username,
+                            muted,
+                            &options,
+                        )?
+                        .is_some()
+                    {
+                        // This receipt records application, not a second copy
+                        // of the preference. Legacy pending contact phases must
+                        // never replay an old mute over a later refresh.
+                        self.store.put_runtime(account, &mute_applied, b"1")?;
+                    }
+                }
                 if contact.username.ends_with("@chatroom") {
                     // Explicit native contact metadata establishes catalog presence.
                     // Missing owner/roster fields remain NULL/preserved; a group seen
@@ -567,7 +586,9 @@ impl Core {
             }
             let pending = contact.username.ends_with("@chatroom")
                 && self.queue_incoming_group(account, &contact, receipt, origin)?;
-            if pending || !controlled.is_empty() || partial_mask {
+            let unresolved_mask = partial_mask
+                && (mute.is_none() || self.store.runtime(account, &mute_applied)?.is_none());
+            if pending || !controlled.is_empty() || unresolved_mask {
                 let mut blocked = command_blocker(command);
                 blocked.classification = "contact_update";
                 blocked.reason = if pending {

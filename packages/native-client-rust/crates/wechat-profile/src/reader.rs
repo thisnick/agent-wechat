@@ -1541,6 +1541,47 @@ mod batch_lookup_tests {
         (temp, reader)
     }
 
+    #[test]
+    fn notification_preferences_use_one_query_for_a_full_page() {
+        let (temp, original) = fixture();
+        drop(original);
+        let directory = temp.path().join("account/db_storage/contact");
+        std::fs::create_dir_all(&directory).unwrap();
+        let db = Connection::open(directory.join("contact.db")).unwrap();
+        db.execute_batch(include_str!("layout/contact.db.sql"))
+            .unwrap();
+        let chats: Vec<_> = (0..200).map(|n| format!("peer_{n}")).collect();
+        for (id, chat) in chats.iter().enumerate() {
+            db.execute(
+                "INSERT INTO contact(id,username,flag,local_type,delete_flag) VALUES(?1,?2,?3,1,0)",
+                params![id, chat, if id % 2 == 0 { 3 } else { 515 }],
+            )
+            .unwrap();
+        }
+        let reader = ProfileReader::open(
+            ProfileLocation::new(temp.path().join("account")).unwrap(),
+            KeyFile::empty("account"),
+            ReadOptions {
+                allow_plaintext: true,
+                stopped_or_consistent_snapshot: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        BATCH_QUERIES.with(|n| n.set(0));
+        let states = reader.thread_muted(&chats).unwrap();
+        assert_eq!(states.len(), 200);
+        for (id, chat) in chats.iter().enumerate() {
+            assert_eq!(states[chat], Some(id % 2 != 0));
+        }
+        BATCH_QUERIES.with(|n| assert_eq!(n.get(), 1));
+        assert!(reader.thread_muted(&[]).unwrap().is_empty());
+        assert!(matches!(
+            reader.thread_muted(&vec!["peer".into(); 201]),
+            Err(ProfileError::InvalidQuery)
+        ));
+    }
+
     fn collect(
         reader: &ProfileReader,
         targets: &[(String, String)],

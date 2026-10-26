@@ -275,6 +275,54 @@ pub fn apply_contact_projection(
         changed,
     })
 }
+/// Apply only a received direct-contact mute bit. Missing or incomplete contact
+/// identities cannot establish the other flag bits and are left untouched.
+pub fn apply_contact_mute_patch(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    username: &str,
+    muted: bool,
+    options: &WriteOptions,
+) -> Result<Option<AppliedContact>> {
+    ownership(location, keys, options)?;
+    identity(username)?;
+    if username.ends_with("@chatroom") {
+        return Err(ProfileError::InvalidMetadata);
+    }
+    let db = find_database(location, "contact.db")?;
+    let mut c = open_write(location, &db, keys, options.allow_plaintext)?;
+    let tx = c.transaction()?;
+    check_known_table(&tx, "contact")?;
+    let existing = tx
+        .query_row(
+            "SELECT id,flag FROM contact WHERE username=?1 AND local_type=1 AND delete_flag=0",
+            [username],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?;
+    let Some((id, Some(flag))) = existing else {
+        return Ok(None);
+    };
+    let Some(flag) = u32::try_from(flag).ok().filter(|flag| flag & 1 != 0) else {
+        return Ok(None);
+    };
+    let flag = (flag & !0x200) | if muted { 0x200 } else { 0 };
+    let changed = apply_row(
+        &tx,
+        "contact",
+        "id",
+        SqlValue::Integer(id.to_string()),
+        &[("flag".into(), SqlValue::Integer(flag.to_string()))]
+            .into_iter()
+            .collect(),
+        true,
+    )?;
+    tx.commit()?;
+    Ok(Some(AppliedContact {
+        local_id: id,
+        changed,
+    }))
+}
 /// Caller supplies the actual retained group fields; complete_roster is explicit.
 /// No absent member is deleted for an incomplete/delta roster.
 #[derive(Clone, Debug, Serialize, Deserialize)]

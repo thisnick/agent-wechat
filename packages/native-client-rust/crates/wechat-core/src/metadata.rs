@@ -154,6 +154,23 @@ fn valid_name(value: &str) -> Result<()> {
     };
     Ok(())
 }
+/// Only the independently understood mute-only mask is handled here. Other
+/// partial masks and version-controlled flag updates retain their sync receipt.
+pub(super) fn contact_mute_patch(record: &ContactRecord) -> Result<Option<bool>> {
+    if record.username.ends_with("@chatroom")
+        || wechat_protocol::controlled_contact_fields(&record.raw)?.contains(&8)
+    {
+        return Ok(None);
+    }
+    let fields = p::decode(&record.raw)?;
+    if p::optional(&fields, 7)? != Some(&p::Value::Varint(0x200)) {
+        return Ok(None);
+    }
+    Ok(match p::optional(&fields, 8)? {
+        Some(p::Value::Varint(value)) => u32::try_from(*value).ok().map(|value| value & 0x200 != 0),
+        _ => None,
+    })
+}
 pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection> {
     let fields = p::decode(&record.raw)?;
     let controlled = wechat_protocol::controlled_contact_fields(&record.raw)?;
@@ -1179,6 +1196,156 @@ mod tests {
         assert!(!patch.fields.contains_key("remark"));
         assert_eq!(patch.fields["flag"], SqlValue::Integer("1".into()));
         assert_eq!(patch.fields["local_type"], SqlValue::Integer("1".into()));
+    }
+    fn direct_contact(
+        mask: u64,
+        flag: u64,
+        controlled: bool,
+    ) -> wechat_protocol::wire::SyncCommand {
+        let mut fields = vec![
+            p::bytes(1, &p::bytes(1, b"peer")),
+            p::uint(7, mask),
+            p::uint(8, flag),
+        ];
+        if controlled {
+            let control = p::message(&[
+                p::uint(1, 1),
+                p::uint(2, 14),
+                p::uint(3, 1),
+                p::bytes(4, &p::uint(1, 8)),
+            ])
+            .unwrap();
+            fields.push(p::bytes(
+                89,
+                &p::message(&[p::uint(1, 1), p::bytes(2, &control)]).unwrap(),
+            ));
+        }
+        wechat_protocol::wire::SyncCommand {
+            id: 2,
+            payload: p::message(&fields).unwrap(),
+        }
+    }
+    fn direct_muted(core: &Core) -> Value {
+        let mut rows = vec![json!({"id":"peer"}), json!({"id":"missing"})];
+        core.thread_summaries(
+            "one",
+            &mut rows,
+            &core.profile_reader("one").unwrap(),
+            Some("synthetic_self"),
+        )
+        .unwrap();
+        assert!(rows[1]["muted"].is_null());
+        rows.remove(0)["muted"].clone()
+    }
+    #[test]
+    fn received_direct_mute_is_saved_before_event_and_replay_preserves_newer_state() {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        let baseline = direct_contact(u64::from(u32::MAX), 259, false);
+        core.apply_sync_command("one", &baseline, "baseline", "live")
+            .unwrap();
+        assert_eq!(direct_muted(&core), false);
+        let muted = direct_contact(0x200, 0x200, false);
+        core.apply_sync_command("one", &muted, "mute", "live")
+            .unwrap();
+        assert_eq!(direct_muted(&core), true);
+        let contacts = core
+            .profile_reader("one")
+            .unwrap()
+            .contacts(&Default::default())
+            .unwrap();
+        let contact = contacts
+            .items
+            .iter()
+            .find(|c| c.username == "peer")
+            .unwrap();
+        assert_eq!(contact.raw_fields["flag"], SqlValue::Integer("771".into()));
+        assert!(core.store.runtime("one", "mute").unwrap().is_some());
+        assert!(core
+            .store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "contacts.updated" && event.data["contactId"] == "peer"));
+        core.apply_sync_command("one", &direct_contact(0x200, 0, false), "unmute", "live")
+            .unwrap();
+        assert_eq!(direct_muted(&core), false);
+        core.apply_sync_command("one", &muted, "mute", "live")
+            .unwrap();
+        assert_eq!(direct_muted(&core), false);
+        core.store
+            .put_runtime("one", "contact-mute:interrupted-mute", b"1")
+            .unwrap();
+        core.apply_sync_command("one", &muted, "interrupted-mute", "live")
+            .unwrap();
+        assert_eq!(direct_muted(&core), false);
+        let contacts = core
+            .profile_reader("one")
+            .unwrap()
+            .contacts(&Default::default())
+            .unwrap();
+        assert_eq!(
+            contacts
+                .items
+                .iter()
+                .find(|c| c.username == "peer")
+                .unwrap()
+                .raw_fields["flag"],
+            SqlValue::Integer("259".into())
+        );
+    }
+    #[test]
+    fn unresolved_or_legacy_direct_flag_controls_do_not_overwrite_saved_preferences() {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        for (receipt, command) in [
+            ("controlled-mute", direct_contact(0x200, 0x200, true)),
+            ("other-mask", direct_contact(0x201, 0x201, false)),
+            ("legacy-mute", direct_contact(0x200, 0x200, false)),
+        ] {
+            if receipt == "legacy-mute" {
+                core.store
+                    .put_runtime("one", "contact-fields:legacy-mute", b"1")
+                    .unwrap();
+            }
+            assert_eq!(
+                core.apply_sync_command("one", &command, receipt, "live")
+                    .unwrap_err()
+                    .to_string(),
+                "contact_update_control_unresolved"
+            );
+            assert_eq!(direct_muted(&core), false);
+            assert!(core.store.runtime("one", receipt).unwrap().is_none());
+        }
+    }
+    #[test]
+    fn missing_flag_baseline_stays_pending_after_later_refresh() {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        let (loc, keys) = core.profile_location_keys("one").unwrap();
+        wechat_profile::apply_contact_patch(
+            &loc,
+            &keys,
+            &ContactProjection {
+                username: "peer".into(),
+                fields: [("flag".into(), SqlValue::Null)].into_iter().collect(),
+            },
+            &core.write_options("one", "incomplete").unwrap(),
+        )
+        .unwrap();
+        let command = direct_contact(0x200, 0x200, false);
+        assert!(core
+            .apply_sync_command("one", &command, "incomplete-mute", "live")
+            .is_err());
+        assert!(direct_muted(&core).is_null());
+        core.apply_sync_command(
+            "one",
+            &direct_contact(u64::from(u32::MAX), 3, false),
+            "fresh-contact",
+            "live",
+        )
+        .unwrap();
+        assert!(core
+            .apply_sync_command("one", &command, "incomplete-mute", "live")
+            .is_err());
+        assert_eq!(direct_muted(&core), false);
     }
     #[test]
     fn partial_masks_do_not_replace_flags_or_hide_independent_group_fields() {

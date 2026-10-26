@@ -143,11 +143,17 @@ export async function groupJourney({ client, wait, account, control, state }) {
       await client.setThreadMuted(account, room, true, "group-mute"),
     );
     assert.equal((await client.group(account, room)).muted, true);
+    assert.equal((await client.thread(account, room)).muted, true);
+    assert.equal(
+      (await client.threads(account)).items.find((thread) => thread.id === room).muted,
+      true,
+    );
     await finish(
       "unmute group",
       await client.setThreadMuted(account, room, false, "group-unmute"),
     );
     assert.equal((await client.group(account, room)).muted, false);
+    assert.equal((await client.thread(account, room)).muted, false);
     await finish(
       "remove member",
       await client.removeGroupMembers(

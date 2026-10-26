@@ -11,11 +11,14 @@ Every command prints JSON. With several accounts, add `--account ID` (or an alia
 
 ```bash
 wx chats list --limit 20                  # recent chats, with unread counts
+wx chats get CHAT_ID                     # includes muted: true, false or null
 wx chats find "Book club"                 # find a chat by name
 wx messages list CHAT_ID --limit 50       # newest first; pass --cursor to page
 wx contacts find Alice
 wx groups members list 'family@chatroom'
 ```
+
+Chat notification preferences come from the saved profile. `null` means unknown. Use `wx contacts refresh CONTACT_ID` to fetch a direct contact's current setting, then read the chat again. Automatic delivery of phone mute changes is not established; `wx chats mute/unmute` currently edits groups only.
 
 `filehelper` is your File Transfer chat, handy for testing. See [Manage groups](/use/groups/) for group edits and member lookup.
 

@@ -89,6 +89,10 @@ pub struct NativeThread {
     pub display_name: Option<String>,
     #[ts(type = "number | null")]
     pub unread_count: Option<i64>,
+    // Saved notification preference; null means the profile cannot establish it.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub muted: Option<bool>,
     pub read_state_version: String,
     // Absent when local message shards are unavailable; null for empty history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +426,22 @@ pub fn typescript() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn thread_mute_contract_preserves_unknown_and_boolean_preferences() {
+        let mut thread = serde_json::json!({"id":"peer","accountId":"one","peerId":"peer","kind":"direct","displayName":null,"unreadCount":0,"readStateVersion":"v","history":{}});
+        assert!(serde_json::from_value::<NativeThread>(thread.clone())
+            .unwrap()
+            .muted
+            .is_none());
+        for value in [Value::Null, Value::Bool(false), Value::Bool(true)] {
+            thread["muted"] = value.clone();
+            let parsed: NativeThread = serde_json::from_value(thread.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap()["muted"], value);
+        }
+        thread["muted"] = serde_json::json!("false");
+        assert!(serde_json::from_value::<NativeThread>(thread).is_err());
+        assert!(typescript().contains("muted?: boolean | null"));
+    }
     #[test]
     fn wire_contract_rejects_numeric_remote_ids_and_bad_scope_shapes() {
         assert!(serde_json::from_value::<NativeMessage>(serde_json::json!({"id":"m","accountId":"a","threadId":"t","serverId":9007199254740992u64,"senderId":null,"type":1,"direction":null,"body":null,"createdAt":null,"mentions":{"state":"unknown","userIds":[],"self":null,"all":null,"source":null},"version":"1","media":[]})).is_err());

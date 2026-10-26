@@ -47,10 +47,11 @@ Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the 
 
 | Field | Contents |
 | --- | --- |
+| `muted` | Saved notification preference for a direct chat or group: `true`, `false`, or `null` when unknown. |
 | `lastMessage` | Latest local message ID, sender ID/name, direction, type, time and a plain-text `text` preview of up to 160 characters. `null` means empty local history; omitted means the preview is unavailable. |
 | `avatarMembers` | Up to four cached group members, each with `id` and `displayName`; empty for direct chats or an unavailable roster. Fetch cached pictures through `GET /avatars/{username}`. |
 
-These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message or group events to update the summaries.
+These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message, contact or group events to update the summaries. To fetch a direct chat's current notification preference, use `POST /contacts/{id}/refresh` and wait for the operation to finish. Automatic delivery of phone mute changes is not established. Notification edits through `PUT /threads/{id}/notifications` currently support groups.
 
 ## Send
 

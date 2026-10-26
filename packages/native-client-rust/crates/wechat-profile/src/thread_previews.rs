@@ -10,6 +10,52 @@ struct PreviewRoom {
 }
 
 impl ProfileReader {
+    /// Derive notification preferences for a page without refreshing contacts.
+    /// Direct contacts and groups use different official fields; incomplete
+    /// identities and unexpected values remain unknown.
+    pub fn thread_muted(&self, threads: &[String]) -> Result<BTreeMap<String, Option<bool>>> {
+        if threads.len() > 200 {
+            return Err(ProfileError::InvalidQuery);
+        }
+        if threads.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        for thread in threads {
+            validate_name(thread)?;
+        }
+        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        #[cfg(test)]
+        super::batch_lookup_tests::record_batch_query();
+        let placeholders = vec!["?"; threads.len()].join(",");
+        let mut statement = c.prepare(&format!(
+            "SELECT username,flag,chat_room_notify,local_type,delete_flag FROM contact WHERE username IN ({placeholders})"
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(threads), raw)?;
+        let mut muted = BTreeMap::new();
+        for row in rows {
+            let fields = row?;
+            let name = text(&fields, "username").ok_or(ProfileError::InvalidMetadata)?;
+            let value = if name.ends_with("@chatroom") {
+                match num(&fields, "chat_room_notify") {
+                    Some(0) => Some(true),
+                    Some(1) => Some(false),
+                    _ => None,
+                }
+            } else if num(&fields, "local_type") == Some(1)
+                && num(&fields, "delete_flag") == Some(0)
+            {
+                num(&fields, "flag")
+                    .and_then(|flag| u32::try_from(flag).ok())
+                    .filter(|flag| flag & 1 != 0)
+                    .map(|flag| flag & 0x200 != 0)
+            } else {
+                None
+            };
+            muted.insert(name, value);
+        }
+        Ok(muted)
+    }
+
     /// Read avatar members for a page of groups with three batched queries.
     /// Validate membership against the same official room metadata used by
     /// group_members; an inconsistent room does not hide other valid rooms.

@@ -32,6 +32,123 @@ fn options() -> WriteOptions {
     }
 }
 #[test]
+fn direct_mute_projection_preserves_other_flags_and_unknown_contacts() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in [
+        "peer",
+        "incomplete",
+        "service",
+        "room@chatroom",
+        "invalid@chatroom",
+        "open@chatroom",
+    ] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    c.execute(
+        "UPDATE contact SET flag=259,delete_flag=0,chat_room_notify=0 WHERE username='peer'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET flag=0,delete_flag=0 WHERE username='service'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET chat_room_notify=0 WHERE username='room@chatroom'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET chat_room_notify=1 WHERE username='open@chatroom'",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE contact SET chat_room_notify=7 WHERE username='invalid@chatroom'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        apply_contact_mute_patch(&loc, &keys, "peer", true, &o)
+            .unwrap()
+            .unwrap()
+            .changed
+    );
+    assert!(
+        !apply_contact_mute_patch(&loc, &keys, "peer", true, &o)
+            .unwrap()
+            .unwrap()
+            .changed
+    );
+    let flag: i64 = c
+        .query_row("SELECT flag FROM contact WHERE username='peer'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(flag, 771);
+    for name in ["missing", "incomplete", "service"] {
+        assert!(apply_contact_mute_patch(&loc, &keys, name, true, &o)
+            .unwrap()
+            .is_none());
+    }
+    assert!(apply_contact_mute_patch(&loc, &keys, "room@chatroom", true, &o).is_err());
+    let read = || {
+        ProfileReader::open(
+            loc.clone(),
+            keys.clone(),
+            ReadOptions {
+                stopped_or_consistent_snapshot: true,
+                allow_plaintext: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let states = read()
+        .thread_muted(
+            &[
+                "peer",
+                "incomplete",
+                "service",
+                "room@chatroom",
+                "invalid@chatroom",
+                "open@chatroom",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+    assert_eq!(states["peer"], Some(true));
+    assert_eq!(states["incomplete"], None);
+    assert_eq!(states["service"], None);
+    assert_eq!(states["room@chatroom"], Some(true));
+    assert_eq!(states["open@chatroom"], Some(false));
+    assert_eq!(states["invalid@chatroom"], None);
+    apply_contact_mute_patch(&loc, &keys, "peer", false, &o).unwrap();
+    let flag: i64 = c
+        .query_row("SELECT flag FROM contact WHERE username='peer'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(flag, 259);
+    assert_eq!(
+        read().thread_muted(&["peer".into()]).unwrap()["peer"],
+        Some(false)
+    );
+    let name: String = c
+        .query_row(
+            "SELECT nick_name FROM contact WHERE username='peer'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "peer");
+}
+#[test]
 fn group_control_edits_preserve_unknown_chunks_other_members_and_history() {
     let d = fixture();
     let loc = ProfileLocation::new(d.path().join("account")).unwrap();
