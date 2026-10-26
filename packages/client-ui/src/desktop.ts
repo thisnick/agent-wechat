@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { connect, type Connection } from "./connection.ts";
 export const desktop = isTauri();
 export type DesktopSession = { id: string; endpoint: string; local: boolean };
@@ -11,16 +12,37 @@ export type DesktopSettings = {
   networkAddresses: string[];
   certificate: string | null;
   cliPath: string;
+  notificationsEnabled: boolean;
+  notificationStatus: string;
 };
 export async function desktopConnect(
   session: DesktopSession,
 ): Promise<Connection> {
-  return connect(
+  const connection = await connect(
     session.endpoint,
     "desktop-native-session",
     false,
     desktopFetch(session),
   );
+  connection.desktopId = session.id;
+  return connection;
+}
+export type NotificationTarget = { connectionId: string; serverId: string; accountId: string; threadId: string };
+export function desktopNotifications(connection: Connection, open: () => void): () => void {
+  let stopped = false;
+  const take = async () => {
+    const target = await invoke<NotificationTarget | null>("notifications_take_target");
+    if (!target || stopped || target.connectionId !== connection.desktopId) return;
+    await connection.session.activate(target.accountId);
+    if (stopped) return;
+    await connection.session.select(target.threadId);
+    open();
+  };
+  const listening = listen("desktop-open-thread", () => { void take().catch(() => {}); });
+  const focus = () => { void take().catch(() => {}); };
+  window.addEventListener("focus", focus);
+  focus();
+  return () => { stopped = true; window.removeEventListener("focus", focus); void listening.then((unlisten) => unlisten()); };
 }
 export const desktopInvoke = invoke;
 export function desktopFetch(session: DesktopSession): typeof fetch {

@@ -25,6 +25,15 @@ pub struct Config {
     pub local_port: u16,
     pub network_port: u16,
     pub network_enabled: bool,
+    #[serde(default = "enabled")]
+    pub notifications_enabled: bool,
+    #[serde(default = "enabled")]
+    pub automatic_updates: bool,
+    #[serde(default)]
+    pub update_prereleases: Option<bool>,
+}
+fn enabled() -> bool {
+    true
 }
 impl Default for Config {
     fn default() -> Self {
@@ -36,6 +45,9 @@ impl Default for Config {
             local_port: 6174,
             network_port: 6175,
             network_enabled: false,
+            notifications_enabled: true,
+            automatic_updates: true,
+            update_prereleases: None,
         }
     }
 }

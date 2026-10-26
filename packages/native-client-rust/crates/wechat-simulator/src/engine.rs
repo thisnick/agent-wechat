@@ -70,6 +70,7 @@ impl Engine {
             CREATE TABLE IF NOT EXISTS group_creations(account TEXT NOT NULL,key TEXT NOT NULL,hash TEXT NOT NULL,room TEXT NOT NULL,name TEXT NOT NULL,members TEXT NOT NULL,PRIMARY KEY(account,key),UNIQUE(account,room));",
         )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS groups(account TEXT NOT NULL,room TEXT NOT NULL,name TEXT NOT NULL,members TEXT NOT NULL,my_name TEXT NOT NULL DEFAULT '',muted INTEGER NOT NULL DEFAULT 0,joined INTEGER NOT NULL DEFAULT 1,announcement TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,room));
+        CREATE TABLE IF NOT EXISTS contact_notifications(account TEXT NOT NULL, username TEXT NOT NULL, muted INTEGER NOT NULL, PRIMARY KEY(account,username));
         CREATE TABLE IF NOT EXISTS group_faults(account TEXT PRIMARY KEY, fault TEXT NOT NULL);
         INSERT OR IGNORE INTO groups(account,room,name,members) SELECT account,room,name,members FROM group_creations;")?;
         // Upgrade only synthetic fixture snapshots from the earlier UI preview.

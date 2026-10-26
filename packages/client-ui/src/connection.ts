@@ -13,6 +13,7 @@ import { MessageRecall } from "./message-recall.ts";
 import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
 import { validQuoteReference } from "./reply.ts";
 export type Connection = {
+  desktopId?: string;
   session: HubSession;
   cache: BrowserCache;
   clearCache: (account: string) => Promise<void>;

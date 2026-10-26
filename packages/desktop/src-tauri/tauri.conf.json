@@ -67,5 +67,15 @@
         ]
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFGRTQwOEM2NDM3MDRDNTgKUldSWVRIQkR4Z2prcjlPVSs4bzlZaHpXRTUvK0lJU25FSXBmQ045TXZiTGlOb09iVHI5NCtFYWEK",
+      "endpoints": [],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

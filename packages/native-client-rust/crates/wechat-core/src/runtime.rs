@@ -1,5 +1,7 @@
 #[path = "checkpoint.rs"]
 mod checkpoint;
+#[path = "contact_sync.rs"]
+mod contact_sync;
 #[path = "groups.rs"]
 mod groups;
 #[path = "incoming_groups.rs"]
@@ -206,6 +208,7 @@ fn auth_rejected(error: &anyhow::Error) -> bool {
             "Heartbeat returned ",
             "Sync service returned ",
             "Contact service returned ",
+            "Contact sync service returned ",
             "Saved-device login returned ",
             "Account authentication returned ",
             "Automatic authentication returned ",
@@ -542,7 +545,7 @@ impl Core {
             "disconnected"
         };
         Ok(
-            json!({"id":record.id,"ownUsername":self.profile_username(account)?,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingRecallProjections":self.store.pending_recall_projections(account)?,"pendingMessageRecalls":self.store.pending_message_recalls(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
+            json!({"id":record.id,"ownUsername":self.profile_username(account)?,"storageMode":record.storage_mode,"schemaCompatibility":record.schema_compatibility,"authenticated":auth,"connection":if auth&&desired==b"connected"{"online"}else if saved&&auto_connect&&desired==b"connected"{"reconnecting"}else{"disconnected"},"incomingTransport":incoming,"contactSyncReady":self.push_connected(account)&&(self.upstream.kind()==crate::upstream::UpstreamKind::Simulator||self.store.runtime(account,"contact-sync-ready")?.as_deref()==Some(self.ownership_generation.as_bytes())),"pendingProjectionBatches":self.store.pending_sync_count(account)?,"pendingCursorProjection":self.store.pending_cursor_projection(account)?,"pendingReadProjections":self.store.pending_reads(account)?,"pendingRecallProjections":self.store.pending_recall_projections(account)?,"pendingMessageRecalls":self.store.pending_message_recalls(account)?,"pendingSavedLoginProjection":self.store.runtime(account,"saved-login-projection-needed")?.is_some()||self.store.runtime(account,"saved-login-publication")?.is_some(),"profileRecoveryPending":self.store.runtime(account,"profile-recovery-pending")?.is_some(),"nativeRuntime":true,"alias":self.store.account_alias(account)?,"autoConnect":auto_connect}),
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
@@ -1440,6 +1443,7 @@ impl Core {
         let mut projected = 0;
         let mut unsupported = 0;
         self.account_state(account)?;
+        self.project_contact_pending(account)?;
         self.reconcile_recall_markers(account)?;
         let sent = self.recover_text_projections(account)?;
         for (batch_id, encrypted) in self.store.pending_sync(account)? {

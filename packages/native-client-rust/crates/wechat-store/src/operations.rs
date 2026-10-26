@@ -242,7 +242,7 @@ impl Store {
     pub(crate) fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=7).contains(&version) {
+        if !(1..=8).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -283,6 +283,11 @@ impl Store {
             ))?;
             tx.commit()?;
         }
+        if version < 8 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V008__contact_sync.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
     pub fn protected_state_exists(&self) -> Result<bool> {
@@ -299,6 +304,28 @@ impl Store {
                 Some(r) => Some(r.get(0)?),
                 None => None,
             })
+        })
+    }
+    /// Read a page of operational markers in one account-local query.
+    pub fn runtime_keys(
+        &self,
+        id: &str,
+        keys: &[String],
+    ) -> Result<std::collections::BTreeSet<String>> {
+        anyhow::ensure!(
+            keys.len() <= 500 && keys.iter().all(|key| key.len() <= 1024),
+            "invalid_runtime_query"
+        );
+        if keys.is_empty() {
+            return Ok(Default::default());
+        }
+        self.control(id, |db| {
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let mut query = db.prepare(&format!(
+                "SELECT key FROM runtime WHERE key IN ({placeholders})"
+            ))?;
+            let rows = query.query_map(rusqlite::params_from_iter(keys), |row| row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
     pub fn put_runtime(&self, id: &str, key: &str, value: &[u8]) -> Result<()> {
@@ -527,10 +554,35 @@ impl Store {
         payload: &[u8],
         received_cursor: &[u8],
     ) -> Result<()> {
+        self.stage_sync_stream(account, id, payload, received_cursor, "message")
+    }
+    pub fn stage_contact_sync(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+    ) -> Result<()> {
+        self.stage_sync_stream(account, id, payload, received_cursor, "contact")
+    }
+    fn stage_sync_stream(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+        stream: &str,
+    ) -> Result<()> {
+        let cursor_key = if stream == "contact" {
+            "contact-received-cursor"
+        } else {
+            "received-cursor"
+        };
         self.control(account,|db|{
-        let tx=db.transaction()?;tx.execute("INSERT OR IGNORE INTO apply_intents VALUES(?1,?2,'pending',?3)",params![id,payload,chrono::Utc::now().to_rfc3339()])?;
-        tx.execute("INSERT INTO runtime VALUES('received-cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[received_cursor])?;
-        tx.execute("INSERT INTO runtime VALUES('cursor-projection-needed',?1) ON CONFLICT(key)DO UPDATE SET value=excluded.value",[b"1".as_slice()])?;tx.commit()?;Ok(())
+        let tx=db.transaction()?;tx.execute("INSERT OR IGNORE INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,?4)",params![id,payload,chrono::Utc::now().to_rfc3339(),stream])?;
+        tx.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![cursor_key,received_cursor])?;
+        if stream == "message" { tx.execute("INSERT INTO runtime VALUES('cursor-projection-needed',?1) ON CONFLICT(key)DO UPDATE SET value=excluded.value",[b"1".as_slice()])?; }
+        tx.commit()?;Ok(())
     })
     }
     pub fn pending_reads(&self, account: &str) -> Result<usize> {
@@ -567,9 +619,24 @@ impl Store {
         })
     }
     pub fn pending_sync(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.pending_sync_stream(account, "message")
+    }
+    pub fn pending_contact_sync(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.pending_sync_stream(account, "contact")
+    }
+    pub fn pending_contact_sync_count(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM apply_intents WHERE stream='contact' AND state!='projected'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? as usize)
+        })
+    }
+    fn pending_sync_stream(&self, account: &str, stream: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.control(account,|db|{
-        let mut q=db.prepare("SELECT id,payload FROM apply_intents WHERE state='pending' ORDER BY created_at,id LIMIT 100")?;
-        let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut q=db.prepare("SELECT id,payload FROM apply_intents WHERE stream=?1 AND state='pending' ORDER BY created_at,id LIMIT 100")?;
+        let rows=q.query_map([stream],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok(rows.collect::<rusqlite::Result<_>>()?)
     })
     }
     pub fn append_event_once(
@@ -993,6 +1060,30 @@ mod runtime_prefix_tests {
             .is_err());
     }
     #[test]
+    fn runtime_keys_batches_exact_account_scoped_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        store.put_runtime("one", "marker:peer", b"1").unwrap();
+        store.put_runtime("two", "marker:other", b"1").unwrap();
+        assert_eq!(
+            store
+                .runtime_keys(
+                    "one",
+                    &[
+                        "marker:peer".into(),
+                        "marker:other".into(),
+                        "marker:%".into()
+                    ]
+                )
+                .unwrap(),
+            ["marker:peer".to_owned()].into_iter().collect()
+        );
+        assert!(store.runtime_keys("one", &vec!["key".into(); 501]).is_err());
+        assert!(store.runtime_keys("one", &[]).unwrap().is_empty());
+    }
+    #[test]
     fn runtime_prefix_is_bounded_literal_and_account_scoped() {
         let temporary = tempfile::tempdir().unwrap();
         let store = Store::open(&temporary.path().join("data")).unwrap();
@@ -1014,5 +1105,51 @@ mod runtime_prefix_tests {
         );
         assert!(store.runtime_prefix("one", "", 1).is_err());
         assert!(store.runtime_prefix("one", "queue:", 101).is_err());
+    }
+    #[test]
+    fn contact_stream_upgrade_keeps_old_batches_and_separates_received_cursors() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("test").unwrap();
+        store
+            .stage_sync("test", "old", b"old sealed commands", b"message cursor")
+            .unwrap();
+        store.control("test", |db| {
+            db.execute_batch("DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;PRAGMA user_version=7;")?;
+            Ok(())
+        }).unwrap();
+        drop(store);
+        let store = Store::open_existing(&temporary.path().join("data")).unwrap();
+        assert_eq!(
+            store.pending_sync("test").unwrap()[0].1,
+            b"old sealed commands"
+        );
+        store
+            .stage_contact_sync(
+                "test",
+                "contact:new",
+                b"new sealed commands",
+                b"contact cursor",
+            )
+            .unwrap();
+        assert_eq!(store.pending_sync("test").unwrap().len(), 1);
+        assert_eq!(
+            store.pending_contact_sync("test").unwrap()[0].0,
+            "contact:new"
+        );
+        assert_eq!(
+            store.runtime("test", "received-cursor").unwrap().unwrap(),
+            b"message cursor"
+        );
+        assert_eq!(
+            store
+                .runtime("test", "contact-received-cursor")
+                .unwrap()
+                .unwrap(),
+            b"contact cursor"
+        );
+        assert_eq!(store.pending_sync_count("test").unwrap(), 2);
+        store.finish_sync("test", "contact:new").unwrap();
+        assert_eq!(store.pending_sync_count("test").unwrap(), 1);
     }
 }

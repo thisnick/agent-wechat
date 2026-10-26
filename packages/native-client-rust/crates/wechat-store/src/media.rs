@@ -491,7 +491,7 @@ impl Store {
     pub fn media_sync_receipts(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.control(account, |db| {
             let mut q = db.prepare(
-                "SELECT id,payload FROM apply_intents ORDER BY created_at DESC,id DESC LIMIT 10000",
+                "SELECT id,payload FROM apply_intents WHERE stream='message' ORDER BY created_at DESC,id DESC LIMIT 10000",
             )?;
             let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)

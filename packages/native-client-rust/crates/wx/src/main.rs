@@ -312,12 +312,13 @@ enum CatalogCommand {
 }
 #[derive(Subcommand)]
 enum ChatCommand {
-    /// Change group thread notifications.
+    /// Mute a direct chat or group.
     Mute {
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// Unmute a direct chat or group.
     Unmute {
         id: String,
         #[command(flatten)]

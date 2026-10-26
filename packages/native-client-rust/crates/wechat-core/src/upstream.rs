@@ -147,6 +147,20 @@ pub trait Upstream: Send + Sync {
     fn sync(&self, state: &mut AccountState, cursor: &[u8]) -> Result<SyncBatch> {
         self.native(NativeOptions::default())?.sync(state, cursor)
     }
+    fn contact_sync(
+        &self,
+        state: &mut AccountState,
+        cursor: &[u8],
+        message_cursor: &[u8],
+        continuation: bool,
+    ) -> Result<wechat_protocol::contact_sync::ContactSyncBatch> {
+        self.native(NativeOptions::default())?.contact_sync(
+            state,
+            cursor,
+            message_cursor,
+            continuation,
+        )
+    }
     fn logout(&self, state: &mut AccountState) -> Result<(bool, i32)> {
         let reply = self.native(NativeOptions::default())?.logout(state)?;
         Ok((reply.accepted, reply.service_code))

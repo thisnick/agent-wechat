@@ -4,6 +4,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import https from "node:https";
+import { notificationsAcceptance } from "./notifications.mjs";
 const application = process.env.DESKTOP_BINARY;
 if (!application) throw new Error("DESKTOP_BINARY is required");
 const driver = spawn(
@@ -30,6 +31,27 @@ async function call(path, body, method = body === undefined ? "GET" : "POST") {
   const json = await response.json();
   if (!response.ok || json.value?.error) throw new Error(JSON.stringify(json));
   return json.value;
+}
+async function invokeNative(command, args = {}) {
+  const result = await call("/session/" + session + "/execute/async", {
+    script:
+      "const done = arguments[arguments.length - 1]; window.__TAURI_INTERNALS__.invoke(arguments[0], arguments[1]).then(value => done({value}), error => done({error: String(error)}));",
+    args: [command, args],
+  });
+  if (result.error) throw new Error(result.error);
+  return result.value;
+}
+async function updatePreferences(expected) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const value = await invokeNative("updates_status");
+    if (
+      value.automatic === expected.automatic &&
+      value.prereleases === expected.prereleases
+    )
+      return value;
+    await pause(100);
+  }
+  throw new Error("Update preferences were not saved");
 }
 async function health(expected) {
   const deadline = Date.now() + 40000;
@@ -110,6 +132,24 @@ try {
   await until("return document.body.innerText", (value) =>
     value.includes("Export key for CLI")
   );
+  await until("return document.body.innerText", (value) =>
+    value.includes("App updates")
+  );
+  const updates = await invokeNative("updates_status");
+  assert.equal(updates.automatic, true);
+  assert.equal(updates.prereleases, updates.currentVersion.includes("-"));
+  await script(
+    "document.querySelector('#automatic-updates').click(); return true"
+  );
+  await updatePreferences({
+    automatic: false,
+    prereleases: updates.prereleases,
+  });
+  if (updates.prereleases)
+    await script(
+      "document.querySelector('#prerelease-updates').click(); return true"
+    );
+  await updatePreferences({ automatic: false, prereleases: false });
   // A key appears only after a deliberate reveal action in this isolated fixture.
   assert.equal(
     await script(
@@ -193,6 +233,7 @@ try {
       )
       .on("error", reject);
   });
+  if (process.platform === "linux") await notificationsAcceptance(invokeNative);
   try {
     await script(
       "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"
@@ -213,6 +254,13 @@ try {
     40000
   );
   await health(true);
+  await updatePreferences({ automatic: false, prereleases: false });
+  await invokeNative("updates_preferences", {
+    preferences: { automatic: true, prereleases: true },
+  });
+  console.log(
+    "Native update settings and release channel persist across restart"
+  );
   try {
     await script(
       "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"

@@ -299,7 +299,7 @@ impl Store {
     pub fn recall_sync_evidence_revision(&self, account: &str) -> Result<i64> {
         self.control(account, |db| {
             Ok(db.query_row(
-                "SELECT COALESCE(MAX(rowid),0) FROM apply_intents",
+                "SELECT COALESCE(MAX(rowid),0) FROM apply_intents WHERE stream='message'",
                 [],
                 |row| row.get(0),
             )?)
@@ -310,7 +310,7 @@ impl Store {
         const MAX_BATCH: usize = 4 * 1024 * 1024;
         const MAX_TOTAL: usize = 16 * 1024 * 1024;
         self.control(account, |db| {
-            let mut query = db.prepare("SELECT id,length(payload),CASE WHEN length(payload)<=4194304 THEN payload ELSE NULL END FROM apply_intents ORDER BY created_at DESC,id DESC LIMIT 256")?;
+            let mut query = db.prepare("SELECT id,length(payload),CASE WHEN length(payload)<=4194304 THEN payload ELSE NULL END FROM apply_intents WHERE stream='message' ORDER BY created_at DESC,id DESC LIMIT 256")?;
             let mut rows = query.query([])?;
             let mut result = Vec::new();
             let mut total = 0usize;
@@ -457,7 +457,7 @@ mod tests {
                     |row| row.get::<_, i64>(0)
                 )?))
                 .unwrap(),
-            7
+            8
         );
         drop(store);
         let store = Store::open_existing(&root).unwrap();
@@ -517,7 +517,7 @@ mod tests {
                 let tx = db.transaction()?;
                 for index in 0..258 {
                     tx.execute(
-                        "INSERT INTO apply_intents VALUES(?1,?2,'projected','2026-10-23')",
+                        "INSERT INTO apply_intents(id,payload,state,created_at) VALUES(?1,?2,'projected','2026-10-23')",
                         params![format!("batch-{index:03}"), b"sealed".as_slice()],
                     )?;
                 }
@@ -554,7 +554,7 @@ mod tests {
                 let payload = vec![1u8; 4 * 1024 * 1024];
                 for index in 0..5 {
                     tx.execute(
-                        "INSERT INTO apply_intents VALUES(?1,?2,'projected','2026-10-23')",
+                        "INSERT INTO apply_intents(id,payload,state,created_at) VALUES(?1,?2,'projected','2026-10-23')",
                         params![format!("batch-{index}"), payload],
                     )?;
                 }

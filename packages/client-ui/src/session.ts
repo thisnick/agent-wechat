@@ -267,6 +267,7 @@ export class HubSession {
   private threadGeneration = 0;
   private accountRequest = 0;
   private catalogRequest = 0;
+  private contactRefresh?: ReturnType<typeof setTimeout>;
   private detailsRequest = 0;
   private threadRequests = new Map<string, number>();
   private interactionReads = new Set<string>();
@@ -399,6 +400,7 @@ export class HubSession {
     for (const listener of this.signOutListeners) listener(account);
   }
   close(): void {
+    clearTimeout(this.contactRefresh);
     this.activationRequest++;
     this.generation++;
     this.threadGeneration++;
@@ -415,6 +417,8 @@ export class HubSession {
     this.resetAccount(account, false);
   }
   private resetAccount(account: string | null, signedOut: boolean): void {
+    clearTimeout(this.contactRefresh);
+    this.contactRefresh = undefined;
     this.activationRequest++;
     if (account) {
       this.histories.clear(account);
@@ -1172,10 +1176,21 @@ export class HubSession {
       )
     ) {
       await this.accounts();
+    } else if (event.kind === "contacts.updated" && event.data.origin === "contact_sync") {
+      // One sync page can update hundreds of contacts. Refresh the local
+      // catalog/thread pages together instead of reading each contact's thread.
+      if (!this.contactRefresh)
+        this.contactRefresh = setTimeout(() => {
+          this.contactRefresh = undefined;
+          if (this.current(account, generation))
+            void this.refresh(account, generation).catch(() => {});
+        }, 100);
     } else if (
       event.kind === "contacts.updated" ||
       (event.kind === "metadata.changed" && event.data.kind !== "avatar")
     ) {
+      if (event.kind === "contacts.updated" && typeof event.data.contactId === "string" && this.value.threads.some((thread) => thread.id === event.data.contactId))
+        await this.refreshThread(account, event.data.contactId, generation).catch(() => {});
       await this.loadCatalog(account, generation);
     } else if (event.kind === "sync.completed") {
       await this.refresh(account, generation, false);

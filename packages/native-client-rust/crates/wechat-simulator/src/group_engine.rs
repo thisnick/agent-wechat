@@ -29,7 +29,15 @@ pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<
             } else if username == "filehelper" {
                 0
             } else {
-                1
+                let muted: bool = db
+                    .query_row(
+                        "SELECT muted FROM contact_notifications WHERE account=?1 AND username=?2",
+                        params![account, username],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                1 | if muted { 0x200 } else { 0 }
             },
         ),
     ];
@@ -47,6 +55,13 @@ pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<
     } else {
         label(username).into()
     };
+    for n in [3, 4, 10, 11, 12] {
+        fields.push(p::bytes(n, &p::bytes(1, b"")));
+    }
+    for n in [5, 9, 13, 14] {
+        fields.push(p::uint(n, 0));
+    }
+    fields.push(p::bytes(6, &p::buffer(b"")));
     fields.push(p::bytes(2, &p::bytes(1, name.as_bytes())));
     fields.push(p::bytes(
         40,
@@ -225,6 +240,22 @@ pub(super) fn mutate(db: &mut Connection, session: &Session, rpc: &GroupRpc) -> 
             };
             validate_destination(&tx, &session.account, &room)?;
             match opcode {
+                2 => {
+                    ensure!(
+                        !room.ends_with("@chatroom")
+                            && p::scalar(&payload, 7)? == u64::from(u32::MAX),
+                        "invalid_simulator_contact_notifications"
+                    );
+                    for n in 1..=14 {
+                        ensure!(
+                            p::optional(&payload, n)?.is_some(),
+                            "incomplete_simulator_contact"
+                        );
+                    }
+                    let flag = p::scalar(&payload, 8)?;
+                    ensure!(flag & !0x200 == 1, "invalid_simulator_contact_flags");
+                    tx.execute("INSERT INTO contact_notifications VALUES(?1,?2,?3) ON CONFLICT(account,username) DO UPDATE SET muted=excluded.muted", params![session.account,room,flag & 0x200 != 0])?;
+                }
                 4 | 7 => {} // Leave cleanup is acknowledged; cached history remains.
                 16 => {
                     tx.execute(

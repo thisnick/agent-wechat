@@ -260,6 +260,63 @@ fn bounded_catalog_result(count: usize, pages: u32, coverage: &str) -> Value {
     json!({"recordCount":count,"pages":pages,"complete":false,"reason":"time_bound","coverage":coverage,"resumeAvailable":true,"profileProjection":"pending"})
 }
 impl Core {
+    /// This is an unresolved-work marker, never a second stored preference.
+    /// Receipt phases keep an old retained update from invalidating a newer read.
+    pub(super) fn invalidate_contact_notifications(
+        &self,
+        account: &str,
+        record: &ContactRecord,
+        receipt: &str,
+    ) -> Result<()> {
+        valid_name(&record.username)?;
+        let phase = format!("contact-notifications:{receipt}:{}", record.username);
+        if self.store.runtime(account, &phase)?.is_some() {
+            return Ok(());
+        }
+        let fields = p::decode(&record.raw)?;
+        let relevant = if record.username.ends_with("@chatroom") {
+            p::optional(&fields, 17)?.is_some()
+        } else {
+            match p::optional(&fields, 7)? {
+                Some(p::Value::Varint(mask)) => mask & 0x200 != 0,
+                Some(_) => true,
+                None => p::optional(&fields, 8)?.is_some(),
+            }
+        };
+        if relevant {
+            self.mark_group_revision(account, &record.username, receipt)?;
+            self.store.put_runtime(
+                account,
+                &format!("contact-notifications-unresolved:{}", record.username),
+                receipt.as_bytes(),
+            )?;
+        }
+        self.store.put_runtime(account, &phase, b"1")?;
+        Ok(())
+    }
+    pub(super) fn settle_contact_notifications(
+        &self,
+        account: &str,
+        record: &ContactRecord,
+        patch: &ContactProjection,
+        mute_applied: bool,
+        receipt: &str,
+    ) -> Result<()> {
+        let known = patch
+            .fields
+            .contains_key(if record.username.ends_with("@chatroom") {
+                "chat_room_notify"
+            } else {
+                "flag"
+            })
+            || mute_applied;
+        let key = format!("contact-notifications-unresolved:{}", record.username);
+        // Do not clear uncertainty introduced by a later contact receipt.
+        if known && self.store.runtime(account, &key)?.as_deref() == Some(receipt.as_bytes()) {
+            self.store.clear_runtime(account, &key)?;
+        }
+        Ok(())
+    }
     pub fn start_metadata(
         self: &Arc<Self>,
         account: &str,
@@ -347,12 +404,10 @@ impl Core {
         let mut count = 0;
         let mut rejected_slots = 0;
         let mut apply = |record: &ContactRecord| -> Result<()> {
-            wechat_profile::apply_contact_patch(
-                &location,
-                &keys,
-                &self.upstream.contact_patch(record)?,
-                &options,
-            )?;
+            self.invalidate_contact_notifications(account, record, id)?;
+            let patch = self.upstream.contact_patch(record)?;
+            wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
+            self.settle_contact_notifications(account, record, &patch, false, id)?;
             if record.username.ends_with("@chatroom") {
                 self.mark_group_revision(account, &record.username, id)?;
                 // Explicit native group metadata supplies catalog identity.
@@ -532,7 +587,7 @@ impl Core {
         self.store.put_runtime(account, &key, &sealed)?;
         Ok(key)
     }
-    fn metadata_contact_reply(
+    pub(super) fn metadata_contact_reply(
         &self,
         account: &str,
         ids: &[String],
@@ -1312,9 +1367,52 @@ mod tests {
                     .to_string(),
                 "contact_update_control_unresolved"
             );
-            assert_eq!(direct_muted(&core), false);
+            assert!(direct_muted(&core).is_null());
             assert!(core.store.runtime("one", receipt).unwrap().is_none());
         }
+    }
+    #[test]
+    fn uncertain_mute_suppresses_notifications_until_a_newer_known_update() {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        assert_eq!(direct_muted(&core), false);
+        let unresolved = direct_contact(0x200, 0x200, true);
+        assert!(core
+            .apply_sync_command("one", &unresolved, "uncertain", "contact_sync")
+            .is_err());
+        assert!(direct_muted(&core).is_null());
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x200, 0, false),
+            "fresh",
+            "contact_sync",
+        )
+        .unwrap();
+        assert_eq!(direct_muted(&core), false);
+        assert!(core
+            .apply_sync_command("one", &unresolved, "uncertain", "contact_sync")
+            .is_err());
+        assert_eq!(direct_muted(&core), false);
+        // An unknown field control also prevents stale saved flags becoming a
+        // known unmuted state, without replacing the original profile flag.
+        let raw = p::message(&[p::uint(1, 999)]).unwrap();
+        let info = p::message(&[p::uint(3, 1), p::bytes(4, &raw)]).unwrap();
+        let control = p::message(&[p::uint(1, 1), p::bytes(2, &info)]).unwrap();
+        let mut command = direct_contact(u64::from(u32::MAX), 3, false);
+        command.payload.extend(p::bytes(89, &control));
+        assert!(core
+            .apply_sync_command("one", &command, "unknown-control", "contact_sync")
+            .is_err());
+        assert!(direct_muted(&core).is_null());
+        let record = wechat_protocol::wire::decode_contact_record(
+            &direct_contact(u64::from(u32::MAX), 3, false).payload,
+        )
+        .unwrap();
+        core.invalidate_contact_notifications("one", &record, "lookup")
+            .unwrap();
+        let patch = contact_patch(&record).unwrap();
+        core.settle_contact_notifications("one", &record, &patch, false, "lookup")
+            .unwrap();
+        assert_eq!(direct_muted(&core), false);
     }
     #[test]
     fn missing_flag_baseline_stays_pending_after_later_refresh() {

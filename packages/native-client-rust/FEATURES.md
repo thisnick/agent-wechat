@@ -50,7 +50,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Eligible incoming original sticker bytes, animation/integrity bounds | Implemented | Restricted pinned source, size/integrity and complete-frame fixtures; no sticker-send substitution or pack support |
 | Ordinary group mutations, CLI/API/SDK | Implemented subset; Linux x64 validation | Create with partial member acceptance, shared rename, own display name, remove/re-add, announcement clear, leave and group mute/unmute accepted in the isolated built-image test; independent roster reads checked display name and membership. Stable keys, sealed raw replies before decode, cancellation before submission, per-step authorization/logout fences, restart repair and no uncertain resend have fixtures. Group creation selects at least two contacts. Profile writes remain partial; see validation |
 | Incoming group edits and refresh events | Partial | Present ModContact names/notifications/membership and version-triggered roster/detail reads save known fields before events; synthetic replay, delta/full-list and stale-receipt tests pass. Two phone rename/mute controls required manual server refresh because no matching ModContact arrived. Automatic delivery of every other-device edit remains unverified; unknown controls stay pending |
-| Saved thread notification preferences | Implemented read subset | Thread pages/detail derive nullable direct/group mute state from the official contact store in one page query. Known direct mute-only masks preserve other flag bits; unresolved controls and older pending phases stay held. Targeted contact refresh updates saved state. Automatic delivery of every phone mute change is not established; direct-chat notification edits are not implemented |
+| [Thread notification preferences](../../protocol-mapping/contact-updates.md) | Implemented; direct live verification | Thread pages/detail derive nullable direct/group mute state with batched profile and unresolved-work reads. Independent command356/CGI8674 contact sync uses its own received and official cursors. Direct phone mute/unmute passed without manual refresh; group stream transitions have fixtures. CLI/API direct mute/unmute use a fresh contact snapshot and the one-attempt mutation journal; both persisted across independent server refresh. Unknown controls remain held; they do not become known unmuted preferences |
 | OpenClaw group information | Implemented, cached reads only | Only `wechat_group_info` is registered; trusted owner/admin invocation, selected account/configuration, cancellation and revocation checks precede data return. Member list and exact lookup distinguish cached absence from confirmed removal. No mutation tools |
 | Durable outgoing text with idempotency and uncertain outcome | Implemented | Controlled File Transfer acceptance and lost-response/restart fixtures |
 | Received shared-card metadata and optional thumbnails | Implemented; live verification pending | Plain/compressed encrypted-profile and group fixtures restore subtypes3/4/5 title/description/URL/source name. Optional image thumbnails use sidecar-only bounded CDN/public HTTP retrieval; transport credentials stay private. Card text survives unavailable previews; official card cache joins and shared music/video playback are not implemented |
@@ -100,7 +100,7 @@ those gaps.
 ## Explicit follow-ups outside the initial capability claim
 
 - Invitation links/joining, ownership/admin changes, announcement publication, personal
-  group remarks, direct-thread notification mutations and complete other-device group
+  group remarks and complete other-device group
   sync require further evidence. The implemented ordinary-group subset is listed above.
 - A web application follows stabilization of the API, events and media surface.
 - File sources above 512 MiB, existing-ciphertext cache-hit recovery, large image/video/voice,
@@ -160,3 +160,9 @@ API and CLI, retain a reproducible fixture or controlled test receipt, verify
 restarts and failure paths, and update this table. User-visible playback and
 phone approval remain distinct from a successful server response. Current local
 artifacts are validation inputs, not a published or deployed release.
+
+### Desktop notification and update validation
+
+Native desktop listeners consume SSE for authenticated accounts on the selected hub. They require contact sync readiness and a known unmuted thread; history, outgoing/system/recall content, focused conversations and duplicate message IDs are suppressed. Linux native-window tests cover SSE reconnect, D-Bus notification-service delivery, click targets, disabled/unknown mute state and saved preferences. Installed macOS/Windows notification acceptance remains separate.
+
+Desktop upgrades check GitHub Releases and verify version-bound package signatures with Tauri. Release tests verify real Tauri signatures, changed-byte/version rejection, final checksums and all-platform feed completeness. A Linux DEB was built, inspected and signed locally; native-window settings/channel persistence passed. Production signed/notarized platform releases and installation across two real release versions remain required acceptance. See `packages/desktop/README.md` and `RELEASING.md`.

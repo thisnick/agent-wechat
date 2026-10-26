@@ -56,7 +56,7 @@ jobs:
           components: rustfmt, clippy
       - name: Install Linux desktop prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb webkit2gtk-driver
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb webkit2gtk-driver python3-dbus python3-gi
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh
@@ -146,6 +146,9 @@ jobs:
           export HOME=$(mktemp -d)
           export XDG_RUNTIME_DIR=$(mktemp -d)
           dbus-run-session -- xvfb-run -a bash -c 'printf "fixture-password\n" | gnome-keyring-daemon --unlock --components=secrets; node packages/desktop/test/webdriver.mjs'
+      - name: Set installer identity before any code signing
+        if: runner.os != 'macOS'
+        run: node packages/desktop/scripts/bundle-type.mjs packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat${{ runner.os == 'Windows' && '.exe' || '' }} ${{ runner.os == 'Windows' && 'nsis' || 'deb' }}
       - name: Stage desktop bundle inputs
         if: inputs.release
         run: |
@@ -181,16 +184,20 @@ jobs:
           path: artifacts/desktop-validation/
           if-no-files-found: error
       - name: Package Linux release
-        if: inputs.release && runner.os == 'Linux'
+        if: inputs.release && github.ref == 'refs/heads/main' && runner.os == 'Linux'
         run: |
           pnpm --filter @agent-wechat/desktop app:bundle --target ${{ matrix.target }} --bundles deb
           node packages/desktop/test/validate-deb.mjs packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           mkdir -p artifacts/desktop-release
           cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb "artifacts/desktop-release/AgentWechat-v$VERSION-${{ matrix.platform }}.deb"
+          node packages/desktop/scripts/sign-updates.mjs artifacts/desktop-release ${{ matrix.platform }}
           node packages/desktop/scripts/manifest.mjs artifacts/desktop-release ${{ matrix.platform }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v7
-        if: inputs.release && runner.os == 'Linux'
+        if: inputs.release && github.ref == 'refs/heads/main' && runner.os == 'Linux'
         with:
           name: desktop-release-${{ matrix.platform }}
           path: artifacts/desktop-release/
@@ -283,14 +290,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
+      - run: pnpm install --frozen-lockfile --filter @agent-wechat/desktop...
       - uses: actions/download-artifact@v8
         with:
           name: desktop-installers-signed-${{ matrix.arch }}
           path: artifacts/desktop-release/
-      - run: node packages/desktop/scripts/manifest.mjs artifacts/desktop-release windows-${{ matrix.arch }}
+      - name: Sign and verify final Windows updater
+        run: |
+          node packages/desktop/scripts/sign-updates.mjs artifacts/desktop-release windows-${{ matrix.arch }}
+          node packages/desktop/scripts/manifest.mjs artifacts/desktop-release windows-${{ matrix.arch }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v7
         with:
           name: desktop-release-windows-${{ matrix.arch }}
@@ -331,11 +346,15 @@ jobs:
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           bash packages/desktop/scripts/macos-notarize.sh packages/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AgentWechat.app artifacts/desktop-release "$VERSION"
+          tar -czf "artifacts/desktop-release/AgentWechat-v$VERSION-macos-arm64.app.tar.gz" -C packages/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos AgentWechat.app
+          node packages/desktop/scripts/sign-updates.mjs artifacts/desktop-release macos-arm64
           node packages/desktop/scripts/manifest.mjs artifacts/desktop-release macos-arm64
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Remove temporary signing credentials
         if: always()
         run: bash packages/desktop/scripts/macos-cleanup.sh

@@ -3,7 +3,9 @@ mod config;
 mod credentials;
 mod files;
 mod hub;
+mod notifications;
 mod transport;
+mod updates;
 
 use anyhow::{bail, Context, Result};
 use config::{Config, Connection};
@@ -40,6 +42,8 @@ pub struct Desktop {
     uploads: Mutex<HashMap<String, transport::Upload>>,
     requests: Arc<Mutex<HashMap<String, transport::Control>>>,
     quit: AtomicU8,
+    notifications: notifications::Notifications,
+    updates: updates::Updates,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +72,8 @@ struct Settings {
     network_addresses: Vec<String>,
     certificate: Option<String>,
     cli_path: String,
+    notifications_enabled: bool,
+    notification_status: String,
 }
 impl Desktop {
     async fn start_local(&self, inner: &mut Inner, key: Zeroizing<String>) -> Result<()> {
@@ -139,7 +145,7 @@ impl Desktop {
         inner.active = Some(active);
         Ok(session)
     }
-    async fn stop(&self) -> Result<()> {
+    async fn stop_hub(&self) -> Result<()> {
         for control in self.requests.lock().await.values() {
             control.cancel.cancel();
         }
@@ -148,7 +154,12 @@ impl Desktop {
             hub::stop(owned).await?;
         }
         inner.hub = None;
-        inner.active = None;
+        Ok(())
+    }
+    async fn stop(&self) -> Result<()> {
+        self.stop_hub().await?;
+        self.inner.lock().await.active = None;
+        self.notifications.cancel.cancel();
         Ok(())
     }
 }
@@ -266,6 +277,8 @@ async fn desktop_settings(state: State<'_, Desktop>) -> Result<Settings, String>
             .map_err(|error| error.to_string())?
             .display()
             .to_string(),
+        notifications_enabled: config.notifications_enabled,
+        notification_status: notifications::status(&state).await,
     })
 }
 #[derive(Deserialize)]
@@ -485,6 +498,8 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
@@ -512,7 +527,11 @@ fn main() {
                 requests: Arc::new(Mutex::new(HashMap::new())),
                 uploads: Mutex::new(HashMap::new()),
                 quit: AtomicU8::new(0),
+                notifications: notifications::Notifications::default(),
+                updates: updates::Updates::default(),
             });
+            notifications::start(app.handle().clone())?;
+            updates::start(app.handle().clone());
             let show = tauri::menu::MenuItem::with_id(
                 app,
                 "show",
@@ -566,6 +585,13 @@ fn main() {
             desktop_forget,
             desktop_install_cli,
             desktop_quit,
+            notifications::notifications_context,
+            notifications::notifications_take_target,
+            notifications::notifications_enabled,
+            updates::updates_status,
+            updates::updates_preferences,
+            updates::updates_check,
+            updates::updates_install,
             files::desktop_save_file,
             files::desktop_export_key,
             transport::http_body_begin,
@@ -631,6 +657,8 @@ mod tests {
             uploads: Mutex::new(HashMap::new()),
             requests: Arc::new(Mutex::new(HashMap::new())),
             quit: AtomicU8::new(0),
+            notifications: notifications::Notifications::default(),
+            updates: updates::Updates::default(),
         };
         desktop.resume_local().await.unwrap();
         {

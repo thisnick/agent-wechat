@@ -20,7 +20,11 @@ impl Drop for CursorPublication {
         self.received.zeroize();
     }
 }
-fn read_cursor_file(path: &std::path::Path, root: &std::path::Path, max: u64) -> Result<Vec<u8>> {
+pub(super) fn read_cursor_file(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    max: u64,
+) -> Result<Vec<u8>> {
     use std::io::Read;
     if std::fs::canonicalize(path)? != path || !path.starts_with(root) {
         bail!("invalid account cursor path");

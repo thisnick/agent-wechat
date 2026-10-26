@@ -203,6 +203,24 @@ impl Core {
         location: &ProfileLocation,
     ) -> Result<()> {
         let path = wechat_profile::account_sync_store_path(location, identity)?;
+        self.ensure_stream_store(account, identity, &path, "account-sync-store-create")
+    }
+    pub(super) fn ensure_contact_sync_store(
+        &self,
+        account: &str,
+        identity: &wechat_profile::ProfileIdentity,
+        location: &ProfileLocation,
+    ) -> Result<()> {
+        let path = wechat_profile::account_contact_sync_store_path(location, identity)?;
+        self.ensure_stream_store(account, identity, &path, "contact-sync-store-create")
+    }
+    fn ensure_stream_store(
+        &self,
+        account: &str,
+        identity: &wechat_profile::ProfileIdentity,
+        path: &std::path::Path,
+        purpose: &str,
+    ) -> Result<()> {
         if path.is_file() && path.with_extension("crc").is_file() {
             return Ok(());
         }
@@ -211,7 +229,6 @@ impl Core {
         {
             bail!("profile_sync_store_missing");
         }
-        let purpose = "account-sync-store-create";
         let iv = match self.store.runtime(account, purpose)? {
             Some(sealed) => self.vault.open_record(account, purpose, &sealed)?.to_vec(),
             None => {
@@ -233,7 +250,7 @@ impl Core {
         }
         let key = wechat_profile::account_mmkv_key(&identity.username)?;
         let pair = wechat_profile::create_mmkv_v4(&key, iv, 65536)?;
-        wechat_profile::publish_mmkv_create(&path, &pair, &self.write_options(account, purpose)?)?;
+        wechat_profile::publish_mmkv_create(path, &pair, &self.write_options(account, purpose)?)?;
         self.store.clear_runtime(account, purpose)?;
         Ok(())
     }

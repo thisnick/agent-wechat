@@ -1907,3 +1907,9 @@ input:focus-visible {
 .desktop-access-key { flex-wrap: wrap; }
 .desktop-access-key input { width: 100%; font-family: monospace; }
 .desktop-connection-details code, .desktop-preferences small { overflow-wrap: anywhere; }
+
+.desktop-update-settings { border-bottom: 1px solid var(--border); padding-bottom: 20px; }
+.desktop-update-settings .setting { gap: 16px; }
+.desktop-update-settings progress { width: 100%; }
+.desktop-update-notice { position: fixed; z-index: 2000; right: 24px; bottom: 24px; max-width: min(440px, calc(100vw - 48px)); padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 8px 24px #0003; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.desktop-update-notice small { flex-basis: 100%; color: var(--muted); }

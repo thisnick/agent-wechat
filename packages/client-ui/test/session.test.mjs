@@ -1236,6 +1236,25 @@ test("continuous SSE lets a read cached chat reopen without another history requ
   assert.equal(hub.snapshot().messages[0].id, "peer");
 });
 
+test("a contact sync burst refreshes thread preferences in one catalog pass", async (t) => {
+  let lists = 0, contacts = 0, details = 0, muted = false;
+  const hub = session(t, {
+    threads: async () => { lists++; return page([{ id: "peer", muted, unreadCount: 0, readStateVersion: "1" }]); },
+    thread: async () => { details++; return { id: "peer", muted, unreadCount: 0, readStateVersion: "1" }; },
+    contacts: async () => { contacts++; return page([]); },
+  });
+  await hub.activate("a");
+  await eventually(() => contacts === 1);
+  const before = { lists, contacts, details };
+  muted = true;
+  for (let index = 0; index < 50; index++)
+    await hub.consume({ kind: "contacts.updated", data: { origin: "contact_sync", contactId: "peer" } }, "a");
+  await eventually(() => hub.snapshot().threads[0].muted === true);
+  assert.equal(lists, before.lists + 1);
+  assert.equal(contacts, before.contacts + 1);
+  assert.equal(details, before.details);
+});
+
 test("read conflicts fetch a fresh version and reload history before a second admission", async (t) => {
   const calls = [];
   let version = 2,

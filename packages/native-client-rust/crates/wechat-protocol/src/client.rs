@@ -906,7 +906,7 @@ impl NativeClient {
         }
         bail!("AutoAuth redirect limit reached")
     }
-    fn authenticated_rpc(
+    pub(crate) fn authenticated_rpc(
         &self,
         state: &mut AccountState,
         cgi: u16,

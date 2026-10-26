@@ -126,6 +126,7 @@ mod tests {
             ("push", "Native envelope"),
             ("polling", "Heartbeat"),
             ("sync", "Sync service"),
+            ("contact_sync", "Contact sync service"),
         ] {
             let (_directory, core) = core();
             let (send, _) = core

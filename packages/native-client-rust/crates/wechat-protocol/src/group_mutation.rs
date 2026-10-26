@@ -113,7 +113,12 @@ impl GroupMutation {
     pub fn validate(&self, own: &str) -> Result<()> {
         ordinary_identity(own)?;
         if let Some(id) = self.target() {
-            group(id)?;
+            if matches!(self, Self::Mute { .. }) && !id.ends_with("@chatroom") {
+                ordinary_identity(id)?;
+                ensure!(id != own && !id.contains('@'), "ordinary_contact_required");
+            } else {
+                group(id)?;
+            }
         }
         match self {
             Self::Create { members, name } => {
@@ -179,6 +184,56 @@ fn oplog(opcode: u32, payload: Vec<u8>) -> Result<GroupRpc> {
         opcode: Some(opcode),
         body: p::bytes(1, &p::message(&[p::uint(1, 1), p::bytes(2, &item)])?),
     })
+}
+/// Direct contact writes use the official full-contact oplog shape. Fetch a
+/// current record first; change only the mute bit and preserve all other bytes.
+pub fn contact_notification_request(record: &ContactRecord, muted: bool) -> Result<GroupRpc> {
+    ordinary_identity(&record.username)?;
+    ensure!(!record.username.contains('@'), "ordinary_contact_required");
+    let fields = p::decode(&record.raw)?;
+    ensure!(
+        wire::decode_contact_record(&record.raw)?.username == record.username,
+        "contact_identity_mismatch"
+    );
+    for number in 1..=14 {
+        ensure!(
+            p::optional(&fields, number)?.is_some(),
+            "contact_snapshot_incomplete"
+        );
+    }
+    ensure!(
+        p::scalar(&fields, 7)? == u64::from(u32::MAX)
+            && !controlled_contact_fields(&record.raw)?.contains(&8),
+        "contact_flags_unresolved"
+    );
+    let flag = u32::try_from(p::scalar(&fields, 8)?)?;
+    ensure!(flag & 1 != 0, "ordinary_contact_required");
+    let flag = (flag & !0x200) | if muted { 0x200 } else { 0 };
+    let mut payload = Vec::new();
+    let mut at = 0;
+    while at < record.raw.len() {
+        let start = at;
+        let tag = p::read_varint(&record.raw, &mut at)?;
+        match tag & 7 {
+            0 => {
+                p::read_varint(&record.raw, &mut at)?;
+            }
+            1 => at += 8,
+            2 => {
+                let length = usize::try_from(p::read_varint(&record.raw, &mut at)?)?;
+                at += length;
+            }
+            5 => at += 4,
+            _ => bail!("invalid_contact_snapshot"),
+        }
+        ensure!(at <= record.raw.len(), "invalid_contact_snapshot");
+        if tag >> 3 == 8 {
+            payload.extend(p::uint(8, flag.into()));
+        } else {
+            payload.extend_from_slice(&record.raw[start..at]);
+        }
+    }
+    oplog(2, payload)
 }
 /// Steps are separate requests. An uncertain step must stop the entire flow.
 /// A known cleanup rejection can be retained while a later quit is attempted.
@@ -271,6 +326,9 @@ pub fn group_mutation_requests(
                 p::uint(8, 1),
             ])?,
         )],
+        GroupMutation::Mute { .. } if !target.ends_with("@chatroom") => {
+            bail!("contact_snapshot_required")
+        }
         GroupMutation::Mute { muted, .. } => {
             let mut out = vec![oplog(
                 20,

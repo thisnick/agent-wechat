@@ -118,3 +118,11 @@ Tauri signs nested executables and the app with hardened runtime and timestamps.
 Desktop checksums are computed after final signing, notarization, stapling and packaging. The publish job verifies every file against its platform manifest and source commit before combining the final checksum manifest. It never replaces existing release assets.
 
 The first trusted prerelease run must report its CI URL, final artifact names, Windows publisher/signature/timestamp results, Apple `Accepted` results, and successful stapler/Gatekeeper validation. Download and run those exact GitHub assets on real desktops to validate fresh installation, keyring persistence, local and remote connections, CLI setup, restart/quit, WeChat login and media. Unsigned CI builds do not establish those acceptance results.
+
+## Desktop update feed
+
+Desktop releases require repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The corresponding public key is committed under `plugins.updater.pubkey` in the Tauri configuration. Keep a protected backup of the private key and password: installed apps trust this key. These credentials are separate from Apple certificates, Azure OIDC and hub keys. Never replace the public key without a migration for already installed apps.
+
+Release jobs set the Tauri installer marker before OS signing and preserve it during later packaging. After Windows signing or Apple notarization/stapling, they sign each final updater package with its app version. Linux DEBs receive the same update signature. Verification checks the payload, trusted version comment and public key before generating checksums and the combined `desktop-updater.json`. All five platform fragments must be present. PR jobs do not sign production updates. The immutable feed lives on the version's GitHub Release, so prereleases do not depend on GitHub's stable-only `/releases/latest` redirect.
+
+First installed-app acceptance must cover discovery on the intended release channel, a rejected modified payload/version, graceful local-hub shutdown, successful installation/restart, and retained credentials/profiles on macOS, Windows and Linux. Local fixture and native-window tests do not replace this two-release acceptance.

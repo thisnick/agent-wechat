@@ -47,11 +47,11 @@ Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the 
 
 | Field | Contents |
 | --- | --- |
-| `muted` | Saved notification preference for a direct chat or group: `true`, `false`, or `null` when unknown. |
+| `muted` | Saved notification preference for a direct chat or group: `true`, `false`, or `null` when missing or unresolved. |
 | `lastMessage` | Latest local message ID, sender ID/name, direction, type, time and a plain-text `text` preview of up to 160 characters. `null` means empty local history; omitted means the preview is unavailable. |
 | `avatarMembers` | Up to four cached group members, each with `id` and `displayName`; empty for direct chats or an unavailable roster. Fetch cached pictures through `GET /avatars/{username}`. |
 
-These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message, contact or group events to update the summaries. To fetch a direct chat's current notification preference, use `POST /contacts/{id}/refresh` and wait for the operation to finish. Automatic delivery of phone mute changes is not established. Notification edits through `PUT /threads/{id}/notifications` currently support groups.
+These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message, contact or group events to update the summaries. Phone contact changes arrive through the independent contact sync stream. For a manual refresh, use `POST /contacts/{id}/refresh` and wait for the operation to finish. Notification consumers should require account status `contactSyncReady: true` and thread `muted: false` before alerting. Notification edits through `PUT /threads/{id}/notifications` support ordinary direct contacts and groups. A direct edit reads the current contact before submitting its change. Repeat the same idempotency key to recover an operation; an uncertain outcome must not be resubmitted with a new key.
 
 ## Send
 

@@ -6,6 +6,7 @@ use crate::{
     wire, AccountState,
 };
 use anyhow::{ensure, Result};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 const REPLY_OFFSET: u32 = 1_000_000_000;
@@ -23,7 +24,33 @@ pub struct Notification {
 /// Unknown commands are retained as transport traffic, not interpreted as sync
 /// work. Command 24 has a four-byte big-endian selector, not protobuf data.
 fn notification(packet: &Longlink) -> Result<Option<Notification>> {
-    if packet.command != 24 || packet.sequence != 0 {
+    if packet.sequence != 0 {
+        return Ok(None);
+    }
+    if packet.command == 356 {
+        use crate::protobuf as p;
+        ensure!(
+            packet.payload.len() <= 128 * 1024,
+            "Contact hint exceeds limit"
+        );
+        let fields = p::decode(&packet.payload)?;
+        if p::scalar(&fields, 2)? != 11 {
+            return Ok(None);
+        }
+        let notice = p::decode(p::data(&fields, 3)?)?;
+        if p::scalar(&notice, 1)? != 2048 {
+            return Ok(None);
+        }
+        let selectors = p::decode(p::data(&notice, 2)?)?;
+        let selector = u32::try_from(p::scalar(&selectors, 1)?)?;
+        return Ok(
+            (selector == crate::contact_sync::CONTACT_SELECTOR as u32).then_some(Notification {
+                command: 356,
+                selector,
+            }),
+        );
+    }
+    if packet.command != 24 {
         return Ok(None);
     }
     ensure!(packet.payload.len() == 4, "Invalid native push selector");
@@ -36,7 +63,7 @@ fn notification(packet: &Longlink) -> Result<Option<Notification>> {
 
 #[derive(Default)]
 struct Inbox {
-    pending: Option<Notification>,
+    pending: VecDeque<Notification>,
     noop_sent: Option<Instant>,
 }
 impl Inbox {
@@ -47,9 +74,13 @@ impl Inbox {
         } else if let Some(next) = notification(packet)? {
             // Repeated notifications announce work; they are not message IDs.
             // Coalesce them while a business response is in flight.
-            match &mut self.pending {
+            match self
+                .pending
+                .iter_mut()
+                .find(|prior| prior.command == next.command)
+            {
                 Some(prior) => prior.selector |= next.selector,
-                None => self.pending = Some(next),
+                None => self.pending.push_back(next),
             }
         }
         Ok(())
@@ -160,8 +191,8 @@ impl Connection {
     /// and logout fences under that lock before acting on a notification.
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<Notification>> {
         self.keepalive()?;
-        if self.inbox.pending.is_some() {
-            return Ok(self.inbox.pending.take());
+        if !self.inbox.pending.is_empty() {
+            return Ok(self.inbox.pending.pop_front());
         }
         let deadline = Instant::now() + timeout;
         for _ in 0..64 {
@@ -173,8 +204,8 @@ impl Connection {
                 return Ok(None);
             };
             self.inbox.observe(&packet)?;
-            if self.inbox.pending.is_some() {
-                return Ok(self.inbox.pending.take());
+            if !self.inbox.pending.is_empty() {
+                return Ok(self.inbox.pending.pop_front());
             }
         }
         anyhow::bail!("Native notification frame limit")
@@ -211,6 +242,50 @@ mod tests {
         }
     }
     #[test]
+    fn contact_hint_coalesces_separately_from_message_work() {
+        use crate::protobuf as p;
+        let hint = Longlink {
+            command: 356,
+            sequence: 0,
+            payload: p::message(&[
+                p::bytes(1, b"opaque"),
+                p::uint(2, 11),
+                p::bytes(
+                    3,
+                    &p::message(&[
+                        p::uint(1, 2048),
+                        p::bytes(2, &p::uint(1, crate::contact_sync::CONTACT_SELECTOR)),
+                    ])
+                    .unwrap(),
+                ),
+            ])
+            .unwrap(),
+        };
+        let mut inbox = Inbox::default();
+        inbox.observe(&push(0, &2u32.to_be_bytes())).unwrap();
+        inbox.observe(&hint).unwrap();
+        inbox.observe(&push(0, &4u32.to_be_bytes())).unwrap();
+        inbox.observe(&hint).unwrap();
+        assert_eq!(inbox.pending.len(), 2);
+        assert_eq!(
+            inbox.pending.pop_front().unwrap(),
+            Notification {
+                command: 24,
+                selector: 6
+            }
+        );
+        assert_eq!(
+            inbox.pending.pop_front().unwrap(),
+            Notification {
+                command: 356,
+                selector: 0x20004
+            }
+        );
+        let mut malformed = hint;
+        malformed.payload = p::message(&[p::uint(2, 11), p::bytes(3, b"invalid")]).unwrap();
+        assert!(notification(&malformed).is_err());
+    }
+    #[test]
     fn interleaved_pushes_coalesce_without_confusing_keepalive_or_unknown_commands() {
         let mut inbox = Inbox {
             noop_sent: Some(Instant::now()),
@@ -226,15 +301,15 @@ mod tests {
             .unwrap();
         inbox
             .observe(&Longlink {
-                command: 356,
+                command: 912,
                 sequence: 0,
                 payload: vec![1, 2, 3],
             })
             .unwrap();
         inbox.observe(&push(0, &4u32.to_be_bytes())).unwrap();
         assert!(inbox.noop_sent.is_none());
-        assert_eq!(inbox.pending.take().unwrap().selector, 6);
-        assert!(inbox.pending.is_none());
+        assert_eq!(inbox.pending.pop_front().unwrap().selector, 6);
+        assert!(inbox.pending.is_empty());
         assert!(inbox
             .observe(&Longlink {
                 command: REPLY_OFFSET + NOOP,

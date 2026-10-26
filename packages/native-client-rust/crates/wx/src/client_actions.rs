@@ -227,7 +227,7 @@ pub async fn mutation(
         .idempotency_key
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let (receipt_path, mut saved) = receipt(config, r, path, "group_mutation", &hash, &key, None)?;
-    eprintln!("Group mutation receipt: {}", receipt_path.display());
+    eprintln!("Change receipt: {}", receipt_path.display());
     let op = if let Some(id) = saved["operationId"].as_str() {
         r.get(&r.path(&format!("operations/{}", encode(id)))?)
             .await?

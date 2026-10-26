@@ -523,6 +523,11 @@ impl Core {
             let contact = wechat_protocol::wire::decode_contact_record(&command.payload)?;
             let fields_applied = format!("contact-fields:{receipt}");
             let mute_applied = format!("contact-mute:{receipt}");
+            if self.store.runtime(account, &fields_applied)?.is_none()
+                && self.store.runtime(account, &mute_applied)?.is_none()
+            {
+                self.invalidate_contact_notifications(account, &contact, receipt)?;
+            }
             let mute = super::metadata::contact_mute_patch(&contact)?;
             let controlled = wechat_protocol::controlled_contact_fields(&contact.raw)?;
             let wire = wechat_protocol::protobuf::decode(&contact.raw)?;
@@ -532,12 +537,9 @@ impl Core {
                 _ => true,
             };
             if self.store.runtime(account, &fields_applied)?.is_none() {
-                wechat_profile::apply_contact_patch(
-                    &location,
-                    &keys,
-                    &self.upstream.contact_patch(&contact)?,
-                    &options,
-                )?;
+                let patch = self.upstream.contact_patch(&contact)?;
+                wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
+                let mut applied_mute = false;
                 if let Some(muted) = mute {
                     if self.store.runtime(account, &mute_applied)?.is_none()
                         && wechat_profile::apply_contact_mute_patch(
@@ -553,8 +555,16 @@ impl Core {
                         // of the preference. Legacy pending contact phases must
                         // never replay an old mute over a later refresh.
                         self.store.put_runtime(account, &mute_applied, b"1")?;
+                        applied_mute = true;
                     }
                 }
+                self.settle_contact_notifications(
+                    account,
+                    &contact,
+                    &patch,
+                    applied_mute,
+                    receipt,
+                )?;
                 if contact.username.ends_with("@chatroom") {
                     // Explicit native contact metadata establishes catalog presence.
                     // Missing owner/roster fields remain NULL/preserved; a group seen

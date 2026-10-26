@@ -1,3 +1,4 @@
+import { DesktopUpdates } from "./desktop-updates.tsx";
 import { useEffect, useState, type FormEvent } from "react";
 import {
   desktopConnect,
@@ -243,6 +244,26 @@ export function DesktopPreferences({
     : settings?.active;
   return (
     <div className="desktop-preferences">
+      <DesktopUpdates />
+      <div className="setting">
+        <span>
+          Message notifications
+          <small>{settings?.notificationStatus || "New messages in unmuted chats."}</small>
+        </span>
+        <input
+          type="checkbox"
+          aria-label="Message notifications"
+          checked={settings?.notificationsEnabled ?? true}
+          disabled={busy || !settings}
+          onChange={(event) => {
+            const enabled = event.target.checked;
+            void action(async () => {
+              await desktopInvoke("notifications_enabled", { enabled });
+              await refresh();
+            });
+          }}
+        />
+      </div>
       <div className="setting">
         <span>Open at login</span>
         <input

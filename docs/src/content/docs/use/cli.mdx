@@ -18,7 +18,7 @@ wx contacts find Alice
 wx groups members list 'family@chatroom'
 ```
 
-Chat notification preferences come from the saved profile. `null` means unknown. Use `wx contacts refresh CONTACT_ID` to fetch a direct contact's current setting, then read the chat again. Automatic delivery of phone mute changes is not established; `wx chats mute/unmute` currently edits groups only.
+Chat notification preferences come from the saved profile. The daemon receives phone contact changes through its contact sync stream. `null` means missing or unresolved preference data; notification consumers should stay silent for that chat. Use `wx contacts refresh CONTACT_ID` for a manual refresh. `wx chats mute/unmute` edits direct chats and groups. Each direct edit reads the current contact first so unrelated contact fields are preserved.
 
 `filehelper` is your File Transfer chat, handy for testing. See [Manage groups](/use/groups/) for group edits and member lookup.
 

@@ -22,7 +22,7 @@ impl Core {
                 .as_deref()
                 == Some(self.ownership_generation.as_bytes()))
     }
-    fn push_state(&self, account: &str, fence: &SessionFence) -> Result<AccountState> {
+    pub(super) fn push_state(&self, account: &str, fence: &SessionFence) -> Result<AccountState> {
         if !self.push_allowed(account)?
             || self.store.runtime(account, "logout-epoch")? != fence.logout_epoch
         {
@@ -34,7 +34,7 @@ impl Core {
         }
         Ok(state)
     }
-    fn save_push_state(
+    pub(super) fn save_push_state(
         &self,
         account: &str,
         state: &AccountState,
@@ -128,6 +128,7 @@ impl Core {
         connection = self
             .drain_push_sync(account, connection, &fence, 6, "catchup")
             .await?;
+        self.drain_contact_sync(account, &fence).await?;
         ready.store(true, Ordering::Release);
         self.store.append_event(
             account,
@@ -173,9 +174,13 @@ impl Core {
                 // disconnect or replacement of its authenticated key generation.
                 self.push_state(account, &fence)?;
                 self.store.append_event(account,"account.push",&json!({"state":"notified","command":notification.command,"selector":notification.selector}))?;
-                connection = self
-                    .drain_push_sync(account, connection, &fence, 1, "native_push")
-                    .await?;
+                if notification.command == 356 {
+                    self.drain_contact_sync(account, &fence).await?;
+                } else {
+                    connection = self
+                        .drain_push_sync(account, connection, &fence, 1, "native_push")
+                        .await?;
+                }
             }
         }
     }

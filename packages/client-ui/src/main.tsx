@@ -1,4 +1,6 @@
-import { desktop, desktopConnect, desktopInvoke, installDesktopLinks, type DesktopSession } from "./desktop.ts";
+import { ThreadNotifications } from "./thread-notifications.tsx";
+import { DesktopUpdates } from "./desktop-updates.tsx";
+import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
 import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
 import { LocalCacheSettings } from "./local-cache-settings.tsx";
 import { GroupSettings } from "./group-settings.tsx";
@@ -747,6 +749,17 @@ function Chats({
     [settings, setSettings] = useState(false),
     [accountMenu, setAccountMenu] = useState(false);
   const [newChat, setNewChat] = useState(false);
+  useEffect(() => desktop ? desktopNotifications(connection, () => { setSection("chats"); setMobile(true); }) : undefined, [connection]);
+  useEffect(() => {
+    if (!desktop || !connection.desktopId) return;
+    const narrow = window.matchMedia("(max-width: 720px)");
+    const report = () => { void desktopInvoke("notifications_context", {
+      focus: { connectionId: connection.desktopId, accountId: state.account, threadId: section === "chats" && (!narrow.matches || mobile) && !settings && !newChat && !accountMenu ? state.selected : null },
+    }); };
+    report();
+    narrow.addEventListener("change", report);
+    return () => { narrow.removeEventListener("change", report); void desktopInvoke("notifications_context", { focus: null }); };
+  }, [connection, state.account, state.selected, section, mobile, settings, newChat, accountMenu]);
   useEffect(() => {
     if (state.account)
       connection.cache.saveView(state.account, { section, filter });
@@ -1948,6 +1961,7 @@ function Details({
           {threadId}
         </p>
       </div>
+      {state.account && <ThreadNotifications key={state.account+threadId} connection={connection} account={state.account} threadId={threadId} />}
       {state.account && threadId.endsWith("@chatroom") && (
         <GroupSettings
           connection={connection}
@@ -1959,4 +1973,4 @@ function Details({
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<><App />{desktop && <DesktopUpdates notice />}</>);

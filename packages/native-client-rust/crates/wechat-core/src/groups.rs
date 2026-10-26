@@ -226,20 +226,35 @@ impl Core {
         {
             return Ok((prior.operation, false));
         }
-        let state = self.account_state(account)?;
+        let mut state = self.account_state(account)?;
         action.validate(&state.own_username)?;
         let mut minimized = false;
         if let Some(target) = action.target() {
             let contact = self.group_contact(account, target)?;
-            ensure!(
-                contact.is_group
-                    && contact.local_type == Some(2)
-                    && integer(&contact.raw_fields, "delete_flag") == Some(0)
-                    && integer(&contact.raw_fields, "is_in_chat_room") == Some(1),
-                "ordinary_group_required"
-            );
-            let flag = integer(&contact.raw_fields, "flag").context("group_state_incomplete")?;
-            minimized = flag & 0x10000000 != 0;
+            if matches!(action, GroupMutation::Mute { .. }) && !target.ends_with("@chatroom") {
+                ensure!(
+                    !contact.is_group
+                        && contact.local_type == Some(1)
+                        && integer(&contact.raw_fields, "delete_flag") == Some(0)
+                        && integer(&contact.raw_fields, "flag").is_some_and(|flag| u32::try_from(
+                            flag
+                        )
+                        .is_ok()
+                            && flag & 1 != 0),
+                    "ordinary_contact_required"
+                );
+            } else {
+                ensure!(
+                    contact.is_group
+                        && contact.local_type == Some(2)
+                        && integer(&contact.raw_fields, "delete_flag") == Some(0)
+                        && integer(&contact.raw_fields, "is_in_chat_room") == Some(1),
+                    "ordinary_group_required"
+                );
+                let flag =
+                    integer(&contact.raw_fields, "flag").context("group_state_incomplete")?;
+                minimized = flag & 0x10000000 != 0;
+            }
         }
         if matches!(
             action,
@@ -256,6 +271,27 @@ impl Core {
                 );
             }
         }
+        let requests = if let GroupMutation::Mute { thread_id, muted } = &action {
+            if !thread_id.ends_with("@chatroom") {
+                let reply =
+                    self.metadata_contact_reply(account, std::slice::from_ref(thread_id))?;
+                ensure!(
+                    reply.value.contacts.len() == 1
+                        && reply.value.results.iter().all(|result| *result == 0),
+                    "contact_snapshot_unavailable"
+                );
+                let request = wechat_protocol::contact_notification_request(
+                    &reply.value.contacts[0],
+                    *muted,
+                )?;
+                state = self.account_state(account)?;
+                vec![request]
+            } else {
+                group_mutation_requests(&state, &action, minimized)?
+            }
+        } else {
+            group_mutation_requests(&state, &action, minimized)?
+        };
         let cipher = self
             .store
             .runtime(account, "account-state")?
@@ -272,16 +308,17 @@ impl Core {
                     == Some(self.ownership_generation.as_bytes()),
             "auth_required"
         );
-        let requests = group_mutation_requests(&state, &action, minimized)?;
         let mut result = json!({"action":action_name(&action),"targetId":action.target(),"groupId":action.target(),"remoteOutcome":"not_attempted","steps":[],"members":[],"unconfirmedMembers":requested(&action),"profileProjection":"pending","retryable":false});
         result["projectionGaps"] = json!([
             "local_notices_and_search_indexes_not_reconstructed",
             "unreturned_member_state_unconfirmed"
         ]);
-        // Thread notification operations use the same journal, with group-only
-        // admission until the full ordinary contact mapper is validated.
+        // Thread notification operations share the guarded one-attempt journal.
         if let GroupMutation::Mute { thread_id, .. } = &action {
             result["threadId"] = json!(thread_id);
+            if !thread_id.ends_with("@chatroom") {
+                result["groupId"] = Value::Null;
+            }
         }
         let stamp = now();
         let op = Operation {
@@ -562,6 +599,23 @@ impl Core {
                 .as_deref()
                 .or(attempt.action.target())
                 .context("group_reply_identity_missing")?;
+            if let GroupMutation::Mute { thread_id, muted } = &attempt.action {
+                if !thread_id.ends_with("@chatroom") {
+                    ensure!(
+                        wechat_profile::apply_contact_mute_patch(
+                            &location, &keys, thread_id, *muted, &options
+                        )?
+                        .is_some(),
+                        "contact_state_incomplete"
+                    );
+                    self.store.clear_runtime(
+                        account,
+                        &format!("contact-notifications-unresolved:{thread_id}"),
+                    )?;
+                    changed = true;
+                    continue;
+                }
+            }
             if rpc.cgi == 119 {
                 let mut contact = RawFields::new();
                 for (name, value) in [
@@ -727,6 +781,17 @@ impl Core {
         attempt: &Attempt,
         receipt_count: usize,
     ) -> Result<()> {
+        if let GroupMutation::Mute { thread_id, .. } = &attempt.action {
+            if !thread_id.ends_with("@chatroom") {
+                self.store.append_event_once(
+                    &op.account_id,
+                    &format!("contact-mutation:{}:{receipt_count}", op.id),
+                    "contacts.updated",
+                    &json!({"operationId":op.id,"contactId":thread_id,"origin":"native_mutation"}),
+                )?;
+                return Ok(());
+            }
+        }
         self.store.append_event_once(&op.account_id, &format!("group-mutation:{}:{receipt_count}", op.id), "group.updated", &json!({"operationId":op.id,"action":action_name(&attempt.action),"groupId":op.result["groupId"],"source":"native_mutation","remoteOutcome":"accepted_steps","receiptCount":receipt_count,"profileProjection":"partial"}))?;
         Ok(())
     }
@@ -897,6 +962,105 @@ pub(super) mod tests {
             f.push(p::bytes(6, &p::bytes(1, &sk("other"))));
         }
         p::message(&f).unwrap()
+    }
+    #[test]
+    fn direct_mute_and_unmute_preserve_other_flags_and_share_one_attempt_receipts() {
+        let (_temp, mut core) = fixture();
+        let flag = |core: &Core| {
+            let contact = core.group_contact("one", "peer").unwrap();
+            integer(&contact.raw_fields, "flag").unwrap()
+        };
+        let baseline = flag(&core);
+        struct ContactSnapshot(u64);
+        impl crate::upstream::Upstream for ContactSnapshot {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+                let mut fields = vec![
+                    p::bytes(1, &p::bytes(1, ids[0].as_bytes())),
+                    p::uint(7, u64::from(u32::MAX)),
+                    p::uint(8, self.0),
+                    p::bytes(123, b"preserve unknown"),
+                ];
+                for n in [2, 3, 4, 10, 11, 12] {
+                    fields.push(p::bytes(n, &p::bytes(1, b"current metadata")));
+                }
+                for n in [5, 9, 13, 14] {
+                    fields.push(p::uint(n, 0));
+                }
+                fields.push(p::bytes(6, &p::buffer(b"")));
+                p::message(&[
+                    p::bytes(1, &p::int32(1, 0)),
+                    p::uint(2, 1),
+                    p::bytes(3, &p::message(&fields)?),
+                    p::uint(4, 0),
+                ])
+            }
+        }
+        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(ContactSnapshot(baseline as u64));
+        for muted in [true, false] {
+            let key = if muted {
+                "direct-mute"
+            } else {
+                "direct-unmute"
+            };
+            let action = GroupMutation::Mute {
+                thread_id: "peer".into(),
+                muted,
+            };
+            let (operation, created) = core.admit_group("one", action.clone(), key).unwrap();
+            assert!(created);
+            let done = core
+                .execute_group("one", &operation.id, |_, rpc| {
+                    assert_eq!(rpc.cgi, 681);
+                    assert_eq!(rpc.opcode, Some(2));
+                    let outer = p::decode(&rpc.body).unwrap();
+                    let list = p::decode(p::data(&outer, 1).unwrap()).unwrap();
+                    let item = p::decode(p::data(&list, 2).unwrap()).unwrap();
+                    let payload =
+                        p::decode(&p::unbuffer(p::data(&item, 2).unwrap()).unwrap()).unwrap();
+                    assert_eq!(payload.len(), 15);
+                    assert_eq!(p::data(&payload, 123).unwrap(), b"preserve unknown");
+                    assert_eq!(p::scalar(&payload, 7).unwrap(), u64::from(u32::MAX));
+                    assert_eq!(
+                        p::scalar(&payload, 8).unwrap(),
+                        (baseline as u64 & !0x200) | if muted { 0x200 } else { 0 }
+                    );
+                    Ok(oplog(0))
+                })
+                .unwrap();
+            assert_eq!(done.state, "succeeded");
+            assert!(done.result["groupId"].is_null());
+            assert_eq!(
+                flag(&core),
+                (baseline & !0x200) | if muted { 0x200 } else { 0 }
+            );
+            let (again, new) = core.admit_group("one", action, key).unwrap();
+            assert!(!new);
+            assert_eq!(again.id, operation.id);
+            core.execute_group("one", &again.id, |_, _| panic!("must not resubmit"))
+                .unwrap();
+        }
+        let (operation, _) = core
+            .admit_group(
+                "one",
+                GroupMutation::Mute {
+                    thread_id: "peer".into(),
+                    muted: true,
+                },
+                "uncertain-mute",
+            )
+            .unwrap();
+        let done = core
+            .execute_group("one", &operation.id, |_, _| bail!("lost response"))
+            .unwrap();
+        assert_eq!(done.state, "needs_review");
+        assert_eq!(flag(&core), baseline & !0x200);
+        core.execute_group("one", &operation.id, |_, _| {
+            panic!("uncertain mutations must not resubmit")
+        })
+        .unwrap();
     }
     #[test]
     fn ordinary_request_shapes_keep_linux_wrappers_and_separate_commands() {

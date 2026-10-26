@@ -63,8 +63,8 @@ const status = await client.operation(accountId, op.id);
 ```
 
 <Aside title="Good to know">
-- Group information is saved locally. Recognized incoming changes emit `group.updated` after saving; version notifications can trigger roster and announcement reads. Two controlled phone rename/mute checks needed manual refresh. Automatic delivery of every other-device edit remains unverified.
+- Group information is saved locally. Recognized incoming changes emit `group.updated` after saving; version notifications can trigger roster and announcement reads. Contact-sync updates also carry group mute state. The stream mapper has group mute/unmute fixtures; a standalone phone toggle for a group remains unverified. Automatic delivery of every other-device edit remains unverified.
 - Unknown sync fields remain pending. Local notices, search indexes and some settings are not reconstructed, so edits can report `profileProjection: "partial"` after the supported fields are saved.
-- Notification edits currently support groups. Direct-chat mute, personal group remarks, announcement publication, invitation links, ownership transfer and administrator changes are not supported.
+- Notification edits support ordinary direct contacts and groups. Personal group remarks, announcement publication, invitation links, ownership transfer and administrator changes are not supported.
 - OpenClaw exposes only the owner-only [group information tool](/openclaw/tools/), with no mutation tools.
 </Aside>

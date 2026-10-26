@@ -587,6 +587,32 @@ pub fn account_sync_store_path(
     }
     Ok(location.root().join("config/login_configv2"))
 }
+/// The inspected contact drain stores its independent SyncKeyBuffer here.
+/// It does not use `mmkv_key_byp_sync_key` from the login store.
+pub fn account_contact_sync_store_path(
+    location: &crate::ProfileLocation,
+    identity: &ProfileIdentity,
+) -> Result<std::path::PathBuf> {
+    account_sync_store_path(location, identity)?;
+    Ok(location.root().join("config/rs_config"))
+}
+pub fn stage_account_contact_sync_key(
+    data: &[u8],
+    metadata: &[u8],
+    username: &str,
+    cursor: &[u8],
+) -> Result<StagedMmkv> {
+    if cursor.len() > 65536 {
+        return Err(ProfileError::ResourceLimit);
+    }
+    let key = account_mmkv_key(username)?;
+    stage_mmkv_values(
+        data,
+        metadata,
+        &key,
+        &[("sync_11".into(), Some(mmkv_string_value(cursor)?.to_vec()))],
+    )
+}
 /// Read the desktop cursor from a caller-confirmed stopped/coherent account.
 /// The binary cursor is independent of saved-login and business-session keys.
 pub fn read_account_sync_key(
