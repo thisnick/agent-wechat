@@ -99,7 +99,7 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
             (3, _) => "Photo",
             (34, _) => "Voice message",
             (43 | 62, _) => "Video",
-            (47, _) => "Sticker",
+            (47, _) | (49, Some(8)) => "Sticker",
             (48, _) => "Location",
             (49, Some(6)) => "File",
             (49, Some(19)) => "Chat history",
@@ -149,6 +149,9 @@ mod tests {
         );
         message["type"] = json!(47);
         message["body"] = json!("<msg><emoji secret='not a preview'/></msg>");
+        assert_eq!(message_summary(&message, None)["text"], "Sticker");
+        message["type"] = json!(49);
+        message["appMessageType"] = json!(8);
         assert_eq!(message_summary(&message, None)["text"], "Sticker");
         message["recall"] = json!({"observedAt":"now"});
         assert_eq!(message_summary(&message, None)["text"], "Message recalled");

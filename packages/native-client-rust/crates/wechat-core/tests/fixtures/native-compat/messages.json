@@ -185,6 +185,12 @@
       "appMessageType": 5,
       "direction": "incoming",
       "embeddedImage": false,
+      "embeddedLink": {
+        "description": "Reserve a table",
+        "sourceName": null,
+        "title": "Example Venue",
+        "url": "https://example.com/booking?a=1&b=2"
+      },
       "embeddedText": "[Link] Example Venue\nReserve a table\nhttps://example.com/booking?a=1&b=2",
       "senderId": "sender",
       "serverId": "998",

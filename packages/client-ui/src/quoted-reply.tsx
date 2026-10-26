@@ -3,6 +3,7 @@ import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { embeddedQuotePreview, localQuote } from "./quote-preview.ts";
 import { MediaCard } from "./media.tsx";
+import { SharedLink } from "./shared-link.tsx";
 import { useConversationNavigation } from "./conversation-navigation.tsx";
 
 export function QuotedReply({
@@ -16,7 +17,7 @@ export function QuotedReply({
 }) {
   const state = useSyncExternalStore(
     connection.session.subscribe,
-    connection.session.snapshot
+    connection.session.snapshot,
   );
   const local = localQuote(message, state.messages);
   const quote = embeddedQuotePreview(message, local);
@@ -55,8 +56,14 @@ export function QuotedReply({
           ? name(quote.senderId)
           : "Quoted message"}
       </strong>
-      {quote.image ? (
-        <MediaCard message={quote.image} connection={connection} previewOnly />
+      {quote.content?.link ? (
+        <SharedLink message={quote.content} connection={connection} compact />
+      ) : quote.content ? (
+        <MediaCard
+          message={quote.content}
+          connection={connection}
+          previewOnly
+        />
       ) : (
         <p>{quote.text}</p>
       )}

@@ -14,6 +14,28 @@
 a.shared-link-card:hover {
   border-color: var(--muted);
 }
+.compact-link-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  min-width: 0;
+  max-width: 300px;
+}
+.compact-link-card .shared-link-art {
+  min-height: 56px;
+  border: 0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.compact-link-card .shared-link-copy {
+  gap: 2px;
+  padding: 0 0 0 8px;
+}
+.compact-link-card .shared-link-copy strong {
+  font-size: 12px;
+}
+.compact-link-card .shared-link-source {
+  padding-top: 0;
+}
 .shared-link-art {
   position: relative;
   display: grid;

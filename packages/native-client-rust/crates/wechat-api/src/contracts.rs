@@ -78,6 +78,12 @@ pub struct NativeQuoteReference {
     #[serde(default)]
     #[ts(optional)]
     pub embedded_image: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub embedded_link: Option<wechat_core::LinkCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub embedded_sticker: Option<bool>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

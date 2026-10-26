@@ -110,7 +110,14 @@ pub(crate) fn parse(app: roxmltree::Node<'_, '_>, subtype: i32) -> Option<Parsed
     if card.title.is_none() && card.description.is_none() && card.url.is_none() {
         return None;
     }
-    let thumbnail = (|| {
+    Some(ParsedLink {
+        card,
+        thumbnail: thumbnail(app),
+    })
+}
+
+pub(crate) fn thumbnail(app: roxmltree::Node<'_, '_>) -> Option<LinkThumbnail> {
+    (|| {
         let attach = child(app, "appattach")?;
         let id = text(attach, "cdnthumburl", 8192)?;
         let key = text(attach, "cdnthumbaeskey", 32)?;
@@ -155,8 +162,7 @@ pub(crate) fn parse(app: roxmltree::Node<'_, '_>, subtype: i32) -> Option<Parsed
         let url = text(app, "thumburl", 8192)?;
         wechat_protocol::media::validate_link_thumbnail_url(&url).ok()?;
         Some(LinkThumbnail::Http(url))
-    });
-    Some(ParsedLink { card, thumbnail })
+    })
 }
 
 #[cfg(test)]

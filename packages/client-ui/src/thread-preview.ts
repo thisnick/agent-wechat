@@ -30,19 +30,21 @@ export function messageSummary(
     kind === "recalled"
       ? recallText(message)
       : ["text", "reply", "forwarded"].includes(kind)
-        ? message.body || "Message"
-        : kind === "link"
-          ? message.link?.title || "Link"
-          : (
-              {
-                3: "Image",
-                34: "Voice message",
-                43: "Video",
-                47: "Sticker",
-                49: "Attachment",
-                62: "Video",
-              } as Record<number, string>
-            )[message.type] || "Unsupported message";
+      ? message.body || "Message"
+      : kind === "link"
+      ? message.link?.title || "Link"
+      : message.type === 49 && message.appMessageType === 8
+      ? "Sticker"
+      : (
+          {
+            3: "Image",
+            34: "Voice message",
+            43: "Video",
+            47: "Sticker",
+            49: "Attachment",
+            62: "Video",
+          } as Record<number, string>
+        )[message.type] || "Unsupported message";
   return {
     id: message.id,
     senderId: message.senderId,

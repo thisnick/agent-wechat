@@ -57,6 +57,7 @@ test("missing history and missing member names have honest fallbacks", () => {
 });
 
 test("recalled thread previews show the replacement notice without an inferred sender prefix", () => {
+  assert.equal(messageSummary({ type: 49, appMessageType: 8 }, "Bot").text, "Sticker");
   for (const direction of ["incoming", "outgoing", null]) {
     const message = {
       id: "recalled",

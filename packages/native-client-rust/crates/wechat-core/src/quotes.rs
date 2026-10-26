@@ -9,6 +9,7 @@ pub(crate) struct AppMessage {
     pub embedded: Option<String>,
     pub sender_id: Option<String>,
     pub link: Option<crate::links::ParsedLink>,
+    pub sticker: Option<crate::stickers::SharedSticker>,
 }
 
 pub(crate) fn child<'a, 'input>(
@@ -87,6 +88,7 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
     Some(AppMessage {
         subtype,
         link: crate::links::parse(app, subtype),
+        sticker: crate::stickers::parse(app, subtype),
         title,
         reference,
         embedded: child(app, "refermsg")
@@ -148,6 +150,28 @@ pub(crate) fn quoted_image_content(msg: &wechat_profile::Message) -> Option<Stri
     embedded_image_content(&message_app(msg)?).map(str::to_owned)
 }
 
+pub(crate) fn quoted_link(app: &AppMessage) -> Option<crate::links::ParsedLink> {
+    if app.subtype != 57 || app.reference.as_ref()?.1 != 49 {
+        return None;
+    }
+    app_message(embedded_content(app)?)?.link
+}
+
+pub(crate) fn quoted_sticker_content(msg: &wechat_profile::Message) -> Option<(i32, String)> {
+    let app = message_app(msg)?;
+    if app.subtype != 57 {
+        return None;
+    }
+    let kind = app.reference.as_ref()?.1;
+    let content = embedded_content(&app)?;
+    let valid = match kind {
+        47 => crate::stickers::ordinary(content).is_some(),
+        49 => app_message(content)?.sticker.is_some(),
+        _ => false,
+    };
+    valid.then(|| (kind, content.into()))
+}
+
 /// Public quote content is derived only from the received parent payload.
 /// Original rows may supply recall evidence, never replacement quote content.
 pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Value> {
@@ -162,26 +186,40 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
         app.embedded.clone()
     } else {
         card.as_ref().and_then(|card| match card.subtype {
-            5 => card.link.as_ref().map(|link| link.card.body()),
+            3..=5 => card.link.as_ref().map(|link| link.card.body()),
             6 | 57 => card.title.clone(),
             _ => None,
         })
     }
     .filter(|s| !s.is_empty() && s.len() <= 16384);
     let image = embedded_image_content(app).is_some();
-    let supported = matches!(*kind, 1 | 3) || card.as_ref().is_some_and(|c| c.subtype == 5);
+    let sticker = (*kind == 47
+        && embedded_content(app)
+            .and_then(crate::stickers::ordinary)
+            .is_some())
+        || card.as_ref().is_some_and(|c| c.sticker.is_some());
+    let supported = matches!(*kind, 1 | 3 | 47)
+        || sticker
+        || card.as_ref().is_some_and(|c| matches!(c.subtype, 3..=5));
     let state = if !supported {
         "unsupported"
-    } else if text.is_some() || image {
+    } else if text.is_some() || image || sticker {
         "embedded"
     } else {
         "missing"
     };
-    Some(json!({"serverId":server,"type":kind,"state":state,
+    let mut quote = json!({"serverId":server,"type":kind,"state":state,
         "senderId":app.sender_id,"direction":app.sender_id.as_deref().zip(own)
             .map(|(sender, own)| if sender == own { "outgoing" } else { "incoming" }),
         "appMessageType":card.as_ref().map(|c| c.subtype),
-        "embeddedText":text,"embeddedImage":image}))
+        "embeddedText":text,"embeddedImage":image});
+    if sticker {
+        quote["embeddedSticker"] = json!(true);
+    }
+    if let Some(link) = card.as_ref().and_then(|c| c.link.as_ref()) {
+        quote["embeddedLink"] = json!(&link.card);
+    }
+    Some(quote)
 }
 
 pub(crate) fn message_app(msg: &wechat_profile::Message) -> Option<AppMessage> {
@@ -308,6 +346,16 @@ mod tests {
             insert_app(local, 57, &format!("<msg><appmsg><type>57</type><title>Explain this link</title><refermsg><type>49</type><svrid>{server}</svrid><fromusr>room@chatroom</fromusr><chatusr>sender</chatusr><content>{escaped}</content></refermsg></appmsg></msg>"));
         }
         insert_app(25, 57, "<msg><appmsg><type>57</type><title>Plain URL</title><refermsg><type>1</type><svrid>995</svrid><fromusr>sender</fromusr><content>https://example.com/?a=1&amp;b=2</content></refermsg></appmsg></msg>");
+        let sticker = include_str!("../tests/fixtures/shared-sticker.xml");
+        insert_app(26, 8, &format!("sender:\n{sticker}"));
+        for (local, server, kind, embedded) in [
+            (27, 991, 49, sticker.to_owned()),
+            (28, 992, 47, "<msg><emoji md5='0123456789abcdef0123456789abcdef' len='42' cdnurl='https://snsvideo.c2c.wechat.com/synthetic-sticker'/></msg>".into()),
+            (29, 993, 49, include_str!("../tests/fixtures/shared-link.xml").replace("<type>5", "<type>4")),
+        ] {
+            let embedded = embedded.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            insert_app(local, 57, &format!("<msg><appmsg><type>57</type><title>Comment</title><refermsg><type>{kind}</type><svrid>{server}</svrid><fromusr>sender</fromusr><content>{embedded}</content></refermsg></appmsg></msg>"));
+        }
         for (index, kind, subtype, content) in [
             (0, 34, 0, "<msg><voicemsg voiceformat='4'/></msg>"),
             (1, 43, 0, "<msg><videomsg playlength='3'/></msg>"),
@@ -438,6 +486,41 @@ mod tests {
         assert_eq!(embedded_link["senderId"], "sender");
         assert_eq!(embedded_link["embeddedImage"], false);
         assert!(!embedded_link.to_string().contains("private-transport"));
+        assert_eq!(embedded_link["embeddedLink"]["title"], "Article <title>");
+        for local in [26, 27, 28, 29] {
+            let value = core.message("a", &id(local)).unwrap();
+            if local != 26 {
+                assert_eq!(value["quote"]["state"], "embedded");
+                if local != 29 {
+                    assert_eq!(value["quote"]["embeddedSticker"], true);
+                }
+            }
+            if local == 29 {
+                assert_eq!(value["quote"]["appMessageType"], 4);
+                assert_eq!(value["quote"]["embeddedLink"]["title"], "Title & preview");
+            }
+            let assets = core.media_assets("a", &id(local)).unwrap();
+            assert!(!assets.is_empty());
+            for asset in &assets {
+                assert_eq!(asset.message_id.as_deref(), Some(id(local).as_str()));
+                assert_eq!(asset.official_writeback, "unsupported");
+                assert!(core.media_asset("b", &asset.id).is_err());
+            }
+            let public = format!("{value}{}", serde_json::to_string(&assets).unwrap());
+            assert!(!public.contains("snsvideo.c2c.wechat.com"));
+            assert!(!public.contains("synthetic-sticker-thumbnail"));
+            assert!(!public.contains("01010101010101010101010101010101"));
+        }
+        for (server, local) in [("991", 27), ("992", 28), ("993", 29)] {
+            core.store
+                .record_recall("a", "room@chatroom", server, None, None, None, "live")
+                .unwrap();
+            let quote = core.message("a", &id(local)).unwrap()["quote"].clone();
+            assert_eq!(quote["state"], "recalled");
+            assert!(quote["embeddedLink"].is_null());
+            assert!(quote["embeddedSticker"].is_null());
+            assert!(core.media_assets("a", &id(local)).is_err());
+        }
         assert_eq!(
             core.message("a", &id(25)).unwrap()["quote"]["embeddedText"],
             "https://example.com/?a=1&b=2"

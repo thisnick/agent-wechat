@@ -612,8 +612,13 @@ impl Core {
             .as_deref()
             .context("media_metadata_unavailable")?;
         let quoted_image = crate::quotes::quoted_image_content(&msg);
-        let link = crate::quotes::message_app(&msg).and_then(|app| app.link);
-        let sidecar_only = quoted_image.is_some() || link.is_some();
+        let quoted_sticker = crate::quotes::quoted_sticker_content(&msg);
+        let link = crate::quotes::message_app(&msg)
+            .and_then(|app| crate::quotes::quoted_link(&app).or(app.link));
+        let sidecar_only = quoted_image.is_some()
+            || quoted_sticker.is_some()
+            || link.is_some()
+            || crate::quotes::message_app(&msg).is_some_and(|app| app.sticker.is_some());
         let mut quoted = msg.clone();
         let mut plans = if let Some(link) = link {
             link.thumbnail
@@ -629,6 +634,11 @@ impl Core {
                 .collect()
         } else if let Some(content) = &quoted_image {
             quoted.message_type = 3;
+            discover(&quoted, content)?
+        } else if let Some((kind, content)) = &quoted_sticker {
+            quoted.message_type = i64::from(*kind);
+            // Embedded subtype belongs to the quote, not the outer reply.
+            quoted.local_type = kind.to_string();
             discover(&quoted, content)?
         } else {
             discover(&msg, content)?
@@ -2125,6 +2135,27 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
             }
         }
         49 => {
+            if let Some(sticker) = crate::quotes::app_message(xml).and_then(|app| app.sticker) {
+                let stored = msg.local_type.parse::<u64>().ok().map(|v| v >> 32);
+                ensure!(matches!(stored, Some(0 | 8)), "media_metadata_invalid");
+                if let Some(descriptor) = sticker.original {
+                    out.push((
+                        MediaKind::Sticker,
+                        MediaVariant::Original,
+                        DownloadPlan::Sticker { descriptor },
+                        None,
+                    ));
+                }
+                if let Some(source) = sticker.thumbnail {
+                    out.push((
+                        MediaKind::Sticker,
+                        MediaVariant::Thumbnail,
+                        DownloadPlan::LinkThumbnail { source },
+                        None,
+                    ));
+                }
+                return Ok(out);
+            }
             let app = element("appmsg")?;
             let child = |name: &str| {
                 app.children()

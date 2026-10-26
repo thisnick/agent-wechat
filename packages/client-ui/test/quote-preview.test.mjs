@@ -27,11 +27,11 @@ test("quote navigation uses only a unique original in the same account and conve
       { ...original, accountId: "b" },
       original,
     ]),
-    original
+    original,
   );
   assert.equal(
     localQuote(parent, [original, { ...original, id: "duplicate" }]),
-    undefined
+    undefined,
   );
   assert.equal(localQuote(parent, [{ ...original, type: 1 }]), undefined);
 });
@@ -63,9 +63,9 @@ test("embedded excerpts and authors never come from a stored original", () => {
         ...reply,
         quote: { ...reply.quote, embeddedText: undefined, state: "missing" },
       },
-      original
+      original,
     ).text,
-    "Quoted message unavailable"
+    "Quoted message unavailable",
   );
 });
 test("embedded image media keeps the reply identity even when an original is loaded", () => {
@@ -76,12 +76,12 @@ test("embedded image media keeps the reply identity even when an original is loa
     quote: { ...parent.quote, type: 3, state: "embedded", embeddedImage: true },
   };
   const preview = embeddedQuotePreview(reply, { ...original, type: 3 });
-  assert.equal(preview.image.id, reply.id);
-  assert.equal(preview.image.accountId, reply.accountId);
-  assert.equal(preview.image.threadId, reply.threadId);
-  assert.equal(preview.image.type, 3);
-  assert.equal(preview.image.quote, undefined);
-  assert.equal(preview.image.appMessageType, undefined);
+  assert.equal(preview.content.id, reply.id);
+  assert.equal(preview.content.accountId, reply.accountId);
+  assert.equal(preview.content.threadId, reply.threadId);
+  assert.equal(preview.content.type, 3);
+  assert.equal(preview.content.quote, undefined);
+  assert.equal(preview.content.appMessageType, undefined);
 });
 test("recalls suppress embedded text and images; other states keep supported summaries", () => {
   const reply = {
@@ -99,15 +99,15 @@ test("recalls suppress embedded text and images; other states keep supported sum
     { ...reply, quote: { ...reply.quote, state: "recalled" } },
   ]) {
     assert.equal(embeddedQuotePreview(changed).text, "Message recalled");
-    assert.equal(embeddedQuotePreview(changed).image, undefined);
+    assert.equal(embeddedQuotePreview(changed).content, undefined);
   }
   assert.equal(
     embeddedQuotePreview(reply, {
       ...original,
       type: 10000,
       recall: { observedAt: "10" },
-    }).image,
-    undefined
+    }).content,
+    undefined,
   );
   assert.equal(
     embeddedQuotePreview({
@@ -119,7 +119,7 @@ test("recalls suppress embedded text and images; other states keep supported sum
         embeddedText: undefined,
       },
     }).text,
-    "Voice message unavailable"
+    "Voice message unavailable",
   );
   assert.equal(
     embeddedQuotePreview({
@@ -132,21 +132,21 @@ test("recalls suppress embedded text and images; other states keep supported sum
         embeddedText: "report.pdf",
       },
     }).text,
-    "report.pdf"
+    "report.pdf",
   );
   assert.equal(
     embeddedQuotePreview({
       ...reply,
       quote: { ...reply.quote, state: "invalid" },
-    }).image,
-    undefined
+    }).content,
+    undefined,
   );
 });
 test("quoted replies show normalized text and recalls suppress their old content", () => {
   assert.equal(quotedText(original), "Quoted reply text");
   assert.equal(
     quotedText({ ...original, recall: { observedAt: "10" } }),
-    "Message recalled"
+    "Message recalled",
   );
   assert.equal(
     quotedText({
@@ -154,6 +154,87 @@ test("quoted replies show normalized text and recalls suppress their old content
       appMessageType: 99,
       body: "<msg>private transport</msg>",
     }),
-    "Attachment"
+    "Attachment",
   );
+});
+
+test("compact link quotes use embedded structured cards and keep the parent media identity", () => {
+  for (const appMessageType of [3, 4, 5]) {
+    const link = {
+      title: "Received title",
+      url: "https://example.com/received",
+    };
+    const reply = {
+      ...parent,
+      type: 49,
+      quote: {
+        ...parent.quote,
+        state: "embedded",
+        appMessageType,
+        embeddedLink: link,
+      },
+    };
+    const preview = embeddedQuotePreview(reply, {
+      ...original,
+      link: {
+        title: "Different stored title",
+        url: "https://example.com/stored",
+      },
+    });
+    assert.equal(preview.content.id, reply.id);
+    assert.equal(preview.content.link, link);
+    assert.equal(preview.content.appMessageType, appMessageType);
+    assert.equal(preview.content.quote, undefined);
+    for (const state of ["missing", "unsupported", "recalled", "invalid"]) {
+      assert.equal(
+        embeddedQuotePreview({ ...reply, quote: { ...reply.quote, state } })
+          .content,
+        undefined,
+      );
+    }
+    assert.equal(
+      embeddedQuotePreview({ ...reply, recall: {} }).content,
+      undefined,
+    );
+    assert.equal(
+      embeddedQuotePreview(reply, { ...original, recall: {} }).content,
+      undefined,
+    );
+  }
+});
+
+test("ordinary and shared sticker quotes reuse sticker rendering without looking up an original", () => {
+  for (const type of [47, 49]) {
+    const reply = {
+      ...parent,
+      type: 49,
+      quote: {
+        ...parent.quote,
+        type,
+        appMessageType: type === 49 ? 8 : undefined,
+        state: "embedded",
+        embeddedSticker: true,
+      },
+    };
+    const preview = embeddedQuotePreview(reply);
+    assert.equal(preview.content.type, 47);
+    assert.equal(preview.content.id, reply.id);
+    assert.equal(preview.content.quote, undefined);
+    assert.equal(preview.content.link, undefined);
+    assert.equal(
+      embeddedQuotePreview({
+        ...reply,
+        quote: { ...reply.quote, embeddedSticker: false },
+      }).content,
+      undefined,
+    );
+    assert.equal(
+      embeddedQuotePreview({
+        ...reply,
+        quote: { ...reply.quote, state: "recalled" },
+      }).content,
+      undefined,
+    );
+  }
+  assert.equal(quotedText({ type: 49, appMessageType: 8 }), "Sticker");
 });

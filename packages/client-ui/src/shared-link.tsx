@@ -11,9 +11,11 @@ import "./shared-link.css";
 export function SharedLink({
   message,
   connection,
+  compact = false,
 }: {
   message: NativeMessage;
   connection: Connection;
+  compact?: boolean;
 }) {
   const link = message.link!;
   const { element, visible } = useVisible<HTMLSpanElement>();
@@ -41,17 +43,21 @@ export function SharedLink({
       </span>
       <span className="shared-link-copy">
         <strong>{title}</strong>
-        {link.description?.trim() && (
+        {!compact && link.description?.trim() && (
           <span className="shared-link-description">{link.description}</span>
         )}
         <span className="shared-link-source">
           <span>{target?.host || link.sourceName || "Shared link"}</span>
-          {target && <ArrowUpRight aria-hidden="true" size={14} />}
+          {!compact && target && <ArrowUpRight aria-hidden="true" size={14} />}
         </span>
       </span>
     </>
   );
-  return target ? (
+  // The quote itself handles navigation. Keep its card presentational rather
+  // than putting an external-link target inside the jump-to-message control.
+  return compact ? (
+    <div className="shared-link-card compact-link-card">{content}</div>
+  ) : target ? (
     <a
       className="bubble shared-link-card"
       href={target.href}

@@ -35,6 +35,7 @@ test("quoted replies and forwarded history never enter the media download flow",
     "link",
   );
   assert.equal(messagePresentation({ type: 49, appMessageType: 6 }), "media");
+  assert.equal(messagePresentation({ type: 49, appMessageType: 8 }), "media");
 });
 
 test("supported media keep their renderer, unsupported cards do not request downloads", () => {

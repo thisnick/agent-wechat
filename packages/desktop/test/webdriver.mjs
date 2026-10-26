@@ -268,6 +268,13 @@ try {
     until,
     resize: (width, height) =>
       call(`/session/${session}/window/rect`, { width, height }),
+    capture: process.env.DESKTOP_INTERFACE_SCREENSHOT
+      ? async () =>
+          writeFile(
+            process.env.DESKTOP_INTERFACE_SCREENSHOT,
+            Buffer.from(await call(`/session/${session}/screenshot`), "base64"),
+          )
+      : undefined,
   });
   try {
     await script(

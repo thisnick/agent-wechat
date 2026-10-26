@@ -6,7 +6,7 @@ export function recallText(message: NativeMessage) {
 }
 
 // WeChat's application-message envelope also carries replies and shared cards.
-// Only file subtype 6 belongs in the ordinary attachment download flow.
+// Files and shared stickers use the validated attachment download flow.
 export function messagePresentation(message: NativeMessage) {
   if (message.recall) return "recalled";
   if ([1, 10000, 10002].includes(message.type)) return "text";
@@ -14,7 +14,7 @@ export function messagePresentation(message: NativeMessage) {
     if (message.appMessageType === 57 || message.quote) return "reply";
     if (message.appMessageType === 19) return "forwarded";
     if (message.link) return "link";
-    return message.appMessageType === 6 ? "media" : "unsupported";
+    return [6, 8].includes(message.appMessageType ?? 0) ? "media" : "unsupported";
   }
   return [3, 34, 43, 47, 62].includes(message.type) ? "media" : "unsupported";
 }

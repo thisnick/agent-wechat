@@ -14,8 +14,10 @@ pub(super) fn advertised_length(plan: &DownloadPlan) -> Option<u64> {
     }
 }
 pub(super) fn allowed(asset: &MediaAsset, limit: u64) -> bool {
-    if matches!(asset.kind, MediaKind::Image | MediaKind::Video)
-        && asset.variant == MediaVariant::Thumbnail
+    if matches!(
+        asset.kind,
+        MediaKind::Image | MediaKind::Video | MediaKind::Sticker
+    ) && asset.variant == MediaVariant::Thumbnail
     {
         return true;
     }

@@ -30,11 +30,15 @@ media.
 
 ## Quotes
 
-Incoming quotes use only the content carried inside the reply delivered by WeChat's server protocol. Read the reply with `GET /messages/{id}` or the usual message-list routes: its `body` is the current comment and `quote` contains the referenced server ID, sender, type, parsed text and image availability. OpenClaw renders text and link-card details from these fields. A stored original never replaces the quoted excerpt. Local recall checks still suppress recalled content.
+Incoming quotes use only the content carried inside the reply delivered by WeChat's server protocol. Read the reply with `GET /messages/{id}` or the usual message-list routes: its `body` is the current comment and `quote` contains the referenced server ID, sender, type, parsed text and media availability. Shared article, music and video cards include `quote.embeddedLink` with the same title, description, URL and source fields as an ordinary link. OpenClaw renders text and link-card details from these fields. A stored original never replaces the quoted excerpt. Local recall checks still suppress recalled content.
 
-Images can be downloaded using metadata embedded in the quote. Missing or expired image data stays visible as a status alongside the comment. Quoted voice, video and files keep the comment and any supported summary, with an unavailable attachment status; their actual attachments aren't retrieved from a stored original.
+Images, supported stickers and link thumbnails can be downloaded using metadata embedded in the quote. The desktop and web apps show compact link cards and small image or sticker previews; clicking a quote jumps to its message. Missing or expired media stays visible as a status alongside the comment. Quoted voice, video and files keep the comment and any supported summary, with an unavailable attachment status; their actual attachments aren't retrieved from a stored original.
 
-An embedded quote can be displayed even when the original isn't stored locally. Image retrieval uses the parent reply ID. To send your own quoted reply, use the normal send endpoint with the stored target's message ID and server ID. See [Send quoted replies](/use/cli/#quoted-replies).
+An embedded quote can be displayed even when the original isn't stored locally. Media retrieval uses the parent reply ID. To send your own quoted reply, use the normal send endpoint with the stored target's message ID and server ID. See [Send quoted replies](/use/cli/#quoted-replies).
+
+## Shared stickers
+
+Ordinary stickers (type 47) and supported shared stickers (application subtype 8) use the same download and image validation path. Animated originals keep their animation. Shared-sticker thumbnails can be displayed while the original downloads; originals follow the account's automatic download limit. Unsupported source or encryption forms remain unavailable.
 
 ## Forwarded chats
 

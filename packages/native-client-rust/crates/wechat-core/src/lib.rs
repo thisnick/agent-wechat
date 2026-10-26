@@ -11,6 +11,7 @@ mod pagination;
 mod profile;
 mod quote_send;
 mod quotes;
+mod stickers;
 pub use quote_send::QuoteSendReference;
 mod recall_evidence;
 mod recalls;

@@ -1,5 +1,15 @@
 import type { NativeMessage } from "@agent-wechat/shared";
 
+export function sameEmbeddedQuote(stored: NonNullable<NativeMessage["quote"]>, current: NonNullable<NativeMessage["quote"]>): boolean {
+  const compared = { ...current };
+  // Older queued inputs do not consume these additive display fields. Keep
+  // comparing every field they did receive; never replace their saved excerpt.
+  for (const field of ["embeddedLink", "embeddedSticker"] as const) {
+    if (!Object.hasOwn(stored, field)) delete compared[field];
+  }
+  return JSON.stringify(stored) === JSON.stringify(compared);
+}
+
 export function renderEmbeddedQuote(message: NativeMessage, permitted = true, imageBody?: string) {
   const comment = (message.body ?? "").slice(0, 16384);
   const source = message.quote;

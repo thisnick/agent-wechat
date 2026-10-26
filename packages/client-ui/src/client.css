@@ -394,6 +394,10 @@
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 .quote-preview .media-card {
   padding: 0;

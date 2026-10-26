@@ -2,12 +2,19 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { browserNavigationAcceptance } from "./browser-navigation.mjs";
 
-export async function interfaceAcceptance({ script, invoke, until, resize }) {
+export async function interfaceAcceptance({
+  script,
+  invoke,
+  until,
+  resize,
+  capture,
+}) {
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGPUrZjGgA0wYRUdtBIA+kEBS3hZwQIAAAAASUVORK5CYII=",
-    "base64"
+    "base64",
   );
   const peers = ["first", "second"];
   const threads = peers.map((id) => ({
@@ -22,6 +29,83 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
     history: {},
   }));
   let avatarReads = 0;
+  let originalLookups = 0;
+  const base = {
+    accountId: "fixture",
+    threadId: "first",
+    senderId: "first",
+    direction: "incoming",
+    createdAt: "2026-10-26T12:00:00Z",
+    media: [],
+  };
+  const link = {
+    title: "Shared video title",
+    description: "Card description",
+    url: "https://example.com/article",
+    sourceName: "Example",
+  };
+  const messages = [
+    {
+      ...base,
+      id: "link-original",
+      serverId: "101",
+      type: 49,
+      appMessageType: 4,
+      link,
+    },
+    {
+      ...base,
+      id: "link-reply",
+      serverId: "102",
+      type: 49,
+      appMessageType: 57,
+      body: "About this link",
+      quote: {
+        serverId: "101",
+        type: 49,
+        appMessageType: 4,
+        state: "embedded",
+        senderId: "first",
+        embeddedLink: link,
+      },
+    },
+    {
+      ...base,
+      id: "sticker-original",
+      serverId: "103",
+      type: 49,
+      appMessageType: 8,
+    },
+    {
+      ...base,
+      id: "sticker-reply",
+      serverId: "104",
+      type: 49,
+      appMessageType: 57,
+      body: "About this sticker",
+      quote: {
+        serverId: "103",
+        type: 49,
+        appMessageType: 8,
+        state: "embedded",
+        senderId: "first",
+        embeddedSticker: true,
+      },
+    },
+  ];
+  const assets = messages.map((message, i) => ({
+    id: "fixture-asset-" + i,
+    messageId: message.id,
+    accountId: "fixture",
+    kind: i < 2 ? "image" : "sticker",
+    variant: i < 2 ? "thumbnail" : "original",
+    actualVariant: i < 2 ? "thumbnail" : "original",
+    state: "available",
+    contentType: "image/png",
+    byteLength: png.length,
+    sha256: createHash("sha256").update(png).digest("hex"),
+    retryable: false,
+  }));
   const backend = createServer(async (req, res) => {
     const path = new URL(req.url, "http://localhost").pathname;
     if (path === "/browser" || /^\/assets\/[\w.-]+$/.test(path)) {
@@ -32,10 +116,10 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
           ? "text/html"
           : path.endsWith(".css")
           ? "text/css"
-          : "text/javascript"
+          : "text/javascript",
       );
       return res.end(
-        await readFile(new URL("../../client-ui/dist" + file, import.meta.url))
+        await readFile(new URL("../../client-ui/dist" + file, import.meta.url)),
       );
     }
     res.setHeader("Content-Type", "application/json");
@@ -56,8 +140,20 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
     if (path.endsWith("/capabilities")) return json({});
     if (path.endsWith("/threads"))
       return json({ items: threads, nextCursor: null, asOfEventCursor: "0" });
+    if (path.endsWith("/threads/first/messages"))
+      return json({ items: messages, nextCursor: null, asOfEventCursor: "0" });
     if (path.endsWith("/contacts") || path.endsWith("/messages"))
       return json({ items: [], nextCursor: null, asOfEventCursor: "0" });
+    if (/\/messages\/[^/]+$/.test(path)) originalLookups++;
+    if (path.endsWith("/read-state")) return json({});
+    const messageAssets = assets.filter((asset) =>
+      path.endsWith(`/messages/${asset.messageId}/media`),
+    );
+    if (messageAssets.length) return json({ items: messageAssets });
+    if (assets.some((asset) => path.endsWith(`/media/${asset.id}/content`))) {
+      res.setHeader("Content-Type", "image/png");
+      return res.end(png);
+    }
     if (path.endsWith("/events/stream")) {
       res.setHeader("Content-Type", "text/event-stream");
       res.write(": ready\n\n");
@@ -77,8 +173,8 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
   const click = (text) =>
     script(
       `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(
-        text
-      )}).click(); return true`
+        text,
+      )}).click(); return true`,
     );
   const avatars =
     "return [...document.querySelectorAll('.conversation-avatar img')].map(im => im.naturalWidth)";
@@ -95,10 +191,10 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
     await script("window.location.reload(); return true");
     await until(
       "return Boolean(document.querySelector('.login-account'))",
-      Boolean
+      Boolean,
     );
     await script(
-      "document.querySelector('.login-account').click(); return true"
+      "document.querySelector('.login-account').click(); return true",
     );
     await until(avatars, imagesReady);
     assert.equal(avatarReads, 2);
@@ -107,7 +203,7 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
     assert.equal(
       avatarReads,
       2,
-      "restart must reuse readable local image bytes"
+      "restart must reuse readable local image bytes",
     );
     // Recreate the older storage format to check upgrade recovery in real WebKit.
     await script(`return new Promise((resolve, reject) => {
@@ -132,18 +228,81 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
     await until(avatars, imagesReady);
     assert.ok(
       avatarReads <= 4,
-      "legacy recovery must fetch cached bytes at most once per avatar"
+      "legacy recovery must fetch cached bytes at most once per avatar",
+    );
+    await resize(1200, 1000);
+    await script("document.querySelector('.chat-row').click(); return true");
+    await until(
+      "return [...document.querySelectorAll('article[data-message-id]')].map(el => el.dataset.messageId)",
+      (ids) => messages.every((message) => ids.includes(message.id)),
+    );
+    for (const id of messages.map((message) => message.id)) {
+      await script(
+        `document.querySelector('[data-message-id="${id}"]').scrollIntoView({block:'center'}); return true`,
+      );
+      await until(
+        `return document.querySelector('[data-message-id="${id}"] img.media-preview, [data-message-id="${id}"] .shared-link-art img')?.naturalWidth`,
+        (width) => width === 8,
+      );
+    }
+    const compact =
+      await script(`const card = document.querySelector('.compact-link-card');
+      return {text:card.innerText, links:document.querySelectorAll('.quote-preview a, .quote-preview button').length,
+      width:card.getBoundingClientRect().width, bubble:card.closest('.bubble').getBoundingClientRect().width,
+      stickers:document.querySelectorAll('.sticker-card img').length};`);
+    assert.ok(
+      compact.text.includes(link.title) && compact.text.includes("example.com"),
+    );
+    assert.ok(
+      !compact.text.includes(link.description) &&
+        !compact.text.includes(link.url),
+    );
+    assert.equal(
+      compact.links,
+      0,
+      "quote previews must have a single navigation target",
+    );
+    assert.ok(
+      compact.width <= compact.bubble,
+      "compact cards must fit their reply bubble",
+    );
+    assert.equal(
+      compact.stickers,
+      2,
+      "shared sticker and embedded quote must both render",
+    );
+    assert.equal(
+      originalLookups,
+      0,
+      "rendering quotes must not fetch original messages",
+    );
+    if (capture) await capture();
+    await resize(420, 820);
+    const bounds =
+      await script(`return [...document.querySelectorAll('.quote-preview')].map(el => {
+      const rect = el.getBoundingClientRect(); return {right:rect.right, width:innerWidth}; });`);
+    assert.ok(
+      bounds.every((rect) => rect.right <= rect.width),
+      "quote previews must fit narrow windows",
+    );
+    await resize(1200, 1000);
+    await script(
+      "document.querySelector('[data-message-id=link-reply] .quote-preview').click(); return true",
+    );
+    await until(
+      "return document.querySelector('.quote-target')?.dataset.messageId",
+      (id) => id === "link-original",
     );
     await script(
-      "document.querySelector('button[aria-label=\"Settings\"]').click(); return true"
+      "document.querySelector('button[aria-label=\"Settings\"]').click(); return true",
     );
     await click("Switch hub");
     await until("return document.body.innerText", (text) =>
-      text.includes("Welcome to AgentWechat")
+      text.includes("Welcome to AgentWechat"),
     );
     await click("Desktop settings");
     await until("return document.body.innerText", (text) =>
-      text.includes("Interface fixture hub")
+      text.includes("Interface fixture hub"),
     );
     let graphicHeight;
     for (const width of [900, 1200]) {
@@ -156,63 +315,63 @@ export async function interfaceAcceptance({ script, invoke, until, resize }) {
         return { scrollable: panel.scrollHeight > panel.clientHeight, top: rect.top, bottom: rect.bottom, height: innerHeight, graphic: document.querySelector('.app-illustration').getBoundingClientRect().height };`);
       assert.ok(
         layout.scrollable,
-        "long settings must scroll inside their panel"
+        "long settings must scroll inside their panel",
       );
       assert.ok(
         layout.top >= 0 && layout.bottom <= layout.height,
-        "Back must be reachable"
+        "Back must be reachable",
       );
       if (graphicHeight !== undefined)
         assert.ok(
           Math.abs(layout.graphic - graphicHeight) < 1,
-          "illustration size must follow height, not width"
+          "illustration size must follow height, not width",
         );
       graphicHeight = layout.graphic;
     }
     await script(
-      "[...document.querySelectorAll('.setting')].find(row => row.textContent.includes('Interface fixture hub')).querySelector('button').click(); return true"
+      "[...document.querySelectorAll('.setting')].find(row => row.textContent.includes('Interface fixture hub')).querySelector('button').click(); return true",
     );
     await until(
       "return document.body.innerText",
-      (text) => !text.includes("Interface fixture hub")
+      (text) => !text.includes("Interface fixture hub"),
     );
     await click("Back");
     await until(
       "return [...document.querySelectorAll('.desktop-choices button')].map(b => b.textContent)",
       (labels) =>
         labels.length > 0 &&
-        !labels.some((label) => label.includes("Interface fixture hub"))
+        !labels.some((label) => label.includes("Interface fixture hub")),
     );
     await click("Connect to another hub");
     assert.equal(
       await script(
-        "return Boolean(document.querySelector('.desktop-certificate'))"
+        "return Boolean(document.querySelector('.desktop-certificate'))",
       ),
-      false
+      false,
     );
     const borders = await script(
-      "const input = document.querySelector('input[type=url]'); return {width:getComputedStyle(input).borderTopWidth,background:getComputedStyle(input).backgroundColor}"
+      "const input = document.querySelector('input[type=url]'); return {width:getComputedStyle(input).borderTopWidth,background:getComputedStyle(input).backgroundColor}",
     );
     assert.equal(borders.width, "1px");
     assert.notEqual(borders.background, "rgba(0, 0, 0, 0)");
     await script(
-      "const input=document.querySelector('input[type=url]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'https://hub.example'); input.dispatchEvent(new Event('input',{bubbles:true})); return true"
+      "const input=document.querySelector('input[type=url]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'https://hub.example'); input.dispatchEvent(new Event('input',{bubbles:true})); return true",
     );
     await until(
       "return Boolean(document.querySelector('.desktop-certificate:not([open])'))",
-      Boolean
+      Boolean,
     );
     await click("Back");
     await invoke("desktop_select", { id: "local" });
     await script("window.location.reload(); return true");
     await until("return document.body.innerText", (text) =>
-      text.includes("Add WeChat account")
+      text.includes("Add WeChat account"),
     );
     await browserNavigationAcceptance(
-      "http://127.0.0.1:" + backend.address().port
+      "http://127.0.0.1:" + backend.address().port,
     );
     console.log(
-      "Native interface: avatars survive reload and legacy storage, forgotten hubs refresh, settings scroll and certificate fields stay optional"
+      "Native interface: avatars survive reload and legacy storage, forgotten hubs refresh, settings scroll and certificate fields stay optional",
     );
   } finally {
     if (connection)

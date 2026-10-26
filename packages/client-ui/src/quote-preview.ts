@@ -3,10 +3,10 @@ import { messagePresentation } from "./message-presentation.ts";
 
 export function localQuote(
   parent: NativeMessage,
-  messages: NativeMessage[]
+  messages: NativeMessage[],
 ): NativeMessage | undefined {
   const found = messages.filter((message) =>
-    quoteTargetMatches(parent, message)
+    quoteTargetMatches(parent, message),
   );
   return found.length === 1 ? found[0] : undefined;
 }
@@ -15,7 +15,7 @@ export function localQuote(
 // replace the excerpt delivered inside the reply.
 export function quoteTargetMatches(
   parent: NativeMessage,
-  message: NativeMessage
+  message: NativeMessage,
 ): boolean {
   return (
     !!parent.quote &&
@@ -29,7 +29,7 @@ export function quoteTargetMatches(
 
 export function embeddedQuotePreview(
   parent: NativeMessage,
-  original?: NativeMessage
+  original?: NativeMessage,
 ) {
   const quote = parent.quote;
   const recalled =
@@ -43,6 +43,19 @@ export function embeddedQuotePreview(
     state === "embedded" &&
     quote?.type === 3 &&
     quote.embeddedImage === true;
+  const sticker =
+    !recalled &&
+    state === "embedded" &&
+    (quote?.type === 47 ||
+      (quote?.type === 49 && quote.appMessageType === 8)) &&
+    quote.embeddedSticker === true;
+  const link =
+    !recalled &&
+    state === "embedded" &&
+    quote?.type === 49 &&
+    [3, 4, 5].includes(quote.appMessageType ?? 0)
+      ? quote.embeddedLink
+      : undefined;
   const text = recalled
     ? "Message recalled"
     : valid && state !== "missing" && quote?.embeddedText
@@ -53,7 +66,7 @@ export function embeddedQuotePreview(
     ? "Voice message unavailable"
     : [43, 62].includes(quote?.type ?? 0)
     ? "Video unavailable"
-    : quote?.type === 47
+    : quote?.type === 47 || (quote?.type === 49 && quote.appMessageType === 8)
     ? "Sticker unavailable"
     : quote?.type === 49 && quote.appMessageType === 6
     ? "File unavailable"
@@ -64,15 +77,17 @@ export function embeddedQuotePreview(
     own: !recalled && quote?.direction === "outgoing",
     // Assets belong to the reply carrying the embedded descriptor. Changing
     // the renderer does not change the account/message sent to the media API.
-    image: image
-      ? {
-          ...parent,
-          type: 3,
-          appMessageType: undefined,
-          quote: undefined,
-          link: undefined,
-        }
-      : undefined,
+    content:
+      image || sticker || link
+        ? {
+            ...parent,
+            type: image ? 3 : sticker ? 47 : 49,
+            appMessageType: link ? quote?.appMessageType : undefined,
+            quote: undefined,
+            link: link || undefined,
+            body: quote?.embeddedText ?? null,
+          }
+        : undefined,
   };
 }
 export function quotedText(message: NativeMessage): string {
@@ -81,6 +96,7 @@ export function quotedText(message: NativeMessage): string {
   if (["text", "reply", "forwarded"].includes(kind))
     return message.body || "Message text unavailable";
   if (kind === "link") return message.link?.title || "Link";
+  if (message.type === 49 && message.appMessageType === 8) return "Sticker";
   return (
     (
       {

@@ -8,6 +8,7 @@ import { NativeConsumerState } from "./native-consumer-state.ts";
 import { invalidateNativePreparedInputs, nativeDispatchManifest, nativeSourceMessageSid, trackNativePreparedInput } from "./native-prepared-boundary.ts";
 import { nativeRecallInfo, type NativeRecallObservation } from "./native-recall-state.ts";
 import { submitNativeText } from "./native-send.ts";
+import { sameEmbeddedQuote } from "./native-quote.ts";
 import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
 import { buildNativeContext, nativeGroupHistoryLimit, prepareNativeHistory, transcribeNativeAttachment } from "./native-history.ts";
 import { getWeChatRuntime } from "./runtime.ts";
@@ -91,7 +92,7 @@ async function recheckNativeInputs(client: NativeWeChatClient, state: NativeCons
         invalidateNativePreparedInputs(message.accountId, affected);
         throw new NativeInputInvalidated();
       }
-      if (!quote || JSON.stringify(quote) !== JSON.stringify(message.quote)) throw Error("Native embedded quote changed; delivery held for review");
+      if (!quote || !sameEmbeddedQuote(message.quote, quote)) throw Error("Native embedded quote changed; delivery held for review");
     }
     if (!state.isCurrent(message)) throw new NativeInputInvalidated();
   }

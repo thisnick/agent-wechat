@@ -352,20 +352,29 @@ export function MediaCard({
   const gallery = useMediaViewer();
   const image = message.type === 3;
   const video = message.type === 43;
-  const sticker = message.type === 47;
+  const sticker =
+    message.type === 47 ||
+    (message.type === 49 && message.appMessageType === 8);
   const voice = message.type === 34;
   const visual = image || sticker || video;
   const standard = standardImage(state.assets);
   const original = viewer ? cachedOriginal(state.assets) : undefined;
+  const stickerOriginal = sticker
+    ? state.assets.find((asset) => asset.variant === "original")
+    : undefined;
   const asset = image
     ? viewer && (!standard || !cachedVariant(standard)) && original
       ? original
       : imagePreview(state.assets)
+    : sticker
+    ? cachedOriginal(state.assets) ??
+      state.assets.find((asset) => asset.variant === "thumbnail") ??
+      stickerOriginal
     : video
-      ? videoAsset(state.assets, viewer)
-      : (state.assets.find(
-          (asset) => asset.variant === (voice ? "normal" : "standard"),
-        ) ?? state.assets[0]);
+    ? videoAsset(state.assets, viewer)
+    : state.assets.find(
+        (asset) => asset.variant === (voice ? "normal" : "standard"),
+      ) ?? state.assets[0];
   const working = !!asset && model.working(asset);
   useEffect(() => {
     if (visible || viewer) void model.load();
@@ -380,13 +389,31 @@ export function MediaCard({
     ) {
       model.ensure(asset);
       if (image && standard && standard.id !== asset.id) model.ensure(standard);
+      if (stickerOriginal && stickerOriginal.id !== asset.id)
+        model.ensure(stickerOriginal);
     }
-  }, [model, asset, standard, image, opening, visible, viewer, visual, voice, video]);
+  }, [
+    model,
+    asset,
+    standard,
+    stickerOriginal,
+    image,
+    opening,
+    visible,
+    viewer,
+    visual,
+    voice,
+    video,
+  ]);
   const available = asset && cachedVariant(asset);
   return (
     <div
       ref={element}
-      className={`bubble media-card${visual ? " visual-media" : ""}${video ? " video-card" : ""}${sticker ? " sticker-card" : ""}${voice ? " voice-card" : ""}${viewer ? " viewer-media" : ""}`}
+      className={`bubble media-card${visual ? " visual-media" : ""}${
+        video ? " video-card" : ""
+      }${sticker ? " sticker-card" : ""}${voice ? " voice-card" : ""}${
+        viewer ? " viewer-media" : ""
+      }`}
     >
       {!visual && !voice && (
         <div className="attachment-file">
@@ -423,19 +450,19 @@ export function MediaCard({
               ? voice
                 ? "Loading voice message"
                 : video
-                  ? "Loading video"
-                  : "Loading image"
+                ? "Loading video"
+                : "Loading image"
               : voice
-                ? "Voice message unavailable"
-                : video
-                  ? "Video unavailable"
-                  : "Image unavailable"
+              ? "Voice message unavailable"
+              : video
+              ? "Video unavailable"
+              : "Image unavailable"
           }
         >
           <Icon name={voice || video ? "play" : "image-off"} />
           {!state.loaded || working ? (
             <span className="media-spinner" />
-          ) : asset && canRetrieve(asset) ? (
+          ) : !previewOnly && asset && canRetrieve(asset) ? (
             <button onClick={() => void model.retrieve(asset)}>
               {asset.state === "pending" ? "Load" : "Retry"}
             </button>
