@@ -33,6 +33,11 @@ pnpm changeset
    `native-release` environment reviewer requirements still apply. For recovery,
    run the workflow manually on main with the version and `confirm_publish=true`.
 
+   Releases skip the development-only `wx-dev` upstream simulator and its smoke
+   checks. PR validation keeps that coverage. Production Rust tests, native
+   platform/media checks, packaged CLI checks and desktop acceptance still gate
+   publication.
+
 6. Successful native asset publication calls **Publish native runtime image** for
    the same commit/version. It tests and pushes Linux x64/ARM64 images and combines
    them into the versioned multi-architecture tag. Stable versions also update

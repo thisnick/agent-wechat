@@ -56,7 +56,13 @@ jobs:
           components: rustfmt, clippy
       - name: Install Linux desktop prerequisites
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb webkit2gtk-driver python3-dbus python3-gi
+        run: |
+          # Avoid the Azure mirror's very slow package downloads on x64 runners.
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb webkit2gtk-driver python3-dbus python3-gi
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh

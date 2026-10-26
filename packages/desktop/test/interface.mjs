@@ -199,6 +199,25 @@ export async function interfaceAcceptance({
     );
     await until(avatars, imagesReady);
     assert.equal(avatarReads, 2);
+    // Displaying an object URL does not mean the optional IndexedDB write has
+    // committed. Establish the persisted-cache precondition before reloading.
+    await until(
+      `return new Promise((resolve, reject) => {
+        const open = indexedDB.open('agent-wechat-cache');
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result, tx = db.transaction('avatars', 'readonly');
+          const request = tx.objectStore('avatars').getAll();
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result.filter(row =>
+            row.key[2] === 'fixture' && ${JSON.stringify(peers)}.includes(row.key[3]) &&
+            row.data.content?.byteLength === ${png.length}
+          ).length);
+          tx.oncomplete = () => db.close();
+        };
+      })`,
+      (count) => count === peers.length,
+    );
     await reloadPage(script, until);
     await until(avatars, imagesReady);
     assert.equal(

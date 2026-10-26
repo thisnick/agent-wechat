@@ -2,6 +2,11 @@ name: Native client
 
 on:
   workflow_call:
+    inputs:
+      simulator_checks:
+        description: Build and exercise the development upstream simulator
+        type: boolean
+        default: true
   pull_request:
     paths:
       - 'packages/native-client-rust/**'
@@ -76,7 +81,12 @@ jobs:
       - if: matrix.suite == 'lint'
         run: cargo fmt --all --check
       - if: matrix.suite == 'lint'
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          packages=()
+          if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
+            packages+=(--exclude wechat-simulator)
+          fi
+          cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache
@@ -114,27 +124,37 @@ jobs:
           "$RUNNER_TEMP/native-ffmpeg/bin/ffprobe" -version
           echo "$RUNNER_TEMP/native-ffmpeg/bin" >> "$GITHUB_PATH"
       - if: matrix.suite == 'test'
-        run: cargo test --workspace --locked
+        run: |
+          packages=()
+          if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
+            packages+=(--exclude wechat-simulator)
+          fi
+          cargo test --workspace "${packages[@]}" --locked
       - if: matrix.suite == 'test'
-        run: cargo build --workspace --profile test --locked
+        run: |
+          if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then
+            cargo build --workspace --profile test --locked
+          else
+            cargo build --profile test --locked -p wx-native --bin wx
+          fi
       - if: matrix.suite == 'test'
         uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
       - name: Exercise the real hub through the local upstream simulator
-        if: matrix.suite == 'test'
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks)
         run: node ../../scripts/native-simulator-smoke.mjs
       - if: matrix.suite == 'test' && runner.arch == 'X64'
         run: bash ../../scripts/native-generate-types.sh --check
       - if: matrix.suite == 'test'
         run: python3 scripts/smoke.py target/debug/wx
-      - if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
+      - if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         uses: pnpm/action-setup@v6
       - name: Install browser-client test dependencies
-        if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui...
       - name: Exercise the connected session and UI launcher with synthetic accounts
-        if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm client:smoke

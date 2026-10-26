@@ -104,6 +104,7 @@ jobs:
     uses: ./.github/workflows/native-portable.yml
     with:
       artifact_prefix: native-release
+      simulator_checks: false
   desktop:
     needs: [plan, build, portable]
     if: needs.plan.outputs.publish == 'true'
@@ -119,6 +120,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/native-client.yml
+    with:
+      simulator_checks: false
   prepare:
     needs: [plan, checks, build, portable, desktop]
     environment: native-release
