@@ -3,9 +3,7 @@
     "externalBin": [],
     "resources": {
       "resources/": "licenses/",
-      "binaries/wx-x86_64-unknown-linux-gnu": "bin/wx",
-      "binaries/ffmpeg-x86_64-unknown-linux-gnu": "bin/ffmpeg",
-      "binaries/ffprobe-x86_64-unknown-linux-gnu": "bin/ffprobe"
+      "binaries/linux/": "bin/"
     }
   }
 }

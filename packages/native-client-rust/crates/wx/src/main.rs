@@ -212,6 +212,13 @@ enum AccountCommand {
         id: String,
         alias: String,
     },
+    /// Remove a signed-out profile from the hub, retaining its local files.
+    Remove {
+        id: String,
+        /// Repeat the exact account ID to confirm removal.
+        #[arg(long)]
+        confirm: String,
+    },
 }
 #[derive(Subcommand)]
 enum AccountAction {
@@ -1253,6 +1260,7 @@ async fn run(cli: Cli) -> Result<()> {
                     | AccountCommand::Create { .. }
                     | AccountCommand::Default { .. }
                     | AccountCommand::Alias { .. }
+                    | AccountCommand::Remove { .. }
                     | AccountCommand::Get { id: Some(_) }
             }
             | Command::Tokens { .. }
@@ -1337,6 +1345,18 @@ async fn run(cli: Cli) -> Result<()> {
                     Method::PATCH,
                     &format!("v1/accounts/{}", encode(&id)),
                     Some(json!({"alias":alias})),
+                    None,
+                )
+                .await?
+            }
+            AccountCommand::Remove { id, confirm } => {
+                if id != confirm {
+                    bail!("Account confirmation does not match");
+                }
+                r.request(
+                    Method::DELETE,
+                    &format!("v1/accounts/{}", encode(&id)),
+                    Some(json!({"confirmAccountId":confirm})),
                     None,
                 )
                 .await?

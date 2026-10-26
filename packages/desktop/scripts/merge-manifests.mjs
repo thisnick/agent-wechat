@@ -19,6 +19,7 @@ const platforms = new Set([
   "windows-x64",
   "windows-arm64",
   "linux-x64",
+  "linux-arm64",
 ]);
 const assets = [],
   names = new Set();

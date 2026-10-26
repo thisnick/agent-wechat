@@ -26,6 +26,7 @@ pnpm --filter @agent-wechat/desktop app:build --target YOUR_TARGET --bundles YOU
 | `x86_64-pc-windows-msvc` | `nsis` |
 | `aarch64-pc-windows-msvc` | `nsis` |
 | `x86_64-unknown-linux-gnu` | `deb` |
+| `aarch64-unknown-linux-gnu` | `deb` |
 
 Media helpers are downloaded from the pinned FFmpeg static release and checked against committed SHA-256 hashes. Their licenses, upstream build information and source links accompany the app. Windows ARM64 uses x64 FFmpeg/FFprobe helpers through Windows emulation. Release Linux DEBs target Ubuntu 24.04 or newer compatible systems.
 

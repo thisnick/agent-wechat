@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 const directory = resolve(process.argv[2]);
 const platform = process.argv[3];
 if (
-  !["macos-arm64", "windows-x64", "windows-arm64", "linux-x64"].includes(
+  !["macos-arm64", "windows-x64", "windows-arm64", "linux-x64", "linux-arm64"].includes(
     platform,
   )
 )

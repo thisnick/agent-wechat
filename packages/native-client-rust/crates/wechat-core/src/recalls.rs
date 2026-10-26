@@ -589,7 +589,7 @@ impl Core {
         own: Option<&str>,
         reader: &wechat_profile::ProfileReader,
     ) -> Result<Value> {
-        self.normalize_recalled_with_quote_status(account, msg, own, reader, None)
+        self.normalize_recalled_with_quote_status(account, msg, own, reader, None, false)
     }
 
     pub(crate) fn normalize_recalled_batch<'a>(
@@ -599,9 +599,45 @@ impl Core {
         own: Option<&'a str>,
         reader: &'a wechat_profile::ProfileReader,
     ) -> Result<impl Iterator<Item = Result<Value>> + 'a> {
+        self.normalize_recalled_page(account, messages, own, reader, true)
+    }
+
+    pub(crate) fn normalize_thread_previews<'a>(
+        &'a self,
+        account: &'a str,
+        messages: Vec<wechat_profile::Message>,
+        own: Option<&'a str>,
+        reader: &'a wechat_profile::ProfileReader,
+    ) -> Result<impl Iterator<Item = Result<Value>> + 'a> {
+        // A sidebar shows the reply's text, without the quoted target. Avoid
+        // reading those targets while preserving recall handling for each row.
+        self.normalize_recalled_page(account, messages, own, reader, false)
+    }
+
+    fn normalize_recalled_page<'a>(
+        &'a self,
+        account: &'a str,
+        messages: Vec<wechat_profile::Message>,
+        own: Option<&'a str>,
+        reader: &'a wechat_profile::ProfileReader,
+        enrich_quotes: bool,
+    ) -> Result<impl Iterator<Item = Result<Value>> + 'a> {
         ensure!(messages.len() <= 200, "invalid_recall_query");
+        let current: Vec<_> = messages
+            .iter()
+            .filter_map(|message| {
+                Some((
+                    message.peer.clone()?,
+                    exact_server(message.server_message_id.as_deref()?)?,
+                ))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let current_markers = self.store.recalled_targets(account, &current)?;
         let targets: Vec<_> = messages
             .iter()
+            .filter(|_| enrich_quotes)
             .filter_map(|message| {
                 let thread = message.peer.as_ref()?;
                 let (server, _) = crate::quotes::message_app(message)?.reference?;
@@ -631,6 +667,11 @@ impl Core {
             Ok(())
         })?;
         Ok(messages.into_iter().map(move |message| {
+            let marker_absent = message.peer.as_ref().zip(message.server_message_id.as_ref())
+                .is_some_and(|(thread, server)| !current_markers.contains(&(thread.clone(), server.clone())))
+                && official_recall(&message).is_none()
+                && !(message.outgoing == Some(true)
+                    && matches!(message.raw_fields.get("status"), Some(wechat_profile::SqlValue::Integer(n)) if n == "7"));
             let quoted_recalled = message
                 .peer
                 .as_ref()
@@ -642,6 +683,7 @@ impl Core {
                 own,
                 reader,
                 Some(quoted_recalled),
+                marker_absent,
             )
         }))
     }
@@ -653,8 +695,13 @@ impl Core {
         own: Option<&str>,
         reader: &wechat_profile::ProfileReader,
         quoted_status: Option<bool>,
+        marker_absent: bool,
     ) -> Result<Value> {
-        let recalled = self.observe_profile_recall(account, &msg)?;
+        let recalled = if marker_absent {
+            None
+        } else {
+            self.observe_profile_recall(account, &msg)?
+        };
         let quoted_recalled = if let Some(status) = quoted_status {
             status
         } else if let (Some(thread), Some((server, _))) = (

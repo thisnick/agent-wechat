@@ -1170,16 +1170,40 @@ fn pending_own_replay_uses_source_tombstone_but_acknowledged_new_identity_remain
     store
         .record_recall("one", "peer", "200", Some(&id), Some(100), None, "outgoing")
         .unwrap();
-    original.server_message_id = Some("199".into());
     original.outgoing = Some(true);
     original
         .raw_fields
         .insert("status".into(), SqlValue::Integer("7".into()));
-    assert_eq!(
-        core.normalize_recalled("one", original.clone(), Some("synthetic_self"), &reader)
-            .unwrap()["body"],
-        crate::recalls::RECALLED_BODY
-    );
+    for provisional in ["199", "0"] {
+        original.server_message_id = Some(provisional.into());
+        let single = core
+            .normalize_recalled("one", original.clone(), Some("synthetic_self"), &reader)
+            .unwrap();
+        assert_eq!(single["body"], crate::recalls::RECALLED_BODY);
+        let page = core
+            .normalize_recalled_batch(
+                "one",
+                vec![original.clone()],
+                Some("synthetic_self"),
+                &reader,
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(page, vec![single.clone()]);
+        let previews = core
+            .normalize_thread_previews(
+                "one",
+                vec![original.clone()],
+                Some("synthetic_self"),
+                &reader,
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(previews, vec![single]);
+    }
+    original.server_message_id = Some("199".into());
     original
         .raw_fields
         .insert("status".into(), SqlValue::Integer("2".into()));

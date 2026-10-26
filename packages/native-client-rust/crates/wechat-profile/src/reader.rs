@@ -16,6 +16,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
 };
+#[path = "thread_previews.rs"]
+mod thread_previews;
 
 pub struct ProfileReader {
     pub(crate) snapshot: Snapshot,
@@ -149,6 +151,22 @@ fn contact(r: RawFields) -> Result<Contact> {
         local_type: num(&r, "local_type"),
         raw_fields: r,
     })
+}
+fn group_member(contact: Contact, display: Option<String>) -> GroupMember {
+    let label = contact
+        .remark
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| display.clone().filter(|s| !s.is_empty()))
+        .or_else(|| contact.nickname.clone().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| contact.username.clone());
+    GroupMember {
+        username: contact.username.clone(),
+        local_id: contact.local_id.clone(),
+        label,
+        room_display_name: display,
+        contact,
+    }
 }
 pub(crate) fn decode(r: &RawFields, column: &str, flag: &str, max: usize) -> Result<DecodedField> {
     let flag = num(r, flag);
@@ -531,8 +549,8 @@ impl ProfileReader {
     }
 
     /// Read the latest saved message for each requested conversation in one
-    /// snapshot. Reuse each shard's connection and sender namespace; never scan
-    /// or decode the rest of a conversation's history for a sidebar preview.
+    /// snapshot. One compound query per shard selects one indexed row per
+    /// conversation; no point lookups or older-body decoding are needed.
     pub fn latest_messages(
         &self,
         chats: &[String],
@@ -544,6 +562,12 @@ impl ProfileReader {
         for chat in chats {
             validate_name(chat)?;
         }
+        if let Some(own) = own_username {
+            validate_name(own)?;
+        }
+        if chats.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         let shards: Vec<_> = self
             .inventory()
             .iter()
@@ -552,7 +576,9 @@ impl ProfileReader {
         if shards.is_empty() || shards.iter().any(|db| db.state != DatabaseState::Readable) {
             return Err(ProfileError::KeyUnavailable("message shards".into()));
         }
-        let labels = self.labels()?;
+        // The selected conversation already supplies the peer identity, so do
+        // not rescan the contact namespace for every preview's table hash.
+        let labels = BTreeMap::new();
         let mut result: BTreeMap<String, Message> = BTreeMap::new();
         for db in shards {
             let schema = self
@@ -562,6 +588,8 @@ impl ProfileReader {
                 .ok_or(ProfileError::InvalidMetadata)?;
             let c = self.snapshot.open(&db.relative_path)?;
             let names = name_map(&c)?;
+            let mut selected = Vec::new();
+            let mut columns = BTreeSet::new();
             for chat in chats {
                 let table = format!("Msg_{:x}", Md5::digest(chat.as_bytes()));
                 let Some(table) = schema
@@ -571,22 +599,58 @@ impl ProfileReader {
                 else {
                     continue;
                 };
-                if !["local_id", "create_time"]
-                    .iter()
-                    .all(|name| table.columns.iter().any(|c| c.name == *name))
+                if ![
+                    "local_id",
+                    "server_id",
+                    "local_type",
+                    "create_time",
+                    "real_sender_id",
+                    "message_content",
+                    "source",
+                    "WCDB_CT_message_content",
+                    "WCDB_CT_source",
+                ]
+                .iter()
+                .all(|name| table.columns.iter().any(|c| c.name == *name))
                 {
                     return Err(ProfileError::UnsupportedSchema(db.relative_path.clone()));
                 }
-                let local = c
-                    .query_row(
-                        &format!("SELECT local_id FROM {} ORDER BY create_time DESC,local_id DESC LIMIT 1", quote_identifier(&table.name)),
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?;
-                let Some(local) = local else { continue };
-                let mut message = self.message_from_connection(
-                    &c,
+                columns.extend(table.columns.iter().map(|column| column.name.clone()));
+                selected.push((chat, table));
+            }
+            if selected.is_empty() {
+                continue;
+            }
+            // Preserve unknown columns even when conversation tables differ.
+            // A private discriminator must not collide with a profile column.
+            let mut discriminator = "__agent_wechat_preview".to_string();
+            while columns.contains(&discriminator) {
+                discriminator.push('_');
+            }
+            let sql = selected.iter().enumerate().map(|(index, (_, table))| {
+                let projection = columns.iter().map(|column| {
+                    if table.columns.iter().any(|c| c.name == *column) {
+                        quote_identifier(column)
+                    } else {
+                        format!("NULL AS {}", quote_identifier(column))
+                    }
+                }).collect::<Vec<_>>().join(",");
+                format!("SELECT {index} AS {},{projection} FROM (SELECT * FROM {} ORDER BY create_time DESC,local_id DESC LIMIT 1)", quote_identifier(&discriminator), quote_identifier(&table.name))
+            }).collect::<Vec<_>>().join(" UNION ALL ");
+            #[cfg(test)]
+            batch_lookup_tests::record_batch_query();
+            let mut statement = c.prepare(&sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let index: usize = row.get(0)?;
+                let (chat, table) = selected.get(index).ok_or(ProfileError::InvalidMetadata)?;
+                let mut fields = raw(row)?;
+                fields.retain(|name, _| table.columns.iter().any(|column| column.name == *name));
+                let local = num(&fields, "local_id")
+                    .filter(|id| *id > 0)
+                    .ok_or(ProfileError::InvalidMetadata)?;
+                let message = self.message_from_fields_with_peer(
+                    fields,
                     &SourceMessageId {
                         database: db.relative_path.clone(),
                         table: table.name.clone(),
@@ -595,13 +659,13 @@ impl ProfileReader {
                     own_username,
                     &labels,
                     &names,
+                    Some(chat),
                 )?;
-                message.peer = Some(chat.clone());
                 if result
-                    .get(chat)
+                    .get(*chat)
                     .is_none_or(|old| message_order(&message) > message_order(old))
                 {
-                    result.insert(chat.clone(), message);
+                    result.insert((*chat).clone(), message);
                 }
             }
         }
@@ -1064,18 +1128,35 @@ impl ProfileReader {
         labels: &BTreeMap<String, String>,
         names: &BTreeMap<i64, String>,
     ) -> Result<Message> {
-        let mut candidates = labels
-            .keys()
-            .cloned()
-            .chain(names.values().cloned())
-            .filter(|name| {
-                format!("{:x}", Md5::digest(name.as_bytes())).eq_ignore_ascii_case(&id.table[4..])
-            })
-            .collect::<BTreeSet<_>>();
-        let peer = if candidates.len() == 1 {
-            candidates.pop_first()
+        self.message_from_fields_with_peer(r, id, own_username, labels, names, None)
+    }
+
+    fn message_from_fields_with_peer(
+        &self,
+        r: RawFields,
+        id: &SourceMessageId,
+        own_username: Option<&str>,
+        labels: &BTreeMap<String, String>,
+        names: &BTreeMap<i64, String>,
+        known_peer: Option<&str>,
+    ) -> Result<Message> {
+        let peer = if let Some(peer) = known_peer {
+            Some(peer.to_owned())
         } else {
-            None
+            let mut candidates = labels
+                .keys()
+                .cloned()
+                .chain(names.values().cloned())
+                .filter(|name| {
+                    format!("{:x}", Md5::digest(name.as_bytes()))
+                        .eq_ignore_ascii_case(&id.table[4..])
+                })
+                .collect::<BTreeSet<_>>();
+            if candidates.len() == 1 {
+                candidates.pop_first()
+            } else {
+                None
+            }
         };
         let signed = num(&r, "server_id");
         let sender = num(&r, "real_sender_id").and_then(|n| names.get(&n).cloned());
@@ -1190,20 +1271,7 @@ impl ProfileReader {
         for r in records {
             let contact = contact(r)?;
             let display = displays.get(&contact.username).cloned().flatten();
-            let label = contact
-                .remark
-                .clone()
-                .filter(|s| !s.is_empty())
-                .or_else(|| display.clone().filter(|s| !s.is_empty()))
-                .or_else(|| contact.nickname.clone().filter(|s| !s.is_empty()))
-                .unwrap_or_else(|| contact.username.clone());
-            items.push(GroupMember {
-                username: contact.username.clone(),
-                local_id: contact.local_id.clone(),
-                label,
-                room_display_name: display,
-                contact,
-            });
+            items.push(group_member(contact, display));
         }
         self.page(items, n, &hash, |v| CursorKey::Name {
             name: v.username.clone(),
@@ -1484,6 +1552,51 @@ mod batch_lookup_tests {
             Ok(())
         })?;
         Ok(messages)
+    }
+
+    #[test]
+    fn sidebar_previews_use_one_compound_query_per_shard_for_a_full_page() {
+        let (temp, original) = fixture();
+        drop(original);
+        let source = format!("Msg_{:x}", Md5::digest(b"peer"));
+        let chats: Vec<_> = (0..50).map(|n| format!("peer_{n}")).collect();
+        for shard in 0..2 {
+            let db = Connection::open(
+                temp.path()
+                    .join(format!("account/db_storage/message/message_{shard}.db")),
+            )
+            .unwrap();
+            for chat in &chats {
+                let table = format!("Msg_{:x}", Md5::digest(chat.as_bytes()));
+                db.execute_batch(&format!("CREATE TABLE {table} AS SELECT * FROM {source}; CREATE INDEX {table}_time ON {table}(create_time DESC,local_id DESC)")).unwrap();
+            }
+            let table = format!("Msg_{:x}", Md5::digest(chats[0].as_bytes()));
+            db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN __agent_wechat_preview BLOB; UPDATE {table} SET __agent_wechat_preview=X'0102'")).unwrap();
+        }
+        let reader = ProfileReader::open(
+            ProfileLocation::new(temp.path().join("account")).unwrap(),
+            KeyFile::empty("account"),
+            ReadOptions {
+                allow_plaintext: true,
+                stopped_or_consistent_snapshot: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        BATCH_QUERIES.with(|n| n.set(0));
+        POINT_QUERIES.with(|n| n.set(0));
+        let latest = reader.latest_messages(&chats, Some("self")).unwrap();
+        assert_eq!(latest.len(), chats.len());
+        assert_eq!(BATCH_QUERIES.with(Cell::get), 2);
+        assert_eq!(POINT_QUERIES.with(Cell::get), 0);
+        for chat in &chats {
+            let expected = reader.message(&latest[chat].id, Some("self")).unwrap();
+            assert_eq!(latest[chat].raw_fields, expected.raw_fields);
+            assert_eq!(latest[chat].sender, expected.sender);
+        }
+        assert!(!latest[&chats[1]]
+            .raw_fields
+            .contains_key("__agent_wechat_preview"));
     }
 
     #[test]

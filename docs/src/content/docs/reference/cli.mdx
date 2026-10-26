@@ -12,8 +12,8 @@ Run `wx COMMAND --help` for the full options of any command. Output is JSON.
 | `wx serve` | Run the daemon in the foreground |
 | `wx daemon` | `start`, `status`, `logs [--follow]`, `stop` |
 | `wx auth` | `login [--official[=PATH]] [--qr] [--saved-only]`, `status`, `qr ID`, `attempts get/cancel ID`, `logout`, `forget --yes` |
-| `wx accounts` | `list`, `get`, `default ID`, `alias ID NAME` |
-| `wx account` | `status`, `capabilities`, `connect`, `disconnect` |
+| `wx accounts` | `list`, `create [--id ID] [--alias NAME]`, `get`, `default ID`, `alias ID NAME`, `remove ID --confirm ID` |
+| `wx account` | `status`, `settings [--auto-download-max-mb MB]`, `capabilities`, `connect`, `disconnect` |
 | `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V`, `mute ID`, `unmute ID` |
 | `wx messages` | `list CHAT`, `get CHAT ID`, `send CHAT --text/--image/--file/--video/--voice/--share`, `media CHAT ID`, `--video-quality normal/original` with `--video`, `recall ID --server-id S`, `sends lookup/get/cancel` |
 | `wx contacts` | `list`, `find TEXT`, `get ID`, `refresh ID`, `sync`, `avatar ID` |

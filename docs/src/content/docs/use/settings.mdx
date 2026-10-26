@@ -1,9 +1,22 @@
 ---
-title: Automatic downloads
-description: Choose how much incoming media the agent-wechat hub downloads automatically for each account.
+title: Settings
+description: Configure the app, local storage and account download settings.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+
+Open **Settings** in the app. Settings apply to the device, the desktop app or the selected hub account:
+
+| Setting | Applies to |
+| --- | --- |
+| Appearance and temporary storage | This device |
+| Local hub, network access and opening at login | Desktop app |
+| Desktop connection keys | System keyring |
+| Automatic downloads | Selected account on the hub |
+
+See [Desktop app](/setup/desktop/) for local/network connections, certificates and CLI setup. Independent CLI clients keep their own protected token files.
+
+## Automatic downloads
 
 The agent-wechat hub downloads new attachments without a browser or API client
 being open. Each account has its own size limit, initially **50 MB (52,428,800 bytes)**.
@@ -17,7 +30,7 @@ being open. Each account has its own size limit, initially **50 MB (52,428,800 b
 | Files and stickers | When their advertised size is within the limit |
 | Larger or unknown-size versions | On request |
 
-## Change the limit
+### Change the limit
 
 1. Select an account and read its settings:
 
@@ -47,7 +60,7 @@ being open. Each account has its own size limit, initially **50 MB (52,428,800 b
 In the browser, open **Settings → Automatic downloads**. This controls media kept
 on the hub. **On this device** describes separate temporary browser copies.
 
-## API and SDK
+### API and SDK
 
 Read with `GET /v1/accounts/{account}/settings` and update with
 `PATCH /v1/accounts/{account}/settings`:

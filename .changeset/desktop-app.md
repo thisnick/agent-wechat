@@ -1,17 +1,13 @@
 ---
 "@agent-wechat/cli": minor
-"@agent-wechat/desktop": minor
+"@agent-wechat/agent-wechat": minor
+"@agent-wechat/shared": minor
 "@agent-wechat/client-ui": minor
+"@agent-wechat/desktop": minor
 ---
 
-Add a separate AgentWechat desktop package with the existing chat UI, a bundled native hub and CLI, system-keyring connection storage, optional HTTPS network access, and native file saving. Keep standalone CLI credentials file based and support private-pipe credentials for client commands.
+Add the AgentWechat desktop app for macOS, Windows and Ubuntu x64/ARM64, with a bundled local hub and CLI, system-keyring credentials, optional HTTPS network access and native file saving. Integrate signed Windows installers and notarized macOS packages into the prerelease release flow. Keep the standalone CLI independent, with protected credential files and a confirmed profile-removal command that retains local files.
 
-Build desktop installers through the prerelease version-package flow. Sign Windows binaries before packaging and sign the final installer, and require Apple notarization, stapling and Gatekeeper verification before publishing macOS downloads.
+Add a browser chat client with account and group management, quoted replies, confirmed recalls, shared-link cards, searchable history, message previews and group avatars. Support photo/video viewing, zoom and swipe navigation, voice playback, original downloads, visible-avatar refresh, version-checked unread clearing and event-stream updates. Remember recent chats, drafts and verified media on the device without resending uncertain operations.
 
-Handle empty profile directories during fresh initialization on macOS and Windows while preserving existing contents and refusing conflicting writers.
-
-Keep group admission and execution under the same account lock so a heartbeat cannot invalidate an already admitted operation before it starts.
-
-Create CLI settings directories with private Windows ownership and protect existing owned directories without reopening them.
-
-Use portable database key names during Windows profile writes so incoming messages can be projected into chat history.
+Download received thumbnails and voice notes on the hub, and apply a per-account 50 MB default limit to automatic image, video, file and sticker downloads. Expose the policy through Settings, the API and CLI. Batch thread summaries from existing profile data without upstream requests or a separate stored preview model. Improve native profile initialization, group-operation locking and Windows credential/profile handling, with isolated simulator coverage for client workflows.

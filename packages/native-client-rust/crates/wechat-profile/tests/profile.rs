@@ -329,6 +329,60 @@ fn cursor_rejects_query_mix_and_changed_generation() {
     ));
 }
 #[test]
+fn group_avatar_batch_matches_member_labels_and_isolates_inconsistent_rooms() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    let mut rooms = vec!["room@chatroom".to_string()];
+    for room in 10..30 {
+        let name = format!("room_{room}@chatroom");
+        c.execute(
+            "INSERT INTO chat_room VALUES(?1,?2,'peer',X'')",
+            params![room, name],
+        )
+        .unwrap();
+        rooms.push(name);
+        for member in 0..6 {
+            let id = room * 10 + member;
+            c.execute(
+                "INSERT INTO contact VALUES(?1,?2,'Nickname','Remark','',1)",
+                params![id, format!("member_{id}")],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO chatroom_member VALUES(?1,?2)",
+                params![room, id],
+            )
+            .unwrap();
+        }
+    }
+    c.execute_batch("INSERT INTO chat_room VALUES(500,'inconsistent@chatroom','peer',X'0A0C0A04706565721204526F6F6D'); INSERT INTO chatroom_member VALUES(500,1)").unwrap();
+    rooms.push("inconsistent@chatroom".into());
+    drop(c);
+    let r = reader(d.path());
+    let previews = r.group_avatar_members(&rooms).unwrap();
+    assert_eq!(previews.len(), rooms.len() - 1);
+    assert!(!previews.contains_key("inconsistent@chatroom"));
+    for room in rooms
+        .iter()
+        .filter(|room| !room.starts_with("inconsistent"))
+    {
+        let expected = r
+            .group_members(
+                room,
+                &ListQuery {
+                    limit: Some(4),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&previews[room]).unwrap(),
+            serde_json::to_value(expected.items).unwrap()
+        );
+    }
+}
+
+#[test]
 fn contacts_threads_groups_and_room_aliases() {
     let d = fixture();
     let r = reader(d.path());

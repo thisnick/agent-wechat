@@ -16,6 +16,7 @@ test("final desktop manifests reject bytes changed after signing or packaging", 
     "windows-x64",
     "windows-arm64",
     "linux-x64",
+    "linux-arm64",
   ];
   const fragments = [];
   for (const platform of platforms) {
@@ -41,7 +42,7 @@ test("final desktop manifests reject bytes changed after signing or packaging", 
   const manifest = JSON.parse(
     await readFile(join(output, `AgentWechat-v${version}-checksums.json`)),
   );
-  assert.equal(manifest.assets.length, 4);
+  assert.equal(manifest.assets.length, 5);
   await writeFile(
     join(fragments[0], `AgentWechat-v${version}-macos-arm64.zip`),
     "changed bytes",

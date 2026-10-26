@@ -71,6 +71,27 @@ import qrLogin from '../../../assets/qr-login.svg';
 
 You're connected. Next: [keep it running](/setup/run/) in the background, then use it from the [CLI](/use/cli/), [OpenClaw](/openclaw/setup/) or [your own code](/use/api/).
 
+## Sign out or remove a profile
+
+List profiles with `wx accounts list`. Use the account ID from that response:
+
+```bash
+wx --account ACCOUNT_ID auth login
+wx --account ACCOUNT_ID auth logout
+```
+
+After sign-out completes, remove the profile from the hub by repeating its exact ID:
+
+```bash
+wx accounts remove ACCOUNT_ID --confirm ACCOUNT_ID
+```
+
+```json
+{ "accountId": "ACCOUNT_ID", "removed": true, "filesRetained": true }
+```
+
+Removal unregisters the profile and keeps its local files. `wx auth forget --yes` is a separate action that forgets saved sign-in credentials; it does not remove the profile.
+
 <Aside title="Good to know">
 - **A new profile starts without your old chats.** WeChat doesn't send full history to a new login, so it fills up from new messages onward.
 - **With `--official`, keep WeChat closed** while the daemon is running. Both writing to the same files can damage them.

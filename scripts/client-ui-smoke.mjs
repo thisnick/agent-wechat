@@ -1,7 +1,7 @@
 // Real session model + SDK + owned Rust simulator processes; never loads native client defaults.
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { readFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
@@ -670,6 +670,14 @@ try {
     "account",
     "settings",
   ];
+  await client.createAccount("cli-removal");
+  const removalArgs = ["--server", hub.endpoint, "--token-file", join(data, "hub-token"), "--json", "accounts", "remove", "cli-removal"];
+  assert.notEqual(spawnSync(wx, removalArgs).status, 0);
+  assert.notEqual(spawnSync(wx, [...removalArgs, "--confirm", "another-account"]).status, 0);
+  assert.equal((await client.account("cli-removal")).id, "cli-removal");
+  const removed = JSON.parse(execFileSync(wx, [...removalArgs, "--confirm", "cli-removal"], {encoding:"utf8"}));
+  assert.deepEqual(removed, {accountId:"cli-removal", removed:true, filesRetained:true});
+  assert.ok(!(await client.accounts()).items.some(account => account.id === "cli-removal"));
   const cliSettings = (...args) =>
     JSON.parse(
       execFileSync(wx, [...settingsArgs, ...args], { encoding: "utf8" })

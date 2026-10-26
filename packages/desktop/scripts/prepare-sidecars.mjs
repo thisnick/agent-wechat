@@ -23,6 +23,7 @@ const platforms = {
   "x86_64-pc-windows-msvc": "win32-x64",
   "aarch64-pc-windows-msvc": "win32-x64",
   "x86_64-unknown-linux-gnu": "linux-x64",
+  "aarch64-unknown-linux-gnu": "linux-arm64",
 };
 const platform = platforms[target];
 if (!platform) throw new Error(`Unsupported desktop target: ${target}`);
@@ -100,4 +101,12 @@ await writeFile(
     2,
   ),
 );
+if (target.endsWith("unknown-linux-gnu")) {
+  const linux = join(output, "linux");
+  await mkdir(linux, { recursive: true });
+  for (const name of ["wx", "ffmpeg", "ffprobe"]) {
+    await copyFile(join(output, `${name}-${target}`), join(linux, name));
+    await chmod(join(linux, name), 0o755);
+  }
+}
 console.log(`Prepared wx and verified media helpers for ${target}`);

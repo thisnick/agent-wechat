@@ -623,6 +623,40 @@ impl Store {
             .and_then(|v| String::from_utf8(v).ok())
             .unwrap_or_else(|| "0".into()))
     }
+    pub fn read_versions(
+        &self,
+        id: &str,
+        threads: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        anyhow::ensure!(threads.len() <= 200, "invalid_read_version_query");
+        if threads.is_empty() {
+            return Ok(Default::default());
+        }
+        let keys: Vec<_> = threads
+            .iter()
+            .map(|thread| format!("read-version:{thread}"))
+            .collect();
+        self.control(id, |db| {
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let mut statement = db.prepare(&format!(
+                "SELECT key,value FROM runtime WHERE key IN ({placeholders})"
+            ))?;
+            let rows = statement.query_map(rusqlite::params_from_iter(&keys), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut versions = std::collections::BTreeMap::new();
+            for row in rows {
+                let (key, bytes) = row?;
+                if let Some(thread) = key.strip_prefix("read-version:") {
+                    versions.insert(
+                        thread.into(),
+                        String::from_utf8(bytes).unwrap_or_else(|_| "0".into()),
+                    );
+                }
+            }
+            Ok(versions)
+        })
+    }
     pub fn begin_read(
         &self,
         id: &str,
@@ -933,6 +967,31 @@ mod tests {
 #[cfg(test)]
 mod runtime_prefix_tests {
     use super::*;
+    #[test]
+    fn read_version_batch_matches_individual_reads_and_keeps_accounts_separate() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
+        store.put_runtime("one", "read-version:peer", b"3").unwrap();
+        store
+            .put_runtime("one", "read-version:invalid", &[255])
+            .unwrap();
+        store.put_runtime("two", "read-version:peer", b"9").unwrap();
+        let threads = vec!["peer".into(), "invalid".into(), "missing".into()];
+        let versions = store.read_versions("one", &threads).unwrap();
+        for thread in &threads {
+            assert_eq!(
+                versions.get(thread).map(String::as_str).unwrap_or("0"),
+                store.read_version("one", thread).unwrap()
+            );
+        }
+        assert_eq!(versions["peer"], "3");
+        assert_eq!(store.read_versions("two", &threads).unwrap()["peer"], "9");
+        assert!(store
+            .read_versions("one", &vec!["peer".into(); 201])
+            .is_err());
+    }
     #[test]
     fn runtime_prefix_is_bounded_literal_and_account_scoped() {
         let temporary = tempfile::tempdir().unwrap();

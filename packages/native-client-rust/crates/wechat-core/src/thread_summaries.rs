@@ -1,7 +1,7 @@
 use crate::Core;
 use anyhow::Result;
 use serde_json::{json, Value};
-use wechat_profile::{ListQuery, ProfileReader};
+use wechat_profile::ProfileReader;
 
 impl Core {
     /// Enrich only the returned page, using the same profile snapshot as its
@@ -18,27 +18,32 @@ impl Core {
             .filter(|r| r["deleted"] != true)
             .filter_map(|r| r["id"].as_str().map(str::to_owned))
             .collect();
-        let mut latest = reader.latest_messages(&ids, own).ok();
+        let mut latest = reader.latest_messages(&ids, own).ok().and_then(|messages| {
+            let (ids, messages): (Vec<_>, Vec<_>) = messages.into_iter().unzip();
+            let senders: Vec<_> = messages
+                .iter()
+                .map(|message| message.sender.clone())
+                .collect();
+            self.normalize_thread_previews(account, messages, own, reader)
+                .ok()
+                .map(|normalized| {
+                    ids.into_iter()
+                        .zip(senders.into_iter().zip(normalized))
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                })
+        });
+        let rooms: Vec<_> = ids
+            .iter()
+            .filter(|id| id.ends_with("@chatroom"))
+            .cloned()
+            .collect();
+        let mut avatar_members = reader.group_avatar_members(&rooms).unwrap_or_default();
         let labels = reader.labels().unwrap_or_default();
         for row in rows.iter_mut().filter(|r| r["deleted"] != true) {
             let Some(id) = row["id"].as_str().map(str::to_owned) else {
                 continue;
             };
-            let members = if id.ends_with("@chatroom") {
-                reader
-                    .group_members(
-                        &id,
-                        &ListQuery {
-                            limit: Some(4),
-                            ..Default::default()
-                        },
-                    )
-                    .ok()
-                    .map(|p| p.items)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let members = avatar_members.remove(&id).unwrap_or_default();
             row["avatarMembers"] = json!(members
                 .iter()
                 .map(|m| json!({"id":m.username,"displayName":m.label}))
@@ -46,15 +51,15 @@ impl Core {
             // Omitted means unavailable, null means the readable local history
             // has no messages. A cache gap must not masquerade as an empty chat.
             if let Some(latest) = &mut latest {
-                row["lastMessage"] = if let Some(message) = latest.remove(&id) {
-                    let sender_name = message.sender.as_deref().and_then(|sender| {
+                row["lastMessage"] = if let Some((sender, message)) = latest.remove(&id) {
+                    let sender_name = sender.as_deref().and_then(|sender| {
                         members
                             .iter()
                             .find(|m| m.username == sender)
                             .map(|m| m.label.clone())
                             .or_else(|| labels.get(sender).cloned())
                     });
-                    match self.normalize_recalled(account, message, own, reader) {
+                    match message {
                         Ok(message) => message_summary(&message, sender_name.as_deref()),
                         Err(_) => continue,
                     }
