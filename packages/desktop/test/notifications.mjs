@@ -15,6 +15,10 @@ async function wait(check) {
   throw new Error("Notification acceptance timed out");
 }
 export async function notificationsAcceptance(invoke) {
+  const window = (action = "state") =>
+    JSON.parse(execFileSync("python3", [
+      fileURLToPath(new URL("./window-control.py", import.meta.url)), action,
+    ], { encoding: "utf8" }));
   const log = join(process.env.HOME, "notifications.jsonl");
   const service = spawn(
     "python3",
@@ -174,10 +178,29 @@ export async function notificationsAcceptance(invoke) {
       "unready contact sync must remain silent"
     );
     contactReady = true;
+    window("close");
+    await wait(() => !window().visible);
+    const reopened = spawn(process.env.DESKTOP_BINARY, [], { stdio: "ignore" });
+    try {
+      await wait(() => window().visible);
+      await wait(() => reopened.exitCode === 0);
+    } finally {
+      if (reopened.exitCode === null) reopened.kill("SIGTERM");
+    }
+    window("close");
+    await wait(() => !window().visible);
+    await invoke("notifications_context", {
+      focus: { connectionId: connection.id, accountId: account, threadId: thread },
+    });
     send("new");
     const first = await wait(async () => (await entries())[0]);
     assert.equal(first.title, "Fixture contact");
     assert.equal(first.body, "Fixture message");
+    assert.equal(
+      window().visible,
+      false,
+      "a background notification must not reopen the window"
+    );
     send("new");
     await pause(700);
     assert.equal(
@@ -203,6 +226,8 @@ export async function notificationsAcceptance(invoke) {
       accountId: account,
       threadId: thread,
     });
+    await wait(() => window().visible);
+    await invoke("notifications_context", { focus: null });
     rejectStream = true;
     for (const stream of streams) stream.destroy();
     await wait(() => streams.size === 0);
@@ -254,7 +279,7 @@ export async function notificationsAcceptance(invoke) {
     );
     await invoke("notifications_enabled", { enabled: true });
     console.log(
-      "Native notifications: real SSE and D-Bus delivery, mute/history/outgoing suppression, deduplication, click target and settings passed"
+      "Native notifications: close hides the window, relaunch restores it, hidden SSE/D-Bus delivery, click restore, mute/history/outgoing suppression, deduplication and settings passed"
     );
   } finally {
     await invoke("desktop_select", { id: "local" }).catch(() => {});

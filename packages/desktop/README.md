@@ -6,7 +6,9 @@ On first launch choose **Use this device** or **Connect to another hub**. Deskto
 
 The app passes a local hub's key through `wx serve --token-stdin`. It brokers API requests and event streams in the native layer, without placing the key in browser storage. The bundled and npm-installed CLI have the same credential behavior; neither accesses the desktop keyring. Independent CLI connections use their own protected token files and saved server settings. **Settings → Export key for CLI** creates a protected file for that setup.
 
-Once configured, the local hub starts whenever the app opens, including when the interface reconnects to a remote hub. Closing the window keeps the app and its hub in the tray/menu bar. **Quit AgentWechat** requests shutdown of the exact child hub using its PID, hub ID and ownership generation. It never adopts another process, and remote hubs are not stopped. Profiles and encryption keys stay in the app's data folder outside the installation directory.
+Once configured, the local hub starts whenever the app opens, including when the interface reconnects to a remote hub. Closing hides the window; the hub and message notifications keep running. Reopen it from the Dock on macOS, launch AgentWechat again, or choose **Open AgentWechat** from its tray/menu-bar icon.
+
+**Quit AgentWechat** requests shutdown of the exact child hub using its PID, hub ID and ownership generation. It never adopts another process, and remote hubs are not stopped. Profiles and encryption keys stay in the app's data folder outside the installation directory.
 
 Message notifications run in the native app for signed-in profiles on the selected hub, including while the window is hidden. Change **Settings → Message notifications** to turn them off. The app alerts for new incoming messages in chats known to be unmuted, after contact sync is ready. It suppresses the conversation being read in the focused window, history, outgoing messages and duplicate events. Starting the app begins at the current event boundary; it does not replay old alerts. Only message IDs and event cursors are kept in protected notification receipts.
 

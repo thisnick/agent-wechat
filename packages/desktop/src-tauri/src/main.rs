@@ -489,13 +489,17 @@ fn request_quit(app: tauri::AppHandle) {
         }
     });
 }
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -555,12 +559,7 @@ fn main() {
                 )
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "show" => show_main_window(app),
                     "quit" => request_quit(app.clone()),
                     _ => {}
                 })
@@ -602,13 +601,16 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize AgentWechat")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            tauri::RunEvent::ExitRequested { api, .. } => {
                 if app.state::<Desktop>().quit.load(Ordering::Acquire) != 2 {
                     api.prevent_exit();
                     request_quit(app.clone());
                 }
             }
+            _ => {}
         });
 }
 
