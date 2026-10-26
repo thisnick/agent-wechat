@@ -5,13 +5,17 @@
     "@agent-wechat/docs": "0.0.1",
     "@agent-wechat/cli": "0.16.0",
     "@agent-wechat/agent-wechat": "0.16.0",
-    "@agent-wechat/shared": "0.3.1"
+    "@agent-wechat/shared": "0.3.1",
+    "@agent-wechat/client-ui": "0.1.0",
+    "@agent-wechat/desktop": "1.0.0-beta.13"
   },
   "changesets": [
     "batch-local-quote-recalls",
     "declare-wechat-send-share",
+    "desktop-app",
     "history-snapshot-reuse",
     "jpeg-photo-trailers",
+    "logout-rejected-sessions",
     "native-account-archive",
     "native-client-cutover",
     "native-group-controls",
