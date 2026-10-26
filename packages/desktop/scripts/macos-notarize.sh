@@ -31,13 +31,38 @@ PYCODE
   fi
   return 1
 }
+staple_and_validate() {
+  local target="$1" result="$RUNNER_TEMP/stapler-result.log"
+  local delay exit_status
+  for delay in 0 5 15 30; do
+    if [ "$delay" -gt 0 ]; then
+      printf 'Retrying Apple ticket download in %s seconds.\n' "$delay"
+      sleep "$delay"
+    fi
+    exit_status=0
+    xcrun stapler staple "$target" > "$result" 2>&1 || exit_status=$?
+    cat "$result"
+    if [ "$exit_status" -eq 0 ]; then
+      rm -f "$result"
+      xcrun stapler validate "$target"
+      return $?
+    fi
+    # Error 68 also covers permanent ticket errors. Retry only an identified
+    # transient network failure, without resubmitting an accepted notarization.
+    if [ "$exit_status" -ne 68 ] || ! grep -Eq 'NSURLErrorDomain Code=-(1001|1003|1004|1005|1006|1009)([^0-9]|$)' "$result"; then
+      rm -f "$result"
+      return "$exit_status"
+    fi
+  done
+  rm -f "$result"
+  return "$exit_status"
+}
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign --display --verbose=4 "$APP"
 UPLOAD="$RUNNER_TEMP/agent-wechat-notarization.zip"
 ditto -c -k --keepParent "$APP" "$UPLOAD"
 submit "$UPLOAD"
-xcrun stapler staple "$APP"
-xcrun stapler validate "$APP"
+staple_and_validate "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 spctl --assess --type execute --verbose=4 "$APP"
 # Recreate the distributable ZIP after the enclosed app has been stapled.
@@ -51,8 +76,7 @@ hdiutil create -volname AgentWechat -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp "$DMG"
 codesign --verify --strict --verbose=2 "$DMG"
 submit "$DMG"
-xcrun stapler staple "$DMG"
-xcrun stapler validate "$DMG"
+staple_and_validate "$DMG"
 spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 printf 'Apple app and DMG: notarization Accepted; stapler and Gatekeeper passed.\n' >> "$GITHUB_STEP_SUMMARY"
 printf '%s\n' "AgentWechat-v$VERSION-macos-arm64.zip" "AgentWechat-v$VERSION-macos-arm64.dmg" >> "$GITHUB_STEP_SUMMARY"

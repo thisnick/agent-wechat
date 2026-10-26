@@ -55,9 +55,8 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+        shell: pwsh
+        run: ./scripts/native-ci-msvc.ps1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/native-client-rust -> target
@@ -99,9 +98,8 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+        shell: pwsh
+        run: ./scripts/native-ci-msvc.ps1
       - name: Select Windows Perl for vendored OpenSSL
         if: runner.os == 'Windows'
         run: |
@@ -114,7 +112,7 @@ jobs:
         with:
           path: packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe
           # No fallback keys: all native inputs and the build driver must match.
-          key: native-executable-v2-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**', '!packages/native-client-rust/**/target/**', 'rust-toolchain.toml', '.cargo/config*', '.gitattributes', 'scripts/native-ci-build.py', '.github/workflows/native-portable.yml') }}
+          key: native-executable-v2-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**', '!packages/native-client-rust/**/target/**', 'rust-toolchain.toml', '.cargo/config*', '.gitattributes', 'scripts/native-ci-build.py', 'scripts/native-ci-msvc.ps1', '.github/workflows/native-portable.yml') }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/native-client-rust -> target
@@ -135,7 +133,7 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 24.22.1
+          node-version-file: .node-version
       - uses: actions/cache@v6
         id: node-modules
         with:

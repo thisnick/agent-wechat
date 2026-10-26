@@ -12,6 +12,7 @@ on:
       - 'scripts/native-simulator-smoke.mjs'
       - 'scripts/client-ui*-smoke.mjs'
       - 'packages/client-ui/**'
+      - '.node-version'
       - 'pnpm-lock.yaml'
       - 'scripts/native-ci-cache-key*.py'
       - '.github/workflows/native-client.yml'
@@ -117,9 +118,9 @@ jobs:
       - if: matrix.suite == 'test'
         run: cargo build --workspace --profile test --locked
       - if: matrix.suite == 'test'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 24.22.1
+          node-version-file: .node-version
       - name: Exercise the real hub through the local upstream simulator
         if: matrix.suite == 'test'
         run: node ../../scripts/native-simulator-smoke.mjs
@@ -128,7 +129,7 @@ jobs:
       - if: matrix.suite == 'test'
         run: python3 scripts/smoke.py target/debug/wx
       - if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
       - name: Install browser-client test dependencies
         if: matrix.suite == 'test' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .

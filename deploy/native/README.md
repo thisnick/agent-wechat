@@ -36,6 +36,8 @@ Linux release binaries are built in Bookworm (glibc 2.36). The Dockerfile builds
 
 Distribution and release preparation pass their CLI artifacts to desktop within the same workflow run. Desktop verifies the clean source commit, pinned compiler, target, Rust flags, checksum and executable identity before reuse. Standalone desktop runs build their own CLI. Windows dependency caches are restored even when the exact CLI executable is cached, and simulator/test builds omit debug symbols.
 
+Every Node setup reads `.node-version`; JavaScript actions use Node 24 or a newer runtime. Windows compiler setup uses the installed Visual Studio PowerShell developer shell on the worker's native architecture. Accepted Apple notarizations are not resubmitted when ticket download fails: app/DMG stapling retries identified temporary network errors up to four attempts, then still requires ticket validation and Gatekeeper acceptance.
+
 CI is the normal build path. An already configured remote Docker builder is also usable without provisioning a local compiler: run Docker against its existing context on a native worker. Do not include private worker addresses or credentials in this repository.
 
 For an explicit local/worker reproduction:

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - '.node-version'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'package.json'
@@ -30,7 +31,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24.22.1
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install dependencies

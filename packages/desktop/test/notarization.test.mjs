@@ -23,6 +23,20 @@ if name=='xcrun':
         print(json.dumps({'id':'fixture','status':os.environ.get('NOTARY_STATUS','Accepted')}))
         sys.exit(int(os.environ.get('NOTARY_EXIT','0')))
     if args[:2]==['notarytool','log']: (folder/'rejection-log').write_text('fixture log')
+    if args[:2]==['stapler','staple']:
+        kind='APP' if args[2].endswith('.app') else 'DMG'
+        counter=folder/('staple-'+kind)
+        attempt=int(counter.read_text())+1 if counter.exists() else 1
+        counter.write_text(str(attempt))
+        if attempt <= int(os.environ.get('STAPLE_FAILURES_'+kind,'0')):
+            print(os.environ.get('STAPLE_ERROR','Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."'),file=sys.stderr)
+            sys.exit(int(os.environ.get('STAPLE_EXIT','68')))
+    if args[:2]==['stapler','validate']:
+        with open(folder/'validations','a') as out: out.write(args[2]+'\\n')
+        sys.exit(int(os.environ.get('VALIDATE_EXIT','0')))
+    sys.exit(0)
+if name=='sleep':
+    with open(folder/'delays','a') as out: out.write(args[0]+'\\n')
     sys.exit(0)
 if name=='codesign': sys.exit(int(os.environ.get('SIGNATURE_EXIT','0')))
 if name=='spctl': sys.exit(0)
@@ -50,6 +64,7 @@ async function fixture(t) {
     "ditto",
     "hdiutil",
     "security",
+    "sleep",
   ])
     await writeFile(join(bin, tool), mock, { mode: 0o755 });
   const app = join(directory, "AgentWechat.app");
@@ -67,6 +82,49 @@ async function fixture(t) {
   return { directory, app, env };
 }
 const options = { skip: process.platform === "win32" };
+function notarize(value, extraEnv = {}) {
+  return spawnSync("bash", ["packages/desktop/scripts/macos-notarize.sh", value.app, join(value.directory, "output"), "1.0.0-beta.14"], {
+    cwd: root, env: { ...value.env, ...extraEnv }, encoding: "utf8",
+  });
+}
+test("temporary Apple ticket download failures retry app and DMG without resubmitting", options, async t => {
+  const value = await fixture(t);
+  const result = notarize(value, { STAPLE_FAILURES_APP: "2", STAPLE_FAILURES_DMG: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(join(value.directory, "staple-APP"), "utf8"), "3");
+  assert.equal(await readFile(join(value.directory, "staple-DMG"), "utf8"), "2");
+  assert.equal(await readFile(join(value.directory, "submissions"), "utf8"), "submit\nsubmit\n");
+  assert.equal(await readFile(join(value.directory, "delays"), "utf8"), "5\n15\n5\n");
+  assert.equal((await readFile(join(value.directory, "validations"), "utf8")).trim().split("\n").length, 2);
+  await access(join(value.directory, "summary"));
+});
+test("Apple ticket download retries are bounded and exhaustion stops distribution", options, async t => {
+  const value = await fixture(t);
+  const result = notarize(value, { STAPLE_FAILURES_APP: "9" });
+  assert.equal(result.status, 68, result.stderr);
+  assert.equal(await readFile(join(value.directory, "staple-APP"), "utf8"), "4");
+  assert.equal(await readFile(join(value.directory, "delays"), "utf8"), "5\n15\n30\n");
+  assert.equal(await readFile(join(value.directory, "submissions"), "utf8"), "submit\n");
+  for (const path of ["summary", "validations", "staple-DMG", "output/AgentWechat-v1.0.0-beta.14-macos-arm64.zip", "output/AgentWechat-v1.0.0-beta.14-macos-arm64.dmg"])
+    await assert.rejects(access(join(value.directory, path)));
+});
+for (const [exit, error] of [["68", "Ticket signature is invalid"], ["65", "Error Domain=NSURLErrorDomain Code=-1005"]])
+  test(`permanent or unrelated stapler errors stop without retry (${exit})`, options, async t => {
+    const value = await fixture(t);
+    const result = notarize(value, { STAPLE_FAILURES_APP: "1", STAPLE_EXIT: exit, STAPLE_ERROR: error });
+    assert.equal(result.status, Number(exit), result.stderr);
+    assert.equal(await readFile(join(value.directory, "staple-APP"), "utf8"), "1");
+    await assert.rejects(access(join(value.directory, "delays")));
+    await assert.rejects(access(join(value.directory, "summary")));
+  });
+test("ticket validation failures remain required and are never retried", options, async t => {
+  const value = await fixture(t);
+  const result = notarize(value, { VALIDATE_EXIT: "65" });
+  assert.equal(result.status, 65, result.stderr);
+  assert.equal(await readFile(join(value.directory, "staple-APP"), "utf8"), "1");
+  await assert.rejects(access(join(value.directory, "delays")));
+  await assert.rejects(access(join(value.directory, "summary")));
+});
 test(
   "notarization orchestration requires acceptance of both app and final DMG",
   options,
