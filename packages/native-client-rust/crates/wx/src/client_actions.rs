@@ -208,6 +208,23 @@ pub async fn group(r: &Remote, config: &settings::File, command: GroupCommand) -
         }
     }
 }
+pub async fn pin_thread(
+    r: &Remote,
+    config: &settings::File,
+    thread_id: &str,
+    pinned: bool,
+    options: MutationOptions,
+) -> Result<Value> {
+    mutation(
+        r,
+        config,
+        reqwest::Method::PUT,
+        &format!("threads/{}/pin", encode(thread_id)),
+        json!({"pinned": pinned}),
+        options,
+    )
+    .await
+}
 pub async fn mutation(
     r: &Remote,
     config: &settings::File,
@@ -829,6 +846,135 @@ pub async fn media(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_pin_commands_keep_mutation_options_and_require_a_target() {
+        for command in ["pin", "unpin"] {
+            let cli = Cli::try_parse_from([
+                "wx",
+                "chats",
+                command,
+                "peer/exact",
+                "--idempotency-key",
+                "same-key",
+                "--detach",
+            ])
+            .unwrap();
+            let Command::Chats { command } = cli.command else {
+                panic!("chat command expected");
+            };
+            let (ChatCommand::Pin { id, options } | ChatCommand::Unpin { id, options }) = command
+            else {
+                panic!("pin command expected");
+            };
+            assert_eq!(id, "peer/exact");
+            assert_eq!(options.idempotency_key.as_deref(), Some("same-key"));
+            assert!(options.detach);
+            assert!(Cli::try_parse_from(["wx", "chats", "pin"]).is_err());
+            assert!(Cli::try_parse_from([
+                "wx", "chats", "unpin", "peer", "--detach", "--wait", "1"
+            ])
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_pin_uses_saved_mutation_receipts_and_does_not_resubmit_a_replay() {
+        use axum::{extract::Path, http::HeaderMap, routing::put, Json, Router};
+        use std::sync::Mutex;
+        let directory = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let receipt_directory = directory.path().join("receipts");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/v1/accounts/synthetic/threads/{thread}/pin",
+                        put(move |Path(thread): Path<String>, headers: HeaderMap, Json(body): Json<Value>| {
+                            let seen = seen.clone();
+                            let receipt_directory = receipt_directory.clone();
+                            async move {
+                                let key = headers["idempotency-key"].to_str().unwrap();
+                                let receipts: Vec<Value> = std::fs::read_dir(receipt_directory)
+                                    .unwrap()
+                                    .map(|entry| serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap())
+                                    .collect();
+                                assert!(receipts.iter().any(|receipt| receipt["idempotencyKey"] == key && receipt["state"] == "submitting"));
+                                seen.lock().unwrap().push((thread.clone(), key.to_owned(), body));
+                                Json(json!({"id":key,"accountId":"synthetic","kind":"group_mutation","state":"queued","result":{"action":"pin","targetId":thread}}))
+                            }
+                        }),
+                    )
+                    .route(
+                        "/v1/accounts/synthetic/operations/{id}",
+                        axum::routing::get(|Path(id): Path<String>| async move {
+                            Json(json!({"id":id,"accountId":"synthetic","kind":"group_mutation","state":"succeeded"}))
+                        }),
+                    ),
+            )
+            .await
+            .unwrap();
+        });
+        let remote = Remote {
+            http: reqwest::Client::new(),
+            base: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            token: "synthetic-token".into(),
+            account: Some("synthetic".into()),
+        };
+        let config = settings::File {
+            path: directory.path().join("client.toml"),
+            settings: Default::default(),
+        };
+        let options = |key: &str| MutationOptions {
+            idempotency_key: Some(key.into()),
+            detach: true,
+            wait: 0,
+        };
+        let first = pin_thread(&remote, &config, "peer/exact", true, options("pin-key"))
+            .await
+            .unwrap();
+        assert_eq!(first["state"], "queued");
+        let replay = pin_thread(&remote, &config, "peer/exact", true, options("pin-key"))
+            .await
+            .unwrap();
+        assert_eq!(replay["state"], "succeeded");
+        assert!(
+            pin_thread(&remote, &config, "peer/exact", false, options("pin-key"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("idempotency_conflict")
+        );
+        pin_thread(
+            &remote,
+            &config,
+            "room@chatroom",
+            false,
+            options("unpin-key"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (
+                    "peer/exact".into(),
+                    "pin-key".into(),
+                    json!({"pinned":true})
+                ),
+                (
+                    "room@chatroom".into(),
+                    "unpin-key".into(),
+                    json!({"pinned":false})
+                ),
+            ]
+        );
+        server.abort();
+    }
 
     #[test]
     fn quote_flags_require_both_ids_and_a_text_payload() {

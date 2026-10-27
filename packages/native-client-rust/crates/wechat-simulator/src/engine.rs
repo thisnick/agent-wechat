@@ -71,6 +71,7 @@ impl Engine {
         )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS groups(account TEXT NOT NULL,room TEXT NOT NULL,name TEXT NOT NULL,members TEXT NOT NULL,my_name TEXT NOT NULL DEFAULT '',muted INTEGER NOT NULL DEFAULT 0,joined INTEGER NOT NULL DEFAULT 1,announcement TEXT NOT NULL DEFAULT '',PRIMARY KEY(account,room));
         CREATE TABLE IF NOT EXISTS contact_notifications(account TEXT NOT NULL, username TEXT NOT NULL, muted INTEGER NOT NULL, PRIMARY KEY(account,username));
+        CREATE TABLE IF NOT EXISTS thread_pins(account TEXT NOT NULL, username TEXT NOT NULL, pinned INTEGER NOT NULL, PRIMARY KEY(account,username));
         CREATE TABLE IF NOT EXISTS group_faults(account TEXT PRIMARY KEY, fault TEXT NOT NULL);
         INSERT OR IGNORE INTO groups(account,room,name,members) SELECT account,room,name,members FROM group_creations;")?;
         // Upgrade only synthetic fixture snapshots from the earlier UI preview.
@@ -980,6 +981,150 @@ mod tests {
             client_id,
         }
     }
+    fn refreshed_contact(
+        engine: &Engine,
+        session: &Session,
+        username: &str,
+    ) -> wechat_protocol::ContactRecord {
+        let ids = vec![username.to_owned()];
+        let bytes: Vec<u8> = serde_json::from_value(
+            engine
+                .request(Request::Contacts {
+                    session: session.clone(),
+                    ids: ids.clone(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let mut reply = wechat_protocol::wire::decode_contacts(&bytes, &ids).unwrap();
+        assert_eq!(reply.contacts.len(), 1);
+        reply.contacts.remove(0)
+    }
+    fn mutate_group(
+        engine: &Engine,
+        session: &Session,
+        request: &wechat_protocol::GroupRpc,
+    ) -> wechat_protocol::GroupMutationReply {
+        let bytes: Vec<u8> = serde_json::from_value(
+            engine
+                .request(Request::GroupMutation {
+                    session: session.clone(),
+                    request: request.clone(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let requested = if request.cgi == 119 {
+            vec!["sim_mei".into(), "sim_daniel".into()]
+        } else {
+            vec![]
+        };
+        wechat_protocol::decode_group_mutation(request, &bytes, &requested).unwrap()
+    }
+    #[test]
+    fn pinning_round_trips_through_contact_refresh_and_preserves_notification_preferences() {
+        use wechat_protocol::{contact_notification_request, contact_pinning_requests};
+
+        let scratch = wechat_platform::private_tempdir("simulator-pinning-").unwrap();
+        let path = scratch.path().join("remote.sqlite");
+        let engine = Engine::open(&path).unwrap();
+        let session = login(&engine, "personal");
+        let other = login(&engine, "work");
+        let state = authorization("personal", session.generation, device()).unwrap();
+        let create = wechat_protocol::group_mutation_requests(
+            &state,
+            &wechat_protocol::GroupMutation::Create {
+                members: vec!["sim_mei".into(), "sim_daniel".into()],
+                name: Some("Pin regression group".into()),
+            },
+            false,
+        )
+        .unwrap();
+        let room = mutate_group(&engine, &session, &create[0])
+            .group_id
+            .unwrap();
+        for username in ["sim_mei", room.as_str()] {
+            let group = username.ends_with("@chatroom");
+            for (muted, pinned) in [(true, false), (false, true)] {
+                let contact = refreshed_contact(&engine, &session, username);
+                let requests = if group {
+                    wechat_protocol::group_mutation_requests(
+                        &state,
+                        &wechat_protocol::GroupMutation::Mute {
+                            thread_id: username.into(),
+                            muted,
+                        },
+                        false,
+                    )
+                    .unwrap()
+                } else {
+                    vec![contact_notification_request(&contact, muted).unwrap()]
+                };
+                for request in requests {
+                    assert!(mutate_group(&engine, &session, &request).accepted);
+                }
+                let contact = refreshed_contact(&engine, &session, username);
+                let fields = p::decode(&contact.raw).unwrap();
+                assert_eq!(p::scalar(&fields, 82).unwrap(), u64::MAX);
+                assert_eq!(p::scalar(&fields, 83).unwrap(), 0);
+                assert_eq!(p::scalar(&fields, 8).unwrap() & 0x800 != 0, pinned);
+                if group {
+                    assert_eq!(p::scalar(&fields, 17).unwrap() == 0, muted);
+                } else {
+                    assert_eq!(p::scalar(&fields, 8).unwrap() & 0x200 != 0, muted);
+                }
+                let requests = contact_pinning_requests(&contact, !pinned).unwrap();
+                assert_eq!(requests.len(), 1);
+                assert!(mutate_group(&engine, &session, &requests[0]).accepted);
+                let contact = refreshed_contact(&engine, &session, username);
+                let fields = p::decode(&contact.raw).unwrap();
+                assert_eq!(p::scalar(&fields, 8).unwrap() & 0x800 != 0, !pinned);
+                if group {
+                    assert_eq!(p::scalar(&fields, 17).unwrap() == 0, muted);
+                } else {
+                    assert_eq!(p::scalar(&fields, 8).unwrap() & 0x200 != 0, muted);
+                }
+            }
+        }
+        let fields = p::decode(&refreshed_contact(&engine, &other, "sim_mei").raw).unwrap();
+        assert_eq!(p::scalar(&fields, 8).unwrap(), 1);
+
+        let contact = refreshed_contact(&engine, &session, "sim_mei");
+        let request = contact_pinning_requests(&contact, true).unwrap().remove(0);
+        engine
+            .control(Control::GroupFault {
+                account: "personal".into(),
+                fault: GroupFault::LostAcknowledgment,
+            })
+            .unwrap();
+        assert!(engine
+            .request(Request::GroupMutation {
+                session: session.clone(),
+                request
+            })
+            .is_err());
+        drop(engine);
+        let engine = Engine::open(&path).unwrap();
+        let contact = refreshed_contact(&engine, &session, "sim_mei");
+        assert_eq!(
+            p::scalar(&p::decode(&contact.raw).unwrap(), 8).unwrap(),
+            2049
+        );
+        let request = contact_pinning_requests(&contact, false).unwrap().remove(0);
+        engine
+            .control(Control::GroupFault {
+                account: "personal".into(),
+                fault: GroupFault::Reject,
+            })
+            .unwrap();
+        assert!(!mutate_group(&engine, &session, &request).accepted);
+        let contact = refreshed_contact(&engine, &session, "sim_mei");
+        assert_eq!(
+            p::scalar(&p::decode(&contact.raw).unwrap(), 8).unwrap(),
+            2049
+        );
+    }
+
     #[test]
     fn synthetic_qr_png_round_trips_through_an_independent_decoder() {
         for id in ["sim-personal-1", "sim-account-with-a-long-name-100"] {

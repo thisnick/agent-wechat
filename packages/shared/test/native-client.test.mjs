@@ -34,6 +34,32 @@ test('single group member reads retain unconfirmed absence and encode both selec
   const client=new NativeWeChatClient({...options,fetch:async(url)=>{assert.match(String(url),/groups\/room%40chatroom\/members\/peer%2Fexact$/);return Response.json({state:'unconfirmed',member:null,coverage:'cached'});}});
   const result=await client.groupMember('a','room@chatroom','peer/exact');assert.equal(result.state,'unconfirmed');assert.equal(result.member,null);
 });
+test('thread pinning preserves target, desired state, stable key and operation identity',async()=>{
+  const calls=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    const path=new URL(url).pathname;
+    const threadId=decodeURIComponent(path.split('/').at(-2));
+    calls.push({path,method:init.method,key:init.headers.get('Idempotency-Key'),body:JSON.parse(init.body)});
+    return Response.json({id:'pin-operation',accountId:'a',kind:'group_mutation',state:'queued',result:{action:'pin',targetId:threadId}});
+  }});
+  await client.setThreadPinned('a','peer/exact',true,'pin-key');
+  await client.setThreadPinned('a','room@chatroom',false,'unpin-key');
+  assert.deepEqual(calls,[
+    {path:'/v1/accounts/a/threads/peer%2Fexact/pin',method:'PUT',key:'pin-key',body:{pinned:true}},
+    {path:'/v1/accounts/a/threads/room%40chatroom/pin',method:'PUT',key:'unpin-key',body:{pinned:false}},
+  ]);
+  for(const key of ['', 'x'.repeat(201),'bad\nkey'])await assert.rejects(async()=>client.setThreadPinned('a','peer',true,key),/idempotency/);
+  for(const pinned of [null,0,'true'])assert.throws(()=>client.setThreadPinned('a','peer',pinned,'key'),/boolean/);
+  assert.equal(calls.length,2);
+  for(const result of [{action:'mute',targetId:'peer'},{action:'pin',targetId:'other'}]){
+    const invalid=new NativeWeChatClient({...options,fetch:async()=>Response.json({id:'pin-operation',accountId:'a',kind:'group_mutation',result})});
+    await assert.rejects(invalid.setThreadPinned('a','peer',true,'key'),/identity/);
+  }
+  let attempts=0;
+  const uncertain=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('connection lost');}});
+  await assert.rejects(uncertain.setThreadPinned('a','peer',true,'same-key'),/connection lost/);
+  assert.equal(attempts,1);
+});
 test('video send quality and its separate 50 MiB source bound are exposed without changing other source limits', async () => {
   assert.equal(NATIVE_MAX_VIDEO_SOURCE_BYTES, 50 * 1024 * 1024); assert.equal(NATIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024);
   assert.equal(NATIVE_MAX_ORDINARY_SOURCE_BYTES, 25 * 1024 * 1024 - 17);

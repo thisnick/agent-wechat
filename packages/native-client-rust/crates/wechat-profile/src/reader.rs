@@ -380,6 +380,15 @@ impl ProfileReader {
             name: v.username.clone(),
         })
     }
+    pub fn thread_exists(&self, username: &str) -> Result<bool> {
+        validate_name(username)?;
+        let c = self.snapshot.open(self.role("session.db", "threads")?)?;
+        Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM SessionTable WHERE username=?1)",
+            [username],
+            |row| row.get(0),
+        )?)
+    }
     pub fn threads(&self, q: &ListQuery) -> Result<Page<Thread>> {
         let n = limit(q.limit)?;
         let hash = query_hash("threads", &q.search)?;
@@ -1579,6 +1588,96 @@ mod batch_lookup_tests {
         assert!(reader.thread_muted(&[]).unwrap().is_empty());
         assert!(matches!(
             reader.thread_muted(&vec!["peer".into(); 201]),
+            Err(ProfileError::InvalidQuery)
+        ));
+    }
+
+    #[test]
+    fn pin_preferences_use_one_query_and_keep_incomplete_or_special_peers_unknown() {
+        let (temp, original) = fixture();
+        drop(original);
+        let directory = temp.path().join("account/db_storage/contact");
+        std::fs::create_dir_all(&directory).unwrap();
+        let db = Connection::open(directory.join("contact.db")).unwrap();
+        db.execute_batch(include_str!("layout/contact.db.sql"))
+            .unwrap();
+        let chats: Vec<_> = (0..200)
+            .map(|n| {
+                if n % 2 == 0 {
+                    format!("peer_{n}")
+                } else {
+                    format!("room_{n}@chatroom")
+                }
+            })
+            .collect();
+        for (id, chat) in chats.iter().enumerate() {
+            let kind = if id % 2 == 0 { 1 } else { 2 };
+            // Other flag bits must not affect the independently saved pin bit.
+            let flag = kind | 0x200 | if id % 4 < 2 { 0x800 } else { 0 };
+            db.execute(
+                "INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room) VALUES(?1,?2,?3,?4,0,1)",
+                params![id, chat, flag, kind],
+            )
+            .unwrap();
+        }
+        db.execute_batch(
+            "INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room) VALUES
+            (201,'missing_flag',NULL,1,0,1),
+            (202,'negative_flag',-1,1,0,1),
+            (203,'wide_flag',4294967296,1,0,1),
+            (204,'malformed_flag','not a flag',1,0,1),
+            (205,'not_friend',2048,1,0,1),
+            (206,'deleted',2049,1,1,1),
+            (207,'wrong_type',2049,7,0,1),
+            (208,'left@chatroom',2050,2,0,2),
+            (209,'not_group@chatroom',2049,1,0,1),
+            (210,'filehelper',2049,1,0,1),
+            (211,'weixin',2049,1,0,1),
+            (212,'gh_service',2049,1,0,1),
+            (213,'notification_messages',2049,1,0,1);",
+        )
+        .unwrap();
+        let reader = ProfileReader::open(
+            ProfileLocation::new(temp.path().join("account")).unwrap(),
+            KeyFile::empty("account"),
+            ReadOptions {
+                allow_plaintext: true,
+                stopped_or_consistent_snapshot: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        BATCH_QUERIES.with(|n| n.set(0));
+        let states = reader.thread_pinned(&chats).unwrap();
+        assert_eq!(states.len(), 200);
+        for (id, chat) in chats.iter().enumerate() {
+            assert_eq!(states[chat], Some(id % 4 < 2));
+        }
+        BATCH_QUERIES.with(|n| assert_eq!(n.get(), 1));
+        let unknown = [
+            "missing",
+            "missing_flag",
+            "negative_flag",
+            "wide_flag",
+            "malformed_flag",
+            "not_friend",
+            "deleted",
+            "wrong_type",
+            "left@chatroom",
+            "not_group@chatroom",
+            "filehelper",
+            "weixin",
+            "gh_service",
+            "notification_messages",
+        ]
+        .map(str::to_owned);
+        let states = reader.thread_pinned(&unknown).unwrap();
+        for name in unknown {
+            assert_eq!(states.get(&name).copied().flatten(), None, "{name}");
+        }
+        assert!(reader.thread_pinned(&[]).unwrap().is_empty());
+        assert!(matches!(
+            reader.thread_pinned(&vec!["peer".into(); 201]),
             Err(ProfileError::InvalidQuery)
         ));
     }

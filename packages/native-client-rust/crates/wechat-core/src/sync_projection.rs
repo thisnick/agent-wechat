@@ -523,12 +523,23 @@ impl Core {
             let contact = wechat_protocol::wire::decode_contact_record(&command.payload)?;
             let fields_applied = format!("contact-fields:{receipt}");
             let mute_applied = format!("contact-mute:{receipt}");
+            let pin_applied = format!("contact-pin:{receipt}");
+            if self.store.runtime(account, &fields_applied)?.is_none() {
+                self.invalidate_contact_pinning(account, &contact, receipt)?;
+                if self.contact_pin_superseded(account, &contact, receipt)? {
+                    let mut blocked = command_blocker(command);
+                    blocked.classification = "contact_update";
+                    blocked.reason = "contact_pin_projection_superseded";
+                    return Err(blocked.into());
+                }
+            }
             if self.store.runtime(account, &fields_applied)?.is_none()
                 && self.store.runtime(account, &mute_applied)?.is_none()
             {
                 self.invalidate_contact_notifications(account, &contact, receipt)?;
             }
             let mute = super::metadata::contact_mute_patch(&contact)?;
+            let pin = super::metadata::contact_pin_patch(&contact)?;
             let controlled = wechat_protocol::controlled_contact_fields(&contact.raw)?;
             let wire = wechat_protocol::protobuf::decode(&contact.raw)?;
             let partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
@@ -538,6 +549,34 @@ impl Core {
             };
             if self.store.runtime(account, &fields_applied)?.is_none() {
                 let patch = self.upstream.contact_patch(&contact)?;
+                let pin_phase = self.store.runtime(account, &pin_applied)?;
+                let mut applied_pin = pin.is_some() && pin_phase.is_some();
+                let mut pin_changed = pin.is_some() && pin_phase.as_deref() == Some(b"changed");
+                if let Some(pinned) = pin {
+                    if !applied_pin {
+                        if let Some(projection) = wechat_profile::apply_contact_pin_patch(
+                            &location,
+                            &keys,
+                            &contact.username,
+                            pinned,
+                            false,
+                            self.contact_pin_time(account, receipt, None)?,
+                            &options,
+                        )? {
+                            pin_changed = projection.changed;
+                            self.store.put_runtime(
+                                account,
+                                &pin_applied,
+                                if pin_changed {
+                                    b"changed"
+                                } else {
+                                    b"unchanged"
+                                },
+                            )?;
+                            applied_pin = true;
+                        }
+                    }
+                }
                 wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
                 let mut applied_mute = false;
                 if let Some(muted) = mute {
@@ -565,6 +604,15 @@ impl Core {
                     applied_mute,
                     receipt,
                 )?;
+                self.settle_contact_pinning(account, &contact, &patch, applied_pin, receipt)?;
+                if pin_changed {
+                    self.store.append_event_once(
+                        account,
+                        &format!("contact-pin-event:{receipt}"),
+                        "thread.updated",
+                        &json!({"threadId":contact.username,"pinned":pin,"source":"remote_sync","origin":origin}),
+                    )?;
+                }
                 if contact.username.ends_with("@chatroom") {
                     // Explicit native contact metadata establishes catalog presence.
                     // Missing owner/roster fields remain NULL/preserved; a group seen
@@ -596,8 +644,22 @@ impl Core {
             }
             let pending = contact.username.ends_with("@chatroom")
                 && self.queue_incoming_group(account, &contact, receipt, origin)?;
-            let unresolved_mask = partial_mask
-                && (mute.is_none() || self.store.runtime(account, &mute_applied)?.is_none());
+            let known_partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
+                Some(wechat_protocol::protobuf::Value::Varint(0x200)) => {
+                    mute.is_some() && self.store.runtime(account, &mute_applied)?.is_some()
+                }
+                Some(wechat_protocol::protobuf::Value::Varint(0x800)) => {
+                    pin.is_some() && self.store.runtime(account, &pin_applied)?.is_some()
+                }
+                Some(wechat_protocol::protobuf::Value::Varint(0xa00)) => {
+                    mute.is_some()
+                        && pin.is_some()
+                        && self.store.runtime(account, &mute_applied)?.is_some()
+                        && self.store.runtime(account, &pin_applied)?.is_some()
+                }
+                _ => false,
+            };
+            let unresolved_mask = partial_mask && !known_partial_mask;
             if pending || !controlled.is_empty() || unresolved_mask {
                 let mut blocked = command_blocker(command);
                 blocked.classification = "contact_update";

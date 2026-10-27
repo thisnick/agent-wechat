@@ -49,11 +49,17 @@ enum ReceiptBody {
 #[derive(Serialize, Deserialize)]
 struct MetadataReceipt {
     body: ReceiptBody,
+    #[serde(default)]
+    received_at: Option<u32>,
 }
 #[derive(Serialize, Deserialize)]
 struct ContactWireReceipt {
     requested: Vec<String>,
     raw: Vec<u8>,
+}
+#[derive(Serialize, Deserialize)]
+struct PinInvalidation {
+    previous_revision: Option<Vec<u8>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -154,8 +160,8 @@ fn valid_name(value: &str) -> Result<()> {
     };
     Ok(())
 }
-/// Only the independently understood mute-only mask is handled here. Other
-/// partial masks and version-controlled flag updates retain their sync receipt.
+/// Only understood direct mute/pin masks are handled here. Other partial masks
+/// and version-controlled flag updates retain their sync receipt.
 pub(super) fn contact_mute_patch(record: &ContactRecord) -> Result<Option<bool>> {
     if record.username.ends_with("@chatroom")
         || wechat_protocol::controlled_contact_fields(&record.raw)?.contains(&8)
@@ -163,12 +169,42 @@ pub(super) fn contact_mute_patch(record: &ContactRecord) -> Result<Option<bool>>
         return Ok(None);
     }
     let fields = p::decode(&record.raw)?;
-    if p::optional(&fields, 7)? != Some(&p::Value::Varint(0x200)) {
+    if !matches!(
+        p::optional(&fields, 7)?,
+        Some(p::Value::Varint(0x200 | 0xa00))
+    ) {
         return Ok(None);
     }
     Ok(match p::optional(&fields, 8)? {
         Some(p::Value::Varint(value)) => u32::try_from(*value).ok().map(|value| value & 0x200 != 0),
         _ => None,
+    })
+}
+pub(super) fn contact_pin_patch(record: &ContactRecord) -> Result<Option<bool>> {
+    if wechat_protocol::controlled_contact_fields(&record.raw)?.contains(&8) {
+        return Ok(None);
+    }
+    let fields = p::decode(&record.raw)?;
+    let mask = match p::optional(&fields, 7)? {
+        Some(p::Value::Varint(mask)) => u32::try_from(*mask)?,
+        _ => return Ok(None),
+    };
+    match mask {
+        u32::MAX | 0x800 => {}
+        0xa00 if !record.username.ends_with("@chatroom") => {}
+        _ => return Ok(None),
+    }
+    Ok(match p::optional(&fields, 8)? {
+        Some(p::Value::Varint(value)) => Some(u32::try_from(*value)? & 0x800 != 0),
+        _ => None,
+    })
+}
+fn contact_pin_relevant(record: &ContactRecord) -> Result<bool> {
+    let fields = p::decode(&record.raw)?;
+    Ok(match p::optional(&fields, 7)? {
+        Some(p::Value::Varint(mask)) => mask & 0x800 != 0,
+        Some(_) => true,
+        None => p::optional(&fields, 8)?.is_some(),
     })
 }
 pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection> {
@@ -260,6 +296,89 @@ fn bounded_catalog_result(count: usize, pages: u32, coverage: &str) -> Value {
     json!({"recordCount":count,"pages":pages,"complete":false,"reason":"time_bound","coverage":coverage,"resumeAvailable":true,"profileProjection":"pending"})
 }
 impl Core {
+    /// These keys describe unapplied receipts, never a second saved pin state.
+    pub(super) fn invalidate_contact_pinning(
+        &self,
+        account: &str,
+        record: &ContactRecord,
+        receipt: &str,
+    ) -> Result<()> {
+        valid_name(&record.username)?;
+        let phase = format!("contact-pinning:{receipt}:{}", record.username);
+        if !contact_pin_relevant(record)? {
+            return Ok(());
+        }
+        let current = self.group_revision(account, &record.username)?;
+        let invalidation = if let Some(bytes) = self.store.runtime(account, &phase)? {
+            serde_json::from_slice::<PinInvalidation>(&bytes)?
+        } else {
+            let invalidation = PinInvalidation {
+                previous_revision: current.clone(),
+            };
+            // Journal the prior revision before either invalidation write. An
+            // interrupted old receipt cannot reset a later revision or marker.
+            self.store
+                .put_runtime(account, &phase, &serde_json::to_vec(&invalidation)?)?;
+            invalidation
+        };
+        if current != invalidation.previous_revision
+            && current.as_deref() != Some(receipt.as_bytes())
+        {
+            return Ok(());
+        }
+        self.mark_group_revision(account, &record.username, receipt)?;
+        self.store.put_runtime(
+            account,
+            &format!("contact-pinning-unresolved:{}", record.username),
+            receipt.as_bytes(),
+        )
+    }
+    pub(super) fn contact_pin_superseded(
+        &self,
+        account: &str,
+        record: &ContactRecord,
+        receipt: &str,
+    ) -> Result<bool> {
+        Ok(contact_pin_relevant(record)?
+            && self.group_revision(account, &record.username)?.as_deref()
+                != Some(receipt.as_bytes()))
+    }
+    pub(super) fn contact_pin_time(
+        &self,
+        account: &str,
+        receipt: &str,
+        received_at: Option<u32>,
+    ) -> Result<u32> {
+        let key = format!("contact-pinning-time:{receipt}");
+        if let Some(bytes) = self.store.runtime(account, &key)? {
+            return Ok(serde_json::from_slice(&bytes)?);
+        }
+        // Older journals lack a received time. Freeze this fallback before the
+        // first saved-file write so interrupted replay cannot advance ordering.
+        let value = match received_at {
+            Some(value) => value,
+            None => wechat_protocol::wire::unix_time()?,
+        };
+        self.store
+            .put_runtime(account, &key, &serde_json::to_vec(&value)?)?;
+        Ok(value)
+    }
+    pub(super) fn settle_contact_pinning(
+        &self,
+        account: &str,
+        record: &ContactRecord,
+        patch: &ContactProjection,
+        pin_applied: bool,
+        receipt: &str,
+    ) -> Result<()> {
+        let key = format!("contact-pinning-unresolved:{}", record.username);
+        if (patch.fields.contains_key("flag") || pin_applied)
+            && self.store.runtime(account, &key)?.as_deref() == Some(receipt.as_bytes())
+        {
+            self.store.clear_runtime(account, &key)?;
+        }
+        Ok(())
+    }
     /// This is an unresolved-work marker, never a second stored preference.
     /// Receipt phases keep an old retained update from invalidating a newer read.
     pub(super) fn invalidate_contact_notifications(
@@ -366,7 +485,10 @@ impl Core {
     }
     fn stage_metadata_body(&self, account: &str, body: ReceiptBody) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
-        let bytes = serde_json::to_vec(&MetadataReceipt { body })?;
+        let bytes = serde_json::to_vec(&MetadataReceipt {
+            body,
+            received_at: Some(wechat_protocol::wire::unix_time()?),
+        })?;
         self.store.stage_metadata(
             account,
             &id,
@@ -404,10 +526,40 @@ impl Core {
         let mut count = 0;
         let mut rejected_slots = 0;
         let mut apply = |record: &ContactRecord| -> Result<()> {
+            self.invalidate_contact_pinning(account, record, id)?;
+            ensure!(
+                !self.contact_pin_superseded(account, record, id)?,
+                "contact_pin_projection_superseded"
+            );
             self.invalidate_contact_notifications(account, record, id)?;
             let patch = self.upstream.contact_patch(record)?;
+            let pin = contact_pin_patch(record)?;
+            // Inspect the previous flag and update ordering before a full flag
+            // replacement can erase evidence that pin state transitioned.
+            let pin_projection = if let Some(pinned) = pin {
+                wechat_profile::apply_contact_pin_patch(
+                    &location,
+                    &keys,
+                    &record.username,
+                    pinned,
+                    false,
+                    self.contact_pin_time(account, id, receipt.received_at)?,
+                    &options,
+                )?
+            } else {
+                None
+            };
             wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
             self.settle_contact_notifications(account, record, &patch, false, id)?;
+            self.settle_contact_pinning(account, record, &patch, pin_projection.is_some(), id)?;
+            if pin_projection.is_some_and(|projection| projection.changed) {
+                self.store.append_event_once(
+                    account,
+                    &format!("contact-pin:{id}:{}", record.username),
+                    "thread.updated",
+                    &json!({"threadId":record.username,"pinned":pin,"source":"metadata_refresh"}),
+                )?;
+            }
             if record.username.ends_with("@chatroom") {
                 self.mark_group_revision(account, &record.username, id)?;
                 // Explicit native group metadata supplies catalog identity.
@@ -1291,6 +1443,369 @@ mod tests {
         .unwrap();
         assert!(rows[1]["muted"].is_null());
         rows.remove(0)["muted"].clone()
+    }
+    fn pin_fixture() -> (tempfile::TempDir, Arc<Core>) {
+        let (temp, core) = super::super::groups::tests::fixture();
+        core.apply_sync_command(
+            "one",
+            &direct_contact(u64::from(u32::MAX), 259, false),
+            "pin-baseline",
+            "catchup",
+        )
+        .unwrap();
+        core.project_accepted_text("one", "peer", "Synthetic history", 100, "123", "pin-seed")
+            .unwrap();
+        (temp, core)
+    }
+    fn direct_pinned(core: &Core) -> Value {
+        let mut rows = vec![json!({"id":"peer"})];
+        core.thread_summaries(
+            "one",
+            &mut rows,
+            &core.profile_reader("one").unwrap(),
+            Some("synthetic_self"),
+        )
+        .unwrap();
+        rows.remove(0)["pinned"].clone()
+    }
+    fn saved_sort(core: &Core) -> SqlValue {
+        core.profile_reader("one")
+            .unwrap()
+            .threads(&Default::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|thread| thread.username == "peer")
+            .unwrap()
+            .raw_fields["sort_timestamp"]
+            .clone()
+    }
+    #[test]
+    fn received_pin_masks_preserve_other_bits_and_order_before_event_and_replay() {
+        let (_temp, core) = pin_fixture();
+        for (receipt, mask, value, timestamp, pinned, muted) in [
+            ("pin-first", 0x800, 0x800, 200, true, false),
+            ("pin-clear", 0x800, 0, 250, false, false),
+            ("pin-and-mute", 0xa00, 0xa00, 300, true, true),
+        ] {
+            core.contact_pin_time("one", receipt, Some(timestamp))
+                .unwrap();
+            core.apply_sync_command(
+                "one",
+                &direct_contact(mask, value, false),
+                receipt,
+                "contact_sync",
+            )
+            .unwrap();
+            assert_eq!(direct_pinned(&core), pinned);
+            assert_eq!(direct_muted(&core), muted);
+            assert_eq!(saved_sort(&core), SqlValue::Integer(timestamp.to_string()));
+            let contact = core
+                .profile_reader("one")
+                .unwrap()
+                .contacts(&Default::default())
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|contact| contact.username == "peer")
+                .unwrap();
+            let expected = 259 | if pinned { 0x800 } else { 0 } | if muted { 0x200 } else { 0 };
+            assert_eq!(
+                contact.raw_fields["flag"],
+                SqlValue::Integer(expected.to_string())
+            );
+            assert!(core
+                .store
+                .events("one", 0, 200)
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event.kind == "thread.updated"
+                        && event.data["threadId"] == "peer"
+                        && event.data["pinned"] == pinned
+                }));
+        }
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x800, 0x800, false),
+            "pin-first",
+            "catchup",
+        )
+        .unwrap();
+        assert!(direct_pinned(&core).as_bool().unwrap());
+        assert_eq!(saved_sort(&core), SqlValue::Integer("300".into()));
+        assert_eq!(
+            core.contact_pin_time("one", "pin-first", Some(900))
+                .unwrap(),
+            200
+        );
+        assert_eq!(
+            core.store
+                .events("one", 0, 200)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "thread.updated")
+                .count(),
+            3
+        );
+    }
+    #[test]
+    fn pin_unknown_masks_and_controls_remain_pending_and_old_settlement_keeps_new_unknown() {
+        let (_temp, core) = pin_fixture();
+        for (receipt, command) in [
+            ("pin-controlled", direct_contact(0x800, 0x800, true)),
+            ("pin-unknown-mask", direct_contact(0x801, 0x801, false)),
+        ] {
+            assert!(core
+                .apply_sync_command("one", &command, receipt, "contact_sync")
+                .is_err());
+            assert!(direct_pinned(&core).is_null());
+            assert!(core.store.runtime("one", receipt).unwrap().is_none());
+        }
+        let known = wechat_protocol::wire::decode_contact_record(
+            &direct_contact(u64::from(u32::MAX), 259, false).payload,
+        )
+        .unwrap();
+        core.settle_contact_pinning(
+            "one",
+            &known,
+            &contact_patch(&known).unwrap(),
+            true,
+            "pin-controlled",
+        )
+        .unwrap();
+        assert_eq!(
+            core.store
+                .runtime("one", "contact-pinning-unresolved:peer")
+                .unwrap()
+                .as_deref(),
+            Some(b"pin-unknown-mask".as_slice())
+        );
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x800, 0, false),
+            "pin-fresh",
+            "contact_sync",
+        )
+        .unwrap();
+        assert_eq!(direct_pinned(&core), false);
+        assert!(core
+            .apply_sync_command(
+                "one",
+                &direct_contact(0x801, 0x801, false),
+                "pin-unknown-mask",
+                "catchup"
+            )
+            .is_err());
+        assert_eq!(direct_pinned(&core), false);
+    }
+    #[test]
+    fn unchanged_contact_pin_refresh_does_not_emit_thread_events_or_advance_order() {
+        let (_temp, core) = pin_fixture();
+        for (id, pinned, flag) in [
+            ("pin-no-change", false, 259),
+            ("pin-no-change-after-set", true, 259 | 0x800),
+        ] {
+            if pinned {
+                core.contact_pin_time("one", "pin-set", Some(200)).unwrap();
+                core.apply_sync_command(
+                    "one",
+                    &direct_contact(0x800, 0x800, false),
+                    "pin-set",
+                    "contact_sync",
+                )
+                .unwrap();
+            }
+            let before = core
+                .store
+                .events("one", 0, 200)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "thread.updated")
+                .count();
+            let sort = saved_sort(&core);
+            core.apply_sync_command(
+                "one",
+                &direct_contact(0x800, if pinned { 0x800 } else { 0 }, false),
+                id,
+                "contact_sync",
+            )
+            .unwrap();
+            let record = wechat_protocol::wire::decode_contact_record(
+                &direct_contact(u64::from(u32::MAX), flag, false).payload,
+            )
+            .unwrap();
+            let receipt = core
+                .stage_metadata_body(
+                    "one",
+                    ReceiptBody::Contacts {
+                        requested: vec!["peer".into()],
+                        reply: MetadataReply {
+                            value: ContactLookup {
+                                contacts: vec![record],
+                                results: vec![0],
+                            },
+                            raw: vec![],
+                        },
+                    },
+                )
+                .unwrap();
+            core.apply_metadata_receipt("one", &receipt, false).unwrap();
+            assert_eq!(direct_pinned(&core), pinned);
+            assert_eq!(saved_sort(&core), sort);
+            assert_eq!(
+                core.store
+                    .events("one", 0, 200)
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.kind == "thread.updated")
+                    .count(),
+                before
+            );
+        }
+    }
+    #[test]
+    fn interrupted_pin_invalidation_cannot_reset_a_newer_revision_or_unknown_marker() {
+        let (_temp, core) = pin_fixture();
+        core.contact_pin_time("one", "pin-current", Some(200))
+            .unwrap();
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x800, 0x800, false),
+            "pin-current",
+            "contact_sync",
+        )
+        .unwrap();
+        let invalidation = PinInvalidation {
+            previous_revision: core.group_revision("one", "peer").unwrap(),
+        };
+        // Crash after preparing invalidation, before either the profile revision
+        // or its unresolved-work marker was changed by this older receipt.
+        core.store
+            .put_runtime(
+                "one",
+                "contact-pinning:pin-interrupted:peer",
+                &serde_json::to_vec(&invalidation).unwrap(),
+            )
+            .unwrap();
+        assert!(core
+            .apply_sync_command(
+                "one",
+                &direct_contact(0x801, 0x801, false),
+                "pin-new-unknown",
+                "contact_sync"
+            )
+            .is_err());
+        assert_eq!(
+            core.apply_sync_command(
+                "one",
+                &direct_contact(u64::from(u32::MAX), 259, false),
+                "pin-interrupted",
+                "catchup"
+            )
+            .unwrap_err()
+            .to_string(),
+            "contact_pin_projection_superseded"
+        );
+        assert_eq!(
+            core.group_revision("one", "peer").unwrap().as_deref(),
+            Some(b"pin-new-unknown".as_slice())
+        );
+        assert_eq!(
+            core.store
+                .runtime("one", "contact-pinning-unresolved:peer")
+                .unwrap()
+                .as_deref(),
+            Some(b"pin-new-unknown".as_slice())
+        );
+        assert_eq!(
+            core.profile_reader("one")
+                .unwrap()
+                .thread_pinned(&["peer".into()])
+                .unwrap()["peer"],
+            Some(true)
+        );
+        assert!(direct_pinned(&core).is_null());
+        assert_eq!(saved_sort(&core), SqlValue::Integer("200".into()));
+    }
+    #[test]
+    fn metadata_pin_uses_received_time_and_stale_full_receipt_cannot_replace_newer_flag() {
+        let (_temp, core) = pin_fixture();
+        let make_receipt = |pinned: bool, received_at| MetadataReceipt {
+            received_at: Some(received_at),
+            body: ReceiptBody::Contacts {
+                requested: vec!["peer".into()],
+                reply: MetadataReply {
+                    value: ContactLookup {
+                        contacts: vec![wechat_protocol::wire::decode_contact_record(
+                            &direct_contact(
+                                u64::from(u32::MAX),
+                                259 | if pinned { 0x800 } else { 0 },
+                                false,
+                            )
+                            .payload,
+                        )
+                        .unwrap()],
+                        results: vec![0],
+                    },
+                    raw: vec![],
+                },
+            },
+        };
+        for (id, receipt) in [
+            ("pin-known", make_receipt(true, 400)),
+            ("pin-stale", make_receipt(false, 450)),
+        ] {
+            core.store
+                .stage_metadata(
+                    "one",
+                    id,
+                    &core
+                        .vault
+                        .seal(
+                            "one",
+                            &format!("metadata:{id}"),
+                            &serde_json::to_vec(&receipt).unwrap(),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        core.apply_metadata_receipt("one", "pin-known", false)
+            .unwrap();
+        assert_eq!(direct_pinned(&core), true);
+        assert_eq!(saved_sort(&core), SqlValue::Integer("400".into()));
+        let stale = wechat_protocol::wire::decode_contact_record(
+            &direct_contact(u64::from(u32::MAX), 259, false).payload,
+        )
+        .unwrap();
+        // Restart boundary: invalidation is saved, but file application has not
+        // yet begun. A later contact receipt supersedes this full replacement.
+        core.invalidate_contact_notifications("one", &stale, "pin-stale")
+            .unwrap();
+        core.invalidate_contact_pinning("one", &stale, "pin-stale")
+            .unwrap();
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x800, 0x800, false),
+            "pin-newer",
+            "contact_sync",
+        )
+        .unwrap();
+        assert_eq!(
+            core.apply_metadata_receipt("one", "pin-stale", false)
+                .unwrap_err()
+                .to_string(),
+            "contact_pin_projection_superseded"
+        );
+        assert_eq!(direct_pinned(&core), true);
+        assert_eq!(saved_sort(&core), SqlValue::Integer("400".into()));
+        assert!(core
+            .store
+            .pending_metadata("one")
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "pin-stale"));
     }
     #[test]
     fn received_direct_mute_is_saved_before_event_and_replay_preserves_newer_state() {

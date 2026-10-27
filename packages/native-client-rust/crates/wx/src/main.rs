@@ -312,6 +312,18 @@ enum CatalogCommand {
 }
 #[derive(Subcommand)]
 enum ChatCommand {
+    /// Pin an ordinary direct chat or group to the top of the thread list.
+    Pin {
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    /// Unpin an ordinary direct chat or group.
+    Unpin {
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
     /// Mute a direct chat or group.
     Mute {
         id: String,
@@ -1526,6 +1538,12 @@ async fn run(cli: Cli) -> Result<()> {
             wait_operation(&r, op, if detach { 0 } else { wait }).await?
         }
         Command::Chats { command } => match command {
+            ChatCommand::Pin { id, options } => {
+                client_actions::pin_thread(&r, &settings, &id, true, options).await?
+            }
+            ChatCommand::Unpin { id, options } => {
+                client_actions::pin_thread(&r, &settings, &id, false, options).await?
+            }
             ChatCommand::Mute { id, options } => {
                 client_actions::mutation(
                     &r,

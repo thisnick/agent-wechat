@@ -6,7 +6,6 @@ use wechat_profile::{
     ContactProjection, GroupProjection, NativeGroupEdit, NativeMemberPatch, NativeRosterPatch,
     RawFields, SqlValue,
 };
-#[cfg(test)]
 use wechat_protocol::protobuf as p;
 use wechat_protocol::{
     decode_group_mutation, group_mutation_requests, observed_created_group, GroupMutationReply,
@@ -25,10 +24,14 @@ struct Attempt {
     epoch: Option<Vec<u8>>,
     #[serde(default)]
     profile_revision: Option<Vec<u8>>,
+    #[serde(default)]
+    pin_clear_folded_primary: bool,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Receipts {
     replies: Vec<Vec<u8>>,
+    #[serde(default)]
+    pin_projection_time: Option<u32>,
 }
 fn digest(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
@@ -54,6 +57,7 @@ fn action_name(action: &GroupMutation) -> &'static str {
         GroupMutation::MyName { .. } => "my_name",
         GroupMutation::ClearAnnouncement { .. } => "clear_announcement",
         GroupMutation::Mute { .. } => "mute",
+        GroupMutation::Pin { .. } => "pin",
     }
 }
 fn integer(fields: &RawFields, name: &str) -> Option<i64> {
@@ -231,7 +235,11 @@ impl Core {
         let mut minimized = false;
         if let Some(target) = action.target() {
             let contact = self.group_contact(account, target)?;
-            if matches!(action, GroupMutation::Mute { .. }) && !target.ends_with("@chatroom") {
+            if matches!(
+                action,
+                GroupMutation::Mute { .. } | GroupMutation::Pin { .. }
+            ) && !target.ends_with("@chatroom")
+            {
                 ensure!(
                     !contact.is_group
                         && contact.local_type == Some(1)
@@ -255,6 +263,19 @@ impl Core {
                     integer(&contact.raw_fields, "flag").context("group_state_incomplete")?;
                 minimized = flag & 0x10000000 != 0;
             }
+            if matches!(action, GroupMutation::Pin { .. }) {
+                let reader = self.profile_reader_owned(account)?;
+                ensure!(
+                    reader
+                        .thread_pinned(&[target.to_owned()])?
+                        .get(target)
+                        .copied()
+                        .flatten()
+                        .is_some(),
+                    "ordinary_thread_required"
+                );
+                ensure!(reader.thread_exists(target)?, "thread_session_unavailable");
+            }
         }
         if matches!(
             action,
@@ -271,7 +292,26 @@ impl Core {
                 );
             }
         }
-        let requests = if let GroupMutation::Mute { thread_id, muted } = &action {
+        let mut pin_clear_folded_primary = false;
+        let requests = if let GroupMutation::Pin { thread_id, pinned } = &action {
+            let reply = self.metadata_contact_reply(account, std::slice::from_ref(thread_id))?;
+            ensure!(
+                reply.value.contacts.len() == 1
+                    && reply.value.results.iter().all(|result| *result == 0),
+                "contact_snapshot_unavailable"
+            );
+            let record = &reply.value.contacts[0];
+            let fields = wechat_protocol::protobuf::decode(&record.raw)?;
+            pin_clear_folded_primary = *pinned
+                && if thread_id.ends_with("@chatroom") {
+                    wechat_protocol::protobuf::scalar(&fields, 8)? & 0x10000000 != 0
+                } else {
+                    wechat_protocol::protobuf::scalar(&fields, 83)? & 0x80 != 0
+                };
+            let requests = wechat_protocol::contact_pinning_requests(record, *pinned)?;
+            state = self.account_state(account)?;
+            requests
+        } else if let GroupMutation::Mute { thread_id, muted } = &action {
             if !thread_id.ends_with("@chatroom") {
                 let reply =
                     self.metadata_contact_reply(account, std::slice::from_ref(thread_id))?;
@@ -314,11 +354,18 @@ impl Core {
             "unreturned_member_state_unconfirmed"
         ]);
         // Thread notification operations share the guarded one-attempt journal.
-        if let GroupMutation::Mute { thread_id, .. } = &action {
+        if let GroupMutation::Mute { thread_id, .. } | GroupMutation::Pin { thread_id, .. } =
+            &action
+        {
             result["threadId"] = json!(thread_id);
             if !thread_id.ends_with("@chatroom") {
                 result["groupId"] = Value::Null;
             }
+        }
+        if let GroupMutation::Pin { pinned, .. } = &action {
+            result["pinned"] = json!(pinned);
+            result["projectionGaps"] = json!([]);
+            result["crossDatabaseAtomic"] = json!(false);
         }
         let stamp = now();
         let op = Operation {
@@ -344,6 +391,7 @@ impl Core {
             owner: self.ownership_generation.clone(),
             epoch,
             profile_revision,
+            pin_clear_folded_primary,
         };
         self.store.create_group_mutation(
             &op,
@@ -417,6 +465,9 @@ impl Core {
                 Err(_) => return self.hold_group(account, id),
             };
             receipts.replies.push(raw);
+            if matches!(attempt.action, GroupMutation::Pin { .. }) && rpc.opcode == Some(2) {
+                receipts.pin_projection_time = Some(u32::try_from(wechat_store::unix_seconds())?);
+            }
             self.store.receive_group_step(
                 account,
                 id,
@@ -495,7 +546,17 @@ impl Core {
             let projected = self
                 .project_group_receipts(&op, &attempt, &receipts)
                 .is_ok();
-            op.result["profileProjection"] = json!(if projected { "partial" } else { "pending" });
+            op.result["profileProjection"] = json!(if projected
+                && matches!(attempt.action, GroupMutation::Pin { .. })
+                && reply.accepted
+                && !keep_going
+            {
+                "complete"
+            } else if projected {
+                "partial"
+            } else {
+                "pending"
+            });
             op.updated_at = now();
             if keep_going {
                 op.state = "running".into();
@@ -599,6 +660,64 @@ impl Core {
                 .as_deref()
                 .or(attempt.action.target())
                 .context("group_reply_identity_missing")?;
+            if let GroupMutation::Pin { thread_id, pinned } = &attempt.action {
+                if rpc.opcode == Some(74) {
+                    wechat_profile::apply_native_group_edit(
+                        &location,
+                        &keys,
+                        thread_id,
+                        NativeGroupEdit::Unfold {
+                            own: attempt.own.clone(),
+                        },
+                        &options,
+                    )?;
+                } else if rpc.opcode == Some(2) {
+                    ensure!(
+                        wechat_profile::apply_contact_pin_patch(
+                            &location,
+                            &keys,
+                            thread_id,
+                            *pinned,
+                            attempt.pin_clear_folded_primary,
+                            receipts
+                                .pin_projection_time
+                                .context("pin_projection_timestamp_missing")?,
+                            &options
+                        )?
+                        .is_some(),
+                        "contact_state_incomplete"
+                    );
+                    // Oplog2 accepted the complete primary flag baseline from
+                    // the refreshed contact, including unrelated preferences.
+                    // Match that accepted record rather than restoring stale
+                    // bits from the pre-refresh local cache.
+                    let outer = p::decode(&rpc.body)?;
+                    let list = p::decode(p::data(&outer, 1)?)?;
+                    let item = p::decode(p::data(&list, 2)?)?;
+                    ensure!(p::scalar(&item, 1)? == 2, "invalid_pin_receipt");
+                    let contact = p::decode(&p::unbuffer(p::data(&item, 2)?)?)?;
+                    let flag = u32::try_from(p::scalar(&contact, 8)?)?;
+                    wechat_profile::apply_contact_patch(
+                        &location,
+                        &keys,
+                        &ContactProjection {
+                            username: thread_id.clone(),
+                            fields: [("flag".into(), SqlValue::Integer(flag.to_string()))]
+                                .into_iter()
+                                .collect(),
+                        },
+                        &options,
+                    )?;
+                    self.store.clear_runtime(
+                        account,
+                        &format!("contact-pinning-unresolved:{thread_id}"),
+                    )?;
+                } else {
+                    bail!("invalid_pin_receipt");
+                }
+                changed = true;
+                continue;
+            }
             if let GroupMutation::Mute { thread_id, muted } = &attempt.action {
                 if !thread_id.ends_with("@chatroom") {
                     ensure!(
@@ -781,6 +900,10 @@ impl Core {
         attempt: &Attempt,
         receipt_count: usize,
     ) -> Result<()> {
+        if let GroupMutation::Pin { thread_id, .. } = &attempt.action {
+            self.store.append_event_once(&op.account_id, &format!("thread-pin:{}:{receipt_count}", op.id), "thread.updated", &json!({"operationId":op.id,"threadId":thread_id,"origin":"native_mutation","refetchRequired":true}))?;
+            return Ok(());
+        }
         if let GroupMutation::Mute { thread_id, .. } = &attempt.action {
             if !thread_id.ends_with("@chatroom") {
                 self.store.append_event_once(
@@ -838,7 +961,13 @@ impl Core {
                 .project_group_receipts(&op, &attempt, &receipts)
                 .is_ok()
             {
-                op.result["profileProjection"] = json!("partial");
+                op.result["profileProjection"] = json!(if fully_accepted
+                    && matches!(attempt.action, GroupMutation::Pin { .. })
+                {
+                    "complete"
+                } else {
+                    "partial"
+                });
                 op.updated_at = now();
                 if fully_accepted && record.phase == "needs_review" {
                     // A retained verified response can resolve a decoder gap.
@@ -962,6 +1091,139 @@ pub(super) mod tests {
             f.push(p::bytes(6, &p::bytes(1, &sk("other"))));
         }
         p::message(&f).unwrap()
+    }
+    #[test]
+    fn thread_pinning_uses_one_attempt_and_repairs_without_resending_or_overwriting_newer_state() {
+        let (_temp, mut core) = fixture();
+        struct Snapshot(u32);
+        impl crate::upstream::Upstream for Snapshot {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+                let mut f = vec![
+                    p::bytes(1, &p::bytes(1, ids[0].as_bytes())),
+                    p::uint(7, u32::MAX.into()),
+                    p::uint(8, self.0.into()),
+                    p::uint(82, u64::MAX),
+                    p::uint(83, 0),
+                ];
+                for n in [2, 3, 4, 10, 11, 12] {
+                    f.push(p::bytes(n, &p::bytes(1, b"")));
+                }
+                for n in [5, 9, 13, 14] {
+                    f.push(p::uint(n, 0));
+                }
+                f.push(p::bytes(6, &p::buffer(b"")));
+                p::message(&[
+                    p::bytes(1, &p::int32(1, 0)),
+                    p::uint(2, 1),
+                    p::bytes(3, &p::message(&f)?),
+                    p::uint(4, 0),
+                ])
+            }
+        }
+        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(Snapshot(0x201));
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        let options = core.write_options("one", "pin-fixture").unwrap();
+        let reader = core.profile_reader("one").unwrap();
+        let table = reader
+            .schemas()
+            .iter()
+            .flat_map(|schema| &schema.tables)
+            .find(|table| table.name == "SessionTable")
+            .unwrap();
+        let mut session: RawFields = table
+            .columns
+            .iter()
+            .filter(|column| column.name != "username")
+            .map(|column| (column.name.clone(), SqlValue::Null))
+            .collect();
+        session.insert("last_timestamp".into(), SqlValue::Integer("100".into()));
+        session.insert("sort_timestamp".into(), SqlValue::Integer("100".into()));
+        wechat_profile::apply_session_projection(&location, &keys, "peer", &session, &options)
+            .unwrap();
+        let flag = |core: &Core| {
+            integer(
+                &core.group_contact("one", "peer").unwrap().raw_fields,
+                "flag",
+            )
+            .unwrap()
+        };
+        for pinned in [true, false] {
+            Arc::get_mut(&mut core).unwrap().upstream =
+                Arc::new(Snapshot(if pinned { 0x201 } else { 0xa01 }));
+            let action = GroupMutation::Pin {
+                thread_id: "peer".into(),
+                pinned,
+            };
+            let key = if pinned { "pin" } else { "unpin" };
+            let (operation, created) = core.admit_group("one", action.clone(), key).unwrap();
+            assert!(created);
+            let done = core
+                .execute_group("one", &operation.id, |_, rpc| {
+                    assert_eq!(rpc.opcode, Some(2));
+                    Ok(oplog(0))
+                })
+                .unwrap();
+            assert_eq!(done.state, "succeeded");
+            assert_eq!(done.result["profileProjection"], "complete");
+            assert_eq!(done.result["crossDatabaseAtomic"], false);
+            assert_eq!(flag(&core), if pinned { 0xa01 } else { 0x201 });
+            assert_eq!(
+                core.catalog_item("one", "threads", "peer").unwrap()["pinned"],
+                pinned
+            );
+            let (replay, new) = core.admit_group("one", action, key).unwrap();
+            assert!(!new);
+            assert_eq!(replay.id, operation.id);
+            core.execute_group("one", &replay.id, |_, _| panic!("replay must not resubmit"))
+                .unwrap();
+            assert!(core
+                .admit_group(
+                    "one",
+                    GroupMutation::Pin {
+                        thread_id: "peer".into(),
+                        pinned: !pinned
+                    },
+                    key
+                )
+                .is_err());
+        }
+        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(Snapshot(0x201));
+        let action = GroupMutation::Pin {
+            thread_id: "peer".into(),
+            pinned: true,
+        };
+        let (uncertain, _) = core
+            .admit_group("one", action.clone(), "unknown-pin")
+            .unwrap();
+        let done = core
+            .execute_group("one", &uncertain.id, |_, _| bail!("response lost"))
+            .unwrap();
+        assert_eq!(done.state, "needs_review");
+        assert_eq!(flag(&core), 0x201);
+        core.execute_group("one", &uncertain.id, |_, _| {
+            panic!("must not retry unknown pin")
+        })
+        .unwrap();
+        let (superseded, _) = core.admit_group("one", action, "old-pin").unwrap();
+        let done = core
+            .execute_group("one", &superseded.id, |_, _| {
+                core.mark_group_revision("one", "peer", "newer-phone-receipt")?;
+                Ok(oplog(0))
+            })
+            .unwrap();
+        assert_eq!(done.state, "succeeded");
+        assert_eq!(done.result["profileProjection"], "pending");
+        core.repair_group_mutations("one").unwrap();
+        assert_eq!(flag(&core), 0x201);
+        assert!(core
+            .store
+            .events("one", 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "thread.updated"));
     }
     #[test]
     fn direct_mute_and_unmute_preserve_other_flags_and_share_one_attempt_receipts() {
@@ -1364,6 +1626,7 @@ pub(super) mod tests {
             .unwrap();
         let receipts = Receipts {
             replies: vec![created(true)],
+            ..Default::default()
         };
         core.store
             .receive_group_step(

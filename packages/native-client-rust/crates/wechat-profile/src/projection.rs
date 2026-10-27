@@ -323,6 +323,131 @@ pub fn apply_contact_mute_patch(
         changed,
     }))
 }
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedContactPin {
+    pub local_id: i64,
+    pub changed: bool,
+    pub session_projected: bool,
+    pub cross_database_atomic: bool,
+}
+
+/// Apply a received ordinary pin preference. The caller retains a stable
+/// transition timestamp and retries the same intent after a partial local write.
+/// Session and contact commits are separate; session-first publication lets a
+/// retry recognize an unfinished flag transition without rewinding newer activity.
+pub fn apply_contact_pin_patch(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    username: &str,
+    pinned: bool,
+    clear_folded_primary: bool,
+    sort_timestamp: u32,
+    options: &WriteOptions,
+) -> Result<Option<AppliedContactPin>> {
+    ownership(location, keys, options)?;
+    identity(username)?;
+    if sort_timestamp == 0 || clear_folded_primary && !pinned {
+        return Err(ProfileError::InvalidQuery);
+    }
+    let contact_db = find_database(location, "contact.db")?;
+    let session_db = find_database(location, "session.db")?;
+    let mut contact = open_write(location, &contact_db, keys, options.allow_plaintext)?;
+    let mut session = open_write(location, &session_db, keys, options.allow_plaintext)?;
+    // Validate both layouts before either database can be changed.
+    check_known_table(&contact, "contact")?;
+    check_known_table(&session, "SessionTable")?;
+    let contact_tx = contact.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let session_tx = session.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let existing = contact_tx
+        .query_row(
+            "SELECT id,flag,local_type,delete_flag,is_in_chat_room FROM contact WHERE username=?1",
+            [username],
+            crate::reader::raw,
+        )
+        .optional()?;
+    let Some(fields) = existing else {
+        return Ok(None);
+    };
+    let Some(flag) = crate::reader::num(&fields, "flag").and_then(|flag| u32::try_from(flag).ok())
+    else {
+        return Ok(None);
+    };
+    let ordinary = if username.ends_with("@chatroom") {
+        crate::reader::num(&fields, "local_type") == Some(2)
+            && crate::reader::num(&fields, "is_in_chat_room") == Some(1)
+            && flag & 2 != 0
+    } else {
+        !username.contains('@')
+            && username != "filehelper"
+            && !username.starts_with("weixin")
+            && !username.starts_with("gh_")
+            && ![
+                "brandsessionholder",
+                "brandservicesessionholder",
+                "qmessage",
+                "medianote",
+                "qqsync",
+                "lbsapp",
+                "shakeapp",
+                "floatbottle",
+                "masssendapp",
+                "appbrandcustomerservicemsg",
+                "service_officialaccounts",
+                "notifymessage",
+                "notification_messages",
+            ]
+            .contains(&username)
+            && crate::reader::num(&fields, "local_type") == Some(1)
+            && flag & 1 != 0
+    };
+    if !ordinary || crate::reader::num(&fields, "delete_flag") != Some(0) {
+        return Ok(None);
+    }
+    let id = crate::reader::num(&fields, "id").ok_or(ProfileError::InvalidMetadata)?;
+    let existing_sort: Option<Option<i64>> = session_tx
+        .query_row(
+            "SELECT sort_timestamp FROM SessionTable WHERE username=?1",
+            [username],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing_sort) = existing_sort else {
+        return Ok(None);
+    };
+    let transition = (flag & 0x800 != 0) != pinned;
+    let flag = (flag & !0x800) | if pinned { 0x800 } else { 0 };
+    let flag = if clear_folded_primary {
+        flag & !0x10000080
+    } else {
+        flag
+    };
+    if transition && existing_sort.unwrap_or(0) < i64::from(sort_timestamp) {
+        session_tx.execute(
+            "UPDATE SessionTable SET sort_timestamp=?2 WHERE username=?1",
+            params![username, sort_timestamp],
+        )?;
+    }
+    let changed = apply_row(
+        &contact_tx,
+        "contact",
+        "id",
+        SqlValue::Integer(id.to_string()),
+        &[("flag".into(), SqlValue::Integer(flag.to_string()))]
+            .into_iter()
+            .collect(),
+        true,
+    )?;
+    session_tx.commit()?;
+    contact_tx.commit()?;
+    Ok(Some(AppliedContactPin {
+        local_id: id,
+        changed,
+        session_projected: true,
+        cross_database_atomic: false,
+    }))
+}
 /// Caller supplies the actual retained group fields; complete_roster is explicit.
 /// No absent member is deleted for an incomplete/delta roster.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -879,6 +1004,9 @@ pub enum NativeGroupEdit<'a> {
         clear_minimized: bool,
         own: &'a str,
     },
+    Unfold {
+        own: String,
+    },
     ClearAnnouncement,
 }
 
@@ -914,6 +1042,18 @@ pub fn apply_native_group_edit(
     let mut remove = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut matched_name = false;
+    let unfold_own = match &edit {
+        NativeGroupEdit::Notifications {
+            own,
+            clear_minimized: true,
+            ..
+        } => Some(*own),
+        NativeGroupEdit::Unfold { own } => {
+            identity(own)?;
+            Some(own.as_str())
+        }
+        _ => None,
+    };
     match &edit {
         NativeGroupEdit::RemoveMembers(names) => remove.extend_from_slice(names),
         NativeGroupEdit::Leave { own } => remove.push((*own).to_owned()),
@@ -950,11 +1090,7 @@ pub fn apply_native_group_edit(
                     },
                 )?)
             }
-            NativeGroupEdit::Notifications {
-                own,
-                clear_minimized: true,
-                ..
-            } if name == *own => {
+            _ if unfold_own == Some(name.as_str()) => {
                 let mut member = vec![];
                 let mut flag_seen = false;
                 for field in proto_chunks(chunk.value)? {
@@ -999,6 +1135,11 @@ pub fn apply_native_group_edit(
         }
         NativeGroupEdit::Notifications { muted, clear_minimized, .. } => {
             if tx.execute("UPDATE contact SET chat_room_notify=?2,flag=CASE WHEN ?3 THEN flag & ~268435456 ELSE flag END WHERE username=?1 AND flag IS NOT NULL", rusqlite::params![room,i64::from(!muted),clear_minimized])? != 1 { return Err(ProfileError::InvalidMetadata); }
+        }
+        NativeGroupEdit::Unfold { .. } => {
+            let flag: Option<i64> = tx.query_row("SELECT flag FROM contact WHERE username=?1 AND local_type=2 AND delete_flag=0 AND is_in_chat_room=1", [room], |r| r.get(0)).optional()?.flatten();
+            let flag = flag.and_then(|flag| u32::try_from(flag).ok()).filter(|flag| flag & 2 != 0).ok_or(ProfileError::InvalidMetadata)?;
+            if tx.execute("UPDATE contact SET flag=?2 WHERE username=?1", rusqlite::params![room,flag & !0x10000000])? != 1 { return Err(ProfileError::InvalidMetadata); }
         }
         NativeGroupEdit::ClearAnnouncement => {
             tx.execute("INSERT INTO chat_room_info_detail(room_id_,username_,announcement_,xml_announcement_)VALUES(?1,?2,'','') ON CONFLICT(room_id_) DO UPDATE SET announcement_='',xml_announcement_=''", rusqlite::params![id,room])?;
@@ -1493,4 +1634,280 @@ pub fn apply_message_session_projection(
     }
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    fn fixture(encrypted: bool) -> (tempfile::TempDir, ProfileLocation, KeyFile, WriteOptions) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("account");
+        let (location, keys) = if encrypted {
+            let (location, keys, _) = initialize_profile(&root, &[42; 32]).unwrap();
+            (location, keys)
+        } else {
+            for (relative, sql) in [
+                ("contact/contact.db", include_str!("layout/contact.db.sql")),
+                ("session/session.db", include_str!("layout/session.db.sql")),
+            ] {
+                let path = root.join("db_storage").join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                Connection::open(path).unwrap().execute_batch(sql).unwrap();
+            }
+            (
+                ProfileLocation::new(&root).unwrap(),
+                KeyFile::empty("account"),
+            )
+        };
+        let options = WriteOptions {
+            exclusive_ownership_confirmed: true,
+            allow_plaintext: !encrypted,
+            durable_intent_id: "synthetic-pin-receipt".into(),
+        };
+        (temp, location, keys, options)
+    }
+
+    #[test]
+    fn pin_projection_preserves_other_state_and_replays_without_rewinding_activity() {
+        for encrypted in [false, true] {
+            let (_temp, location, keys, options) = fixture(encrypted);
+            let contact = open_write(&location, "contact/contact.db", &keys, !encrypted).unwrap();
+            let session = open_write(&location, "session/session.db", &keys, !encrypted).unwrap();
+            contact.execute_batch("INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room,chat_room_notify)VALUES(1,'peer',268436099,1,0,0,0),(2,'room@chatroom',268435586,2,0,1,0);").unwrap();
+            session.execute_batch("INSERT INTO SessionTable(username,unread_count,draft,status,is_hidden,sort_timestamp,last_timestamp,last_msg_locald_id)VALUES('peer',4,'Keep draft',7,0,100,90,12),('room@chatroom',2,'Room draft',3,0,100,99,15);").unwrap();
+            let saved_flag = || {
+                contact
+                    .query_row(
+                        "SELECT flag FROM contact WHERE username='peer'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            };
+            let saved_sort = || {
+                session
+                    .query_row(
+                        "SELECT sort_timestamp FROM SessionTable WHERE username='peer'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            };
+            let baseline = saved_flag();
+            let result =
+                apply_contact_pin_patch(&location, &keys, "peer", true, false, 200, &options)
+                    .unwrap()
+                    .unwrap();
+            assert!(result.changed && result.session_projected);
+            assert!(!result.cross_database_atomic);
+            assert_eq!(saved_flag(), baseline | 0x800);
+            assert_eq!(saved_sort(), 200);
+            assert!(
+                !apply_contact_pin_patch(&location, &keys, "peer", true, false, 300, &options)
+                    .unwrap()
+                    .unwrap()
+                    .changed
+            );
+            assert_eq!(saved_sort(), 200);
+            session
+                .execute(
+                    "UPDATE SessionTable SET sort_timestamp=400 WHERE username='peer'",
+                    [],
+                )
+                .unwrap();
+            apply_contact_pin_patch(&location, &keys, "peer", false, false, 250, &options)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved_flag(), baseline);
+            assert_eq!(saved_sort(), 400);
+            // Model an interrupted session-first commit before its contact flag.
+            session
+                .execute(
+                    "UPDATE SessionTable SET sort_timestamp=500 WHERE username='peer'",
+                    [],
+                )
+                .unwrap();
+            apply_contact_pin_patch(&location, &keys, "peer", true, true, 450, &options)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved_flag(), (baseline & !0x10000080) | 0x800);
+            assert_eq!(saved_sort(), 500);
+            let unrelated = session.query_row("SELECT unread_count,draft,status,is_hidden,last_timestamp,last_msg_locald_id FROM SessionTable WHERE username='peer'", [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?,row.get::<_,i64>(4)?,row.get::<_,i64>(5)?))).unwrap();
+            assert_eq!(unrelated, (4, "Keep draft".into(), 7, 0, 90, 12));
+            apply_contact_pin_patch(&location, &keys, "room@chatroom", true, true, 600, &options)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                contact
+                    .query_row(
+                        "SELECT flag,chat_room_notify FROM contact WHERE username='room@chatroom'",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    )
+                    .unwrap(),
+                (2050, 0)
+            );
+            apply_contact_pin_patch(
+                &location,
+                &keys,
+                "room@chatroom",
+                false,
+                false,
+                700,
+                &options,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                session
+                    .query_row(
+                        "SELECT sort_timestamp FROM SessionTable WHERE username='room@chatroom'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                700
+            );
+        }
+    }
+
+    #[test]
+    fn pin_projection_preflights_both_schemas_and_keeps_wal_modes() {
+        let (_temp, location, keys, options) = fixture(false);
+        let contact = open_write(&location, "contact/contact.db", &keys, true).unwrap();
+        let session = open_write(&location, "session/session.db", &keys, true).unwrap();
+        contact.execute_batch("PRAGMA journal_mode=WAL;INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room)VALUES(1,'peer',1,1,0,0),(2,'no_session',1,1,0,0),(3,'missing_flag',NULL,1,0,0),(4,'filehelper',1,1,0,0),(5,'left@chatroom',2,2,0,2);").unwrap();
+        session.execute_batch("PRAGMA journal_mode=WAL;INSERT INTO SessionTable(username,sort_timestamp)VALUES('peer',100),('missing_flag',100),('filehelper',100),('left@chatroom',100);").unwrap();
+        for name in [
+            "missing",
+            "no_session",
+            "missing_flag",
+            "filehelper",
+            "left@chatroom",
+        ] {
+            assert!(
+                apply_contact_pin_patch(&location, &keys, name, true, false, 200, &options)
+                    .unwrap()
+                    .is_none(),
+                "{name}"
+            );
+        }
+        session
+            .execute_batch("ALTER TABLE SessionTable ADD COLUMN unknown_column TEXT;")
+            .unwrap();
+        assert!(matches!(
+            apply_contact_pin_patch(&location, &keys, "peer", true, false, 200, &options),
+            Err(ProfileError::UnsupportedSchema(_))
+        ));
+        assert_eq!(
+            contact
+                .query_row(
+                    "SELECT flag FROM contact WHERE username='peer'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            session
+                .query_row(
+                    "SELECT sort_timestamp FROM SessionTable WHERE username='peer'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            100
+        );
+        session
+            .execute_batch("ALTER TABLE SessionTable DROP COLUMN unknown_column;")
+            .unwrap();
+        let mut unowned = options.clone();
+        unowned.exclusive_ownership_confirmed = false;
+        assert!(matches!(
+            apply_contact_pin_patch(&location, &keys, "peer", true, false, 200, &unowned),
+            Err(ProfileError::SnapshotRequired)
+        ));
+        assert!(
+            apply_contact_pin_patch(&location, &keys, "peer", false, true, 200, &options).is_err()
+        );
+        apply_contact_pin_patch(&location, &keys, "peer", true, false, 200, &options)
+            .unwrap()
+            .unwrap();
+        for db in [&contact, &session] {
+            assert_eq!(
+                db.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "wal"
+            );
+        }
+    }
+
+    #[test]
+    fn group_unfold_preserves_notification_state_other_members_and_opaque_fields() {
+        let (_temp, location, keys, options) = fixture(false);
+        let contact = open_write(&location, "contact/contact.db", &keys, true).unwrap();
+        contact.execute_batch("INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room,chat_room_notify)VALUES(1,'room@chatroom',268435458,2,0,1,0);INSERT INTO chat_room(id,username)VALUES(1,'room@chatroom');").unwrap();
+        let before = [
+            10, 14, 10, 4, b's', b'e', b'l', b'f', 24, 129, 64, 34, 3, 1, 2, 3, 10, 9, 10, 4, b'p',
+            b'e', b'e', b'r', 24, 129, 64, 42, 3, 9, 8, 7,
+        ];
+        let expected = [
+            10, 13, 10, 4, b's', b'e', b'l', b'f', 24, 1, 34, 3, 1, 2, 3, 10, 9, 10, 4, b'p', b'e',
+            b'e', b'r', 24, 129, 64, 42, 3, 9, 8, 7,
+        ];
+        contact
+            .execute("UPDATE chat_room SET ext_buffer=?1", [before.as_slice()])
+            .unwrap();
+        for _ in 0..2 {
+            apply_native_group_edit(
+                &location,
+                &keys,
+                "room@chatroom",
+                NativeGroupEdit::Unfold { own: "self".into() },
+                &options,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            contact
+                .query_row(
+                    "SELECT flag,chat_room_notify FROM contact WHERE username='room@chatroom'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+            (2, 0)
+        );
+        assert_eq!(
+            contact
+                .query_row("SELECT ext_buffer FROM chat_room", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            expected
+        );
+        // Invalid contact metadata rolls back even the already prepared packed edit.
+        contact
+            .execute("UPDATE contact SET flag=4294967296", [])
+            .unwrap();
+        contact
+            .execute("UPDATE chat_room SET ext_buffer=?1", [before.as_slice()])
+            .unwrap();
+        assert!(apply_native_group_edit(
+            &location,
+            &keys,
+            "room@chatroom",
+            NativeGroupEdit::Unfold { own: "self".into() },
+            &options
+        )
+        .is_err());
+        assert_eq!(
+            contact
+                .query_row("SELECT ext_buffer FROM chat_room", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            before
+        );
+    }
 }

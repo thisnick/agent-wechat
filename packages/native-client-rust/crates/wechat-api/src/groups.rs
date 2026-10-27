@@ -26,6 +26,7 @@ pub(super) fn routes() -> Router<App> {
             "/v1/accounts/{a}/threads/{id}/notifications",
             axum::routing::put(notifications),
         )
+        .route("/v1/accounts/{a}/threads/{id}/pin", axum::routing::put(pin))
         .route(
             "/v1/accounts/{a}/group-mutations/by-idempotency-key",
             get(by_key),
@@ -185,6 +186,25 @@ async fn notifications(
     )
     .await
 }
+async fn pin(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<contracts::NativeThreadPinRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    submit(
+        app,
+        c,
+        a,
+        headers,
+        GroupMutation::Pin {
+            thread_id: id,
+            pinned: input.pinned,
+        },
+    )
+    .await
+}
 async fn member(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -267,6 +287,8 @@ mod tests {
                 "threads/room%40chatroom/notifications",
                 json!({"muted":true}),
             ),
+            ("PUT", "threads/room%40chatroom/pin", json!({"pinned":true})),
+            ("PUT", "threads/peer/pin", json!({"pinned":false})),
         ] {
             for (bearer, key, status) in [
                 (&read, Some("key"), StatusCode::FORBIDDEN),

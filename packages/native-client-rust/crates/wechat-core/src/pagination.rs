@@ -5,7 +5,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+};
 use wechat_profile::{ListQuery, MessageQuery, ProfileReader};
 
 #[derive(Clone, Default)]
@@ -400,6 +403,7 @@ impl Core {
         let mut result = Vec::new();
         let mut cursor = None;
         let mut encoded_bytes = 0usize;
+        let mut thread_order = BTreeMap::new();
         if let Some(limit) = message_limit {
             let references = reader.message_references(subject, MAX_ITEMS).map_err(|e| {
                 if matches!(e, wechat_profile::ProfileError::ResourceLimit) {
@@ -470,6 +474,23 @@ impl Core {
                         .map(|thread| thread.username.clone())
                         .collect();
                     let versions = self.store.read_versions(account, &ids)?;
+                    let pinned = reader.thread_pinned(&ids).unwrap_or_default();
+                    for thread in &page.items {
+                        thread_order.insert(
+                            thread.username.clone(),
+                            (
+                                pinned
+                                    .get(&thread.username)
+                                    .copied()
+                                    .flatten()
+                                    .unwrap_or(false),
+                                thread
+                                    .last_timestamp
+                                    .unwrap_or(0)
+                                    .max(thread.sort_timestamp.unwrap_or(0)),
+                            ),
+                        );
+                    }
                     (page.items.into_iter().map(|t|{let id=t.username;let kind=if id.ends_with("@chatroom"){"group"}else if id=="filehelper"||id.starts_with("weixin"){"system"}else{"direct"};Ok(json!({"id":id,"peerId":id,"accountId":account,"kind":kind,"displayName":t.label,"unreadCount":t.unread_count,"readStateVersion":Self::read_state_hash(&id,reader.generation(),versions.get(&id).map(String::as_str).unwrap_or("0"))?,"history":{"coverage":"partial","localCount":null},"version":reader.generation()}))}).collect::<Result<Vec<_>>>()?,page.next_cursor)
                 }
                 "contacts" => {
@@ -515,6 +536,16 @@ impl Core {
                 Some(_) => bail!("invalid profile continuation"),
                 None => break,
             }
+        }
+        if kind == "threads" {
+            // Read every canonical session page before selecting the public
+            // page: an older pinned thread can occur after the reader's first
+            // 200 rows. Preview enrichment still runs only for returned rows.
+            result.sort_by_cached_key(|row| {
+                let id = row["id"].as_str().unwrap_or_default();
+                let (pinned, timestamp) = thread_order.get(id).copied().unwrap_or_default();
+                (Reverse(pinned), Reverse(timestamp), id.to_owned())
+            });
         }
         Ok(result)
     }
@@ -594,6 +625,131 @@ mod tests {
             .to_string()
             .contains("invalid_cursor"));
     }
+    #[test]
+    fn thread_order_uses_saved_pins_and_timestamps_before_paging_and_retains_old_views() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let profile = temp.path().join("fixture");
+        let password = [42u8; 32];
+        let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
+        let open = |relative: &str| {
+            let db = rusqlite::Connection::open(profile.join("db_storage").join(relative)).unwrap();
+            assert_eq!(
+                unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+                0
+            );
+            db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;").unwrap();
+            db
+        };
+        let contact = open("contact/contact.db");
+        let session = open("session/session.db");
+        for index in 0..205 {
+            let peer = format!("peer{index:03}");
+            contact
+                .execute(
+                    "INSERT INTO contact(username,local_type,flag,delete_flag) VALUES(?1,1,?2,0)",
+                    rusqlite::params![peer, if index >= 203 { 0x801 } else { 1 }],
+                )
+                .unwrap();
+            let sort = if index == 204 { 1 } else { 1000 - index };
+            let last = match index {
+                203 => 1002,
+                202 => 2000,
+                _ => sort,
+            };
+            session.execute(
+                "INSERT INTO SessionTable(username,sort_timestamp,last_timestamp) VALUES(?1,?2,?3)",
+                rusqlite::params![peer, sort, last],
+            ).unwrap();
+        }
+        drop(contact);
+        drop(session);
+        let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
+        store.attach("a", &profile, true).unwrap();
+        let key_path = temp.path().join("keys.json");
+        keys.write_new(&key_path).unwrap();
+        store.set_keys_file("a", &key_path).unwrap();
+        let core = Core::new(store, None).unwrap();
+        let first = core
+            .catalog_page(
+                "a",
+                "threads",
+                None,
+                &CatalogQuery {
+                    limit: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(first["items"][0]["id"], "peer203");
+        assert_eq!(first["items"][1]["id"], "peer204");
+        let cursor = first["nextCursor"].as_str().unwrap().to_owned();
+        let old_order = first["order"].clone();
+        // Unpinning changes the canonical sort timestamp. New messages can
+        // have a newer last timestamp than their saved sort timestamp.
+        let contact = open("contact/contact.db");
+        contact
+            .execute("UPDATE contact SET flag=1 WHERE username='peer203'", [])
+            .unwrap();
+        drop(contact);
+        let session = open("session/session.db");
+        session
+            .execute(
+                "UPDATE SessionTable SET sort_timestamp=2500 WHERE username='peer203'",
+                [],
+            )
+            .unwrap();
+        session.execute("UPDATE SessionTable SET last_timestamp=3000 WHERE username IN ('peer200','peer201')", []).unwrap();
+        drop(session);
+        let fresh = core
+            .catalog_page(
+                "a",
+                "threads",
+                None,
+                &CatalogQuery {
+                    limit: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            fresh["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["peer204", "peer200", "peer201", "peer203", "peer202"]
+        );
+        assert!(
+            fresh["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.get("sortTimestamp").is_none()
+                    && item.get("lastTimestamp").is_none())
+        );
+        let later = core
+            .catalog_page(
+                "a",
+                "threads",
+                None,
+                &CatalogQuery {
+                    limit: Some(2),
+                    cursor: Some(cursor),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(later["order"], old_order);
+        assert_eq!(later["items"][0]["id"], "peer202");
+        assert_eq!(later["items"][1]["id"], "peer000");
+    }
+
     #[test]
     fn account_message_search_retains_cross_thread_membership_and_peers() {
         use md5::Digest;

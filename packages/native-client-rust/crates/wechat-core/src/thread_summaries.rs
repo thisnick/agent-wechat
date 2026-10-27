@@ -19,10 +19,16 @@ impl Core {
             .filter_map(|r| r["id"].as_str().map(str::to_owned))
             .collect();
         let muted = reader.thread_muted(&ids).unwrap_or_default();
+        let pinned = reader.thread_pinned(&ids).unwrap_or_default();
         let unresolved = self.store.runtime_keys(
             account,
             &ids.iter()
-                .map(|id| format!("contact-notifications-unresolved:{id}"))
+                .flat_map(|id| {
+                    [
+                        format!("contact-notifications-unresolved:{id}"),
+                        format!("contact-pinning-unresolved:{id}"),
+                    ]
+                })
                 .collect::<Vec<_>>(),
         )?;
         let mut latest = reader.latest_messages(&ids, own).ok().and_then(|messages| {
@@ -55,6 +61,11 @@ impl Core {
                 Value::Null
             } else {
                 json!(muted.get(&id).copied().flatten())
+            };
+            row["pinned"] = if unresolved.contains(&format!("contact-pinning-unresolved:{id}")) {
+                Value::Null
+            } else {
+                json!(pinned.get(&id).copied().flatten())
             };
             let members = avatar_members.remove(&id).unwrap_or_default();
             row["avatarMembers"] = json!(members
@@ -133,6 +144,81 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn list_and_detail_derive_pin_state_and_unresolved_work_does_not_replace_saved_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let profile = temp.path().join("account");
+        let password = [42u8; 32];
+        let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
+        for (relative, sql) in [
+            (
+                "contact/contact.db",
+                "INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room)VALUES(1,'peer',2561,1,0,0),(2,'other',1,1,0,0),(3,'room@chatroom',2050,2,0,1);",
+            ),
+            (
+                "session/session.db",
+                "INSERT INTO SessionTable(username,unread_count,is_hidden,sort_timestamp,last_timestamp)VALUES('peer',0,0,100,100),('other',0,0,101,101),('room@chatroom',0,0,102,102);",
+            ),
+        ] {
+            let db = rusqlite::Connection::open(profile.join("db_storage").join(relative)).unwrap();
+            assert_eq!(
+                unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+                0
+            );
+            db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;").unwrap();
+            db.execute_batch(sql).unwrap();
+        }
+        let store = std::sync::Arc::new(crate::Store::open(&temp.path().join("data")).unwrap());
+        store.attach("one", &profile, true).unwrap();
+        let key_path = temp.path().join("keys.json");
+        keys.write_new(&key_path).unwrap();
+        store.set_keys_file("one", &key_path).unwrap();
+        let core = Core::new(store, None).unwrap();
+        let detail = |name| core.catalog_item("one", "threads", name).unwrap();
+        let page = core
+            .catalog_page("one", "threads", None, &Default::default())
+            .unwrap();
+        for (name, expected) in [("peer", true), ("other", false), ("room@chatroom", true)] {
+            let listed = page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|thread| thread["id"] == name)
+                .unwrap();
+            assert_eq!(listed["pinned"], expected);
+            assert_eq!(detail(name)["pinned"], expected);
+        }
+        assert_eq!(detail("peer")["muted"], true);
+        core.store
+            .put_runtime("one", "contact-pinning-unresolved:peer", b"receipt")
+            .unwrap();
+        assert!(detail("peer")["pinned"].is_null());
+        assert_eq!(detail("peer")["muted"], true);
+        assert_eq!(detail("other")["pinned"], false);
+        let reader = core.profile_reader("one").unwrap();
+        assert_eq!(
+            reader.thread_pinned(&["peer".into()]).unwrap()["peer"],
+            Some(true)
+        );
+        let mut unknown = vec![
+            json!({"id":"missing"}),
+            json!({"id":"removed","deleted":true}),
+        ];
+        core.thread_summaries("one", &mut unknown, &reader, Some("synthetic_self"))
+            .unwrap();
+        assert_eq!(unknown[0].get("pinned"), Some(&Value::Null));
+        assert!(unknown[1].get("pinned").is_none());
+        core.store
+            .clear_runtime("one", "contact-pinning-unresolved:peer")
+            .unwrap();
+        assert_eq!(detail("peer")["pinned"], true);
+    }
+
     #[test]
     fn summary_is_bounded_plain_text_and_never_exposes_media_xml_or_recalled_text() {
         let base = json!({"id":"one","senderId":"peer","direction":"incoming","type":1,"body":"hello\n  world","createdAt":"now"});

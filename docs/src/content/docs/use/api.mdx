@@ -48,10 +48,13 @@ Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the 
 | Field | Contents |
 | --- | --- |
 | `muted` | Saved notification preference for a direct chat or group: `true`, `false`, or `null` when missing or unresolved. |
+| `pinned` | Saved pin state for an ordinary direct chat or active group: `true`, `false`, or `null` when unavailable. |
 | `lastMessage` | Latest local message ID, sender ID/name, direction, type, time and a plain-text `text` preview of up to 160 characters. `null` means empty local history; omitted means the preview is unavailable. |
 | `avatarMembers` | Up to four cached group members, each with `id` and `displayName`; empty for direct chats or an unavailable roster. Fetch cached pictures through `GET /avatars/{username}`. |
 
 These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message, contact or group events to update the summaries. Phone contact changes arrive through the independent contact sync stream. For a manual refresh, use `POST /contacts/{id}/refresh` and wait for the operation to finish. Notification consumers should require account status `contactSyncReady: true` and thread `muted: false` before alerting. Notification edits through `PUT /threads/{id}/notifications` support ordinary direct contacts and groups. A direct edit reads the current contact before submitting its change. Repeat the same idempotency key to recover an operation; an uncertain outcome must not be resubmitted with a new key.
+
+Pin or unpin with `PUT /threads/{id}/pin`, body `{"pinned":true}` or `{"pinned":false}`, an `admin` token and `Idempotency-Key`. The SDK method is `setThreadPinned(accountId, threadId, pinned, key)`. The response is an operation; inspect its `remoteOutcome` and `profileProjection`. Saved pin changes emit `thread.updated`; refetch the thread or list. A new list places pinned chats first, then orders each section by saved activity. An existing pagination cursor keeps its original order.
 
 ## Send
 
@@ -108,7 +111,7 @@ All account routes start with `/v1/accounts/{account}`.
 | Login | `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
 | Chats and messages | `GET /threads`, `GET /threads/{id}/messages`, `GET /messages?query=`, `GET /messages/{id}` |
 | Contacts and groups | `GET /contacts`, `GET /groups`, `GET /groups/{id}`, `GET /groups/{id}/members`, `GET /groups/{id}/members/{username}`, `POST /contacts/lookup` |
-| [Group edits](/use/groups/) (admin) | `POST /groups`, `PATCH /groups/{id}`, `POST /groups/{id}/leave`, `POST/DELETE /groups/{id}/members`, `PUT /groups/{id}/my-name`, `DELETE /groups/{id}/announcement`, `PUT /threads/{id}/notifications` |
+| [Group edits](/use/groups/) and chat settings (admin) | `POST /groups`, `PATCH /groups/{id}`, `POST /groups/{id}/leave`, `POST/DELETE /groups/{id}/members`, `PUT /groups/{id}/my-name`, `DELETE /groups/{id}/announcement`, `PUT /threads/{id}/notifications`, `PUT /threads/{id}/pin` |
 | Sending | `POST /uploads`, `POST /sends`, `GET /sends/{id}`, `POST /sends/{id}/cancel`, `POST /messages/{id}/recall` |
 | Media | `GET /messages/{id}/media`, `POST /media/lookup`, `POST /messages/{id}/media-transfers`, `GET /media/{id}/content` |
 | Read state | `POST /threads/{id}/read-state` with `{"expectedVersion": "..."}` |

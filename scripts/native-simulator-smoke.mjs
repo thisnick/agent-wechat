@@ -130,6 +130,57 @@ async function stopHub() {
   await a.request("v1/daemon/shutdown", { method: "POST", body: JSON.stringify({ pid: status.pid, serverId: status.serverId, ownershipGeneration: status.ownershipGeneration }) });
   await waitFor("hub shutdown", () => hub.child.exitCode !== null || hub.child.signalCode !== null);
 }
+async function finishOperation(label, operation) {
+  return waitFor(label, async () => {
+    const current = await a.operation("personal", operation.id);
+    if (["failed", "needs_review", "cancelled"].includes(current.state)) throw new Error(`${label}: ${JSON.stringify(current)}`);
+    return current.state === "succeeded" && current;
+  });
+}
+async function pinJourney(streams) {
+  const created = await finishOperation("create pin regression group", await a.createGroup("personal", {
+    members: ["sim_mei", "sim_daniel"], name: "Simulator pin regression",
+  }, "pin-regression-create"));
+  const room = created.result.groupId;
+  await waitFor("pin regression group thread", async () => (await b.thread("personal", room)).pinned === false);
+  await waitFor("both clients see created group", () => streams.every(stream => stream.events.some(event => event.kind === "message.committed" && event.data.threadId === room)));
+  for (const threadId of ["sim_mei", room]) {
+    const key = `pin-cli-${threadId}`;
+    await finishOperation("mute before pin", await a.setThreadMuted("personal", threadId, true, `pin-mute-${threadId}`));
+    const pinned = await cli("chats", "pin", threadId, "--idempotency-key", key);
+    assert.equal(pinned.state, "succeeded");
+    assert.equal((await b.setThreadPinned("personal", threadId, true, key)).id, pinned.id);
+    await finishOperation("refresh pinned remote contact", await a.refreshContact("personal", threadId));
+    let thread = await b.thread("personal", threadId);
+    assert.equal(thread.pinned, true);
+    assert.equal(thread.muted, true);
+    assert.equal((await b.threads("personal")).items.find(item => item.id === threadId).pinned, true);
+    await waitFor("both clients see committed pin event", () => streams.every(stream => stream.events.some(event => event.kind === "thread.updated" && event.data.threadId === threadId && event.data.operationId === pinned.id)));
+
+    // A separate full-contact notification write must keep the saved pin bit.
+    await finishOperation("unmute pinned thread", await a.setThreadMuted("personal", threadId, false, `pin-unmute-${threadId}`));
+    await finishOperation("refresh unmuted pinned contact", await a.refreshContact("personal", threadId));
+    thread = await b.thread("personal", threadId);
+    assert.equal(thread.pinned, true);
+    assert.equal(thread.muted, false);
+    await finishOperation("API unpin", await a.setThreadPinned("personal", threadId, false, `unpin-api-${threadId}`));
+    await finishOperation("refresh unpinned remote contact", await a.refreshContact("personal", threadId));
+    assert.equal((await b.thread("personal", threadId)).pinned, false);
+    await finishOperation("API repin", await a.setThreadPinned("personal", threadId, true, `repin-api-${threadId}`));
+    const unpinned = await cli("chats", "unpin", threadId, "--idempotency-key", `unpin-cli-${threadId}`);
+    assert.equal(unpinned.state, "succeeded");
+    await finishOperation("refresh CLI unpin", await a.refreshContact("personal", threadId));
+    thread = await b.thread("personal", threadId);
+    assert.equal(thread.pinned, false);
+    assert.equal(thread.muted, false);
+    // Reopening the original accepted intent cannot submit that old pin again.
+    assert.equal((await b.setThreadPinned("personal", threadId, true, key)).id, pinned.id);
+    await finishOperation("refresh after original pin receipt replay", await a.refreshContact("personal", threadId));
+    assert.equal((await b.thread("personal", threadId)).pinned, false);
+  }
+  await assert.rejects(a.setThreadPinned("personal", "filehelper", true, "pin-unsupported-filehelper"));
+  await finishOperation("leave pin regression group", await a.leaveGroup("personal", room, "pin-regression-leave"));
+}
 
 try {
   remote = await start("upstream");
@@ -189,6 +240,8 @@ try {
   assert.equal((await b.thread("personal", "filehelper")).unreadCount, 0);
   assert.equal((await cli("status")).serverId, initialStatus.serverId);
   assert.equal((await cli("messages", "get", "filehelper", selfMessage.id)).body, selfMessage.body);
+
+  await pinJourney([streamA, streamB]);
 
   const beforeInbound = streamA.events.at(-1).cursor;
   await control({ op: "inbound", account: "personal", peer: "sim_mei", body: "Incoming through real sync" });
@@ -262,20 +315,21 @@ try {
     assert.notEqual((await a.mediaAsset("personal", candidate.id)).state, "available");
   }
 
+  const controlCursor = streamA.events.at(-1).cursor;
   await control({ op: "status_notification", account: "personal", operation_id: 2 });
   await control({ op: "status_notification", account: "personal", operation_id: 11 });
   await waitFor("unhandled status controls remain staged", async () => (await a.account("personal")).pendingProjectionBatches > 0);
   await waitFor("status control diagnostics", async () => {
-    const events = (await a.events("personal", "0", 200)).items;
+    const events = (await a.events("personal", controlCursor, 200)).items;
     return [2, 11].every(operation => events.some(event => event.kind === "projection.blocked" && event.data.commands?.some(command => command.classification === "status_notification" && command.operationIds.includes(operation))));
   });
   await control({ op: "inbound", account: "personal", peer: "sim_mei", body: "Live message after blocked status controls" });
   const laterMessage = await waitFor("blocked controls do not delay live messages", async () => (await a.messages("personal", "sim_mei")).items.find(item => item.body === "Live message after blocked status controls"));
-  assert.equal((await a.events("personal", "0", 200)).items.find(event => event.kind === "message.committed" && event.data.messageId === laterMessage.id).data.origin, "live");
+  assert.equal((await a.events("personal", controlCursor, 200)).items.find(event => event.kind === "message.committed" && event.data.messageId === laterMessage.id).data.origin, "live");
   assert.ok((await a.account("personal")).pendingProjectionBatches > 0);
   await control({ op: "unknown_sync", account: "personal" });
   await waitFor("unknown command remains staged", async () => (await a.account("personal")).pendingProjectionBatches > 0);
-  await waitFor("unknown command blocks official cursor publication", async () => (await a.events("personal", "0", 200)).items.some(event => event.kind === "projection.blocked"));
+  await waitFor("unknown command blocks official cursor publication", async () => (await a.events("personal", controlCursor, 200)).items.some(event => event.kind === "projection.blocked"));
   await unsubscribe(streamA);
   await unsubscribe(streamB);
   const logout = await a.logout("personal", "logout-personal");
@@ -300,7 +354,7 @@ try {
   if (process.platform !== "win32") assert.equal(launcher.child.exitCode, 0);
   await assert.rejects(stat(launcher.ready.dataDir), error => error.code === "ENOENT");
   await assert.rejects(fetch(launcherRemote));
-  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
+  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
 } finally {
   for (const subscription of subscriptions) subscription.controller.abort();
   await Promise.allSettled(subscriptions.map(subscription => subscription.done));

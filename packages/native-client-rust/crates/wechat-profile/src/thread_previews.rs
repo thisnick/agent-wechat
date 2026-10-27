@@ -10,6 +10,67 @@ struct PreviewRoom {
 }
 
 impl ProfileReader {
+    /// Read the saved pin bit for ordinary contacts and active groups in one
+    /// query. Incomplete identities and unsupported built-in peers stay unknown.
+    pub fn thread_pinned(&self, threads: &[String]) -> Result<BTreeMap<String, Option<bool>>> {
+        if threads.len() > 200 {
+            return Err(ProfileError::InvalidQuery);
+        }
+        if threads.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        for thread in threads {
+            validate_name(thread)?;
+        }
+        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        #[cfg(test)]
+        super::batch_lookup_tests::record_batch_query();
+        let placeholders = vec!["?"; threads.len()].join(",");
+        let mut statement = c.prepare(&format!(
+            "SELECT username,flag,local_type,delete_flag,is_in_chat_room FROM contact WHERE username IN ({placeholders})"
+        ))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(threads), raw)?;
+        let mut pinned = BTreeMap::new();
+        for row in rows {
+            let fields = row?;
+            let name = text(&fields, "username").ok_or(ProfileError::InvalidMetadata)?;
+            let flag = num(&fields, "flag").and_then(|flag| u32::try_from(flag).ok());
+            let ordinary = if name.ends_with("@chatroom") {
+                num(&fields, "local_type") == Some(2)
+                    && num(&fields, "is_in_chat_room") == Some(1)
+                    && flag.is_some_and(|flag| flag & 2 != 0)
+            } else {
+                !name.contains('@')
+                    && name != "filehelper"
+                    && !name.starts_with("weixin")
+                    && !name.starts_with("gh_")
+                    && ![
+                        "brandsessionholder",
+                        "brandservicesessionholder",
+                        "qmessage",
+                        "medianote",
+                        "qqsync",
+                        "lbsapp",
+                        "shakeapp",
+                        "floatbottle",
+                        "masssendapp",
+                        "appbrandcustomerservicemsg",
+                        "service_officialaccounts",
+                        "notifymessage",
+                        "notification_messages",
+                    ]
+                    .contains(&name.as_str())
+                    && num(&fields, "local_type") == Some(1)
+                    && flag.is_some_and(|flag| flag & 1 != 0)
+            };
+            let value = (ordinary && num(&fields, "delete_flag") == Some(0))
+                .then(|| flag.map(|flag| flag & 0x800 != 0))
+                .flatten();
+            pinned.insert(name, value);
+        }
+        Ok(pinned)
+    }
+
     /// Derive notification preferences for a page without refreshing contacts.
     /// Direct contacts and groups use different official fields; incomplete
     /// identities and unexpected values remain unknown.

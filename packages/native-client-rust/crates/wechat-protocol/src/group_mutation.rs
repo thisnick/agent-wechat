@@ -41,6 +41,10 @@ pub enum GroupMutation {
         thread_id: String,
         muted: bool,
     },
+    Pin {
+        thread_id: String,
+        pinned: bool,
+    },
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +105,7 @@ impl GroupMutation {
     pub fn target(&self) -> Option<&str> {
         match self {
             Self::Create { .. } => None,
-            Self::Mute { thread_id, .. } => Some(thread_id),
+            Self::Mute { thread_id, .. } | Self::Pin { thread_id, .. } => Some(thread_id),
             Self::Rename { group_id, .. }
             | Self::Leave { group_id }
             | Self::AddMembers { group_id, .. }
@@ -113,7 +117,7 @@ impl GroupMutation {
     pub fn validate(&self, own: &str) -> Result<()> {
         ordinary_identity(own)?;
         if let Some(id) = self.target() {
-            if matches!(self, Self::Mute { .. }) && !id.ends_with("@chatroom") {
+            if matches!(self, Self::Mute { .. } | Self::Pin { .. }) && !id.ends_with("@chatroom") {
                 ordinary_identity(id)?;
                 ensure!(id != own && !id.contains('@'), "ordinary_contact_required");
             } else {
@@ -235,6 +239,93 @@ pub fn contact_notification_request(record: &ContactRecord, muted: bool) -> Resu
     }
     oplog(2, payload)
 }
+
+/// Ordinary Linux pin/unpin copies the complete contact, changes primary bit
+/// 0x800, and sends ModContact through oplog2. The secondary mask is a uint64.
+/// A folded group is removed from its message box in a preceding oplog74 step.
+pub fn contact_pinning_requests(record: &ContactRecord, pinned: bool) -> Result<Vec<GroupRpc>> {
+    ordinary_identity(&record.username)?;
+    let group = record.username.ends_with("@chatroom");
+    ensure!(
+        group || !record.username.contains('@'),
+        "ordinary_contact_required"
+    );
+    let fields = p::decode(&record.raw)?;
+    ensure!(
+        wire::decode_contact_record(&record.raw)?.username == record.username,
+        "contact_identity_mismatch"
+    );
+    for number in 1..=14 {
+        ensure!(
+            p::optional(&fields, number)?.is_some(),
+            "contact_snapshot_incomplete"
+        );
+    }
+    let controlled = controlled_contact_fields(&record.raw)?;
+    ensure!(
+        p::scalar(&fields, 7)? == u64::from(u32::MAX)
+            && !controlled.contains(&8)
+            && !controlled.contains(&83),
+        "contact_flags_unresolved"
+    );
+    let flag = u32::try_from(p::scalar(&fields, 8)?)?;
+    ensure!(
+        flag & if group { 2 } else { 1 } != 0,
+        "ordinary_contact_required"
+    );
+    let secondary_mask = p::scalar(&fields, 82)?;
+    ensure!(
+        secondary_mask == u64::MAX || secondary_mask == u64::from(u32::MAX),
+        "contact_flags_unresolved"
+    );
+    let secondary = u32::try_from(p::scalar(&fields, 83)?)?;
+    let folded = if group {
+        flag & 0x10000000 != 0
+    } else {
+        secondary & 0x80 != 0
+    };
+    let mut new_flag = (flag & !0x800) | if pinned { 0x800 } else { 0 };
+    if pinned && folded {
+        // This branch changes the primary flags only. The official producer
+        // restores the prior secondary value, unlike notification unmute.
+        new_flag &= !0x10000080;
+    }
+    let mut payload = Vec::new();
+    let mut at = 0;
+    while at < record.raw.len() {
+        let start = at;
+        let tag = p::read_varint(&record.raw, &mut at)?;
+        match tag & 7 {
+            0 => {
+                p::read_varint(&record.raw, &mut at)?;
+            }
+            1 => at += 8,
+            2 => {
+                let length = usize::try_from(p::read_varint(&record.raw, &mut at)?)?;
+                at += length;
+            }
+            5 => at += 4,
+            _ => bail!("invalid_contact_snapshot"),
+        }
+        ensure!(at <= record.raw.len(), "invalid_contact_snapshot");
+        match tag >> 3 {
+            7 => payload.extend(p::uint(7, u64::from(u32::MAX))),
+            8 => payload.extend(p::uint(8, new_flag.into())),
+            82 => payload.extend(p::uint(82, u64::MAX)),
+            83 => payload.extend(p::uint(83, secondary.into())),
+            _ => payload.extend_from_slice(&record.raw[start..at]),
+        }
+    }
+    let mut requests = Vec::new();
+    if group && pinned && folded {
+        requests.push(oplog(
+            74,
+            p::message(&[p::bytes(1, &sk(&record.username)), p::uint(2, 0)])?,
+        )?);
+    }
+    requests.push(oplog(2, payload)?);
+    Ok(requests)
+}
 /// Steps are separate requests. An uncertain step must stop the entire flow.
 /// A known cleanup rejection can be retained while a later quit is attempted.
 pub fn group_mutation_requests(
@@ -253,6 +344,7 @@ pub fn group_mutation_requests(
         body,
     };
     Ok(match action {
+        GroupMutation::Pin { .. } => bail!("contact_snapshot_required"),
         GroupMutation::Create { members, name } => {
             let mut fields = vec![
                 p::bytes(1, &base()?),
@@ -493,6 +585,82 @@ mod tests {
             f.push(p::bytes(n, &sk("")));
         }
         p::message(&f).unwrap()
+    }
+    #[test]
+    fn pinning_full_contact_preserves_unknown_fields_and_uses_u64_secondary_mask() {
+        fn record(name: &str, flag: u32, secondary: u32) -> ContactRecord {
+            let mut fields = vec![
+                p::bytes(1, &sk(name)),
+                p::uint(7, u32::MAX.into()),
+                p::uint(8, flag.into()),
+                p::uint(82, u32::MAX.into()),
+                p::uint(83, secondary.into()),
+                p::bytes(123, b"untouched"),
+            ];
+            for n in [2, 3, 4, 10, 11, 12] {
+                fields.push(p::bytes(n, &sk("")));
+            }
+            for n in [5, 9, 13, 14] {
+                fields.push(p::uint(n, 0));
+            }
+            fields.push(p::bytes(6, &p::buffer(b"")));
+            wire::decode_contact_record(&p::message(&fields).unwrap()).unwrap()
+        }
+        fn payload(rpc: &GroupRpc) -> Vec<p::Field> {
+            assert_eq!(rpc.cgi, 681);
+            assert_eq!(rpc.path, "/cgi-bin/micromsg-bin/oplog");
+            let outer = p::decode(&rpc.body).unwrap();
+            let list = p::decode(p::data(&outer, 1).unwrap()).unwrap();
+            assert_eq!(p::scalar(&list, 1).unwrap(), 1);
+            let item = p::decode(p::data(&list, 2).unwrap()).unwrap();
+            assert_eq!(p::scalar(&item, 1).unwrap(), u64::from(rpc.opcode.unwrap()));
+            p::decode(&p::unbuffer(p::data(&item, 2).unwrap()).unwrap()).unwrap()
+        }
+        for (name, baseline, secondary, pinned, expected, steps) in [
+            ("peer", 0x421, 0x400, true, 0xc21, 1),
+            ("peer", 0xe21, 0x400, false, 0x621, 1),
+            // Direct folded state is in the secondary flags. Pinning preserves
+            // those bytes while clearing these primary bits, as Linux does.
+            ("peer", 0x10000081, 0x480, true, 0x801, 1),
+            ("room@chatroom", 0x10000082, 0x400, true, 0x802, 2),
+            ("room@chatroom", 0x10000882, 0x400, false, 0x10000082, 1),
+        ] {
+            let source = record(name, baseline, secondary);
+            let requests = contact_pinning_requests(&source, pinned).unwrap();
+            assert_eq!(requests.len(), steps);
+            if steps == 2 {
+                assert_eq!(requests[0].opcode, Some(74));
+                let fields = payload(&requests[0]);
+                assert_eq!(text_field(&fields, 1).unwrap(), name);
+                assert_eq!(p::scalar(&fields, 2).unwrap(), 0);
+            }
+            let fields = payload(requests.last().unwrap());
+            assert_eq!(requests.last().unwrap().opcode, Some(2));
+            assert_eq!(p::scalar(&fields, 7).unwrap(), u64::from(u32::MAX));
+            assert_eq!(p::scalar(&fields, 8).unwrap(), expected);
+            assert_eq!(p::scalar(&fields, 82).unwrap(), u64::MAX);
+            assert_eq!(p::scalar(&fields, 83).unwrap(), u64::from(secondary));
+            assert_eq!(p::data(&fields, 123).unwrap(), b"untouched");
+        }
+        let mut missing = record("peer", 1, 0);
+        missing.raw = p::message(
+            &p::decode(&missing.raw)
+                .unwrap()
+                .into_iter()
+                .filter(|f| f.number != 83)
+                .map(|f| match f.value {
+                    p::Value::Varint(n) => p::uint(f.number, n),
+                    p::Value::Bytes(b) => p::bytes(f.number, &b),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(contact_pinning_requests(&missing, true).is_err());
+        let mut mismatch = record("peer", 1, 0);
+        mismatch.username = "other".into();
+        assert!(contact_pinning_requests(&mismatch, true).is_err());
+        assert!(contact_pinning_requests(&record("peer", 0, 0), true).is_err());
     }
     #[test]
     fn packed_signed_results_and_uncertain_special_code() {

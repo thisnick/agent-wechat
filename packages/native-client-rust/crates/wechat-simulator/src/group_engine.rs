@@ -19,12 +19,20 @@ fn label(username: &str) -> &str {
 }
 pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<Vec<u8>> {
     let group = username.ends_with("@chatroom");
+    let pinned: bool = db
+        .query_row(
+            "SELECT pinned FROM thread_pins WHERE account=?1 AND username=?2",
+            params![account, username],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
     let mut fields = vec![
         p::bytes(1, &p::bytes(1, username.as_bytes())),
         p::uint(7, u32::MAX.into()),
         p::uint(
             8,
-            if group {
+            (if group {
                 2
             } else if username == "filehelper" {
                 0
@@ -38,8 +46,10 @@ pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<
                     .optional()?
                     .unwrap_or(false);
                 1 | if muted { 0x200 } else { 0 }
-            },
+            }) | if pinned { 0x800 } else { 0 },
         ),
+        p::uint(82, u64::MAX),
+        p::uint(83, 0),
     ];
     let name = if group {
         let (name, muted, joined): (String, bool, bool) = db.query_row(
@@ -242,9 +252,8 @@ pub(super) fn mutate(db: &mut Connection, session: &Session, rpc: &GroupRpc) -> 
             match opcode {
                 2 => {
                     ensure!(
-                        !room.ends_with("@chatroom")
-                            && p::scalar(&payload, 7)? == u64::from(u32::MAX),
-                        "invalid_simulator_contact_notifications"
+                        p::scalar(&payload, 7)? == u64::from(u32::MAX),
+                        "invalid_simulator_contact_flags"
                     );
                     for n in 1..=14 {
                         ensure!(
@@ -253,8 +262,24 @@ pub(super) fn mutate(db: &mut Connection, session: &Session, rpc: &GroupRpc) -> 
                         );
                     }
                     let flag = p::scalar(&payload, 8)?;
-                    ensure!(flag & !0x200 == 1, "invalid_simulator_contact_flags");
-                    tx.execute("INSERT INTO contact_notifications VALUES(?1,?2,?3) ON CONFLICT(account,username) DO UPDATE SET muted=excluded.muted", params![session.account,room,flag & 0x200 != 0])?;
+                    let group = room.ends_with("@chatroom");
+                    ensure!(
+                        flag & !(0x200 | 0x800) == if group { 2 } else { 1 },
+                        "invalid_simulator_contact_flags"
+                    );
+                    if group
+                        || p::optional(&payload, 82)?.is_some()
+                        || p::optional(&payload, 83)?.is_some()
+                    {
+                        ensure!(
+                            p::scalar(&payload, 82)? == u64::MAX && p::scalar(&payload, 83)? == 0,
+                            "invalid_simulator_secondary_flags"
+                        );
+                    }
+                    tx.execute("INSERT INTO thread_pins VALUES(?1,?2,?3) ON CONFLICT(account,username) DO UPDATE SET pinned=excluded.pinned",params![session.account,room,flag &0x800!=0])?;
+                    if !group {
+                        tx.execute("INSERT INTO contact_notifications VALUES(?1,?2,?3) ON CONFLICT(account,username) DO UPDATE SET muted=excluded.muted", params![session.account,room,flag & 0x200 != 0])?;
+                    }
                 }
                 4 | 7 => {} // Leave cleanup is acknowledged; cached history remains.
                 16 => {

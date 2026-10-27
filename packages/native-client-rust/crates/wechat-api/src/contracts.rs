@@ -99,6 +99,10 @@ pub struct NativeThread {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub muted: Option<bool>,
+    // Saved pin preference; null means the profile cannot establish it.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub pinned: Option<bool>,
     pub read_state_version: String,
     // Absent when local message shards are unavailable; null for empty history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,6 +232,11 @@ pub struct NativeGroupMyNameRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeThreadNotificationsRequest {
     pub muted: bool,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeThreadPinRequest {
+    pub pinned: bool,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -403,6 +412,7 @@ pub fn typescript() -> String {
         NativeGroupMembersRequest::decl(),
         NativeGroupMyNameRequest::decl(),
         NativeThreadNotificationsRequest::decl(),
+        NativeThreadPinRequest::decl(),
         NativeTombstone::decl(),
         NativePageItem::<String>::decl(),
         NativePage::<String>::decl(),
@@ -468,6 +478,39 @@ mod tests {
         thread["muted"] = serde_json::json!("false");
         assert!(serde_json::from_value::<NativeThread>(thread).is_err());
         assert!(typescript().contains("muted?: boolean | null"));
+    }
+    #[test]
+    fn thread_pin_contract_preserves_unknown_and_requires_a_boolean_desired_state() {
+        let mut thread = serde_json::json!({"id":"peer","accountId":"one","peerId":"peer","kind":"direct","displayName":null,"unreadCount":0,"readStateVersion":"v","history":{}});
+        assert!(serde_json::from_value::<NativeThread>(thread.clone())
+            .unwrap()
+            .pinned
+            .is_none());
+        for value in [Value::Null, Value::Bool(false), Value::Bool(true)] {
+            thread["pinned"] = value.clone();
+            let parsed: NativeThread = serde_json::from_value(thread.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap()["pinned"], value);
+        }
+        for value in [serde_json::json!("false"), serde_json::json!(1)] {
+            thread["pinned"] = value;
+            assert!(serde_json::from_value::<NativeThread>(thread.clone()).is_err());
+        }
+        for pinned in [false, true] {
+            let input: NativeThreadPinRequest =
+                serde_json::from_value(serde_json::json!({"pinned":pinned})).unwrap();
+            assert_eq!(input.pinned, pinned);
+        }
+        for input in [
+            serde_json::json!({}),
+            serde_json::json!({"pinned":null}),
+            serde_json::json!({"pinned":"false"}),
+            serde_json::json!({"pinned":true,"toggle":true}),
+        ] {
+            assert!(serde_json::from_value::<NativeThreadPinRequest>(input).is_err());
+        }
+        let generated = typescript();
+        assert!(generated.contains("pinned?: boolean | null"));
+        assert!(generated.contains("NativeThreadPinRequest = { pinned: boolean, }"));
     }
     #[test]
     fn wire_contract_rejects_numeric_remote_ids_and_bad_scope_shapes() {

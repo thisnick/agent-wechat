@@ -11,7 +11,7 @@ Every command prints JSON. With several accounts, add `--account ID` (or an alia
 
 ```bash
 wx chats list --limit 20                  # recent chats, with unread counts
-wx chats get CHAT_ID                     # includes muted: true, false or null
+wx chats get CHAT_ID                     # includes muted and pinned preferences
 wx chats find "Book club"                 # find a chat by name
 wx messages list CHAT_ID --limit 50       # newest first; pass --cursor to page
 wx contacts find Alice
@@ -21,6 +21,15 @@ wx groups members list 'family@chatroom'
 Chat notification preferences come from the saved profile. The daemon receives phone contact changes through its contact sync stream. `null` means missing or unresolved preference data; notification consumers should stay silent for that chat. Use `wx contacts refresh CONTACT_ID` for a manual refresh. `wx chats mute/unmute` edits direct chats and groups. Each direct edit reads the current contact first so unrelated contact fields are preserved.
 
 `filehelper` is your File Transfer chat, handy for testing. See [Manage groups](/use/groups/) for group edits and member lookup.
+
+## Pin chats
+
+```bash
+wx chats pin CHAT_ID --idempotency-key pin-001
+wx chats unpin CHAT_ID --idempotency-key unpin-001
+```
+
+Requires `admin` scope and an ordinary direct chat or active group already in the saved chat list. Each command prints an operation and receipt path. Check `remoteOutcome` and `profileProjection`; reuse the same key and arguments after a lost response. A fresh `chats list` places pinned chats first. Built-in chats such as File Transfer are not supported for pin edits.
 
 ## Send
 
@@ -95,5 +104,6 @@ wx config server use box
 - **Voice** is encoded by `wx` itself. A note can be up to 60 seconds; longer audio is split into equal notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
 - **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the 512 MiB file limit, video, image and voice limits and current validation status. Stickers can't be sent.
 - **Quoted replies are experimental.** Server acceptance and phone rendering remain unverified. Missing, recalled or mismatched sources are rejected. Only text replies accept quotes: non-whitespace text up to 16 KiB and escaped messages up to 256 KiB. Quoting media doesn't ensure it can be downloaded.
+- **Pinning a folded group unfolds it.** Built-in chats are unsupported. Folded-group behavior has offline coverage; phone checks covered an ordinary direct chat and an unfolded group.
 - **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
 </Aside>
