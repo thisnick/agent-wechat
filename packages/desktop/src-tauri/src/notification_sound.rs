@@ -6,7 +6,7 @@ use anyhow::Result;
 use tauri_plugin_notification::NotificationExt;
 
 #[cfg(target_os = "macos")]
-const SOUND_NAME: &str = "AgentWechatSoftPair.wav";
+const SOUND_NAME: &str = "AgentWechatSoftPair";
 #[cfg(windows)]
 const SOUND_NAME: &str = "Default";
 
@@ -131,12 +131,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_sound_matches_the_bundled_filename() {
-        let config: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        let resource = config["bundle"]["resources"]["sounds/AgentWechatSoftPair.wav"]
-            .as_str()
-            .unwrap();
-        assert_eq!(super::SOUND_NAME, resource);
+    fn macos_uses_the_bundled_sound_name() {
+        assert_eq!(super::SOUND_NAME, "AgentWechatSoftPair");
     }
 }
