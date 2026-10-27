@@ -70,6 +70,13 @@ and make the extension test pass without touching the frozen consumer file.
 Never regenerate a frozen consumer file. If a later release needs a newer
 baseline as well, add another frozen file beside it.
 
+The frozen file only holds messages its release could already read. When the
+daemon learns to read something an earlier release saved as unsupported, such
+as a quoted link card, the fresh read no longer matches the saved copy.
+`sameEmbeddedQuote` in `native-quote.ts` accepts a quote that moves from
+`unsupported` to `embedded` with the same source message; cover any similar
+change with a unit test, since the frozen file can't show it.
+
 ## What CI/CD Does
 
 The npm workflow waits until every configured native target, checksum manifest,

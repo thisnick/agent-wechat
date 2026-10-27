@@ -1,6 +1,12 @@
 import type { NativeMessage } from "@agent-wechat/shared";
 
 export function sameEmbeddedQuote(stored: NonNullable<NativeMessage["quote"]>, current: NonNullable<NativeMessage["quote"]>): boolean {
+  // An input saved while the daemon couldn't read this quote type was rendered
+  // as "[Quoted message unsupported]". A later daemon that reads the same
+  // source message changes only its own rendering, not the saved input.
+  if (stored.state === "unsupported" && current.state === "embedded")
+    return (["serverId", "type", "appMessageType", "senderId", "direction"] as const)
+      .every(field => (stored[field] ?? null) === (current[field] ?? null));
   const compared = { ...current };
   // Older queued inputs do not consume these additive display fields. Keep
   // comparing every field they did receive; never replace their saved excerpt.
