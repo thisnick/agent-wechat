@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { NativeWeChatClient } from "../packages/shared/src/native-client.ts";
+import { assertSameUnavailableMedia } from "./native-ci-media-assertions.mjs";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = process.env.WX_DEV_BINARY ?? join(repository, "packages/native-client-rust/target/debug", process.platform === "win32" ? "wx-dev.exe" : "wx-dev");
@@ -250,12 +251,10 @@ try {
   const media = await a.mediaAssets("personal", image.id);
   const batch = await a.mediaAssetsBatch("personal", [image.id, "invalid-message-id"]);
   assert.equal(batch.items[0].messageId, image.id);
-  assert.deepEqual(batch.items[0].assets, media.items);
+  assertSameUnavailableMedia(batch.items[0].assets, media.items);
   assert.equal(batch.items[1].messageId, "invalid-message-id");
   assert.ok(batch.items[1].error);
   assert.deepEqual(batch.items[1].assets, []);
-  assert.ok(media.items.length > 0);
-  assert.ok(media.items.every(asset => asset.state !== "available" && asset.sha256 === null));
   const candidate = media.items.find(asset => asset.state !== "unsupported");
   if (candidate) {
     const transfer = await a.transferMedia("personal", { messageId: image.id, assetId: candidate.id, quality: candidate.variant });
