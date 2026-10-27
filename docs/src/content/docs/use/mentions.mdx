@@ -1,0 +1,86 @@
+---
+title: Mention group members
+description: Send group mentions from the CLI or API and read received mention metadata.
+---
+
+Use WeChat user IDs to mention group members. The daemon adds the visible names and
+the metadata WeChat uses to identify the recipients. Typing `@name` in ordinary
+text does not create a mention.
+
+## CLI
+
+1. Find the member's ID with `wx groups members list GROUP_ID`.
+2. Send an ordinary text message:
+
+   ```bash
+   wx messages send GROUP_ID --text "Please check this" \
+     --mention MEMBER_ID --idempotency-key mention-001
+   ```
+
+   The command prints a send ID, its `state`, and a `receiptPath`. An accepted
+   message appears as `@Member Name` followed by your text. Repeat `--mention`
+   for several members; their names appear in the supplied order.
+3. To address everyone, use `--mention-all` instead of individual IDs:
+
+   ```bash
+   wx messages send GROUP_ID --text "Meeting starts now" --mention-all
+   ```
+
+   WeChat decides whether your account may mention everyone in that group.
+
+## API and SDK
+
+Submit to `POST /v1/accounts/ACCOUNT_ID/sends` with an `Idempotency-Key` header:
+
+```json
+{
+  "threadId": "GROUP_ID",
+  "text": "Please check this",
+  "mentions": { "userIds": ["MEMBER_ID"] }
+}
+```
+
+Use `"mentions": { "all": true }` for everyone. These options cannot be combined.
+The response is the normal send receipt; check progress with `GET /sends/SEND_ID`.
+
+```ts
+await client.sendText(accountId, groupId, "Please check this", "mention-001", {
+  mentions: { userIds: [memberId] },
+});
+```
+
+Names come from the saved group display name or nickname, with the account ID as
+a fallback. Private contact remarks are not included. The daemon keeps the
+resolved names and metadata with the original send, so replaying its key uses
+the same message even if a name changes.
+
+## Receive mentions
+
+Message GET/list responses include:
+
+```json
+{
+  "mentions": {
+    "state": "known",
+    "userIds": ["MEMBER_ID"],
+    "self": true,
+    "all": false,
+    "source": "msgsource.atuserlist"
+  }
+}
+```
+
+`self` means your account ID is listed; `all` means everyone is mentioned.
+All-members markers are separate from `userIds`. Missing or malformed metadata
+returns `state: "unknown"` and nullable flags. Fetch the message referenced by
+a `message.committed` event to read these facts. OpenClaw's group mention gate
+accepts either a known self mention or a known all-members mention.
+
+:::note[Good to know]
+Mentions currently support ordinary text in groups already saved on the daemon.
+Unknown member IDs, duplicate IDs, direct chats, quoted replies and media
+payloads are rejected. The daemon prepends mention tokens; it does not place
+them inside your text. The complete message, including those names, must fit
+within the 64 KiB text limit. Keep the original send key after a timeout; see
+[Sends and recovery](/how-it-works/sends/).
+:::

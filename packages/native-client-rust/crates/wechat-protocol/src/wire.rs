@@ -502,17 +502,31 @@ pub fn text_send_request(
     created_at: u32,
     client_id: u32,
 ) -> Result<Vec<u8>> {
+    text_send_request_with_source(destination, content, created_at, client_id, None)
+}
+
+pub fn text_send_request_with_source(
+    destination: &str,
+    content: &str,
+    created_at: u32,
+    client_id: u32,
+    source: Option<&str>,
+) -> Result<Vec<u8>> {
     ensure!(
         created_at > 0 && client_id > 0,
         "Invalid send timestamp/client ID"
     );
-    let item = p::message(&[
+    let mut fields = vec![
         p::bytes(1, &p::bytes(1, text(destination, 256, false)?)),
         p::bytes(2, text(content, 64 * 1024, false)?),
         p::uint(3, 1),
         p::uint(4, created_at as u64),
         p::uint(5, client_id as u64),
-    ])?;
+    ];
+    if let Some(source) = source.filter(|value| !value.is_empty()) {
+        fields.push(p::bytes(6, text(source, 256 * 1024, false)?));
+    }
+    let item = p::message(&fields)?;
     p::message(&[p::uint(1, 1), p::bytes(2, &item)])
 }
 /// Native SuperFastHash of the persisted task client-ID string. Tail bytes have
@@ -1262,6 +1276,29 @@ mod tests {
         ] {
             assert_eq!(client_message_id(&data), expected);
         }
+    }
+    #[test]
+    fn text_source_is_optional_length_delimited_item_field_six() {
+        let request = text_send_request_with_source("r", "x", 1, 2, Some("<msgsource/>")).unwrap();
+        // One outer item; its nested destination is field 1, scalars 3/4/5
+        // remain varints, and the source uses tag 0x32 (field 6, wire 2).
+        assert_eq!(
+            hex::encode(request),
+            "0801121c0a030a0172120178180120012802320c3c6d7367736f757263652f3e"
+        );
+        let plain = text_send_request("r", "x", 1, 2).unwrap();
+        assert_eq!(
+            plain,
+            text_send_request_with_source("r", "x", 1, 2, None).unwrap()
+        );
+        assert_eq!(
+            plain,
+            text_send_request_with_source("r", "x", 1, 2, Some("")).unwrap()
+        );
+        assert!(
+            text_send_request_with_source("r", "x", 1, 2, Some(&"x".repeat(256 * 1024 + 1)))
+                .is_err()
+        );
     }
     #[test]
     fn addmsg_preserves_numbered_fields_and_opaque_source() {

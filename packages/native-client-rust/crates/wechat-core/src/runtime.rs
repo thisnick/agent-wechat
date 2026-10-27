@@ -180,6 +180,14 @@ struct SendPayload {
     share: Option<crate::ShareSendRequest>,
     #[serde(default)]
     quote: Option<crate::quote_send::ResolvedQuote>,
+    #[serde(default)]
+    mentions: Option<crate::mention_send::ResolvedMentions>,
+}
+#[derive(Default)]
+struct SendOptions {
+    share: Option<crate::ShareSendRequest>,
+    quote: Option<crate::QuoteSendReference>,
+    mentions: Option<crate::TextMentions>,
 }
 #[path = "recall_send_author.rs"]
 mod recall_send_author;
@@ -1113,8 +1121,29 @@ impl Core {
         destination: &str,
         text: &str,
     ) -> Result<SendIntent> {
-        self.queue_message_send(account, key, destination, text, None, None)
+        self.queue_message_send(account, key, destination, text, SendOptions::default())
             .await
+    }
+    pub async fn send_mentioned_text(
+        self: &Arc<Self>,
+        account: &str,
+        key: &str,
+        destination: &str,
+        text: &str,
+        mentions: crate::TextMentions,
+    ) -> Result<SendIntent> {
+        mentions.validate()?;
+        self.queue_message_send(
+            account,
+            key,
+            destination,
+            text,
+            SendOptions {
+                mentions: Some(mentions),
+                ..Default::default()
+            },
+        )
+        .await
     }
     pub async fn send_share(
         self: &Arc<Self>,
@@ -1126,8 +1155,17 @@ impl Core {
         let state = self.account_state(account)?;
         request.xml(&state.own_username)?;
         let destination = request.destination().to_owned();
-        self.queue_message_send(account, key, &destination, "", Some(request), None)
-            .await
+        self.queue_message_send(
+            account,
+            key,
+            &destination,
+            "",
+            SendOptions {
+                share: Some(request),
+                ..Default::default()
+            },
+        )
+        .await
     }
     pub async fn send_quoted_text(
         self: &Arc<Self>,
@@ -1138,8 +1176,17 @@ impl Core {
         quote: crate::QuoteSendReference,
     ) -> Result<SendIntent> {
         quote.validate()?;
-        self.queue_message_send(account, key, destination, text, None, Some(quote))
-            .await
+        self.queue_message_send(
+            account,
+            key,
+            destination,
+            text,
+            SendOptions {
+                quote: Some(quote),
+                ..Default::default()
+            },
+        )
+        .await
     }
     async fn queue_message_send(
         self: &Arc<Self>,
@@ -1147,18 +1194,22 @@ impl Core {
         key: &str,
         destination: &str,
         text: &str,
-        share: Option<crate::ShareSendRequest>,
-        quote: Option<crate::QuoteSendReference>,
+        options: SendOptions,
     ) -> Result<SendIntent> {
+        let SendOptions {
+            share,
+            quote,
+            mentions,
+        } = options;
         let gate = self.gate(account)?;
-        let _guard = if quote.is_some() {
+        let _guard = if quote.is_some() || mentions.is_some() {
             Some(gate.lock().await)
         } else {
             None
         };
         // A replay uses the sealed reference even if the profile row was later
         // removed or changed. It must never create a second submission.
-        if let Some(reference) = &quote {
+        if quote.is_some() || mentions.is_some() {
             if let Ok(prior) = self.store.send_by_key(account, key) {
                 let sealed = self.store.send_payload(account, &prior.id)?;
                 let old: SendPayload = serde_json::from_slice(&self.vault.open_record(
@@ -1169,7 +1220,8 @@ impl Core {
                 if old.thread_id != destination
                     || old.text != text
                     || old.share.is_some()
-                    || old.quote.as_ref().map(|q| &q.target) != Some(reference)
+                    || old.quote.as_ref().map(|q| &q.target) != quote.as_ref()
+                    || old.mentions.as_ref().map(|m| &m.request) != mentions.as_ref()
                 {
                     bail!("idempotency_conflict");
                 }
@@ -1205,6 +1257,18 @@ impl Core {
                 .as_ref()
                 .map(|q| self.resolve_quote(account, destination, text, q, &state.own_username))
                 .transpose()?,
+            mentions: mentions
+                .as_ref()
+                .map(|request| {
+                    self.resolve_mentions(
+                        account,
+                        destination,
+                        text,
+                        request.clone(),
+                        &state.own_username,
+                    )
+                })
+                .transpose()?,
         };
         let hash = format!(
             "{:x}",
@@ -1214,7 +1278,12 @@ impl Core {
                     Some(reference) => serde_json::to_vec(
                         &json!({"threadId":destination,"text":text,"quote":reference})
                     )?,
-                    None => serde_json::to_vec(&json!({"threadId":destination,"text":text}))?,
+                    None => match &mentions {
+                        Some(request) => serde_json::to_vec(
+                            &json!({"threadId":destination,"text":text,"mentions":request})
+                        )?,
+                        None => serde_json::to_vec(&json!({"threadId":destination,"text":text}))?,
+                    },
                 },
             })
         );
@@ -1330,6 +1399,22 @@ impl Core {
                         correlated: result.client_id_matches == Some(true),
                         server_message_id: result.server_message_id,
                     })
+            } else if let Some(mentions) = &payload.mentions {
+                native
+                    .send_text_with_source(
+                        &mut state,
+                        &payload.thread_id,
+                        &mentions.text,
+                        payload.created_at,
+                        payload.client_id,
+                        &mentions.source,
+                    )
+                    .map(|result| SendReceipt {
+                        accepted: result.accepted,
+                        correlated: result.returned_destination_matches
+                            && result.returned_client_id_matches,
+                        server_message_id: result.server_message_id,
+                    })
             } else {
                 native
                     .send_text(
@@ -1416,6 +1501,15 @@ impl Core {
                 49,
                 &content,
                 "[Link]",
+                u64::from(payload.created_at),
+                server,
+                &receipt,
+            )?
+        } else if let Some(mentions) = &payload.mentions {
+            self.project_accepted_text_source(
+                account,
+                &payload.thread_id,
+                (&mentions.text, &mentions.source),
                 u64::from(payload.created_at),
                 server,
                 &receipt,
@@ -2601,6 +2695,176 @@ mod tests {
             core.message("one", messages["items"][0]["id"].as_str().unwrap())
                 .unwrap()["direction"],
             "incoming"
+        );
+    }
+    #[tokio::test]
+    async fn mentioned_text_freezes_names_replays_and_projects_official_source() {
+        use wechat_profile::{ContactProjection, GroupProjection, RawFields, SqlValue};
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        let mut accepted = state();
+        accepted.database_password = vec![7; 32];
+        accepted.key_info = vec![8; 32];
+        accepted.auto_auth_key = wechat_protocol::protobuf::message(&[
+            wechat_protocol::protobuf::bytes(1, &wechat_protocol::protobuf::buffer(&[1; 16])),
+            wechat_protocol::protobuf::bytes(2, &wechat_protocol::protobuf::buffer(&[2; 16])),
+        ])
+        .unwrap();
+        core.install_login_state("one", &accepted, None).unwrap();
+        core.ensure_managed_profile("one", &accepted).unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        core.stopping.store(true, Ordering::SeqCst);
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        let options = core.write_options("one", "mention-roster").unwrap();
+        let contact = |name: &str| ContactProjection {
+            username: "member_a".into(),
+            fields: RawFields::from([
+                ("nick_name".into(), SqlValue::Text(name.into())),
+                (
+                    "remark".into(),
+                    SqlValue::Text("Private remark must stay private".into()),
+                ),
+            ]),
+        };
+        wechat_profile::apply_contact_patch(&location, &keys, &contact("Member A"), &options)
+            .unwrap();
+        for username in ["synthetic_self", "room@chatroom"] {
+            wechat_profile::apply_contact_patch(
+                &location,
+                &keys,
+                &ContactProjection {
+                    username: username.into(),
+                    fields: RawFields::new(),
+                },
+                &options,
+            )
+            .unwrap();
+        }
+        wechat_profile::apply_group_patch(
+            &location,
+            &keys,
+            &GroupProjection {
+                username: "room@chatroom".into(),
+                fields: RawFields::new(),
+                detail_fields: None,
+                members: vec!["synthetic_self".into(), "member_a".into()],
+                complete_roster: false,
+            },
+            &options,
+        )
+        .unwrap();
+        let request = crate::TextMentions {
+            user_ids: vec!["member_a".into()],
+            all: false,
+        };
+        let first = core
+            .send_mentioned_text(
+                "one",
+                "mention-key",
+                "room@chatroom",
+                "hello",
+                request.clone(),
+            )
+            .await
+            .unwrap();
+        let sealed = store.send_payload("one", &first.id).unwrap();
+        assert!(!sealed.windows(8).any(|w| w == b"Member A"));
+        let payload: SendPayload = serde_json::from_slice(
+            &core
+                .vault
+                .open_record("one", "send-payload", &sealed)
+                .unwrap(),
+        )
+        .unwrap();
+        let resolved = payload.mentions.unwrap();
+        assert_eq!(resolved.text, "@Member A\u{2005}hello");
+        assert!(!resolved.text.contains("Private"));
+        wechat_profile::apply_contact_patch(&location, &keys, &contact("Changed name"), &options)
+            .unwrap();
+        assert_eq!(
+            core.send_mentioned_text(
+                "one",
+                "mention-key",
+                "room@chatroom",
+                "hello",
+                request.clone()
+            )
+            .await
+            .unwrap()
+            .id,
+            first.id
+        );
+        assert_eq!(store.send_payload("one", &first.id).unwrap(), sealed);
+        assert!(core
+            .send_mentioned_text(
+                "one",
+                "mention-key",
+                "room@chatroom",
+                "changed",
+                request.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(core
+            .send_text("one", "mention-key", "room@chatroom", "hello")
+            .await
+            .is_err());
+        assert!(core
+            .send_mentioned_text("one", "dm", "peer", "hello", request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("mentions_require_group"));
+        assert!(core
+            .send_mentioned_text(
+                "one",
+                "absent",
+                "room@chatroom",
+                "hello",
+                crate::TextMentions {
+                    user_ids: vec!["not_a_member".into()],
+                    all: false
+                }
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("mention_member_unavailable"));
+        assert!(store.claim_send("one", &first.id).unwrap());
+        store
+            .update_send("one", &first.id, "accepted", Some("456"), None)
+            .unwrap();
+        core.project_message_send("one", &first.id).unwrap();
+        core.project_message_send("one", &first.id).unwrap();
+        let row = core
+            .profile_reader("one")
+            .unwrap()
+            .messages_by_server_id("room@chatroom", "456", Some("synthetic_self"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.content.text.as_deref(), Some(resolved.text.as_str()));
+        assert_eq!(row.source.text.as_deref(), Some(resolved.source.as_str()));
+        assert_eq!(
+            crate::mentions(row.source.text.as_deref(), Some("member_a"))["self"],
+            true
+        );
+        assert_eq!(
+            store
+                .events("one", 0, 200)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "message.committed")
+                .count(),
+            1
         );
     }
     #[tokio::test]

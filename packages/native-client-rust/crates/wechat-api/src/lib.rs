@@ -133,6 +133,9 @@ impl From<anyhow::Error> for ApiError {
             "invalid_group_idempotency_key",
             "invalid_quote_reference",
             "invalid_quote_request",
+            "invalid_mentions",
+            "invalid_mention_text",
+            "mentions_require_group",
             "unsupported_quote_type",
         ] {
             if message == code {
@@ -152,6 +155,8 @@ impl From<anyhow::Error> for ApiError {
             "quote_target_ambiguous",
             "quote_content_unavailable",
             "quote_sender_unavailable",
+            "mention_member_unavailable",
+            "mention_group_membership_unavailable",
         ] {
             if message == code {
                 return Self(StatusCode::CONFLICT, code);
@@ -971,6 +976,8 @@ struct TextSend {
     text: String,
     #[serde(default)]
     quote: Option<wechat_core::QuoteSendReference>,
+    #[serde(default)]
+    mentions: Option<wechat_core::TextMentions>,
 }
 fn idempotency_key(headers: &HeaderMap) -> ApiResult<&str> {
     let key = headers

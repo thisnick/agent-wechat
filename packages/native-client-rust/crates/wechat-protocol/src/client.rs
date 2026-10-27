@@ -964,7 +964,31 @@ impl NativeClient {
         created_at: u32,
         client_message_id: u32,
     ) -> Result<TextSendResult> {
-        let request = wire::text_send_request(destination, content, created_at, client_message_id)?;
+        self.send_text_with_source(
+            state,
+            destination,
+            content,
+            created_at,
+            client_message_id,
+            None,
+        )
+    }
+    pub fn send_text_with_source(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        content: &str,
+        created_at: u32,
+        client_message_id: u32,
+        source: Option<&str>,
+    ) -> Result<TextSendResult> {
+        let request = wire::text_send_request_with_source(
+            destination,
+            content,
+            created_at,
+            client_message_id,
+            source,
+        )?;
         wire::decode_text_send(
             &self.authenticated_rpc(state, 522, "/cgi-bin/micromsg-bin/newsendmsg", &request)?,
             destination,

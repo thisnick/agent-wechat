@@ -153,6 +153,24 @@ test('quoted text preserves exact source IDs and rejects invalid references befo
   await assert.rejects(lost.sendText('a','room@chatroom','Reply','same-key',quote),/lost response/);
   assert.equal(attempts,1);
 });
+test('text mention options preserve member IDs and reject ambiguous requests before transport', async () => {
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{requests.push(init);return Response.json({id:'mention-send',state:'queued'});}});
+  await client.sendText('a','room@chatroom','Hello','mention-key',{mentions:{userIds:['member_a','member_b']}});
+  assert.deepEqual(JSON.parse(requests[0].body),{kind:'text',threadId:'room@chatroom',text:'Hello',mentions:{userIds:['member_a','member_b']}});
+  assert.equal(requests[0].headers.get('Idempotency-Key'),'mention-key');
+  await client.sendText('a','room@chatroom','Hello','all-key',{mentions:{all:true}});
+  for(const mentions of [null,{},[],{all:false},{all:true,userIds:['a']},{all:'true'},{userIds:['a','a']},{userIds:['a,b']},{userIds:['notify@all']},{userIds:['<self>']},{userIds:['a'],source:'xml'}]) {
+    assert.throws(()=>client.sendText('a','room@chatroom','Hello','key',{mentions}),/Invalid text mentions/);
+  }
+  assert.throws(()=>client.sendText('a','peer','Hello','key',{mentions:{userIds:['a']}}),/Invalid text mentions/);
+  assert.throws(()=>client.sendText('a','room@chatroom','Hello','key',{mentions:{all:true},quote:{messageId:'m',serverId:'1'}}),/Invalid text mentions/);
+  assert.equal(requests.length,2);
+  let attempts=0;
+  const lost=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('lost response');}});
+  await assert.rejects(lost.sendText('a','room@chatroom','Hello','key',{mentions:{userIds:['a']}}),/lost response/);
+  assert.equal(attempts,1);
+});
 
 test('recall sends an exact decimal identity and caller key once without cancelling its operation', async () => {
   const requests=[];

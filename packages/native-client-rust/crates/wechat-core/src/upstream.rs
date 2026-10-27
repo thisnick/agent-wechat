@@ -181,6 +181,25 @@ pub trait Upstream: Send + Sync {
             client_message_id,
         )
     }
+    fn send_text_with_source(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        content: &str,
+        created_at: u32,
+        client_message_id: u32,
+        source: &str,
+    ) -> Result<TextSendResult> {
+        self.native(NativeOptions::default())?
+            .send_text_with_source(
+                state,
+                destination,
+                content,
+                created_at,
+                client_message_id,
+                Some(source),
+            )
+    }
     fn send_quote(
         &self,
         state: &mut AccountState,

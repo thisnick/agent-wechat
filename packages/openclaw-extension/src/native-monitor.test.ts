@@ -34,10 +34,22 @@ function fixture(t: any, options: { group?: boolean; mention?: boolean; origin?:
 test("structured self mentions use exact facts, unknown and display text do not activate", t => {
   const value = fixture(t); value.message.body = "@Self Name fixture"; assert.equal(nativeWasMentioned(value.message), false);
   value.message.mentions = { state: "known", userIds: ["different"], self: false, all: null, source: "msgsource.atuserlist" }; assert.equal(nativeWasMentioned(value.message), false);
+  value.message.mentions.all = true; assert.equal(nativeWasMentioned(value.message), true);
+  value.message.mentions.state = "unknown"; assert.equal(nativeWasMentioned(value.message), false);
 });
 test("group mention gate runs before model dispatch and leaves ignored messages unread", async t => {
   const value = fixture(t, { group: true }); assert.equal(await dispatchNativeMessage(value), "ignored");
   assert.equal(value.runs.length, 0); assert.equal(value.state.get("m1")?.readPending, undefined);
+});
+test("a known all-members mention satisfies the group gate without a direct self mention", async t => {
+  const value = fixture(t, { group: true, mention: false });
+  value.message.mentions.state = "known";
+  value.message.mentions.source = "msgsource.atuserlist";
+  value.message.mentions.all = true;
+  value.state.accept("2", value.message, "live");
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  assert.equal(value.runs.length, 1);
+  assert.equal(value.runs[0].ctx.WasMentioned, true);
 });
 test("prepared model harness records exact input custody and read projection separately", async t => {
   const value = fixture(t, { readPolicy: "on_model_dispatch" }); assert.equal(await dispatchNativeMessage(value), "completed");

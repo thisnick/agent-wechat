@@ -72,7 +72,7 @@ test("normalizeWeChatCommandBody strips leading mentions before slash commands i
     }),
     "@agent /compact",
   );
-  // Multi-word agent name with hair space separator
+  // Multi-word agent name with mention separator separator
   assert.equal(
     normalizeWeChatCommandBody("@Agent Name\u2005/compact", {
       isGroup: true,
@@ -96,7 +96,7 @@ test("normalizeWeChatCommandBody strips leading mentions before slash commands i
     }),
     "/status",
   );
-  // No hair space — no stripping (not a real WeChat mention)
+  // No mention separator — no stripping (not a real WeChat mention)
   assert.equal(
     normalizeWeChatCommandBody("@Agent Name /compact", {
       isGroup: true,

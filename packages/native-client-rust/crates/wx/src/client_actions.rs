@@ -552,6 +552,8 @@ pub async fn send(
     text: Option<String>,
     quote_message_id: Option<String>,
     quote_server_id: Option<String>,
+    mention: Vec<String>,
+    mention_all: bool,
     image: Option<PathBuf>,
     file: Option<PathBuf>,
     video: Option<PathBuf>,
@@ -561,6 +563,23 @@ pub async fn send(
     detach: bool,
     wait: u64,
 ) -> Result<Value> {
+    let mentions = if mention_all || !mention.is_empty() {
+        if text.is_none()
+            || quote_message_id.is_some()
+            || quote_server_id.is_some()
+            || !thread.ends_with("@chatroom")
+        {
+            bail!("mentions require ordinary group --text without quote flags");
+        }
+        let mentions = wechat_core::TextMentions {
+            user_ids: mention,
+            all: mention_all,
+        };
+        mentions.validate()?;
+        Some(mentions)
+    } else {
+        None
+    };
     let quote = match (quote_message_id, quote_server_id) {
         (None, None) => None,
         (Some(message_id), Some(server_id)) => {
@@ -608,10 +627,15 @@ pub async fn send(
         if text.is_empty() {
             bail!("message text cannot be empty");
         }
-        let bytes = if let Some(reference) = &quote {
-            serde_json::to_vec(&json!({
-                "kind":"text", "threadId":thread, "text":text, "quote":reference
-            }))?
+        let bytes = if quote.is_some() || mentions.is_some() {
+            let mut body = json!({"kind":"text", "threadId":thread, "text":text});
+            if let Some(reference) = &quote {
+                body["quote"] = serde_json::to_value(reference)?;
+            }
+            if let Some(mentions) = &mentions {
+                body["mentions"] = serde_json::to_value(mentions)?;
+            }
+            serde_json::to_vec(&body)?
         } else {
             text.into_bytes()
         };
@@ -675,11 +699,13 @@ pub async fn send(
             r.request(
                 reqwest::Method::POST,
                 &r.path("sends")?,
-                Some(if kind == "share" || quote.is_some() {
-                    serde_json::from_slice(&bytes)?
-                } else {
-                    json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?})
-                }),
+                Some(
+                    if kind == "share" || quote.is_some() || mentions.is_some() {
+                        serde_json::from_slice(&bytes)?
+                    } else {
+                        json!({"threadId":thread,"text":std::str::from_utf8(&bytes)?})
+                    },
+                ),
                 Some(&key),
             )
             .await
@@ -977,6 +1003,33 @@ mod tests {
     }
 
     #[test]
+    fn mention_flags_require_plain_text_and_keep_all_separate() {
+        let base = ["wx", "messages", "send", "room@chatroom"];
+        for valid in [
+            vec!["--text", "Hello", "--mention", "a", "--mention", "b"],
+            vec!["--text", "Hello", "--mention-all"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(valid)).is_ok());
+        }
+        for invalid in [
+            vec!["--mention", "a"],
+            vec!["--image", "image.png", "--mention", "a"],
+            vec!["--text", "Hello", "--mention", "a", "--mention-all"],
+            vec![
+                "--text",
+                "Hello",
+                "--mention",
+                "a",
+                "--quote-message-id",
+                "m",
+                "--quote-server-id",
+                "1",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(invalid)).is_err());
+        }
+    }
+    #[test]
     fn quote_flags_require_both_ids_and_a_text_payload() {
         let base = ["wx", "messages", "send", "peer", "--text", "Reply"];
         let valid = [
@@ -1067,6 +1120,8 @@ mod tests {
                 Some("Reply".into()),
                 Some(message.into()),
                 Some(server.into()),
+                vec![],
+                false,
                 None,
                 None,
                 None,
@@ -1254,6 +1309,8 @@ mod tests {
                 None,
                 None,
                 None,
+                vec![],
+                false,
                 (kind == "image").then(|| path.clone()),
                 None,
                 (kind == "video").then(|| path.clone()),

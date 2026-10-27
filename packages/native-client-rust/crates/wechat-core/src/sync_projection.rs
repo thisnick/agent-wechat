@@ -1059,8 +1059,27 @@ impl Core {
         server_message_id: &str,
         receipt: &str,
     ) -> Result<wechat_profile::SourceMessageId> {
+        self.project_accepted_text_source(
+            account,
+            destination,
+            (text, "<msgsource><alnode><fr>1</fr></alnode></msgsource>"),
+            created_at,
+            server_message_id,
+            receipt,
+        )
+    }
+    pub(crate) fn project_accepted_text_source(
+        &self,
+        account: &str,
+        destination: &str,
+        text_source: (&str, &str),
+        created_at: u64,
+        server_message_id: &str,
+        receipt: &str,
+    ) -> Result<wechat_profile::SourceMessageId> {
+        let (text, source_xml) = text_source;
         identity(destination)?;
-        if text.is_empty() || text.len() > 64 * 1024 {
+        if text.is_empty() || text.len() > 64 * 1024 || source_xml.len() > 256 * 1024 {
             bail!("invalid_accepted_text")
         }
         let options = self.write_options(account, receipt)?;
@@ -1094,7 +1113,12 @@ impl Core {
                 .is_none()
                 && (existing.message_type != 1
                     || existing.sender.as_deref() != Some(&state.own_username)
-                    || existing.content.text.as_deref() != Some(text))
+                    || existing.content.text.as_deref() != Some(text)
+                    || (source_xml.contains("<atuserlist>")
+                        && crate::mentions(
+                            existing.source.text.as_deref(),
+                            Some(&state.own_username),
+                        ) != crate::mentions(Some(source_xml), Some(&state.own_username))))
             {
                 bail!("accepted_message_identity_conflict")
             }
@@ -1124,10 +1148,7 @@ impl Core {
                 fields.insert(k.into(), SqlValue::Integer(n.to_string()));
             }
             fields.insert("message_content".into(), SqlValue::Text(text.into()));
-            fields.insert(
-                "source".into(),
-                SqlValue::Text("<msgsource><alnode><fr>1</fr></alnode></msgsource>".into()),
-            );
+            fields.insert("source".into(), SqlValue::Text(source_xml.into()));
             fields.insert("compress_content".into(), SqlValue::Text(String::new()));
             wechat_profile::apply_message_projection(
                 &location,
@@ -2274,6 +2295,7 @@ mod encrypted_roundtrip {
             client_id: 123,
             share: Some(share),
             quote: None,
+            mentions: None,
         };
         let sealed = core
             .vault

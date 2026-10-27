@@ -173,6 +173,7 @@ mod tests {
             client_id: 42,
             share: None,
             quote: None,
+            mentions: None,
         };
         let encrypted = core
             .vault
@@ -317,6 +318,7 @@ mod tests {
                     }
                 }),
                 quote: None,
+                mentions: None,
             };
             let encrypted = if changed == "cipher" {
                 b"invalid ciphertext".to_vec()

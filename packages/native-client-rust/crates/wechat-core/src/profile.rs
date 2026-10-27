@@ -51,6 +51,15 @@ pub fn mentions(source: Option<&str>, own: Option<&str>) -> Value {
     if lists.len() > 1 {
         return unknown();
     }
+    if lists
+        .iter()
+        .any(|n| n.children().any(|child| child.is_element()))
+        || doc
+            .descendants()
+            .any(|n| n.ancestors().take(65).count() > 64)
+    {
+        return unknown();
+    }
     let raw = lists.first().and_then(|n| n.text()).unwrap_or("");
     let ids: Vec<_> = raw
         .split(',')
@@ -64,7 +73,13 @@ pub fn mentions(source: Option<&str>, own: Option<&str>) -> Value {
     {
         return unknown();
     }
-    json!({"state":"known","userIds":ids,"self":own.map(|own|ids.contains(&own)),"all":null,"source":"msgsource.atuserlist"})
+    let all = ids.contains(&"notify@all");
+    let users: Vec<_> = ids
+        .iter()
+        .copied()
+        .filter(|id| *id != "notify@all")
+        .collect();
+    json!({"state":"known","userIds":users,"self":own.map(|own|users.contains(&own)),"all":all,"source":"msgsource.atuserlist"})
 }
 impl Core {
     pub fn profile_location_keys(&self, account: &str) -> Result<(ProfileLocation, KeyFile)> {
@@ -334,7 +349,17 @@ mod tests {
             mentions(Some("<!DOCTYPE x><msgsource/>"), Some("self"))["state"],
             "unknown"
         );
-        assert!(mentions(Some("<msgsource/>"), Some("self"))["all"].is_null());
+        assert_eq!(mentions(Some("<msgsource/>"), Some("self"))["all"], false);
+        let all = mentions(
+            Some("<msgsource><atuserlist>notify@all,other</atuserlist></msgsource>"),
+            Some("self"),
+        );
+        assert_eq!(all["all"], true);
+        assert_eq!(all["self"], false);
+        assert_eq!(all["userIds"], json!(["other"]));
+        for invalid in ["<msgsource><atuserlist>self<x/></atuserlist></msgsource>", "<msgsource><atuserlist>self</atuserlist><atuserlist>notify@all</atuserlist></msgsource>"] {
+            assert_eq!(mentions(Some(invalid), Some("self"))["state"], "unknown");
+        }
     }
     #[test]
     fn message_ids_preserve_full_scoped_decimal_values() {

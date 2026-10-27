@@ -16,7 +16,7 @@ import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
 import type { WeChatMonitorOptions } from "./types.js";
 export function nativeWasMentioned(message: NativeMessage): boolean {
   // Unknown/malformed direct metadata and displayed @names never satisfy a gate.
-  return message.mentions?.state === "known" && message.mentions.self === true;
+  return message.mentions?.state === "known" && (message.mentions.self === true || message.mentions.all === true);
 }
 export async function projectNativeRead(client: NativeWeChatClient, accountId: string, state: NativeConsumerState): Promise<void> {
   const pending = state.items().filter(value => value.readPending);

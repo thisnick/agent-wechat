@@ -69,6 +69,7 @@ export default defineConfig({
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
           { label: 'Manage groups', slug: 'use/groups' },
+          { label: 'Mention group members', slug: 'use/mentions' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Settings', slug: 'use/settings' },
           { label: 'Video and image quality', slug: 'use/quality' },

@@ -127,13 +127,13 @@ export function normalizeWeChatCommandBody(
   if (!prefix) {
     return trimmed.slice(commandStart).trimStart();
   }
-  // WeChat terminates each @-mention with a hair space (U+2005).
-  // Split on hair space to preserve spaces within display names
+  // WeChat terminates each @-mention with a four-per-em space (U+2005).
+  // Split on mention separator to preserve spaces within display names
   // (e.g. "@Agent Name\u2005" is a single mention token).
-  // The hair space may be within rawPrefix (between multiple mentions)
+  // The mention separator may be within rawPrefix (between multiple mentions)
   // or at trimmed[commandStart] (between last mention and the command).
-  const hasHairSpace = rawPrefix.includes("\u2005") || trimmed[commandStart] === "\u2005";
-  if (!hasHairSpace) {
+  const hasMentionSeparator = rawPrefix.includes("\u2005") || trimmed[commandStart] === "\u2005";
+  if (!hasMentionSeparator) {
     return trimmed;
   }
   const mentionRegion = rawPrefix + (trimmed[commandStart] === "\u2005" ? "\u2005" : "");

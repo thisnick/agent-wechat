@@ -352,6 +352,9 @@ pub struct NativeTextSendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub quote: Option<wechat_core::QuoteSendReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mentions: Option<wechat_core::TextMentions>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -444,6 +447,7 @@ pub fn typescript() -> String {
         NativeAccountRemovalRequest::decl(),
         NativeAccountRemoval::decl(),
         wechat_core::QuoteSendReference::decl(),
+        wechat_core::TextMentions::decl(),
         NativeTextSendRequest::decl(),
         wechat_core::ShareSendRequest::decl(),
         NativeRecallRequest::decl(),
@@ -597,6 +601,33 @@ mod tests {
         assert!(
             generated.contains("type QuoteSendReference = { messageId: string, serverId: string,")
         );
+    }
+    #[test]
+    fn text_mentions_contract_has_optional_fields_without_accepting_raw_source() {
+        for mentions in [
+            serde_json::json!({"userIds":["member_a"]}),
+            serde_json::json!({"all":true}),
+        ] {
+            let body =
+                serde_json::json!({"threadId":"room@chatroom","text":"Hello","mentions":mentions});
+            let parsed: NativeTextSendRequest = serde_json::from_value(body.clone()).unwrap();
+            parsed.mentions.as_ref().unwrap().validate().unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), body);
+        }
+        for invalid in [
+            serde_json::json!({"userIds":"a"}),
+            serde_json::json!({"all":"true"}),
+            serde_json::json!({"userIds":["a"],"source":"xml"}),
+        ] {
+            assert!(serde_json::from_value::<NativeTextSendRequest>(
+                serde_json::json!({"threadId":"room@chatroom","text":"Hello","mentions":invalid})
+            )
+            .is_err());
+        }
+        let generated = typescript();
+        assert!(generated.contains("mentions?: TextMentions"));
+        assert!(generated.contains("userIds?: Array<string>"));
+        assert!(generated.contains("all?: boolean"));
     }
     #[test]
     fn text_send_contract_preserves_both_quote_ids_and_rejects_untrusted_content() {

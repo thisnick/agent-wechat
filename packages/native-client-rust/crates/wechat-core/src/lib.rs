@@ -5,6 +5,8 @@ mod forwarded;
 mod links;
 pub use links::{LinkCard, ShareSendRequest};
 mod media;
+mod mention_send;
+pub use mention_send::TextMentions;
 pub mod media_types;
 #[cfg(test)]
 mod native_compat_tests;

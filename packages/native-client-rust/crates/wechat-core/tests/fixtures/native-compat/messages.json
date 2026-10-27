@@ -9,7 +9,7 @@
     "link": null,
     "media": [],
     "mentions": {
-      "all": null,
+      "all": false,
       "self": true,
       "source": "msgsource.atuserlist",
       "state": "known",
@@ -35,7 +35,7 @@
     "link": null,
     "media": [],
     "mentions": {
-      "all": null,
+      "all": false,
       "self": true,
       "source": "msgsource.atuserlist",
       "state": "known",
@@ -114,7 +114,7 @@
     "link": null,
     "media": [],
     "mentions": {
-      "all": null,
+      "all": false,
       "self": true,
       "source": "msgsource.atuserlist",
       "state": "known",

@@ -418,10 +418,28 @@ pub(super) async fn send(
     }
     let request: TextSend = serde_json::from_value(input)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    if request.quote.is_some() && request.mentions.is_some() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "quote_mentions_unsupported",
+        ));
+    }
+    if let Some(mentions) = &request.mentions {
+        mentions
+            .validate()
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_mentions"))?;
+        if !request.thread_id.ends_with("@chatroom") {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "mentions_require_group"));
+        }
+    }
     let send = if let Some(reference) = request.quote {
         c.require(Some(&a), "read")?;
         app.core
             .send_quoted_text(&a, key, &request.thread_id, &request.text, reference)
+            .await?
+    } else if let Some(mentions) = request.mentions {
+        app.core
+            .send_mentioned_text(&a, key, &request.thread_id, &request.text, mentions)
             .await?
     } else {
         app.core
