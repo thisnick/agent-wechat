@@ -175,7 +175,8 @@ impl Core {
     pub fn contacts(&self, account: &str, q: &ListQuery) -> Result<Value> {
         let reader = self.profile_reader_owned(account)?;
         let page = reader.contacts(q)?;
-        let items:Vec<_>=page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":"unknown"})).collect();
+        let mut items:Vec<_>=page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":"unknown"})).collect();
+        self.classify_peers(&mut items, &reader)?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
         )
@@ -183,7 +184,8 @@ impl Core {
     pub fn groups(&self, account: &str, q: &ListQuery) -> Result<Value> {
         let reader = self.profile_reader_owned(account)?;
         let page = reader.groups(q)?;
-        let items:Vec<_>=page.items.into_iter().map(|g|json!({"id":g.username,"roomId":g.username,"displayName":g.label,"ownerId":g.owner,"announcement":g.announcement})).collect();
+        let mut items:Vec<_>=page.items.into_iter().map(|g|json!({"id":g.username,"roomId":g.username,"displayName":g.label,"ownerId":g.owner,"announcement":g.announcement})).collect();
+        self.classify_peers(&mut items, &reader)?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
         )
@@ -191,7 +193,8 @@ impl Core {
     pub fn group_members(&self, account: &str, room: &str, q: &ListQuery) -> Result<Value> {
         let reader = self.profile_reader_owned(account)?;
         let page = reader.group_members(room, q)?;
-        let items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name})).collect();
+        let mut items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name})).collect();
+        self.classify_peers(&mut items, &reader)?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
         )

@@ -64,6 +64,7 @@ export default defineConfig({
         ] },
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
+          { label: 'Identify contacts', slug: 'use/contacts' },
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Settings', slug: 'use/settings' },

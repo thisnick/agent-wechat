@@ -6,6 +6,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NativeApiError, NativeWeChatClient, validateNativeBaseUrl, isNativeTombstone, NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from '../src/native-client.ts';
 const options = { baseUrl: 'http://127.0.0.1:6174', token: 'fixture-secret' };
+test('classification keeps conversation kind, unknown relationship and cached language labels separate', async () => {
+  const classification = { category: 'openim', namespace: 'openim', businessType: null, businessKind: null, openIm: { appId: 'app', wordingId: 'label', wordings: [{ languageId: 0, text: 'Example' }, { languageId: 1, text: '示例' }], applications: [] } };
+  const client = new NativeWeChatClient({ ...options, fetch: async url => {
+    const path = new URL(url).pathname;
+    if (path.endsWith('/contacts/legacy')) return Response.json({ id: 'legacy', username: 'legacy', relation: 'unknown' });
+    const item = { id: 'peer@openim', username: 'peer@openim', peerId: 'peer@openim', accountId: 'a', kind: 'direct', relation: 'unknown', classification };
+    return Response.json(path.endsWith('/threads') ? { items: [item], nextCursor: null } : item);
+  } });
+  const thread = (await client.threads('a')).items[0];
+  assert.equal(thread.kind, 'direct');
+  assert.deepEqual(thread.classification, classification);
+  const contact = await client.contact('a', 'peer@openim');
+  assert.equal(contact.relation, 'unknown');
+  assert.deepEqual(contact.classification.openIm.wordings, classification.openIm.wordings);
+  assert.equal((await client.contact('a', 'legacy')).classification, undefined);
+});
 test('group mutations preserve exact methods, stable keys and operation identity without transport retries', async () => {
   const calls=[];
   const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{

@@ -577,7 +577,14 @@ impl Core {
                         }
                     }
                 }
-                wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
+                if let Some(business) = crate::business_contacts::business_contact_patch(&contact)?
+                {
+                    wechat_profile::apply_contact_business_patch(
+                        &location, &keys, &patch, &business, &options,
+                    )?;
+                } else {
+                    wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
+                }
                 let mut applied_mute = false;
                 if let Some(muted) = mute {
                     if self.store.runtime(account, &mute_applied)?.is_none()
@@ -2484,6 +2491,10 @@ impl Core {
 #[cfg(test)]
 #[path = "incoming_recall_tests.rs"]
 mod recall_tests;
+
+#[cfg(test)]
+#[path = "business_sync_tests.rs"]
+mod business_sync_tests;
 
 #[cfg(test)]
 mod automatic_voice_tests {

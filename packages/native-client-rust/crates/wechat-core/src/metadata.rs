@@ -549,7 +549,13 @@ impl Core {
             } else {
                 None
             };
-            wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
+            if let Some(business) = crate::business_contacts::business_contact_patch(record)? {
+                wechat_profile::apply_contact_business_patch(
+                    &location, &keys, &patch, &business, &options,
+                )?;
+            } else {
+                wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
+            }
             self.settle_contact_notifications(account, record, &patch, false, id)?;
             self.settle_contact_pinning(account, record, &patch, pin_projection.is_some(), id)?;
             if pin_projection.is_some_and(|projection| projection.changed) {

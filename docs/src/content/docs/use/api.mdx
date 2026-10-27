@@ -43,6 +43,10 @@ curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=inv
 
 Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the same query to get the next page.
 
+Contact, thread, group and member reads include [peer classification](/use/contacts/)
+from saved WeChat metadata. It keeps entity category separate from conversation
+`kind` and contact `relation`.
+
 `GET /threads` and `GET /threads/{id}` include sidebar summaries from saved history:
 
 | Field | Contents |

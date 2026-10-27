@@ -10,6 +10,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use md5::{Digest, Md5};
 use rusqlite::{params, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+#[path = "business_projection.rs"]
+mod business_projection;
+pub use business_projection::*;
 
 pub(crate) fn ownership(
     location: &ProfileLocation,
@@ -106,9 +109,12 @@ fn row_values(
 }
 pub(crate) fn check_known_table(c: &Connection, table: &str) -> Result<()> {
     let relative = match table {
-        "contact" | "chat_room" | "chat_room_info_detail" | "chatroom_member" | "name2id" => {
-            "contact/contact.db"
-        }
+        "contact"
+        | "biz_info"
+        | "chat_room"
+        | "chat_room_info_detail"
+        | "chatroom_member"
+        | "name2id" => "contact/contact.db",
         "SessionTable" | "SessionUnreadListTable_1" | "SessionUnreadStatTable_1" => {
             "session/session.db"
         }

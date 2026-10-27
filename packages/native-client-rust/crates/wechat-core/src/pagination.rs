@@ -49,7 +49,7 @@ impl Core {
         }
         let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
-        let member = self
+        let mut member = self
             .catalog_rows(
                 account,
                 "members",
@@ -60,6 +60,9 @@ impl Core {
             )?
             .into_iter()
             .find(|m| m["username"] == username);
+        if let Some(member) = member.as_mut() {
+            self.classify_peers(std::slice::from_mut(member), &reader)?;
+        }
         // A cached roster can be incomplete. Absence is never an authoritative
         // server assertion that this person is not a member.
         Ok(
@@ -126,6 +129,8 @@ impl Core {
                 &reader,
                 own.as_deref(),
             )?;
+        } else {
+            self.classify_peers(std::slice::from_mut(&mut item), &reader)?;
         }
         Ok(item)
     }
@@ -259,6 +264,11 @@ impl Core {
                 page["items"].as_array_mut().context("invalid page")?,
                 &reader,
                 own.as_deref(),
+            )?;
+        } else if matches!(kind, "contacts" | "groups" | "members") {
+            self.classify_peers(
+                page["items"].as_array_mut().context("invalid page")?,
+                &reader,
             )?;
         }
         Ok(page)

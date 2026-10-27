@@ -13,6 +13,7 @@ impl Core {
         reader: &ProfileReader,
         own: Option<&str>,
     ) -> Result<()> {
+        self.classify_peers(rows, reader)?;
         let ids: Vec<_> = rows
             .iter()
             .filter(|r| r["deleted"] != true)

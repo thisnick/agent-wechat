@@ -92,6 +92,9 @@ pub struct NativeThread {
     pub account_id: String,
     pub peer_id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub classification: Option<wechat_core::PeerClassification>,
     pub display_name: Option<String>,
     #[ts(type = "number | null")]
     pub unread_count: Option<i64>,
@@ -160,12 +163,18 @@ pub struct NativeContact {
     pub remark: Option<String>,
     pub alias: Option<String>,
     pub relation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub classification: Option<wechat_core::PeerClassification>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeGroup {
     pub id: String,
     pub room_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub classification: Option<wechat_core::PeerClassification>,
     pub display_name: Option<String>,
     pub owner_id: Option<String>,
     pub announcement: Option<String>,
@@ -193,6 +202,9 @@ pub struct NativeGroup {
 pub struct NativeGroupMember {
     pub id: String,
     pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub classification: Option<wechat_core::PeerClassification>,
     pub display_name: Option<String>,
     pub room_display_name: Option<String>,
 }
@@ -400,6 +412,13 @@ pub fn typescript() -> String {
         wechat_core::LinkCard::decl(),
         NativeRecallInfo::decl(),
         NativeMessage::decl(),
+        wechat_core::PeerCategory::decl(),
+        wechat_core::PeerNamespace::decl(),
+        wechat_core::PeerBusinessKind::decl(),
+        wechat_core::PeerWording::decl(),
+        wechat_core::PeerApplication::decl(),
+        wechat_core::PeerOpenIm::decl(),
+        wechat_core::PeerClassification::decl(),
         NativeThread::decl(),
         NativeThreadMessage::decl(),
         NativeThreadAvatarMember::decl(),
@@ -511,6 +530,27 @@ mod tests {
         let generated = typescript();
         assert!(generated.contains("pinned?: boolean | null"));
         assert!(generated.contains("NativeThreadPinRequest = { pinned: boolean, }"));
+    }
+    #[test]
+    fn peer_classification_contract_is_additive_and_keeps_unknown_values() {
+        let mut contact = serde_json::json!({"id":"peer","username":"peer","displayName":null,"nickname":null,"remark":null,"alias":null,"relation":"unknown"});
+        assert!(serde_json::from_value::<NativeContact>(contact.clone())
+            .unwrap()
+            .classification
+            .is_none());
+        contact["classification"] = serde_json::json!({"category":"business","namespace":"wechat","businessType":0,"businessKind":"official_account","openIm":null});
+        let parsed = serde_json::from_value::<NativeContact>(contact.clone()).unwrap();
+        assert_eq!(parsed.classification.unwrap().business_type, Some(0));
+        contact["classification"]["category"] = serde_json::json!("unknown");
+        contact["classification"]["businessType"] = Value::Null;
+        let parsed = serde_json::from_value::<NativeContact>(contact.clone()).unwrap();
+        assert_eq!(
+            parsed.classification.unwrap().category,
+            wechat_core::PeerCategory::Unknown
+        );
+        contact["classification"]["businessType"] = serde_json::json!("0");
+        assert!(serde_json::from_value::<NativeContact>(contact).is_err());
+        assert!(typescript().contains("classification?: PeerClassification"));
     }
     #[test]
     fn wire_contract_rejects_numeric_remote_ids_and_bad_scope_shapes() {

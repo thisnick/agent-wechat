@@ -1,4 +1,5 @@
 //! Account coordination, durable intents and profile application barriers.
+mod business_contacts;
 mod format;
 mod forwarded;
 mod links;
@@ -8,6 +9,13 @@ pub mod media_types;
 #[cfg(test)]
 mod native_compat_tests;
 mod pagination;
+mod peer_classification;
+#[cfg(test)]
+mod peer_classification_tests;
+pub use peer_classification::{
+    PeerApplication, PeerBusinessKind, PeerCategory, PeerClassification, PeerNamespace, PeerOpenIm,
+    PeerWording,
+};
 mod profile;
 mod quote_send;
 mod quotes;
