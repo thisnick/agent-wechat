@@ -49,6 +49,14 @@ pnpm changeset
    Prereleases use their Changesets channel (such as `beta`); stable releases use
    `latest`.
 
+## Switch to a stable release
+
+Run `pnpm changeset pre exit` and merge the generated `.changeset/pre.json`
+change. The next Version Packages PR removes the prerelease suffixes, updates
+the changelogs and synchronizes the CLI, Rust and desktop versions. Review that
+PR before merging it to publish the stable release. Stable builds use npm's
+`latest` tag, the runtime image's `latest` tag and a regular GitHub Release.
+
 ## Upgrade compatibility
 
 Every release must accept the consumer state an earlier release left on disk.
