@@ -7,6 +7,7 @@ import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
 import { LocalCacheSettings } from "./local-cache-settings.tsx";
 import { GroupSettings } from "./group-settings.tsx";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import {
   useEffect,
   useRef,
@@ -440,7 +441,12 @@ function Client({
                 disabled={busy}
                 onClick={() => void open(a)}
               >
-                <Avatar name={a.alias || a.id} />
+                <HubAvatar
+                  connection={connection}
+                  account={a.id}
+                  username={a.ownUsername}
+                  name={a.alias || a.id}
+                />
                 <span>
                   <strong>{a.alias || a.id}</strong>
                   <small>
@@ -971,9 +977,14 @@ function Chats({
     messageInput.current?.focus();
   }
   function select(id: string) {
-    setMobile(true);
-    setInChat("");
-    void session.select(id);
+    // Commit the selected composer within the click gesture, including on mobile.
+    // History continues loading without delaying focus or stealing it later.
+    flushSync(() => {
+      setMobile(true);
+      setInChat("");
+      void session.select(id);
+    });
+    messageInput.current?.focus({ preventScroll: true });
   }
   const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter(
     (t) =>
@@ -1022,7 +1033,12 @@ function Chats({
           aria-label="Switch account"
           onClick={() => setAccountMenu(!accountMenu)}
         >
-          <Avatar name={account?.alias || state.account || "?"} />
+          <HubAvatar
+            connection={connection}
+            account={state.account!}
+            username={account?.ownUsername}
+            name={account?.alias || state.account || "?"}
+          />
         </button>
       </nav>
       <aside className="sidebar">
@@ -1555,7 +1571,12 @@ function Chats({
                   : Promise.resolve(switchAccount()));
               }}
             >
-              <Avatar name={a.alias || a.id} />
+              <HubAvatar
+                connection={connection}
+                account={a.id}
+                username={a.ownUsername}
+                name={a.alias || a.id}
+              />
               <span>
                 <strong>{a.alias || a.id}</strong>
                 <small>

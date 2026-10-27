@@ -23,6 +23,14 @@ export async function pinningAcceptance({
     );
   };
   const account = "pin-fixture";
+  const ownUsername = "fixture_self";
+  const ownAvatar = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGPUrZjGgA0wYRUdtBIA+kEBS3hZwQIAAAAASUVORK5CYII=",
+    "base64",
+  );
+  let ownAvatarReads = 0,
+    holdHistory = false,
+    releaseHistory;
   const ids = ["open", "unopened", "room@chatroom", "unknown", "filehelper"];
   const rows = ids.map((id, i) => ({
     id,
@@ -98,7 +106,7 @@ export async function pinningAcceptance({
       });
     if (path === "/v1/accounts")
       return json(
-        page([{ id: account, alias: "Pin fixture", authenticated: true }]),
+        page([{ id: account, alias: "Pin fixture", ownUsername, authenticated: true }]),
       );
     if (path.endsWith("/capabilities"))
       return json({
@@ -118,6 +126,11 @@ export async function pinningAcceptance({
       return;
     }
     if (path.endsWith("/events")) return json(page([]));
+    if (path.endsWith(`/avatars/${ownUsername}`)) {
+      ownAvatarReads++;
+      res.setHeader("Content-Type", "image/png");
+      return res.end(ownAvatar);
+    }
     if (path.includes("/avatars/"))
       return json({ error: { code: "media_not_cached" } }, 404);
     const matched = path.match(
@@ -130,6 +143,8 @@ export async function pinningAcceptance({
       if (!action) return json(target);
       if (action === "messages") {
         histories.push(id);
+        if (id === "unknown" && holdHistory)
+          await new Promise((resolve) => { releaseHistory = resolve; });
         return json(
           page(
             id === "open"
@@ -250,6 +265,11 @@ export async function pinningAcceptance({
       "return Boolean(document.querySelector('.login-account'))",
       Boolean,
     );
+    const accountAvatar = (selector) => until(
+      `const img=document.querySelector('${selector} .avatar img');return Boolean(img?.complete && img.naturalWidth);`,
+      Boolean,
+    );
+    await accountAvatar(".login-account");
     await click("document.querySelector('.login-account')");
     await until(
       "return document.querySelectorAll('article[data-message-id]').length",
@@ -260,9 +280,20 @@ export async function pinningAcceptance({
       "return document.querySelector('.side-footer').textContent",
       (text) => text.includes("connected"),
     );
+    await accountAvatar(".account-btn");
+    await click("document.querySelector('.account-btn')");
+    await accountAvatar(".account-option.selected");
+    await click("document.querySelector('.account-btn')");
+    assert.equal(ownAvatarReads, 1, "chooser, sidebar and switcher share the cached account avatar");
     await until(
       "const view=document.querySelector('.messages');return !view.hasAttribute('data-pending-scroll') && view.scrollHeight>view.clientHeight && Math.abs(view.scrollHeight-view.clientHeight-view.scrollTop)<2;",
       Boolean,
+    );
+    await click(row("open") + ".querySelector('.chat-row')");
+    assert.equal(
+      await script("return document.activeElement === document.querySelector('textarea[aria-label=Message]')"),
+      true,
+      "selecting the current chat also focuses its composer",
     );
     await script(
       `const text=document.querySelector('textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(text,'Keep this draft');text.dispatchEvent(new Event('input',{bubbles:true}));const view=document.querySelector('.messages');view.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true}));view.scrollTop=100;return true;`,
@@ -538,7 +569,23 @@ export async function pinningAcceptance({
       "open",
     );
     // Unknown does not claim to be an unchecked switch.
+    holdHistory = true;
     await click(row("unknown") + ".querySelector('.chat-row')");
+    await wait(() => releaseHistory);
+    assert.equal(
+      await script("return document.activeElement === document.querySelector('textarea[aria-label=Message]')"),
+      true,
+      "focus reaches the new composer before history responds",
+    );
+    await script("document.querySelector('button[aria-label=\"Conversation details\"]').focus();return true;");
+    releaseHistory();
+    holdHistory = false;
+    await until("return Boolean(document.querySelector('.empty-chat'))", Boolean);
+    assert.equal(
+      await script("return document.activeElement?.getAttribute('aria-label')"),
+      "Conversation details",
+      "history hydration does not steal focus back from another control",
+    );
     await until(
       "return Boolean(document.querySelector('[aria-label=\"Pin chat: state unavailable\"]'))",
       Boolean,
@@ -641,6 +688,13 @@ export async function pinningAcceptance({
       )};const r=el.getBoundingClientRect();return {width:r.width,height:r.height,display:getComputedStyle(el).display};`,
     );
     assert.ok(hit.width >= 44 && hit.height >= 44 && hit.display !== "none");
+    await click(row("open") + ".querySelector('.chat-row')");
+    assert.equal(
+      await script("return document.activeElement === document.querySelector('textarea[aria-label=Message]') && document.querySelector('.shell').classList.contains('mobile-chat')"),
+      true,
+      "touch-sized conversation selection opens and focuses the composer",
+    );
+    await click("document.querySelector('button[aria-label=\"Back to conversations\"]')");
     assert.equal(
       await script(
         `return getComputedStyle(${row(
@@ -689,6 +743,7 @@ export async function pinningAcceptance({
       "Pinning interface: unread badges, hover actions/info, direct pin/mute, shared details, keyboard/context/touch access, optimistic pins, server order, unknown state, pending projection, rejection, reload recovery, phone updates, stable focus/drafts/history/unreads/scroll passed",
     );
   } finally {
+    releaseHistory?.();
     if (connection)
       await invoke("desktop_forget", { id: connection.id }).catch(() => {});
     await invoke("desktop_select", { id: "local" });
