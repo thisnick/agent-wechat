@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 1.0.0-beta.19
+
+### Patch Changes
+
+- [#296](https://github.com/thisnick/agent-wechat/pull/296) [`6edded4`](https://github.com/thisnick/agent-wechat/commit/6edded4e950883a502eac4cd5d18b05f2bd0b435) Thanks [@thisnick](https://github.com/thisnick)! - Keep group history that an earlier release saved with an unsupported quote. When a later daemon can read that quoted message, the OpenClaw channel no longer treats it as changed and holds new mentions in the group for review.
+
 ## 1.0.0-beta.18
 
 ### Patch Changes
