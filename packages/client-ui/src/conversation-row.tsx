@@ -218,9 +218,7 @@ export function ConversationRow({
               <span className="chat-name">{name}</span>
             </div>
             <div className="preview-row">
-              <span className="preview" title={threadPreview(thread)}>
-                {threadPreview(thread)}
-              </span>
+              <span className="preview">{threadPreview(thread)}</span>
               {!!thread.unreadCount && (
                 <span className="count">{thread.unreadCount}</span>
               )}

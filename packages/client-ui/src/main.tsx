@@ -817,6 +817,7 @@ function Chats({
   >(undefined);
 
   const messageInput = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
   const [simBody, setSimBody] = useState("Hello from the simulated phone."),
     [simStatus, setSimStatus] = useState("");
   const [find, setFind] = useState(false),
@@ -1490,6 +1491,15 @@ function Chats({
                         aria-label="Message"
                         onFocus={acknowledgeComposer}
                         onClick={acknowledgeComposer}
+                        onCompositionStart={() => {
+                          composing.current = true;
+                        }}
+                        onCompositionEnd={() => {
+                          composing.current = false;
+                        }}
+                        onBlur={() => {
+                          composing.current = false;
+                        }}
                         rows={2}
                         placeholder={
                           state.selected
@@ -1505,18 +1515,24 @@ function Chats({
                           }))
                         }
                         onKeyDown={(e) => {
+                          // WebKit can end composition before its confirming Enter.
+                          // Leave IME keys untouched so candidate selection keeps working.
+                          if (
+                            e.defaultPrevented ||
+                            composing.current ||
+                            e.nativeEvent.isComposing ||
+                            e.nativeEvent.keyCode === 229
+                          ) {
+                            return;
+                          }
                           if (e.key === "Escape" && reply) {
                             e.preventDefault();
                             clearReply();
                             return;
                           }
-                          if (
-                            e.key === "Enter" &&
-                            !e.shiftKey &&
-                            !e.nativeEvent.isComposing
-                          ) {
+                          if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
-                            send();
+                            if (!e.repeat) send();
                           }
                         }}
                       />
