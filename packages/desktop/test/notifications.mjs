@@ -39,6 +39,7 @@ export async function notificationsAcceptance(invoke) {
   const streams = new Set(),
     fetched = new Set(),
     messages = new Map();
+  const memberRequests = [];
   let muted = false,
     contactReady = true,
     cursor = 0,
@@ -48,6 +49,7 @@ export async function notificationsAcceptance(invoke) {
   const events = [];
   const account = "fixture",
     thread = "peer",
+    group = "team@chatroom",
     serverId = "desktop-notifications-fixture";
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
@@ -77,6 +79,31 @@ export async function notificationsAcceptance(invoke) {
     }
     if (path === "/v1/accounts/fixture/threads/peer")
       return json({ id: thread, displayName: "Fixture contact", muted });
+    if (path === `/v1/accounts/fixture/threads/${group}`)
+      return json({
+        id: group, kind: "group", displayName: "Fixture group", muted,
+        lastMessage: { senderId: "alice", senderName: "Alice" },
+      });
+    if (path.startsWith(`/v1/accounts/fixture/groups/${group}/members/`)) {
+      const username = decodeURIComponent(path.split("/").at(-1));
+      memberRequests.push(username);
+      assert.equal(request.method, "GET", "notification names must not mutate or refresh contacts");
+      if (username === "slow") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.flushHeaders();
+        return;
+      }
+      if (username === "bob")
+        return json({ groupId: group, username, state: "present", member: {
+          id: username, username, displayName: "Bob <B>", roomDisplayName: "Robert",
+        } });
+      if (username === "mismatch")
+        return json({ groupId: group, username, state: "present", member: {
+          id: "other", username: "other", displayName: "Wrong sender",
+        } });
+      response.statusCode = 404;
+      return json({});
+    }
     if (path.startsWith("/v1/accounts/fixture/messages/")) {
       const id = decodeURIComponent(path.split("/").at(-1));
       fetched.add(id);
@@ -104,7 +131,7 @@ export async function notificationsAcceptance(invoke) {
       request.on("close", () => streams.delete(response));
       return;
     }
-    response.writeHead(404);
+    response.statusCode = 404;
     json({});
   });
   const entries = async () => {
@@ -321,9 +348,53 @@ export async function notificationsAcceptance(invoke) {
     const burst = await wait(async () => (await entries())[7]);
     assert.equal(burst.suppressSound, true);
     assert.equal(burst.soundFile, null);
+    const groupSend = (id, senderId, message = {}) => send(id, {
+      message: { threadId: group, senderId, ...message },
+      event: { threadId: group },
+    });
+    groupSend("group-text", "alice");
+    const groupText = await wait(async () => (await entries())[8]);
+    assert.equal(groupText.title, "Alice");
+    assert.equal(groupText.body, "Fixture group\nFixture message");
+    assert.equal(memberRequests.length, 0, "the thread's sender name needs no extra lookup");
+    groupSend("group-photo", "alice", { type: 3, body: "" });
+    const groupPhoto = await wait(async () => (await entries())[9]);
+    assert.equal(groupPhoto.title, "Alice");
+    assert.equal(groupPhoto.body, "Fixture group\nPhoto");
+    groupSend("group-quote", "bob", {
+      type: 49, appMessageType: 57, body: "Yes, that works",
+      quote: { type: 1, embeddedText: "Original quoted message" },
+    });
+    const groupQuote = await wait(async () => (await entries())[10]);
+    assert.equal(groupQuote.title, "Bob <B>");
+    assert.equal(groupQuote.body, "Fixture group\nYes, that works");
+    assert.deepEqual(memberRequests, ["bob"], "only a cached exact-member lookup is needed");
+    groupSend("group-unknown", null);
+    const groupUnknown = await wait(async () => (await entries())[11]);
+    assert.equal(groupUnknown.title, "Member");
+    assert.equal(groupUnknown.body, "Fixture group\nFixture message");
+    assert.deepEqual(memberRequests, ["bob"], "a missing sender ID cannot trigger a lookup");
+    groupSend("group-unavailable", "missing");
+    const groupUnavailable = await wait(async () => (await entries())[12]);
+    assert.equal(groupUnavailable.title, "Member");
+    assert.equal(groupUnavailable.body, "Fixture group\nFixture message");
+    groupSend("group-mismatch", "mismatch");
+    const groupMismatch = await wait(async () => (await entries())[13]);
+    assert.equal(groupMismatch.title, "Member");
+    assert.equal(groupMismatch.body, "Fixture group\nFixture message");
+    groupSend("group-slow", "slow");
+    const groupSlow = await wait(async () => (await entries())[14]);
+    assert.equal(groupSlow.title, "Member");
+    assert.equal(groupSlow.body, "Fixture group\nFixture message", "a stalled name lookup must not block delivery");
+    muted = true;
+    groupSend("group-muted", "muted-member");
+    await wait(() => fetched.has("group-muted"));
+    await pause(250);
+    assert.equal((await entries()).length, 15);
+    assert.ok(!memberRequests.includes("muted-member"), "muted groups do not resolve senders");
     await invoke("notifications_sound_enabled", { enabled: false });
     console.log(
-      "Native notifications: hidden delivery, click restore, mute/history/outgoing suppression, deduplication, Soft pair sound, silent banners, preview and burst limiting passed",
+      "Native notifications: group sender previews and cached-member fallback, hidden delivery, click restore, mute/history/outgoing suppression, deduplication, Soft pair sound, silent banners, preview and burst limiting passed",
     );
   } finally {
     await invoke("desktop_select", { id: "local" }).catch(() => {});

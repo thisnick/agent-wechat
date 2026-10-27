@@ -14,10 +14,14 @@ const SOUND_NAME: &str = "Default";
 pub async fn show(
     app: &tauri::AppHandle,
     title: &str,
+    subtitle: Option<&str>,
     body: &str,
     target: Option<Target>,
     sound: bool,
 ) -> Result<()> {
+    if let Some(subtitle) = subtitle {
+        return show_group(app, title, subtitle, body, target, sound);
+    }
     let mut notification = app.notification().builder().title(title).body(body);
     if let Some(target) = target {
         notification = notification.extra("target", target);
@@ -29,17 +33,97 @@ pub async fn show(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", windows))]
+fn native_group_notification(
+    title: &str,
+    subtitle: &str,
+    body: &str,
+    sound: bool,
+) -> notify_rust::Notification {
+    let mut notification = notify_rust::Notification::new();
+    notification
+        .summary(title)
+        .subtitle(subtitle)
+        .body(body)
+        .auto_icon();
+    if sound {
+        notification.sound_name(SOUND_NAME);
+    }
+    notification
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn show_group(
+    app: &tauri::AppHandle,
+    title: &str,
+    subtitle: &str,
+    body: &str,
+    target: Option<Target>,
+    sound: bool,
+) -> Result<()> {
+    // The Tauri builder omits subtitles. Use its underlying native library for
+    // group alerts, preserving the same application identity and click handling.
+    #[allow(unused_mut)]
+    let mut notification = native_group_notification(title, subtitle, body, sound);
+    #[cfg(windows)]
+    {
+        let exe = tauri::utils::platform::current_exe()?;
+        if exe.parent().is_some_and(|parent| {
+            !["debug", "release"]
+                .iter()
+                .any(|profile| parent.ends_with(std::path::Path::new("target").join(profile)))
+        }) {
+            notification.app_id(&app.config().identifier);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let _ = notify_rust::set_application(if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        &app.config().identifier
+    });
+    let clicked = app.clone();
+    std::thread::Builder::new()
+        .name("group-notification".into())
+        .spawn(move || {
+            let Ok(handle) = notification.show() else {
+                return;
+            };
+            let _ = handle.wait_for_response(|response: &notify_rust::NotificationResponse| {
+                if response.is_default_action() {
+                    if let Some(target) = target {
+                        crate::notifications::open_target(clicked, target);
+                    }
+                }
+            });
+        })?;
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn linux_notification(
     title: &str,
+    subtitle: Option<&str>,
     body: &str,
     sound: Option<&std::path::Path>,
 ) -> notify_rust::Notification {
     let mut notification = notify_rust::Notification::new();
+    // Freedesktop notifications have no subtitle field. Keep the same reading
+    // order by putting the group on its own line above the escaped message.
+    let body = subtitle.map_or_else(
+        || body.to_owned(),
+        |group| {
+            let group = group
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            format!("{group}\n{body}")
+        },
+    );
     notification
         .appname("AgentWechat")
         .summary(title)
-        .body(body)
+        .body(&body)
         .auto_icon();
     if let Some(path) = sound {
         notification.hint(notify_rust::Hint::SoundFile(
@@ -55,6 +139,7 @@ fn linux_notification(
 pub async fn show(
     app: &tauri::AppHandle,
     title: &str,
+    subtitle: Option<&str>,
     body: &str,
     target: Option<Target>,
     sound: bool,
@@ -64,7 +149,8 @@ pub async fn show(
         .path()
         .resource_dir()?
         .join("sounds/AgentWechatSoftPair.wav");
-    let mut notification = linux_notification(title, body, sound.then_some(path.as_path()));
+    let mut notification =
+        linux_notification(title, subtitle, body, sound.then_some(path.as_path()));
     if target.is_some() {
         notification.action("default", "");
     }
@@ -115,12 +201,32 @@ mod tests {
     fn linux_sound_has_a_file_or_explicit_suppression() {
         use notify_rust::Hint;
         let path = std::path::Path::new("/fixture/AgentWechatSoftPair.wav");
-        assert!(super::linux_notification("Message", "Hello", Some(path))
-            .hints
-            .contains(&Hint::SoundFile(path.display().to_string())));
-        assert!(super::linux_notification("Message", "Hello", None)
+        assert!(
+            super::linux_notification("Message", None, "Hello", Some(path))
+                .hints
+                .contains(&Hint::SoundFile(path.display().to_string()))
+        );
+        assert!(super::linux_notification("Message", None, "Hello", None)
             .hints
             .contains(&Hint::SuppressSound(true)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_group_context_is_a_separate_escaped_line_above_the_message() {
+        let notification =
+            super::linux_notification("Alice", Some("Team <Friends>"), "Hello", None);
+        assert_eq!(notification.summary, "Alice");
+        assert_eq!(notification.body, "Team &lt;Friends&gt;\nHello");
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn native_groups_use_separate_title_subtitle_and_body_fields() {
+        let notification = super::native_group_notification("Alice", "Team", "Hello", true);
+        assert_eq!(notification.summary, "Alice");
+        assert_eq!(notification.subtitle.as_deref(), Some("Team"));
+        assert_eq!(notification.body, "Hello");
     }
 
     #[cfg(windows)]

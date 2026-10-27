@@ -164,6 +164,99 @@ fn preview(message: &Value) -> Option<String> {
             .collect(),
     )
 }
+fn group_message(thread: &Value, message: &Value) -> bool {
+    thread["kind"] == "group"
+        || message["threadId"]
+            .as_str()
+            .is_some_and(|id| id.ends_with("@chatroom"))
+}
+fn sender_label(value: &Value, sender: &str) -> Option<String> {
+    let name: String = value
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect();
+    (!name.is_empty() && name != sender).then_some(name)
+}
+fn cached_sender(thread: &Value, message: &Value) -> Option<String> {
+    let sender = field(message, "senderId").ok()?;
+    let latest = &thread["lastMessage"];
+    if latest["senderId"] == sender {
+        if let Some(name) = sender_label(&latest["senderName"], sender) {
+            return Some(name);
+        }
+    }
+    thread["avatarMembers"]
+        .as_array()?
+        .iter()
+        .find_map(|member| {
+            (member["id"] == sender)
+                .then(|| sender_label(&member["displayName"], sender))
+                .flatten()
+        })
+}
+async fn group_sender(
+    active: &Active,
+    account: &str,
+    thread_id: &str,
+    thread: &Value,
+    message: &Value,
+) -> Option<String> {
+    if !group_message(thread, message) {
+        return None;
+    }
+    if let Some(name) = cached_sender(thread, message) {
+        return Some(name);
+    }
+    let sender = field(message, "senderId").ok()?;
+    let url = api(
+        active,
+        &[
+            "v1", "accounts", account, "groups", thread_id, "members", sender,
+        ],
+    )
+    .ok()?;
+    // Read only the hub's cached member. Missing names must not hold up an alert
+    // or start a contact refresh, roster download or other WeChat request.
+    let lookup = tokio::time::timeout(Duration::from_secs(1), get(active, url))
+        .await
+        .ok()?
+        .ok()?;
+    if lookup["groupId"] != thread_id
+        || lookup["username"] != sender
+        || lookup["member"]["username"] != sender
+    {
+        return None;
+    }
+    sender_label(&lookup["member"]["displayName"], sender)
+        .or_else(|| sender_label(&lookup["member"]["roomDisplayName"], sender))
+}
+fn notification_heading(
+    thread: &Value,
+    message: &Value,
+    sender: Option<&str>,
+) -> (String, Option<String>) {
+    let name: String = thread["displayName"]
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("New message")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    if group_message(thread, message) {
+        (sender.unwrap_or("Member").into(), Some(name))
+    } else {
+        (name, None)
+    }
+}
 fn muted_or_read(thread: &Value, focus: Option<&Focus>, target: &Target, reading: bool) -> bool {
     thread["muted"].as_bool() != Some(false)
         || reading
@@ -417,6 +510,11 @@ async fn alert(
         api(active, &["v1", "accounts", account, "threads", thread_id])?,
     )
     .await?;
+    if thread["muted"].as_bool() != Some(false) {
+        return Ok(());
+    }
+    let sender = group_sender(active, account, thread_id, &thread, &message).await;
+    let (title, subtitle) = notification_heading(&thread, &message, sender.as_deref());
     let target = Target {
         connection_id: active.connection.id.clone(),
         server_id: active
@@ -452,15 +550,6 @@ async fn alert(
     if !ledger.claim(path, id, field(event, "cursor")?)? {
         return Ok(());
     }
-    let title = thread["displayName"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("New message");
-    let title: String = title
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(100)
-        .collect();
     #[cfg(target_os = "linux")]
     let body = body
         .replace('&', "&amp;")
@@ -473,7 +562,8 @@ async fn alert(
         Instant::now(),
     );
     drop(inner);
-    crate::notification_sound::show(app, &title, &body, Some(target), sound).await?;
+    crate::notification_sound::show(app, &title, subtitle.as_deref(), &body, Some(target), sound)
+        .await?;
     Ok(())
 }
 #[derive(Default)]
@@ -578,6 +668,7 @@ pub async fn notifications_preview_sound(app: tauri::AppHandle) -> Result<(), St
     crate::notification_sound::show(
         &app,
         "AgentWechat",
+        None,
         "Notification sound preview",
         None,
         true,
@@ -706,6 +797,69 @@ mod tests {
         assert_eq!(
             preview(&json!({"type":49,"appMessageType":57,"body":"😀".repeat(200),"direction":"incoming"})).unwrap().chars().count(),
             180
+        );
+    }
+    #[test]
+    fn groups_use_sender_title_and_group_subtitle_while_direct_titles_stay_unchanged() {
+        let message = json!({"threadId":"room@chatroom","senderId":"alice"});
+        assert_eq!(
+            notification_heading(
+                &json!({"kind":"group","displayName":"Team"}),
+                &message,
+                Some("Alice")
+            ),
+            ("Alice".into(), Some("Team".into()))
+        );
+        assert_eq!(
+            notification_heading(&json!({"displayName":"Team"}), &message, None),
+            ("Member".into(), Some("Team".into()))
+        );
+        assert_eq!(
+            notification_heading(
+                &json!({"kind":"direct","displayName":"Alice"}),
+                &json!({"threadId":"alice"}),
+                Some("Alice")
+            ),
+            ("Alice".into(), None)
+        );
+        assert_eq!(
+            notification_heading(
+                &json!({"kind":"group","displayName":"😀".repeat(200)}),
+                &message,
+                Some("Alice")
+            )
+            .1
+            .unwrap()
+            .chars()
+            .count(),
+            100
+        );
+    }
+    #[test]
+    fn sender_names_only_match_the_message_author_and_are_safe_for_previews() {
+        let message = json!({"senderId":"alice"});
+        let thread = json!({
+            "lastMessage":{"senderId":"bob","senderName":"Bob"},
+            "avatarMembers":[{"id":"alice","displayName":"Alice"}]
+        });
+        assert_eq!(cached_sender(&thread, &message).as_deref(), Some("Alice"));
+        assert!(cached_sender(
+            &json!({"lastMessage":{"senderId":"bob","senderName":"Bob"}}),
+            &message
+        )
+        .is_none());
+        assert_eq!(
+            cached_sender(&json!({"lastMessage":{"senderId":"alice","senderName":" Alice\n\t Example\u{0000} "}}), &message).as_deref(),
+            Some("Alice Example")
+        );
+        assert!(sender_label(&json!("alice"), "alice").is_none());
+        assert!(sender_label(&json!("\n\t"), "alice").is_none());
+        assert_eq!(
+            sender_label(&json!("😀".repeat(100)), "alice")
+                .unwrap()
+                .chars()
+                .count(),
+            60
         );
     }
     #[test]

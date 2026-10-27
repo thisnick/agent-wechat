@@ -38,6 +38,7 @@ tokio-util = { version = "0.7", features = ["io", "rt"] }
 wechat-platform = { path = "../../native-client-rust/crates/wechat-platform" }
 tauri-plugin-updater = "2.14"
 semver = "1"
+notify-rust = "4.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"] }
@@ -49,5 +50,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust"] }
-notify-rust = "4.18"
 
