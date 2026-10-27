@@ -1,15 +1,5 @@
 # @agent-wechat/client-ui
 
-## 0.2.1
-
-### Patch Changes
-
-- [#306](https://github.com/thisnick/agent-wechat/pull/306) [`2ca9626`](https://github.com/thisnick/agent-wechat/commit/2ca962663a9e5e01c7ff0172848b9ab0bf80a76f) Thanks [@thisnick](https://github.com/thisnick)! - Keep IME candidate confirmation and cancellation inside the message input instead of sending a message or removing a quoted reply. Track composition events, handle WebKit's IME key code, and ignore repeated Enter presses when sending.
-
-  Remove the duplicate browser tooltip from conversation previews, keeping the conversation hover card.
-
-  Add cancellation for queued text messages and dismissal for uncertain or failed send notices. Dismissal keeps the receipt for recovery and does not claim to cancel a message that may already have been accepted.
-
 ## 0.2.0
 
 ### Minor Changes
