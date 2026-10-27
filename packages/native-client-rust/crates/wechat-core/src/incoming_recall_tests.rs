@@ -53,6 +53,83 @@ fn retain_original(core: &Core, store: &Store, id: &str, command: SyncCommand) {
 }
 
 #[test]
+fn application_text_share_keeps_raw_content_and_roundtrips_quotes_until_recalled() {
+    for (subtype, xml, expected) in [
+        (1, "<msg><appmsg appid='synthetic'><type>1</type><title><![CDATA[https://example.invalid/shared?a=1&b=2]]></title><des>Not the shared text</des><url/><appattach><aeskey>private-transport</aeskey></appattach></appmsg></msg>", "https://example.invalid/shared?a=1&b=2"),
+        (51, "<msg><appmsg><type>51</type><title>Channels post</title><url>https://example.invalid/channels</url><finderFeed><desc>Post description</desc><nickname>Publisher</nickname><objectNonceId>private-transport</objectNonceId></finderFeed></appmsg></msg>", "[Link] Channels post\nPost description\nhttps://example.invalid/channels"),
+        (74, "<msg><appmsg><type>74</type><title>report.pdf</title><appattach><status>0</status><fileuploadtoken>private-transport</fileuploadtoken></appattach></appmsg></msg>", "[File upload notice]\nreport.pdf"),
+        (87, "<msg><appmsg><type>87</type><announcement><![CDATA[<p>private-transport</p>]]></announcement><textannouncement>Plain announcement</textannouncement></appmsg></msg>", "[Group announcement]\nPlain announcement"),
+    ] {
+    let (_temporary, store, core) = fixture();
+    let original = add(49, "peer", "synthetic_self", xml.as_bytes(), 123, 100);
+    retain_original(&core, &store, "text-share-original", original.clone());
+    core.apply_sync_command("one", &original, "text-share", "live")
+        .unwrap();
+    let before = first(&core);
+    let id = before["id"].as_str().unwrap();
+    assert_eq!(before["type"], 49);
+    assert_eq!(before["appMessageType"], subtype);
+    assert_eq!(before["body"], expected);
+    assert_eq!(before["link"].is_object(), subtype == 51);
+    assert!(!before.to_string().contains("private-transport"));
+    let source = crate::source_message_id(id).unwrap();
+    for _ in 0..2 {
+        let raw = core
+            .profile_reader("one")
+            .unwrap()
+            .message(&source, Some("synthetic_self"))
+            .unwrap();
+        assert_eq!(raw.local_type, (((subtype as u64) << 32) | 49).to_string());
+        assert_eq!(raw.content.text.as_deref(), Some(xml));
+        assert_eq!(core.message("one", id).unwrap()["body"], before["body"]);
+    }
+    let target = crate::QuoteSendReference {
+        message_id: id.into(),
+        server_id: "123".into(),
+    };
+    let resolved = core.resolve_quote("one", "peer", "Reply", &target, "synthetic_self");
+    let carrier = if subtype == 74 {
+        assert!(resolved.is_err());
+        let embedded = xml.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        format!("<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>49</type><svrid>123</svrid><content>{embedded}</content></refermsg></appmsg></msg>")
+    } else {
+        format!("<msg>{}</msg>", resolved.unwrap().xml)
+    };
+    core.apply_sync_command(
+        "one",
+        &add(49, "synthetic_self", "peer", carrier.as_bytes(), 124, 101),
+        "text-share-reply",
+        "live",
+    )
+    .unwrap();
+    let parent = first(&core);
+    assert_eq!(parent["quote"]["type"], 49);
+    assert_eq!(parent["quote"]["appMessageType"], subtype);
+    assert_eq!(parent["quote"]["state"], "embedded");
+    assert_eq!(parent["quote"]["embeddedText"], before["body"]);
+    assert_eq!(parent["body"], "Reply");
+    assert!(!parent.to_string().contains("private-transport"));
+    core.apply_sync_command("one", &recall(123), "text-share-recall", "live")
+        .unwrap();
+    let cleared = core.message("one", id).unwrap();
+    assert_eq!(cleared["body"], "[Message recalled]");
+    assert_eq!(
+        cleared["recall"]["replacementText"],
+        "Localized recall notice"
+    );
+    assert!(cleared["appMessageType"].is_null());
+    assert!(cleared["link"].is_null());
+    assert!(core
+        .resolve_quote("one", "peer", "Late reply", &target, "synthetic_self")
+        .is_err());
+    let parent = core.message("one", parent["id"].as_str().unwrap()).unwrap();
+    assert_eq!(parent["quote"]["state"], "recalled");
+    assert!(parent["quote"]["embeddedText"].is_null());
+    assert_eq!(recall_count(&store), 1);
+    }
+}
+
+#[test]
 fn recall_api_derives_own_and_group_authors_from_existing_sync_receipts() {
     for (thread, from, to, body, author, direction) in [
         (

@@ -43,7 +43,11 @@ import {
   messageSummary,
   orderThreads,
 } from "./thread-preview.ts";
-import { messagePresentation, recallText } from "./message-presentation.ts";
+import {
+  messagePresentation,
+  recallText,
+  textMessageLink,
+} from "./message-presentation.ts";
 import { AccountSettings, ProfileDialog } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import { QuotedReply } from "./quoted-reply.tsx";
@@ -1936,6 +1940,7 @@ function Message({
   const navigation = useConversationNavigation();
   const own = m.direction === "outgoing";
   const presentation = messagePresentation(m);
+  const textLink = textMessageLink(m);
   if (
     presentation === "recalled" &&
     (!m.senderId || !["incoming", "outgoing"].includes(m.direction ?? ""))
@@ -1980,7 +1985,13 @@ function Message({
               <div className="bubble recalled">{recallText(m)}</div>
             ) : presentation === "text" ? (
               <div className="bubble">
-                <p>{m.body || (m.type >= 10000 ? "System message" : "")}</p>
+                <p>
+                  {textLink ? (
+                    <a href={textLink.href} target="_blank" rel="noopener noreferrer">
+                      {m.body}
+                    </a>
+                  ) : m.body || (m.type >= 10000 ? "System message" : "")}
+                </p>
               </div>
             ) : presentation === "reply" || presentation === "forwarded" ? (
               <div className={`bubble ${presentation}-message`}>

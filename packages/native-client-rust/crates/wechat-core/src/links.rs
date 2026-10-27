@@ -86,7 +86,7 @@ pub(crate) struct ParsedLink {
     pub card: LinkCard,
     pub thumbnail: Option<LinkThumbnail>,
 }
-fn text(node: roxmltree::Node<'_, '_>, name: &str, max: usize) -> Option<String> {
+pub(crate) fn text(node: roxmltree::Node<'_, '_>, name: &str, max: usize) -> Option<String> {
     let value = leaf(child(node, name)?)?;
     let value = value.trim();
     (!value.is_empty()
@@ -97,15 +97,24 @@ fn text(node: roxmltree::Node<'_, '_>, name: &str, max: usize) -> Option<String>
     .then(|| value.to_owned())
 }
 pub(crate) fn parse(app: roxmltree::Node<'_, '_>, subtype: i32) -> Option<ParsedLink> {
-    if !matches!(subtype, 3..=5) {
+    if !matches!(subtype, 3..=5 | 51) {
         return None;
     }
+    let finder = if subtype == 51 {
+        Some(child(app, "finderFeed")?)
+    } else {
+        None
+    };
     let card = LinkCard {
         title: text(app, "title", 16384),
-        description: text(app, "des", 16384),
+        description: finder
+            .and_then(|node| text(node, "desc", 16384))
+            .or_else(|| text(app, "des", 16384)),
         url: text(app, "url", 8192)
             .filter(|s| wechat_protocol::media::validate_shared_link_url(s).is_ok()),
-        source_name: text(app, "sourcedisplayname", 1024),
+        source_name: finder
+            .and_then(|node| text(node, "nickname", 1024))
+            .or_else(|| text(app, "sourcedisplayname", 1024)),
     };
     if card.title.is_none() && card.description.is_none() && card.url.is_none() {
         return None;
@@ -171,6 +180,36 @@ mod tests {
     use crate::quotes::app_message;
 
     const CARD: &str = include_str!("../tests/fixtures/shared-link.xml");
+
+    #[test]
+    fn channels_cards_expose_display_fields_without_media_transport_or_playback_claims() {
+        let xml = "<msg><appmsg><type>51</type><title>Channels post</title><url>https://example.invalid/channels</url><finderFeed><desc>Post &amp; description</desc><nickname>Publisher</nickname><objectNonceId>private-nonce</objectNonceId><mediaList><media><url>https://example.invalid/private-video</url><coverUrl>https://example.invalid/private-cover</coverUrl></media></mediaList></finderFeed></appmsg></msg>";
+        let link = app_message(xml).unwrap().link.unwrap();
+        assert_eq!(link.card.description.as_deref(), Some("Post & description"));
+        assert_eq!(link.card.source_name.as_deref(), Some("Publisher"));
+        assert_eq!(
+            link.card.url.as_deref(),
+            Some("https://example.invalid/channels")
+        );
+        assert!(link.thumbnail.is_none());
+        let public = serde_json::to_string(&link.card).unwrap();
+        for private in ["private-nonce", "private-video", "private-cover"] {
+            assert!(!public.contains(private));
+        }
+        for bad in [
+            xml.replace("<finderFeed>", "<finderFeed/><finderFeed>"),
+            xml.replace("finderFeed", "unknownFeed"),
+        ] {
+            assert!(app_message(&bad).unwrap().link.is_none());
+        }
+        let unsafe_url =
+            app_message(&xml.replace("https://example.invalid/channels", "javascript:alert(1)"))
+                .unwrap()
+                .link
+                .unwrap();
+        assert!(unsafe_url.card.url.is_none());
+        assert!(unsafe_url.card.title.is_some());
+    }
 
     #[test]
     fn encrypted_profile_plain_and_compressed_group_cards_use_the_same_normalization() {

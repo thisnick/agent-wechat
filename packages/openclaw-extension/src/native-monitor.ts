@@ -114,6 +114,10 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
   const custody = state.get(message.id);
   if (state.isRecalled(message)) return "ignored";
   if (!custody || custody.state !== "received" || !state.isCurrent(message, revision)) return "needs_review";
+  // Upload notices precede a final attachment; they are not another model turn.
+  if (message.type === 49 && message.appMessageType === 74) {
+    state.update(message.id, { state: "ignored" }, revision); return "ignored";
+  }
   if (custody.origin !== "live" || message.direction !== "incoming" || ![1,3,34,43,47,49].includes(message.type) || (message.type === 1 && !message.body) || !message.senderId) {
     state.update(message.id, { state: "ignored" }, revision); return "ignored";
   }
@@ -189,8 +193,8 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
     agentId: route.agentId, channelAccountId: account.accountId, policy, assets: context.assets, history: admitted });
   assertCurrent(); state.beginDispatch(message.id, dispatchManifest, buffered.map(item => item.message.id));
   const callback = readPolicy !== "on_inbound"
-    && (message.type === 1 || (message.type === 49 && message.appMessageType === 19 && !!message.body)
-      || (message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && !!message.link)
+    && (message.type === 1 || (message.type === 49 && [1, 19, 87].includes(message.appMessageType ?? 0) && !!message.body)
+      || (message.type === 49 && [3, 4, 5, 51].includes(message.appMessageType ?? 0) && !!message.link)
       || (preparedMedia.quote && [1, 49].includes(preparedMedia.quote.type ?? 0) && ["resolved", "embedded"].includes(preparedMedia.quote.state))
       || (preparedMedia.attachment?.status === "ready" && preparedMedia.suppliedAssets?.length))
     ? state.preparedCallback([message.id], readPolicy) : undefined;

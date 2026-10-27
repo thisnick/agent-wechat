@@ -76,6 +76,19 @@ fn source_content(message: &Message) -> Result<String> {
     if message.message_type == 49 {
         let app = crate::quotes::message_app(message).context("unsupported_quote_type")?;
         match app.subtype {
+            1 | 87 => {
+                ensure!(
+                    app.text
+                        .as_deref()
+                        .is_some_and(|title| !title.trim().is_empty()),
+                    "quote_content_unavailable"
+                );
+                return Ok(raw_content.into());
+            }
+            51 => {
+                ensure!(app.link.is_some(), "quote_content_unavailable");
+                return Ok(raw_content.into());
+            }
             5 | 6 => return Ok(raw_content.into()),
             57 => {
                 let title = app.title.context("quote_content_unavailable")?;
@@ -270,6 +283,21 @@ mod tests {
             (43, 0, "<msg><videomsg playlength='3'/></msg>"),
             (
                 49,
+                1,
+                "<msg><appmsg><type>1</type><title>https://example.invalid/shared</title><url/></appmsg></msg>",
+            ),
+            (
+                49,
+                51,
+                "<msg><appmsg><type>51</type><title>Channels post</title><finderFeed><desc>Post</desc></finderFeed></appmsg></msg>",
+            ),
+            (
+                49,
+                87,
+                "<msg><appmsg><type>87</type><textannouncement>Announcement</textannouncement></appmsg></msg>",
+            ),
+            (
+                49,
                 5,
                 "<msg><appmsg><type>5</type><title>Link</title></appmsg></msg>",
             ),
@@ -305,6 +333,17 @@ mod tests {
             (10002, 0, "system"),
             (47, 0, "<msg><emoji/></msg>"),
             (49, 19, "<msg><appmsg><type>19</type></appmsg></msg>"),
+            (
+                49,
+                74,
+                "<msg><appmsg><type>74</type><title>Upload notice</title></appmsg></msg>",
+            ),
+            (49, 1, "<msg><appmsg><type>1</type><title/></appmsg></msg>"),
+            (
+                49,
+                1,
+                "<msg><appmsg><type>5</type><title>Wrong stored subtype</title></appmsg></msg>",
+            ),
             (49, 6, "<msg><appmsg><type>5</type></appmsg></msg>"),
             (3, 0, "<!DOCTYPE msg><msg><img/></msg>"),
             (3, 0, "<msg><videomsg/></msg>"),

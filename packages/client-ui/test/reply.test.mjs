@@ -13,7 +13,7 @@ const message = {
 test("reply eligibility matches native supported types and preserves full unsigned identities", () => {
   for (const type of [1, 3, 34, 43])
     assert.equal(canReply({ ...message, type }), true);
-  for (const appMessageType of [5, 6, 57])
+  for (const appMessageType of [1, 5, 6, 57, 87])
     assert.equal(canReply({ ...message, type: 49, appMessageType }), true);
   for (const change of [
     { type: 47 },
@@ -29,6 +29,21 @@ test("reply eligibility matches native supported types and preserves full unsign
   ])
     assert.equal(canReply({ ...message, ...change }), false);
   assert.equal(canReply({ ...message, direction: "outgoing" }), true);
+  assert.equal(
+    canReply({
+      ...message,
+      type: 49,
+      appMessageType: 51,
+      link: { title: "Channels post" },
+    }),
+    true
+  );
+  assert.equal(canReply({ ...message, type: 49, appMessageType: 51 }), false);
+  assert.equal(canReply({ ...message, type: 49, appMessageType: 74 }), false);
+  assert.equal(
+    canReply({ ...message, type: 49, appMessageType: 1, body: "" }),
+    false
+  );
 });
 test("stored reply references carry only exact identities, never caller-supplied quote content", () => {
   const reference = { messageId: "m", serverId: message.serverId };

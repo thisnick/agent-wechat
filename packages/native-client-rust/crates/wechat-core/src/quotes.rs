@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 pub(crate) struct AppMessage {
     pub subtype: i32,
     pub title: Option<String>,
+    pub text: Option<String>,
     pub reference: Option<(String, i32)>,
     pub embedded: Option<String>,
     pub sender_id: Option<String>,
@@ -68,6 +69,19 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
     let title = child(app, "title")
         .and_then(leaf)
         .filter(|s| s.len() <= 16384 && !s.contains('\0'));
+    let text = match subtype {
+        1 | 57 => title.clone(),
+        // A retained notice does not establish the current transfer state.
+        74 => title
+            .as_ref()
+            .filter(|title| !title.trim().is_empty())
+            .map(|title| format!("[File upload notice]\n{title}")),
+        // The companion announcement field contains editor HTML. Read only
+        // the plain-text field rather than exposing that document as markup.
+        87 => crate::links::text(app, "textannouncement", 16384)
+            .map(|text| format!("[Group announcement]\n{text}")),
+        _ => None,
+    };
     let reference = (|| {
         let reference = child(app, "refermsg")?;
         let id = leaf(child(reference, "svrid")?)?;
@@ -90,6 +104,7 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
         link: crate::links::parse(app, subtype),
         sticker: crate::stickers::parse(app, subtype),
         title,
+        text,
         reference,
         embedded: child(app, "refermsg")
             .and_then(|r| child(r, "content"))
@@ -186,7 +201,8 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
         app.embedded.clone()
     } else {
         card.as_ref().and_then(|card| match card.subtype {
-            3..=5 => card.link.as_ref().map(|link| link.card.body()),
+            1 | 74 | 87 => card.text.clone(),
+            3..=5 | 51 => card.link.as_ref().map(|link| link.card.body()),
             6 | 57 => card.title.clone(),
             _ => None,
         })
@@ -200,7 +216,9 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
         || card.as_ref().is_some_and(|c| c.sticker.is_some());
     let supported = matches!(*kind, 1 | 3 | 47)
         || sticker
-        || card.as_ref().is_some_and(|c| matches!(c.subtype, 3..=5));
+        || card
+            .as_ref()
+            .is_some_and(|c| matches!(c.subtype, 1 | 3..=5 | 51 | 74 | 87));
     let state = if !supported {
         "unsupported"
     } else if text.is_some() || image || sticker {
@@ -270,6 +288,39 @@ mod tests {
     use super::*;
     use crate::Core;
     const LINK: &str = "<msg><appmsg><type>5</type><title><![CDATA[Article <title>]]></title><des>A &amp; B</des><url>https://example.com/article?a=1&amp;b=2</url><appattach><cdnattachurl>private-transport</cdnattachurl></appattach></appmsg></msg>";
+
+    #[test]
+    fn upload_notice_and_announcement_use_plain_fields_and_embedded_quotes() {
+        for (subtype, xml, expected) in [
+            (74, "<msg><appmsg><type>74</type><title>report.pdf</title><appattach><status>0</status><fileuploadtoken>private-token</fileuploadtoken></appattach></appmsg></msg>", "[File upload notice]\nreport.pdf"),
+            (87, "<msg><appmsg><type>87</type><announcement><![CDATA[<script>private editor document</script>]]></announcement><textannouncement>Group &amp; announcement</textannouncement><xmlpuretext>1</xmlpuretext></appmsg></msg>", "[Group announcement]\nGroup & announcement"),
+        ] {
+            let app = app_message(xml).unwrap();
+            assert_eq!(app.text.as_deref(), Some(expected));
+            assert!(app.link.is_none());
+            let content = xml.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            let parent = app_message(&format!("<msg><appmsg><type>57</type><title>Comment</title><refermsg><type>49</type><svrid>42</svrid><content>{content}</content></refermsg></appmsg></msg>")).unwrap();
+            let quote = embedded_quote(&parent, None).unwrap();
+            assert_eq!(quote["appMessageType"], subtype);
+            assert_eq!(quote["state"], "embedded");
+            assert_eq!(quote["embeddedText"], expected);
+            assert!(!quote.to_string().contains("private-"));
+        }
+        for field in [
+            "<textannouncement>one</textannouncement><textannouncement>two</textannouncement>"
+                .into(),
+            "<textannouncement><b>nested</b></textannouncement>".into(),
+            format!("<textannouncement>{}</textannouncement>", "x".repeat(16385)),
+            "<announcement>HTML only has no plain fallback</announcement>".into(),
+        ] {
+            assert!(app_message(&format!(
+                "<msg><appmsg><type>87</type>{field}</appmsg></msg>"
+            ))
+            .unwrap()
+            .text
+            .is_none());
+        }
+    }
 
     #[test]
     fn quotes_use_embedded_content_even_when_an_original_is_stored() {
@@ -560,5 +611,22 @@ mod tests {
         assert!(app_message(&format!("<!DOCTYPE msg>{xml}")).is_none());
         assert!(app_message(&xml.replace("<msg>", "<msg xmlns='foreign'>")).is_none());
         assert!(app_message(&format!("<msg>{}</msg>", "<n>".repeat(40))).is_none());
+    }
+    #[test]
+    fn shared_text_quotes_use_only_the_embedded_title_and_keep_parser_bounds() {
+        for (content, expected) in [
+            ("<msg><appmsg><type>1</type><title>Shared &amp; text</title><des>Not the title</des><url/></appmsg></msg>".to_owned(), Some("Shared & text")),
+            ("<msg><appmsg><type>1</type><title/><des>No fallback</des></appmsg></msg>".to_owned(), None),
+            ("<msg><appmsg><type>1</type><title>one</title><title>two</title></appmsg></msg>".to_owned(), None),
+            ("<msg><appmsg><type>1</type><title><nested>Not text</nested></title></appmsg></msg>".to_owned(), None),
+            (format!("<msg><appmsg><type>1</type><title>{}</title></appmsg></msg>", "x".repeat(16385)), None),
+        ] {
+            let content = content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            let parent = app_message(&format!("<msg><appmsg><type>57</type><title>Comment</title><refermsg><type>49</type><svrid>1</svrid><content>{content}</content></refermsg></appmsg></msg>")).unwrap();
+            let quote = embedded_quote(&parent, None).unwrap();
+            assert_eq!(quote["embeddedText"].as_str(), expected);
+            assert_eq!(quote["state"], if expected.is_some() { "embedded" } else { "missing" });
+            assert!(quote["embeddedLink"].is_null());
+        }
     }
 }

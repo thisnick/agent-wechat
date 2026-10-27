@@ -1,13 +1,13 @@
 import type { NativeMessage, QuoteSendReference } from "@agent-wechat/shared";
 
 export function validQuoteReference(
-  value: unknown,
+  value: unknown
 ): value is QuoteSendReference {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const quote = value as Record<string, unknown>;
   return (
     Object.keys(quote).every(
-      (key) => key === "messageId" || key === "serverId",
+      (key) => key === "messageId" || key === "serverId"
     ) &&
     typeof quote.messageId === "string" &&
     !!quote.messageId &&
@@ -30,8 +30,14 @@ export function canReply(message: NativeMessage): boolean {
     ((message.type === 1 && !!message.body?.trim()) ||
       [3, 34, 43].includes(message.type) ||
       (message.type === 49 &&
+        [1, 87].includes(message.appMessageType ?? 0) &&
+        !!message.body?.trim()) ||
+      (message.type === 49 &&
+        message.appMessageType === 51 &&
+        !!message.link) ||
+      (message.type === 49 &&
         [5, 6, 57].includes(
-          message.appMessageType ?? (message.quote ? 57 : 0),
+          message.appMessageType ?? (message.quote ? 57 : 0)
         )))
   );
 }

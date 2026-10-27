@@ -44,6 +44,22 @@ test("prepared model harness records exact input custody and read projection sep
   assert.equal(value.runs.length, 1); assert.equal(value.state.get("m1")?.runId, "run_1"); assert.equal(value.state.get("m1")?.readPending, true);
   assert.match(value.runs[0].ctx.MessageSid, /^wechat-native:a:m1:[a-f0-9]{64}$/);
 });
+test("application text shares reach model input without media access", async t => {
+  const value = fixture(t, { readPolicy: "on_model_dispatch" });
+  const text = "https://example.invalid/shared?a=1&b=2";
+  Object.assign(value.message, { type: 49, appMessageType: 1, body: text });
+  await dispatchNativeMessage(value);
+  assert.equal(value.runs.length, 1);
+  assert.ok(value.runs[0].ctx.BodyForAgent.includes(text));
+  assert.equal(value.state.get("m1")?.readPending, true);
+});
+test("upload progress notices do not start model work before a final attachment", async t => {
+  const value = fixture(t);
+  Object.assign(value.message, { type: 49, appMessageType: 74, body: "[File upload notice]\nreport.pdf" });
+  assert.equal(await dispatchNativeMessage(value), "ignored");
+  assert.equal(value.runs.length, 0);
+  assert.equal(value.state.get("m1")?.readPending, undefined);
+});
 test("embedded quoted links reach prepared model input without original resolution", async t => {
   const value = fixture(t, { readPolicy: "on_model_dispatch" });
   const link = "[Link] Article title\nArticle description\nhttps://example.com/article?a=1&b=2";

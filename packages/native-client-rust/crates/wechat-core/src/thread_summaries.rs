@@ -106,7 +106,7 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
             .unwrap_or("Message recalled")
     } else {
         match (kind, app) {
-            (1, _) | (49, Some(57)) => message["body"].as_str().unwrap_or("Message"),
+            (1, _) | (49, Some(1 | 57 | 74 | 87)) => message["body"].as_str().unwrap_or("Message"),
             (3, _) => "Photo",
             (34, _) => "Voice message",
             (43 | 62, _) => "Video",
@@ -223,6 +223,11 @@ mod tests {
     fn summary_is_bounded_plain_text_and_never_exposes_media_xml_or_recalled_text() {
         let base = json!({"id":"one","senderId":"peer","direction":"incoming","type":1,"body":"hello\n  world","createdAt":"now"});
         assert_eq!(message_summary(&base, Some("Peer"))["text"], "hello world");
+        let shared = json!({"type":49,"appMessageType":1,"body":"https://example.invalid/shared"});
+        assert_eq!(
+            message_summary(&shared, None)["text"],
+            "https://example.invalid/shared"
+        );
         let mut message = base;
         message["body"] = json!("👋".repeat(200));
         assert_eq!(

@@ -46,6 +46,17 @@ A forwarded chat bundle becomes plain text: each sender and message, with nested
 
 ## Link cards
 
+| Received form | Display and limits |
+| --- | --- |
+| Shared text (subtype 1) | Plain text; whole HTTP(S) URLs are clickable. |
+| WeChat Channels (51) | Title, description, author and supplied link; no Channels video playback. |
+| File-upload notice (74) | Filename notice; no claim about current progress or final availability. Does not start OpenClaw model work. |
+| Group announcement (87) | Plain announcement text. |
+
+Shared text, Channels cards and announcements can be quoted and recalled.
+Received quotes of upload notices can be displayed, but upload notices cannot
+be selected as reply targets. Quote previews use the text carried in the reply.
+
 You can send one with `wx messages send --share URL --title ...` or the `wechat_send_share` tool. You supply the title, description and thumbnail URL; nothing is fetched from the page.
 
 ## Recalls

@@ -289,8 +289,8 @@ pub(crate) fn normalized_message(
     if let Some(link) = link {
         text = Some(link.body());
     }
-    if let Some(app) = app.as_ref().filter(|a| a.subtype == 57) {
-        text = app.title.clone();
+    if let Some(body) = app.as_ref().and_then(|a| a.text.as_ref()) {
+        text = Some(body.clone());
     }
     if forwarded.is_some() {
         text = forwarded;

@@ -3,10 +3,10 @@ import { messagePresentation } from "./message-presentation.ts";
 
 export function localQuote(
   parent: NativeMessage,
-  messages: NativeMessage[],
+  messages: NativeMessage[]
 ): NativeMessage | undefined {
   const found = messages.filter((message) =>
-    quoteTargetMatches(parent, message),
+    quoteTargetMatches(parent, message)
   );
   return found.length === 1 ? found[0] : undefined;
 }
@@ -15,7 +15,7 @@ export function localQuote(
 // replace the excerpt delivered inside the reply.
 export function quoteTargetMatches(
   parent: NativeMessage,
-  message: NativeMessage,
+  message: NativeMessage
 ): boolean {
   return (
     !!parent.quote &&
@@ -29,7 +29,7 @@ export function quoteTargetMatches(
 
 export function embeddedQuotePreview(
   parent: NativeMessage,
-  original?: NativeMessage,
+  original?: NativeMessage
 ) {
   const quote = parent.quote;
   const recalled =
@@ -53,7 +53,7 @@ export function embeddedQuotePreview(
     !recalled &&
     state === "embedded" &&
     quote?.type === 49 &&
-    [3, 4, 5].includes(quote.appMessageType ?? 0)
+    [3, 4, 5, 51].includes(quote.appMessageType ?? 0)
       ? quote.embeddedLink
       : undefined;
   const text = recalled

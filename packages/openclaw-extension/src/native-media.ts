@@ -188,8 +188,9 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   if (nativeRecallInfo(message)) return { body: "[Message recalled]", pending: false, retryable: false, reason: "message_recalled" };
   const authorize = async () => { guard(); await params.beforeMediaAccess?.(); guard(); };
   if (message.type === 49 && message.appMessageType === 57) return prepareNativeQuote(params);
+  if (message.type === 49 && [1, 74, 87].includes(message.appMessageType ?? 0)) return { body: message.body?.slice(0, 32768) || "[Shared text unavailable]", pending: false };
   if (message.type === 49 && message.appMessageType === 19) return { body: message.body?.slice(0, 65536) || "[Forwarded chat history unavailable]", pending: false };
-  if (message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && message.link) return prepareNativeLink(params);
+  if (message.type === 49 && [3, 4, 5, 51].includes(message.appMessageType ?? 0) && message.link) return prepareNativeLink(params);
   if (message.type === 49 && message.appMessageType != null && message.appMessageType !== 6) return { body: `[Unsupported WeChat app message subtype ${message.appMessageType}]`, pending: false, retryable: false };
   if (!attachmentKind) return { body: message.type === 1 ? message.body ?? "" : `[Unsupported WeChat message type ${message.type}]`, pending: false };
   const accountId = account.native!.accountId; const maxBytes = Math.min(account.mediaMaxMb * 1024 * 1024,

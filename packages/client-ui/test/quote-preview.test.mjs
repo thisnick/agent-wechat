@@ -20,6 +20,66 @@ const original = {
   appMessageType: 57,
   body: "Quoted reply text",
 };
+test("Channels quote cards use embedded metadata and notices retain their text", () => {
+  const link = {
+    title: "Channels post",
+    description: "Description",
+    sourceName: "Publisher",
+    url: "https://example.invalid/channels",
+  };
+  const reply = {
+    ...parent,
+    quote: {
+      ...parent.quote,
+      state: "embedded",
+      appMessageType: 51,
+      embeddedLink: link,
+      embeddedText: "[Link] Channels post",
+    },
+  };
+  assert.deepEqual(embeddedQuotePreview(reply).content.link, link);
+  assert.equal(
+    embeddedQuotePreview({
+      ...reply,
+      quote: { ...reply.quote, state: "recalled" },
+    }).content,
+    undefined
+  );
+  for (const appMessageType of [74, 87]) {
+    const notice = {
+      ...parent,
+      quote: {
+        ...parent.quote,
+        state: "embedded",
+        appMessageType,
+        embeddedText: "Notice text",
+      },
+    };
+    assert.equal(embeddedQuotePreview(notice).text, "Notice text");
+  }
+});
+test("application text shares keep their embedded quote text and recall suppression", () => {
+  const share = {
+    ...original,
+    appMessageType: 1,
+    body: "https://example.com/shared",
+  };
+  const reply = {
+    ...parent,
+    quote: {
+      ...parent.quote,
+      appMessageType: 1,
+      state: "embedded",
+      embeddedText: share.body,
+    },
+  };
+  assert.equal(quotedText(share), share.body);
+  assert.equal(embeddedQuotePreview(reply, share).text, share.body);
+  assert.equal(
+    embeddedQuotePreview(reply, { ...share, recall: {} }).text,
+    "Message recalled"
+  );
+});
 test("quote navigation uses only a unique original in the same account and conversation", () => {
   assert.equal(
     localQuote(parent, [
@@ -27,11 +87,11 @@ test("quote navigation uses only a unique original in the same account and conve
       { ...original, accountId: "b" },
       original,
     ]),
-    original,
+    original
   );
   assert.equal(
     localQuote(parent, [original, { ...original, id: "duplicate" }]),
-    undefined,
+    undefined
   );
   assert.equal(localQuote(parent, [{ ...original, type: 1 }]), undefined);
 });
@@ -63,9 +123,9 @@ test("embedded excerpts and authors never come from a stored original", () => {
         ...reply,
         quote: { ...reply.quote, embeddedText: undefined, state: "missing" },
       },
-      original,
+      original
     ).text,
-    "Quoted message unavailable",
+    "Quoted message unavailable"
   );
 });
 test("embedded image media keeps the reply identity even when an original is loaded", () => {
@@ -107,7 +167,7 @@ test("recalls suppress embedded text and images; other states keep supported sum
       type: 10000,
       recall: { observedAt: "10" },
     }).content,
-    undefined,
+    undefined
   );
   assert.equal(
     embeddedQuotePreview({
@@ -119,7 +179,7 @@ test("recalls suppress embedded text and images; other states keep supported sum
         embeddedText: undefined,
       },
     }).text,
-    "Voice message unavailable",
+    "Voice message unavailable"
   );
   assert.equal(
     embeddedQuotePreview({
@@ -132,21 +192,21 @@ test("recalls suppress embedded text and images; other states keep supported sum
         embeddedText: "report.pdf",
       },
     }).text,
-    "report.pdf",
+    "report.pdf"
   );
   assert.equal(
     embeddedQuotePreview({
       ...reply,
       quote: { ...reply.quote, state: "invalid" },
     }).content,
-    undefined,
+    undefined
   );
 });
 test("quoted replies show normalized text and recalls suppress their old content", () => {
   assert.equal(quotedText(original), "Quoted reply text");
   assert.equal(
     quotedText({ ...original, recall: { observedAt: "10" } }),
-    "Message recalled",
+    "Message recalled"
   );
   assert.equal(
     quotedText({
@@ -154,7 +214,7 @@ test("quoted replies show normalized text and recalls suppress their old content
       appMessageType: 99,
       body: "<msg>private transport</msg>",
     }),
-    "Attachment",
+    "Attachment"
   );
 });
 
@@ -189,16 +249,16 @@ test("compact link quotes use embedded structured cards and keep the parent medi
       assert.equal(
         embeddedQuotePreview({ ...reply, quote: { ...reply.quote, state } })
           .content,
-        undefined,
+        undefined
       );
     }
     assert.equal(
       embeddedQuotePreview({ ...reply, recall: {} }).content,
-      undefined,
+      undefined
     );
     assert.equal(
       embeddedQuotePreview(reply, { ...original, recall: {} }).content,
-      undefined,
+      undefined
     );
   }
 });
@@ -226,14 +286,14 @@ test("ordinary and shared sticker quotes reuse sticker rendering without looking
         ...reply,
         quote: { ...reply.quote, embeddedSticker: false },
       }).content,
-      undefined,
+      undefined
     );
     assert.equal(
       embeddedQuotePreview({
         ...reply,
         quote: { ...reply.quote, state: "recalled" },
       }).content,
-      undefined,
+      undefined
     );
   }
   assert.equal(quotedText({ type: 49, appMessageType: 8 }), "Sticker");

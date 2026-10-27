@@ -437,6 +437,31 @@ test("foreign account or message asset metadata never reaches content retrieval"
 const quoteMessage = { ...message, type: 49, appMessageType: 57, body: "Please explain this",
   quote: { serverId: "18446744073709551615", type: 3, state: "embedded", senderId: "source-author", embeddedImage: true } } as NativeMessage;
 const quoteCore = { channel: { media: { saveMediaBuffer: async () => ({ path: "/managed/quoted.gif" }) } } };
+test("application text shares and their quotes need no media lookup and obey recall", async () => {
+  const text = "https://example.invalid/shared?a=1&b=2";
+  const client = {} as NativeWeChatClient;
+  const input = { ...message, type: 49, appMessageType: 1, body: text };
+  const prepared = await prepareNativeAttachment({ client, account, message: input, core: {} });
+  assert.equal(prepared.body, text); assert.equal(prepared.attachment, undefined); assert.equal(prepared.pending, false);
+  const parent = { ...quoteMessage, quote: { serverId: "42", type: 49, appMessageType: 1, state: "embedded", embeddedImage: false, embeddedText: text } };
+  const quoted = await prepareNativeAttachment({ client, account, message: parent, core: {} });
+  assert.match(quoted.body, /Quoted text/); assert.ok(quoted.body.includes(text));
+  const recalled = await prepareNativeAttachment({ client, account, message: { ...input, recall: { observedAt: "2026-10-27T00:00:00Z" } }, core: {} });
+  assert.equal(recalled.body, "[Message recalled]"); assert.ok(!recalled.body.includes(text));
+  const suppressed = await prepareNativeAttachment({ client, account, message: { ...parent, quote: { ...parent.quote, state: "recalled" } }, core: {} });
+  assert.match(suppressed.body, /Quoted message recalled/); assert.ok(!suppressed.body.includes(text));
+});
+test("upload notices and plain announcements need no attachment transfer", async () => {
+  for (const appMessageType of [74, 87]) {
+    const body = appMessageType === 74 ? "[File upload notice]\nreport.pdf" : "[Group announcement]\nAnnouncement";
+    const input = { ...message, type: 49, appMessageType, body };
+    const result = await prepareNativeAttachment({ client: {} as NativeWeChatClient, account, message: input, core: {} });
+    assert.equal(result.body, body); assert.equal(result.attachment, undefined); assert.equal(result.pending, false);
+    const quoted = await prepareNativeAttachment({ client: {} as NativeWeChatClient, account,
+      message: { ...quoteMessage, quote: { serverId: "42", type: 49, appMessageType, state: "embedded", embeddedText: body } }, core: {} });
+    assert.ok(quoted.body.includes(body));
+  }
+});
 function embeddedClient(extra: Partial<MediaAsset> = {}) {
   const calls: string[] = [];
   const client = {
@@ -529,7 +554,7 @@ test("shared link previews supply verified thumbnails under the stored parent ID
   const directory = await mkdtemp(join(tmpdir(), "native-link-preview-")); t.after(() => rm(directory, { recursive: true, force: true }));
   const png = await readFile(new URL("../test/fixtures/native-model.png", import.meta.url));
   const sha256 = createHash("sha256").update(png).digest("hex");
-  for (const subtype of [3, 4, 5]) for (const cached of [false, true]) {
+  for (const subtype of [3, 4, 5, 51]) for (const cached of [false, true]) {
     const calls: string[] = []; let ready = cached;
     const metadata = () => asset({ variant: "thumbnail", actualVariant: ready ? "thumbnail" : null, state: ready ? "available" : "pending",
       contentType: "image/png", filename: "preview.png", byteLength: png.length, sha256, expiresAt: cached ? 1 : null, officialWriteback: "unsupported" });

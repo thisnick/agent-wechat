@@ -21,12 +21,12 @@ export function SharedLink({
   const { element, visible } = useVisible<HTMLSpanElement>();
   const opening = useSyncExternalStore(
     connection.session.subscribe,
-    connection.session.snapshot,
+    connection.session.snapshot
   ).opening;
   const model = connection.incomingMedia.get(message.accountId, message.id);
   const media = useSyncExternalStore(model.subscribe, model.snapshot);
   const thumbnail = media.assets.find(
-    (asset) => asset.kind === "image" && asset.variant === "thumbnail",
+    (asset) => asset.kind === "image" && asset.variant === "thumbnail"
   );
   useEffect(() => {
     if (visible) void model.load();
@@ -47,7 +47,13 @@ export function SharedLink({
           <span className="shared-link-description">{link.description}</span>
         )}
         <span className="shared-link-source">
-          <span>{target?.host || link.sourceName || "Shared link"}</span>
+          <span>
+            {message.appMessageType === 51
+              ? `WeChat Channels${
+                  link.sourceName ? ` · ${link.sourceName}` : ""
+                }`
+              : target?.host || link.sourceName || "Shared link"}
+          </span>
           {!compact && target && <ArrowUpRight aria-hidden="true" size={14} />}
         </span>
       </span>

@@ -28,8 +28,11 @@ export function renderEmbeddedQuote(message: NativeMessage, permitted = true, im
   if (!["embedded", "missing", "unsupported"].includes(state)
     || (source.embeddedText != null && (typeof source.embeddedText !== "string" || source.embeddedText.length > 16384))
     || (source.embeddedImage != null && typeof source.embeddedImage !== "boolean")) return unavailable("invalid");
-  const label = source.type === 1 ? "text" : source.type === 3 ? "image" : source.type === 34 ? "voice" : source.type === 43 ? "video"
-    : source.type === 49 && source.appMessageType === 5 ? "link" : source.type === 49 && source.appMessageType === 6 ? "file" : "message";
+  const label = source.type === 1 || (source.type === 49 && source.appMessageType === 1) ? "text" : source.type === 3 ? "image" : source.type === 34 ? "voice" : source.type === 43 ? "video"
+    : source.type === 49 && source.appMessageType === 51 ? "Channels card"
+    : source.type === 49 && source.appMessageType === 74 ? "file upload notice"
+    : source.type === 49 && source.appMessageType === 87 ? "group announcement"
+    : source.type === 49 && [3, 4, 5].includes(source.appMessageType ?? 0) ? "link" : source.type === 49 && source.appMessageType === 6 ? "file" : "message";
   const image = state === "embedded" && source.type === 3 && source.embeddedImage === true;
   if (state === "embedded" && !image && !source.embeddedText) return unavailable("invalid");
   const content = state === "missing" ? "" : image ? imageBody ?? "[Image metadata embedded in quote; image not retrieved]" : source.embeddedText ?? "";
