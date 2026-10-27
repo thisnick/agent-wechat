@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::Path,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
@@ -22,6 +22,7 @@ pub struct Notifications {
     focus: Mutex<Option<Focus>>,
     pending: Mutex<Option<Target>>,
     status: Mutex<String>,
+    last_sound: Mutex<Option<Instant>>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -185,27 +186,29 @@ pub fn start(app: tauri::AppHandle) -> Result<()> {
         else {
             return;
         };
-        let app = clicked.clone();
-        tauri::async_runtime::spawn(async move {
-            let desktop = app.state::<Desktop>();
-            let active = desktop.inner.lock().await.active.clone();
-            if active.is_none_or(|active| {
-                active.connection.id != target.connection_id
-                    || active.connection.server_id.as_deref() != Some(target.server_id.as_str())
-            }) {
-                return;
-            }
-            *desktop.notifications.pending.lock().await = Some(target.clone());
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-            let _ = app.emit("desktop-open-thread", target);
-        });
+        open_target(clicked.clone(), target);
     })?;
     tauri::async_runtime::spawn(coordinate(app));
     Ok(())
+}
+pub(crate) fn open_target(app: tauri::AppHandle, target: Target) {
+    tauri::async_runtime::spawn(async move {
+        let desktop = app.state::<Desktop>();
+        let active = desktop.inner.lock().await.active.clone();
+        if active.is_none_or(|active| {
+            active.connection.id != target.connection_id
+                || active.connection.server_id.as_deref() != Some(target.server_id.as_str())
+        }) {
+            return;
+        }
+        *desktop.notifications.pending.lock().await = Some(target.clone());
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        let _ = app.emit("desktop-open-thread", target);
+    });
 }
 async fn coordinate(app: tauri::AppHandle) {
     let mut current: Option<Arc<Active>> = None;
@@ -463,12 +466,14 @@ async fn alert(
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");
-    app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .extra("target", &target)
-        .show()?;
+    let enabled = inner.config.notification_sound_enabled;
+    let sound = sound_due(
+        &mut *desktop.notifications.last_sound.lock().await,
+        enabled,
+        Instant::now(),
+    );
+    drop(inner);
+    crate::notification_sound::show(app, &title, &body, Some(target), sound).await?;
     Ok(())
 }
 #[derive(Default)]
@@ -554,6 +559,43 @@ pub async fn notifications_enabled(state: State<'_, Desktop>, enabled: bool) -> 
     inner.config = config;
     Ok(())
 }
+#[tauri::command]
+pub async fn notifications_sound_enabled(
+    state: State<'_, Desktop>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().await;
+    let mut config = inner.config.clone();
+    config.notification_sound_enabled = enabled;
+    config
+        .save(&state.config_file)
+        .map_err(|_| "Cannot save notification sound settings")?;
+    inner.config = config;
+    Ok(())
+}
+#[tauri::command]
+pub async fn notifications_preview_sound(app: tauri::AppHandle) -> Result<(), String> {
+    crate::notification_sound::show(
+        &app,
+        "AgentWechat",
+        "Notification sound preview",
+        None,
+        true,
+    )
+    .await
+    .map_err(|_| "Cannot preview notification sound".into())
+}
+fn sound_due(last: &mut Option<Instant>, enabled: bool, now: Instant) -> bool {
+    if !enabled
+        || last.is_some_and(|previous| {
+            now.saturating_duration_since(previous) < Duration::from_secs(3)
+        })
+    {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
 pub async fn status(desktop: &Desktop) -> String {
     desktop.notifications.status.lock().await.clone()
 }
@@ -562,6 +604,21 @@ pub async fn status(desktop: &Desktop) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn sound_is_optional_and_bursts_do_not_repeat_it() {
+        let now = Instant::now();
+        let mut last = None;
+        assert!(!sound_due(&mut last, false, now));
+        assert!(last.is_none());
+        assert!(sound_due(&mut last, true, now));
+        assert!(!sound_due(
+            &mut last,
+            true,
+            now + Duration::from_millis(2999)
+        ));
+        assert!(!sound_due(&mut last, false, now + Duration::from_secs(3)));
+        assert!(sound_due(&mut last, true, now + Duration::from_secs(3)));
+    }
     #[test]
     fn stream_frames_survive_chunk_boundaries_and_comments() {
         let mut parser = Frames::default();

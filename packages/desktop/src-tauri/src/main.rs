@@ -3,6 +3,7 @@ mod config;
 mod credentials;
 mod files;
 mod hub;
+mod notification_sound;
 mod notifications;
 mod transport;
 mod updates;
@@ -75,6 +76,7 @@ struct Settings {
     certificate: Option<String>,
     cli_path: String,
     notifications_enabled: bool,
+    notification_sound_enabled: bool,
     notification_status: String,
 }
 impl Desktop {
@@ -281,6 +283,7 @@ async fn desktop_settings(state: State<'_, Desktop>) -> Result<Settings, String>
             .display()
             .to_string(),
         notifications_enabled: config.notifications_enabled,
+        notification_sound_enabled: config.notification_sound_enabled,
         notification_status: notifications::status(&state).await,
     })
 }
@@ -590,6 +593,8 @@ fn main() {
             notifications::notifications_context,
             notifications::notifications_take_target,
             notifications::notifications_enabled,
+            notifications::notifications_sound_enabled,
+            notifications::notifications_preview_sound,
             updates::updates_status,
             updates::updates_preferences,
             updates::updates_check,

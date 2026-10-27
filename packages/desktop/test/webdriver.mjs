@@ -145,6 +145,12 @@ try {
   await until("return document.body.innerText", (value) =>
     value.includes("App updates")
   );
+  const soundToggle = `document.querySelector('input[aria-label="Notification sound"]')`;
+  for (const enabled of [false, true]) {
+    await script(`${soundToggle}.click(); return true`);
+    await until(`return ${soundToggle}.disabled`, value => !value);
+    assert.equal((await invokeNative("desktop_settings")).notificationSoundEnabled, enabled);
+  }
   const updates = await invokeNative("updates_status");
   assert.equal(updates.automatic, true);
   assert.equal(updates.prereleases, updates.currentVersion.includes("-"));
@@ -268,6 +274,10 @@ try {
   await invokeNative("updates_preferences", {
     preferences: { automatic: true, prereleases: true },
   });
+  if (process.platform === "linux") {
+    assert.equal((await invokeNative("desktop_settings")).notificationSoundEnabled, false);
+    await invokeNative("notifications_sound_enabled", { enabled: true });
+  }
   console.log(
     "Native update settings and release channel persist across restart"
   );

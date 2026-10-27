@@ -28,6 +28,8 @@ pub struct Config {
     #[serde(default = "enabled")]
     pub notifications_enabled: bool,
     #[serde(default = "enabled")]
+    pub notification_sound_enabled: bool,
+    #[serde(default = "enabled")]
     pub automatic_updates: bool,
     #[serde(default)]
     pub update_prereleases: Option<bool>,
@@ -46,6 +48,7 @@ impl Default for Config {
             network_port: 6175,
             network_enabled: false,
             notifications_enabled: true,
+            notification_sound_enabled: true,
             automatic_updates: true,
             update_prereleases: None,
         }
@@ -199,5 +202,20 @@ mod tests {
         config.network_port = config.local_port;
         assert!(config.save(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn notification_sound_defaults_on_and_saved_choice_survives_reload() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("notificationSoundEnabled");
+        let mut config: Config = serde_json::from_value(value).unwrap();
+        assert!(config.notification_sound_enabled);
+        let directory = wechat_platform::private_tempdir("desktop-sound-").unwrap();
+        let path = directory.path().join("desktop.json");
+        config.notification_sound_enabled = false;
+        config.save(&path).unwrap();
+        assert!(!Config::load(&path).unwrap().notification_sound_enabled);
     }
 }

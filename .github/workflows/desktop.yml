@@ -161,7 +161,7 @@ jobs:
           mkdir -p artifacts/desktop-input/packages/desktop/src-tauri/target/${{ matrix.target }}/release
           mkdir -p artifacts/desktop-input/packages/desktop/src-tauri
           cp packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat${{ runner.os == 'Windows' && '.exe' || '' }} artifacts/desktop-input/packages/desktop/src-tauri/target/${{ matrix.target }}/release/
-          cp -R packages/desktop/src-tauri/binaries packages/desktop/src-tauri/resources artifacts/desktop-input/packages/desktop/src-tauri/
+          cp -R packages/desktop/src-tauri/binaries packages/desktop/src-tauri/resources packages/desktop/src-tauri/sounds artifacts/desktop-input/packages/desktop/src-tauri/
       - uses: actions/upload-artifact@v7
         if: inputs.release
         with:

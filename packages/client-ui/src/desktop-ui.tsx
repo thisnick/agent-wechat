@@ -12,8 +12,8 @@ const message = (error: unknown) =>
   typeof error === "string"
     ? error
     : error instanceof Error
-      ? error.message
-      : "The operation could not be completed.";
+    ? error.message
+    : "The operation could not be completed.";
 export function DesktopWelcome({
   onConnect,
   error: initialError,
@@ -266,7 +266,9 @@ export function DesktopPreferences({
       <div className="setting">
         <span>
           Message notifications
-          <small>{settings?.notificationStatus || "New messages in unmuted chats."}</small>
+          <small>
+            {settings?.notificationStatus || "New messages in unmuted chats."}
+          </small>
         </span>
         <input
           type="checkbox"
@@ -281,6 +283,35 @@ export function DesktopPreferences({
             });
           }}
         />
+      </div>
+      <div className="setting">
+        <span>Notification sound</span>
+        <div className="notification-sound-controls">
+          <button
+            className="quiet-button"
+            disabled={busy || !settings}
+            onClick={() =>
+              void action(async () => {
+                await desktopInvoke("notifications_preview_sound");
+              })
+            }
+          >
+            Preview
+          </button>
+          <input
+            type="checkbox"
+            aria-label="Notification sound"
+            checked={settings?.notificationSoundEnabled ?? true}
+            disabled={busy || !settings}
+            onChange={(event) => {
+              const enabled = event.target.checked;
+              void action(async () => {
+                await desktopInvoke("notifications_sound_enabled", { enabled });
+                await refresh();
+              });
+            }}
+          />
+        </div>
       </div>
       <div className="setting">
         <span>Open at login</span>

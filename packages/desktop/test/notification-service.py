@@ -21,13 +21,13 @@ class Notifications(dbus.service.Object):
 
     @dbus.service.method("org.freedesktop.Notifications", out_signature="as")
     def GetCapabilities(self):
-        return ["body", "actions"]
+        return ["body", "actions", "sound"]
 
     @dbus.service.method("org.freedesktop.Notifications", in_signature="susssasa{sv}i", out_signature="u")
     def Notify(self, app, replaces, icon, title, body, actions, hints, expiry):
         self.next_id += 1
         with open(sys.argv[1], "a", encoding="utf-8") as output:
-            output.write(json.dumps({"id": self.next_id, "title": str(title), "body": str(body)}) + "\n")
+            output.write(json.dumps({"id": self.next_id, "title": str(title), "body": str(body), "soundFile": str(hints["sound-file"]) if "sound-file" in hints else None, "suppressSound": bool(hints.get("suppress-sound", False))}) + "\n")
         return self.next_id
 
     @dbus.service.method("org.freedesktop.Notifications", in_signature="u")

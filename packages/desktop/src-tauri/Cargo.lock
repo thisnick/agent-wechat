@@ -27,6 +27,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "keyring",
+ "notify-rust",
  "rand 0.8.8",
  "rcgen",
  "reqwest 0.12.28",

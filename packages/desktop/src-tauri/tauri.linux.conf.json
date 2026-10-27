@@ -3,7 +3,8 @@
     "externalBin": [],
     "resources": {
       "resources/": "licenses/",
-      "binaries/linux/": "bin/"
+      "binaries/linux/": "bin/",
+      "sounds/AgentWechatSoftPair.wav": "sounds/AgentWechatSoftPair.wav"
     }
   }
 }

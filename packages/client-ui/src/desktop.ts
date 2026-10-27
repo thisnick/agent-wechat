@@ -14,6 +14,7 @@ export type DesktopSettings = {
   certificate: string | null;
   cliPath: string;
   notificationsEnabled: boolean;
+  notificationSoundEnabled: boolean;
   notificationStatus: string;
 };
 export async function desktopConnect(

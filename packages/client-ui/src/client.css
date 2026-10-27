@@ -2171,3 +2171,6 @@ input:focus-visible {
     animation: none;
   }
 }
+
+.notification-sound-controls { display: flex; align-items: center; gap: 16px; }
+.notification-sound-controls .quiet-button { padding: 7px 12px; font-size: 12px; }

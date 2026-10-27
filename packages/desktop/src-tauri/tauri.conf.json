@@ -41,9 +41,10 @@
       "binaries/ffmpeg",
       "binaries/ffprobe"
     ],
-    "resources": [
-      "resources/*"
-    ],
+    "resources": {
+      "resources/": "resources/",
+      "sounds/AgentWechatSoftPair.wav": "AgentWechatSoftPair.wav"
+    },
     "category": "SocialNetworking",
     "shortDescription": "WeChat desktop client and local agent-wechat hub",
     "macOS": {

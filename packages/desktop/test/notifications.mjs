@@ -16,14 +16,21 @@ async function wait(check) {
 }
 export async function notificationsAcceptance(invoke) {
   const window = (action = "state") =>
-    JSON.parse(execFileSync("python3", [
-      fileURLToPath(new URL("./window-control.py", import.meta.url)), action,
-    ], { encoding: "utf8" }));
+    JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          fileURLToPath(new URL("./window-control.py", import.meta.url)),
+          action,
+        ],
+        { encoding: "utf8" },
+      ),
+    );
   const log = join(process.env.HOME, "notifications.jsonl");
   const service = spawn(
     "python3",
     [fileURLToPath(new URL("./notification-service.py", import.meta.url)), log],
-    { stdio: ["ignore", "pipe", "inherit"] }
+    { stdio: ["ignore", "pipe", "inherit"] },
   );
   let ready = false;
   service.stdout.on("data", () => {
@@ -90,7 +97,7 @@ export async function notificationsAcceptance(invoke) {
       response.writeHead(200, { "Content-Type": "text/event-stream" });
       response.write(": ready\n\n");
       for (const event of events.filter(
-        (event) => Number(event.cursor) > Number(url.searchParams.get("after"))
+        (event) => Number(event.cursor) > Number(url.searchParams.get("after")),
       ))
         response.write("data: " + JSON.stringify(event) + "\n\n");
       streams.add(response);
@@ -157,7 +164,7 @@ export async function notificationsAcceptance(invoke) {
     assert.equal(
       (await entries()).length,
       0,
-      "muted/history/outgoing messages must not notify"
+      "muted/history/outgoing messages must not notify",
     );
     muted = null;
     send("unknown-mute");
@@ -166,7 +173,7 @@ export async function notificationsAcceptance(invoke) {
     assert.equal(
       (await entries()).length,
       0,
-      "unknown mute state must remain silent"
+      "unknown mute state must remain silent",
     );
     muted = false;
     contactReady = false;
@@ -175,7 +182,7 @@ export async function notificationsAcceptance(invoke) {
     assert.equal(
       (await entries()).length,
       0,
-      "unready contact sync must remain silent"
+      "unready contact sync must remain silent",
     );
     contactReady = true;
     window("close");
@@ -190,23 +197,35 @@ export async function notificationsAcceptance(invoke) {
     window("close");
     await wait(() => !window().visible);
     await invoke("notifications_context", {
-      focus: { connectionId: connection.id, accountId: account, threadId: thread },
+      focus: {
+        connectionId: connection.id,
+        accountId: account,
+        threadId: thread,
+      },
     });
     send("new");
     const first = await wait(async () => (await entries())[0]);
     assert.equal(first.title, "Fixture contact");
     assert.equal(first.body, "Fixture message");
+    assert.ok(first.soundFile.endsWith("/sounds/AgentWechatSoftPair.wav"));
+    assert.deepEqual(
+      await readFile(first.soundFile),
+      await readFile(
+        new URL("../src-tauri/sounds/AgentWechatSoftPair.wav", import.meta.url),
+      ),
+    );
+    assert.equal(first.suppressSound, false);
     assert.equal(
       window().visible,
       false,
-      "a background notification must not reopen the window"
+      "a background notification must not reopen the window",
     );
     send("new");
     await pause(700);
     assert.equal(
       (await entries()).length,
       1,
-      "duplicate message must not notify again"
+      "duplicate message must not notify again",
     );
     execFileSync("gdbus", [
       "call",
@@ -236,7 +255,7 @@ export async function notificationsAcceptance(invoke) {
     assert.equal(
       (await entries())[1].body,
       "Fixture message",
-      "transport reconnect must replay from its cursor"
+      "transport reconnect must replay from its cursor",
     );
     const priorBaselines = baselineReads;
     expireStream = true;
@@ -247,7 +266,7 @@ export async function notificationsAcceptance(invoke) {
     assert.equal(
       (await entries()).length,
       2,
-      "expired cursors must start a fresh boundary without old alerts"
+      "expired cursors must start a fresh boundary without old alerts",
     );
     send("after-expiry");
     await wait(async () => (await entries()).length === 3);
@@ -267,19 +286,44 @@ export async function notificationsAcceptance(invoke) {
     assert.equal(
       quoted.body,
       "Yes, that works",
-      "quoted reply alerts must show the new comment"
+      "quoted reply alerts must show the new comment",
     );
     await invoke("notifications_enabled", { enabled: false });
+    await wait(() => streams.size === 0);
     send("disabled");
     await pause(700);
     assert.equal(
       (await entries()).length,
       4,
-      "disabled notifications must remain silent"
+      "disabled notifications must remain silent",
     );
     await invoke("notifications_enabled", { enabled: true });
+    await wait(() => streams.size > 0);
+    await invoke("notifications_sound_enabled", { enabled: false });
+    assert.equal(
+      (await invoke("desktop_settings")).notificationSoundEnabled,
+      false,
+    );
+    send("silent-banner");
+    const silent = await wait(async () => (await entries())[4]);
+    assert.equal(silent.suppressSound, true);
+    assert.equal(silent.soundFile, null);
+    await invoke("notifications_preview_sound");
+    const preview = await wait(async () => (await entries())[5]);
+    assert.equal(preview.body, "Notification sound preview");
+    assert.equal(preview.soundFile, first.soundFile);
+    await invoke("notifications_sound_enabled", { enabled: true });
+    await pause(3100);
+    send("sound-on");
+    const withSound = await wait(async () => (await entries())[6]);
+    assert.equal(withSound.soundFile, first.soundFile);
+    send("burst");
+    const burst = await wait(async () => (await entries())[7]);
+    assert.equal(burst.suppressSound, true);
+    assert.equal(burst.soundFile, null);
+    await invoke("notifications_sound_enabled", { enabled: false });
     console.log(
-      "Native notifications: close hides the window, relaunch restores it, hidden SSE/D-Bus delivery, click restore, mute/history/outgoing suppression, deduplication and settings passed"
+      "Native notifications: hidden delivery, click restore, mute/history/outgoing suppression, deduplication, Soft pair sound, silent banners, preview and burst limiting passed",
     );
   } finally {
     await invoke("desktop_select", { id: "local" }).catch(() => {});

@@ -1,6 +1,7 @@
 // Inspect a built package without installing it or changing the host filesystem.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 const path = process.argv[2];
 if (!path) throw new Error('Pass the built DEB path');
 const files = execFileSync('dpkg-deb', ['--fsys-tarfile', path], { maxBuffer: 512 * 1024 * 1024 });
@@ -22,4 +23,7 @@ for (const helper of ['wx', 'ffmpeg', 'ffprobe']) {
   assert.ok(names.some((name) => name.endsWith(`/usr/lib/AgentWechat/bin/${helper}`) || name === `usr/lib/AgentWechat/bin/${helper}`));
   assert.ok(!names.some((name) => name.endsWith(`/usr/bin/${helper}`) || name === `usr/bin/${helper}`), 'Helpers must not replace system commands');
 }
-console.log('Desktop DEB contains private helpers without replacing system CLI or media tools');
+const soundEntry = names.find(name => name.endsWith('/usr/lib/AgentWechat/sounds/AgentWechatSoftPair.wav') || name === 'usr/lib/AgentWechat/sounds/AgentWechatSoftPair.wav');
+assert.ok(soundEntry, 'Missing bundled notification sound');
+assert.deepEqual(execFileSync('tar', ['-xOf', '-', soundEntry], { input: files }), readFileSync(new URL('../src-tauri/sounds/AgentWechatSoftPair.wav', import.meta.url)));
+console.log('Desktop DEB contains private helpers and the notification sound without replacing system commands');

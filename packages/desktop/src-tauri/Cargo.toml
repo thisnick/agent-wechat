@@ -49,4 +49,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust"] }
+notify-rust = "4.18"
 
