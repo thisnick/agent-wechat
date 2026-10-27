@@ -13,6 +13,7 @@
     "batch-local-quote-recalls",
     "compact-quote-previews",
     "conversation-history-ttl",
+    "conversation-pinning-ui",
     "declare-wechat-send-share",
     "desktop-app",
     "desktop-connection-layout",
@@ -48,6 +49,7 @@
     "quote-recheck-after-upgrade",
     "recall-author-search",
     "thread-notification-preferences",
+    "thread-pinning",
     "voice-first-range-metadata"
   ]
 }

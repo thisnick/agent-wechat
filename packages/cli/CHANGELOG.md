@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.20
+
+### Minor Changes
+
+- [#298](https://github.com/thisnick/agent-wechat/pull/298) [`acbc39d`](https://github.com/thisnick/agent-wechat/commit/acbc39d8039943de2f61054a249a0a0cbefb685c) Thanks [@thisnick](https://github.com/thisnick)! - Add backend thread pinning for ordinary direct chats and active groups. Chat responses include nullable saved pin state; new lists place pinned chats first. Add admin-only pin/unpin API, SDK and CLI operations using the existing idempotency and recovery journal. Recognized incoming pin changes update the official profile and emit thread.updated. Built-in peers and unknown updates remain unsupported; the frontend is unchanged.
+
 ## 1.0.0-beta.19
 
 ## 1.0.0-beta.18
