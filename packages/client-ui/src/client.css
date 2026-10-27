@@ -435,6 +435,14 @@ input:focus-visible {
   outline-offset: 2px;
 }
 @media (max-width: 720px) {
+  .chat-header > .conversation-avatar {
+    width: 36px;
+    height: 36px;
+  }
+  .chat-header > .conversation-avatar:not(.group-avatar) > .avatar {
+    width: 100%;
+    height: 100%;
+  }
   .simulator-tools {
     padding: 10px 14px;
   }

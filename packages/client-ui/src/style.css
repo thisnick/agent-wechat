@@ -1303,9 +1303,6 @@ h1 {
     gap: 7px;
     height: 72px;
   }
-  .chat-header .avatar {
-    display: none;
-  }
   .chat-heading h2 {
     font-size: 14px;
   }

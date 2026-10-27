@@ -29,6 +29,14 @@ export async function interfaceAcceptance({
     readStateVersion: "0",
     history: {},
   }));
+  threads.push({
+    ...threads[0],
+    id: "fixture@chatroom",
+    peerId: "fixture@chatroom",
+    kind: "group",
+    displayName: "Test group",
+    avatarMembers: peers.map((id) => ({ id, displayName: id })),
+  });
   let avatarReads = 0;
   let originalLookups = 0;
   const base = {
@@ -298,6 +306,24 @@ export async function interfaceAcceptance({
     );
     if (capture) await capture();
     await resize(420, 820);
+    const headerAvatars = `return [...document.querySelectorAll('.chat-header .conversation-avatar img')].map(img => {
+      const rect = img.getBoundingClientRect();
+      const frame = img.closest('.conversation-avatar').getBoundingClientRect();
+      return { loaded: img.naturalWidth === 8, visible: rect.width > 0 && rect.height > 0,
+        contained: rect.left >= frame.left && rect.right <= frame.right && rect.top >= frame.top && rect.bottom <= frame.bottom };
+    });`;
+    const headerReady = (count) => (avatars) =>
+      avatars.length === count && avatars.every((avatar) => avatar.loaded && avatar.visible && avatar.contained);
+    await until(headerAvatars, headerReady(1));
+    const readsBeforeGroup = avatarReads;
+    await script("document.querySelector('button[aria-label=\"Back to conversations\"]').click(); return true");
+    await script("[...document.querySelectorAll('.chat-row')].find(row => row.querySelector('.chat-name')?.textContent === 'Test group').click(); return true");
+    await until(headerAvatars, headerReady(2));
+    assert.equal(avatarReads, readsBeforeGroup, "mobile group headers reuse the same visible members' cached avatars");
+    await script("document.querySelector('button[aria-label=\"Back to conversations\"]').click(); return true");
+    await script("document.querySelector('.chat-row').click(); return true");
+    await until(headerAvatars, headerReady(1));
+    await until("return document.querySelectorAll('.quote-preview').length", (count) => count === 2);
     const bounds =
       await script(`return [...document.querySelectorAll('.quote-preview')].map(el => {
       const rect = el.getBoundingClientRect(); return {right:rect.right, width:innerWidth}; });`);
@@ -391,7 +417,7 @@ export async function interfaceAcceptance({
       "http://127.0.0.1:" + backend.address().port,
     );
     console.log(
-      "Native interface: avatars survive reload and legacy storage, forgotten hubs refresh, settings scroll and certificate fields stay optional",
+      "Native interface: cached avatars survive reload and remain visible in mobile direct/group headers, forgotten hubs refresh, settings scroll and certificate fields stay optional",
     );
   } finally {
     if (connection)
