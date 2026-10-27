@@ -239,6 +239,9 @@ impl Snapshot {
             return Err(ProfileError::InvalidQuery);
         }
         let temp = wechat_platform::private_tempdir("agent-wechat-read-")?;
+        // macOS and custom TMPDIRs may reach this private directory through a
+        // symlink. Resolve its root before opening files with SQLITE_OPEN_NOFOLLOW.
+        let temp_root = fs::canonicalize(temp.path())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -249,7 +252,7 @@ impl Snapshot {
         let files = candidates(&location.storage, &options)?;
         for source in &files {
             let rel = relative(&location.storage, source)?;
-            let dest = temp.path().join(&rel);
+            let dest = temp_root.join(&rel);
             fs::create_dir_all(dest.parent().ok_or(ProfileError::UnsupportedFile)?)?;
             let (bytes, hash) =
                 hash_copy(source, Some(&dest), &mut total, options.max_database_bytes)?;
@@ -288,7 +291,7 @@ impl Snapshot {
             if !rel.ends_with(".db") {
                 continue;
             }
-            let p = temp.path().join(rel);
+            let p = temp_root.join(rel);
             let mut prefix = [0u8; 16];
             let mut f = fs::File::open(&p)?;
             let n = f.read(&mut prefix)?;
