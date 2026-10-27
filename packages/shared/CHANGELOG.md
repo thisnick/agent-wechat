@@ -1,5 +1,15 @@
 # @agent-wechat/shared
 
+## 1.0.0-beta.5
+
+### Patch Changes
+
+- [#294](https://github.com/thisnick/agent-wechat/pull/294) [`312ffc9`](https://github.com/thisnick/agent-wechat/commit/312ffc95c2a40fe32dee92c227decbf6e2b64c19) Thanks [@thisnick](https://github.com/thisnick)! - Speed up chat opening with reusable read-only database connections for daemon-owned profiles, batched attachment metadata and an immediate event-stream heartbeat. Keep offline inspection on source-preserving snapshots.
+
+  Reuse authenticated conversation caches by last message ID with a five-minute history validation limit, retain hidden cached history across sign-out, catch up missed changes before restoring messages, and avoid redundant startup and foreground reloads. Cancel obsolete history requests when switching chats.
+
+  Show contact photos and group member collages in the chat header on narrow screens, using the same avatar cache as the conversation list.
+
 ## 1.0.0-beta.4
 
 ### Patch Changes

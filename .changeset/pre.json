@@ -12,9 +12,11 @@
   "changesets": [
     "batch-local-quote-recalls",
     "compact-quote-previews",
+    "conversation-history-ttl",
     "declare-wechat-send-share",
     "desktop-app",
     "desktop-connection-layout",
+    "desktop-window-reopen",
     "history-snapshot-reuse",
     "jpeg-photo-trailers",
     "logout-rejected-sessions",

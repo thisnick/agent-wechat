@@ -1,5 +1,7 @@
 # @agent-wechat/cli
 
+## 1.0.0-beta.18
+
 ## 1.0.0-beta.17
 
 ### Patch Changes
