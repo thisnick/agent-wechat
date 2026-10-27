@@ -1406,7 +1406,10 @@ function Chats({
                           </ConversationItem>
                         ))}
                         {state.sends
-                          .filter((s) => s.threadId === state.selected)
+                          .filter(
+                            (s) =>
+                              s.threadId === state.selected && !s.dismissed,
+                          )
                           .map((s) => (
                             <ConversationItem
                               key={s.key}
@@ -1414,7 +1417,9 @@ function Chats({
                             >
                               <Pending
                                 send={s}
-                                check={() => void session.checkSend(s.key)}
+                                check={() => session.checkSend(s.key)}
+                                cancel={() => session.cancelSend(s.key)}
+                                dismiss={() => session.dismissSend(s.key)}
                               />
                             </ConversationItem>
                           ))}
@@ -1787,9 +1792,29 @@ function SearchResults({
     </section>
   );
 }
-function Pending({ send, check }: { send: PendingSend; check: () => void }) {
+function Pending({
+  send,
+  check,
+  cancel,
+  dismiss,
+}: {
+  send: PendingSend;
+  check: () => Promise<void>;
+  cancel: () => Promise<void>;
+  dismiss: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await action();
+    } finally {
+      setBusy(false);
+    }
+  };
   const state = send.intent?.state;
   const uncertain = send.uncertain || state === "needs_review";
+  const ended = ["rejected", "failed", "cancelled"].includes(state ?? "");
   const label = uncertain
     ? "Couldn't confirm send"
     : state === "rejected" || state === "failed"
@@ -1803,6 +1828,7 @@ function Pending({ send, check }: { send: PendingSend; check: () => void }) {
     <article
       className="message own"
       data-send-state={state || (send.uncertain ? "uncertain" : "submitting")}
+      aria-busy={busy}
     >
       <Avatar name="You" />
       <div className="message-body">
@@ -1825,11 +1851,26 @@ function Pending({ send, check }: { send: PendingSend; check: () => void }) {
           }`}
           role="status"
         >
-          {label} <button onClick={check}>Check status</button>
+          {label}
+          {!ended && (
+            <button disabled={busy} onClick={() => void run(check)}>
+              Check status
+            </button>
+          )}
+          {state === "queued" && (
+            <button disabled={busy} onClick={() => void run(cancel)}>
+              Cancel
+            </button>
+          )}
+          {(uncertain || ended) && (
+            <button disabled={busy} onClick={dismiss}>
+              Dismiss
+            </button>
+          )}
         </div>
         {uncertain && (
           <small className="send-explanation">
-            Check the conversation before sending again.
+            Dismiss hides this notice; it doesn’t cancel delivery.
           </small>
         )}
       </div>

@@ -963,6 +963,143 @@ test("uncertain sends retain their key and check status without resubmitting", a
   assert.equal(hub.snapshot().sends[0].intent.state, "needs_review");
 });
 
+test("queued sends cancel using their existing intent without resubmission", async (t) => {
+  const cancellations = [];
+  let submissions = 0;
+  const hub = session(t, {
+    sendText: async () => { submissions++; return receipt(); },
+    send: async () => receipt(),
+    cancelSend: async (...args) => { cancellations.push(args); return receipt("cancelled"); },
+  });
+  await hub.activate("a");
+  await hub.send("Cancel this");
+  const key = hub.snapshot().sends[0].key;
+  await hub.cancelSend(key);
+  assert.deepEqual(cancellations, [["a", "send1"]]);
+  assert.equal(hub.snapshot().sends[0].intent.state, "cancelled");
+  assert.equal(hub.snapshot().sends[0].key, key);
+  assert.equal(submissions, 1);
+  hub.dismissSend(key);
+  assert.equal(hub.snapshot().sends[0].dismissed, true);
+  await hub.consume({ kind: "send.updated", data: { id: "send1" }, cursor: "21" }, "a");
+  assert.equal(hub.snapshot().sends[0].intent.state, "cancelled");
+  assert.equal(hub.snapshot().sends[0].dismissed, true);
+});
+
+test("cancellation losing a race to acceptance does not report cancellation", async (t) => {
+  let cancellations = 0;
+  const hub = session(t, {
+    sendText: async () => receipt(),
+    send: async () => receipt(),
+    cancelSend: async () => { cancellations++; return receipt("accepted"); },
+  });
+  await hub.activate("a");
+  await hub.send("Already accepted");
+  const key = hub.snapshot().sends[0].key;
+  await hub.cancelSend(key);
+  assert.equal(hub.snapshot().sends[0].intent.state, "accepted");
+  await hub.cancelSend(key);
+  hub.dismissSend(key);
+  assert.equal(cancellations, 1);
+  assert.notEqual(hub.snapshot().sends[0].dismissed, true);
+});
+
+for (const stale of ["queued", "error"]) {
+  test(`a late ${stale} status check cannot overwrite confirmed cancellation`, async (t) => {
+    const late = deferred();
+    let reads = 0;
+    const hub = session(t, {
+      sendText: async () => receipt(),
+      send: async () => {
+        if (++reads === 1) return receipt();
+        await late.promise;
+        if (stale === "error") throw new Error("old read failed");
+        return receipt();
+      },
+      cancelSend: async () => receipt("cancelled"),
+    });
+    await hub.activate("a");
+    await hub.send("Cancel this");
+    const key = hub.snapshot().sends[0].key;
+    const checking = hub.checkSend(key);
+    await hub.cancelSend(key);
+    hub.dismissSend(key);
+    late.resolve();
+    await checking;
+    assert.equal(hub.snapshot().sends[0].intent.state, "cancelled");
+    assert.equal(hub.snapshot().sends[0].uncertain, false);
+    assert.equal(hub.snapshot().sends[0].dismissed, true);
+  });
+}
+
+test("a lost cancellation response remains uncertain and recovers by reading the same intent", async (t) => {
+  let cancelled = false, submissions = 0;
+  const hub = session(t, {
+    sendText: async () => { submissions++; return receipt(); },
+    send: async () => receipt(cancelled ? "cancelled" : "queued"),
+    cancelSend: async () => { cancelled = true; throw new Error("lost cancel response"); },
+  });
+  await hub.activate("a");
+  await hub.send("Cancel this");
+  const key = hub.snapshot().sends[0].key;
+  await hub.cancelSend(key);
+  assert.equal(hub.snapshot().sends[0].uncertain, true);
+  assert.equal(hub.snapshot().sends[0].intent.state, "queued");
+  await hub.checkSend(key);
+  assert.equal(hub.snapshot().sends[0].intent.state, "cancelled");
+  assert.equal(hub.snapshot().sends[0].uncertain, false);
+  assert.equal(submissions, 1);
+});
+
+test("dismissed uncertain sends stay hidden after reload while their original receipts recover", async (t) => {
+  const saved = new Map(), lookedUp = [];
+  let submissions = 0, cancellations = 0;
+  const api = client({
+    sendText: async () => { submissions++; throw new Error("lost send response"); },
+    sendByKey: async (account, key) => { lookedUp.push([account, key]); return receipt("needs_review"); },
+    cancelSend: async () => { cancellations++; throw new Error("must not cancel unknown send"); },
+  });
+  const storage = {
+    read: (account) => structuredClone(saved.get(account) ?? []),
+    write: (account, sends) => saved.set(account, structuredClone(sends)),
+  };
+  const first = new HubSession(api, storage);
+  t.after(() => first.close());
+  await first.activate("a");
+  await first.send("Uncertain");
+  const key = first.snapshot().sends[0].key;
+  await first.cancelSend(key);
+  first.dismissSend(key);
+  first.close();
+  const next = new HubSession(api, storage);
+  t.after(() => next.close());
+  await next.activate("a");
+  await eventually(() => next.snapshot().sends[0]?.intent?.state === "needs_review");
+  assert.deepEqual(lookedUp, [["a", key]]);
+  assert.equal(next.snapshot().sends[0].dismissed, true);
+  assert.equal(next.snapshot().sends[0].text, "Uncertain");
+  assert.equal(submissions, 1);
+  assert.equal(cancellations, 0);
+  await next.activate("b");
+  assert.equal(next.snapshot().sends.length, 0);
+});
+
+test("late cancellation results cannot modify another account", async (t) => {
+  const late = deferred();
+  const hub = session(t, {
+    sendText: async () => receipt(),
+    send: async () => receipt(),
+    cancelSend: async () => late.promise,
+  });
+  await hub.activate("a");
+  await hub.send("For account a");
+  const cancelling = hub.cancelSend(hub.snapshot().sends[0].key);
+  await hub.activate("b");
+  late.resolve(receipt("cancelled"));
+  await cancelling;
+  assert.equal(hub.snapshot().sends.length, 0);
+});
+
 test("quoted sends retain exact references and their preview across an uncertain response without resubmitting", async (t) => {
   const calls = [];
   const target = { ...message("target"), serverId: "18446744073709551615" };

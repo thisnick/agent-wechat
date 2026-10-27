@@ -122,6 +122,8 @@ export async function connect(
                     typeof s.key === "string" &&
                     typeof s.text === "string" &&
                     typeof s.threadId === "string" &&
+                    (s.dismissed === undefined ||
+                      typeof s.dismissed === "boolean") &&
                     (s.quote === undefined || validQuoteReference(s.quote)),
                 )
                 .slice(-50)

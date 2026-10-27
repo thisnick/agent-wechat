@@ -33,6 +33,7 @@ export type PendingSend = {
   quotePreview?: NativeThreadMessage;
   intent?: NativeSendIntent;
   uncertain?: boolean;
+  dismissed?: boolean;
   error?: string;
 };
 export type SessionState = {
@@ -1290,6 +1291,15 @@ export class HubSession {
     if (!this.current(account, generation) || intent.accountId !== account)
       return;
     let sends = this.value.sends;
+    const settled = sends.find((send) => send.intent?.id === intent.id)?.intent;
+    // Accepted and cancelled intents cannot return to the queue. An admission
+    // response or status read may arrive after cancellation or an SSE update.
+    if (
+      settled &&
+      ["accepted", "cancelled"].includes(settled.state) &&
+      intent.state !== settled.state
+    )
+      intent = settled;
     if (key && sends.some((send) => send.key === key))
       sends = sends.filter(
         (send) => send.key === key || send.intent?.id !== intent.id,
@@ -1644,15 +1654,20 @@ export class HubSession {
     const account = this.value.account,
       generation = this.generation;
     if (!account) return;
+    const known = this.value.sends.find((send) => send.key === key)?.intent;
     try {
-      const known = this.value.sends.find((send) => send.key === key)?.intent;
       const receipt = known
         ? await this.client.send(account, known.id)
         : await this.client.sendByKey(account, key);
+      if (this.value.sends.find((send) => send.key === key)?.intent !== known)
+        return;
       if ("clientId" in receipt)
         await this.acceptReceipt(receipt, account, generation, key);
     } catch (error) {
-      if (this.current(account, generation))
+      if (
+        this.current(account, generation) &&
+        this.value.sends.find((send) => send.key === key)?.intent === known
+      )
         this.publish({
           sends: this.value.sends.map((send) =>
             send.key === key
@@ -1661,5 +1676,41 @@ export class HubSession {
           ),
         });
     }
+  }
+  async cancelSend(key: string): Promise<void> {
+    const account = this.value.account,
+      generation = this.generation,
+      known = this.value.sends.find((send) => send.key === key)?.intent;
+    if (!account || known?.state !== "queued") return;
+    try {
+      const receipt = await this.client.cancelSend(account, known.id);
+      if ("clientId" in receipt)
+        await this.acceptReceipt(receipt, account, generation, key);
+    } catch (error) {
+      if (
+        this.current(account, generation) &&
+        this.value.sends.find((send) => send.key === key)?.intent === known
+      )
+        this.publish({
+          sends: this.value.sends.map((send) =>
+            send.key === key
+              ? { ...send, uncertain: true, error: readableError(error) }
+              : send,
+          ),
+        });
+    }
+  }
+  dismissSend(key: string): void {
+    this.publish({
+      sends: this.value.sends.map((send) =>
+        send.key === key &&
+        (send.uncertain ||
+          ["failed", "rejected", "cancelled", "needs_review"].includes(
+            send.intent?.state ?? "",
+          ))
+          ? { ...send, dismissed: true }
+          : send,
+      ),
+    });
   }
 }
