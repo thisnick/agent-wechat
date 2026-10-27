@@ -52,6 +52,15 @@ including messages outside the browser's loaded page. **Load more matches**
 continues the same query using the hub's cursor. Clearing the query restores the
 chat; switching accounts or conversations discards any late search response.
 
+Pin a conversation from its **⋯ → Pin chat** menu (also available on right-click),
+or from the **Pin chat** switch in Conversation details. Pinned chats stay together
+at the top in the hub's order. Both controls share one pending operation; pinning
+an unopened chat does not open it or clear its unread badge. Unknown pin state
+can be refreshed. **Check status** recovers an uncertain change without resending
+it, including after a reload. The hub must advertise pinning for that chat type,
+and the connection key must have account management permission. File Transfer
+and other unsupported built-in chats cannot be pinned.
+
 The hub access key stays in memory. IndexedDB retains recent history, contacts,
 verified media bytes, avatars, drafts and pending-operation receipts. Each record
 is scoped to the hub address, its persistent server ID and the account. IDs and

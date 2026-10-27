@@ -15,12 +15,14 @@ export type GroupAction =
       members: string[];
     }
   | { action: "my_name"; groupId: string; displayName: string }
-  | { action: "mute"; groupId: string; muted: boolean };
+  | { action: "mute"; groupId: string; muted: boolean }
+  | { action: "pin"; groupId: string; pinned: boolean };
 export type GroupReceipt = {
   key: string;
   input: GroupAction;
   operation?: NativeOperation;
   notAdmitted?: boolean;
+  admissionStatus?: number;
 };
 export function validGroupReceipt(
   value: unknown,
@@ -48,6 +50,7 @@ export function validGroupReceipt(
       "my_name",
       "clear_announcement",
       "mute",
+      "pin",
     ].includes(input.action)
   )
     return false;
@@ -76,7 +79,8 @@ export function validGroupReceipt(
       typeof input.name !== "string") ||
     (input.action === "rename" && typeof input.name !== "string") ||
     (input.action === "my_name" && typeof input.displayName !== "string") ||
-    (input.action === "mute" && typeof input.muted !== "boolean")
+    (input.action === "mute" && typeof input.muted !== "boolean") ||
+    (input.action === "pin" && typeof input.pinned !== "boolean")
   )
     return false;
   return true;
@@ -86,11 +90,22 @@ type Storage = {
   write(value: GroupReceipt | null): void;
 };
 type Snapshot = { receipt: GroupReceipt | null; busy: boolean; error: string };
-export const groupEnded = (operation?: NativeOperation): boolean =>
-  !!operation &&
-  ["succeeded", "failed", "needs_review", "cancelled", "rejected"].includes(
-    operation.state,
+export const groupEnded = (operation?: NativeOperation): boolean => {
+  const result = operation?.result as Record<string, unknown> | undefined;
+  if (
+    result?.action === "pin" &&
+    operation?.state === "succeeded" &&
+    (result.remoteOutcome !== "accepted" ||
+      result.profileProjection !== "complete")
+  )
+    return false;
+  return (
+    !!operation &&
+    ["succeeded", "failed", "needs_review", "cancelled", "rejected"].includes(
+      operation.state,
+    )
   );
+};
 export const groupTarget = (input: GroupAction): string | null =>
   input.action === "create" ? null : input.groupId;
 /** Each account/target retains its admission key. Recovery only reads status. */
@@ -99,6 +114,8 @@ export class GroupMutations {
   private listeners = new Set<() => void>();
   private controller = new AbortController();
   private watching = false;
+  private statusVersion = 0;
+  private checkingVersion = 0;
   private client: NativeWeChatClient;
   private account: string;
   private storage: Storage;
@@ -110,7 +127,11 @@ export class GroupMutations {
     if (receipt?.operation && !this.matches(receipt.operation, receipt))
       delete receipt.operation;
     this.value = { receipt, busy: false, error: "" };
-    if (this.value.receipt && !this.value.receipt.notAdmitted)
+    const settledPin =
+      receipt?.input.action === "pin" &&
+      receipt.operation?.state === "succeeded" &&
+      groupEnded(receipt.operation);
+    if (this.value.receipt && !this.value.receipt.notAdmitted && !settledPin)
       queueMicrotask(() => void this.check());
   }
   snapshot = (): Snapshot => this.value;
@@ -136,7 +157,8 @@ export class GroupMutations {
       !!operation.id &&
       !!result &&
       result.action === receipt.input.action &&
-      result.targetId === groupTarget(receipt.input)
+      result.targetId === groupTarget(receipt.input) &&
+      (receipt.input.action !== "pin" || result.pinned === receipt.input.pinned)
     );
   }
   private accept(operation: NativeOperation, key: string): void {
@@ -233,6 +255,15 @@ export class GroupMutations {
             signal,
           );
           break;
+        case "pin":
+          operation = await client.setThreadPinned(
+            account,
+            request.groupId,
+            request.pinned,
+            key,
+            signal,
+          );
+          break;
       }
       this.accept(operation, key);
       void this.watch();
@@ -241,9 +272,24 @@ export class GroupMutations {
       // response, conflict or server error remains recoverable by the same key.
       const notAdmitted =
         error instanceof NativeApiError &&
-        [400, 401, 403, 404, 422].includes(error.status);
+        ([400, 401, 403, 404, 422].includes(error.status) ||
+          (request.action === "pin" &&
+            error.status === 409 &&
+            [
+              "ordinary_contact_required",
+              "ordinary_group_required",
+              "ordinary_thread_required",
+              "thread_session_unavailable",
+              "thread_pinning_unavailable",
+            ].includes(error.code)));
       this.publish({
-        receipt: { ...this.value.receipt!, notAdmitted },
+        receipt: {
+          ...this.value.receipt!,
+          notAdmitted,
+          ...(error instanceof NativeApiError
+            ? { admissionStatus: error.status }
+            : {}),
+        },
         error: readableError(error),
       });
     } finally {
@@ -255,26 +301,31 @@ export class GroupMutations {
     if (!receipt || receipt.notAdmitted || this.controller.signal.aborted)
       return;
     this.publish({ busy: true, error: "" });
+    const version = ++this.statusVersion;
+    this.checkingVersion = version;
     try {
-      this.accept(
-        receipt.operation
-          ? await this.client.operation(
-              this.account,
-              receipt.operation.id,
-              this.controller.signal,
-            )
-          : await this.client.groupMutationByKey(
-              this.account,
-              receipt.key,
-              this.controller.signal,
-            ),
-        receipt.key,
-      );
+      const operation = receipt.operation
+        ? await this.client.operation(
+            this.account,
+            receipt.operation.id,
+            this.controller.signal,
+          )
+        : await this.client.groupMutationByKey(
+            this.account,
+            receipt.key,
+            this.controller.signal,
+          );
+      if (version !== this.statusVersion) return;
+      this.accept(operation, receipt.key);
       void this.watch();
     } catch (error) {
-      this.publish({ error: readableError(error) });
+      if (version === this.statusVersion)
+        this.publish({ error: readableError(error) });
     } finally {
-      this.publish({ busy: false });
+      if (this.checkingVersion === version) {
+        this.checkingVersion = 0;
+        this.publish({ busy: false });
+      }
     }
   }
   private async watch(): Promise<void> {
@@ -287,14 +338,14 @@ export class GroupMutations {
         if (!operation || groupEnded(operation)) return;
         await pause(800, this.controller.signal);
         if (this.controller.signal.aborted) return;
-        this.accept(
-          await this.client.operation(
-            this.account,
-            operation.id,
-            this.controller.signal,
-          ),
-          receipt!.key,
+        if (this.checkingVersion) continue;
+        const version = ++this.statusVersion;
+        const current = await this.client.operation(
+          this.account,
+          operation.id,
+          this.controller.signal,
         );
+        if (version === this.statusVersion) this.accept(current, receipt!.key);
       }
     } catch (error) {
       this.publish({ error: readableError(error) });

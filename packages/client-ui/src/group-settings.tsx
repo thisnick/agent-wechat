@@ -30,6 +30,7 @@ const labels: Record<GroupAction["action"], string> = {
   my_name: "My name in this group",
   clear_announcement: "Clear announcement",
   mute: "Notifications",
+  pin: "Pin chat",
 };
 type Result = {
   groupId?: string;
@@ -43,7 +44,7 @@ type Result = {
 export function GroupResult({ model }: { model: GroupMutations }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const receipt = state.receipt;
-  if (!receipt) return null;
+  if (!receipt || receipt.input.action === "pin") return null;
   const operation = receipt.operation;
   const result = operation?.result as Result | undefined;
   const partial = result?.memberOutcome === "partial";
@@ -53,24 +54,24 @@ export function GroupResult({ model }: { model: GroupMutations }) {
         {receipt.notAdmitted
           ? "The change wasn’t submitted."
           : operation?.state === "succeeded"
-            ? partial
-              ? receipt.input.action === "create"
-                ? "Group created. Some selected contacts weren’t confirmed as added."
-                : "Group updated. Some member changes weren’t confirmed."
-              : receipt.input.action === "leave"
-                ? "You left the group. Cached history is still available."
-                : receipt.input.action === "create"
-                  ? "Group created."
-                  : "Group updated."
-            : operation?.state === "needs_review"
-              ? "The outcome couldn’t be confirmed. Check the group before attempting this change again."
-              : operation?.state === "failed"
-                ? "The change failed. Review the result before trying again."
-                : operation?.state === "cancelled"
-                  ? "Cancelled before submission."
-                  : operation
-                    ? "Updating group…"
-                    : "Checking whether the change was submitted…"}
+          ? partial
+            ? receipt.input.action === "create"
+              ? "Group created. Some selected contacts weren’t confirmed as added."
+              : "Group updated. Some member changes weren’t confirmed."
+            : receipt.input.action === "leave"
+            ? "You left the group. Cached history is still available."
+            : receipt.input.action === "create"
+            ? "Group created."
+            : "Group updated."
+          : operation?.state === "needs_review"
+          ? "The outcome couldn’t be confirmed. Check the group before attempting this change again."
+          : operation?.state === "failed"
+          ? "The change failed. Review the result before trying again."
+          : operation?.state === "cancelled"
+          ? "Cancelled before submission."
+          : operation
+          ? "Updating group…"
+          : "Checking whether the change was submitted…"}
       </p>
       {result?.members && result.members.length > 0 && (
         <ul className="group-member-results">
@@ -82,8 +83,8 @@ export function GroupResult({ model }: { model: GroupMutations }) {
                 member.status === null
                   ? "Removal acknowledged"
                   : member.status === 0
-                    ? "Accepted"
-                    : `Not confirmed (status ${member.status ?? "unknown"})`}
+                  ? "Accepted"
+                  : `Not confirmed (status ${member.status ?? "unknown"})`}
               </small>
             </li>
           ))}
@@ -153,6 +154,11 @@ export function GroupSettings({
     : [];
   const enabled = (action: GroupAction["action"]) =>
     state.connected &&
+    !(
+      operation.receipt?.input.action === "pin" &&
+      (!groupEnded(operation.receipt.operation) ||
+        operation.receipt.operation?.state === "needs_review")
+    ) &&
     group?.isInGroup === true &&
     (action === "mute"
       ? Array.isArray(state.capabilities.threadNotificationTargets) &&
@@ -198,10 +204,14 @@ export function GroupSettings({
     void load().catch((e) => {
       if (!lifetime.current?.signal.aborted) setError(readableError(e));
     });
-  }, [load, state.threads, state.contacts]);
+  }, [load, state.selectedGroup, state.contacts]);
   const receiptState = operation.receipt?.operation?.state;
   useEffect(() => {
-    if (receiptState && groupEnded(operation.receipt?.operation)) {
+    if (
+      operation.receipt?.input.action !== "pin" &&
+      receiptState &&
+      groupEnded(operation.receipt?.operation)
+    ) {
       void load().catch((e) => {
         if (!lifetime.current?.signal.aborted) setError(readableError(e));
       });
@@ -247,7 +257,14 @@ export function GroupSettings({
     }
   }
   function edit(action: GroupAction["action"]) {
-    if (operation.receipt) {
+    if (operation.receipt?.input.action === "pin") {
+      if (
+        !groupEnded(operation.receipt.operation) ||
+        operation.receipt.operation?.state === "needs_review"
+      )
+        return;
+      model.clear();
+    } else if (operation.receipt) {
       setMode("result");
       return;
     }
@@ -258,12 +275,13 @@ export function GroupSettings({
       action === "rename"
         ? group?.name || group?.displayName || ""
         : action === "my_name"
-          ? group?.myDisplayName || ""
-          : "",
+        ? group?.myDisplayName || ""
+        : "",
     );
   }
   async function submit() {
-    if (!mode || mode === "result" || mode === "create") return;
+    if (!mode || mode === "result" || mode === "create" || mode === "pin")
+      return;
     let input: GroupAction;
     if (mode === "rename") input = { action: mode, groupId, name: draft };
     else if (mode === "my_name")
@@ -365,8 +383,8 @@ export function GroupSettings({
               {group?.muted === true
                 ? "On"
                 : group?.muted === false
-                  ? "Off"
-                  : "Unknown"}
+                ? "Off"
+                : "Unknown"}
             </small>
           </span>
           <span className={`toggle-track ${group?.muted ? "on" : ""}`}>
@@ -635,12 +653,12 @@ export function GroupSettings({
                     {mode === "leave"
                       ? "Leave group"
                       : mode === "clear_announcement"
-                        ? "Clear announcement"
-                        : memberMode
-                          ? mode === "add_members"
-                            ? "Add members"
-                            : "Remove members"
-                          : "Save changes"}
+                      ? "Clear announcement"
+                      : memberMode
+                      ? mode === "add_members"
+                        ? "Add members"
+                        : "Remove members"
+                      : "Save changes"}
                   </button>
                 </div>
               </form>

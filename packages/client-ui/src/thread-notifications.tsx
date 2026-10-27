@@ -19,8 +19,8 @@ export function ThreadNotifications({
   const receipt = operation.receipt;
   const current = receipt?.operation;
   useEffect(() => {
-    if (current?.state === "succeeded")
-      void connection.session.refresh(account).catch(() => {});
+    if (receipt?.input.action === "mute" && current?.state === "succeeded")
+      void connection.session.refreshConversations(account).catch(() => {});
   }, [connection, account, current?.id, current?.state]);
   const supported =
     Array.isArray(state.capabilities.threadNotificationTargets) &&
@@ -58,7 +58,7 @@ export function ThreadNotifications({
           <i />
         </span>
       </button>
-      {unresolved && (
+      {unresolved && receipt?.input.action === "mute" && (
         <p className="field-help">
           {current?.state === "needs_review"
             ? "Couldn’t confirm this change."

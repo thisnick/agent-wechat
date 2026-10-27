@@ -81,7 +81,7 @@ test("recalled thread previews show the replacement notice without an inferred s
   }
 });
 
-test("chat order follows the latest message time across incoming, own and live updates", () => {
+test("chat order preserves server ranking even when activity times disagree", () => {
   const thread = (id, time, direction = "incoming") => ({
     id,
     lastMessage: { id: `message-${id}`, createdAt: time, direction },
@@ -93,7 +93,7 @@ test("chat order follows the latest message time across incoming, own and live u
   ];
   assert.deepEqual(
     orderThreads(threads).map((t) => t.id),
-    ["new", "middle", "old"],
+    ["old", "new", "middle"],
   );
   assert.deepEqual(
     threads.map((t) => t.id),
@@ -121,6 +121,17 @@ test("equal and unknown activity times keep their existing relative order", () =
   ];
   assert.deepEqual(
     orderThreads(threads).map((t) => t.id),
-    ["first", "second", "missing", "invalid", "empty"],
+    ["missing", "first", "invalid", "second", "empty"],
   );
+});
+
+ test("old pinned conversations stay above newer unpinned chats in server order", () => {
+  const rows = [
+    { id: "pin-second", pinned: true, lastMessage: { createdAt: "2" } },
+    { id: "pin-first", pinned: true, lastMessage: { createdAt: "1" } },
+    { id: "new", pinned: false, lastMessage: { createdAt: "900" } },
+    { id: "unknown", pinned: null, lastMessage: { createdAt: "999" } },
+  ];
+  assert.deepEqual(orderThreads(rows), rows);
+  assert.notEqual(orderThreads(rows), rows);
 });

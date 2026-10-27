@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import https from "node:https";
 import { notificationsAcceptance } from "./notifications.mjs";
+import { pinningAcceptance } from "./pinning.mjs";
 import { interfaceAcceptance } from "./interface.mjs";
 const application = process.env.DESKTOP_BINARY;
 if (!application) throw new Error("DESKTOP_BINARY is required");
@@ -282,6 +283,14 @@ try {
             process.env.DESKTOP_INTERFACE_SCREENSHOT,
             Buffer.from(await call(`/session/${session}/screenshot`), "base64"),
           )
+      : undefined,
+  });
+  await pinningAcceptance({
+    script, invoke: invokeNative, until,
+    resize: (width, height) => call(`/session/${session}/window/rect`, { width, height }),
+    key: (value) => call(`/session/${session}/actions`, { actions: [{ type: "key", id: "keyboard", actions: [{ type: "keyDown", value }, { type: "keyUp", value }] }] }),
+    capture: process.env.DESKTOP_PINNING_SCREENSHOT
+      ? async () => writeFile(process.env.DESKTOP_PINNING_SCREENSHOT, Buffer.from(await call(`/session/${session}/screenshot`), "base64"))
       : undefined,
   });
   try {

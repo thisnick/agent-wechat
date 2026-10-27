@@ -677,6 +677,7 @@ test("recall events retrieve canonical notices and authors for inactive cached c
     version: "2",
   };
   const hub = session(t, {
+    threads: async () => page([{ id: "peer", unreadCount: 0, lastMessage: { id: "recent", text: "You recalled a message", createdAt: "10", type: 10000 } }]),
     messages: async (_account, thread) =>
       refresh
         ? late.promise
@@ -1166,7 +1167,7 @@ test("chat content does not wait for contacts or group details", async (t) => {
   contacts.resolve(page([]));
 });
 
-test("SSE updates affected messages and read badges without reloading inventories", async (t) => {
+test("SSE message activity reloads server order while read and avatar events stay targeted", async (t) => {
   let lists = 0,
     contacts = 0,
     unread = 2;
@@ -1174,7 +1175,7 @@ test("SSE updates affected messages and read badges without reloading inventorie
   const hub = session(t, {
     threads: async () => {
       lists++;
-      return page([{ id: "peer", unreadCount: 0, readStateVersion: "1" }]);
+      return page([{ id: "peer", unreadCount: 0, readStateVersion: "1", ...(lists > 1 ? { lastMessage: { id: "new", text: "new", createdAt: "10" } } : {}) }]);
     },
     contacts: async () => {
       contacts++;
@@ -1207,8 +1208,8 @@ test("SSE updates affected messages and read badges without reloading inventorie
     { kind: "metadata.changed", data: { kind: "avatar" } },
     "a"
   );
-  assert.deepEqual({ lists, contacts }, before);
-  assert.deepEqual(targets, ["peer", "peer"]);
+  assert.deepEqual({ lists, contacts }, { ...before, lists: before.lists + 1 });
+  assert.deepEqual(targets, ["peer"]);
   assert.equal(hub.snapshot().threads[0].unreadCount, 0);
   assert.equal(hub.snapshot().messages[0].id, "new");
   assert.equal(hub.snapshot().threads[0].lastMessage.text, "new");

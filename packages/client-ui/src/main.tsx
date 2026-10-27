@@ -1,3 +1,5 @@
+import { ConversationRow } from "./conversation-row.tsx";
+import { ThreadPinSwitch } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
 import { DesktopUpdates } from "./desktop-updates.tsx";
 import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
@@ -37,7 +39,6 @@ import { HistorySearch } from "./history-search.ts";
 import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
 import {
-  threadPreview,
   messageSummary,
   orderThreads,
 } from "./thread-preview.ts";
@@ -980,6 +981,7 @@ function Chats({
       (filter !== "unread" || !!t.unreadCount) &&
       (filter !== "groups" || t.kind === "group"),
   );
+  const firstPinned = threads.find((thread) => thread.pinned === true)?.id;
   return (
     <div className={`shell ${mobile ? "mobile-chat" : ""}`}>
       <nav className="rail" aria-label="Main navigation">
@@ -1065,35 +1067,18 @@ function Chats({
         </div>
         <div className="chat-list">
           {section === "chats"
-            ? threads.map((t) => (
-                <button
+            ? threads.map((t, index) => (
+                <ConversationRow
                   key={t.id}
-                  className={`chat-row ${
-                    state.selected === t.id ? "selected" : ""
-                  }`}
-                  onClick={() => select(t.id)}
-                >
-                  <ConversationAvatar
-                    connection={connection}
-                    account={state.account!}
-                    username={t.id}
-                    name={name(t.id)}
-                    members={t.avatarMembers}
-                  />
-                  <div className="chat-copy">
-                    <div className="chat-top">
-                      <span className="chat-name">{name(t.id)}</span>
-                    </div>
-                    <div className="preview-row">
-                      <span className="preview" title={threadPreview(t)}>
-                        {threadPreview(t)}
-                      </span>
-                      {!!t.unreadCount && (
-                        <span className="count">{t.unreadCount}</span>
-                      )}
-                    </div>
-                  </div>
-                </button>
+                  connection={connection}
+                  account={state.account!}
+                  thread={t}
+                  name={name(t.id)}
+                  selected={state.selected === t.id}
+                  select={() => select(t.id)}
+                  heading={t.id === firstPinned}
+                  divider={index > 0 && threads[index - 1].pinned === true && t.pinned !== true}
+                />
               ))
             : state.contacts
                 .filter((c) =>
@@ -1999,6 +1984,14 @@ function Details({
           {threadId}
         </p>
       </div>
+      {state.account && (
+        <ThreadPinSwitch
+          key={`pin:${state.account}:${threadId}`}
+          connection={connection}
+          account={state.account}
+          threadId={threadId}
+        />
+      )}
       {state.account && <ThreadNotifications key={state.account+threadId} connection={connection} account={state.account} threadId={threadId} />}
       {state.account && threadId.endsWith("@chatroom") && (
         <GroupSettings

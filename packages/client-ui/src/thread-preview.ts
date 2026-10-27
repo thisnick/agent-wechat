@@ -5,20 +5,9 @@ import type {
 } from "@agent-wechat/shared";
 import { messagePresentation, recallText } from "./message-presentation.ts";
 
-function lastActivity(thread: NativeThread): number {
-  const value = thread.lastMessage?.createdAt;
-  if (!value) return -Infinity;
-  const time = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value);
-  return Number.isFinite(time) ? time : -Infinity;
-}
-
 export function orderThreads(threads: NativeThread[]): NativeThread[] {
-  // Equal or unavailable times keep the server's order without mutating state.
-  return [...threads].sort((a, b) => {
-    const left = lastActivity(a),
-      right = lastActivity(b);
-    return left === right ? 0 : left > right ? -1 : 1;
-  });
+  // The hub orders both pinned and ordinary chats. Never rank its saved page again.
+  return [...threads];
 }
 
 export function messageSummary(

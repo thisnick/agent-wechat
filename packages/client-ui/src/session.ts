@@ -284,7 +284,15 @@ export class HubSession {
   private accountRequest = 0;
   private accountsCheckedAt = -Infinity;
   private catalogRequest = 0;
-  private contactRefresh?: ReturnType<typeof setTimeout>;
+  private conversationRefresh?: {
+    account: string;
+    generation: number;
+    running: boolean;
+    again: boolean;
+    catalog: boolean;
+    groups: Set<string>;
+    promise: Promise<void>;
+  };
   private detailsRequest = 0;
   private threadRequests = new Map<string, number>();
   private interactionReads = new Set<string>();
@@ -435,7 +443,6 @@ export class HubSession {
     for (const listener of this.signOutListeners) listener(account);
   }
   close(): void {
-    clearTimeout(this.contactRefresh);
     this.activationRequest++;
     this.generation++;
     this.threadGeneration++;
@@ -457,8 +464,6 @@ export class HubSession {
     signedOut: boolean,
     cursor?: string,
   ): void {
-    clearTimeout(this.contactRefresh);
-    this.contactRefresh = undefined;
     this.activationRequest++;
     if (account) {
       if (this.value.account === account) this.remember();
@@ -612,6 +617,7 @@ export class HubSession {
                   "thread.read",
                   "thread.read-state",
                   "group.updated",
+                  "thread.updated",
                   "contacts.updated",
                   "metadata.changed",
                 ].includes(event.kind)
@@ -962,6 +968,7 @@ export class HubSession {
     signal?: AbortSignal,
   ): Promise<NativeThread> {
     const key = JSON.stringify([account, threadId]);
+    const inventoryVersion = this.catalogRequest;
     const request = (this.threadRequests.get(key) ?? 0) + 1;
     this.threadRequests.set(key, request);
     let thread: NativeThread;
@@ -984,6 +991,7 @@ export class HubSession {
     }
     if (
       this.current(account, generation) &&
+      inventoryVersion === this.catalogRequest &&
       this.threadRequests.get(key) === request
     ) {
       const found = this.value.threads.some((item) => item.id === threadId);
@@ -1115,15 +1123,20 @@ export class HubSession {
     const threads = await inventory((cursor) =>
       this.client.threads(account, { cursor, limit: 200 }),
     );
-    if (this.current(account, generation) && request === this.catalogRequest)
-      this.publish({
-        threads: threads.items.map((thread) => {
-          const key = JSON.stringify([account, thread.id]);
-          return revisions.get(key) !== this.threadRequests.get(key)
-            ? this.value.threads.find((item) => item.id === thread.id) ?? thread
-            : thread;
-        }),
-      });
+    if (this.current(account, generation) && request === this.catalogRequest) {
+      // A point read begun during this inventory may carry a newer setting.
+      // Restart at page one instead of splicing it into an older page order.
+      if (
+        threads.items.some(
+          (thread) =>
+            revisions.get(JSON.stringify([account, thread.id])) !==
+            this.threadRequests.get(JSON.stringify([account, thread.id])),
+        )
+      )
+        return this.refresh(account, generation, catalog);
+      this.publish({ threads: threads.items });
+      this.persist();
+    }
     if (catalog && this.current(account, generation)) {
       await Promise.all([
         this.loadCatalog(account, generation),
@@ -1138,6 +1151,63 @@ export class HubSession {
       ]);
     }
     return threads.cursor;
+  }
+  /** Coalesce metadata events and mutation completion without opening a chat. */
+  refreshConversations(
+    account = this.value.account,
+    catalog = false,
+    group?: string,
+  ): Promise<void> {
+    const generation = this.generation;
+    if (!account || !this.current(account, generation))
+      return Promise.resolve();
+    // Invalidate older inventories and point reads immediately, before the timer.
+    this.catalogRequest++;
+    const previous = this.conversationRefresh;
+    if (previous?.account === account && previous.generation === generation) {
+      previous.again ||= previous.running;
+      previous.catalog ||= catalog;
+      if (group) previous.groups.add(group);
+      return previous.promise;
+    }
+    const work = {
+      account,
+      generation,
+      running: false,
+      again: false,
+      catalog,
+      groups: new Set(group ? [group] : []),
+      promise: Promise.resolve(),
+    };
+    this.conversationRefresh = work;
+    work.promise = (async () => {
+      await pause(50, this.stream?.signal ?? new AbortController().signal);
+      do {
+        if (!this.current(account, generation)) return;
+        work.again = false;
+        work.running = true;
+        const withCatalog = work.catalog;
+        work.catalog = false;
+        const groups = [...work.groups];
+        work.groups.clear();
+        const before = this.catalogRequest;
+        await this.refresh(account, generation, withCatalog);
+        if (!this.current(account, generation)) return;
+        if (this.catalogRequest !== before + 1) work.again = true;
+        if (!withCatalog && groups.includes(this.value.selected ?? ""))
+          await this.refreshGroup(
+            account,
+            this.value.selected!,
+            generation,
+            this.threadGeneration,
+          ).catch(() => {});
+      } while (work.again || work.catalog || work.groups.size);
+      this.persist();
+    })().finally(() => {
+      if (this.conversationRefresh === work)
+        this.conversationRefresh = undefined;
+    });
+    return work.promise;
   }
   async refreshMessage(account: string, messageId: string): Promise<void> {
     if (this.value.account !== account) return;
@@ -1252,6 +1322,7 @@ export class HubSession {
             (send) => send.key !== key && send.intent?.id !== intent.id,
           ),
         });
+      await this.refreshConversations(account);
     }
   }
   async consume(
@@ -1288,8 +1359,7 @@ export class HubSession {
         generation,
       );
       if (message && this.current(account, generation)) {
-        await this.refreshThread(account, message.threadId, generation);
-        if (this.current(account, generation)) this.updatePreview(message);
+        await this.refreshConversations(account);
       }
     } else if (
       event.kind === "send.updated" &&
@@ -1304,19 +1374,12 @@ export class HubSession {
       if (typeof event.data.threadId === "string")
         await this.refreshThread(account, event.data.threadId, generation);
       else await this.refresh(account, generation, false);
-    } else if (event.kind === "group.updated") {
-      if (typeof event.data.groupId === "string") {
-        await this.refreshThread(account, event.data.groupId, generation).catch(
-          () => this.refresh(account, generation, false),
-        );
-        if (event.data.groupId === this.value.selected)
-          await this.refreshGroup(
-            account,
-            event.data.groupId,
-            generation,
-            this.threadGeneration,
-          ).catch(() => {});
-      } else await this.refresh(account, generation, false);
+    } else if (["thread.updated", "group.updated"].includes(event.kind)) {
+      await this.refreshConversations(
+        account,
+        false,
+        typeof event.data.groupId === "string" ? event.data.groupId : undefined,
+      );
     } else if (
       ["account.updated", "account.connection", "auth.updated"].includes(
         event.kind,
@@ -1327,31 +1390,17 @@ export class HubSession {
       event.kind === "contacts.updated" &&
       event.data.origin === "contact_sync"
     ) {
-      // One sync page can update hundreds of contacts. Refresh the local
-      // catalog/thread pages together instead of reading each contact's thread.
-      if (!this.contactRefresh)
-        this.contactRefresh = setTimeout(() => {
-          this.contactRefresh = undefined;
-          if (this.current(account, generation))
-            void this.refresh(account, generation).catch(() => {});
-        }, 100);
+      void this.refreshConversations(account, true).catch((error) => {
+        if (this.current(account, generation))
+          this.publish({ error: readableError(error) });
+      });
     } else if (
       event.kind === "contacts.updated" ||
       (event.kind === "metadata.changed" && event.data.kind !== "avatar")
     ) {
-      if (
-        event.kind === "contacts.updated" &&
-        typeof event.data.contactId === "string" &&
-        this.value.threads.some((thread) => thread.id === event.data.contactId)
-      )
-        await this.refreshThread(
-          account,
-          event.data.contactId,
-          generation,
-        ).catch(() => {});
-      await this.loadCatalog(account, generation);
+      await this.refreshConversations(account, true);
     } else if (event.kind === "sync.completed") {
-      await this.refresh(account, generation, false);
+      await this.refreshConversations(account);
     }
     // Push hints and control diagnostics carry no conversation content.
   }
@@ -1374,6 +1423,8 @@ export class HubSession {
   ): Promise<void> {
     while (!signal.aborted && this.current(account, generation)) {
       try {
+        if (this.value.reconnecting) await this.refreshConversations(account);
+        if (signal.aborted || !this.current(account, generation)) return;
         for await (const event of this.client.watch(
           account,
           this.cursor,
@@ -1394,9 +1445,26 @@ export class HubSession {
           },
         )) {
           if (signal.aborted || !this.current(account, generation)) return;
-          await this.consume(event, account, generation);
+          const metadataOnly =
+            [
+              "thread.updated",
+              "group.updated",
+              "contacts.updated",
+              "sync.completed",
+            ].includes(event.kind) ||
+            (event.kind === "metadata.changed" && event.data.kind !== "avatar");
+          const applied = this.consume(event, account, generation);
+          if (metadataOnly) {
+            // Do not serialize an entire contact-sync burst into one read per
+            // event. The shared refresh persists the final order when complete.
+            void applied.catch((error) => {
+              if (this.current(account, generation))
+                this.publish({ error: readableError(error) });
+            });
+          } else await applied;
           if (this.current(account, generation)) {
             this.cursor = event.cursor;
+            if (metadataOnly) continue;
             if (
               [
                 "message.committed",
