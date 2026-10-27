@@ -301,6 +301,8 @@ impl Core {
                 "contact_snapshot_unavailable"
             );
             let record = &reply.value.contacts[0];
+            let requests = wechat_protocol::contact_pinning_requests(record, *pinned)
+                .context("thread_pinning_unavailable")?;
             let fields = wechat_protocol::protobuf::decode(&record.raw)?;
             pin_clear_folded_primary = *pinned
                 && if thread_id.ends_with("@chatroom") {
@@ -308,7 +310,6 @@ impl Core {
                 } else {
                     wechat_protocol::protobuf::scalar(&fields, 83)? & 0x80 != 0
                 };
-            let requests = wechat_protocol::contact_pinning_requests(record, *pinned)?;
             state = self.account_state(account)?;
             requests
         } else if let GroupMutation::Mute { thread_id, muted } = &action {

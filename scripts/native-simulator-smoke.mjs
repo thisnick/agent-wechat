@@ -178,7 +178,7 @@ async function pinJourney(streams) {
     await finishOperation("refresh after original pin receipt replay", await a.refreshContact("personal", threadId));
     assert.equal((await b.thread("personal", threadId)).pinned, false);
   }
-  await assert.rejects(a.setThreadPinned("personal", "filehelper", true, "pin-unsupported-filehelper"));
+  await assert.rejects(a.setThreadPinned("personal", "filehelper", true, "pin-unsupported-filehelper"), error => error.status === 409 && ["ordinary_contact_required", "ordinary_thread_required"].includes(error.code));
   await finishOperation("leave pin regression group", await a.leaveGroup("personal", room, "pin-regression-leave"));
 }
 

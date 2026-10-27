@@ -142,6 +142,10 @@ impl From<anyhow::Error> for ApiError {
         for code in [
             "ordinary_group_required",
             "ordinary_contact_required",
+            "ordinary_thread_required",
+            "thread_session_unavailable",
+            "thread_pinning_unavailable",
+            "contact_snapshot_unavailable",
             "group_contact_unavailable",
             "group_state_incomplete",
             "quote_target_mismatch",
