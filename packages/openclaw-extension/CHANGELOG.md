@@ -1,5 +1,132 @@
 # @agent-wechat/wechat
 
+## 1.0.0
+
+### Major Changes
+
+- [#215](https://github.com/thisnick/agent-wechat/pull/215) [`1e33596`](https://github.com/thisnick/agent-wechat/commit/1e335969911474870764926cf30f8c105c91107c) Thanks [@thisnick](https://github.com/thisnick)! - Replace the official-client container backend with the standalone native WeChat daemon and Rust `wx` CLI. This is a breaking release: remove `wx-legacy`, the UI server/image and Wechaty integrations; use native v1 HTTP/SSE and managed or external OpenClaw hosting. Existing container API configurations must be migrated explicitly.
+
+  Take over a stopped, supported official Linux profile in place with `auth login --official[=/path]`, preserving account/device/database identity and saved-login material. Continue supported encrypted database, local read-state and media writes with durable sync, idempotent text/media jobs, independently encoded voice and explicit uncertainty handling. Add offline inspection, metadata catalogs and generated API contracts. Fresh-profile creation and copy import/export remain experimental extras.
+
+  Distribute verified Linux x64 and ARM64 GNU executables (glibc 2.36+), an npm launcher and a native-only multi-architecture container. Add CI package/runtime tests, exact-source publication gates, codec notices and optional service/Compose examples. Deployment and publication remain separate operator actions. The shared TypeScript SDK remains private and is bundled into the OpenClaw package.
+
+  Use OpenClaw environment/SecretRef credentials instead of `native.tokenFile`; owned daemon startup passes the token through a private stdin pipe without writing it or inheriting Gateway secrets. Clarify daemon-host profile paths and the unverified status of macOS/Windows profile compatibility in the published migration guide.
+
+  Include the versioned Changesets package changelog entries in GitHub release notes, preserving Markdown and operator notes during release retries. Fail release preparation when exact-version changelogs are missing or entirely empty.
+
+  Prepare the native rewrite for `1.0.0-beta.0` through Changesets prerelease mode and a CI-generated version PR. Keep beta npm/GitHub channels separate from stable, retain exact-version image/artifact identities and reject mismatched prerelease publication.
+
+### Minor Changes
+
+- [#279](https://github.com/thisnick/agent-wechat/pull/279) [`e31e6c4`](https://github.com/thisnick/agent-wechat/commit/e31e6c47a1c49bd1884403bc7acc1854c07bb43f) Thanks [@thisnick](https://github.com/thisnick)! - Add the AgentWechat desktop app for macOS, Windows and Ubuntu x64/ARM64, with a bundled local hub and CLI, system-keyring credentials, optional HTTPS network access and native file saving. Integrate signed Windows installers and notarized macOS packages into the prerelease release flow. Keep the standalone CLI independent, with protected credential files and a confirmed profile-removal command that retains local files.
+
+  Add a browser chat client with account and group management, quoted replies, confirmed recalls, shared-link cards, searchable history, message previews and group avatars. Support photo/video viewing, zoom and swipe navigation, voice playback, original downloads, visible-avatar refresh, version-checked unread clearing and event-stream updates. Remember recent chats, drafts and verified media on the device without resending uncertain operations.
+
+  Download received thumbnails and voice notes on the hub, and apply a per-account 50 MB default limit to automatic image, video, file and sticker downloads. Expose the policy through Settings, the API and CLI. Batch thread summaries from existing profile data without upstream requests or a separate stored preview model. Improve native profile initialization, group-operation locking and Windows credential/profile handling, with isolated simulator coverage for client workflows.
+
+- [#232](https://github.com/thisnick/agent-wechat/pull/232) [`b281c4c`](https://github.com/thisnick/agent-wechat/commit/b281c4cbc9e0d874bfb852bddf9668b8159249b6) Thanks [@thisnick](https://github.com/thisnick)! - Add optional account-wide archive tools for thread discovery, cross-thread search, selected-thread history, exact message lookup and attachment retrieval. OpenClaw tool policies control access without a second plugin permission list; default tools remain restricted to the current thread. Archive tools preserve verified media paths, image content and bounded download status handling.
+
+  Add the account-scoped local message search endpoint with retained, query-bound pagination across threads, preserving peer identities, edits and deletion tombstones during continuation.
+
+- [#257](https://github.com/thisnick/agent-wechat/pull/257) [`2d0b57c`](https://github.com/thisnick/agent-wechat/commit/2d0b57c3f2f5141aa85515a29384e50668c8928d) Thanks [@thisnick](https://github.com/thisnick)! - Add admin-scoped native group creation, rename, membership, own display name, announcement clearing, leave and group notification operations with stable idempotency keys and retained uncertain outcomes. Split member list and exact lookup, refresh server group details, and expose matching API/SDK methods.
+
+  Add the owner-only `wechat_group_info` OpenClaw tool. Recognized incoming group metadata updates are saved before events; unknown sync controls remain pending. Automatic propagation of every edit made on another device is not established.
+
+- [#232](https://github.com/thisnick/agent-wechat/pull/232) [`b281c4c`](https://github.com/thisnick/agent-wechat/commit/b281c4cbc9e0d874bfb852bddf9668b8159249b6) Thanks [@thisnick](https://github.com/thisnick)! - Add default stored message history, keyword search and exact message lookup tools, restricted to the trusted current WeChat conversation for every requester, including owners. These default tools cannot select another thread or enumerate chats. History reads do not mark messages read or download media.
+
+  Add current-thread attachment retrieval using verified cached bytes or bounded, server-owned downloads. Return managed file paths and prepared image content, with cache-only and strict quality options and explicit pending, expired and unavailable outcomes.
+
+  Restore original attachment paths and attachment metadata in direct and group inputs. Retain bounded sender-admitted group context across restarts until the next mention, with explicit pending states, verified media and one prepared image preview. Preserve original mention facts and distinguish historical context from the current trigger.
+
+- [#255](https://github.com/thisnick/agent-wechat/pull/255) [`673c2c3`](https://github.com/thisnick/agent-wechat/commit/673c2c3c41e96d5d76b42682ab88b79348963a70) Thanks [@thisnick](https://github.com/thisnick)! - Add native ordinary-file transfers up to 512 MiB, including large-file routing, upload completion receipts, verified download readback, and persisted file-message reservations. Apply the file limit consistently in the daemon, CLI, SDK, and OpenClaw while retaining the existing image, video, and voice limits. Stream large file retrievals in the CLI and OpenClaw without base64 conversion. Keep ordinary-file transfers from blocking account heartbeats and incoming sync. An operator can request full verification of a completed upload on the original job only when message submission has never started. Interrupted or uncertain message reservations require review before another send.
+
+  Keep the submitted OpenClaw job ID and idempotency key available when status polling times out or fails, without repeating the send.
+
+- [#241](https://github.com/thisnick/agent-wechat/pull/241) [`6c16321`](https://github.com/thisnick/agent-wechat/commit/6c16321abd7a8554a291bac0b2f65e95a39e89db) Thanks [@thisnick](https://github.com/thisnick)! - Add the current-conversation `wechat_recall` tool for own sent messages using exact stored message and server IDs, stable idempotency keys and explicit confirmed, rejected, pending or uncertain operation receipts. Outbound delivery results now expose verified stored IDs, including per-note voice receipts, instead of send or job IDs.
+
+  Wait briefly for accepted media jobs to publish their stored message receipts before verification, using only reads of the same job. Missing receipts and partial or uncertain outcomes never trigger another send.
+
+  Consume durable native recall events independently of model work. Invalidate buffered originals, quotes, attachment references and pending handoff proofs, suppress late media/transcription and automatic replies, and retain tombstones across restart. History and media tools stop exposing recalled content. Existing runtime transcripts and host-retained attachment bytes follow their existing retention policy.
+
+  Bind custody revisions, host turns and reply keys to the exact source target so reused local message IDs admit the new message without accepting late callbacks or cached media from the old one.
+
+- [#237](https://github.com/thisnick/agent-wechat/pull/237) [`4f82fd9`](https://github.com/thisnick/agent-wechat/commit/4f82fd96ffa30e87258df178feffb127e7a05393) Thanks [@thisnick](https://github.com/thisnick)! - Add macOS ARM64 and native Windows x64/ARM64 release targets, portable private-file and daemon ownership handling, and ownership-bound graceful shutdown. Extend verified npm provisioning and OpenClaw managed hosting to these targets. Build candidate artifacts on native CI workers; live account and official-app profile compatibility require separate platform acceptance and are not established by the offline smoke tests.
+
+  Apply the same private directory/file protections to WXGF decoder and media encoder scratch data, including owner-only Windows ACLs.
+
+  Create scratch files and directories with an explicit current-user owner and private permissions from the start, including when Windows runs with an elevated administrator token.
+
+- [#261](https://github.com/thisnick/agent-wechat/pull/261) [`e12e189`](https://github.com/thisnick/agent-wechat/commit/e12e1899910641730927fb8f5d603d2f3f2c61f5) Thanks [@thisnick](https://github.com/thisnick)! - Add native quoted text replies through the send API, TypeScript SDK and `wx messages send` quote flags. Resolve the original from saved history using its local message ID and exact server ID, retain encrypted reference material for idempotent sends, and write accepted replies into supported profiles.
+
+  Resolve saved quote targets for voice, video, files, link cards and quoted replies in addition to text and images. Initial quote sending has static and synthetic coverage; live server acceptance and recipient rendering remain unverified.
+
+- [#243](https://github.com/thisnick/agent-wechat/pull/243) [`d123c6e`](https://github.com/thisnick/agent-wechat/commit/d123c6e12829ed64ad74ceca971b38952d8ba012) Thanks [@thisnick](https://github.com/thisnick)! - Restore received link/music/video share titles, descriptions and URLs with optional verified thumbnail previews. Add a durable `share` send type, CLI `--share` payload and current-conversation `wechat_send_share` tool. Share submission and thumbnail interoperability still require verification with live official installs.
+
+- [#255](https://github.com/thisnick/agent-wechat/pull/255) [`673c2c3`](https://github.com/thisnick/agent-wechat/commit/673c2c3c41e96d5d76b42682ab88b79348963a70) Thanks [@thisnick](https://github.com/thisnick)! - Add normal/original video sends for MP4 sources through 50 MiB. Prepare and verify a compressed playback copy before uploading; original mode also uploads and verifies the unchanged source. Save prepared bytes and separate upload identities for recovery, preserve uncertain send handling, and expose videoQuality through the HTTP API, SDK, CLI --video-quality and OpenClaw message channelData. Honor OpenClaw forceDocument/asDocument to send media as ordinary files.
+
+### Patch Changes
+
+- [#271](https://github.com/thisnick/agent-wechat/pull/271) [`083d90d`](https://github.com/thisnick/agent-wechat/commit/083d90d40d47b4589e2e65b13770b95e6fc3b626) Thanks [@thisnick](https://github.com/thisnick)! - Batch local recall checks for quoted originals when reading history pages. Reuse
+  one page-scoped journal lookup and grouped profile queries instead of repeating
+  database reads for every quote. Preserve embedded excerpts, recall suppression,
+  conversation boundaries and fresh checks on subsequent requests.
+
+- [#286](https://github.com/thisnick/agent-wechat/pull/286) [`2c2a02c`](https://github.com/thisnick/agent-wechat/commit/2c2a02c704a563dafcdb9c616ce22ec70e620d4b) Thanks [@thisnick](https://github.com/thisnick)! - Render compact link cards, images and stickers inside quotes using the received reply content. Include structured quoted article, music and video cards in the API, and support eligible shared-sticker originals and thumbnails through the validated media pipeline. Preserve reply-owned media, account isolation and recall restrictions without fetching stored originals to fill quotes. Keep older OpenClaw queued excerpts compatible with the new display fields while retaining checks on their original content. Show the reply text in desktop notifications for quoted replies instead of labeling them as attachments.
+
+- [#294](https://github.com/thisnick/agent-wechat/pull/294) [`312ffc9`](https://github.com/thisnick/agent-wechat/commit/312ffc95c2a40fe32dee92c227decbf6e2b64c19) Thanks [@thisnick](https://github.com/thisnick)! - Speed up chat opening with reusable read-only database connections for daemon-owned profiles, batched attachment metadata and an immediate event-stream heartbeat. Keep offline inspection on source-preserving snapshots.
+
+  Reuse authenticated conversation caches by last message ID with a five-minute history validation limit, retain hidden cached history across sign-out, catch up missed changes before restoring messages, and avoid redundant startup and foreground reloads. Cancel obsolete history requests when switching chats.
+
+  Show contact photos and group member collages in the chat header on narrow screens, using the same avatar cache as the conversation list.
+
+- [#252](https://github.com/thisnick/agent-wechat/pull/252) [`4591315`](https://github.com/thisnick/agent-wechat/commit/45913156c8baeb945d2db147067a499b24649018) Thanks [@thisnick](https://github.com/thisnick)! - Declare `wechat_send_share` in the plugin manifest's `contracts.tools`. OpenClaw drops tools a plugin registers without declaring them, so agents never saw the share tool and `openclaw plugins doctor` reported an error.
+
+- [#268](https://github.com/thisnick/agent-wechat/pull/268) [`f31be38`](https://github.com/thisnick/agent-wechat/commit/f31be388fc17807657555a0130df72da85cc79e5) Thanks [@thisnick](https://github.com/thisnick)! - Reuse a history request's captured profile snapshot when checking quoted-message recalls, avoiding repeated full-profile copies and hashing. Capture unfiltered history membership without reading message bodies, then load and normalize only the delivered page. Preserve fresh reads between requests, content search and recall suppression.
+
+- [#236](https://github.com/thisnick/agent-wechat/pull/236) [`16824e7`](https://github.com/thisnick/agent-wechat/commit/16824e7bad780b18519c7f017a9ae05511ee3857) Thanks [@thisnick](https://github.com/thisnick)! - Accept complete images with trailing source data while preserving downloaded bytes and integrity hashes. Use format-specific JPEG, PNG, GIF and WebP boundaries, decode static WebP images correctly, retain animated frames, and report fixed image-validation reasons instead of a generic media-processing failure.
+
+  Read supported incoming WXGF containers through a bounded FFmpeg decoder, retaining original bytes in the server and official DAT cache. Provide separately encrypted, source-bound JPEG still previews for OpenClaw vision and quote retrieval. Source animation timing/transparency and sticker sending remain outside this change.
+
+  Download incoming files advertising attachment encryption version 0 through the verified native CDN path, preserving strict advertised size/checksum validation. Report unsupported or malformed attachment metadata as specific media errors instead of `unsupported_profile`; PDFs remain byte-preserving file-path references in OpenClaw.
+
+- [#230](https://github.com/thisnick/agent-wechat/pull/230) [`54c884c`](https://github.com/thisnick/agent-wechat/commit/54c884c70c3e41d9fa2dd0c99d74f1d16d41f415) Thanks [@thisnick](https://github.com/thisnick)! - Mark whole WeChat threads read after successful inbound handling by default, including commands handled without a model call. The new `native.readPolicy: "on_inbound"` does not require conversation access or model-input confirmation. Retain pending reads across restarts without replaying the message. Ignored messages, pending media and failed handling do not initiate a read. Explicit `never` and `on_model_dispatch` policies remain available.
+
+- [#222](https://github.com/thisnick/agent-wechat/pull/222) [`dad905d`](https://github.com/thisnick/agent-wechat/commit/dad905dad01bc6b1c7237604244592be54e2c6a2) Thanks [@thisnick](https://github.com/thisnick)! - Validate supported official table columns by name instead of physical order. Previously, an unread table with `create_time` before `local_id` could let a new message reach history but fail the thread update, preventing OpenClaw from receiving its committed event. Preserve strict column attributes, keys and indexes, and recover retained messages without another network send or duplicate event.
+
+- [#244](https://github.com/thisnick/agent-wechat/pull/244) [`c49f335`](https://github.com/thisnick/agent-wechat/commit/c49f335362a145b18fb10e876b5c240868af4c7f) Thanks [@thisnick](https://github.com/thisnick)! - Add experimental handling for the server-directed LAN challenge during desktop phone/QR login. Advertise local IPv4 addresses through the native login service and answer the phone's temporary TCP token exchange, with cancellation, expiry and one upload per attempt. Live challenge acceptance remains unverified.
+
+- [#220](https://github.com/thisnick/agent-wechat/pull/220) [`afbeddc`](https://github.com/thisnick/agent-wechat/commit/afbeddcfe83f5812f28581c66a08821bbc5f28a1) Thanks [@thisnick](https://github.com/thisnick)! - Resolve continued native message pages from their retained message IDs instead of decoding the entire thread again for every page. Preserve stable membership, current edits, deletion tombstones and account/query checks. Allow a bounded thirty-minute history view so large downloads can finish without the former five-minute cursor expiry.
+
+- [#270](https://github.com/thisnick/agent-wechat/pull/270) [`621298c`](https://github.com/thisnick/agent-wechat/commit/621298c4143d87d554153587f14452acbb785589) Thanks [@thisnick](https://github.com/thisnick)! - Register wechat_login explicitly for native account login from any OpenClaw channel. Return the daemon's QR as a direct image, reuse pending login operations, and support bounded start/wait polling, status, disconnect, logout and explicitly confirmed credential forgetting. Preserve invocation cancellation and account/configuration boundaries.
+
+- [#270](https://github.com/thisnick/agent-wechat/pull/270) [`621298c`](https://github.com/thisnick/agent-wechat/commit/621298c4143d87d554153587f14452acbb785589) Thanks [@thisnick](https://github.com/thisnick)! - Use only the quoted content embedded in replies delivered by WeChat's server protocol. Include parsed quote text, link-card fields, image availability and sender metadata in normal message responses without substituting a stored original. Remove `GET /messages/{id}/quote`, the SDK's `quotedMessage` method and the separate quote-resolution response types; read quotes through the normal message endpoint and message lists. Keep local recall checks and quoted-author admission. Retrieve images using quote-owned metadata; preserve comments and unavailable status for other quoted media. Sending quoted replies continues through the normal send endpoint with the stored target's message ID and server ID.
+
+- [#234](https://github.com/thisnick/agent-wechat/pull/234) [`a59b59d`](https://github.com/thisnick/agent-wechat/commit/a59b59d0a0dd465d5991daa72f47a5f9ed9431fc) Thanks [@thisnick](https://github.com/thisnick)! - Support text and image quotes with parent-bound same-chat original lookup, bounded embedded-content fallback when the original is absent, and verified quoted-image delivery to OpenClaw. Preserve comments and explicit pending/expired status, keep image source identity, enforce quoted-author admission for default tools, and restore bounded forwarded chat bundle rendering from the stable release.
+
+- [#217](https://github.com/thisnick/agent-wechat/pull/217) [`cc5a217`](https://github.com/thisnick/agent-wechat/commit/cc5a2175ad7fd5ae972f2126aaa1e2498575faf9) Thanks [@thisnick](https://github.com/thisnick)! - Keep generated release notes outside the build checkout so native release manifests correctly identify clean source. Reject dirty architecture fragments before publishing release assets, rather than waiting for the npm and image publication gates.
+
+- [#223](https://github.com/thisnick/agent-wechat/pull/223) [`700f2c1`](https://github.com/thisnick/agent-wechat/commit/700f2c132eecd0fe16a80b5fee10efd1d2c3fdb9) Thanks [@thisnick](https://github.com/thisnick)! - Make whole-thread marking the only public read operation. Remove message-selection flags and request fields, keep expected-version checks, and mark a thread after confirmed OpenClaw model handoff unless reads are disabled. Add durable native cross-device read notifications that retain uncertain outcomes without automatic resubmission. Apply recognized incoming unread-clear controls while retaining unsupported session-exit behavior.
+
+- [#228](https://github.com/thisnick/agent-wechat/pull/228) [`b4c9e8a`](https://github.com/thisnick/agent-wechat/commit/b4c9e8a1886abdf773d9cefff45474646fcef9d7) Thanks [@thisnick](https://github.com/thisnick)! - Receive incoming work over an authenticated persistent WeChat connection and sync immediately on native push notifications. Preserve server-directed heartbeats and transport keepalives, reconnect with bounded backoff, and fall back to heartbeat polling when the persistent connection is unavailable. Expose the active incoming transport in account status and retain durable sync, account isolation and logout fences.
+
+  Bound stalled HTTP event streams so OpenClaw can reconnect and replay its durable cursor after a network interruption, including connections that remain open without receiving keepalives.
+
+- [#248](https://github.com/thisnick/agent-wechat/pull/248) [`112ad51`](https://github.com/thisnick/agent-wechat/commit/112ad51a96491a060495bac661a77783ec16597c) Thanks [@thisnick](https://github.com/thisnick)! - Send outgoing voice as notes of up to 60 seconds, WeChat's single-message limit, instead of 10-second notes. Longer audio splits into the fewest equal-length notes and keeps per-note IDs, partial results and `needs_review` on uncertainty. Notes above 32 KiB of SILK (about 15 seconds) are uploaded as consecutive offset ranges of one voice message; that upload path has offline fixtures only and still requires live verification.
+
+- [#280](https://github.com/thisnick/agent-wechat/pull/280) [`063f072`](https://github.com/thisnick/agent-wechat/commit/063f0726bef6f37252b21c5716bd1b31d2344a8a) Thanks [@thisnick](https://github.com/thisnick)! - Validate the OpenClaw integration against 2026.10.7. Source development and CI now use Node 24.22.1 or newer; the standalone CLI's Node requirement is unchanged.
+
+- [#296](https://github.com/thisnick/agent-wechat/pull/296) [`6edded4`](https://github.com/thisnick/agent-wechat/commit/6edded4e950883a502eac4cd5d18b05f2bd0b435) Thanks [@thisnick](https://github.com/thisnick)! - Keep group history that an earlier release saved with an unsupported quote. When a later daemon can read that quoted message, the OpenClaw channel no longer treats it as changed and holds new mentions in the group for review.
+
+- [#262](https://github.com/thisnick/agent-wechat/pull/262) [`c1147ed`](https://github.com/thisnick/agent-wechat/commit/c1147edca08fc2cdb126ac591a54b67b75077f37) Thanks [@thisnick](https://github.com/thisnick)! - Match official recall rows and notices, derive API sender and direction from existing message and receipt evidence without new author columns, and remove recalled entries from supported official message search indexes. Keep unknown authors unset and leave unsupported index layouts pending for repair.
+
+- [#282](https://github.com/thisnick/agent-wechat/pull/282) [`3f55bd1`](https://github.com/thisnick/agent-wechat/commit/3f55bd14ff6522467a05c87535635ded52a95e21) Thanks [@thisnick](https://github.com/thisnick)! - Expose saved direct-chat and group notification preferences as nullable `muted` values on thread lists and detail, using batched local reads per page. Receive phone contact changes through the independent contact sync stream, retain unsupported controls, and preserve official cursor publication and restart fences. Profile exports also wait for the contact checkpoint receipt. Ignore unmapped contact notices without selectors so they cannot interrupt message catch-up.
+
+  Add native desktop notifications for new incoming messages in known unmuted chats, including when the window is hidden. Suppress history, outgoing messages, duplicates, stale mute state and the currently focused conversation. Add a settings toggle and click-to-open navigation.
+
+  Support direct-chat mute/unmute through the existing thread notification API and CLI alongside group controls. Add signed desktop update discovery, channel settings, verified downloads, graceful install/restart, and final-artifact update manifests in the release workflow.
+
+- [#253](https://github.com/thisnick/agent-wechat/pull/253) [`e259b46`](https://github.com/thisnick/agent-wechat/commit/e259b462a7dc7e6511a2680cb76c84b066229bb1) Thanks [@thisnick](https://github.com/thisnick)! - Correct metadata for voice notes uploaded in multiple requests by including the client-ID buffer only in the first request. Notes continue to support up to 60 seconds.
+
 ## 1.0.0-beta.20
 
 ## 1.0.0-beta.19
