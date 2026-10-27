@@ -1,6 +1,7 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import type { Connection } from "./connection.ts";
-import { groupEnded } from "./group-creation.ts";
+import { PinFeedback } from "./thread-pinning.tsx";
+import { Icon } from "./ui.tsx";
 export function ThreadNotifications({
   connection,
   account,
@@ -10,69 +11,48 @@ export function ThreadNotifications({
   account: string;
   threadId: string;
 }) {
-  const state = useSyncExternalStore(
-    connection.session.subscribe,
-    connection.session.snapshot
-  );
-  const model = connection.groupCreation(account, threadId);
-  const operation = useSyncExternalStore(model.subscribe, model.snapshot);
-  const receipt = operation.receipt;
-  const current = receipt?.operation;
-  useEffect(() => {
-    if (receipt?.input.action === "mute" && current?.state === "succeeded")
-      void connection.session.refreshConversations(account).catch(() => {});
-  }, [connection, account, current?.id, current?.state]);
-  const supported =
-    Array.isArray(state.capabilities.threadNotificationTargets) &&
-    state.capabilities.threadNotificationTargets.includes("direct");
-  if (!supported || threadId === "filehelper" || threadId.endsWith("@chatroom"))
-    return null;
-  const muted = state.threads.find((thread) => thread.id === threadId)?.muted;
-  const unresolved =
-    receipt &&
-    !receipt.notAdmitted &&
-    (!groupEnded(current) || current?.state === "needs_review");
+  const model = connection.threadMuting(account, threadId);
+  const state = useSyncExternalStore(model.subscribe, model.snapshot);
+  if (!state.supported) return null;
+  const known = state.muted !== null;
   return (
     <div className="detail-section">
-      <button
-        className="group-toggle"
-        role="switch"
-        aria-checked={muted === true}
-        disabled={operation.busy || !!unresolved || typeof muted !== "boolean"}
-        onClick={() => {
-          model.clear();
-          void model.run({ action: "mute", groupId: threadId, muted: !muted });
-        }}
-      >
-        <span>
-          Mute notifications
-          <small>
-            {typeof muted !== "boolean"
-              ? "Setting unavailable"
-              : muted
-              ? "On"
-              : "Off"}
-          </small>
-        </span>
-        <span className={`toggle-track ${muted ? "on" : ""}`}>
-          <i />
-        </span>
-      </button>
-      {unresolved && receipt?.input.action === "mute" && (
-        <p className="field-help">
-          {current?.state === "needs_review"
-            ? "Couldn’t confirm this change."
-            : "Updating…"}{" "}
-          <button className="text-button" onClick={() => void model.check()}>
-            Check status
+      <div className="pin-detail-setting">
+        <button
+          className="group-toggle"
+          role={known ? "switch" : undefined}
+          aria-label={
+            known ? "Mute notifications" : "Notification state unavailable"
+          }
+          aria-checked={known ? state.muted! : undefined}
+          aria-busy={state.busy}
+          disabled={state.disabled}
+          onClick={() => void model.toggle()}
+        >
+          <span>Mute notifications</span>
+          {state.saving && <span className="pin-spinner" aria-hidden="true" />}
+          <span
+            className={`toggle-track ${state.muted ? "on" : ""} ${
+              known ? "" : "unknown"
+            }`}
+            aria-hidden="true"
+          >
+            {known ? <i /> : <span>−</span>}
+          </span>
+        </button>
+        {!known && (
+          <button
+            className="icon-btn"
+            aria-label="Refresh notification state"
+            title="Refresh notification state"
+            disabled={state.busy}
+            onClick={() => void model.check()}
+          >
+            <Icon name="refresh" />
           </button>
-        </p>
-      )}
-      {operation.error && (
-        <p className="attachment-error" role="alert">
-          {operation.error}
-        </p>
-      )}
+        )}
+      </div>
+      <PinFeedback model={model} kind="notification" />
     </div>
   );
 }

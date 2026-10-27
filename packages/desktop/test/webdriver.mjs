@@ -289,8 +289,9 @@ try {
     script, invoke: invokeNative, until,
     resize: (width, height) => call(`/session/${session}/window/rect`, { width, height }),
     key: (value) => call(`/session/${session}/actions`, { actions: [{ type: "key", id: "keyboard", actions: [{ type: "keyDown", value }, { type: "keyUp", value }] }] }),
+    hover: (x, y) => call(`/session/${session}/actions`, { actions: [{ type: "pointer", id: "mouse", parameters: { pointerType: "mouse" }, actions: [{ type: "pointerMove", origin: "viewport", x, y }] }] }),
     capture: process.env.DESKTOP_PINNING_SCREENSHOT
-      ? async () => writeFile(process.env.DESKTOP_PINNING_SCREENSHOT, Buffer.from(await call(`/session/${session}/screenshot`), "base64"))
+      ? async (name) => writeFile(name ? process.env.DESKTOP_PINNING_SCREENSHOT.replace(/\.png$/, `-${name}.png`) : process.env.DESKTOP_PINNING_SCREENSHOT, Buffer.from(await call(`/session/${session}/screenshot`), "base64"))
       : undefined,
   });
   try {

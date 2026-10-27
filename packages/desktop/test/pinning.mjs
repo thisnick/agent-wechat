@@ -9,6 +9,7 @@ export async function pinningAcceptance({
   until,
   resize,
   key,
+  hover,
   capture,
 }) {
   const wait = async (ready) => {
@@ -30,6 +31,7 @@ export async function pinningAcceptance({
     kind: id.endsWith("@chatroom") ? "group" : "direct",
     displayName: id,
     pinned: id === "unknown" ? null : false,
+    muted: false,
     unreadCount: id === "unopened" ? 9 : 0,
     readStateVersion: "v",
     history: {},
@@ -65,10 +67,13 @@ export async function pinningAcceptance({
       socket.write(`id: ${cursor}\ndata: ${JSON.stringify(event)}\n\n`);
   };
   const apply = (op) => {
-    rows.find((x) => x.id === op.result.targetId).pinned = op.result.pinned;
+    const target = rows.find((x) => x.id === op.result.targetId);
+    if (op.result.action === "pin") target.pinned = op.result.pinned;
+    else target.muted = op.result.muted;
     op.state = "succeeded";
     op.result.remoteOutcome = "accepted";
-    op.result.profileProjection = "complete";
+    op.result.profileProjection =
+      op.result.action === "mute" ? "partial" : "complete";
     changed(op.result.targetId);
   };
   const backend = createServer(async (req, res) => {
@@ -98,6 +103,7 @@ export async function pinningAcceptance({
     if (path.endsWith("/capabilities"))
       return json({
         threadPinningTargets: ["direct", "group"],
+        threadNotificationTargets: ["direct", "group"],
         threadPinningScope: "admin",
       });
     if (path === `/v1/accounts/${account}`)
@@ -115,7 +121,7 @@ export async function pinningAcceptance({
     if (path.includes("/avatars/"))
       return json({ error: { code: "media_not_cached" } }, 404);
     const matched = path.match(
-      /\/threads\/([^/]+)(?:\/(messages|pin|read-state))?$/,
+      /\/threads\/([^/]+)(?:\/(messages|pin|notifications|read-state))?$/,
     );
     if (matched) {
       const id = decodeURIComponent(matched[1]),
@@ -146,12 +152,13 @@ export async function pinningAcceptance({
         reads.push(id);
         return json({});
       }
-      if (action === "pin") {
+      if (action === "pin" || action === "notifications") {
         let body = "";
         for await (const chunk of req) body += chunk;
         const input = JSON.parse(body),
           admission = req.headers["idempotency-key"];
-        assert.equal(typeof input.pinned, "boolean");
+        const field = action === "pin" ? "pinned" : "muted";
+        assert.equal(typeof input[field], "boolean");
         assert.ok(admission);
         if (mode === "forbidden")
           return json({ error: { code: "forbidden" } }, 403);
@@ -165,9 +172,10 @@ export async function pinningAcceptance({
           createdAt: "1",
           updatedAt: "1",
           result: {
-            action: "pin",
+            action: action === "pin" ? "pin" : "mute",
             targetId: id,
             pinned: input.pinned,
+            muted: input.muted,
             remoteOutcome: "accepted",
             profileProjection: "complete",
           },
@@ -207,7 +215,18 @@ export async function pinningAcceptance({
     return json({ error: { code: "not_found" } }, 404);
   });
   const row = (id) => `document.querySelector('[data-thread-id="${id}"]')`;
-  const more = (id) => row(id) + `.querySelector('.thread-row-more')`;
+  const more = (id) => row(id) + `.querySelector('.thread-row-pin')`;
+  const context = async (id) => {
+    await until(
+      `return Boolean(${row(id)}.querySelector('.pin-spinner'))`,
+      (v) => !v,
+    );
+    return script(
+      `${row(
+        id,
+      )}.querySelector('.chat-row').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));return true;`,
+    );
+  };
   const click = (source) => script(`${source}.click(); return true`);
   const menu = () =>
     until("return document.querySelector('[role=menu]')?.textContent", Boolean);
@@ -254,7 +273,7 @@ export async function pinningAcceptance({
     );
     const beforeHistories = [...histories],
       beforeReads = [...reads];
-    await click(more("unopened"));
+    await context("unopened");
     await menu();
     assert.equal(
       await script(
@@ -305,12 +324,129 @@ export async function pinningAcceptance({
       ),
       1,
     );
-    const pinGap = await script(
-      `const row=${row(
-        "unopened",
-      )};return row.querySelector('.thread-pin-icon').getBoundingClientRect().left-row.querySelector('.chat-name').getBoundingClientRect().right;`,
+    assert.equal(
+      await script(
+        `return getComputedStyle(${row(
+          "unopened",
+        )}.querySelector('.count')).visibility`,
+      ),
+      "visible",
     );
-    assert.ok(pinGap >= 0 && pinGap <= 8, "the pin icon sits beside the name");
+    assert.equal(
+      await script(
+        "return document.querySelectorAll('.thread-row-more').length",
+      ),
+      0,
+    );
+    if (hover) {
+      await script("document.activeElement?.blur();return true;");
+      await hover(20, 20);
+      assert.equal(
+        await script(
+          `return getComputedStyle(${row(
+            "unopened",
+          )}.querySelector('.thread-row-actions')).opacity`,
+        ),
+        "0",
+      );
+      assert.equal(
+        await script(
+          `return getComputedStyle(${row(
+            "unopened",
+          )}.querySelector('.thread-row-status')).opacity`,
+        ),
+        "1",
+      );
+      const position = await script(
+        `const r=${row(
+          "unopened",
+        )}.getBoundingClientRect();return {x:Math.round(r.left+90),y:Math.round(r.top+30)};`,
+      );
+      await hover(position.x, position.y);
+      await until(
+        `return getComputedStyle(${row(
+          "unopened",
+        )}.querySelector('.thread-row-actions')).opacity`,
+        (v) => v === "1",
+      );
+      assert.equal(
+        await script(
+          `return getComputedStyle(${row(
+            "unopened",
+          )}.querySelector('.thread-row-status')).opacity`,
+        ),
+        "0",
+      );
+      assert.equal(
+        await script(
+          `return ${row(
+            "unopened",
+          )}.querySelectorAll('.thread-row-actions button').length`,
+        ),
+        2,
+      );
+      const geometry = await script(
+        `const row=${row(
+          "unopened",
+        )};const actions=row.querySelector('.thread-row-actions').getBoundingClientRect();const badge=row.querySelector('.count').getBoundingClientRect();return {separate:actions.bottom<=badge.top, badgeRight:badge.right,rowRight:row.getBoundingClientRect().right};`,
+      );
+      assert.ok(
+        geometry.separate && geometry.badgeRight <= geometry.rowRight,
+        "unread badge stays visible below the action buttons",
+      );
+      const sizes = await script(
+        `const row=${row(
+          "unopened",
+        )};return {status:row.querySelector('.thread-row-status .icon').getBoundingClientRect().width, action:row.querySelector('.thread-row-pin .icon').getBoundingClientRect().width};`,
+      );
+      assert.equal(
+        sizes.status,
+        sizes.action,
+        "status and action glyphs have the same size",
+      );
+      await until(
+        "return document.querySelector('[role=tooltip]')?.textContent",
+        (text) => text?.includes("9 unread") && text.includes("Saved message"),
+      );
+      if (capture) await capture("hover");
+      assert.deepEqual(histories, beforeHistories);
+      assert.deepEqual(reads, beforeReads);
+      await key("\uE00C");
+      await until(
+        "return Boolean(document.querySelector('[role=tooltip]'))",
+        (v) => !v,
+      );
+      await hover(20, 20);
+    }
+    // Direct mute/unmute keeps the unread badge and selected conversation intact.
+    await click(row("unopened") + ".querySelector('.thread-row-mute')");
+    await until(
+      `return ${row(
+        "unopened",
+      )}.querySelector('.thread-row-mute').getAttribute('aria-pressed')`,
+      (v) => v === "true",
+    );
+    await until(
+      `return ${row(
+        "unopened",
+      )}.querySelector('.thread-row-mute').getAttribute('aria-disabled')==='true'`,
+      (v) => !v,
+    );
+    await click(row("unopened") + ".querySelector('.thread-row-mute')");
+    await until(
+      `return ${row(
+        "unopened",
+      )}.querySelector('.thread-row-mute').getAttribute('aria-pressed')`,
+      (v) => v === "false",
+    );
+    assert.equal(
+      await script(
+        `return ${row("unopened")}.querySelector('.count').textContent`,
+      ),
+      "9",
+    );
+    assert.deepEqual(histories, beforeHistories);
+    assert.deepEqual(reads, beforeReads);
     assert.equal(
       await script("return document.querySelectorAll('button button').length"),
       0,
@@ -337,7 +473,11 @@ export async function pinningAcceptance({
       await script(`return document.activeElement === ${more("open")}`),
       true,
     );
-    await key("\uE015");
+    await script(
+      `${row(
+        "open",
+      )}.querySelector('.chat-row').dispatchEvent(new KeyboardEvent('keydown',{key:'F10',shiftKey:true,bubbles:true,cancelable:true}));return true;`,
+    );
     await menu();
     await until(
       "return document.activeElement?.getAttribute('role')",
@@ -348,6 +488,10 @@ export async function pinningAcceptance({
       "return document.querySelector('[role=switch][aria-label=\"Pin chat\"]')?.getAttribute('aria-checked')",
       (v) => v === "true",
     );
+    await until(
+      "return document.querySelector('[role=switch][aria-label=\"Pin chat\"]').disabled",
+      (v) => !v,
+    );
     await click(
       "document.querySelector('[role=switch][aria-label=\"Pin chat\"]')",
     );
@@ -355,7 +499,7 @@ export async function pinningAcceptance({
       "return document.querySelector('[role=switch][aria-label=\"Pin chat\"]')?.getAttribute('aria-checked')",
       (v) => v === "false",
     );
-    await click(more("unopened"));
+    await context("unopened");
     await menu();
     await click(pinItem());
     await until(
@@ -417,7 +561,7 @@ export async function pinningAcceptance({
     // Accepted, locally pending: both controls stay busy until operation readback and inventory agree.
     mode = "pending";
     const beforePending = puts.length;
-    await click(more("unopened"));
+    await context("unopened");
     await menu();
     await click(pinItem());
     await until(
@@ -428,7 +572,7 @@ export async function pinningAcceptance({
       await script(
         `return Boolean(${row("unopened")}.querySelector('.thread-pin-icon'))`,
       ),
-      false,
+      true,
     );
     await wait(() => puts.length > beforePending);
     const pending = [...operations.values()].at(-1);
@@ -440,7 +584,7 @@ export async function pinningAcceptance({
       (v) => v === false,
     );
     mode = "confirm";
-    await click(more("unopened"));
+    await context("unopened");
     await menu();
     await click(pinItem());
     await until(
@@ -448,8 +592,12 @@ export async function pinningAcceptance({
       (n) => n === 0,
     );
     // Rejection retains state and permits a deliberate new attempt.
+    await until(
+      `return Boolean(${row("unopened")}.querySelector('.pin-spinner'))`,
+      (v) => !v,
+    );
     mode = "reject";
-    await click(more("unopened"));
+    await context("unopened");
     await menu();
     await click(pinItem());
     await until(`return ${row("unopened")}?.textContent`, (text) =>
@@ -457,7 +605,7 @@ export async function pinningAcceptance({
     );
     assert.equal(rows.find((x) => x.id === "unopened").pinned, false);
     mode = "lost";
-    await click(more("unopened"));
+    await context("unopened");
     await menu();
     await click(pinItem());
     await until(`return ${row("unopened")}?.textContent`, (text) =>
@@ -482,7 +630,7 @@ export async function pinningAcceptance({
       (v) => v === false,
     );
     assert.equal(puts.length, submissions);
-    // The overflow is visible and has a touch target without requiring hover.
+    // Both direct actions have touch targets without requiring hover.
     await resize(420, 820);
     await click(
       "document.querySelector('button[aria-label=\"Back to conversations\"]')",
@@ -493,17 +641,52 @@ export async function pinningAcceptance({
       )};const r=el.getBoundingClientRect();return {width:r.width,height:r.height,display:getComputedStyle(el).display};`,
     );
     assert.ok(hit.width >= 44 && hit.height >= 44 && hit.display !== "none");
+    assert.equal(
+      await script(
+        `return getComputedStyle(${row(
+          "room@chatroom",
+        )}.querySelector('.thread-row-actions')).opacity`,
+      ),
+      "1",
+    );
+    const muteHit = await script(
+      `const r=${row(
+        "room@chatroom",
+      )}.querySelector('.thread-row-mute').getBoundingClientRect();return {width:r.width,height:r.height};`,
+    );
+    assert.ok(muteHit.width >= 44 && muteHit.height >= 44);
     mode = "confirm";
-    await click(more("room@chatroom"));
+    await click(row("room@chatroom") + ".querySelector('.thread-row-mute')");
+    await until(
+      `return ${row(
+        "room@chatroom",
+      )}.querySelector('.thread-row-mute').getAttribute('aria-pressed')`,
+      (v) => v === "true",
+    );
+    await until(
+      `return ${row(
+        "room@chatroom",
+      )}.querySelector('.thread-row-mute').getAttribute('aria-disabled')==='true'`,
+      (v) => !v,
+    );
+    await click(row("room@chatroom") + ".querySelector('.thread-row-mute')");
+    await until(
+      `return ${row(
+        "room@chatroom",
+      )}.querySelector('.thread-row-mute').getAttribute('aria-pressed')`,
+      (v) => v === "false",
+    );
+    mode = "confirm";
+    await context("room@chatroom");
     await menu();
     await click(pinItem());
     await pinned("room@chatroom");
-    await click(more("filehelper"));
+    await context("filehelper");
     await menu();
     assert.equal(await script(`return ${pinItem()}.disabled`), true);
     await key("\uE00C");
     console.log(
-      "Pinning interface: shared row/details state, keyboard/context/touch access, server order, unknown state, pending projection, rejection, reload recovery, phone updates, stable focus/drafts/history/unreads/scroll passed",
+      "Pinning interface: unread badges, hover actions/info, direct pin/mute, shared details, keyboard/context/touch access, optimistic pins, server order, unknown state, pending projection, rejection, reload recovery, phone updates, stable focus/drafts/history/unreads/scroll passed",
     );
   } finally {
     if (connection)

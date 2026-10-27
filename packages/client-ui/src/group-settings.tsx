@@ -44,7 +44,7 @@ type Result = {
 export function GroupResult({ model }: { model: GroupMutations }) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const receipt = state.receipt;
-  if (!receipt || receipt.input.action === "pin") return null;
+  if (!receipt || ["pin", "mute"].includes(receipt.input.action)) return null;
   const operation = receipt.operation;
   const result = operation?.result as Result | undefined;
   const partial = result?.memberOutcome === "partial";
@@ -155,9 +155,9 @@ export function GroupSettings({
   const enabled = (action: GroupAction["action"]) =>
     state.connected &&
     !(
-      operation.receipt?.input.action === "pin" &&
-      (!groupEnded(operation.receipt.operation) ||
-        operation.receipt.operation?.state === "needs_review")
+      ["pin", "mute"].includes(operation.receipt?.input.action ?? "") &&
+      (!groupEnded(operation.receipt?.operation) ||
+        operation.receipt?.operation?.state === "needs_review")
     ) &&
     group?.isInGroup === true &&
     (action === "mute"
@@ -208,7 +208,7 @@ export function GroupSettings({
   const receiptState = operation.receipt?.operation?.state;
   useEffect(() => {
     if (
-      operation.receipt?.input.action !== "pin" &&
+      !["pin", "mute"].includes(operation.receipt?.input.action ?? "") &&
       receiptState &&
       groupEnded(operation.receipt?.operation)
     ) {
@@ -257,7 +257,10 @@ export function GroupSettings({
     }
   }
   function edit(action: GroupAction["action"]) {
-    if (operation.receipt?.input.action === "pin") {
+    if (
+      operation.receipt &&
+      ["pin", "mute"].includes(operation.receipt.input.action)
+    ) {
       if (
         !groupEnded(operation.receipt.operation) ||
         operation.receipt.operation?.state === "needs_review"
@@ -370,27 +373,6 @@ export function GroupSettings({
             Edit
           </button>
         </div>
-        <button
-          className="group-toggle"
-          role="switch"
-          aria-checked={group?.muted === true}
-          disabled={!enabled("mute") || refreshing}
-          onClick={() => edit("mute")}
-        >
-          <span>
-            Mute notifications
-            <small>
-              {group?.muted === true
-                ? "On"
-                : group?.muted === false
-                ? "Off"
-                : "Unknown"}
-            </small>
-          </span>
-          <span className={`toggle-track ${group?.muted ? "on" : ""}`}>
-            <i />
-          </span>
-        </button>
         <div className="group-announcement">
           <div className="section-head">Announcement</div>
           <p>

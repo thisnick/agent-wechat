@@ -6,6 +6,9 @@ import {
   ZoomOut,
   Focus,
   CloudDownload,
+  BellOff,
+  PinOff,
+  Pin,
 } from "lucide-react";
 import type { ReactNode } from "react";
 const icons: Record<string, string> = {
@@ -34,8 +37,8 @@ const icons: Record<string, string> = {
   pause: "M8 4v16M16 4v16",
   logout: "M9 4H4v16h5M9 12h12m-5-5 5 5-5 5",
   leaf: "M20 3C7 1 2 8 6 15c7 5 15-1 14-12ZM4 21 15 9",
-  pin: "m16 3 5 5-4 2-3 6-2-2-6 6M9 3l12 12M3 9l6-6",
-  refresh: "M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.55-2.6L20 7M4 17l2.35 2.6A7 7 0 0 0 17.9 17",
+  refresh:
+    "M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.55-2.6L20 7M4 17l2.35 2.6A7 7 0 0 0 17.9 17",
   sun: "M12 3V1M12 23v-2M3 12H1M23 12h-2M5 5 3 3M21 21l-2-2M3 21l2-2M19 5l2-2M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0Z",
   server: "M3 3h18v7H3zM3 14h18v7H3zM7 6h.01M7 17h.01",
   help: "M12 17h.01M9 9a3 3 0 1 1 4 3v2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
@@ -49,6 +52,9 @@ export function Icon({ name }: { name: string }) {
       "zoom-out": ZoomOut,
       "reset-zoom": Focus,
       "cloud-download": CloudDownload,
+      "bell-off": BellOff,
+      unpin: PinOff,
+      pin: Pin,
     } as Record<string, typeof MessageSquareX>
   )[name];
   if (component) {

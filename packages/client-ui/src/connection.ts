@@ -12,7 +12,7 @@ import { AvatarCache } from "./avatar-cache.ts";
 import { MediaInbox } from "./media-inbox.ts";
 import { MessageRecall } from "./message-recall.ts";
 import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
-import { ThreadPinning } from "./thread-pinning.ts";
+import { ThreadPinning, ThreadMuting } from "./thread-pinning.ts";
 import { validQuoteReference } from "./reply.ts";
 export type Connection = {
   desktopId?: string;
@@ -31,6 +31,7 @@ export type Connection = {
   clearLogout: (account: string) => void;
   groupCreation: (account: string, target?: string) => GroupMutations;
   threadPinning: (account: string, target: string) => ThreadPinning;
+  threadMuting: (account: string, target: string) => ThreadMuting;
 };
 export async function connect(
   endpoint: string,
@@ -184,6 +185,7 @@ export async function connect(
   );
   const groups = new Map<string, GroupMutations>();
   const pins = new Map<string, ThreadPinning>();
+  const mutes = new Map<string, ThreadMuting>();
   const stopSignOut = session.onSignedOut((account) => {
     incomingMedia.clear(account);
     avatars.clear(account);
@@ -198,6 +200,11 @@ export async function connect(
       if ((JSON.parse(key) as string[])[0] === account) {
         pin.close();
         pins.delete(key);
+      }
+    for (const [key, mute] of mutes)
+      if ((JSON.parse(key) as string[])[0] === account) {
+        mute.close();
+        mutes.delete(key);
       }
     for (const [key, group] of groups)
       if ((JSON.parse(key) as string[])[0] === account) {
@@ -273,6 +280,7 @@ export async function connect(
       incomingMedia.close();
       for (const recall of recalls.values()) recall.close();
       for (const pin of pins.values()) pin.close();
+      for (const mute of mutes.values()) mute.close();
       for (const group of groups.values()) group.close();
     },
     avatars,
@@ -325,6 +333,20 @@ export async function connect(
         pins.set(key, pin);
       }
       return pin;
+    },
+    threadMuting(account, target) {
+      const key = JSON.stringify([account, target]);
+      let mute = mutes.get(key);
+      if (!mute) {
+        mute = new ThreadMuting(
+          session,
+          groupCreation(account, target),
+          account,
+          target,
+        );
+        mutes.set(key, mute);
+      }
+      return mute;
     },
     clearLogout(account) {
       saveLogout(account, null);

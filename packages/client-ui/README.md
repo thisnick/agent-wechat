@@ -52,9 +52,15 @@ including messages outside the browser's loaded page. **Load more matches**
 continues the same query using the hub's cursor. Clearing the query restores the
 chat; switching accounts or conversations discards any late search response.
 
-Pin a conversation from its **⋯ → Pin chat** menu (also available on right-click),
-or from the **Pin chat** switch in Conversation details. Pinned chats stay together
-at the top in the hub's order. Both controls share one pending operation; pinning
+Hover or focus a conversation to reveal **Pin/Unpin** and **Mute/Unmute** buttons.
+Unread badges stay visible; a short hover panel shows chat information from the
+loaded inventory. On touch screens, both actions stay visible. Right-click also
+opens a menu. Pin and mute switches are available in Conversation details.
+Pinned chats stay together at the top. Pinning updates the icon, switch and
+section immediately while saving, then
+uses the hub’s confirmed order. Rejected or uncertain changes return to the last
+confirmed state and retain their recovery receipt. Both controls share one
+pending operation; pinning
 an unopened chat does not open it or clear its unread badge. Unknown pin state
 can be refreshed. **Check status** recovers an uncertain change without resending
 it, including after a reload. The hub must advertise pinning for that chat type,

@@ -400,3 +400,47 @@ test("a running operation with an unsettled remote outcome is saving, not uncert
   assert.equal(f.saved().key, key);
   assert.equal(f.posts(), 1);
 });
+
+test("optimistic pin is presentation only and rolls back on rejection or uncertainty", async (t) => {
+  for (const result of [
+    op({ state: "rejected" }),
+    op({ state: "needs_review" }),
+  ]) {
+    const response = deferred();
+    const f = setup(t, { submit: () => response.promise });
+    const saving = f.pin.toggle();
+    assert.equal(f.pin.snapshot().preview, true);
+    assert.equal(f.pin.snapshot().pinned, false);
+    assert.equal(
+      f.state().threads[0].pinned,
+      false,
+      "canonical cache is untouched",
+    );
+    response.resolve(result);
+    await saving;
+    assert.equal(f.pin.snapshot().preview, undefined);
+    assert.equal(f.pin.snapshot().pinned, false);
+    assert.ok(f.saved().key, "receipt survives rollback");
+  }
+});
+
+test("looking up a lost admission does not create an optimistic pin", async (t) => {
+  const response = deferred();
+  const f = setup(
+    t,
+    { lookup: () => response.promise },
+    {
+      receipt: {
+        key: "retained-key",
+        input: { action: "pin", groupId: "peer", pinned: true },
+      },
+    },
+  );
+  await until(() => f.mutations.snapshot().busy);
+  assert.equal(f.pin.snapshot().preview, undefined);
+  assert.equal(f.posts(), 0);
+  response.resolve(op({ state: "needs_review" }));
+  await until(() => !f.mutations.snapshot().busy);
+  assert.equal(f.pin.snapshot().uncertain, true);
+  assert.equal(f.saved().key, "retained-key");
+});

@@ -93,6 +93,12 @@ type Snapshot = { receipt: GroupReceipt | null; busy: boolean; error: string };
 export const groupEnded = (operation?: NativeOperation): boolean => {
   const result = operation?.result as Record<string, unknown> | undefined;
   if (
+    result?.action === "mute" &&
+    operation?.state === "succeeded" &&
+    result.profileProjection === "pending"
+  )
+    return false;
+  if (
     result?.action === "pin" &&
     operation?.state === "succeeded" &&
     (result.remoteOutcome !== "accepted" ||
@@ -127,11 +133,15 @@ export class GroupMutations {
     if (receipt?.operation && !this.matches(receipt.operation, receipt))
       delete receipt.operation;
     this.value = { receipt, busy: false, error: "" };
-    const settledPin =
-      receipt?.input.action === "pin" &&
-      receipt.operation?.state === "succeeded" &&
-      groupEnded(receipt.operation);
-    if (this.value.receipt && !this.value.receipt.notAdmitted && !settledPin)
+    const settledPreference =
+      ["pin", "mute"].includes(receipt?.input.action ?? "") &&
+      receipt?.operation?.state === "succeeded" &&
+      groupEnded(receipt?.operation);
+    if (
+      this.value.receipt &&
+      !this.value.receipt.notAdmitted &&
+      !settledPreference
+    )
       queueMicrotask(() => void this.check());
   }
   snapshot = (): Snapshot => this.value;

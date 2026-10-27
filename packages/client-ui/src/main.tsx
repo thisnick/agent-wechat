@@ -1,5 +1,5 @@
 import { ConversationRow } from "./conversation-row.tsx";
-import { ThreadPinSwitch } from "./thread-pinning.tsx";
+import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
 import { DesktopUpdates } from "./desktop-updates.tsx";
 import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
@@ -975,7 +975,7 @@ function Chats({
     setInChat("");
     void session.select(id);
   }
-  const threads = orderThreads(state.threads).filter(
+  const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter(
     (t) =>
       name(t.id).toLowerCase().includes(query.toLowerCase()) &&
       (filter !== "unread" || !!t.unreadCount) &&

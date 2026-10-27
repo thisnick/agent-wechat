@@ -2,31 +2,40 @@ import type { NativeOperation } from "@agent-wechat/shared";
 import { GroupMutations, groupEnded } from "./group-creation.ts";
 import { readableError, type HubSession } from "./session.ts";
 
-export type PinState = {
-  pinned: boolean | null;
+type Field = "pinned" | "muted";
+export type PreferenceState<K extends Field> = Record<K, boolean | null> & {
   supported: boolean;
   disabled: boolean;
   busy: boolean;
+  saving: boolean;
+  preview?: boolean;
   uncertain: boolean;
   error: string;
   announcement: string;
 };
 
-export function confirmedPin(operation?: NativeOperation): boolean {
+function confirmedPreference(
+  operation: NativeOperation | undefined,
+  field: Field,
+): boolean {
   const result = operation?.result as Record<string, unknown> | undefined;
   return (
     operation?.state === "succeeded" &&
     result?.remoteOutcome === "accepted" &&
-    result.profileProjection === "complete"
+    (result.profileProjection === "complete" ||
+      (field === "muted" && result.profileProjection === "partial"))
   );
 }
 
 /** One view of canonical state and the shared account/target mutation receipt. */
-export class ThreadPinning {
-  private value: PinState;
+export class ThreadPreference<K extends Field> {
+  private value: PreferenceState<K>;
+  private field: K;
+  private action: "pin" | "mute";
   private listeners = new Set<() => void>();
   private stopped = false;
   private syncing = false;
+  private submitting = false;
   private syncError = "";
   private synced = "";
   private reconciling?: Promise<void>;
@@ -40,7 +49,10 @@ export class ThreadPinning {
     mutations: GroupMutations,
     account: string,
     thread: string,
+    field: K,
   ) {
+    this.field = field;
+    this.action = field === "pinned" ? "pin" : "mute";
     this.session = session;
     this.mutations = mutations;
     this.account = account;
@@ -48,7 +60,10 @@ export class ThreadPinning {
     // Activation already obtains a fresh ordered inventory before enabling
     // controls. Completed receipts must not add one status request per row.
     const receipt = mutations.snapshot().receipt;
-    if (receipt?.input.action === "pin" && confirmedPin(receipt.operation))
+    if (
+      receipt?.input.action === this.action &&
+      confirmedPreference(receipt.operation, this.field)
+    )
       this.synced = receipt.key;
     this.value = this.read();
     this.stop = [
@@ -57,80 +72,109 @@ export class ThreadPinning {
     ];
     this.update();
   }
-  snapshot = (): PinState => this.value;
+  snapshot = (): PreferenceState<K> => this.value;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
   };
-  private read(): PinState {
+  private read(): PreferenceState<K> {
     const session = this.session.snapshot();
     const operation = this.mutations.snapshot();
     const receipt = operation.receipt;
-    const pin = receipt?.input.action === "pin" ? receipt : undefined;
-    const result = pin?.operation?.result as
+    const change = receipt?.input.action === this.action ? receipt : undefined;
+    const result = change?.operation?.result as
       | Record<string, unknown>
       | undefined;
     const thread = session.threads.find((item) => item.id === this.thread);
-    const pinned = typeof thread?.pinned === "boolean" ? thread.pinned : null;
+    const enabled =
+      typeof thread?.[this.field] === "boolean" ? thread[this.field]! : null;
+    const targets =
+      this.field === "pinned"
+        ? session.capabilities.threadPinningTargets
+        : session.capabilities.threadNotificationTargets;
     const supported =
       this.thread !== "filehelper" &&
-      Array.isArray(session.capabilities.threadPinningTargets) &&
-      session.capabilities.threadPinningTargets.includes(
-        this.thread.endsWith("@chatroom") ? "group" : "direct",
-      );
+      Array.isArray(targets) &&
+      targets.includes(this.thread.endsWith("@chatroom") ? "group" : "direct");
     const uncertain =
-      !!pin &&
-      !pin.notAdmitted &&
-      ((!pin.operation && !operation.busy) ||
-        pin.operation?.state === "needs_review" ||
+      !!change &&
+      !change.notAdmitted &&
+      ((!change.operation && !operation.busy) ||
+        change.operation?.state === "needs_review" ||
         (result?.remoteOutcome === "unknown" &&
           ["succeeded", "failed", "rejected", "cancelled"].includes(
-            pin.operation?.state ?? "",
+            change.operation?.state ?? "",
           )) ||
-        (!!operation.error && !groupEnded(pin.operation)));
+        (!!operation.error && !groupEnded(change.operation)));
     const pending =
       !!receipt &&
       !receipt.notAdmitted &&
       (!groupEnded(receipt.operation) ||
         receipt.operation?.state === "needs_review");
-    const confirmed = confirmedPin(pin?.operation);
-    const needsSync = confirmed && this.synced !== pin!.key;
+    const confirmed = confirmedPreference(change?.operation, this.field);
+    const needsSync = confirmed && this.synced !== change!.key;
     const busy =
       operation.busy ||
       this.syncing ||
       (pending && !uncertain) ||
       (needsSync && !this.syncError);
+    const saving = busy && (!!change || this.syncing);
+    const isPin = this.field === "pinned";
+    const noun = isPin ? "pin" : "notification";
     let error = this.syncError;
-    if (pin?.notAdmitted) {
+    if (change?.notAdmitted) {
       error =
-        pin.admissionStatus === 403
-          ? "This access key can’t change pins. Use a key with account management permission."
-          : pin.admissionStatus === 409
-          ? "Pinning is unavailable. Refresh this chat and check again."
-          : "Couldn’t pin this chat. Refresh and try again.";
+        change.admissionStatus === 403
+          ? isPin
+            ? "This access key can’t change pins. Use a key with account management permission."
+            : "This access key can’t change notifications. Use a key with account management permission."
+          : change.admissionStatus === 409
+          ? isPin
+            ? "Pinning is unavailable. Refresh this chat and check again."
+            : "Notifications are unavailable. Refresh this chat and check again."
+          : isPin
+          ? "Couldn’t pin this chat. Refresh and try again."
+          : "Couldn’t change notifications. Refresh and try again.";
     } else if (
-      pin?.operation &&
-      ["rejected", "failed", "cancelled"].includes(pin.operation.state)
+      change?.operation &&
+      ["rejected", "failed", "cancelled"].includes(change.operation.state)
     )
-      error = "Pin change wasn’t applied. Refresh and try again.";
-    else if (operation.error && pin && !uncertain && !confirmed)
+      error = `${
+        isPin ? "Pin" : "Notification"
+      } change wasn’t applied. Refresh and try again.`;
+    else if (operation.error && change && !uncertain && !confirmed)
       error = operation.error;
-    const announcement = busy
-      ? "Saving pin"
+    const announcement = saving
+      ? `Saving ${noun}`
       : uncertain
-      ? "Pin change needs a status check"
+      ? `${isPin ? "Pin" : "Notification"} change needs a status check`
       : error ||
-        (pinned === null
-          ? "Pin state unavailable"
-          : pinned
-          ? "Chat pinned"
-          : "Chat unpinned");
+        (enabled === null
+          ? `${isPin ? "Pin" : "Notification"} state unavailable`
+          : enabled
+          ? isPin
+            ? "Chat pinned"
+            : "Notifications muted"
+          : isPin
+          ? "Chat unpinned"
+          : "Notifications unmuted");
     return {
-      pinned,
+      [this.field]: enabled,
+      preview:
+        isPin &&
+        change?.input.action === "pin" &&
+        saving &&
+        (this.submitting || !!change.operation) &&
+        !uncertain &&
+        !error &&
+        !change.notAdmitted
+          ? change.input.pinned
+          : undefined,
       supported,
       busy,
+      saving,
       uncertain,
       error,
       announcement,
@@ -139,19 +183,19 @@ export class ThreadPinning {
         session.account !== this.account ||
         !session.connected ||
         !supported ||
-        pinned === null ||
+        enabled === null ||
         busy ||
         pending ||
         uncertain ||
         needsSync ||
-        pin?.admissionStatus === 403,
-    };
+        change?.admissionStatus === 403,
+    } as PreferenceState<K>;
   }
   private update = (): void => {
     if (this.stopped) return;
     const next = this.read();
     if (
-      (Object.keys(next) as (keyof PinState)[]).some(
+      (Object.keys(next) as (keyof PreferenceState<K>)[]).some(
         (key) => next[key] !== this.value[key],
       )
     ) {
@@ -160,8 +204,8 @@ export class ThreadPinning {
     }
     const receipt = this.mutations.snapshot().receipt;
     if (
-      receipt?.input.action === "pin" &&
-      confirmedPin(receipt.operation) &&
+      receipt?.input.action === this.action &&
+      confirmedPreference(receipt.operation, this.field) &&
       this.synced !== receipt.key &&
       !this.reconciling &&
       !this.syncError
@@ -175,10 +219,18 @@ export class ThreadPinning {
     // Assign the flight before publishing: both controls can subscribe at once.
     const work = Promise.resolve().then(async () => {
       try {
-        await this.session.refreshConversations(this.account);
+        await this.session.refreshConversations(
+          this.account,
+          false,
+          this.field === "muted" && this.thread.endsWith("@chatroom")
+            ? this.thread
+            : undefined,
+        );
         if (key) this.synced = key;
       } catch (error) {
-        this.syncError = `Couldn’t refresh pins. ${readableError(error)}`;
+        this.syncError = `Couldn’t refresh ${
+          this.field === "pinned" ? "pins" : "notifications"
+        }. ${readableError(error)}`;
       } finally {
         this.syncing = false;
         this.reconciling = undefined;
@@ -191,22 +243,36 @@ export class ThreadPinning {
   }
   async toggle(): Promise<void> {
     if (this.value.disabled) return;
-    const pinned = !this.value.pinned;
+    const enabled = !this.value[this.field];
     this.syncError = "";
     this.mutations.clear();
-    await this.mutations.run({ action: "pin", groupId: this.thread, pinned });
+    this.submitting = true;
+    try {
+      await this.mutations.run(
+        this.field === "pinned"
+          ? { action: "pin", groupId: this.thread, pinned: enabled }
+          : { action: "mute", groupId: this.thread, muted: enabled },
+      );
+    } finally {
+      this.submitting = false;
+      this.update();
+    }
     if (this.reconciling) await this.reconciling;
   }
   async check(): Promise<void> {
     if (this.stopped) return;
     this.syncError = "";
     const receipt = this.mutations.snapshot().receipt;
-    if (receipt?.input.action === "pin" && receipt.notAdmitted)
+    if (receipt?.input.action === this.action && receipt.notAdmitted)
       this.mutations.clear();
-    else if (receipt?.input.action === "pin") await this.mutations.check();
+    else if (receipt?.input.action === this.action)
+      await this.mutations.check();
     await this.reconcile(
-      receipt?.input.action === "pin" &&
-        confirmedPin(this.mutations.snapshot().receipt?.operation)
+      receipt?.input.action === this.action &&
+        confirmedPreference(
+          this.mutations.snapshot().receipt?.operation,
+          this.field,
+        )
         ? receipt.key
         : undefined,
     );
@@ -215,5 +281,25 @@ export class ThreadPinning {
     this.stopped = true;
     for (const stop of this.stop) stop();
     this.listeners.clear();
+  }
+}
+
+export type PinState = PreferenceState<"pinned">;
+export const confirmedPin = (operation?: NativeOperation) =>
+  confirmedPreference(operation, "pinned");
+type PreferenceArgs = [
+  session: HubSession,
+  mutations: GroupMutations,
+  account: string,
+  thread: string,
+];
+export class ThreadPinning extends ThreadPreference<"pinned"> {
+  constructor(...args: PreferenceArgs) {
+    super(...args, "pinned");
+  }
+}
+export class ThreadMuting extends ThreadPreference<"muted"> {
+  constructor(...args: PreferenceArgs) {
+    super(...args, "muted");
   }
 }

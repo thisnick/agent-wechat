@@ -1,9 +1,52 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
+import type { NativeThread } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
-import type { ThreadPinning } from "./thread-pinning.ts";
+import type { ThreadPreference } from "./thread-pinning.ts";
 import { Icon } from "./ui.tsx";
 
-export function PinFeedback({ model }: { model: ThreadPinning }) {
+/** Pending receipt intent affects presentation only; cached threads stay canonical. */
+export function useThreadPinPreview(
+  connection: Connection,
+  account: string,
+  threads: NativeThread[],
+) {
+  const models = useMemo(
+    () => threads.map((thread) => connection.threadPinning(account, thread.id)),
+    [connection, account, threads],
+  );
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      const stops = models.map((model) => model.subscribe(listener));
+      return () => stops.forEach((stop) => stop());
+    },
+    [models],
+  );
+  const snapshot = useCallback(
+    () =>
+      JSON.stringify(models.map((model) => model.snapshot().preview ?? null)),
+    [models],
+  );
+  const values = JSON.parse(useSyncExternalStore(subscribe, snapshot)) as (
+    | boolean
+    | null
+  )[];
+  if (values.every((value) => value === null)) return threads;
+  const preview = threads.map((thread, i) =>
+    values[i] === null ? thread : { ...thread, pinned: values[i] },
+  );
+  return [
+    ...preview.filter((thread) => thread.pinned === true),
+    ...preview.filter((thread) => thread.pinned !== true),
+  ];
+}
+
+export function PinFeedback<K extends "pinned" | "muted">({
+  model,
+  kind = "pin",
+}: {
+  model: ThreadPreference<K>;
+  kind?: "pin" | "notification";
+}) {
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   return (
     <>
@@ -13,7 +56,7 @@ export function PinFeedback({ model }: { model: ThreadPinning }) {
       {(state.uncertain || state.error) && (
         <div className="pin-feedback" role={state.error ? "alert" : undefined}>
           <span>
-            {state.uncertain ? "Couldn’t confirm pin change." : state.error}
+            {state.uncertain ? `Couldn’t confirm ${kind} change.` : state.error}
           </span>
           <button
             className="text-button"
@@ -41,13 +84,14 @@ export function ThreadPinSwitch({
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   if (!state.supported) return null;
   const known = state.pinned !== null;
+  const displayed = state.preview ?? state.pinned;
   return (
     <div className="detail-section">
       <div className="pin-detail-setting">
         <button
           className="group-toggle"
           role={known ? "switch" : undefined}
-          aria-checked={known ? state.pinned! : undefined}
+          aria-checked={known ? displayed! : undefined}
           aria-label={known ? "Pin chat" : "Pin chat: state unavailable"}
           aria-busy={state.busy}
           disabled={state.disabled}
@@ -55,9 +99,9 @@ export function ThreadPinSwitch({
           onClick={() => void model.toggle()}
         >
           <span>Pin chat</span>
-          {state.busy && <span className="pin-spinner" aria-hidden="true" />}
+          {state.saving && <span className="pin-spinner" aria-hidden="true" />}
           <span
-            className={`toggle-track ${state.pinned ? "on" : ""} ${
+            className={`toggle-track ${displayed ? "on" : ""} ${
               known ? "" : "unknown"
             }`}
             aria-hidden="true"
