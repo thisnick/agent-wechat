@@ -24,6 +24,10 @@ pub(super) fn routes() -> Router<App> {
         )
         .route("/v1/accounts/{a}/messages/{id}/media", get(assets))
         .route(
+            "/v1/accounts/{a}/media/lookup",
+            post(assets_batch).layer(DefaultBodyLimit::max(384 * 1024)),
+        )
+        .route(
             "/v1/accounts/{a}/messages/{id}/media-transfers",
             post(transfer),
         )
@@ -121,6 +125,50 @@ async fn assets(
     let guard = app.core.lock_account(&a).await?;
     Ok(Json(
         json!({"items":work(move||{let _guard=guard;app.core.media_assets(&a,&id)}).await?}),
+    ))
+}
+async fn assets_batch(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<contracts::NativeMediaBatchRequest>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")?;
+    if input.message_ids.is_empty()
+        || input.message_ids.len() > 40
+        || input
+            .message_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 8192)
+    {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+    }
+    let guard = app.core.lock_account(&a).await?;
+    let rows = work(move || {
+        let _guard = guard;
+        app.core.media_assets_batch(&a, &input.message_ids)
+    })
+    .await?;
+    let items = rows
+        .into_iter()
+        .map(|(message_id, result)| match result {
+            Ok(assets) => contracts::NativeMediaBatchItem {
+                message_id,
+                assets,
+                error: None,
+            },
+            Err(error) => {
+                let ApiError(_, code) = ApiError::from(error);
+                contracts::NativeMediaBatchItem {
+                    message_id,
+                    assets: Vec::new(),
+                    error: Some(code.into()),
+                }
+            }
+        })
+        .collect();
+    Ok(Json(
+        serde_json::to_value(contracts::NativeMediaBatch { items }).map_err(anyhow::Error::from)?,
     ))
 }
 async fn transfer(

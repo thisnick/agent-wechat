@@ -21,7 +21,7 @@ mod thread_previews;
 
 pub struct ProfileReader {
     pub(crate) snapshot: Snapshot,
-    schemas: Vec<SchemaReport>,
+    pub(crate) schemas: Vec<SchemaReport>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -275,8 +275,9 @@ impl ProfileReader {
         let mut schemas = Vec::new();
         for db in &snapshot.inventory {
             if db.state == DatabaseState::Readable {
+                let connection = snapshot.open(&db.relative_path)?;
                 schemas.push(
-                    inspect(&snapshot.open(&db.relative_path)?, &db.relative_path)
+                    inspect(&connection, &db.relative_path)
                         .map_err(|_| ProfileError::UnsupportedSchema(db.relative_path.clone()))?,
                 );
             }

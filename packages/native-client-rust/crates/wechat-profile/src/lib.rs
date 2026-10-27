@@ -1,8 +1,8 @@
 //! Readers and narrow opt-in writers for selected official Linux profiles.
 //!
-//! The source must be stopped or a coherent snapshot. Every database query runs
-//! on a private temporary copy, including its WAL, so SQLite never opens a source
-//! database or changes source SHM. This crate neither launches WeChat nor connects
+//! Offline readers use a private temporary copy, including its WAL, without
+//! changing source SHM. An owned daemon can instead reuse read-only connections
+//! while serializing profile operations. This crate neither launches WeChat nor connects
 //! to the network or acquires keys from a process. Checked write functions require
 //! explicit ownership and a durable caller intent.
 mod dat;
@@ -13,6 +13,7 @@ mod login_storage;
 mod media;
 mod mmkv;
 mod model;
+mod owned_reader;
 mod projection;
 mod reader;
 mod recall_search;
@@ -29,6 +30,7 @@ pub use login_storage::*;
 pub use media::*;
 pub use mmkv::*;
 pub use model::*;
+pub use owned_reader::OwnedReaderCache;
 pub use projection::*;
 pub use reader::*;
 pub use recall_search::*;

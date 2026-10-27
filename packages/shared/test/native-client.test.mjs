@@ -455,3 +455,33 @@ test('account settings read and update the account-scoped API with byte limits',
   for (const autoDownloadMaxBytes of [-1, 1.5, NaN, 536870913]) assert.throws(() => client.updateAccountSettings('personal', { autoDownloadMaxBytes }), /limit/);
   assert.equal(calls.length, 2);
 });
+
+test('media batches validate account/message identity and retain per-message failures', async () => {
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    assert.match(String(url), /accounts\/a\/media\/lookup$/);
+    assert.deepEqual(JSON.parse(init.body), { messageIds: ['first', 'second'] });
+    return Response.json({ items: [
+      { messageId: 'first', assets: [{ accountId: 'a', messageId: 'first', id: 'asset' }], error: null },
+      { messageId: 'second', assets: [], error: 'message_recalled' },
+    ] });
+  } });
+  const result = await client.mediaAssetsBatch('a', ['first', 'second']);
+  assert.equal(result.items[0].assets[0].id, 'asset');
+  assert.equal(result.items[1].error, 'message_recalled');
+  const foreign = new NativeWeChatClient({ ...options, fetch: async () => Response.json({ items: [{ messageId: 'first', assets: [{ accountId: 'other', messageId: 'first' }], error: null }] }) });
+  await assert.rejects(foreign.mediaAssetsBatch('a', ['first']), /identity/);
+  for (const ids of [[], ['one', 'one'], Array.from({ length: 41 }, (_, id) => String(id))])
+    await assert.rejects(client.mediaAssetsBatch('a', ids), /Invalid media lookup batch/);
+});
+
+test('media batch fallback probes an older hub once and keeps ordinary GET support', async () => {
+  let probes = 0, gets = 0;
+  const client = new NativeWeChatClient({ ...options, fetch: async (_url, init) => {
+    if (init.method === 'POST') { probes++; return Response.json({ error: { code: 'not_found' } }, { status: 404 }); }
+    gets++; return Response.json({ items: [] });
+  } });
+  await client.mediaAssetsBatch('a', ['first', 'second']);
+  await client.mediaAssetsBatch('a', ['third']);
+  assert.equal(probes, 1);
+  assert.equal(gets, 3);
+});

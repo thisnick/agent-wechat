@@ -550,7 +550,15 @@ impl Core {
         Ok(None)
     }
     pub(crate) fn ensure_message_not_recalled(&self, account: &str, id: &str) -> Result<()> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
+        self.ensure_message_not_recalled_with_reader(account, id, &reader)
+    }
+    pub(crate) fn ensure_message_not_recalled_with_reader(
+        &self,
+        account: &str,
+        id: &str,
+        reader: &wechat_profile::ProfileReader,
+    ) -> Result<()> {
         let msg = reader.message(
             &crate::source_message_id(id)?,
             self.profile_username(account)?.as_deref(),

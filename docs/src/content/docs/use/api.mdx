@@ -93,6 +93,9 @@ curl -N -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/events/stream"
 
 A server-sent event stream. A new message arrives as a `message.committed` event; fetch it with `GET /messages/{messageId}`. To resume after a disconnect, reconnect with `?after=CURSOR` (or the standard `Last-Event-ID` header) and the daemon replays what you missed. `POST /consumers/{name}/ack` with `{"cursor": "..."}` records how far you've processed.
 
+The stream sends an immediate heartbeat comment, followed by periodic keepalives.
+Heartbeat comments contain no message and do not advance the event cursor.
+
 Recognized group changes emit `group.updated` after the saved profile changes; fetch `GET /groups/{groupId}` or its members. `group.refresh_blocked` means a follow-up read could not finish. These events share the same replayable stream. Automatic delivery of every edit made on another device is not established; see [group refresh limits](/use/groups/).
 
 ## Routes
@@ -107,13 +110,19 @@ All account routes start with `/v1/accounts/{account}`.
 | Contacts and groups | `GET /contacts`, `GET /groups`, `GET /groups/{id}`, `GET /groups/{id}/members`, `GET /groups/{id}/members/{username}`, `POST /contacts/lookup` |
 | [Group edits](/use/groups/) (admin) | `POST /groups`, `PATCH /groups/{id}`, `POST /groups/{id}/leave`, `POST/DELETE /groups/{id}/members`, `PUT /groups/{id}/my-name`, `DELETE /groups/{id}/announcement`, `PUT /threads/{id}/notifications` |
 | Sending | `POST /uploads`, `POST /sends`, `GET /sends/{id}`, `POST /sends/{id}/cancel`, `POST /messages/{id}/recall` |
-| Media | `GET /messages/{id}/media`, `POST /messages/{id}/media-transfers`, `GET /media/{id}/content` |
+| Media | `GET /messages/{id}/media`, `POST /media/lookup`, `POST /messages/{id}/media-transfers`, `GET /media/{id}/content` |
 | Read state | `POST /threads/{id}/read-state` with `{"expectedVersion": "..."}` |
 | Background work | `GET /jobs/{id}`, `GET /operations/{id}` |
 | Events | `GET /events`, `GET /events/stream`, `POST /consumers/{name}/ack` |
 | Tokens | `GET /v1/tokens`, `POST /v1/tokens`, `DELETE /v1/tokens/{id}` |
 
 Request and response types are generated from the Rust source into [`native.generated.ts`](https://github.com/thisnick/agent-wechat/blob/main/packages/shared/src/native.generated.ts). The [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api) crate is the source of truth.
+
+To read attachment metadata together, send `{"messageIds":["MESSAGE_ID_1","MESSAGE_ID_2"]}`
+to `POST /media/lookup` with the `media` scope. A batch accepts up to 40 message IDs
+and returns an `items` array with each `messageId`, its `assets` and an `error`
+code or `null`. It does not download attachments. In the SDK, use
+`client.mediaAssetsBatch(accountId, messageIds)`.
 
 <Aside title="Good to know">
 - **IDs are strings.** Message IDs are opaque, and server IDs can exceed JavaScript's safe integer range. Don't parse them as numbers.

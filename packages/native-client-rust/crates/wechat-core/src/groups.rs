@@ -112,7 +112,7 @@ impl Core {
         Ok(value)
     }
     fn group_contact(&self, account: &str, id: &str) -> Result<wechat_profile::Contact> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let mut cursor = None;
         loop {
             let page = reader.contacts(&wechat_profile::ListQuery {

@@ -96,6 +96,37 @@ impl Core {
             },
         )?)
     }
+    /// The caller holds the account gate across this view and its event boundary.
+    pub(crate) fn profile_reader_owned(&self, account: &str) -> Result<ProfileReader> {
+        let (location, keys) = self.profile_location_keys(account)?;
+        let owned = self.owns_profile(account)?;
+        let options = ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            ..Default::default()
+        };
+        if owned {
+            let mut readers = self
+                .profile_readers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("profile reader unavailable"))?;
+            // Bound idle descriptors across accounts as well as within a profile.
+            if !readers.contains_key(account) && readers.len() >= 4 {
+                if let Some(oldest) = readers
+                    .iter()
+                    .min_by_key(|(_, (used, _))| *used)
+                    .map(|(account, _)| account.clone())
+                {
+                    readers.remove(&oldest);
+                }
+            }
+            let (used, reader) = readers
+                .entry(account.into())
+                .or_insert_with(|| (std::time::Instant::now(), Default::default()));
+            *used = std::time::Instant::now();
+            return Ok(reader.read(location, keys, options)?);
+        }
+        Ok(ProfileReader::open(location, keys, options)?)
+    }
     pub fn read_state_version(
         &self,
         account: &str,
@@ -116,13 +147,13 @@ impl Core {
         ))
     }
     pub fn profile_schema(&self, account: &str) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         Ok(
             json!({"accountId":account,"sourceGeneration":reader.generation(),"schemas":reader.schemas(),"coverage":reader.coverage()}),
         )
     }
     pub fn threads(&self, account: &str, q: &ListQuery) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let page = reader.threads(q)?;
         let ids: Vec<_> = page
             .items
@@ -142,7 +173,7 @@ impl Core {
         )
     }
     pub fn contacts(&self, account: &str, q: &ListQuery) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let page = reader.contacts(q)?;
         let items:Vec<_>=page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":"unknown"})).collect();
         Ok(
@@ -150,7 +181,7 @@ impl Core {
         )
     }
     pub fn groups(&self, account: &str, q: &ListQuery) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let page = reader.groups(q)?;
         let items:Vec<_>=page.items.into_iter().map(|g|json!({"id":g.username,"roomId":g.username,"displayName":g.label,"ownerId":g.owner,"announcement":g.announcement})).collect();
         Ok(
@@ -158,7 +189,7 @@ impl Core {
         )
     }
     pub fn group_members(&self, account: &str, room: &str, q: &ListQuery) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let page = reader.group_members(room, q)?;
         let items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name})).collect();
         Ok(
@@ -172,7 +203,7 @@ impl Core {
         limit: Option<usize>,
         cursor: Option<String>,
     ) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
         let page = reader.messages(&MessageQuery {
             chat: Some(thread.into()),
@@ -189,7 +220,7 @@ impl Core {
         )
     }
     pub fn message(&self, account: &str, id: &str) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
         self.normalize_recalled(
             account,
@@ -206,13 +237,13 @@ impl Core {
     ) -> Result<wechat_profile::CachedImage> {
         self.ensure_message_not_recalled(account, id)?;
         let result = self
-            .profile_reader(account)?
+            .profile_reader_owned(account)?
             .cached_image(&source_message_id(id)?, quality)?;
         self.ensure_message_not_recalled(account, id)?;
         Ok(result)
     }
     pub fn avatar(&self, account: &str, username: &str) -> Result<wechat_profile::CachedBytes> {
-        Ok(self.profile_reader(account)?.avatar(username)?)
+        Ok(self.profile_reader_owned(account)?.avatar(username)?)
     }
 }
 

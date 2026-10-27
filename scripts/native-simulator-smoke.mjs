@@ -248,6 +248,12 @@ try {
   await control({ op: "advertise_image", account: "personal", peer: "sim_mei" });
   const image = await waitFor("advertised image committed", async () => (await a.messages("personal", "sim_mei")).items.find(item => item.type === 3));
   const media = await a.mediaAssets("personal", image.id);
+  const batch = await a.mediaAssetsBatch("personal", [image.id, "invalid-message-id"]);
+  assert.equal(batch.items[0].messageId, image.id);
+  assert.deepEqual(batch.items[0].assets, media.items);
+  assert.equal(batch.items[1].messageId, "invalid-message-id");
+  assert.ok(batch.items[1].error);
+  assert.deepEqual(batch.items[1].assets, []);
   assert.ok(media.items.length > 0);
   assert.ok(media.items.every(asset => asset.state !== "available" && asset.sha256 === null));
   const candidate = media.items.find(asset => asset.state !== "unsupported");

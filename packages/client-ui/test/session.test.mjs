@@ -104,8 +104,8 @@ function client(overrides = {}) {
     ...overrides,
   };
 }
-function session(t, overrides = {}) {
-  const hub = new HubSession(client(overrides));
+function session(t, overrides = {}, now = Date.now) {
+  const hub = new HubSession(client(overrides), undefined, undefined, now);
   t.after(() => hub.close());
   return hub;
 }
@@ -1217,6 +1217,7 @@ test("SSE updates affected messages and read badges without reloading inventorie
 test("continuous SSE lets a read cached chat reopen without another history request", async (t) => {
   let reads = 0;
   const hub = session(t, {
+    thread: async (a, id) => ({ id, accountId: a, unreadCount: 0, lastMessage: { id } }),
     messages: async (a, id) => {
       reads++;
       return page([message(id, a, id)]);
@@ -1581,4 +1582,94 @@ test("composer acknowledgments stay deduplicated while the updated unread badge 
   refreshed.resolve(view(0));
   await Promise.all([focusing, clicking]);
   assert.equal(hub.snapshot().threads[0].unreadCount, 0);
+});
+
+test("cached history expires after five minutes without renewal by opens, events or older pages", async (t) => {
+  let now = 1000000, reads = 0, current = "first";
+  const hub = session(t, {
+    threads: async () => page([{ id: "peer", unreadCount: 0, lastMessage: { id: "tail" } }]),
+    thread: async (_a, id) => ({ id, unreadCount: 0, lastMessage: { id: id === "peer" ? "tail" : id } }),
+    messages: async (a, id, options) => {
+      reads++;
+      return options.cursor ? page([message("old", a, id, "1")]) : page([message("tail", a, id, "10", current)], "20", "older");
+    },
+    message: async () => message("tail", "a", "peer", "10", "event content"),
+    async *watch(_a, _cursor, signal, options) {
+      options.onActivity();
+      await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+    },
+  }, () => now);
+  await hub.activate("a");
+  now += 4 * 60000;
+  await hub.older();
+  await hub.consume({ kind: "message.committed", data: { messageId: "tail" } }, "a");
+  const before = reads;
+  await hub.select("peer");
+  assert.equal(reads, before, "fresh history is reused");
+  now += 60000;
+  current = "authoritative content";
+  await hub.select("peer");
+  assert.equal(reads, before + 1, "history reloads at the exact TTL boundary despite recent activity");
+  assert.equal(hub.snapshot().messages.at(-1).body, current);
+  await hub.select("peer");
+  assert.equal(reads, before + 1, "a successful refresh renews the TTL");
+});
+
+test("a changed last message reloads history before its TTL expires", async (t) => {
+  let latest = "one", reads = 0;
+  const hub = session(t, {
+    threads: async () => page([{ id: "peer", unreadCount: 0, lastMessage: { id: latest } }]),
+    thread: async (_a, id) => ({ id, unreadCount: 0, lastMessage: { id: latest } }),
+    messages: async (a, id) => { reads++; return page([message(latest, a, id)]); },
+    async *watch(_a, _cursor, signal, options) {
+      options.onActivity();
+      await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+    },
+  });
+  await hub.activate("a");
+  latest = "two";
+  await hub.refresh();
+  await hub.select("peer");
+  assert.equal(reads, 2);
+  assert.equal(hub.snapshot().messages[0].id, "two");
+});
+
+test("switching chats cancels an obsolete history request without showing its error", async (t) => {
+  let pendingSignal;
+  const hub = session(t, {
+    messages: async (account, id, _options, signal) => {
+      if (id !== "slow") return page([message(id, account, id)]);
+      pendingSignal = signal;
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")), { once: true }));
+    },
+  });
+  await hub.activate("a");
+  const opening = hub.select("slow");
+  await eventually(() => pendingSignal);
+  await hub.select("fast");
+  await opening;
+  assert.equal(pendingSignal.aborted, true);
+  assert.equal(hub.snapshot().selected, "fast");
+  assert.equal(hub.snapshot().messages[0].id, "fast");
+  assert.equal(hub.snapshot().error, null);
+});
+
+test("returning to a healthy stream skips full inventories until the history TTL expires", async (t) => {
+  let now = 1000000, inventories = 0, reads = 0;
+  const hub = session(t, {
+    threads: async () => { inventories++; return page([{ id: "peer", unreadCount: 0, lastMessage: { id: "tail" } }]); },
+    messages: async () => { reads++; return page([message("tail")]); },
+    async *watch(_a, _cursor, signal, options) {
+      options.onActivity();
+      await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+    },
+  }, () => now);
+  await hub.activate("a");
+  await hub.reconcile();
+  assert.equal(inventories, 1);
+  assert.equal(reads, 1);
+  now += 300000;
+  await hub.reconcile();
+  assert.equal(inventories, 1);
+  assert.equal(reads, 2);
 });

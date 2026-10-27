@@ -9,6 +9,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::Duration,
 };
 use zeroize::Zeroizing;
@@ -91,7 +92,30 @@ pub(crate) struct Snapshot {
     pub generation: String,
     pub inventory: Vec<DatabaseInventory>,
     pub paths: BTreeMap<String, PathBuf>,
-    _temp: wechat_platform::PrivateTempDir,
+    pub(crate) _temp: Option<wechat_platform::PrivateTempDir>,
+    pub(crate) owned: BTreeMap<String, Arc<Mutex<Connection>>>,
+}
+
+pub(crate) enum ReadConnection<'a> {
+    Copied(Connection),
+    Owned(MutexGuard<'a, Connection>),
+}
+impl std::ops::Deref for ReadConnection<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        match self {
+            Self::Copied(connection) => connection,
+            Self::Owned(connection) => connection,
+        }
+    }
+}
+impl Drop for ReadConnection<'_> {
+    fn drop(&mut self) {
+        if let Self::Owned(connection) = self {
+            connection.progress_handler(0, None::<fn() -> bool>);
+            let _ = connection.execute_batch("ROLLBACK");
+        }
+    }
 }
 
 fn relative(root: &Path, p: &Path) -> Result<String> {
@@ -291,20 +315,42 @@ impl Snapshot {
             generation,
             inventory,
             paths,
-            _temp: temp,
+            _temp: Some(temp),
+            owned: BTreeMap::new(),
         };
         for i in 0..result.inventory.len() {
             let rel = result.inventory[i].relative_path.clone();
-            result.inventory[i].state = match result.open(&rel) {
+            let state = match result.open(&rel) {
                 Ok(_) => DatabaseState::Readable,
                 Err(ProfileError::KeyUnavailable(_)) => DatabaseState::KeyUnavailable,
                 Err(ProfileError::KeyMismatch(_)) => DatabaseState::KeyMismatch,
                 Err(e) => return Err(e),
             };
+            result.inventory[i].state = state;
         }
         Ok(result)
     }
-    pub fn open(&self, rel: &str) -> Result<Connection> {
+    pub fn open(&self, rel: &str) -> Result<ReadConnection<'_>> {
+        if let Some(connection) = self.owned.get(rel) {
+            let connection = match connection.try_lock() {
+                Ok(connection) => connection,
+                Err(TryLockError::WouldBlock) => {
+                    // Some compound readers nest a second query of the same
+                    // database. It must not wait on its own checked-out handle.
+                    return Ok(ReadConnection::Copied(self.open_connection(rel, true)?));
+                }
+                Err(TryLockError::Poisoned(_)) => return Err(ProfileError::Database),
+            };
+            let deadline = std::time::Instant::now() + self.options.query_timeout;
+            connection.progress_handler(1000, Some(move || std::time::Instant::now() > deadline));
+            connection.execute_batch("BEGIN DEFERRED")?;
+            return Ok(ReadConnection::Owned(connection));
+        }
+        Ok(ReadConnection::Copied(
+            self.open_connection(rel, self._temp.is_none())?,
+        ))
+    }
+    pub(crate) fn open_connection(&self, rel: &str, read_only: bool) -> Result<Connection> {
         let path = self.paths.get(rel).ok_or(ProfileError::InvalidQuery)?;
         let entry = self
             .inventory
@@ -313,7 +359,12 @@ impl Snapshot {
             .ok_or(ProfileError::InvalidQuery)?;
         let c = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            (if read_only {
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+            } else {
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+            }) | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         c.busy_timeout(Duration::from_millis(1000))?;
         if entry.plaintext {

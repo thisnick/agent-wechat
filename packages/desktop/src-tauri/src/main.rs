@@ -51,6 +51,7 @@ struct Session {
     id: String,
     endpoint: String,
     local: bool,
+    status: Option<serde_json::Value>,
 }
 impl From<&Connection> for Session {
     fn from(value: &Connection) -> Self {
@@ -58,6 +59,7 @@ impl From<&Connection> for Session {
             id: value.id.clone(),
             endpoint: value.endpoint.clone(),
             local: value.local,
+            status: None,
         }
     }
 }
@@ -137,7 +139,8 @@ impl Desktop {
             connection: connection.clone(),
             key,
         });
-        let session = Session::from(&connection);
+        let mut session = Session::from(&connection);
+        session.status = Some(identity);
         inner.config.connections.retain(|value| value.id != id);
         inner.config.connections.push(connection);
         inner.config.active = Some(id.into());

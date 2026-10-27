@@ -471,6 +471,7 @@ function Client({
             }}
             removed={() => {
               session.deactivate(managed);
+              void connection.clearCache(managed);
               setManaged(null);
             }}
             signedIn={() => {
@@ -1134,6 +1135,8 @@ function Chats({
             <i className={`status-dot ${!state.connected ? "off" : ""}`} />
             {state.connected
               ? "agent-wechat hub connected"
+              : state.reconnecting
+              ? "Reconnecting live updates…"
               : "Connecting to agent-wechat hub…"}
           </span>
           {simulator && <span className="sim-label">SIMULATOR</span>}
@@ -1673,6 +1676,7 @@ function Chats({
                   }}
                   removed={() => {
                     session.deactivate(account.id);
+                    void connection.clearCache(account.id);
                     setSettings(false);
                     switchAccount();
                   }}

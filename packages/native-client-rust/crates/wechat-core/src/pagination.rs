@@ -44,7 +44,7 @@ impl Core {
         if !group.ends_with("@chatroom") {
             bail!("invalid_group_identity");
         }
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
         let member = self
             .catalog_rows(
@@ -109,7 +109,7 @@ impl Core {
         if !matches!(kind, "threads" | "contacts" | "groups") || id.is_empty() || id.len() > 512 {
             bail!("invalid_request");
         }
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
         let mut item = self
             .catalog_rows(account, kind, None, &reader, own.as_deref(), None)?
@@ -179,7 +179,7 @@ impl Core {
         } else {
             None
         };
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
         // A continuation resolves retained IDs against the current generation.
         // New arrivals and renames cannot change the original view membership.

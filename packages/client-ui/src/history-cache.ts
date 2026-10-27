@@ -1,10 +1,13 @@
 import type { NativeGroup, NativeMessage } from "@agent-wechat/shared";
 
+export const HISTORY_TTL_MS = 5 * 60 * 1000;
+
 export type CachedHistory = {
   messages: NativeMessage[];
   nextMessages: string | null;
   sourceGeneration: string;
   group: NativeGroup | null;
+  validatedAt?: number;
 };
 
 /** Bounded working set; persistence is owned by the connection cache. */
@@ -53,5 +56,8 @@ export class HistoryCache {
   clear(account?: string): void {
     for (const [key, entry] of this.entries)
       if (!account || entry.account === account) this.entries.delete(key);
+  }
+  delete(account: string, thread: string): void {
+    this.entries.delete(JSON.stringify([account, thread]));
   }
 }

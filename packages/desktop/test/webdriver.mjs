@@ -47,7 +47,15 @@ async function updatePreferences(expected) {
     const value = await invokeNative("updates_status");
     if (
       value.automatic === expected.automatic &&
-      value.prereleases === expected.prereleases
+      value.prereleases === expected.prereleases &&
+      await script(`
+        const automatic = document.querySelector('#automatic-updates');
+        const prereleases = document.querySelector('#prerelease-updates');
+        if (!automatic && !prereleases) return true;
+        return automatic?.checked === ${expected.automatic} &&
+          prereleases?.checked === ${expected.prereleases} &&
+          !automatic.disabled && !prereleases.disabled;
+      `)
     )
       return value;
     await pause(100);

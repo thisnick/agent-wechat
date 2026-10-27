@@ -1,8 +1,9 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { connect, type Connection } from "./connection.ts";
+import type { NativeStatus } from "@agent-wechat/shared";
 export const desktop = isTauri();
-export type DesktopSession = { id: string; endpoint: string; local: boolean };
+export type DesktopSession = { id: string; endpoint: string; local: boolean; status?: NativeStatus };
 export type DesktopSettings = {
   connections: { id: string; name: string; endpoint: string; local: boolean }[];
   active: string | null;
@@ -23,6 +24,7 @@ export async function desktopConnect(
     "desktop-native-session",
     false,
     desktopFetch(session),
+    session.status,
   );
   connection.desktopId = session.id;
   return connection;

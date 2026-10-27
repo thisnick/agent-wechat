@@ -13,7 +13,7 @@ import {
   type NativeThreadMessage,
 } from "@agent-wechat/shared";
 import type { BrowserCache } from "./browser-cache.ts";
-import { HistoryCache } from "./history-cache.ts";
+import { HISTORY_TTL_MS, HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
 import { quoteTargetMatches } from "./quote-preview.ts";
@@ -48,6 +48,7 @@ export type SessionState = {
   loading: boolean;
   opening: boolean;
   connected: boolean;
+  reconnecting: boolean;
   signInRequired: string | null;
   error: string | null;
   capabilities: Record<string, unknown>;
@@ -65,10 +66,25 @@ const initial = (): SessionState => ({
   loading: false,
   opening: false,
   connected: false,
+  reconnecting: false,
   signInRequired: null,
   error: null,
   capabilities: {},
 });
+function isSignOut(event: NativeEvent): boolean {
+  return (
+    [
+      "account.updated",
+      "account.connection",
+      "auth.updated",
+      "account.push",
+    ].includes(event.kind) &&
+    (event.data.authentication === "logged_out" ||
+      event.data.authenticated === false ||
+      event.data.state === "auth_required" ||
+      event.data.reason === "auth_required")
+  );
+}
 export function readableError(error: unknown): string {
   if (error instanceof NativeApiError)
     return (
@@ -266,6 +282,7 @@ export class HubSession {
   private generation = 0;
   private threadGeneration = 0;
   private accountRequest = 0;
+  private accountsCheckedAt = -Infinity;
   private catalogRequest = 0;
   private contactRefresh?: ReturnType<typeof setTimeout>;
   private detailsRequest = 0;
@@ -282,12 +299,16 @@ export class HubSession {
   private histories = new HistoryCache();
   private historyLoaded = false;
   private historySource = "";
+  private historyValidatedAt?: number;
   private stopped = false;
   private cache?: BrowserCache;
   private restoring = false;
   private activationRequest = 0;
   private reconcileFlight?: Promise<void>;
   private restored = new Set<string>();
+  private replayReady = false;
+  private readonly now: () => number;
+  private historyRequest?: AbortController;
   readonly client: NativeWeChatClient;
   private receipts?: {
     read(account: string): PendingSend[];
@@ -300,10 +321,17 @@ export class HubSession {
       write(account: string, sends: PendingSend[]): void;
     },
     cache?: BrowserCache,
+    now: () => number = Date.now,
+    initialAccounts?: Account[],
   ) {
     this.client = client;
     this.receipts = receipts;
     this.cache = cache;
+    this.now = now;
+    if (initialAccounts) {
+      this.value.accounts = initialAccounts;
+      this.accountsCheckedAt = this.now();
+    }
   }
   snapshot = (): SessionState => this.value;
   subscribe = (listener: () => void): (() => void) => {
@@ -339,6 +367,9 @@ export class HubSession {
       contacts: this.value.contacts,
       histories: this.histories.export(account),
       cursor: this.cursor,
+      ownUsername:
+        this.value.accounts.find((item) => item.id === account)?.ownUsername ??
+        undefined,
     });
   }
   async clearLocalCache(account = this.value.account): Promise<void> {
@@ -353,6 +384,7 @@ export class HubSession {
     if (this.value.account === account) {
       this.historyLoaded = false;
       this.historySource = "";
+      this.historyValidatedAt = undefined;
     }
   }
   private remember(): void {
@@ -364,6 +396,7 @@ export class HubSession {
         nextMessages,
         group: selectedGroup,
         sourceGeneration: this.historySource,
+        validatedAt: this.historyValidatedAt,
       });
     this.persist();
   }
@@ -378,8 +411,10 @@ export class HubSession {
       !this.stopped &&
       request === this.accountRequest &&
       generation === this.generation
-    )
+    ) {
+      this.accountsCheckedAt = this.now();
       this.acceptAccounts(accounts);
+    }
     return accounts;
   }
   private acceptAccounts(accounts: Account[]): void {
@@ -394,9 +429,9 @@ export class HubSession {
       this.signedOut(account);
     } else this.publish({ accounts });
   }
-  private signedOut(account: string): void {
+  private signedOut(account: string, cursor?: string): void {
     if (this.value.account !== account) return;
-    this.resetAccount(account, true);
+    this.resetAccount(account, true, cursor);
     for (const listener of this.signOutListeners) listener(account);
   }
   close(): void {
@@ -405,6 +440,7 @@ export class HubSession {
     this.generation++;
     this.threadGeneration++;
     this.stream?.abort();
+    this.historyRequest?.abort();
     this.publish(initial());
     this.stopped = true;
     this.mediaListeners.clear();
@@ -416,24 +452,32 @@ export class HubSession {
   deactivate(account = this.value.account): void {
     this.resetAccount(account, false);
   }
-  private resetAccount(account: string | null, signedOut: boolean): void {
+  private resetAccount(
+    account: string | null,
+    signedOut: boolean,
+    cursor?: string,
+  ): void {
     clearTimeout(this.contactRefresh);
     this.contactRefresh = undefined;
     this.activationRequest++;
     if (account) {
+      if (this.value.account === account) this.remember();
       this.histories.clear(account);
       if (this.cache?.lastAccount() === account)
         this.cache.rememberAccount(null);
-      void this.cache?.clearAccount(account);
+      void this.cache?.signedOut(account, cursor);
     }
     if (this.value.account !== account) return;
     this.generation++;
     this.threadGeneration++;
     this.catalogRequest++;
     this.stream?.abort();
+    this.historyRequest?.abort();
     this.historyLoaded = false;
     this.historySource = "";
+    this.historyValidatedAt = undefined;
     this.restoring = false;
+    this.replayReady = false;
     this.restored.clear();
     this.cursor = "0";
     this.publish({
@@ -449,7 +493,11 @@ export class HubSession {
   async activate(account: string): Promise<void> {
     const activation = ++this.activationRequest;
     if (this.cache) {
-      const accounts = await this.accounts();
+      const accounts =
+        this.now() - this.accountsCheckedAt < 5000 &&
+        this.now() >= this.accountsCheckedAt
+          ? this.value.accounts
+          : await this.accounts();
       if (activation !== this.activationRequest || this.stopped) return;
       if (
         !accounts.some(
@@ -457,12 +505,13 @@ export class HubSession {
         )
       ) {
         this.cache.rememberAccount(null);
-        await this.cache.clearAccount(account);
         throw new NativeApiError(409, "auth_required");
       }
     }
     this.remember();
     this.historyLoaded = false;
+    this.replayReady = false;
+    this.historyValidatedAt = undefined;
     this.stream?.abort();
     const generation = ++this.generation;
     this.threadGeneration++;
@@ -482,6 +531,7 @@ export class HubSession {
       loading: true,
       opening: false,
       connected: false,
+      reconnecting: false,
       signInRequired: null,
       error: null,
       capabilities: {},
@@ -490,10 +540,17 @@ export class HubSession {
     this.restoring = !!this.cache;
     this.cache?.rememberAccount(account);
     try {
-      const saved = this.cache
+      let saved = this.cache
         ? await this.cache.readAccount(account)
         : undefined;
       if (!this.current(account, generation)) return;
+      const own = this.value.accounts.find(
+        (item) => item.id === account,
+      )?.ownUsername;
+      if (saved && own && saved.ownUsername !== own) {
+        await this.cache?.clearAccount(account);
+        saved = undefined;
+      }
       if (saved) {
         this.cursor = saved.cursor;
         this.publish({ threads: saved.threads, contacts: saved.contacts });
@@ -515,7 +572,51 @@ export class HubSession {
               throw new Error("Incomplete cache catch-up");
             for (const event of events.items) {
               if (!this.current(account, generation)) return;
-              await this.consume(event, account, generation);
+              // Events after this inventory's boundary belong to the live
+              // stream; consuming them here would skip their sidebar updates.
+              if (BigInt(event.cursor) > BigInt(boundary)) break;
+              if (
+                ["message.committed", "message.recalled"].includes(event.kind)
+              ) {
+                if (
+                  event.kind === "message.recalled" &&
+                  typeof event.data.messageId === "string"
+                ) {
+                  this.invalidateMedia(account, event.data.messageId);
+                  const histories = this.histories.export(account);
+                  const original = histories
+                    .flatMap(([, history]) => history.messages)
+                    .find((message) => message.id === event.data.messageId);
+                  if (original?.serverId)
+                    for (const [, history] of histories)
+                      for (const message of history.messages)
+                        if (message.quote?.serverId === original.serverId)
+                          this.invalidateMedia(account, message.id);
+                }
+                const affected =
+                  typeof event.data.threadId === "string"
+                    ? event.data.threadId
+                    : this.histories
+                        .export(account)
+                        .find(([, history]) =>
+                          history.messages.some(
+                            (message) => message.id === event.data.messageId,
+                          ),
+                        )?.[0];
+                if (affected) this.histories.delete(account, affected);
+                else this.histories.clear(account);
+              } else if (
+                !(saved.signedOut && isSignOut(event)) &&
+                ![
+                  "sync.completed",
+                  "thread.read",
+                  "thread.read-state",
+                  "group.updated",
+                  "contacts.updated",
+                  "metadata.changed",
+                ].includes(event.kind)
+              )
+                await this.consume(event, account, generation);
               if (!this.current(account, generation)) return;
               this.cursor = event.cursor;
             }
@@ -529,6 +630,11 @@ export class HubSession {
           this.cursor = boundary;
         }
       } else this.cursor = boundary;
+      if (saved?.signedOut) {
+        await this.accounts();
+        if (!this.current(account, generation)) return;
+      }
+      this.replayReady = true;
       this.restoring = false;
       const previous = this.cache?.view(account).thread;
       const target =
@@ -555,6 +661,12 @@ export class HubSession {
       generation = this.generation;
     if (!account || this.value.opening) return;
     this.reconcileFlight = (async () => {
+      if (this.value.connected) {
+        const selected = this.value.selected;
+        if (selected && !this.fresh(this.histories.get(account, selected)))
+          await this.select(selected, true);
+        return;
+      }
       await this.accounts();
       if (!this.current(account, generation)) return;
       const boundary = await this.refresh(account, generation, false);
@@ -570,16 +682,28 @@ export class HubSession {
       });
     return this.reconcileFlight;
   }
+  private fresh(history: { validatedAt?: number } | undefined): boolean {
+    const at = history?.validatedAt;
+    return (
+      at !== undefined &&
+      Number.isFinite(at) &&
+      this.now() >= at &&
+      this.now() - at < HISTORY_TTL_MS
+    );
+  }
   async select(threadId: string, force = false): Promise<void> {
     const account = this.value.account;
     if (!account) return;
     this.remember();
     const cached = this.histories.get(account, threadId);
+    this.historyRequest?.abort();
+    const request = (this.historyRequest = new AbortController());
     const restoredKey = JSON.stringify([account, threadId]);
     const fromDisk = this.restored.has(restoredKey);
     this.cache?.saveView(account, { thread: threadId });
     this.historyLoaded = !!cached && !fromDisk;
     this.historySource = cached?.sourceGeneration ?? "";
+    this.historyValidatedAt = cached?.validatedAt;
     const previousGroup =
       this.value.selected === threadId
         ? this.value.selectedGroup
@@ -597,35 +721,54 @@ export class HubSession {
       opening: true,
       error: null,
     });
-    if (threadId.endsWith("@chatroom"))
-      void this.refreshGroup(account, threadId, generation, selected).catch(
-        () => {},
-      );
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         const baseline =
           attempt === 0 ? cached?.messages ?? [] : this.value.messages;
-        // A list entry can be minutes old. Fetch the version for this open.
-        const readBoundary = await this.refreshThread(
-          account,
-          threadId,
-          generation,
+        // Reuse a reconciled list entry only while its history is still fresh.
+        const listed = this.value.threads.find(
+          (thread) => thread.id === threadId,
         );
+        const readBoundary =
+          attempt === 0 &&
+          !force &&
+          listed &&
+          ((cached && this.value.connected && this.fresh(cached)) ||
+            (fromDisk && this.replayReady))
+            ? listed
+            : await this.refreshThread(
+                account,
+                threadId,
+                generation,
+                request.signal,
+              );
         if (!current()) return;
         if (
           attempt === 0 &&
           cached &&
-          !fromDisk &&
+          (!fromDisk || this.replayReady) &&
           !force &&
-          this.value.connected &&
+          (this.value.connected || (fromDisk && this.replayReady)) &&
+          this.fresh(cached) &&
+          readBoundary.lastMessage !== undefined &&
+          (readBoundary.lastMessage?.id ?? null) ===
+            (cached.messages.at(-1)?.id ?? null) &&
           readBoundary.unreadCount === 0
         ) {
-          this.publish({ loading: false });
-          return; // The continuous event stream already maintains this cache.
+          this.historyLoaded = true;
+          this.restored.delete(restoredKey);
+          this.publish({ messages: cached.messages, loading: false });
+          return; // Replay maintains this cache only until its history TTL expires.
         }
-        const page = await this.client.messages(account, threadId, {
-          limit: 40,
-        });
+        const validatedAt = this.now();
+        const page = await this.client.messages(
+          account,
+          threadId,
+          {
+            limit: 40,
+          },
+          request.signal,
+        );
         if (!current()) return;
         const latest = (
           page.items.filter(
@@ -653,6 +796,7 @@ export class HubSession {
         this.restored.delete(restoredKey);
         this.historyLoaded = true;
         this.historySource = page.sourceGeneration;
+        this.historyValidatedAt = validatedAt;
         this.publish({
           messages,
 
@@ -693,7 +837,13 @@ export class HubSession {
       if (current())
         this.publish({ error: readableError(error), loading: false });
     } finally {
-      if (current()) this.publish({ opening: false });
+      if (current()) {
+        this.publish({ opening: false });
+        if (threadId.endsWith("@chatroom"))
+          void this.refreshGroup(account, threadId, generation, selected).catch(
+            () => {},
+          );
+      }
     }
   }
   async older(): Promise<void> {
@@ -703,10 +853,15 @@ export class HubSession {
     if (!account || !selected || !nextMessages || this.value.loading) return;
     this.publish({ loading: true });
     try {
-      const page = await this.client.messages(account, selected, {
-        cursor: nextMessages,
-        limit: 100,
-      });
+      const page = await this.client.messages(
+        account,
+        selected,
+        {
+          cursor: nextMessages,
+          limit: 100,
+        },
+        this.historyRequest?.signal,
+      );
       if (
         !this.current(account, generation) ||
         threadGeneration !== this.threadGeneration
@@ -804,13 +959,14 @@ export class HubSession {
     account: string,
     threadId: string,
     generation: number,
+    signal?: AbortSignal,
   ): Promise<NativeThread> {
     const key = JSON.stringify([account, threadId]);
     const request = (this.threadRequests.get(key) ?? 0) + 1;
     this.threadRequests.set(key, request);
     let thread: NativeThread;
     try {
-      thread = await this.client.thread(account, threadId);
+      thread = await this.client.thread(account, threadId, signal);
     } catch (error) {
       if (!(error instanceof NativeApiError) || error.status !== 404)
         throw error;
@@ -922,7 +1078,9 @@ export class HubSession {
           this.client.contacts(account, { cursor, limit: 200 }),
         ),
         this.client.capabilities(account),
-        this.client.accounts(),
+        this.now() - this.accountsCheckedAt < 5000
+          ? Promise.resolve({ items: this.value.accounts })
+          : this.client.accounts(),
       ]);
       if (
         this.current(account, generation) &&
@@ -1102,19 +1260,8 @@ export class HubSession {
     generation = this.generation,
   ): Promise<void> {
     if (!this.current(account, generation)) return;
-    if (
-      [
-        "account.updated",
-        "account.connection",
-        "auth.updated",
-        "account.push",
-      ].includes(event.kind) &&
-      (event.data.authentication === "logged_out" ||
-        event.data.authenticated === false ||
-        event.data.state === "auth_required" ||
-        event.data.reason === "auth_required")
-    ) {
-      this.signedOut(account);
+    if (isSignOut(event)) {
+      this.signedOut(account, event.cursor);
       return;
     }
     if (event.kind === "account.settings_updated")
@@ -1176,7 +1323,10 @@ export class HubSession {
       )
     ) {
       await this.accounts();
-    } else if (event.kind === "contacts.updated" && event.data.origin === "contact_sync") {
+    } else if (
+      event.kind === "contacts.updated" &&
+      event.data.origin === "contact_sync"
+    ) {
       // One sync page can update hundreds of contacts. Refresh the local
       // catalog/thread pages together instead of reading each contact's thread.
       if (!this.contactRefresh)
@@ -1189,8 +1339,16 @@ export class HubSession {
       event.kind === "contacts.updated" ||
       (event.kind === "metadata.changed" && event.data.kind !== "avatar")
     ) {
-      if (event.kind === "contacts.updated" && typeof event.data.contactId === "string" && this.value.threads.some((thread) => thread.id === event.data.contactId))
-        await this.refreshThread(account, event.data.contactId, generation).catch(() => {});
+      if (
+        event.kind === "contacts.updated" &&
+        typeof event.data.contactId === "string" &&
+        this.value.threads.some((thread) => thread.id === event.data.contactId)
+      )
+        await this.refreshThread(
+          account,
+          event.data.contactId,
+          generation,
+        ).catch(() => {});
       await this.loadCatalog(account, generation);
     } else if (event.kind === "sync.completed") {
       await this.refresh(account, generation, false);
@@ -1227,7 +1385,11 @@ export class HubSession {
                 !signal.aborted &&
                 !this.value.connected
               )
-                this.publish({ connected: true, error: null });
+                this.publish({
+                  connected: true,
+                  reconnecting: false,
+                  error: null,
+                });
             },
           },
         )) {
@@ -1252,14 +1414,18 @@ export class HubSession {
           }
         }
         if (!signal.aborted && this.current(account, generation))
-          this.publish({ connected: false });
+          this.publish({ connected: false, reconnecting: true });
       } catch (error) {
         if (signal.aborted || !this.current(account, generation)) return;
         if (error instanceof NativeApiError && error.code === "auth_required") {
           this.signedOut(account);
           return;
         }
-        this.publish({ connected: false, error: readableError(error) });
+        this.publish({
+          connected: false,
+          reconnecting: true,
+          error: readableError(error),
+        });
         if (
           error instanceof NativeApiError &&
           ["cursor_expired", "event_cursor_expired"].includes(error.code)

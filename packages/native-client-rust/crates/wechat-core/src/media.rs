@@ -598,8 +598,36 @@ impl Core {
         });
     }
     pub fn media_assets(&self, account: &str, message_id: &str) -> Result<Vec<MediaAsset>> {
-        self.ensure_message_not_recalled(account, message_id)?;
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
+        self.media_assets_with_reader(account, message_id, &reader)
+    }
+    pub fn media_assets_batch(
+        &self,
+        account: &str,
+        ids: &[String],
+    ) -> Result<Vec<(String, Result<Vec<MediaAsset>>)>> {
+        if ids.is_empty() || ids.len() > 40 || ids.iter().any(|id| id.is_empty() || id.len() > 8192)
+        {
+            bail!("invalid_request");
+        }
+        let reader = self.profile_reader_owned(account)?;
+        Ok(ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    self.media_assets_with_reader(account, id, &reader),
+                )
+            })
+            .collect())
+    }
+    fn media_assets_with_reader(
+        &self,
+        account: &str,
+        message_id: &str,
+        reader: &wechat_profile::ProfileReader,
+    ) -> Result<Vec<MediaAsset>> {
+        self.ensure_message_not_recalled_with_reader(account, message_id, reader)?;
         let own = self.profile_username(account)?;
         let msg = reader.message(&source_message_id(message_id)?, own.as_deref())?;
         if !matches!(msg.message_type, 3 | 34 | 43 | 47 | 49) {

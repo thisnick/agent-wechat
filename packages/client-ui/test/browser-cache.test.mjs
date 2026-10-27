@@ -36,6 +36,7 @@ const snapshot = (account = "a", cursor = "90071992547409930001") => ({
         ],
         nextMessages: "opaque-page",
         sourceGeneration: "profile-1",
+        validatedAt: 1793060000000,
         group: null,
       },
     ],

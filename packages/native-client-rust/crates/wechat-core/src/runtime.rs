@@ -84,6 +84,8 @@ pub struct Core {
     pub(crate) cursor_vault: Arc<Vault>,
     password_proofs: Mutex<BTreeMap<String, String>>,
     pub(crate) recall_sync_cache: Mutex<BTreeMap<String, crate::recall_evidence::RecallSyncCache>>,
+    pub(crate) profile_readers:
+        Mutex<BTreeMap<String, (std::time::Instant, wechat_profile::OwnedReaderCache)>>,
     profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     startup_profiles_recovered: AtomicBool,
@@ -284,6 +286,7 @@ impl Core {
             cursor_vault: Arc::new(cursor_vault),
             password_proofs: Mutex::new(BTreeMap::new()),
             recall_sync_cache: Mutex::new(BTreeMap::new()),
+            profile_readers: Mutex::new(BTreeMap::new()),
             profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
             bootstrap_leases: Mutex::new(bootstrap_leases),
             startup_profiles_recovered: AtomicBool::new(false),
@@ -358,6 +361,10 @@ impl Core {
         {
             bail!("operation_in_progress");
         }
+        self.profile_readers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile reader unavailable"))?
+            .remove(account);
         self.store.remove_account(account)?;
         // Keep the existing gates: requests already waiting on one must never
         // acquire a new gate for the same identity. Removed IDs cannot be reused.
@@ -378,6 +385,13 @@ impl Core {
             .map_err(|_| anyhow::anyhow!("recall cache unavailable"))?
             .remove(account);
         Ok(())
+    }
+    pub(crate) fn owns_profile(&self, account: &str) -> Result<bool> {
+        Ok(self
+            .leases
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile ownership unavailable"))?
+            .contains_key(account))
     }
     fn gate(&self, account: &str) -> Result<Arc<AsyncMutex<()>>> {
         self.store.account(account)?;
@@ -1639,7 +1653,7 @@ impl Core {
         let thread = thread.to_string();
         let expected = expected.to_string();
         blocking(move||{
-            let reader=core.profile_reader(&account)?;let own=core.profile_username(&account)?.context("profile_identity_unavailable")?;
+            let reader=core.profile_reader_owned(&account)?;let own=core.profile_username(&account)?.context("profile_identity_unavailable")?;
             let counter=core.store.read_version(&account,&thread)?;
             let intent=json!({"messageIds":ids,"expectedVersion":expected});
             if core.read_state_version(&account,&thread,reader.generation())?!=expected&&core.store.runtime(&account,&format!("read-pending:{thread}"))?.as_deref()!=Some(serde_json::to_vec(&intent)?.as_slice()){bail!("read_state_conflict");}
@@ -1658,7 +1672,7 @@ impl Core {
                 before.get_or_insert(applied.unread_count_before);after=applied.unread_count_after;removed+=applied.removed_unread_rows;
             }
             let projection=json!({"removedUnreadRows":removed,"unreadCountBefore":before,"unreadCountAfter":after,"exactIdsOnly":true});
-            let reader=core.profile_reader(&account)?;
+            let reader=core.profile_reader_owned(&account)?;
             let version=format!("{:x}",Sha256::digest(serde_json::to_vec(&(reader.generation(),&thread,&next))?));
             core.store.finish_read_projection(&account,&thread,&next,&durable,&json!({"threadId":thread,"version":version,"messageIds":ids}))?;
             let next=version;

@@ -61,8 +61,17 @@ the last account, conversation and scroll anchor use local storage.
 
 Returning to a valid web session opens the last signed-in account and conversation
 automatically. Authentication is checked with the hub before restoring its cache.
+Sign-out hides cached history and keeps it on this device for the same account's
+next sign-in. Profile removal and **Clear temporary data** remove fetched data.
+After event catch-up, conversations with an unchanged last message ID can reuse
+their cached history. Changed or unavailable IDs cause a fresh history read.
 Credentials are not copied into either browser store. **Settings → On this device**
 shows usage and clears fetched data while preserving drafts and pending receipts.
+Opening a cached conversation rechecks its history after five minutes, even when
+the event stream is connected. Only a successful latest-history fetch renews that
+time; event replay, opening the conversation and loading older pages do not.
+Visible attachments share batched metadata reads, and bringing a connected app
+back into focus does not reload every conversation.
 If storage is unavailable, the client keeps working with memory and tab storage. The bootstrap secret
 is saved privately inside the simulator workspace so a named preview can restart
 without invalidating its preview link.

@@ -81,7 +81,7 @@ async function seed(cache, cursor = "10") {
   cache.saveView("a", { thread: "peer" });
 }
 
-test("sign-out clears fetched cache but preserves drafts and send recovery", async (t) => {
+test("sign-out hides history and retains the account-scoped cache and recovery state", async (t) => {
   const disk = cache(t);
   await seed(disk);
   disk.writeState("a", "peer", { text: "unfinished reply" }, "drafts");
@@ -100,7 +100,9 @@ test("sign-out clears fetched cache but preserves drafts and send recovery", asy
   );
   await disk.flush();
   assert.equal(disk.lastAccount(), undefined);
-  assert.equal(await disk.readAccount("a"), undefined);
+  assert.equal((await disk.readAccount("a")).signedOut, true);
+  assert.equal((await disk.readAccount("a")).cursor, "21");
+  assert.deepEqual(hub.snapshot().messages, []);
   assert.deepEqual(disk.readState("a", "peer", "drafts"), {
     text: "unfinished reply",
   });
@@ -135,9 +137,9 @@ test("a missed logout during cache catch-up prevents history restoration", async
   assert.equal(historyReads, 0);
   assert.equal(streams, 0);
   await disk.flush();
-  assert.equal(await disk.readAccount("a"), undefined);
+  assert.equal((await disk.readAccount("a")).signedOut, true);
 });
-function session(t, cache, overrides = {}) {
+function session(t, cache, overrides = {}, now = Date.now) {
   const hub = new HubSession(
     {
       accounts: async () =>
@@ -167,6 +169,7 @@ function session(t, cache, overrides = {}) {
     },
     undefined,
     cache,
+    now,
   );
   t.after(() => hub.close());
   return hub;
@@ -194,6 +197,10 @@ test("reload restores last chat, catches up a missed recall, and redacts older q
     }),
     message: async () =>
       message("original", "1", { body: null, recall: { actor: "self" } }),
+    messages: async () => page([
+      message("original", "1", { body: null, recall: { actor: "self" } }),
+      message("quote", "2", { quote: { serverId: "original", state: "recalled" } }),
+    ]),
   });
   hub.onMediaInvalidated((account, id) =>
     persistent.invalidateMessage(account, id),
@@ -279,7 +286,8 @@ test("an unauthenticated account cannot read its persistent cache", async (t) =>
   await assert.rejects(hub.activate("a"), { code: "auth_required" });
   assert.equal(reads, 0);
   assert.equal(persistent.lastAccount(), undefined);
-  assert.equal(await read("a"), undefined);
+  assert.ok(await read("a"));
+  assert.deepEqual(hub.snapshot().messages, []);
 });
 
 test("a failed first page cannot make unvalidated persisted bodies visible on retry", async (t) => {
@@ -326,4 +334,90 @@ test("late account validation cannot switch away from the more recent activation
   await first;
   assert.equal(hub.snapshot().account, "b");
   assert.equal(persistent.lastAccount(), "b");
+});
+
+for (const scenario of ["unchanged", "expired TTL", "changed last ID", "missing last ID", "missing timestamp", "future timestamp"]) {
+  test(`restored history: ${scenario}`, async (t) => {
+    const persistent = cache(t);
+    const now = 1000000;
+    await persistent.writeAccount("a", {
+      cursor: "20", threads: [thread()], contacts: [],
+      histories: [["peer", { messages: [message("tail")], nextMessages: null, sourceGeneration: "1", group: null,
+        ...(scenario === "missing timestamp" ? {} : { validatedAt: scenario === "expired TTL" ? now - 300000 : scenario === "future timestamp" ? now + 1 : now - 1000 }),
+      }]],
+    });
+    persistent.saveView("a", { thread: "peer" });
+    let reads = 0;
+    const current = { ...thread(), ...(scenario === "missing last ID" ? {} : { lastMessage: { id: scenario === "changed last ID" ? "new" : "tail" } }) };
+    const hub = session(t, persistent, {
+      threads: async () => page([current]), thread: async () => current,
+      messages: async () => { reads++; return page([message("authoritative")]); },
+    }, () => now);
+    await hub.activate("a");
+    assert.equal(reads, scenario === "unchanged" ? 0 : 1);
+    assert.equal(hub.snapshot().messages[0].id, scenario === "unchanged" ? "tail" : "authoritative");
+  });
+}
+
+test("logging back into the same account reuses history and skips its old sign-out event", async (t) => {
+  const persistent = cache(t);
+  let reads = 0, authenticated = true;
+  const current = { ...thread(), lastMessage: { id: "tail" } };
+  const hub = session(t, persistent, {
+    accounts: async () => page([{ id: "a", authenticated, ownUsername: "self" }]),
+    threads: async () => page([current]), thread: async () => current,
+    messages: async () => { reads++; return page([message("tail")]); },
+  });
+  await hub.activate("a");
+  authenticated = false;
+  await hub.accounts();
+  assert.deepEqual(hub.snapshot().messages, []);
+  await persistent.flush();
+  assert.equal((await persistent.readAccount("a")).signedOut, true);
+  authenticated = true;
+  // A poll-detected logout has no exact event cursor; its earlier event can
+  // still be in the replay after a fresh authenticated login.
+  hub.client.events = async () => ({ items: [{ cursor: "21", kind: "account.updated", data: { authentication: "logged_out" } }] });
+  hub.client.threads = async () => page([current], { asOfEventCursor: "21" });
+  await hub.accounts();
+  await hub.activate("a");
+  assert.equal(reads, 1);
+  assert.equal(hub.snapshot().messages[0].id, "tail");
+});
+
+test("a different authenticated profile identity cannot restore the previous account cache", async (t) => {
+  const persistent = cache(t);
+  await persistent.writeAccount("a", { cursor: "20", ownUsername: "old-owner", contacts: [], threads: [thread()],
+    histories: [["peer", { messages: [message("tail")], validatedAt: 1000000, nextMessages: null, sourceGeneration: "1", group: null }]],
+  });
+  const current = { ...thread(), lastMessage: { id: "tail" } };
+  let reads = 0;
+  const seen = [];
+  const hub = session(t, persistent, {
+    accounts: async () => page([{ id: "a", authenticated: true, ownUsername: "new-owner" }]),
+    threads: async () => page([current]), thread: async () => current,
+    messages: async () => { reads++; return page([message("new-owner-content")]); },
+  }, () => 1000000);
+  hub.subscribe(() => seen.push(...hub.snapshot().messages));
+  await hub.activate("a");
+  assert.equal(reads, 1);
+  assert.equal(seen.some((item) => item.id === "tail"), false);
+});
+
+test("cache catch-up stops at the inventory boundary so newer updates stay on the live stream", async (t) => {
+  const persistent = cache(t);
+  await seed(persistent, "10");
+  let resumedAfter;
+  const hub = session(t, persistent, {
+    events: async () => ({ items: [
+      { cursor: "20", kind: "push.hint", data: {} },
+      { cursor: "21", kind: "message.committed", data: { threadId: "peer", messageId: "new" } },
+    ] }),
+    async *watch(_account, after, signal) {
+      resumedAfter = after;
+      await new Promise((done) => signal.addEventListener("abort", done, { once: true }));
+    },
+  });
+  await hub.activate("a");
+  assert.equal(resumedAfter, "20");
 });

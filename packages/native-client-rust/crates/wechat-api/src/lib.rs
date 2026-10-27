@@ -1058,7 +1058,9 @@ async fn stream(
     let last = headers.get("last-event-id").and_then(|v| v.to_str().ok());
     let mut after = decimal(q.after.as_deref().or(last))?;
     app.core.store.events(&a, after, 1)?;
-    let events = async_stream::stream! {loop {
+    let events = async_stream::stream! {
+        yield Ok::<_,std::convert::Infallible>(Event::default().comment("connected"));
+        loop {
         if app.core.stopping.load(std::sync::atomic::Ordering::SeqCst)||!c.valid(&app.core.store){break;}
         match app.core.store.events(&a,after,100){Ok(items)=>for item in items {after=item.cursor.parse().unwrap_or(after);yield Ok::<_,std::convert::Infallible>(Event::default().id(&item.cursor).json_data(&item).expect("serializable event"));},Err(_)=>{yield Ok(Event::default().event("error").data("{\"error\":{\"code\":\"event_cursor_expired\"}}"));break;}}
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1392,6 +1394,69 @@ mod tests {
         let core = Core::new(store, None).unwrap();
         let app = router(core.clone(), OWNER);
         (t, core, app)
+    }
+    #[tokio::test]
+    async fn quiet_event_stream_sends_an_immediate_heartbeat_without_advancing_the_cursor() {
+        let (_temp, core, app) = setup();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/accounts/one/events/stream?after=0")
+                    .header("authorization", format!("Bearer {OWNER}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.into_data().unwrap().as_ref(), b": connected\n\n");
+        assert!(core.store.events("one", 0, 10).unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn media_lookup_batch_requires_media_scope_and_rejects_unbounded_inputs() {
+        let (_temp, core, app) = setup();
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        core.store
+            .issue_token(
+                "read-only",
+                &format!("{:x}", Sha256::digest(token.as_bytes())),
+                &["one".into()],
+                &["read".into()],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/v1/accounts/one/media/lookup",
+                Some(token),
+                Some(json!({"messageIds":["opaque"]}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        for ids in [vec![], vec!["opaque"; 41], vec![""]] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "POST",
+                    "/v1/accounts/one/media/lookup",
+                    Some(OWNER),
+                    Some(json!({"messageIds":ids}))
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
     }
     #[tokio::test]
     async fn profile_removal_requires_confirmation_scope_signout_and_idle_workers() {

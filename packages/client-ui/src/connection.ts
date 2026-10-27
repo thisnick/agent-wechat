@@ -2,9 +2,10 @@ import {
   NativeWeChatClient,
   type NativeOperation,
   type NativeMessage,
+  type NativeStatus,
 } from "@agent-wechat/shared";
 import { BrowserCache } from "./browser-cache.ts";
-import { HubSession, type PendingSend } from "./session.ts";
+import { HubSession, type Account, type PendingSend } from "./session.ts";
 import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
 import { MediaOutbox, type PendingMedia } from "./media-outbox.ts";
 import { AvatarCache } from "./avatar-cache.ts";
@@ -34,6 +35,7 @@ export async function connect(
   token: string,
   simulator = false,
   transport: typeof fetch = globalThis.fetch.bind(globalThis),
+  initialStatus?: NativeStatus,
 ): Promise<Connection> {
   let cache: BrowserCache | undefined;
   const client = new NativeWeChatClient({
@@ -45,7 +47,7 @@ export async function connect(
       return transport(input, init);
     },
   });
-  const status = await client.status();
+  const status = initialStatus ?? await client.status();
   if (simulator && status.version.backend !== "simulator")
     throw new Error("Expected a simulator");
   let preferences: Storage | undefined;
@@ -144,8 +146,9 @@ export async function connect(
       },
     },
     persistent,
+    Date.now,
+    accounts.items.filter((item) => typeof item.id === "string") as Account[],
   );
-  await session.accounts();
   const resume = () => {
     if (
       typeof document !== "undefined" &&

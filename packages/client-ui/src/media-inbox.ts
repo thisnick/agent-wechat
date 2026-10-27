@@ -4,6 +4,7 @@ import type {
   NativeWeChatClient,
 } from "@agent-wechat/shared";
 import type { BrowserCache } from "./browser-cache.ts";
+import { MediaMetadata } from "./media-metadata.ts";
 import { canAutoRetrieve, canRetrieve } from "./media-variants.ts";
 import { MediaPreviewCache } from "./media-preview-cache.ts";
 import { pause, readableError } from "./session.ts";
@@ -53,12 +54,17 @@ export class IncomingMedia {
     account: string,
     messageId: string,
     interval = 700,
+    lookup?: MediaMetadata["lookup"],
   ) {
     this.client = client;
     this.account = account;
     this.messageId = messageId;
     this.interval = interval;
+    this.lookup =
+      lookup ??
+      ((account, message) => this.client.mediaAssets(account, message));
   }
+  private lookup: MediaMetadata["lookup"];
   snapshot = (): MediaState => this.value;
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -81,8 +87,11 @@ export class IncomingMedia {
       return Promise.resolve();
     const policyGeneration = this.policyGeneration;
     this.pendingPolicyGeneration = policyGeneration;
-    this.pending = this.client
-      .mediaAssets(this.account, this.messageId)
+    this.pending = this.lookup(
+      this.account,
+      this.messageId,
+      this.controller.signal,
+    )
       .then((response) => {
         if (policyGeneration === this.policyGeneration)
           this.publish({ assets: response.items, loaded: true, error: "" });
@@ -192,9 +201,11 @@ export class IncomingMedia {
 export class MediaInbox {
   private entries = new Map<string, IncomingMedia>();
   private client: NativeWeChatClient;
+  private metadata: MediaMetadata;
   readonly previews: MediaPreviewCache;
   constructor(client: NativeWeChatClient, persistent?: BrowserCache) {
     this.client = client;
+    this.metadata = new MediaMetadata(client);
     this.previews = new MediaPreviewCache(
       client,
       undefined,
@@ -205,7 +216,14 @@ export class MediaInbox {
   get(account: string, messageId: string): IncomingMedia {
     const key = JSON.stringify([account, messageId]);
     let entry = this.entries.get(key);
-    if (!entry) entry = new IncomingMedia(this.client, account, messageId);
+    if (!entry)
+      entry = new IncomingMedia(
+        this.client,
+        account,
+        messageId,
+        undefined,
+        this.metadata.lookup,
+      );
     this.entries.delete(key);
     this.entries.set(key, entry);
     for (const [oldKey, old] of this.entries) {
@@ -241,6 +259,7 @@ export class MediaInbox {
     this.previews.clear(account);
   }
   close(): void {
+    this.metadata.close();
     for (const entry of this.entries.values()) entry.close();
     this.entries.clear();
     this.previews.close();

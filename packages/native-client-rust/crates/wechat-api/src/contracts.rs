@@ -128,6 +128,24 @@ pub struct NativeThreadAvatarMember {
     pub id: String,
     pub display_name: String,
 }
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeMediaBatchRequest {
+    pub message_ids: Vec<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMediaBatchItem {
+    pub message_id: String,
+    pub assets: Vec<wechat_core::MediaAsset>,
+    pub error: Option<String>,
+}
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMediaBatch {
+    pub items: Vec<NativeMediaBatchItem>,
+}
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeContact {
@@ -417,6 +435,9 @@ pub fn typescript() -> String {
         wechat_core::media_types::MediaSendRequest::decl(),
         wechat_core::media_types::MediaImagePreview::decl(),
         wechat_core::media_types::MediaAsset::decl(),
+        NativeMediaBatchRequest::decl(),
+        NativeMediaBatchItem::decl(),
+        NativeMediaBatch::decl(),
         wechat_core::media_types::MediaJob::decl(),
         wechat_store::OwnedMediaSource::decl(),
     ];

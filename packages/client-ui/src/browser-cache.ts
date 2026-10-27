@@ -31,6 +31,8 @@ export type AccountSnapshot = {
   contacts: NativeContact[];
   histories: [string, CachedHistory][];
   cursor: string;
+  ownUsername?: string;
+  signedOut?: boolean;
 };
 export type ViewState = {
   thread?: string;
@@ -242,6 +244,8 @@ export class BrowserCache {
           cursor: string;
           threadIds: string[];
           contactIds: string[];
+          ownUsername?: string;
+          signedOut?: boolean;
         };
         if (!decimal(state.cursor)) return undefined;
         const threads = new Map(
@@ -288,6 +292,8 @@ export class BrowserCache {
           contacts: state.contactIds.flatMap((id) => contacts.get(id) ?? []),
           histories,
           cursor: state.cursor,
+          ...(state.ownUsername ? { ownUsername: state.ownUsername } : {}),
+          ...(state.signedOut ? { signedOut: true } : {}),
         };
       },
     );
@@ -338,6 +344,8 @@ export class BrowserCache {
               cursor: value.cursor,
               threadIds: value.threads.map((item) => item.id),
               contactIds: value.contacts.map((item) => item.id),
+              ownUsername: value.ownUsername,
+              signedOut: value.signedOut ?? false,
             }),
           );
         },
@@ -354,6 +362,21 @@ export class BrowserCache {
         const state = row.data as { cursor: string };
         if (older(cursor, state.cursor)) return;
         state.cursor = cursor;
+        tx.objectStore("syncState").put(row);
+      }),
+    );
+  }
+  signedOut(account: string, cursor?: string) {
+    return this.enqueue(() =>
+      this.transaction(["syncState"], "readwrite", async (tx) => {
+        const row = await request<Row | undefined>(
+          tx.objectStore("syncState").get(this.key(account, "state")),
+        );
+        if (!row) return;
+        const state = row.data as { cursor: string; signedOut?: boolean };
+        state.signedOut = true;
+        if (cursor && decimal(cursor) && !older(cursor, state.cursor))
+          state.cursor = cursor;
         tx.objectStore("syncState").put(row);
       }),
     );
@@ -412,12 +435,12 @@ export class BrowserCache {
   async blob(
     kind: "avatars" | "media",
     account: string,
-    id: string
+    id: string,
   ): Promise<SavedBlob | undefined> {
     await this.flush();
     const data = await this.transaction([kind], "readwrite", async (tx) => {
       const row = await request<Row | undefined>(
-        tx.objectStore(kind).get(this.key(account, id))
+        tx.objectStore(kind).get(this.key(account, id)),
       );
       if (!row) return;
       row.lastUsed = this.now();
@@ -443,7 +466,7 @@ export class BrowserCache {
       await this.enqueue(() =>
         this.transaction([kind], "readwrite", (tx) => {
           tx.objectStore(kind).delete(this.key(account, id));
-        })
+        }),
       );
       return;
     }
@@ -453,7 +476,7 @@ export class BrowserCache {
     account: string,
     id: string,
     data: SavedBlob,
-    messageId?: string
+    messageId?: string,
   ) {
     if (data.blob.size > this.mediaBudget) return;
     void this.enqueue(async () => {
@@ -478,10 +501,10 @@ export class BrowserCache {
         }
         let bytes = entries.reduce(
           (sum, item) => sum + (item.row.bytes ?? 0),
-          0
+          0,
         );
         for (const item of entries.sort(
-          (a, b) => a.row.lastUsed - b.row.lastUsed
+          (a, b) => a.row.lastUsed - b.row.lastUsed,
         )) {
           if (bytes <= this.mediaBudget) break;
           tx.objectStore(item.kind).delete(item.row.key);

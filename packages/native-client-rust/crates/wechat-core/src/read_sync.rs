@@ -113,7 +113,7 @@ impl Core {
         blocking(move || {
             let _guard = guard;
             let state = core.account_state(&account)?;
-            let reader = core.profile_reader(&account)?;
+            let reader = core.profile_reader_owned(&account)?;
             let page = reader.messages(&wechat_profile::MessageQuery {
                 chat: Some(thread.clone()),
                 own_username: Some(state.own_username.clone()),
@@ -197,7 +197,7 @@ impl Core {
         through_time: i64,
         expected: &str,
     ) -> Result<Value> {
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let counter = self.store.read_version(account, thread)?;
         let intent = json!({"threadReadTime":through_time,"expectedVersion":expected});
         if self.read_state_version(account, thread, reader.generation())? != expected
@@ -219,7 +219,7 @@ impl Core {
         let (location, keys) = self.profile_location_keys(account)?;
         let projection =
             wechat_profile::mark_read_thread(&location, &keys, thread, through_time, &options)?;
-        let reader = self.profile_reader(account)?;
+        let reader = self.profile_reader_owned(account)?;
         let version = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&(reader.generation(), thread, &next))?)

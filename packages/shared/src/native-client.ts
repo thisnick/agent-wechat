@@ -47,6 +47,7 @@ const decimal = (value: string): string => {
   return value;
 };
 export class NativeWeChatClient {
+  private mediaBatchSupported = true;
   readonly baseUrl: URL;
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
@@ -159,7 +160,7 @@ export class NativeWeChatClient {
   threads(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeThread>> { return this.request(`v1/accounts/${id(accountId)}/threads${listQuery(options)}`); }
   contacts(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeContact>> { return this.request(`v1/accounts/${id(accountId)}/contacts${listQuery(options)}`); }
   groups(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeGroup>> { return this.request(`v1/accounts/${id(accountId)}/groups${listQuery(options)}`); }
-  thread(accountId: string, threadId: string): Promise<NativeThread> { return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}`); }
+  thread(accountId: string, threadId: string, signal?: AbortSignal): Promise<NativeThread> { return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}`, { signal }); }
   contact(accountId: string, username: string): Promise<NativeContact> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}`); }
   group(accountId: string, roomId: string, signal?: AbortSignal): Promise<NativeGroup> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}`, { signal }); }
   groupMembers(accountId: string, roomId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeGroupMember>> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members${listQuery(options)}`, { signal }); }
@@ -189,8 +190,8 @@ export class NativeWeChatClient {
   refreshGroupMembers(accountId: string, roomId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members/refresh`, { method: "POST", body: "{}" }); }
   syncContacts(accountId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/contact-sync`, { method: "POST", body: "{}" }); }
   syncGroups(accountId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/group-sync`, { method: "POST", body: "{}" }); }
-  async messages(accountId: string, threadId: string, options?: string | NativeListOptions): Promise<NativePage<NativeMessage>> {
-    const result = await this.request<NativePage<NativeMessage>>(`v1/accounts/${id(accountId)}/threads/${id(threadId)}/messages${listQuery(options)}`);
+  async messages(accountId: string, threadId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeMessage>> {
+    const result = await this.request<NativePage<NativeMessage>>(`v1/accounts/${id(accountId)}/threads/${id(threadId)}/messages${listQuery(options)}`, { signal });
     for (const msg of result.items) {
       if (isNativeTombstone(msg)) continue;
       if (typeof msg.id !== "string" || msg.accountId !== accountId || msg.threadId !== threadId
@@ -246,7 +247,28 @@ export class NativeWeChatClient {
     return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as OwnedMediaSource;
   }
   sendMedia(accountId: string, input: MediaSendRequest, key: string): Promise<MediaJob> { if (!key || /[\r\n]/.test(key)) throw new Error("An idempotency key is required"); return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(input) }); }
-  mediaAssets(accountId: string, messageId: string): Promise<{ items: MediaAsset[] }> { return this.request(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/media`); }
+  mediaAssets(accountId: string, messageId: string, signal?: AbortSignal): Promise<{ items: MediaAsset[] }> { return this.request(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/media`, { signal }); }
+  async mediaAssetsBatch(accountId: string, messageIds: string[], signal?: AbortSignal): Promise<import("./native.generated.js").NativeMediaBatch> {
+    if (!messageIds.length || messageIds.length > 40 || messageIds.some((id) => !id || id.length > 8192) || new Set(messageIds).size !== messageIds.length) throw new Error("Invalid media lookup batch");
+    if (this.mediaBatchSupported) {
+      try {
+        const batch = await this.request<import("./native.generated.js").NativeMediaBatch>(`v1/accounts/${id(accountId)}/media/lookup`, { method: "POST", body: JSON.stringify({ messageIds }), signal });
+        const expected = new Set(messageIds);
+        if (!Array.isArray(batch.items) || batch.items.length !== expected.size) throw new Error("Invalid media lookup response");
+        for (const item of batch.items) {
+          if (!expected.delete(item.messageId) || !Array.isArray(item.assets) || (item.error !== null && typeof item.error !== "string") || item.assets.some((asset) => asset.accountId !== accountId || asset.messageId !== item.messageId)) throw new Error("Invalid media lookup identity");
+        }
+        return batch;
+      } catch (error) {
+        if (!(error instanceof NativeApiError) || ![404, 405].includes(error.status)) throw error;
+        this.mediaBatchSupported = false;
+      }
+    }
+    return { items: await Promise.all(messageIds.map(async (messageId) => {
+      try { return { messageId, assets: (await this.mediaAssets(accountId, messageId, signal)).items, error: null }; }
+      catch (error) { if (!(error instanceof NativeApiError)) throw error; return { messageId, assets: [], error: error.code }; }
+    })) };
+  }
   transferMedia(accountId: string, input: MediaTransferRequest): Promise<MediaJob> { return this.request(`v1/accounts/${id(accountId)}/messages/${id(input.messageId)}/media-transfers`, { method: "POST", body: JSON.stringify(input) }); }
   mediaAsset(accountId: string, assetId: string): Promise<MediaAsset> { return this.request(`v1/accounts/${id(accountId)}/media/${id(assetId)}`); }
   job(accountId: string, jobId: string, signal?: AbortSignal): Promise<MediaJob> { return this.request(`v1/accounts/${id(accountId)}/jobs/${id(jobId)}`, { signal }); }
