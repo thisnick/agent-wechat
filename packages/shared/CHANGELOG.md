@@ -1,5 +1,15 @@
 # @agent-wechat/shared
 
+## 1.1.0
+
+### Minor Changes
+
+- [#301](https://github.com/thisnick/agent-wechat/pull/301) [`bafeb28`](https://github.com/thisnick/agent-wechat/commit/bafeb28e06ff91dce78fa030a3a08cbed6a83a3c) Thanks [@thisnick](https://github.com/thisnick)! - Add profile-derived peer classification to contact, thread, group and member reads, including official/business account kinds and cached multilingual OpenIM labels. Keep conversation kind and relationship separate, with unknown values preserved. Incoming ordinary business metadata updates both the official business row and contact extra data in one transaction. Existing schema, frontend and routing policies are unchanged; separate OpenIM synchronization remains unsupported.
+
+### Patch Changes
+
+- [#316](https://github.com/thisnick/agent-wechat/pull/316) [`8e007d7`](https://github.com/thisnick/agent-wechat/commit/8e007d70f04db207f9be34c913bceb759ca633fc) Thanks [@thisnick](https://github.com/thisnick)! - Add inline group mentions to the message composer, with member search, removable mentions and saved recipient identities. Keep attachment and mention actions in the bottom toolbar. Extend the native API to preserve inline positions using shared member names, and expose group mentions and quoted text replies through OpenClaw's existing message tool, including queued-send recovery.
+
 ## 1.0.0
 
 ### Major Changes
