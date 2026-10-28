@@ -122,7 +122,11 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("Shared link"),
             (49, _) => "Shared content",
-            (10000 | 10002, _) => "System message",
+            (10000, _) => message["body"]
+                .as_str()
+                .and_then(crate::profile::plain_system_notice)
+                .unwrap_or("System message"),
+            (10002, _) => "System message",
             _ => "Message",
         }
     };
@@ -137,6 +141,7 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
     if text.is_empty() {
         text = "Message".into();
     }
+    let sender_name = message["senderId"].as_str().and(sender_name);
     json!({
         "id":message["id"],"senderId":message["senderId"],"senderName":sender_name,
         "direction":message["direction"],"type":message["type"],
@@ -147,6 +152,13 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plain_system_summary_preserves_notice_text_without_transport_author() {
+        let message = json!({"id":"system","type":10000,"body":"Location sharing has ended.","senderId":null,"direction":null});
+        let summary = message_summary(&message, Some("Transport peer"));
+        assert_eq!(summary["text"], "Location sharing has ended.");
+        assert!(summary["senderId"].is_null() && summary["senderName"].is_null());
+    }
     #[test]
     fn list_and_detail_derive_pin_state_and_unresolved_work_does_not_replace_saved_flags() {
         let temp = tempfile::tempdir().unwrap();

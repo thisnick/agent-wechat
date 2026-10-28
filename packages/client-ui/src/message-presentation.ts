@@ -17,7 +17,8 @@ export function recallText(message: NativeMessage) {
 // Files and shared stickers use the validated attachment download flow.
 export function messagePresentation(message: NativeMessage) {
   if (message.recall) return "recalled";
-  if ([1, 10000, 10002].includes(message.type)) return "text";
+  if ([10000, 10002].includes(message.type)) return "system";
+  if (message.type === 1) return "text";
   if (message.type === 48 && message.location && message.body?.trim()) return "location";
   if (message.type === 49) {
     if (

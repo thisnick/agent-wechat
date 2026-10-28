@@ -56,6 +56,13 @@ test("static locations use a card without map downloads and recalls suppress coo
   assert.equal(messagePresentation({ ...message, recall: {} }), "recalled");
 });
 
+test("plain system notices do not use chat bubbles or clickable message text", () => {
+  const notice = { type: 10000, senderId: "transport-peer", direction: "incoming", body: "Location sharing has ended." };
+  assert.equal(messagePresentation(notice), "system");
+  assert.equal(textMessageLink({ ...notice, body: "https://example.invalid" }), null);
+  assert.equal(messagePresentation({ ...notice, recall: {} }), "recalled");
+});
+
 test("quoted replies and forwarded history never enter the media download flow", () => {
   assert.equal(
     messagePresentation({ type: 49, appMessageType: 57, body: "A reply" }),
@@ -99,8 +106,9 @@ test("supported media keep their renderer, unsupported cards do not request down
       messagePresentation({ type: 49, appMessageType }),
       "unsupported"
     );
-  for (const type of [1, 10000, 10002])
-    assert.equal(messagePresentation({ type }), "text");
+  assert.equal(messagePresentation({ type: 1 }), "text");
+  for (const type of [10000, 10002])
+    assert.equal(messagePresentation({ type }), "system");
 });
 
 test("recall markers override every body and content renderer", () => {

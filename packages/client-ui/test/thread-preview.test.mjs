@@ -56,6 +56,16 @@ test("missing history and missing member names have honest fallbacks", () => {
   );
 });
 
+test("system-notice previews keep supplied wording without a transport-peer author", () => {
+  const message = { id: "system", type: 10000, senderId: "peer", direction: "incoming", body: "Location sharing has ended." };
+  const lastMessage = messageSummary(message, "Peer name");
+  assert.equal(lastMessage.text, message.body);
+  assert.equal(lastMessage.senderId, null);
+  assert.equal(lastMessage.senderName, null);
+  assert.equal(lastMessage.direction, null);
+  assert.equal(threadPreview({ id: "example@chatroom", kind: "group", lastMessage }), message.body);
+});
+
 test("recalled thread previews show the replacement notice without an inferred sender prefix", () => {
   assert.equal(messageSummary({ type: 49, appMessageType: 8 }, "Bot").text, "Sticker");
   for (const direction of ["incoming", "outgoing", null]) {

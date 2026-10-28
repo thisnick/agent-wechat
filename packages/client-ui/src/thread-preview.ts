@@ -18,6 +18,8 @@ export function messageSummary(
   const text =
     kind === "recalled"
       ? recallText(message)
+      : kind === "system"
+      ? message.body || "System message"
       : ["text", "reply", "forwarded"].includes(kind)
       ? message.body || "Message"
       : kind === "link"
@@ -36,9 +38,9 @@ export function messageSummary(
         )[message.type] || "Unsupported message";
   return {
     id: message.id,
-    senderId: message.senderId,
-    senderName,
-    direction: message.direction,
+    senderId: kind === "system" ? null : message.senderId,
+    senderName: kind === "system" ? null : senderName,
+    direction: kind === "system" ? null : message.direction,
     type: kind === "recalled" ? 10000 : message.type,
     text: text.replace(/\s+/g, " ").slice(0, 240),
     createdAt: message.createdAt,

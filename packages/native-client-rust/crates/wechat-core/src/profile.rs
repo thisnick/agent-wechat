@@ -265,6 +265,16 @@ impl Core {
     }
 }
 
+pub(crate) fn plain_system_notice(text: &str) -> Option<&str> {
+    (!text.trim().is_empty()
+        && text.len() <= 16 * 1024
+        && !text.contains(['<', '>'])
+        && !text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
+    .then_some(text)
+}
+
 pub(crate) fn normalized_message(
     account: &str,
     msg: wechat_profile::Message,
@@ -272,8 +282,15 @@ pub(crate) fn normalized_message(
     generation: &str,
 ) -> Result<Value> {
     let thread = msg.peer.clone();
+    let system = matches!(msg.message_type, 10000 | 10002);
     let mut text = if msg.message_type == 1 {
         msg.content.text.clone()
+    } else if msg.message_type == 10000 {
+        msg.content
+            .text
+            .as_deref()
+            .and_then(plain_system_notice)
+            .map(str::to_owned)
     } else {
         None
     };
@@ -317,7 +334,17 @@ pub(crate) fn normalized_message(
     if forwarded.is_some() {
         text = forwarded;
     }
-    let mut value = json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":msg.sender,"direction":msg.outgoing.map(|out|if out{"outgoing"}else{"incoming"}),"type":msg.message_type,"appMessageType":app_type,"quote":quote,"link":link,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"});
+    // System notices may carry a transport peer in the official row. That
+    // peer is not the author of the notice. Recall normalization separately
+    // restores an original author only when its own evidence establishes one.
+    let sender = if system { None } else { msg.sender };
+    let direction = if system {
+        None
+    } else {
+        msg.outgoing
+            .map(|out| if out { "outgoing" } else { "incoming" })
+    };
+    let mut value = json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":sender,"direction":direction,"type":msg.message_type,"appMessageType":app_type,"quote":quote,"link":link,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"});
     if let Some(location) = location {
         value["location"] = serde_json::to_value(location)?;
     }
@@ -327,6 +354,62 @@ pub(crate) fn normalized_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plain_system_notices_keep_their_text_without_attributing_a_transport_peer() {
+        use wechat_profile::{DecodeState, DecodedField, Message};
+        let field = |text| DecodedField {
+            text,
+            state: DecodeState::Utf8,
+            compression_flag: None,
+        };
+        let mut message = Message {
+            id: SourceMessageId {
+                database: "message/message_0.db".into(),
+                table: "Msg_example".into(),
+                local_id: "1".into(),
+            },
+            server_message_id: Some("42".into()),
+            server_id_signed: Some("42".into()),
+            peer: Some("peer".into()),
+            sender: Some("peer".into()),
+            outgoing: Some(false),
+            message_type: 10000,
+            local_type: "10000".into(),
+            create_time: 100,
+            sort_seq: None,
+            content: field(Some("Location sharing has ended.".into())),
+            source: field(None),
+            raw_fields: Default::default(),
+        };
+        let value = normalized_message("example", message.clone(), Some("self"), "1").unwrap();
+        assert_eq!(value["body"], "Location sharing has ended.");
+        assert!(value["senderId"].is_null() && value["direction"].is_null());
+        for text in [
+            "<sysmsg><private>transport</private></sysmsg>".into(),
+            "invalid\0notice".into(),
+            "x".repeat(16385),
+        ] {
+            message.content.text = Some(text);
+            assert!(
+                normalized_message("example", message.clone(), Some("self"), "1").unwrap()["body"]
+                    .is_null()
+            );
+        }
+        message.content.text = Some("Ordinary text".into());
+        message.message_type = 1;
+        message.local_type = "1".into();
+        let ordinary = normalized_message("example", message.clone(), Some("self"), "1").unwrap();
+        assert_eq!(ordinary["senderId"], "peer");
+        assert_eq!(ordinary["direction"], "incoming");
+        message.message_type = 10002;
+        message.local_type = "10002".into();
+        let control = normalized_message("example", message, Some("self"), "1").unwrap();
+        assert!(
+            control["body"].is_null()
+                && control["senderId"].is_null()
+                && control["direction"].is_null()
+        );
+    }
     #[test]
     fn mentions_use_exact_direct_source_ids() {
         assert_eq!(
