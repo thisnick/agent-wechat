@@ -42,22 +42,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["ubuntu-24.04","ubuntu-24.04-arm"]') }}
         suite: [lint, test]
         exclude:
           - runner: ubuntu-24.04-arm
             suite: lint
-        include:
-          - runner: ubuntu-24.04
-            ffmpeg_arch: x64
-            ffmpeg_sha256: bfe8a8fc511530457b528c48d77b5737527b504a3797a9bc4866aeca69c2dffa
-            ffprobe_sha256: 25d9b6ccb05e3d9de9e04e31e2506d8dd7f9f0418981965ac6df12e8d3afd067
-          - runner: ubuntu-24.04-arm
-            ffmpeg_arch: arm64
-            ffmpeg_sha256: 754a678672298bc68156adff58aa7385a592c2b30b1d0ae8750c45c915c4bac0
-            ffprobe_sha256: 2ab6aba60ee84412dff9188720703376cb4e7aaf7e0b5e43aa8249f2acae5bf8
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      FFMPEG_ARCH: ${{ matrix.runner == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+      FFMPEG_SHA256: ${{ matrix.runner == 'ubuntu-24.04-arm' && '754a678672298bc68156adff58aa7385a592c2b30b1d0ae8750c45c915c4bac0' || 'bfe8a8fc511530457b528c48d77b5737527b504a3797a9bc4866aeca69c2dffa' }}
+      FFPROBE_SHA256: ${{ matrix.runner == 'ubuntu-24.04-arm' && '2ab6aba60ee84412dff9188720703376cb4e7aaf7e0b5e43aa8249f2acae5bf8' || '25d9b6ccb05e3d9de9e04e31e2506d8dd7f9f0418981965ac6df12e8d3afd067' }}
     defaults:
       run:
         working-directory: packages/native-client-rust
@@ -93,13 +88,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/native-ffmpeg
-          key: native-ffmpeg-${{ runner.arch }}-${{ env.FFMPEG_RELEASE }}-${{ matrix.ffmpeg_sha256 }}-${{ matrix.ffprobe_sha256 }}
+          key: native-ffmpeg-${{ runner.arch }}-${{ env.FFMPEG_RELEASE }}-${{ env.FFMPEG_SHA256 }}-${{ env.FFPROBE_SHA256 }}
       - name: Install verified image decoder runtime
         if: matrix.suite == 'test' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        env:
-          FFMPEG_ARCH: ${{ matrix.ffmpeg_arch }}
-          FFMPEG_SHA256: ${{ matrix.ffmpeg_sha256 }}
-          FFPROBE_SHA256: ${{ matrix.ffprobe_sha256 }}
         run: |
           base="https://github.com/eugeneware/ffmpeg-static/releases/download/$FFMPEG_RELEASE"
           mkdir -p "$RUNNER_TEMP/native-ffmpeg/bin"

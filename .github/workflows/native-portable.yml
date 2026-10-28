@@ -12,9 +12,6 @@ on:
         description: Build and exercise the development upstream simulator
         type: boolean
         default: true
-      main_checks_only:
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       artifact_prefix:
@@ -36,17 +33,10 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 jobs:
   platform-tests:
-    if: ${{ !inputs.main_checks_only }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc"}]' || '[{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     env:
@@ -82,10 +72,9 @@ jobs:
   build:
     strategy:
       fail-fast: false
-      # Main only runs the deferred Windows simulator checks. PR/release runs
-      # also validate the macOS CLI, package and platform primitives.
+      # PRs cover macOS ARM64 and Windows x64; releases/manual runs add Windows ARM64.
       matrix:
-        include: ${{ fromJSON(inputs.main_checks_only && '[{"runner":"windows-2025","target":"x86_64-pc-windows-msvc"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' || '[{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc"}]' || '[{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -175,7 +164,6 @@ jobs:
       - run: node scripts/native-portable-build.mjs
       - run: node scripts/native-ci-artifact.mjs record artifacts/native
       - name: Validate actual executable and npm installation
-        if: ${{ !inputs.main_checks_only }}
         run: |
           BINARY=$(node --input-type=module -e "import {assetName} from './packages/cli/scripts/native-runtime.mjs'; import fs from 'node:fs'; console.log('artifacts/native/'+assetName(JSON.parse(fs.readFileSync('packages/cli/package.json')).version))")
           # Both checks read the artifact and create independent temporary data.

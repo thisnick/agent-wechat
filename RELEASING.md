@@ -34,9 +34,9 @@ pnpm changeset
    run the workflow manually on main with the version and `confirm_publish=true`.
 
    Releases skip the development-only `wx-dev` upstream simulator and its smoke
-   checks. PR validation keeps that coverage. Production Rust tests, native
-   platform/media checks, packaged CLI checks and desktop acceptance still gate
-   publication.
+   checks. PR validation runs the simulator on Linux x64, Windows x64 and macOS
+   ARM64. Production Rust tests, native platform/media checks, packaged CLI
+   checks and desktop acceptance still gate publication.
 
 6. Successful native asset publication calls **Publish native runtime image** for
    the same commit/version. It tests and pushes Linux x64/ARM64 images and combines
@@ -127,7 +127,11 @@ Once configured, delete the `NPM_TOKEN` secret from GitHub repo settings. The wo
 
 `@agent-wechat/desktop` is a separate private workspace package on the native prerelease train. Its version, Rust manifest and Tauri configuration are synchronized by `version-packages`. The npm CLI remains a native executable launcher; it does not contain the desktop UI.
 
-A merged version-package PR starts `native-release.yml`, which also calls `desktop.yml`. Desktop reuses the verified CLI artifacts from that same run. Desktop PR checks omit installers; manual validation builds unsigned installers for all five platforms, while main validates the deferred Linux/Windows ARM64 builds. Production signing runs only on trusted release refs; pull requests cannot use production signing. Existing `native-release` approval and source/version checks remain in effect. Publication waits for the Rust checks on the release commit, the complete CLI matrix, and successful desktop signing and notarization.
+A merged version-package PR starts `native-release.yml`, which also calls `desktop.yml`. Desktop reuses the verified CLI artifacts from that same run. Desktop PR checks cover Linux x64, Windows x64 and macOS ARM64 and omit installers. Linux/Windows ARM64 validation runs during releases or manual validation, which builds unsigned installers for all five platforms.
+
+Native distribution validation runs only on PRs; ordinary main-branch pushes do not repeat those builds. Linux Rust PR checks also use x64, while release checks retain both Linux architectures. Complete CLI manifest verification runs during release preparation.
+
+Production signing runs only on trusted release refs; pull requests cannot use production signing. Existing `native-release` approval and source/version checks remain in effect. Publication waits for the Rust checks on the release commit, the complete CLI matrix, and successful desktop signing and notarization.
 
 Windows uses the reusable workflow introduced in PR #278, with GitHub OIDC and the existing `windows-signing` environment. Keep its main/v* environment restrictions and profile-scoped Certificate Profile Signer identity. The environment supplies `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT` and `AZURE_SIGNING_PROFILE`. Application binaries, bundled CLI and media helpers are signed first; installers built from those signed inputs are signed in a second pass. Both passes use an x64 runner, including ARM64 builds, and require the expected publisher, valid signatures and verified timestamps. Installer packaging disables binary patching so it preserves the already signed application payloads, then verifies their signatures again.
 
