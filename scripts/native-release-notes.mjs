@@ -4,7 +4,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { publicPackages as packages } from './native-release-policy.mjs';
+import { publicPackages } from './native-release-policy.mjs';
+
+const packages = [
+  ...publicPackages.map(([directory, name]) => ({ directory, name, private: false })),
+  { directory: 'packages/desktop', name: '@agent-wechat/desktop', private: true },
+];
 
 const start = '<!-- agent-wechat:changesets:start -->';
 const end = '<!-- agent-wechat:changesets:end -->';
@@ -41,18 +46,18 @@ export function mergeReleaseNotes(existing, managed) {
 }
 
 export async function renderReleaseNotes({ root = process.cwd(), version, existing = '' } = {}) {
-  const cli = JSON.parse(await readFile(join(root, packages[0][0], 'package.json'), 'utf8'));
+  const cli = JSON.parse(await readFile(join(root, packages[0].directory, 'package.json'), 'utf8'));
   version ??= cli.version;
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version ?? '')) throw new Error('Invalid release notes version');
   const sections = [];
-  for (const [directory, name] of packages) {
+  for (const { directory, name, private: privatePackage } of packages) {
     const pkg = JSON.parse(await readFile(join(root, directory, 'package.json'), 'utf8'));
-    if (pkg.name !== name || pkg.private === true || pkg.version !== version) throw new Error('Release notes package/version mismatch');
+    if (pkg.name !== name || Boolean(pkg.private) !== privatePackage || pkg.version !== version) throw new Error('Release notes package/version mismatch');
     const entry = changelogEntry(await readFile(join(root, directory, 'CHANGELOG.md'), 'utf8'), version);
     if (entry) sections.push(`## ${name} ${version}\n\n${entry}`);
   }
   if (!sections.length) throw new Error('Versioned package changelogs contain no release notes; run Changesets versioning first');
-  const managed = sections.join('\n\n') + '\n\nNative Linux x64/ARM64 assets, npm publication and deployment are separate release steps.';
+  const managed = sections.join('\n\n') + '\n\nNative assets and desktop installers are published on GitHub; npm publication and deployment are separate release steps.';
   return mergeReleaseNotes(existing, managed);
 }
 

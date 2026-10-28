@@ -21,6 +21,10 @@ pnpm changeset
 
 3. Merge to main. The changesets GitHub Action opens a "Version Packages" PR with bumped versions and changelogs.
 
+   GitHub release notes include the CLI, OpenClaw extension and desktop changelog
+   entries for that exact version. Empty fixed-group entries are omitted; a
+   desktop-only release can leave both npm package entries empty.
+
 4. Merge the Version Packages PR. The Release workflow checks the npm channel and
    reports **Waiting for native release assets** if the matching artifacts have
    not been published. This is an expected waiting state, not a failed build.

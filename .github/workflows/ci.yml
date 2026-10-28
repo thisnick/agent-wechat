@@ -115,6 +115,7 @@ jobs:
           node --test scripts/native-release-policy.test.mjs
           node --test scripts/native-release-orchestration.test.mjs
           node --test scripts/native-release-trigger.test.mjs
+          node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
           node scripts/verify-ci-publisher.mjs
 
   ts:
