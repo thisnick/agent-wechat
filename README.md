@@ -11,7 +11,7 @@ need the official app running.
 
 ## See it in action
 
-[![Watch the Agent WeChat demo: phone, OpenClaw, desktop, and terminal](docs/public/demo/poster.jpg)](https://www.youtube.com/watch?v=T5LgL4n1MOQ)
+https://github.com/user-attachments/assets/969f95ef-c17a-4e22-bda0-ec9e08af4ad3
 
 [Watch the 93-second demo](https://www.youtube.com/watch?v=T5LgL4n1MOQ) ·
 [Download the video](docs/public/demo/agent-wechat-demo.mp4)

@@ -1,6 +1,7 @@
 # Demo and launch gallery
 
 The approved video and image assets live in [`docs/public/demo`](../../docs/public/demo).
+A [GitHub attachment](https://github.com/user-attachments/assets/969f95ef-c17a-4e22-bda0-ec9e08af4ad3) plays inline in the root README.
 The video is also [on YouTube](https://www.youtube.com/watch?v=T5LgL4n1MOQ).
 This directory preserves the inputs and scripts used to make the README images
 and seven Product Hunt cards. It has no production account configuration.

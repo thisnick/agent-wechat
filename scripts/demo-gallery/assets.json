@@ -115,5 +115,14 @@
         610
       ]
     }
-  ]
+  ],
+  "githubVideo": {
+    "url": "https://github.com/user-attachments/assets/969f95ef-c17a-4e22-bda0-ec9e08af4ad3",
+    "issueComment": "https://github.com/thisnick/agent-wechat/issues/324#issuecomment-6480211337",
+    "bytes": 9545885,
+    "sha256": "8cacf30a4c824a0848862b0f52e4ac19351be3372d10e42b05f75ee3641a607d",
+    "video": "unchanged H.264 stream",
+    "audio": "AAC 128 kbps",
+    "videoStreamSha256": "c0f2aba34a74c9f390bf6d39ba0a7bd6a583fcf144b876066bf1bfa004d7a38b"
+  }
 }
