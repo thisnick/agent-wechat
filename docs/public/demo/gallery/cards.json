@@ -1,0 +1,44 @@
+[
+  {
+    "id": "01-introducing",
+    "headline": "Agent WeChat",
+    "body": "An open source WeChat client.\nFor people and AI agents.",
+    "visual": "Synthetic group conversation with video, mentions, and attachment."
+  },
+  {
+    "id": "02-images-video",
+    "headline": "Images and video.\nIn the conversation.",
+    "body": "Download original or compressed\nimages and videos.",
+    "visual": "Fresh synthetic media viewer showing compressed download and Get original controls."
+  },
+  {
+    "id": "03-voice-files",
+    "headline": "Voice notes.\nFile attachments.",
+    "body": "Receive links and forwarded\nconversations, too.",
+    "visual": "Fresh synthetic shared-link card and forwarded conversation in the client."
+  },
+  {
+    "id": "04-dms-groups",
+    "headline": "Direct messages.\nGroup conversations.",
+    "body": "Keep the context.\nQuote messages in your replies.",
+    "visual": "Fresh group conversation showing an original message and the quoted reply."
+  },
+  {
+    "id": "05-ai-agents",
+    "headline": "Connect your agent\nto WeChat.",
+    "body": "Text, voice, and media,\nright in your WeChat thread.",
+    "visual": "Real question and Nick Bot reply from the approved phone recording."
+  },
+  {
+    "id": "06-terminal",
+    "headline": "Your WeChat,\nfrom the terminal.",
+    "body": "Drive your entire WeChat client directly from the command line.",
+    "visual": "Actual wx command from the demo recording, with no fabricated terminal output."
+  },
+  {
+    "id": "07-open-source",
+    "headline": "Open source.\nControl it your way.",
+    "body": "Use the desktop app, CLI, or API.\nChoose how you interact with WeChat.",
+    "visual": "Typography-only closing card with the source repository."
+  }
+]

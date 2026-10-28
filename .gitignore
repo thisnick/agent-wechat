@@ -50,3 +50,6 @@ artifacts/desktop/
 /work/demo-video/
 /work/demo-design/
 /.codex-attachments/
+
+# Local launch-image build environments and generated sample media
+/work/demo-gallery/

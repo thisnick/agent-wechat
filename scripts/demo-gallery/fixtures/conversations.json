@@ -1,0 +1,46 @@
+{
+  "purpose": "Editorial fixture manifest for the archived gallery screenshots; not an API import or live compatibility test.",
+  "account": { "id": "demo_self", "displayName": "Demo workspace" },
+  "contacts": [
+    { "id": "demo_jin", "displayName": "Jin Wu" },
+    { "id": "demo_mei", "displayName": "Mei Chen" },
+    { "id": "demo_ying", "displayName": "Ying" }
+  ],
+  "conversations": [
+    {
+      "id": "design@chatroom",
+      "name": "Design team",
+      "kind": "group",
+      "messages": [
+        { "from": "demo_jin", "text": "Here are the visual references for the afternoon walk." },
+        { "from": "demo_jin", "kind": "image", "source": "media/afternoon-walk.jpg" },
+        { "from": "demo_mei", "text": "A short preview of the lakeside path." },
+        { "from": "demo_mei", "kind": "video", "source": "media/afternoon-walk.mp4", "original": "media/afternoon-walk-original.mp4" },
+        { "from": "demo_ying", "text": "@Jin the plan is ready. Can you take a look?", "mentions": ["demo_jin"] },
+        { "from": "demo_ying", "kind": "file", "source": "media/launch-notes.txt" },
+        { "id": "review-question", "from": "demo_jin", "text": "Can we review the walk preview this afternoon?" },
+        { "from": "demo_self", "text": "Yes, I will bring the updated images.", "quote": "review-question" }
+      ]
+    },
+    {
+      "id": "demo_jin",
+      "name": "Jin Wu",
+      "kind": "direct",
+      "messages": [
+        { "from": "demo_jin", "kind": "link", "title": "Afternoon walk references", "description": "Images and notes for our lakeside walk.", "url": "https://example.com/walk-references", "thumbnail": "media/afternoon-walk.jpg" },
+        { "from": "demo_jin", "kind": "forwarded", "text": "Jin Wu: Meet by the lake at 3?\nMei Chen: Works for me.\nYing: I will bring the route." }
+      ]
+    },
+    {
+      "id": "demo_mei",
+      "name": "Mei Chen",
+      "kind": "direct",
+      "messages": [
+        { "from": "demo_self", "text": "Can you send the afternoon walking plan?" },
+        { "from": "demo_mei", "kind": "voice", "durationSeconds": 15.96, "source": null, "note": "Only the player screenshot is archived; audio is not included as a synthetic fixture." },
+        { "from": "demo_mei", "text": "And here is the image to go with it." },
+        { "from": "demo_mei", "kind": "image", "source": "media/afternoon-walk.jpg" }
+      ]
+    }
+  ]
+}

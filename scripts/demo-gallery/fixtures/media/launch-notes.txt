@@ -1,0 +1,5 @@
+Agent WeChat demo notes
+
+Text, images, video, files, and voice notes.
+Direct messages and group conversations.
+Desktop, terminal, and AI agent integrations.

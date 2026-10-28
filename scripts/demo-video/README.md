@@ -6,9 +6,12 @@ It preserves the recorded demo's copy and interfaces, including the historical
 Windows client; it is not a compatibility statement for current releases.
 
 The final cut is **1920 × 1080, 30 fps, 2,776 frames (92.533 seconds)**.
-Private recordings, voice notes, generated chat media, credentials and rendered
-videos are not stored in Git. Keep the original recordings separately to rebuild
+The approved final export is included at
+[`docs/public/demo/agent-wechat-demo.mp4`](../../docs/public/demo/agent-wechat-demo.mp4).
+Private raw recordings, standalone voice notes, credentials, and intermediate
+renders are not stored in Git. Keep the original recordings separately to rebuild
 the full video. The title preview and instrumental can be generated without them.
+README and gallery images have their own [rebuild guide](../demo-gallery/README.md).
 
 ## Run
 

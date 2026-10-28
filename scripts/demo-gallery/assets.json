@@ -1,0 +1,119 @@
+{
+  "videoUrl": "https://www.youtube.com/watch?v=T5LgL4n1MOQ",
+  "video": {
+    "frames": 2776,
+    "fps": 30,
+    "durationSeconds": 92.53333333333333
+  },
+  "assets": [
+    {
+      "path": "docs/public/demo/agent-wechat-demo.mp4",
+      "bytes": 10944355,
+      "sha256": "e20b13e04c99f4e5242b8a2922827bcaac6482080f51d9f37083017e532fe958"
+    },
+    {
+      "path": "docs/public/demo/desktop.jpg",
+      "bytes": 95431,
+      "sha256": "9e4503ff6c2afc1fcddc911dfb635147ca79623a9540b4ab8836c5f27e0722a7",
+      "dimensions": [
+        1280,
+        728
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/01-introducing.png",
+      "bytes": 157183,
+      "sha256": "9e3f5bc812f2cc32dbda00d761c22159c9d880ee42ad40aca7cd626bfc6d0b0d",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/02-images-video.png",
+      "bytes": 256494,
+      "sha256": "e350f96ed2ced4a5244a8f2e49e518f9e5f4e716564eee6c2a75484505bc9106",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/03-voice-files.png",
+      "bytes": 125200,
+      "sha256": "ffb271c0a502e1872736deeaade6e9b0889cc299d10a9ed816b7667678ba189f",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/04-dms-groups.png",
+      "bytes": 116481,
+      "sha256": "b6fc282292c6893eccabf5580ef6e162b8d66af7085375da93052f1e14123226",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/05-ai-agents.png",
+      "bytes": 137439,
+      "sha256": "7e749df7ce7f82052b0781a54047f368f09239d319b33e99d569970ff7172e4d",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/06-terminal.png",
+      "bytes": 63242,
+      "sha256": "63d68768ef12d06dddf35f6ea7302bdf185c036e69590aac01f3639e5fdc2d37",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/07-open-source.png",
+      "bytes": 42383,
+      "sha256": "317ff1d47590b1bdec5e295bdc0490d61af05f9eaf6107f03ee595cb8b29cb9e",
+      "dimensions": [
+        1270,
+        760
+      ]
+    },
+    {
+      "path": "docs/public/demo/gallery/cards.json",
+      "bytes": 1734,
+      "sha256": "78ae64b8cc60a8da985fcf7be3566b5c960e737568880e5b15d743a241d4a36f"
+    },
+    {
+      "path": "docs/public/demo/gallery/preview.jpg",
+      "bytes": 365235,
+      "sha256": "01cc8ce8ea851c4692fce0b929a43f88a1cda645565b694284f1f749058ebb2e",
+      "dimensions": [
+        1600,
+        2040
+      ]
+    },
+    {
+      "path": "docs/public/demo/poster.jpg",
+      "bytes": 115987,
+      "sha256": "79514f68d70ca190e05e899e1029e96bebcbf3415bce000f87dc19f2ea2f8629",
+      "dimensions": [
+        1600,
+        900
+      ]
+    },
+    {
+      "path": "docs/public/demo/terminal.jpg",
+      "bytes": 44786,
+      "sha256": "cae349e4cde45ba49b4187e699cec79f384e76ff25b4c88869c7558967f7bae1",
+      "dimensions": [
+        1792,
+        610
+      ]
+    }
+  ]
+}
