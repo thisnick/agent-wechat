@@ -1,11 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { NativeMessage } from "@agent-wechat/shared";
 import { NativeConsumerState, type NativeSuppliedAsset } from "./native-consumer-state.ts";
 import { invalidateNativePreparedInputs, nativeDispatchManifest, observeNativeModelCall, observeNativePreparedInput, registerNativePreparedBoundary, trackNativePreparedText } from "./native-prepared-boundary.ts";
+
+test("location metadata binds prepared input without changing older message hashes", () => {
+  const message = { id: "m", accountId: "a", threadId: "peer", type: 1, body: "existing input" } as NativeMessage;
+  const params = { message, inputBody: message.body!, sessionKey: "session", agentId: "agent", channelAccountId: "default", history: [{ ...message, id: "older" }] };
+  const manifest = nativeDispatchManifest(params);
+  const previousHash = (m: NativeMessage) => createHash("sha256").update(JSON.stringify([m.id, m.version, m.senderId, m.type, m.body, m.mentions, m.serverId, m.appMessageType, m.quote, m.link])).digest("hex");
+  assert.equal(manifest.newInputs[0].contentSha256, previousHash(message));
+  assert.equal(manifest.historyInputs![0].contentSha256, previousHash(params.history[0]));
+  const location = { latitude: 12.5, longitude: -45.25, name: null, address: null, scale: null, mapType: null, poiId: null, coordinateSystem: "unknown" as const };
+  const pin = { ...message, type: 48, location };
+  const first = nativeDispatchManifest({ ...params, message: pin });
+  const changed = nativeDispatchManifest({ ...params, message: { ...pin, location: { ...location, longitude: -46 } } });
+  assert.notEqual(first.newInputs[0].contentSha256, changed.newInputs[0].contentSha256);
+});
 
 function fixture(t: any, options: { access?: boolean; policy?: "never" | "on_model_dispatch" } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-boundary-"));
