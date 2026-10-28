@@ -206,6 +206,27 @@ test("queued native reply ending needs_review retains uncertainty without resend
   assert.equal(await dispatchNativeMessage(value), "needs_review");
   assert.equal(submissions, 1); assert.equal(inspections, 1); assert.equal(value.state.get("m1")?.readPending, true);
 });
+test("buffered group replies retain structured mention IDs instead of dropping them", async t => {
+  const value = fixture(t, { group: true, mention: true }), calls: unknown[][] = [];
+  value.client.sendText = (async (...args: unknown[]) => {
+    calls.push(args); return { id: "send_mentions", accountId: "a", destination: value.message.threadId, state: "accepted" };
+  }) as any;
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+    await params.dispatcherOptions.deliver({ text: "please check", channelData: { "agent-wechat": { mentions: { userIds: ["wxid_member"] } } } });
+  };
+  assert.equal(await dispatchNativeMessage(value), "completed"); assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][4], { mentions: { userIds: ["wxid_member"] } }); assert.match(calls[0][3] as string, /^[a-f0-9]{64}$/);
+});
+test("buffered reply mention conflicts fail before any message or attachment send", async t => {
+  for (const payload of [{ text: "hi", mediaUrl: "/fixture/a.png" }, { text: "hi", audioAsVoice: true }, { text: "hi", replyToId: "quoted" }]) {
+    const value = fixture(t, { group: true, mention: true }); let sends = 0;
+    value.client.sendText = async () => { sends++; throw Error("must not send"); };
+    value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+      await params.dispatcherOptions.deliver({ ...payload, channelData: { "agent-wechat": { mentions: { all: true } } } });
+    };
+    assert.equal(await dispatchNativeMessage(value), "needs_review"); assert.equal(sends, 0);
+  }
+});
 test("whole-thread read CAS refreshes version without sending message IDs", async t => {
   const value = fixture(t); value.state.accept("2", { ...value.message, id: "gap" }, "live"); await dispatchNativeMessage(value);
   const requests: any[] = []; let attempt = 0;

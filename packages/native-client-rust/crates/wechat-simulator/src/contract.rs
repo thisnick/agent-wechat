@@ -48,6 +48,14 @@ pub enum Request {
         created_at: u32,
         client_id: u32,
     },
+    SendTextWithSource {
+        session: Session,
+        destination: String,
+        content: String,
+        created_at: u32,
+        client_id: u32,
+        source: String,
+    },
     SendQuote {
         session: Session,
         destination: String,

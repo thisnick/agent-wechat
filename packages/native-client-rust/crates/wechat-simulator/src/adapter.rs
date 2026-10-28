@@ -330,6 +330,32 @@ impl Upstream for SimulatorUpstream {
             returned_client_id_matches: true,
         })
     }
+    fn send_text_with_source(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        content: &str,
+        created_at: u32,
+        client_message_id: u32,
+        source: &str,
+    ) -> Result<TextSendResult> {
+        let reply: SendReply = self.rpc(&Request::SendTextWithSource {
+            session: self.session(state)?,
+            destination: destination.into(),
+            content: content.into(),
+            created_at,
+            client_id: client_message_id,
+            source: source.into(),
+        })?;
+        Ok(TextSendResult {
+            accepted: reply.accepted,
+            outer_code: 0,
+            item_code: Some(if reply.accepted { 0 } else { -1 }),
+            server_message_id: reply.server_id,
+            returned_destination_matches: true,
+            returned_client_id_matches: true,
+        })
+    }
     fn send_quote(
         &self,
         state: &mut AccountState,

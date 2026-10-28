@@ -513,7 +513,7 @@ impl Core {
                 }
                 "members" => {
                     let page = reader.group_members(subject.context("room required")?, &q)?;
-                    (page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"version":reader.generation()})).collect(),page.next_cursor)
+                    (page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"mentionName":crate::mention_send::mention_name(&m),"version":reader.generation()})).collect(),page.next_cursor)
                 }
                 "messages" => {
                     let page = reader.messages(&MessageQuery {

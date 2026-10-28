@@ -1,4 +1,5 @@
-import type { NativeSendIntent, NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeApiError, type NativeSendIntent, type NativeWeChatClient } from "@agent-wechat/shared";
+import { parseWeChatTextMentions, validateWeChatMentionSend, type WeChatTextMentions } from "./outbound-mentions.ts";
 export type NativeOutboundDelivery = { messageId: string; meta: Record<string, unknown> };
 export type NativeVerifiedMessageReceipt = { messageId: string; serverId: string; accountId: string; threadId: string };
 
@@ -26,18 +27,64 @@ export async function nativeOutboundDelivery(client: NativeWeChatClient, account
     ...source, messageIds: receipts, receiptState: "verified" } };
 }
 
+export class NativeTextSendInspectionError extends Error {
+  readonly code = "native_text_send_inspection_required";
+  readonly retryable = false;
+  readonly accountId: string;
+  readonly threadId: string;
+  readonly idempotencyKey: string;
+  readonly state: string;
+  readonly sendId?: string;
+  constructor(accountId: string, threadId: string, idempotencyKey: string, state: string, sendId?: string) {
+    super(`Native text send requires inspection (${state}); retain the original idempotency key and do not automatically resend`);
+    this.name = "NativeTextSendInspectionError";
+    this.accountId = accountId; this.threadId = threadId; this.idempotencyKey = idempotencyKey; this.state = state; this.sendId = sendId;
+  }
+}
+
 /** Submit once, then inspect the durable intent without repeating its side effect. */
-export async function submitNativeText(client: NativeWeChatClient, accountId: string, threadId: string, text: string, key: string, options: { timeoutMs?: number; initialDelayMs?: number } = {}): Promise<NativeSendIntent> {
-  let intent = await client.sendText(accountId, threadId, text, key);
+export async function submitNativeText(client: NativeWeChatClient, accountId: string, threadId: string, text: string, key: string,
+  options: { timeoutMs?: number; initialDelayMs?: number; mentions?: WeChatTextMentions } = {}): Promise<NativeSendIntent> {
+  const mentions = options.mentions === undefined ? undefined : parseWeChatTextMentions(options.mentions);
+  validateWeChatMentionSend(mentions, { to: threadId, text });
+  const inspect = (value: unknown, sendId?: string): NativeSendIntent => {
+    const intent = value as Partial<NativeSendIntent> & { kind?: unknown; threadId?: unknown };
+    if (!intent || typeof intent !== "object" || Array.isArray(intent) || typeof intent.id !== "string" || !intent.id
+      || (intent.accountId !== undefined && intent.accountId !== accountId)
+      || (intent.destination !== undefined && intent.destination !== threadId)
+      || intent.kind !== undefined || intent.threadId !== undefined
+      || typeof intent.state !== "string" || (sendId !== undefined && intent.id !== sendId)) throw new NativeTextSendInspectionError(accountId, threadId, key, "receipt_identity_mismatch", sendId);
+    // Older acknowledgements contain only id/state. Missing scope comes from
+    // this authenticated request, never from another account or conversation.
+    // This records acceptance only; nativeOutboundDelivery still requires an
+    // exact canonical message readback before returning a verified delivery.
+    return { ...intent, accountId, destination: threadId } as NativeSendIntent;
+  };
+  let intent: NativeSendIntent;
+  try { intent = inspect(await client.sendText(accountId, threadId, text, key, mentions ? { mentions } : undefined)); }
+  catch (error) {
+    if (error instanceof NativeTextSendInspectionError || error instanceof NativeApiError && error.status < 500 && error.code !== "timeout") throw error;
+    // The POST may have reached the daemon. Recover only by the original key;
+    // an absent or unreadable receipt is not permission to send again.
+    try { intent = inspect(await client.sendByKey(accountId, key)); }
+    catch (lookupError) {
+      if (lookupError instanceof NativeTextSendInspectionError) throw lookupError;
+      throw new NativeTextSendInspectionError(accountId, threadId, key, "submission_unknown");
+    }
+  }
   const deadline = Date.now() + Math.max(1, Math.min(options.timeoutMs ?? 65000, 65000));
   let delay = Math.max(1, Math.min(options.initialDelayMs ?? 250, 1000));
   while (["queued", "submitting"].includes(intent.state) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
-    intent = await client.send(accountId, intent.id, AbortSignal.timeout(remaining));
+    try { intent = inspect(await client.send(accountId, intent.id, AbortSignal.timeout(remaining)), intent.id); }
+    catch (error) {
+      if (error instanceof NativeTextSendInspectionError) throw error;
+      throw new NativeTextSendInspectionError(accountId, threadId, key, "status_unavailable", intent.id);
+    }
     delay = Math.min(delay * 2, 1000);
   }
-  if (!["accepted", "sent", "server_accepted"].includes(intent.state)) throw new Error(`Native send ${intent.id} requires inspection (${intent.state}); do not automatically resend`);
+  if (!["accepted", "sent", "server_accepted"].includes(intent.state)) throw new NativeTextSendInspectionError(accountId, threadId, key, intent.state, intent.id);
   return intent;
 }

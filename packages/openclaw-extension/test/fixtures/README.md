@@ -29,3 +29,21 @@ Never regenerate or edit this file: it stands for state already on deployed
 hosts. `src/native-consumer-compat.test.ts` checks that the current extension
 loads it and dispatches its buffered context against the daemon's current
 message JSON.
+
+## Native HTTP acknowledgement fixtures
+
+`native-send-legacy.json` preserves the minimal `{id,state}` acknowledgement
+accepted by earlier extension code and the existing Gateway smoke fixtures.
+`native-send-current.json` is a separate full send-intent response. Keep both
+files unchanged when adding another response shape; add a new fixture instead.
+
+`src/native-send.test.ts` exercises both through submission, queue polling and
+lost-response recovery. Missing account/conversation fields use the authenticated
+request's scope; a supplied mismatch or null is rejected. Acceptance alone does
+not establish delivery: a verified result still requires reading the exact stored
+outgoing message and checking its account, conversation and server ID.
+
+These are daemon HTTP responses, separate from the persisted consumer-file
+upgrade fixture above. The existing Gateway fixtures keep their original minimal
+responses, and `src/native-consumer-compat.test.ts` continues to load the frozen
+consumer file without regenerating it.

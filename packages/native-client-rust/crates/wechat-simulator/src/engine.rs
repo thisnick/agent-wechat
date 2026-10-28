@@ -135,6 +135,10 @@ impl Engine {
         } else {
             1
         };
+        let source = match &request {
+            Request::SendTextWithSource { source, .. } => Some(source.clone()),
+            _ => None,
+        };
         match request {
             Request::GroupMutation { session, request } => Ok(serde_json::to_value(
                 groups::mutate(&mut db, &session, &request)?,
@@ -347,6 +351,14 @@ impl Engine {
                 created_at,
                 client_id,
             }
+            | Request::SendTextWithSource {
+                session,
+                destination,
+                content,
+                created_at,
+                client_id,
+                source: _,
+            }
             | Request::SendQuote {
                 session,
                 destination,
@@ -373,15 +385,24 @@ impl Engine {
                         || (content.contains("<type>57</type>") && content.contains("<refermsg>")),
                     "invalid_quote_send"
                 );
-                let hash = format!(
-                    "{:x}",
-                    Sha256::digest(serde_json::to_vec(&(
-                        send_kind,
-                        destination.as_str(),
-                        content.as_str(),
-                        created_at
-                    ))?)
+                ensure!(
+                    source
+                        .as_ref()
+                        .is_none_or(|value| value.len() <= 64 * 1024 && !value.contains('\0')),
+                    "invalid_message_source"
                 );
+                let mut hash = Sha256::new();
+                hash.update(serde_json::to_vec(&(
+                    send_kind,
+                    destination.as_str(),
+                    content.as_str(),
+                    created_at,
+                ))?);
+                if let Some(source) = &source {
+                    hash.update([0]);
+                    hash.update(source.as_bytes());
+                }
+                let hash = format!("{:x}", hash.finalize());
                 let old:Option<(String,Option<String>,bool)>=db.query_row("SELECT hash,server_id,accepted FROM sends WHERE account=?1 AND client_id=?2",
                     params![session.account,client_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
                 if let Some((old_hash, server_id, accepted)) = old {
@@ -409,7 +430,10 @@ impl Engine {
                         send_kind,
                         &own(&session.account),
                         &destination,
-                        content.as_bytes(),
+                        (
+                            content.as_bytes(),
+                            source.as_deref().unwrap_or("<msgsource/>"),
+                        ),
                         created_at,
                     )?;
                     // A hub-originated send is committed from its receipt. It is
@@ -518,8 +542,15 @@ impl Engine {
                 } else {
                     (peer, own(&account))
                 };
-                let (_, command) =
-                    store_message(&tx, &account, 1, &from, &to, body.as_bytes(), time)?;
+                let (_, command) = store_message(
+                    &tx,
+                    &account,
+                    1,
+                    &from,
+                    &to,
+                    (body.as_bytes(), "<msgsource/>"),
+                    time,
+                )?;
                 append(&tx, &account, &command)?;
                 if notification {
                     notify(&tx, &account, 1)?;
@@ -595,7 +626,7 @@ impl Engine {
                     51,
                     &own(&account),
                     "filehelper",
-                    xml.as_bytes(),
+                    (xml.as_bytes(), "<msgsource/>"),
                     clock(&tx)?,
                 )?;
                 append(&tx, &account, &command)?;
@@ -607,8 +638,15 @@ impl Engine {
                 seed(&mut db, &account)?;
                 let tx = db.transaction()?;
                 let xml=b"<msg><img aeskey=\"00112233445566778899aabbccddeeff\" cdnmidimgurl=\"synthetic-media-reference\" length=\"100\" md5=\"00112233445566778899aabbccddeeff\"/></msg>";
-                let (_, command) =
-                    store_message(&tx, &account, 3, &peer, &own(&account), xml, clock(&tx)?)?;
+                let (_, command) = store_message(
+                    &tx,
+                    &account,
+                    3,
+                    &peer,
+                    &own(&account),
+                    (xml, "<msgsource/>"),
+                    clock(&tx)?,
+                )?;
                 append(&tx, &account, &command)?;
                 notify(&tx, &account, 1)?;
                 tx.commit()?;
@@ -720,7 +758,7 @@ fn store_message(
     kind: u32,
     from: &str,
     to: &str,
-    body: &[u8],
+    body: (&[u8], &str),
     time: u32,
 ) -> Result<(String, SyncCommand)> {
     let next: u64 = db.query_row(
@@ -776,7 +814,7 @@ fn seed(db: &mut Connection, account: &str) -> Result<()> {
         1,
         "sim_mei",
         &own(account),
-        b"Synthetic conversation ready.",
+        (b"Synthetic conversation ready.", "<msgsource/>"),
         INITIAL_TIME,
     )?;
     append(&tx, account, &command)?;
@@ -908,7 +946,7 @@ fn message(
     kind: u32,
     from: &str,
     to: &str,
-    body: &[u8],
+    body: (&[u8], &str),
     sid: u64,
     time: u32,
     sequence: u64,
@@ -920,12 +958,12 @@ fn message(
             p::bytes(2, &p::bytes(1, from.as_bytes())),
             p::bytes(3, &p::bytes(1, to.as_bytes())),
             p::uint(4, kind.into()),
-            p::bytes(5, &p::bytes(1, body)),
+            p::bytes(5, &p::bytes(1, body.0)),
             p::uint(6, 0),
             p::uint(7, 0),
             p::bytes(8, &p::buffer(&[])),
             p::uint(9, time.into()),
-            p::bytes(10, b"<msgsource/>"),
+            p::bytes(10, body.1.as_bytes()),
             p::uint(12, sid),
             p::uint(13, sequence),
         ])?,
@@ -1208,6 +1246,57 @@ mod tests {
             engine.snapshot().unwrap()["accounts"][0]["acceptedSends"],
             1
         );
+    }
+
+    #[test]
+    fn text_source_survives_synthetic_echo_and_idempotency_checks() {
+        let scratch = wechat_platform::private_tempdir("simulator-mention-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        let session = login(&engine, "personal");
+        let before = engine.snapshot().unwrap()["accounts"][0]["head"]
+            .as_u64()
+            .unwrap();
+        let source =
+            "<msgsource><atuserlist>sim_mei</atuserlist><alnode><fr>1</fr></alnode></msgsource>";
+        let content = "😀 Hi @Mei Chen\u{2005}!";
+        let send = |source: &str| Request::SendTextWithSource {
+            session: session.clone(),
+            destination: "sim_mei".into(),
+            content: content.into(),
+            created_at: INITIAL_TIME,
+            client_id: 778,
+            source: source.into(),
+        };
+        let accepted = engine.request(send(source)).unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(engine.request(send(source)).unwrap(), accepted);
+        assert!(engine.request(send("<msgsource/>")).is_err());
+        assert_eq!(
+            engine.snapshot().unwrap()["accounts"][0]["acceptedSends"],
+            1
+        );
+        engine
+            .control(Control::EchoSend {
+                account: "personal".into(),
+                client_id: 778,
+            })
+            .unwrap();
+        let batch: SyncBatch = serde_json::from_value(
+            engine
+                .request(Request::Sync {
+                    session,
+                    cursor: encode_cursor(before).unwrap(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(batch.commands.len(), 1);
+        let message =
+            wechat_protocol::wire::decode_add_message(&batch.commands[0].payload, &own("personal"))
+                .unwrap();
+        assert_eq!(message.message_type, 1);
+        assert_eq!(message.content_text.as_deref(), Some(content));
+        assert_eq!(message.msgsource.as_deref(), Some(source.as_bytes()));
     }
 
     #[test]

@@ -14,6 +14,7 @@ import { MessageRecall } from "./message-recall.ts";
 import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
 import { ThreadPinning, ThreadMuting } from "./thread-pinning.ts";
 import { validQuoteReference } from "./reply.ts";
+import { validMentionReceipt } from "./mentions.ts";
 export type Connection = {
   desktopId?: string;
   session: HubSession;
@@ -124,7 +125,8 @@ export async function connect(
                     typeof s.threadId === "string" &&
                     (s.dismissed === undefined ||
                       typeof s.dismissed === "boolean") &&
-                    (s.quote === undefined || validQuoteReference(s.quote)),
+                    (s.quote === undefined || validQuoteReference(s.quote)) &&
+                    (s.mentions === undefined || (!s.quote && s.threadId.endsWith("@chatroom") && validMentionReceipt(s.text, s.mentions))),
                 )
                 .slice(-50)
             : [];

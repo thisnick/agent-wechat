@@ -208,7 +208,7 @@ impl Core {
     pub fn group_members(&self, account: &str, room: &str, q: &ListQuery) -> Result<Value> {
         let reader = self.profile_reader_owned(account)?;
         let page = reader.group_members(room, q)?;
-        let mut items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name})).collect();
+        let mut items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"mentionName":crate::mention_send::mention_name(&m)})).collect();
         self.classify_peers(&mut items, &reader)?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),

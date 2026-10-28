@@ -207,6 +207,9 @@ pub struct NativeGroupMember {
     pub classification: Option<wechat_core::PeerClassification>,
     pub display_name: Option<String>,
     pub room_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mention_name: Option<String>,
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -447,6 +450,7 @@ pub fn typescript() -> String {
         NativeAccountRemovalRequest::decl(),
         NativeAccountRemoval::decl(),
         wechat_core::QuoteSendReference::decl(),
+        wechat_core::TextMentionPosition::decl(),
         wechat_core::TextMentions::decl(),
         NativeTextSendRequest::decl(),
         wechat_core::ShareSendRequest::decl(),

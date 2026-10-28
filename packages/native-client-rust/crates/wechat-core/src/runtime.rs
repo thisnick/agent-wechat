@@ -2762,6 +2762,7 @@ mod tests {
         let request = crate::TextMentions {
             user_ids: vec!["member_a".into()],
             all: false,
+            positions: vec![],
         };
         let first = core
             .send_mentioned_text(
@@ -2785,8 +2786,93 @@ mod tests {
         let resolved = payload.mentions.unwrap();
         assert_eq!(resolved.text, "@Member A\u{2005}hello");
         assert!(!resolved.text.contains("Private"));
+        assert_eq!(
+            core.group_member("one", "room@chatroom", "member_a")
+                .unwrap()["member"]["mentionName"],
+            "Member A"
+        );
+        assert_eq!(
+            core.group_members("one", "room@chatroom", &Default::default())
+                .unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["username"] == "member_a")
+                .unwrap()["mentionName"],
+            "Member A"
+        );
+        let inline_text = "😀 @old\u{2005} + @again\u{2005}!";
+        let inline_request = crate::TextMentions {
+            user_ids: vec!["member_a".into()],
+            all: false,
+            positions: vec![
+                crate::TextMentionPosition {
+                    start: 3,
+                    end: 8,
+                    index: 0,
+                },
+                crate::TextMentionPosition {
+                    start: 11,
+                    end: 18,
+                    index: 0,
+                },
+            ],
+        };
+        let inline_send = core
+            .send_mentioned_text(
+                "one",
+                "inline-key",
+                "room@chatroom",
+                inline_text,
+                inline_request.clone(),
+            )
+            .await
+            .unwrap();
+        let inline_sealed = store.send_payload("one", &inline_send.id).unwrap();
+        let inline_payload: SendPayload = serde_json::from_slice(
+            &core
+                .vault
+                .open_record("one", "send-payload", &inline_sealed)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            inline_payload.mentions.unwrap().text,
+            "😀 @Member A\u{2005} + @Member A\u{2005}!"
+        );
         wechat_profile::apply_contact_patch(&location, &keys, &contact("Changed name"), &options)
             .unwrap();
+        assert_eq!(
+            core.send_mentioned_text(
+                "one",
+                "inline-key",
+                "room@chatroom",
+                inline_text,
+                inline_request.clone()
+            )
+            .await
+            .unwrap()
+            .id,
+            inline_send.id
+        );
+        assert_eq!(
+            store.send_payload("one", &inline_send.id).unwrap(),
+            inline_sealed
+        );
+        let mut changed_positions = inline_request;
+        changed_positions.positions.pop();
+        assert!(core
+            .send_mentioned_text(
+                "one",
+                "inline-key",
+                "room@chatroom",
+                inline_text,
+                changed_positions
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
         assert_eq!(
             core.send_mentioned_text(
                 "one",
@@ -2831,7 +2917,8 @@ mod tests {
                 "hello",
                 crate::TextMentions {
                     user_ids: vec!["not_a_member".into()],
-                    all: false
+                    all: false,
+                    positions: vec![],
                 }
             )
             .await

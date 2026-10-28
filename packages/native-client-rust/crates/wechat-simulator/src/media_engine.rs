@@ -131,7 +131,7 @@ pub(super) fn request(
                     message_type,
                     &own(&session.account),
                     &destination,
-                    content.as_bytes(),
+                    (content.as_bytes(), "<msgsource/>"),
                     created_at,
                 )?;
                 if let Some(bytes) = encoded {
@@ -318,7 +318,7 @@ pub(super) fn receive(db: &mut Connection, account: &str, peer: &str, kind: &str
         message_type,
         peer,
         &own(account),
-        xml.as_bytes(),
+        (xml.as_bytes(), "<msgsource/>"),
         clock(&tx)?,
     )?;
     if let Some(bytes) = voice {

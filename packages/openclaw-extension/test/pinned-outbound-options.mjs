@@ -27,14 +27,16 @@ const createRegistry = await runtime('registry-empty-', 'createEmptyPluginRegist
 const runMessageAction = await runtime('message-action-runner-', 'runMessageAction');
 const setActiveRegistry = await runtime('runtime-', 'setActivePluginRegistry');
 const resolveSchema = await runtime('message-action-discovery-', 'resolveChannelMessageToolSchemaProperties');
-const calls = []; let preparations = 0;
+const createTools = await runtime('openclaw-tools-', 'createOpenClawTools');
+const calls = [], handoffs = []; let preparations = 0;
 const handlers = createWeChatMediaHandlers(async (...args) => {
-  calls.push(args[6]); await args[7]?.(); return { messageId: 'synthetic-message', meta: { outcome: 'sent' } };
+  calls.push(args[6]); handoffs.push({ to: args[1], text: args[2], key: args[5], options: args[6] });
+  await args[7]?.(); return { messageId: 'synthetic-message', meta: { outcome: 'sent' } };
 });
 const plugin = { ...wechatPlugin, actions: { ...wechatPlugin.actions, prepareSendPayload: args => {
   preparations++; return wechatPlugin.actions.prepareSendPayload(args);
 } }, outbound: { ...wechatPlugin.outbound, ...handlers },
-  message: createChannelMessageAdapterFromOutbound({ id: 'agent-wechat', outbound: handlers }) };
+  message: { ...createChannelMessageAdapterFromOutbound({ id: 'agent-wechat', outbound: handlers }), durableFinal: wechatPlugin.message.durableFinal } };
 const registry = createRegistry(); registry.channels.push({ plugin, pluginId: 'agent-wechat', source: 'synthetic-option-check' });
 setActiveRegistry(registry, 'synthetic-option-check', 'default', join(root, 'workspace'));
 const fixture = join(root, 'workspace/source.mp4');
@@ -44,6 +46,16 @@ const cfg = { channels: { 'agent-wechat': { enabled: true, backend: 'native', na
   agents: { defaults: { workspace: join(root, 'workspace') } } };
 const schema = resolveSchema({ cfg, channel: 'agent-wechat' });
 assert.deepEqual(schema.channelData.properties['agent-wechat'].properties.videoQuality.enum, ['normal', 'original']);
+assert.equal(schema.channelData.properties['agent-wechat'].properties.mentions.properties.userIds.uniqueItems, true);
+const tools = createTools({ config: cfg, workspaceDir: join(root, 'workspace'), agentChannel: 'agent-wechat', currentChannelId: 'g@chatroom',
+  requesterSenderId: 'wxid_requester', senderIsOwner: true, computerTransport: null, modelHasVision: false, wrapBeforeToolCallHook: false });
+const messageTool = tools.find(tool => tool.name === 'message');
+assert.ok(messageTool, 'the host tools list must include its built-in message tool');
+assert.ok(JSON.stringify(messageTool.parameters).includes('mentions'), 'the actual model-facing message schema must expose WeChat mentions');
+assert.ok(JSON.stringify(messageTool.parameters).includes('wechat_group_info'));
+const manifest = JSON.parse(await readFile(join(extension, 'openclaw.plugin.json'), 'utf8'));
+assert.ok(manifest.contracts.tools.includes('wechat_send_share'), 'plugin-owned send-share tool stays discoverable');
+assert.ok(!manifest.contracts.tools.includes('message'), 'the host built-in is not declared as a duplicate plugin tool');
 const checks = [];
 for (const [name, forceCoreDelivery, requireQueuePersistence, params, expected] of [
   ['prepared-normal', false, false, { channelData: { 'agent-wechat': { videoQuality: 'normal' } } }, { videoQuality: 'normal', forceDocument: false }],
@@ -65,4 +77,40 @@ await assert.rejects(runMessageAction({ cfg, action: 'send', forceCoreDelivery: 
   params: { channel: 'agent-wechat', to: 'wxid_synthetic_target', media: fixture, asDocument: true, channelData: { 'agent-wechat': { videoQuality: 'original' } } },
   mediaAccess: { localRoots: [join(root, 'workspace')] } }), /cannot also request/);
 assert.equal(calls.length, before); assert.equal(networkCalls, 0);
-await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.7', checks, schemaIncludesQuality: true, queuedConflictRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });
+const mentionChecks = [];
+for (const [name, forceCoreDelivery, requireQueuePersistence, mentions] of [
+  ['prepared-members', false, false, { userIds: ['wxid_a', 'wxid_b'] }],
+  ['prepared-all', false, false, { all: true }],
+  ['forced-core-members', true, false, { userIds: ['wxid_a'] }],
+  ['queued-members', true, true, { userIds: ['wxid_b'] }],
+  ['queued-all', true, true, { all: true }],
+]) {
+  const before = calls.length, beforePreparation = preparations;
+  await runMessageAction({ cfg, action: 'send', params: { channel: 'agent-wechat', to: 'g@chatroom', message: 'please check', channelData: { 'agent-wechat': { mentions } } },
+    forceCoreDelivery, requireQueuePersistence, agentId: 'main', senderIsOwner: true });
+  assert.equal(calls.length, before + 1); assert.deepEqual(calls.at(-1), { mentions, forceDocument: false });
+  assert.equal(handoffs.at(-1).to, 'g@chatroom'); assert.equal(handoffs.at(-1).text, 'please check');
+  if (requireQueuePersistence) assert.match(handoffs.at(-1).key, /^[a-f0-9]{64}$/);
+  assert.equal(preparations - beforePreparation, forceCoreDelivery ? 0 : 1);
+  mentionChecks.push(name);
+}
+for (const [params, expected] of [
+  [{ to: 'wxid_dm', mentions: { all: true } }, /group conversation/],
+  [{ mentions: { userIds: ['wxid_a', 'wxid_a'] } }, /Invalid WeChat mentions/],
+  [{ mentions: { all: true, userIds: ['wxid_a'] } }, /Invalid WeChat mentions/],
+  [{ mentions: { userIds: ['A Name'] } }, /Invalid WeChat mentions/],
+  [{ mentions: { all: true }, media: fixture }, /group text only/],
+  [{ mentions: { all: true }, audioAsVoice: true }, /group text only/],
+  [{ mentions: { all: true }, replyTo: 'quoted-message' }, /group text only/],
+]) {
+  const { mentions, ...extra } = params, before = calls.length;
+  for (const forceCoreDelivery of [false, true]) {
+    await assert.rejects(runMessageAction({ cfg, action: 'send', forceCoreDelivery, requireQueuePersistence: true, agentId: 'main', senderIsOwner: true,
+      params: { channel: 'agent-wechat', to: 'g@chatroom', message: 'hello', channelData: { 'agent-wechat': { mentions } }, ...extra },
+      mediaAccess: { localRoots: [join(root, 'workspace')] } }), expected);
+    assert.equal(calls.length, before);
+  }
+}
+assert.equal(networkCalls, 0);
+await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.7', checks, mentionChecks, messageToolListed: true,
+  schemaIncludesQuality: true, schemaIncludesMentions: true, queuedConflictRejected: true, queuedMentionsRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });

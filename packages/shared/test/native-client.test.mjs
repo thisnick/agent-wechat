@@ -172,6 +172,31 @@ test('text mention options preserve member IDs and reject ambiguous requests bef
   assert.equal(attempts,1);
 });
 
+test('inline mentions retain UTF-16 positions and reject malformed spans before transport', async () => {
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{requests.push(JSON.parse(init.body));return Response.json({id:'inline-send',state:'queued'});}});
+  const text='😀 @old\u2005 + @again\u2005!';
+  const mentions={userIds:['member_a'],positions:[{start:3,end:8,index:0},{start:11,end:18,index:0}]};
+  await client.sendText('a','room@chatroom',text,'inline-key',{mentions});
+  assert.deepEqual(requests[0],{kind:'text',threadId:'room@chatroom',text,mentions});
+  await client.sendText('a','room@chatroom','Hi @everyone\u2005!','inline-all',{mentions:{all:true,positions:[{start:3,end:13,index:0}]}});
+  await client.sendText('a','room@chatroom','Hi','prepend-empty',{mentions:{userIds:['a'],positions:[]}});
+  await client.sendText('a','room@chatroom','@😀\u2005','emoji-label',{mentions:{userIds:['a'],positions:[{start:0,end:4,index:0}]}});
+  for(const positions of [null,{},[{start:1,end:8,index:0}],[{start:3,end:7,index:0}],[{start:3,end:9,index:0}],
+    [{start:3,end:99,index:0}],[{start:-1,end:8,index:0}],[{start:3.5,end:8,index:0}],[{start:3,end:8,index:1}],
+    [{start:3,end:3,index:0}],[{start:3,end:8,index:0,source:'xml'}],
+    [{start:3,end:8,index:0},{start:3,end:8,index:0}],[{start:11,end:18,index:0},{start:3,end:8,index:0}],
+    Array.from({length:257},(_,i)=>({start:i*3,end:i*3+3,index:0}))]) {
+    assert.throws(()=>client.sendText('a','room@chatroom',text,'bad',{mentions:{userIds:['a'],positions}}),/Invalid text mentions/);
+  }
+  assert.throws(()=>client.sendText('a','room@chatroom',text,'bad',{mentions:{userIds:['a','b'],positions:[{start:3,end:8,index:0}]}}),/Invalid text mentions/);
+  for(const label of ['', ' ', 'bad\nname', 'bad\u0085name', 'bad\u2005name', 'a'.repeat(1025), '\ud800']) {
+    const invalid=`@${label}\u2005`;
+    assert.throws(()=>client.sendText('a','room@chatroom',invalid,'bad',{mentions:{userIds:['a'],positions:[{start:0,end:invalid.length,index:0}]}}),/Invalid text mentions/);
+  }
+  assert.equal(requests.length,4);
+});
+
 test('recall sends an exact decimal identity and caller key once without cancelling its operation', async () => {
   const requests=[];
   const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{requests.push({url:String(url),init});return Response.json({id:'recall_operation',accountId:'a',kind:'message_recall',state:'queued',result:{}});}});

@@ -11,7 +11,9 @@ import {
   type NativeThread,
   type QuoteSendReference,
   type NativeThreadMessage,
+  type TextMentions,
 } from "@agent-wechat/shared";
+import { mentionOptions, type MentionToken } from "./mentions.ts";
 import type { BrowserCache } from "./browser-cache.ts";
 import { HISTORY_TTL_MS, HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
@@ -31,6 +33,7 @@ export type PendingSend = {
   threadId: string;
   quote?: QuoteSendReference;
   quotePreview?: NativeThreadMessage;
+  mentions?: TextMentions;
   intent?: NativeSendIntent;
   uncertain?: boolean;
   dismissed?: boolean;
@@ -102,6 +105,12 @@ export function readableError(error: unknown): string {
           read_state_conflict:
             "The conversation changed. Refresh it and try again.",
           idempotency_conflict: "This send key is already in use.",
+          invalid_mentions: "Choose the mentioned members again.",
+          invalid_mention_text: "The message or its mention positions are invalid. Edit it and try again.",
+          mentions_require_group: "Mentions are available in groups only.",
+          mention_member_unavailable: "A mentioned member is unavailable. Remove the mention or choose them again.",
+          mention_group_membership_unavailable: "Refresh the group’s members before sending mentions.",
+          quote_mentions_unsupported: "Send mentions separately from quoted replies.",
           quote_target_unavailable:
             "That message is no longer available to quote.",
           quote_target_mismatch: "The quoted message changed. Select it again.",
@@ -1518,11 +1527,18 @@ export class HubSession {
       await pause(1500, signal);
     }
   }
-  async send(text: string, replyTo?: NativeMessage): Promise<boolean> {
+  async send(text: string, replyTo?: NativeMessage, tokens: MentionToken[] = []): Promise<boolean> {
     const account = this.value.account,
       threadId = this.value.selected,
       generation = this.generation;
     if (!account || !threadId || !text.trim()) return false;
+    let mentions: TextMentions | undefined;
+    try { mentions = mentionOptions(text, tokens); }
+    catch (error) { this.publish({ error: error instanceof Error ? error.message : "Choose the mentioned members again." }); return false; }
+    if (mentions && (replyTo || !threadId.endsWith("@chatroom") || this.value.capabilities.inlineTextMentions !== true)) {
+      this.publish({ error: replyTo ? "Send mentions separately from quoted replies." : "This hub cannot send inline mentions. Remove them or update the hub." });
+      return false;
+    }
     if (this.value.selectedGroup?.isInGroup === false) {
       this.publish({
         error:
@@ -1567,7 +1583,7 @@ export class HubSession {
     this.publish({
       sends: [
         ...this.value.sends,
-        { key, text, threadId, ...(quote && { quote, quotePreview }) },
+        { key, text, threadId, ...(quote && { quote, quotePreview }), ...(mentions && { mentions }) },
       ],
       error: null,
     });
@@ -1578,7 +1594,7 @@ export class HubSession {
         threadId,
         text,
         key,
-        quote,
+        mentions ? { mentions } : quote,
       );
       if (this.current(account, generation)) {
         await this.acceptReceipt(intent, account, generation, key);
@@ -1604,7 +1620,7 @@ export class HubSession {
       )
         this.signedOut(account);
       if (
-        quote &&
+        (quote || mentions) &&
         error instanceof NativeApiError &&
         !error.retryable &&
         [
@@ -1616,6 +1632,7 @@ export class HubSession {
           "quote_target_ambiguous",
           "quote_content_unavailable",
           "quote_sender_unavailable",
+          "invalid_mentions", "invalid_mention_text", "mentions_require_group", "mention_member_unavailable", "mention_group_membership_unavailable", "quote_mentions_unsupported", "invalid_request",
         ].includes(error.code)
       ) {
         // These admission errors occur before an intent exists. Preserve the

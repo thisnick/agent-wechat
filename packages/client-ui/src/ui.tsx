@@ -9,6 +9,7 @@ import {
   BellOff,
   PinOff,
   Pin,
+  AtSign,
 } from "lucide-react";
 import type { ReactNode } from "react";
 const icons: Record<string, string> = {
@@ -55,6 +56,7 @@ export function Icon({ name }: { name: string }) {
       "bell-off": BellOff,
       unpin: PinOff,
       pin: Pin,
+      mention: AtSign,
     } as Record<string, typeof MessageSquareX>
   )[name];
   if (component) {

@@ -235,12 +235,37 @@ export class NativeWeChatClient {
       const ids = mentions?.userIds ?? [];
       if (Object.keys(options).some(key => key !== "mentions") || !threadId.endsWith("@chatroom")
         || !mentions || typeof mentions !== "object" || Array.isArray(mentions)
-        || Object.keys(mentions).some(key => key !== "userIds" && key !== "all")
+        || Object.keys(mentions).some(key => key !== "userIds" && key !== "all" && key !== "positions")
         || (mentions.userIds !== undefined && !Array.isArray(mentions.userIds))
         || (mentions.all !== undefined && typeof mentions.all !== "boolean")
         || !Array.isArray(ids) || ids.length > 128 || new Set(ids).size !== ids.length
         || (mentions.all === true) === (ids.length > 0)
         || ids.some(id => typeof id !== "string" || !/^[A-Za-z0-9_@.-]{1,256}$/.test(id) || id === "notify@all")) throw new Error("Invalid text mentions");
+      const positions = mentions.positions ?? [];
+      if (mentions.positions !== undefined && !Array.isArray(mentions.positions) || positions.length > 256) throw new Error("Invalid text mentions");
+      if (positions.length) {
+        const boundary = (offset: number) => !(offset > 0 && offset < text.length
+          && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff
+          && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff);
+        const covered = new Set<number>();
+        const recipients = mentions.all === true ? 1 : ids.length;
+        let previous = 0;
+        if (!text || text.includes("\0") || new TextEncoder().encode(text).length > 65536) throw new Error("Invalid text mentions");
+        for (const position of positions) {
+          if (!position || typeof position !== "object" || Array.isArray(position)
+            || Object.keys(position).some(key => !["start", "end", "index"].includes(key))
+            || !Number.isSafeInteger(position.start) || !Number.isSafeInteger(position.end) || !Number.isSafeInteger(position.index)
+            || position.start < previous || position.start >= position.end || position.end > text.length
+            || position.index < 0 || position.index >= recipients || !boundary(position.start) || !boundary(position.end)) throw new Error("Invalid text mentions");
+          const span = text.slice(position.start, position.end);
+          const label = span.slice(1, -1);
+          if (!span.startsWith("@") || !span.endsWith("\u2005") || !label.trim()
+            || new TextEncoder().encode(label).length > 1024
+            || /[\u0000-\u001f\u007f-\u009f\u2005\ud800-\udfff]/u.test(label)) throw new Error("Invalid text mentions");
+          covered.add(position.index); previous = position.end;
+        }
+        if (covered.size !== recipients) throw new Error("Invalid text mentions");
+      }
     }
     if (quote !== undefined && (!quote || typeof quote !== "object" || Array.isArray(quote)
       || Object.keys(quote).some(key => key !== "messageId" && key !== "serverId")

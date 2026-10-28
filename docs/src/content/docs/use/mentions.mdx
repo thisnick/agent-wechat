@@ -1,11 +1,36 @@
 ---
 title: Mention group members
-description: Send group mentions from the CLI or API and read received mention metadata.
+description: Mention group members in the app, CLI, OpenClaw or API.
 ---
 
 Use WeChat user IDs to mention group members. The daemon adds the visible names and
 the metadata WeChat uses to identify the recipients. Typing `@name` in ordinary
 text does not create a mention.
+
+## In the app
+
+Type `@` in a group message or use **Mention someone** beside the attachment
+button. Choose a member to insert their mention at the cursor. Use its × button
+or Backspace to remove it. The app saves selected recipients with the draft.
+
+## OpenClaw
+
+Use the existing `message` tool with the `agent-wechat` channel. For example:
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "target": "GROUP_ID",
+  "message": "Please check this",
+  "channelData": {
+    "agent-wechat": { "mentions": { "userIds": ["MEMBER_ID"] } }
+  }
+}
+```
+
+Use `"mentions": { "all": true }` to address everyone. The tool includes these
+options in its schema when the WeChat channel is loaded.
 
 ## CLI
 
@@ -49,6 +74,22 @@ await client.sendText(accountId, groupId, "Please check this", "mention-001", {
 });
 ```
 
+To keep a mention inside a sentence, supply `positions` with UTF-16 offsets into
+the submitted text. Each span starts at `@` and includes its final U+2005 space;
+`end` is exclusive and `index` selects an entry in `userIds`:
+
+```ts
+await client.sendText(accountId, groupId, "Hi @Alice\u2005, please check this", "mention-002", {
+  mentions: { userIds: [memberId], positions: [{ start: 3, end: 10, index: 0 }] },
+});
+```
+
+The daemon replaces the selected labels with the saved shared member names.
+Use the member response's `mentionName` for a matching preview. Repeated spans
+may select the same member; every selected member needs at least one span.
+For `all: true`, use index `0`. Hubs supporting this form advertise
+`inlineTextMentions: true` in account capabilities.
+
 Names come from the saved group display name or nickname, with the account ID as
 a fallback. Private contact remarks are not included. The daemon keeps the
 resolved names and metadata with the original send, so replaying its key uses
@@ -79,8 +120,8 @@ accepts either a known self mention or a known all-members mention.
 :::note[Good to know]
 Mentions currently support ordinary text in groups already saved on the daemon.
 Unknown member IDs, duplicate IDs, direct chats, quoted replies and media
-payloads are rejected. The daemon prepends mention tokens; it does not place
-them inside your text. The complete message, including those names, must fit
+payloads are rejected. Without positions, the daemon prepends mention tokens.
+The complete message, including those names, must fit
 within the 64 KiB text limit. Keep the original send key after a timeout; see
 [Sends and recovery](/how-it-works/sends/).
 :::

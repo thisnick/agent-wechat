@@ -226,7 +226,7 @@ pub(super) fn mutate(db: &mut Connection, session: &Session, rpc: &GroupRpc) -> 
                     10000,
                     &room,
                     &own(&session.account),
-                    b"Group created in the simulator.",
+                    (b"Group created in the simulator.", "<msgsource/>"),
                     clock(&tx)?,
                 )?;
                 append(&tx, &session.account, &notice)?;

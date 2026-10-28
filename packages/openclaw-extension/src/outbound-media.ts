@@ -4,6 +4,9 @@ import { resolveWeChatAccount } from "./types.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { sendNativeAttachment, validateNativeMediaSendOptions, type NativeMediaSendOptions } from "./native-media.ts";
 import { nativeOutboundDelivery, submitNativeText, type NativeOutboundDelivery } from "./native-send.ts";
+import { validateWeChatMentionSend, type WeChatTextMentions } from "./outbound-mentions.ts";
+
+export type WeChatOutboundSendOptions = NativeMediaSendOptions & { mentions?: WeChatTextMentions };
 
 export async function sendWeChatMedia(
   cfg: unknown,
@@ -12,9 +15,10 @@ export async function sendWeChatMedia(
   mediaUrl: string | undefined,
   audioAsVoice = false,
   idempotencyKey?: string,
-  options: NativeMediaSendOptions = {},
+  options: WeChatOutboundSendOptions = {},
   beforeSend?: () => Promise<void>,
 ): Promise<NativeOutboundDelivery> {
+  validateWeChatMentionSend(options.mentions, { to, text, mediaUrl, audioAsVoice, ...options });
   validateNativeMediaSendOptions(options, audioAsVoice);
   if (!mediaUrl && (options.forceDocument || options.videoQuality != null)) throw new Error("WeChat media options require an attachment");
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
@@ -24,7 +28,7 @@ export async function sendWeChatMedia(
   if (!mediaUrl) {
     if (audioAsVoice) throw new Error("Voice sending requires an audio attachment");
     await beforeSend?.();
-    const send = await submitNativeText(client, account.native.accountId, to, text, key);
+    const send = await submitNativeText(client, account.native.accountId, to, text, key, { mentions: options.mentions });
     return nativeOutboundDelivery(client, account.native.accountId, to, send.localMessageId ? [send.localMessageId] : [],
       { sendId: send.id, state: send.state, serverIds: send.serverId ? [send.serverId] : undefined });
   }

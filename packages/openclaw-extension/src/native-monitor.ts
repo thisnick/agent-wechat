@@ -8,6 +8,8 @@ import { NativeConsumerState } from "./native-consumer-state.ts";
 import { invalidateNativePreparedInputs, nativeDispatchManifest, nativeSourceMessageSid, trackNativePreparedInput } from "./native-prepared-boundary.ts";
 import { nativeRecallInfo, type NativeRecallObservation } from "./native-recall-state.ts";
 import { submitNativeText } from "./native-send.ts";
+import { nativePayloadMediaOptions } from "./outbound-options.ts";
+import { validateWeChatMentionSend } from "./outbound-mentions.ts";
 import { sameEmbeddedQuote } from "./native-quote.ts";
 import { prepareNativeAttachment, sendNativeAttachment } from "./native-media.ts";
 import { buildNativeContext, nativeGroupHistoryLimit, prepareNativeHistory, transcribeNativeAttachment } from "./native-history.ts";
@@ -208,11 +210,13 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
           params.signal?.throwIfAborted();
           if (state.get(message.id)?.invalidatedByRecall) return;
           await beforeSend();
+          const options = nativePayloadMediaOptions(payload);
+          validateWeChatMentionSend(options.mentions, { ...payload, ...options, to: message.threadId });
           const urls: string[] = payload.mediaUrls?.length ? payload.mediaUrls : payload.mediaUrl ? [payload.mediaUrl] : [];
           if (urls.length > 16) throw new Error("Native reply media count exceeds its bound");
           if (payload.audioAsVoice && !urls.length) throw new Error("Native voice reply requires an audio attachment");
           for (const url of urls) { const key = createHash("sha256").update(`${dispatchManifest.messageSid}\0${delivery++}`).digest("hex"); await sendNativeAttachment(client, account, message.threadId, url, payload.audioAsVoice === true, key, beforeSend); }
-          if (payload.text) { await beforeSend(); const key = createHash("sha256").update(`${dispatchManifest.messageSid}\0${delivery++}`).digest("hex"); await submitNativeText(client, account.native!.accountId, message.threadId, payload.text, key); }
+          if (payload.text) { await beforeSend(); const key = createHash("sha256").update(`${dispatchManifest.messageSid}\0${delivery++}`).digest("hex"); await submitNativeText(client, account.native!.accountId, message.threadId, payload.text, key, { mentions: options.mentions }); }
           if (urls.length || payload.text) params.onDelivered?.();
         }, onError: () => { failed = true; } },
       // This hook is intentionally separate from onModelSelected and old

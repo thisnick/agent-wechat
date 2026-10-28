@@ -124,6 +124,19 @@ export async function groupJourney({ client, wait, account, control, state }) {
       latest.id,
       (await client.messages(account, room, { limit: 1 })).items[0].id,
     );
+    assert.equal(capability.inlineTextMentions, true);
+    const mentioned = (await client.groupMembers(account, room)).items.find(member => member.username === "sim_mei");
+    assert.ok(mentioned.mentionName);
+    const inlineText = "😀 Hi @Draft\u2005, check this";
+    const mentionOptions = { mentions: { userIds: ["sim_mei"], positions: [{ start: 6, end: 13, index: 0 }] } };
+    const inline = await client.sendText(account, room, inlineText, "group-inline-mention", mentionOptions);
+    await wait("inline mention acceptance", async () => (await client.send(account, inline.id)).state === "accepted");
+    const rendered = `😀 Hi @${mentioned.mentionName}\u2005, check this`;
+    await wait("inline mention canonical history", async () => {
+      const message = (await client.messages(account, room)).items.find(item => item.body === rendered);
+      return message?.mentions?.userIds.includes("sim_mei");
+    });
+    assert.equal((await client.sendText(account, room, inlineText, "group-inline-mention", mentionOptions)).id, inline.id);
     const rename = await finish(
       "rename group",
       await client.renameGroup(account, room, "Design team", "group-rename"),

@@ -2174,3 +2174,55 @@ input:focus-visible {
 
 .notification-sound-controls { display: flex; align-items: center; gap: 16px; }
 .notification-sound-controls .quiet-button { padding: 7px 12px; font-size: 12px; }
+
+/* Inline group mentions share the message field and the bottom action row. */
+.composer { position: relative; overflow: visible; }
+.composer-bottom { gap: 12px; }
+.composer-bottom .composer-tools { padding: 0; flex: 1; min-width: 0; }
+.composer-hint { margin-left: auto; white-space: nowrap; }
+.mention-editor {
+  min-height: 74px; max-height: 180px; overflow-y: auto; padding: 12px 15px 8px;
+  white-space: pre-wrap; overflow-wrap: anywhere; outline: none; color: var(--ink);
+  font-size: 13px; line-height: 1.8;
+}
+.mention-editor:empty::before { content: attr(data-placeholder); color: var(--muted); pointer-events: none; }
+.mention-editor[aria-disabled="true"] { opacity: .5; }
+.inline-mention { display: inline; color: var(--accent-ink); }
+.inline-mention-remove {
+  display: inline-flex; align-items: center; justify-content: center; vertical-align: baseline;
+  width: 18px; height: 22px; padding: 0; margin-right: 2px; border: 0; border-radius: 3px;
+  color: var(--muted); background: transparent; font-size: 14px;
+}
+.inline-mention-remove:hover, .inline-mention-remove:focus-visible { color: var(--ink); background: var(--accent-soft); }
+.mention-picker {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30;
+  width: min(360px, 100%); border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); color: var(--ink); box-shadow: 0 8px 30px #0002; overflow: hidden;
+}
+.mention-picker-heading { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px 0 16px; font-size: 11px; color: var(--muted); }
+.mention-search { display: flex; align-items: center; gap: 9px; padding: 8px 10px; margin: 6px 12px 8px; border: 1px solid var(--line); border-radius: 7px; }
+.mention-search > .icon { width: 16px; height: 16px; color: var(--muted); }
+.mention-search input { min-width: 0; width: 100%; padding: 0; border: 0; background: transparent; color: var(--ink); font: inherit; font-size: 12px; }
+.mention-options { max-height: min(280px, 40dvh); overflow-y: auto; padding: 0 6px 7px; }
+.mention-option { display: flex; width: 100%; align-items: center; gap: 11px; padding: 9px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ink); text-align: left; }
+.mention-option.active, .mention-option:hover { background: var(--accent-soft); }
+.mention-option > .avatar { width: 30px; height: 30px; border-radius: 8px; flex: none; }
+.mention-option > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.mention-option strong { font-weight: 500; display: block; font-size: 12px; }
+.mention-option small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.mention-option.all { border-top: 1px solid var(--line); border-radius: 0 0 7px 7px; margin-top: 5px; padding-top: 12px; }
+.mention-everyone { width: 30px; flex: none; text-align: center; font-size: 21px; color: var(--muted); }
+.mention-empty, .mention-error { font-size: 12px; margin: 0; padding: 10px 15px; color: var(--muted); }
+.mention-error { color: var(--accent-ink); }
+.mention-error button, .mention-more { color: var(--accent-ink); }
+.mention-more { width: 100%; padding: 9px; }
+.mention-loading { display: flex; padding: 8px; justify-content: center; }
+.mention-loading > .icon { width: 16px; height: 16px; animation: mention-spin 1s linear infinite; }
+@keyframes mention-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .mention-loading > .icon { animation: none; } }
+@media (max-width: 720px) {
+  .mention-editor, .mention-search input { font-size: 16px; }
+  .inline-mention-remove { width: 26px; height: 28px; }
+  .mention-option { min-height: 48px; }
+  .composer-bottom { gap: 8px; }
+}

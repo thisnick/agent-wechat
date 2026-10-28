@@ -13,13 +13,8 @@ import { createWeChatMediaHandlers, wechatMediaActions } from "./outbound-option
 import { nativeConfigSchema } from "./native-config.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { startNativeMonitor } from "./native-monitor.ts";
-import { nativeLoginStart, nativeLoginWait, sendNativeText } from "./native-login.ts";
-
-async function sendWeChatText(cfg: unknown, to: string, text: string) {
-  const account = resolveWeChatAccount(cfg as Record<string, unknown>);
-  if (!account?.serverUrl) throw new Error("No native daemon configured");
-  return sendNativeText(account, to, text);
-}
+import { nativeLoginStart, nativeLoginWait } from "./native-login.ts";
+import { createWeChatDurableFinal } from "./native-outbound-recovery.ts";
 
 const mediaHandlers = createWeChatMediaHandlers();
 const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
@@ -29,14 +24,9 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
     media: true,
     messageSendingHooks: true,
   },
-  outbound: {
-    sendText: async ({ cfg, to, text }) => ({
-      channel: "agent-wechat",
-      ...await sendWeChatText(cfg, to, text),
-    }),
-    ...mediaHandlers,
-  },
+  outbound: mediaHandlers,
 });
+wechatMessageAdapter.durableFinal = createWeChatDurableFinal();
 
 const meta: ChannelPlugin["meta"] = {
   id: "agent-wechat",
@@ -189,10 +179,6 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   // ---- Outbound adapter for OpenClaw hosts using the outbound hook ----
   outbound: {
     deliveryMode: "direct",
-    sendText: async ({ cfg, to, text }) => ({
-      channel: "agent-wechat" as const,
-      ...await sendWeChatText(cfg, to, text),
-    }),
     ...mediaHandlers,
   },
 

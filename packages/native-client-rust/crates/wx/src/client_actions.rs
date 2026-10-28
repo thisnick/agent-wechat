@@ -574,6 +574,7 @@ pub async fn send(
         let mentions = wechat_core::TextMentions {
             user_ids: mention,
             all: mention_all,
+            positions: vec![],
         };
         mentions.validate()?;
         Some(mentions)

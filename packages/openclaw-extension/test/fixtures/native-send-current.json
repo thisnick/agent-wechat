@@ -1,0 +1,11 @@
+{
+  "id": "send_fixture",
+  "accountId": "a",
+  "destination": "g@chatroom",
+  "state": "accepted",
+  "clientId": "12345",
+  "serverId": "9007199254740999",
+  "localMessageId": "msg_fixture",
+  "errorCode": null,
+  "createdAt": "2026-10-27T12:00:00Z"
+}

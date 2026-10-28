@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { reloadPage } from "./webdriver-navigation.mjs";
 import { composerAcceptance } from "./composer.mjs";
+import { mentionsAcceptance } from "./mentions.mjs";
 
 export async function pinningAcceptance({
   script,
@@ -62,6 +63,7 @@ export async function pinningAcceptance({
     histories = [],
     reads = [];
   const sentTexts = [];
+  const memberQueries = [];
   const textIntents = new Map();
   let queueNextText = false, textCancellations = 0;
   let mode = "confirm",
@@ -115,6 +117,8 @@ export async function pinningAcceptance({
     if (path.endsWith("/capabilities"))
       return json({
         quotedTextSend: true,
+        textMentions: true,
+        inlineTextMentions: true,
         threadPinningTargets: ["direct", "group"],
         threadNotificationTargets: ["direct", "group"],
         threadPinningScope: "admin",
@@ -123,6 +127,15 @@ export async function pinningAcceptance({
       return json({ authenticated: true, contactSyncReady: true });
     if (path.endsWith("/threads")) return json(page(order()));
     if (path.endsWith("/contacts")) return json(page([]));
+    if (path.endsWith("/groups/room%40chatroom/members")) {
+      memberQueries.push(url.searchParams.get("query") ?? "");
+      const members = [
+        { username: "wxid_jin", displayName: "Private Jin label", roomDisplayName: "Jin", mentionName: "Jin" },
+        { username: "wxid_mei", displayName: "Mei", roomDisplayName: "", mentionName: "Mei" },
+      ];
+      const query = (url.searchParams.get("query") ?? "").toLowerCase();
+      return json(page(members.filter(member => member.mentionName.toLowerCase().includes(query))));
+    }
     if (path.endsWith("/events/stream")) {
       res.setHeader("Content-Type", "text/event-stream");
       res.write(": connected\n\n");
@@ -137,6 +150,7 @@ export async function pinningAcceptance({
       const input = JSON.parse(body);
       sentTexts.push(input);
       if (queueNextText) {
+        queueNextText = false;
         const intent = {
           id: `text-${sentTexts.length}`, accountId: account,
           destination: input.threadId, state: "queued", clientId: "123",
@@ -784,6 +798,7 @@ export async function pinningAcceptance({
       queueNextSend: () => { queueNextText = true; },
       cancelledSends: () => textCancellations,
     });
+    await mentionsAcceptance({ script, until, key, resize, sentTexts, memberQueries, capture });
     console.log(
       "Pinning interface: unread badges, hover actions/info, direct pin/mute, shared details, keyboard/context/touch access, optimistic pins, server order, unknown state, pending projection, rejection, reload recovery, phone updates, stable focus/drafts/history/unreads/scroll passed",
     );
