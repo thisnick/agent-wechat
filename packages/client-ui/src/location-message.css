@@ -63,6 +63,27 @@ a.location-open:hover .location-copy strong {
   overflow-wrap: anywhere;
   user-select: text;
 }
+.location-pin-target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.location-pin-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+.location-pin-target:hover .location-pin-label {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .location-coordinates > button {
   display: grid;
   place-items: center;

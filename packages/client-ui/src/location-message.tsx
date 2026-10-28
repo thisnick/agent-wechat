@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { ArrowUpRight, Check, Copy, MapPin } from "lucide-react";
 import type { LocationCard } from "@agent-wechat/shared";
-import { googleMapsLocationTarget } from "./location-target.ts";
+import { googleMapsCoordinateTarget, googleMapsLocationTarget } from "./location-target.ts";
 import "./location-message.css";
 
 export function LocationMessage({ location }: { location: LocationCard }) {
   const [copyState, setCopyState] = useState("");
   const coordinates = `${location.latitude}, ${location.longitude}`;
   const target = googleMapsLocationTarget(location);
+  const pinTarget = googleMapsCoordinateTarget(location);
   async function copy() {
     try {
       await navigator.clipboard.writeText(coordinates);
@@ -23,14 +24,18 @@ export function LocationMessage({ location }: { location: LocationCard }) {
         <strong>{location.name || "Shared location"}</strong>
         {location.address && location.address !== location.name && <span>{location.address}</span>}
       </div>
-      {target && <span className="location-open-label">Open in Google Maps<ArrowUpRight size={13} aria-hidden="true" /></span>}
+      {target && <span className="location-open-label">Search place<ArrowUpRight size={13} aria-hidden="true" /></span>}
     </>
   );
   return (
     <div className="bubble location-card">
       {target ? <a className="location-open" href={target} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{content}</a> : <div className="location-open">{content}</div>}
       <div className="location-coordinates">
-        <span aria-label={`Latitude ${location.latitude}, longitude ${location.longitude}`}>{coordinates}</span>
+        {pinTarget ? (
+          <a className="location-pin-target" href={pinTarget} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer" aria-label={`View pin in Google Maps at latitude ${location.latitude}, longitude ${location.longitude}`}>
+            <span>{coordinates}</span><span className="location-pin-label">View pin<ArrowUpRight size={12} aria-hidden="true" /></span>
+          </a>
+        ) : <span>{coordinates}</span>}
         <button type="button" onClick={copy} aria-label="Copy coordinates" title="Copy coordinates">
           {copyState === "Copied" ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
         </button>

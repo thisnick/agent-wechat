@@ -27,9 +27,10 @@ Static pins expose `location.latitude`,
 `longitude`, optional `name`, `address`, `scale`, `mapType` and `poiId`, plus a
 readable `body`. The coordinate system is reported as `unknown`; coordinates
 are not converted and no map service is contacted automatically. The desktop app shows a
-location card; clicking its place name/address opens a Google Maps search.
-Coordinate-only pins remain readable and copyable without assuming a map
-coordinate conversion. OpenClaw applies the usual sender and group-mention rules.
+location card with two Google Maps actions: **Search place** uses its name/address
+and shared coordinates as search context, while **View pin** opens the shared
+coordinates directly. Search results are not restricted to a strict boundary.
+Coordinates can also be copied; no coordinate conversion is applied. OpenClaw applies the usual sender and group-mention rules.
 
 Location-sharing notices display the sender's supplied title. They do not start
 or join live tracking. Map thumbnails are not downloaded.
