@@ -1558,7 +1558,9 @@ function Chats({
                         <div className="composer-tools" role="group" aria-label="Message actions">
                           {state.account && <AttachmentPicker key={state.account} connection={connection} account={state.account} threadId={state.selected} recipient={selectedName}
                             enabled={active && !reply && !pendingQuote.current && !draftMentions.length && Array.isArray(state.capabilities.mediaKinds) && state.capabilities.mediaKinds.length > 0} />}
-                          {inlineCapable && <Button icon="mention" label="Mention someone" disabled={!active || !!reply || !!pendingQuote.current} onClick={() => setMentionOpen(value => value + 1)} />}
+                          <Button icon="mention" label="Mention someone"
+                            title={!state.selected?.endsWith("@chatroom") ? "Mentions are available in group chats" : !inlineCapable ? "Update the hub to use inline mentions" : reply || pendingQuote.current ? "Remove the reply to mention someone" : "Mention someone"}
+                            disabled={!inlineCapable || !active || !!reply || !!pendingQuote.current} onClick={() => setMentionOpen(value => value + 1)} />
                         </div>
                         <span className="composer-hint">
                           {simulator ? "Messages stay in the simulator." : "Enter to send · Shift + Enter for a new line"}

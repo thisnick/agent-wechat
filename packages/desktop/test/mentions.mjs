@@ -21,6 +21,12 @@ export async function mentionsAcceptance({ script, until, key, resize, sentTexts
   assert.equal(await script("return Boolean(document.querySelector('.mention-picker'))"), false);
   assert.equal(memberQueries.length, queries, "opening a group never fetches the mention roster");
 
+  await key("@");
+  await until(`return Boolean(${choice("Jin")})`, Boolean);
+  assert.equal(await plain(), "@", "desktop keyboard input opens the member picker");
+  await key("\uE00C");
+  await until("return Boolean(document.querySelector('.mention-picker'))", value => !value);
+
   await text("Before @Ji after", 10);
   await until(`return Boolean(${choice("Jin")})`, Boolean);
   await composition("compositionstart");

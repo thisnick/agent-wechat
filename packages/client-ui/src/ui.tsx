@@ -125,19 +125,21 @@ export function Button({
   onClick,
   className = "",
   disabled = false,
+  title = label,
 }: {
   icon: string;
   label: string;
   onClick: () => void;
   className?: string;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
     <button
       type="button"
       className={`icon-btn ${className}`}
       aria-label={label}
-      title={label}
+      title={title}
       onClick={onClick}
       disabled={disabled}
     >
