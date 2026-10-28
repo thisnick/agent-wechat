@@ -9,6 +9,7 @@ const site = 'https://thisnick.github.io';
 
 // Pages from the previous layout, kept working for existing links.
 const moved = {
+  'use/mentions': 'use/groups#mention-group-members',
   'use/video': 'use/quality',
   'use/contacts': 'use/api#contacts',
   'getting-started/overview': '',
@@ -69,7 +70,6 @@ export default defineConfig({
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
           { label: 'Manage groups', slug: 'use/groups' },
-          { label: 'Mention group members', slug: 'use/mentions' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Settings', slug: 'use/settings' },
           { label: 'Video and image quality', slug: 'use/quality' },

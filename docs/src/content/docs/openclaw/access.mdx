@@ -56,7 +56,7 @@ Here the agent answers Alice and Bob directly. In the family group it answers Al
 
 <Aside title="Good to know">
 - **Find IDs** with `wx contacts find NAME` for people and `wx chats find NAME` for groups (group IDs end in `@chatroom`). Your own ID is the `senderId` on messages you sent.
-- **A mention means a real WeChat @mention** of your account or everyone in the group. The daemon reads WeChat's mention metadata; typing "@yourname" as plain text doesn't count. See [sending and receiving mentions](/use/mentions/).
+- **A mention means a real WeChat @mention** of your account or everyone in the group. The daemon reads WeChat's mention metadata; typing "@yourname" as plain text doesn't count. See [sending and receiving mentions](/use/groups/#mention-group-members).
 - **Group context:** `messages.groupChat.historyLimit` sets how many unmentioned messages are kept per group (default 50, maximum 200, 0 turns it off). Images in that context are downloaded only when a mention triggers a reply.
 - **Recalled messages** are removed from the context, even if they were never answered.
 - **Media is checked after the sender.** Attachments from ignored messages are never downloaded or transcribed.

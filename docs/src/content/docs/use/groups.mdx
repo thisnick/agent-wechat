@@ -1,15 +1,15 @@
 ---
 title: Manage groups
-description: Read members, create and edit groups, and change group notifications.
+description: Manage groups and members, change notifications, and send and receive mentions.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Use `wx groups` for ordinary group chats and `wx chats mute/unmute` for their notifications. Edits require a daemon token with `admin` scope. WeChat still checks your account's permissions in the group.
+Use `wx groups` to manage ordinary groups and members, `wx chats mute/unmute` for notifications, and [mentions](#mention-group-members) to address members. Group edits require an `admin` token and WeChat's permission.
 
 ## Read and refresh
 
-1. Find the group and read its saved members:
+1. Read groups and saved members:
 
    ```bash
    wx groups list
@@ -18,20 +18,20 @@ Use `wx groups` for ordinary group chats and `wx chats mute/unmute` for their no
    wx groups members get '123456@chatroom' wxid_alice
    ```
 
-   Exact member lookup returns `{"state":"present","member":{...}}` or `{"state":"unconfirmed","member":null}`. A missing saved row does not prove someone left.
+   Exact lookup returns `{"state":"present","member":{...}}` or `{"state":"unconfirmed","member":null}`. A missing row does not prove someone left.
 
-2. Fetch current server data when needed:
+2. Refresh server data:
 
    ```bash
    wx groups refresh '123456@chatroom'
    wx groups members refresh '123456@chatroom'
    ```
 
-   Group refresh reads the shared name, notifications and announcement. Member refresh reads the roster. The operation reports whether the server supplied a complete member list.
+   Group refresh reads the shared name, notifications and announcement. Member refresh reads the roster and reports whether it is complete.
 
 ## Edit
 
-1. Choose the group and contacts carefully. Creation selects at least two contacts in addition to you; each selected member can have a different server result.
+1. Create a group with at least two contacts besides you, or edit an existing group:
 
    ```bash
    wx groups create wxid_alice wxid_bob --name 'Book club' --idempotency-key group-create-001
@@ -45,13 +45,13 @@ Use `wx groups` for ordinary group chats and `wx chats mute/unmute` for their no
    wx groups leave '123456@chatroom' --idempotency-key group-leave-001
    ```
 
-2. Check the operation's `remoteOutcome`, `members`, `unconfirmedMembers` and `profileProjection`. `succeeded` means the group request was accepted; inspect individual member statuses for partial acceptance. Leaving keeps saved history. Each command prints the operation ID and a local receipt path.
+2. Each command prints an operation ID and receipt path:
 
    ```bash
    wx operations get OPERATION_ID
    ```
 
-   Reuse the same key and identical arguments after a lost response. `needs_review` means WeChat might have accepted the request; inspect the existing operation instead of trying a new key.
+   Inspect `remoteOutcome`, `members`, `unconfirmedMembers` and `profileProjection`. `succeeded` means the request was accepted; member results can differ. Leaving keeps history. After a lost response, reuse the key and identical arguments. For `needs_review`, check the existing operation; do not try a new key.
 
 ## API and SDK
 
@@ -62,9 +62,95 @@ const op = await client.renameGroup(accountId, groupId, 'Book club', 'group-name
 const status = await client.operation(accountId, op.id);
 ```
 
+## Mention group members
+
+Use member IDs for real WeChat mentions. Plain `@name` text is not a mention; the daemon supplies names and recipient metadata.
+
+### In the app
+
+Type `@` or choose **Mention someone** beside the attachment button. Pick a member to insert a mention at the cursor; remove it with × or Backspace. Recipients are saved with the draft.
+
+### CLI
+
+Use IDs from `wx groups members list GROUP_ID`:
+
+```bash
+wx messages send GROUP_ID --text "Please check this" \
+  --mention MEMBER_ID --idempotency-key mention-001
+wx messages send GROUP_ID --text "Meeting starts now" --mention-all
+```
+
+Repeat `--mention` for several members in order. Use `--mention-all` instead to address everyone, subject to WeChat permissions. Output includes the send ID, `state` and `receiptPath`.
+
+### OpenClaw
+
+Use the `message` tool with the `agent-wechat` channel:
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "target": "GROUP_ID",
+  "message": "Please check this",
+  "channelData": {
+    "agent-wechat": { "mentions": { "userIds": ["MEMBER_ID"] } }
+  }
+}
+```
+
+Use `"mentions": { "all": true }` for everyone. These options appear in the tool schema when the channel loads.
+
+### HTTP and SDK
+
+Send to `POST /v1/accounts/ACCOUNT_ID/sends` with `Idempotency-Key`:
+
+```json
+{
+  "threadId": "GROUP_ID",
+  "text": "Please check this",
+  "mentions": { "userIds": ["MEMBER_ID"] }
+}
+```
+
+Use either `userIds` or `all: true`. Check the send receipt with `GET /sends/SEND_ID`.
+
+```ts
+await client.sendText(accountId, groupId, "Please check this", "mention-001", {
+  mentions: { userIds: [memberId] },
+});
+```
+
+Without `positions`, names precede the text. For inline mentions, supply UTF-16 offsets: each span starts at `@`, includes the final U+2005 space and excludes `end`. Its `index` selects a `userIds` entry:
+
+```ts
+await client.sendText(accountId, groupId, "Hi @Alice\u2005, please check this", "mention-002", {
+  mentions: { userIds: [memberId], positions: [{ start: 3, end: 10, index: 0 }] },
+});
+```
+
+Every selected member needs a span; repeated spans are allowed. For `all: true`, use index `0`. Supporting hubs advertise `inlineTextMentions: true`. Use the member's `mentionName` for previews. Names come from shared group names or nicknames, falling back to account IDs; private remarks are excluded. Replaying a send key retains the original names and metadata.
+
+### Receive mentions
+
+Message GET/list responses include:
+
+```json
+{
+  "mentions": {
+    "state": "known",
+    "userIds": ["MEMBER_ID"],
+    "self": true,
+    "all": false,
+    "source": "msgsource.atuserlist"
+  }
+}
+```
+
+`self` means your account is listed; `all` means everyone, separate from `userIds`. Missing or malformed metadata yields `state: "unknown"` and nullable flags. Fetch the message named by `message.committed`. OpenClaw's group gate accepts known self or all-members mentions.
+
 <Aside title="Good to know">
-- Group information is saved locally. Recognized incoming changes emit `group.updated` after saving; version notifications can trigger roster and announcement reads. Contact-sync updates also carry group mute state. The stream mapper has group mute/unmute fixtures; a standalone phone toggle for a group remains unverified. Automatic delivery of every other-device edit remains unverified.
-- Unknown sync fields remain pending. Local notices, search indexes and some settings are not reconstructed, so edits can report `profileProjection: "partial"` after the supported fields are saved.
-- Notification edits support ordinary direct contacts and groups. Personal group remarks, announcement publication, invitation links, ownership transfer and administrator changes are not supported.
-- OpenClaw exposes only the owner-only [group information tool](/openclaw/tools/), with no mutation tools.
+- Saved group changes emit `group.updated`; version notifications can trigger roster and announcement reads. Contact sync carries group mute state. Group mute/unmute stream handling has fixtures; standalone phone toggles and automatic delivery of every other-device edit remain unverified.
+- Unknown sync fields stay pending. Unreconstructed local notices, search indexes and settings can leave `profileProjection: "partial"` after supported fields are saved.
+- Notification edits support ordinary direct contacts and groups. Personal group remarks, announcement publication, invitation links, ownership transfer and administrator changes are unsupported. OpenClaw has an owner-only [group information tool](/openclaw/tools/), with no group mutation tools.
+- Mentions support ordinary text in saved groups. Unknown or duplicate IDs, direct chats, quoted replies and media are rejected. Text including names must fit 64 KiB. Keep the original key after a timeout; see [Sends and recovery](/how-it-works/sends/).
 </Aside>

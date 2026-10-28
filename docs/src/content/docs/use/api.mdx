@@ -203,7 +203,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 Every send needs an `Idempotency-Key`. Sending the same key again returns the original send instead of sending twice. Check progress with `GET /sends/{id}`, or find a send by key with `GET /sends/by-idempotency-key?key=...`.
 
 Group text accepts `mentions: { userIds: ["MEMBER_ID"] }` or `mentions: { all: true }`.
-See [sending and receiving mentions](/use/mentions/) for CLI, SDK and response examples.
+See [sending and receiving mentions](/use/groups/#mention-group-members) for CLI, SDK and response examples.
 
 To quote a saved message, send both its `id` and `serverId` from that chat's message list:
 
