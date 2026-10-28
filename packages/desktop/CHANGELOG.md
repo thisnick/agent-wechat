@@ -1,5 +1,16 @@
 # @agent-wechat/desktop
 
+## 1.2.0
+
+### Minor Changes
+
+- [#319](https://github.com/thisnick/agent-wechat/pull/319) [`1f8701d`](https://github.com/thisnick/agent-wechat/commit/1f8701decd8def7371a67fa2c8f0e669e613f057) Thanks [@thisnick](https://github.com/thisnick)! - Allow message notifications to be turned off for individual accounts on this device, while retaining the desktop-wide master switch and each chat's WeChat mute setting. Remove the sound-preview button and duplicate settings divider. Let a private web preview select between configured hubs through separate authenticated same-origin routes.
+
+### Patch Changes
+
+- Updated dependencies [[`1f8701d`](https://github.com/thisnick/agent-wechat/commit/1f8701decd8def7371a67fa2c8f0e669e613f057)]:
+  - @agent-wechat/client-ui@0.3.1
+
 ## 1.1.0
 
 ### Minor Changes
