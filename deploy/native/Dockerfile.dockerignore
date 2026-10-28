@@ -1,5 +1,6 @@
-# Only reviewed Rust build inputs enter this context; no host profiles or caches.
+# Only reviewed Rust build inputs and license notices enter this context.
 **
+!LICENSE
 !packages/
 !packages/native-client-rust/
 !packages/native-client-rust/Cargo.toml
@@ -9,6 +10,8 @@
 !packages/native-client-rust/crates/*/Cargo.toml
 !packages/native-client-rust/crates/*/build.rs
 !packages/native-client-rust/crates/*/NOTICE
+!packages/native-client-rust/crates/wechat-media/NOTICE.md
+!packages/native-client-rust/crates/wechat-media/LICENSE-CHATLOG
 !packages/native-client-rust/crates/*/src/
 !packages/native-client-rust/crates/*/src/**/
 !packages/native-client-rust/crates/*/src/**/*.rs

@@ -1,5 +1,6 @@
 # Send only standalone runtime sources to local, CI or remote Docker builders.
 **
+!LICENSE
 !packages/
 !packages/native-client-rust/
 !packages/native-client-rust/**

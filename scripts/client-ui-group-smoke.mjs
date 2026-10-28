@@ -101,7 +101,10 @@ export async function groupJourney({ client, wait, account, control, state }) {
     assert.ok(
       groupThread.avatarMembers.some((member) => member.id === "sim_mei"),
     );
-    assert.equal(groupThread.lastMessage.text, "System message");
+    assert.equal(groupThread.lastMessage.text, "Group created in the simulator.");
+    assert.equal(groupThread.lastMessage.senderId, null);
+    assert.equal(groupThread.lastMessage.senderName, null);
+    assert.equal(groupThread.lastMessage.direction, null);
     const text = await client.sendText(
       account,
       room,
