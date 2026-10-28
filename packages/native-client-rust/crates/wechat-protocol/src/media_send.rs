@@ -602,8 +602,8 @@ impl<'a> VoiceUpload<'a> {
             p::bytes(8, &p::buffer(chunk)),
             p::uint(9, self.is_final().into()),
             p::bytes(10, &base_request(&state.device, state.uin, 0)?),
-            p::uint(11, 4),
-            p::uint(13, 0),
+            p::uint(11, 0),
+            p::uint(13, 4),
             p::uint(15, 0),
             p::uint(16, 0),
             p::uint(17, self.created_at.into()),
@@ -1373,7 +1373,8 @@ mod tests {
             assert_eq!(p::scalar(&f, 4).unwrap(), length as u64);
             assert_eq!(p::scalar(&f, 7).unwrap(), 60_000);
             assert_eq!(p::scalar(&f, 9).unwrap(), u64::from(index == 2));
-            assert_eq!(p::scalar(&f, 11).unwrap(), 4);
+            assert_eq!(p::scalar(&f, 11).unwrap(), 0);
+            assert_eq!(p::scalar(&f, 13).unwrap(), 4);
             if index == 0 {
                 assert_eq!(
                     p::unbuffer(p::data(&f, 18).unwrap()).unwrap(),
