@@ -10,6 +10,7 @@ const site = 'https://thisnick.github.io';
 // Pages from the previous layout, kept working for existing links.
 const moved = {
   'use/video': 'use/quality',
+  'use/contacts': 'use/api#contacts',
   'getting-started/overview': '',
   'getting-started/quickstart': 'setup/install',
   'getting-started/native-client': 'setup/requirements',
@@ -36,7 +37,10 @@ export default defineConfig({
   site,
   base,
   redirects: Object.fromEntries(
-    Object.entries(moved).map(([from, to]) => [`/${from}`, `${base}/${to}${to ? '/' : ''}`]),
+    Object.entries(moved).map(([from, to]) => {
+      const [path, fragment] = to.split('#');
+      return [`/${from}`, `${base}/${path}${path ? '/' : ''}${fragment ? `#${fragment}` : ''}`];
+    }),
   ),
   markdown: {
     remarkPlugins: [remarkBasePath(base), remarkMermaid()],
@@ -64,7 +68,6 @@ export default defineConfig({
         ] },
         { label: 'Use it', items: [
           { label: 'CLI recipes', slug: 'use/cli' },
-          { label: 'Identify contacts', slug: 'use/contacts' },
           { label: 'Manage groups', slug: 'use/groups' },
           { label: 'Send attachments', slug: 'use/media' },
           { label: 'Settings', slug: 'use/settings' },

@@ -43,10 +43,6 @@ curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=inv
 
 Lists return `{ "items": [...], "nextCursor": "..." }`. Pass `cursor=` with the same query to get the next page.
 
-Contact, thread, group and member reads include [peer classification](/use/contacts/)
-from saved WeChat metadata. It keeps entity category separate from conversation
-`kind` and contact `relation`.
-
 `GET /threads` and `GET /threads/{id}` include sidebar summaries from saved history:
 
 | Field | Contents |
@@ -56,9 +52,144 @@ from saved WeChat metadata. It keeps entity category separate from conversation
 | `lastMessage` | Latest local message ID, sender ID/name, direction, type, time and a plain-text `text` preview of up to 160 characters. `null` means empty local history; omitted means the preview is unavailable. |
 | `avatarMembers` | Up to four cached group members, each with `id` and `displayName`; empty for direct chats or an unavailable roster. Fetch cached pictures through `GET /avatars/{username}`. |
 
-These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message, contact or group events to update the summaries. Phone contact changes arrive through the independent contact sync stream. For a manual refresh, use `POST /contacts/{id}/refresh` and wait for the operation to finish. Notification consumers should require account status `contactSyncReady: true` and thread `muted: false` before alerting. Notification edits through `PUT /threads/{id}/notifications` support ordinary direct contacts and groups. A direct edit reads the current contact before submitting its change. Repeat the same idempotency key to recover an operation; an uncertain outcome must not be resubmitted with a new key.
+These reads do not refresh WeChat or download media. Media messages use labels such as “Photo” and “Sticker”; recalled content stays suppressed. Refresh the thread list after message, contact or group events to update the summaries. [Contact refresh and sync](#refresh-and-sync-contacts) update saved metadata. Notification consumers should require account status `contactSyncReady: true` and thread `muted: false` before alerting. Notification edits through `PUT /threads/{id}/notifications` support ordinary direct contacts and groups. A direct edit reads the current contact before submitting its change. Repeat the same idempotency key to recover an operation; an uncertain outcome must not be resubmitted with a new key.
 
 Pin or unpin with `PUT /threads/{id}/pin`, body `{"pinned":true}` or `{"pinned":false}`, an `admin` token and `Idempotency-Key`. The SDK method is `setThreadPinned(accountId, threadId, pinned, key)`. The response is an operation; inspect its `remoteOutcome` and `profileProjection`. Saved pin changes emit `thread.updated`; refetch the thread or list. A new list places pinned chats first, then orders each section by saved activity. An existing pagination cursor keeps its original order.
+
+## Contacts
+
+List, search and read contacts saved in one account's WeChat profile. All routes
+below start with `/v1/accounts/{account}` and require `read` scope for that account.
+Choose `ACCOUNT` from `GET /v1/accounts`; it is the daemon's account ID, not a
+contact's WeChat username. Percent-encode usernames in URL paths.
+
+| Task | Request | TypeScript SDK |
+| --- | --- | --- |
+| List or search saved contacts | `GET /contacts?search=Alice&limit=20` | `contacts(accountId, { query: "Alice", limit: 20 })` |
+| Read one saved contact | `GET /contacts/{username}` | `contact(accountId, username)` |
+| Refresh one known identity | `POST /contacts/{username}/refresh` with `{}` | `refreshContact(accountId, username)` |
+| Fetch the contact inventory | `POST /contact-sync` with `{}` | `syncContacts(accountId)` |
+| Look up known identities on WeChat | `POST /contacts/lookup` with `{"ids":["wxid_alice"]}` | No dedicated method |
+
+### Read saved contacts
+
+1. Search by a case-insensitive substring of the ID, display name, nickname,
+   remark or alias. `query` is an alias for `search`; use one, not both.
+
+   ```bash
+   curl -G -H "Authorization: Bearer $TOKEN" \
+     --data-urlencode 'search=Alice' --data-urlencode 'limit=20' \
+     "$WX/accounts/$ACCOUNT/contacts" > contacts-page.json
+   ```
+
+   An abridged, synthetic response:
+
+   ```json
+   {
+     "items": [{
+       "id": "wxid_alice", "username": "wxid_alice",
+       "displayName": "Alice", "nickname": "Alice Chen",
+       "remark": "Alice", "alias": null, "relation": "unknown",
+       "classification": {
+         "category": "unknown", "namespace": "wechat",
+         "businessType": null, "businessKind": null, "openIm": null
+       }
+     }],
+     "nextCursor": "OPAQUE_CURSOR",
+     "sourceGeneration": "PROFILE_GENERATION",
+     "asOfEventCursor": "EVENT_CURSOR"
+   }
+   ```
+
+2. If `nextCursor` is non-null, pass it with the same search. Repeat until null:
+
+   ```bash
+   CURSOR=$(jq -r '.nextCursor' contacts-page.json)
+   curl -G -H "Authorization: Bearer $TOKEN" \
+     --data-urlencode 'search=Alice' --data-urlencode "cursor=$CURSOR" \
+     --data-urlencode 'limit=20' "$WX/accounts/$ACCOUNT/contacts" > contacts-page.json
+   ```
+
+   The default limit is 50; accepted limits are 1–200. Search accepts at most 256
+   UTF-8 bytes. Cursors expire after 30 minutes and retain the first page's IDs
+   and order; fields reflect current saved data. Restart without a cursor after
+   `409 pagination_cursor_expired`. A removed row can become an
+   `{"id":"wxid_alice","deleted":true,"version":"..."}` item.
+
+3. For a known username, use `GET /contacts/wxid_alice`. A missing saved contact
+   returns `404 not_found`; this does not establish friendship or server absence.
+   CLI equivalents are `wx --json contacts list --limit 20`,
+   `wx --json contacts find Alice` and `wx --json contacts get wxid_alice`.
+
+`id` and `username` identify the same peer. `displayName` prefers a nonempty
+remark, then nickname, then username. `nickname`, `remark` and `alias` may be
+null. `relation` currently remains `unknown`, including for saved friends.
+Contacts exclude ordinary group records; use [groups and member reads](/use/groups/)
+for rosters. This API does not add friends, delete contacts or edit their remarks.
+
+### Refresh and sync contacts
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{}' \
+  "$WX/accounts/$ACCOUNT/contacts/wxid_alice/refresh"
+```
+
+Refresh and inventory requests return HTTP 202 with an operation (abridged):
+`{"id":"OPERATION_ID","kind":"metadata","state":"queued"}`.
+Poll `GET /operations/{id}` or `client.operation(accountId, op.id)`, then reread
+contacts. A finished operation can still have `result.profileProjection` set to
+`"partial"`; inspect the result rather than relying on its state alone.
+
+A refresh retrieves one known identity and saves supported fields. Contact sync
+fetches the inventory in up to 10 pages or two minutes per operation. Inspect
+`complete`, `catalogComplete`, `failedItems`, `unavailableCount` and
+`resumeAvailable` in its result; call it again to continue saved progress.
+Unavailable contacts do not imply deletion. CLI equivalents are
+`wx contacts refresh wxid_alice` and `wx contacts sync`.
+
+This inventory request is separate from the daemon's automatic contact-change
+stream. That stream emits `contacts.updated` after supported changes are saved
+and `contacts.sync` for progress. Refetch affected resources after events.
+Account status `contactSyncReady` means that stream caught up in this connection;
+it does not promise a complete contact inventory.
+
+`POST /contacts/lookup` is a different, immediate server lookup: it accepts one
+or two distinct known IDs, returns `items` plus numeric per-ID `results`, and
+reports `profileProjection: "pending"` on returned items. It does not save those
+contacts. Prefer refresh when you need subsequent cached reads to change.
+
+### Interpret peer classification
+
+Contact, thread, group and member reads derive `classification` from the same
+saved profile. It is independent of thread `kind` and contact `relation`.
+
+| `category` | Saved evidence |
+| --- | --- |
+| `business` | Official/business account metadata. |
+| `openim` / `openim_customer_service` | WeCom contact / separate customer-service identity. |
+| `group` / `system` | Recognized group / built-in peer such as File Transfer. |
+| `unknown` | No established category; never assume a personal account or friend. |
+
+`namespace` distinguishes identifier families; it grants no additional actions.
+`businessType` retains the numeric value; `businessKind` is `official_account`,
+`service_account`, `enterprise`, `enterprise_child`, `photo_account`, or null
+for unknown/conflicting values. An Official Account label does not establish a
+subscription account. `openIm` contains cached `appId`, `wordingId`, localized
+`wordings` (`languageId`, `text`) and application/account-type references; choose
+the language in your app.
+
+<Aside title="Good to know">
+- Reads work from saved data and do not refresh it. Page `coverage.partial` and
+  `coverage.databases` describe available local databases, not server inventory
+  completeness. `sourceGeneration` identifies the source view; treat it as opaque.
+- Older servers may omit `classification`. Missing OpenIM labels remain missing:
+  fetching separate OpenIM resource catalogs is unsupported. Labels do not prove
+  employment or account permissions.
+- Cached avatar bytes use `GET /avatars/{username}` with `media` scope. Fetching a
+  new avatar through `POST /avatars/{username}/refresh` needs `read` and `media`;
+  poll its operation before rereading.
+</Aside>
 
 ## Send
 
@@ -114,7 +245,8 @@ All account routes start with `/v1/accounts/{account}`.
 | Accounts | `GET /v1/accounts`, `GET /`, `GET /capabilities`, `POST /connect`, `POST /disconnect`, `POST /logout` |
 | Login | `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
 | Chats and messages | `GET /threads`, `GET /threads/{id}/messages`, `GET /messages?query=`, `GET /messages/{id}` |
-| Contacts and groups | `GET /contacts`, `GET /groups`, `GET /groups/{id}`, `GET /groups/{id}/members`, `GET /groups/{id}/members/{username}`, `POST /contacts/lookup` |
+| [Contacts](#contacts) | `GET /contacts`, `GET /contacts/{username}`, `POST /contacts/{username}/refresh`, `POST /contact-sync`, `POST /contacts/lookup` |
+| [Groups](/use/groups/) | `GET /groups`, `GET /groups/{id}`, `GET /groups/{id}/members`, `GET /groups/{id}/members/{username}` |
 | [Group edits](/use/groups/) and chat settings (admin) | `POST /groups`, `PATCH /groups/{id}`, `POST /groups/{id}/leave`, `POST/DELETE /groups/{id}/members`, `PUT /groups/{id}/my-name`, `DELETE /groups/{id}/announcement`, `PUT /threads/{id}/notifications`, `PUT /threads/{id}/pin` |
 | Sending | `POST /uploads`, `POST /sends`, `GET /sends/{id}`, `POST /sends/{id}/cancel`, `POST /messages/{id}/recall` |
 | Media | `GET /messages/{id}/media`, `POST /media/lookup`, `POST /messages/{id}/media-transfers`, `GET /media/{id}/content` |
