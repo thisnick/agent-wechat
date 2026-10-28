@@ -1,4 +1,4 @@
-import { NativeApiError, type NativeSendIntent, type NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeApiError, type NativeSendIntent, type NativeWeChatClient, type QuoteSendReference } from "@agent-wechat/shared";
 import { parseWeChatTextMentions, validateWeChatMentionSend, type WeChatTextMentions } from "./outbound-mentions.ts";
 export type NativeOutboundDelivery = { messageId: string; meta: Record<string, unknown> };
 export type NativeVerifiedMessageReceipt = { messageId: string; serverId: string; accountId: string; threadId: string };
@@ -44,9 +44,9 @@ export class NativeTextSendInspectionError extends Error {
 
 /** Submit once, then inspect the durable intent without repeating its side effect. */
 export async function submitNativeText(client: NativeWeChatClient, accountId: string, threadId: string, text: string, key: string,
-  options: { timeoutMs?: number; initialDelayMs?: number; mentions?: WeChatTextMentions } = {}): Promise<NativeSendIntent> {
+  options: { timeoutMs?: number; initialDelayMs?: number; mentions?: WeChatTextMentions; quote?: QuoteSendReference } = {}): Promise<NativeSendIntent> {
   const mentions = options.mentions === undefined ? undefined : parseWeChatTextMentions(options.mentions);
-  validateWeChatMentionSend(mentions, { to: threadId, text });
+  validateWeChatMentionSend(mentions, { to: threadId, text, replyToId: options.quote?.messageId });
   const inspect = (value: unknown, sendId?: string): NativeSendIntent => {
     const intent = value as Partial<NativeSendIntent> & { kind?: unknown; threadId?: unknown };
     if (!intent || typeof intent !== "object" || Array.isArray(intent) || typeof intent.id !== "string" || !intent.id
@@ -61,7 +61,7 @@ export async function submitNativeText(client: NativeWeChatClient, accountId: st
     return { ...intent, accountId, destination: threadId } as NativeSendIntent;
   };
   let intent: NativeSendIntent;
-  try { intent = inspect(await client.sendText(accountId, threadId, text, key, mentions ? { mentions } : undefined)); }
+  try { intent = inspect(await client.sendText(accountId, threadId, text, key, options.quote ?? (mentions ? { mentions } : undefined))); }
   catch (error) {
     if (error instanceof NativeTextSendInspectionError || error instanceof NativeApiError && error.status < 500 && error.code !== "timeout") throw error;
     // The POST may have reached the daemon. Recover only by the original key;

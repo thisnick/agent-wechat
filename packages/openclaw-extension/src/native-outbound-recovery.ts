@@ -7,11 +7,12 @@ import { nativePayloadMediaOptions } from "./outbound-options.ts";
 import { validateWeChatMentionSend } from "./outbound-mentions.ts";
 import { nativeOutboundKey } from "./native-send-key.ts";
 import { nativeOutboundDelivery } from "./native-send.ts";
+import { nativeReplyMessageId, nativeReplyReference, parseWeChatReplyTo, validateWeChatReplySend } from "./outbound-reply.ts";
 
 /** Queue recovery reads the original send only. It never submits another one. */
 export function createWeChatDurableFinal(host: typeof ensureNativeHost = ensureNativeHost): ChannelMessageDurableFinalAdapter {
   return {
-    capabilities: { text: true, media: true, payload: true, messageSendingHooks: true, reconcileUnknownSend: true },
+    capabilities: { text: true, media: true, payload: true, replyTo: true, messageSendingHooks: true, reconcileUnknownSend: true },
     automaticUnknownSendReconciliation: true,
     reconcileUnknownSendKinds: { text: true, payload: true },
     reconcileUnknownSend: async ctx => {
@@ -21,11 +22,12 @@ export function createWeChatDurableFinal(host: typeof ensureNativeHost = ensureN
         if (ctx.channel !== "agent-wechat" || !ctx.queueId || ctx.payloads.length !== 1) return unresolved;
         const payload = ctx.payloads[0];
         const options = nativePayloadMediaOptions(payload);
-        const replyToId = ctx.effectiveReplyToId ?? ctx.replyToId ?? payload.replyToId;
+        const replyToId = parseWeChatReplyTo(ctx.effectiveReplyToId ?? ctx.replyToId ?? payload.replyToId);
         if (payload.mediaUrl || payload.mediaUrls?.length || payload.audioAsVoice || payload.videoAsNote || payload.location
-          || payload.presentation || payload.interactive || options.videoQuality != null || replyToId != null
+          || payload.presentation || payload.interactive || options.videoQuality != null
           || typeof payload.text !== "string" || !payload.text.trim()) return unresolved;
         validateWeChatMentionSend(options.mentions, { ...payload, to: ctx.to, replyToId });
+        validateWeChatReplySend(replyToId, payload);
         const account = resolveWeChatAccount(ctx.cfg as Record<string, unknown>);
         if (!account?.enabled || !account.native || ctx.accountId && ctx.accountId !== account.accountId) return unresolved;
         const configurationKey = nativeConfigurationKey(account.native);
@@ -42,7 +44,14 @@ export function createWeChatDurableFinal(host: typeof ensureNativeHost = ensureN
         // its first chunk must not acknowledge the complete logical message.
         if (!options.mentions) {
           const message = await client.message(account.native.accountId, intent.localMessageId);
-          if (!current() || message.body !== payload.text || message.type !== 1) return unresolved;
+          if (!current() || message.body !== payload.text) return unresolved;
+          if (replyToId) {
+            // Original recall may happen after an accepted reply. Read its
+            // identity only; recovery never rebuilds or sends quoted content.
+            const original = await client.message(account.native.accountId, nativeReplyMessageId(replyToId, account.native.accountId));
+            const quote = nativeReplyReference(original, account.native.accountId, ctx.to, replyToId);
+            if (!current() || message.type !== 49 || message.appMessageType !== 57 || message.quote?.serverId !== quote.serverId) return unresolved;
+          } else if (message.type !== 1 || message.quote) return unresolved;
         }
         const delivery = await nativeOutboundDelivery(client, account.native.accountId, ctx.to, [intent.localMessageId],
           { sendId: intent.id, state: intent.state, serverIds: [intent.serverId] });

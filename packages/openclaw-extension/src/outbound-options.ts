@@ -5,6 +5,7 @@ import type { NativeOutboundDelivery } from "./native-send.ts";
 import { parseWeChatTextMentions, validateWeChatMentionSend } from "./outbound-mentions.ts";
 import type { WeChatOutboundSendOptions } from "./outbound-media.ts";
 import { nativeOutboundKey } from "./native-send-key.ts";
+import { parseWeChatReplyTo, validateWeChatReplySend } from "./outbound-reply.ts";
 
 type MediaPayload = { text?: string; mediaUrl?: string; mediaUrls?: string[]; audioAsVoice?: boolean; channelData?: Record<string, unknown>; replyToId?: string };
 type SendContext = { cfg: unknown; to: string; text: string; mediaUrl?: string; audioAsVoice?: boolean; forceDocument?: boolean; signal?: AbortSignal;
@@ -26,6 +27,7 @@ export function nativePayloadMediaOptions(payload: MediaPayload): WeChatOutbound
 
 export const wechatMediaActions: NonNullable<ChannelPlugin["actions"]> = {
   describeMessageTool: () => ({ actions: ["send"], schema: { actions: ["send"], visibility: "all-configured", properties: {
+    replyTo: { type: "string", minLength: 1, maxLength: 4096, description: "Quote a stored WeChat message in this same chat. Use its exact id from wechat_history, wechat_search or wechat_message, or the current inbound message ID; not a server ID or send/job ID. Text replies only; cannot combine with attachments or mentions. The hub validates the original message." },
     channelData: { type: "object", description: "WeChat send options: mentions for ordinary group text, or videoQuality for one video attachment.", additionalProperties: true, properties: {
       "agent-wechat": { type: "object", additionalProperties: false, anyOf: [{ required: ["videoQuality"] }, { required: ["mentions"] }], properties: {
         videoQuality: { type: "string", enum: ["normal", "original"], description: "WeChat video mode: normal prepares playback; original also retains the unchanged source video. Cannot combine with forceDocument." },
@@ -42,7 +44,9 @@ export const wechatMediaActions: NonNullable<ChannelPlugin["actions"]> = {
     const options = nativePayloadMediaOptions(payload);
     const forceDocument = (ctx.params.forceDocument ?? ctx.params.asDocument) as boolean | undefined;
     validateWeChatMentionSend(options.mentions, { ...payload, ...options, to, forceDocument, replyToId: replyToId ?? payload.replyToId });
-    if (options.videoQuality == null && options.mentions == null) return undefined;
+    const reply = parseWeChatReplyTo(replyToId ?? payload.replyToId);
+    validateWeChatReplySend(reply, { ...payload, ...options, forceDocument });
+    if (options.videoQuality == null && options.mentions == null && reply == null) return undefined;
     validateNativeMediaSendOptions({ ...options, forceDocument }, payload.audioAsVoice);
     return payload;
   },
@@ -68,10 +72,13 @@ export function createWeChatMediaHandlers(send: typeof sendWeChatMedia = sendWeC
     ctx.signal?.throwIfAborted(); await ctx.onPlatformSendDispatch?.(); ctx.signal?.throwIfAborted(); ctx.assertDirectAdapterHandoff?.();
   };
   const sendPayload = async (ctx: SendContext & { payload: MediaPayload }) => {
-    const options = { ...nativePayloadMediaOptions(ctx.payload), forceDocument: ctx.forceDocument };
+    const replyToId = parseWeChatReplyTo(ctx.replyToId ?? ctx.payload.replyToId);
+    const options = { ...nativePayloadMediaOptions(ctx.payload), forceDocument: ctx.forceDocument, ...(replyToId && { replyToId }) };
     const audioAsVoice = ctx.payload.audioAsVoice ?? ctx.audioAsVoice;
     validateWeChatMentionSend(options.mentions, { ...ctx.payload, ...options, to: ctx.to, text: ctx.payload.text ?? ctx.text,
       mediaUrl: ctx.payload.mediaUrl ?? ctx.mediaUrl, audioAsVoice, replyToId: ctx.replyToId ?? ctx.payload.replyToId });
+    validateWeChatReplySend(replyToId, { ...ctx.payload, ...options, text: ctx.payload.text ?? ctx.text,
+      mediaUrl: ctx.payload.mediaUrl ?? ctx.mediaUrl, audioAsVoice });
     validateNativeMediaSendOptions(options, audioAsVoice);
     const urls = [...new Set([...(ctx.payload.mediaUrls ?? []), ctx.payload.mediaUrl ?? ctx.mediaUrl].filter((url): url is string => typeof url === "string" && !!url))];
     if (urls.length > 16 || options.videoQuality != null && urls.length !== 1) throw Error("WeChat video quality requires one attachment per send");

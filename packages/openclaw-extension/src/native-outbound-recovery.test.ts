@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { NativeApiError } from "@agent-wechat/shared";
 import { createWeChatDurableFinal } from "./native-outbound-recovery.ts";
 import { nativeOutboundKey } from "./native-send-key.ts";
+import { nativeSourceMessageSid } from "./native-prepared-boundary.ts";
 
 function fixture() {
   const cfg: any = { channels: { "agent-wechat": { enabled: true, backend: "native", native: { mode: "external", accountId: "account",
@@ -56,4 +57,46 @@ test("a first text chunk cannot confirm an entire queued message", async () => {
   assert.equal((await value.hook(value.ctx))?.status, "unresolved");
   value.setMessage({ ...value.getMessage(), body: "the complete original message" });
   assert.equal((await value.hook(value.ctx))?.status, "sent");
+});
+
+test("queued quoted replies recover by their original key and exact source identity", async () => {
+  for (const location of ["payload", "context", "effective", "qualified-current"]) {
+    const value = fixture();
+    value.ctx.payloads[0] = { text: "Agreed", ...(location === "payload" && { replyToId: "msg_source" }) };
+    if (location === "context") value.ctx.replyToId = "msg_source";
+    if (location === "effective") { value.ctx.replyToId = "older"; value.ctx.effectiveReplyToId = "msg_source"; }
+    if (location === "qualified-current") value.ctx.replyToId = nativeSourceMessageSid({ id: "msg_source", accountId: "account", threadId: "g@chatroom", serverId: "18446744073709551615" } as any);
+    value.setMessage({ ...value.getMessage(), type: 49, appMessageType: 57, body: "Agreed", quote: { serverId: "18446744073709551615" } });
+    const hook = createWeChatDurableFinal((async () => ({ client: {
+      sendByKey: async (...args: unknown[]) => { value.calls.push(["inspect", ...args]); return value.getIntent(); },
+      message: async (_account: string, id: string) => id === "msg_source"
+        ? { id, accountId: "account", threadId: "g@chatroom", serverId: "18446744073709551615", recall: { replacementText: "Recalled later" } }
+        : value.getMessage(),
+      sendText: async () => assert.fail("Recovery must never submit"),
+    } })) as any).reconcileUnknownSend!;
+    assert.equal((await hook(value.ctx))?.status, "sent");
+    assert.deepEqual(value.calls, [["inspect", "account", nativeOutboundKey("retained-queue")]]);
+    for (const change of [{ body: "Only part" }, { type: 1 }, { appMessageType: 5 }, { quote: undefined },
+      { quote: { serverId: "1" } }, { accountId: "other" }, { threadId: "other@chatroom" }]) {
+      const prior = value.getMessage(); value.setMessage({ ...prior, ...change });
+      assert.equal((await hook(value.ctx))?.status, "unresolved"); value.setMessage(prior);
+    }
+  }
+});
+
+test("missing or foreign originals cannot confirm queued quoted replies", async () => {
+  for (const source of [undefined, { id: "other" }, { accountId: "other" }, { threadId: "other@chatroom" }, { serverId: "0" }]) {
+    const value = fixture(); value.ctx.payloads[0] = { text: "Agreed", replyToId: "msg_source" };
+    value.setMessage({ ...value.getMessage(), type: 49, appMessageType: 57, body: "Agreed", quote: { serverId: "18446744073709551615" } });
+    const hook = createWeChatDurableFinal((async () => ({ client: {
+      sendByKey: async () => value.getIntent(),
+      message: async (_account: string, id: string) => {
+        if (id !== "msg_source") return value.getMessage();
+        if (!source) throw Error("Original unavailable");
+        return { id, accountId: "account", threadId: "g@chatroom", serverId: "18446744073709551615", ...source };
+      }, sendText: async () => assert.fail("Recovery must never submit"),
+    } })) as any).reconcileUnknownSend!;
+    const result = await hook(value.ctx);
+    assert.equal(result?.status, "unresolved"); if (result?.status === "unresolved") assert.equal(result.retryable, false);
+  }
 });

@@ -53,6 +53,8 @@ const messageTool = tools.find(tool => tool.name === 'message');
 assert.ok(messageTool, 'the host tools list must include its built-in message tool');
 assert.ok(JSON.stringify(messageTool.parameters).includes('mentions'), 'the actual model-facing message schema must expose WeChat mentions');
 assert.ok(JSON.stringify(messageTool.parameters).includes('wechat_group_info'));
+assert.ok(JSON.stringify(messageTool.parameters).includes('replyTo'));
+assert.match(schema.replyTo.description, /same chat/);
 const manifest = JSON.parse(await readFile(join(extension, 'openclaw.plugin.json'), 'utf8'));
 assert.ok(manifest.contracts.tools.includes('wechat_send_share'), 'plugin-owned send-share tool stays discoverable');
 assert.ok(!manifest.contracts.tools.includes('message'), 'the host built-in is not declared as a duplicate plugin tool');
@@ -112,5 +114,29 @@ for (const [params, expected] of [
   }
 }
 assert.equal(networkCalls, 0);
+const replyChecks = [];
+for (const [name, forceCoreDelivery, requireQueuePersistence, to] of [
+  ['prepared-group-reply', false, false, 'g@chatroom'],
+  ['prepared-dm-reply', false, false, 'wxid_peer'],
+  ['forced-core-reply', true, false, 'g@chatroom'],
+  ['queued-reply', true, true, 'g@chatroom'],
+]) {
+  const before = calls.length;
+  await runMessageAction({ cfg, action: 'send', params: { channel: 'agent-wechat', to, message: 'Agreed', replyTo: 'msg_source' },
+    forceCoreDelivery, requireQueuePersistence, agentId: 'main', senderIsOwner: true });
+  assert.equal(calls.length, before + 1);
+  assert.deepEqual(calls.at(-1), { forceDocument: false, replyToId: 'msg_source' });
+  assert.equal(handoffs.at(-1).text, 'Agreed'); assert.equal(handoffs.at(-1).to, to);
+  if (requireQueuePersistence) assert.match(handoffs.at(-1).key, /^[a-f0-9]{64}$/);
+  replyChecks.push(name);
+}
+for (const forceCoreDelivery of [false, true]) {
+  const before = calls.length;
+  await assert.rejects(runMessageAction({ cfg, action: 'send', forceCoreDelivery, requireQueuePersistence: true, agentId: 'main', senderIsOwner: true,
+    params: { channel: 'agent-wechat', to: 'g@chatroom', message: 'Reply', replyTo: 'msg_source', media: fixture },
+    mediaAccess: { localRoots: [join(root, 'workspace')] } }), /quoted replies support text only/);
+  assert.equal(calls.length, before);
+}
+assert.equal(networkCalls, 0);
 await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.7', checks, mentionChecks, messageToolListed: true,
-  schemaIncludesQuality: true, schemaIncludesMentions: true, queuedConflictRejected: true, queuedMentionsRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });
+  replyChecks, schemaIncludesReplies: true, schemaIncludesQuality: true, schemaIncludesMentions: true, queuedConflictRejected: true, queuedMentionsRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });

@@ -110,6 +110,21 @@ test("text mentions survive a lost response and recover only through their origi
   assert.deepEqual(calls, [["submit", "a", "g@chatroom", "check this", "stable-key", { mentions: { userIds: ["wxid_a", "wxid_b"] } }], ["recover", "a", "stable-key"]]);
 });
 
+test("quoted text preserves both quote IDs through queued status and lost-response recovery", async () => {
+  const quote = { messageId: "msg_source", serverId: "18446744073709551615" };
+  for (const lost of [false, true]) {
+    const calls: unknown[][] = [];
+    const receipt = { id: "send_quote", accountId: "a", destination: "peer", state: "accepted" };
+    const client = {
+      sendText: async (...args: unknown[]) => { calls.push(["submit", ...args]); if (lost) throw Error("lost response"); return { ...receipt, state: "queued" }; },
+      send: async (...args: unknown[]) => { calls.push(["poll", ...args.slice(0, 2)]); return receipt; },
+      sendByKey: async (...args: unknown[]) => { calls.push(["recover", ...args]); return receipt; },
+    } as unknown as NativeWeChatClient;
+    assert.deepEqual(await submitNativeText(client, "a", "peer", "Agreed", "quote-key", { quote, initialDelayMs: 1 }), receipt);
+    assert.deepEqual(calls, [["submit", "a", "peer", "Agreed", "quote-key", quote], lost ? ["recover", "a", "quote-key"] : ["poll", "a", "send_quote"]]);
+  }
+});
+
 test("unknown mention sends retain identity and never resubmit or accept foreign receipts", async () => {
   for (const recovered of [undefined, { id: "send_foreign", accountId: "other", destination: "g@chatroom", state: "accepted" },
     { id: "media_job", accountId: "a", threadId: "g@chatroom", state: "accepted" },

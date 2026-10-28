@@ -22,6 +22,7 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
   capabilities: {
     text: true,
     media: true,
+    replyTo: true,
     messageSendingHooks: true,
   },
   outbound: mediaHandlers,

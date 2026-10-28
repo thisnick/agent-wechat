@@ -20,5 +20,7 @@ test("pinned host tools list exposes message mentions and required queues retain
   assert.equal(result.runtime, "2026.10.7"); assert.equal(result.schemaIncludesQuality, true); assert.equal(result.queuedConflictRejected, true);
   assert.equal(result.messageToolListed, true); assert.equal(result.schemaIncludesMentions, true); assert.equal(result.queuedMentionsRejected, true);
   assert.deepEqual(result.mentionChecks, ["prepared-members", "prepared-all", "forced-core-members", "queued-members", "queued-all"]);
+  assert.equal(result.schemaIncludesReplies, true);
+  assert.deepEqual(result.replyChecks, ["prepared-group-reply", "prepared-dm-reply", "forced-core-reply", "queued-reply"]);
   assert.equal(result.networkCalls, 0); assert.equal(result.providerSends, 0);
 });

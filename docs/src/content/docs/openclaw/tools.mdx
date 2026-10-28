@@ -18,6 +18,27 @@ Besides replying, the agent gets tools for the **current chat**. They can't see 
 
 For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
 
+## Quote a message
+
+Use OpenClaw's built-in `message` tool with `replyTo` set to the stored message's
+`id` from history, search or message lookup:
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "target": "CHAT_ID",
+  "message": "Agreed, let's do that.",
+  "replyTo": "STORED_MESSAGE_ID"
+}
+```
+
+This sends a quoted text reply in a direct chat or group. The hub supplies the
+original content and checks that it belongs to the same account and chat.
+Use a stored message ID, rather than its `serverId` or a send/job ID. Unavailable,
+recalled or unsupported targets return an error. Attachments and mentions cannot
+be combined with a quoted reply.
+
 ## Log in through your agent
 
 `wechat_login` works from another channel while WeChat is offline, if your agent's tool policy allows it:
