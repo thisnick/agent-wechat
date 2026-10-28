@@ -760,6 +760,9 @@ impl Core {
             value["body"] = json!(RECALLED_BODY);
             value["quote"] = Value::Null;
             value["link"] = Value::Null;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("location");
+            }
             value["appMessageType"] = Value::Null;
             value["mentions"] =
                 json!({"state":"known","userIds":[],"self":false,"all":false,"source":null});

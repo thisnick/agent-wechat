@@ -1,0 +1,83 @@
+.bubble.location-card {
+  display: grid;
+  gap: 12px;
+  width: 320px;
+  max-width: 100%;
+  padding: 15px 16px 12px;
+  white-space: normal;
+}
+.location-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 500;
+}
+.location-open {
+  display: grid;
+  gap: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+a.location-open:hover .location-copy strong {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.location-open-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent-ink);
+  font-size: 11px;
+}
+.location-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.location-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.location-copy > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.location-coordinates {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.location-coordinates > span {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.location-coordinates > button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 5px;
+}
+.location-coordinates > button:hover {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.location-footnote {
+  margin-top: -8px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}

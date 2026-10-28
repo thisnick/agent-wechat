@@ -28,7 +28,7 @@ export function recalledNativeMessage(message: NativeMessage, recall: NativeReca
   validateNativeRecall(recall);
   const previous = nativeRecallInfo(message);
   const replacementText = previous?.replacementText ?? recall.replacementText;
-  return { ...message, type: 10000, body: "[Message recalled]", quote: undefined, link: undefined, media: [],
+  return { ...message, type: 10000, body: "[Message recalled]", quote: undefined, link: undefined, location: undefined, media: [],
     senderId: message.senderId || null, direction: message.senderId ? message.direction : null,
     mentions: { state: "unknown", userIds: [], self: null, all: null, source: null },
     recall: { observedAt: previous?.observedAt ?? recall.observedAt, ...(previous?.recalledAt ?? recall.recalledAt ? { recalledAt: previous?.recalledAt ?? recall.recalledAt } : {}),

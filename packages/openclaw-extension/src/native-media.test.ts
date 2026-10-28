@@ -462,6 +462,19 @@ test("upload notices and plain announcements need no attachment transfer", async
     assert.ok(quoted.body.includes(body));
   }
 });
+
+test("static pins and location-sharing notices never request media or join tracking", async () => {
+  const body = "[Location]\nExample park\nLatitude: 12.5\nLongitude: -45.25\nCoordinate system: unknown";
+  const location = { latitude: 12.5, longitude: -45.25, name: "Example park", address: null, scale: null, mapType: "supplied", poiId: null, coordinateSystem: "unknown" as const };
+  const client = new Proxy({} as NativeWeChatClient, { get: () => assert.fail("Location context must not access media or tracking") });
+  const result = await prepareNativeAttachment({ client, account, message: { ...message, type: 48, body, location }, core: {} });
+  assert.equal(result.body, body); assert.equal(result.attachment, undefined); assert.equal(result.pending, false);
+  const notice = "[Location sharing notice]\nSharing location";
+  assert.equal((await prepareNativeAttachment({ client, account, message: { ...message, type: 49, appMessageType: 17, body: notice }, core: {} })).body, notice);
+  const recalled = await prepareNativeAttachment({ client, account, message: { ...message, type: 48, body, location,
+    recall: { observedAt: "2026-10-28T00:00:00Z" } }, core: {} });
+  assert.equal(recalled.body, "[Message recalled]"); assert.ok(!recalled.body.includes("12.5"));
+});
 function embeddedClient(extra: Partial<MediaAsset> = {}) {
   const calls: string[] = [];
   const client = {

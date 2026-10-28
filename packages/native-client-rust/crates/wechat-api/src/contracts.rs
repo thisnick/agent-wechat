@@ -34,6 +34,9 @@ pub struct NativeMessage {
     pub link: Option<wechat_core::LinkCard>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub location: Option<wechat_core::LocationCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub recall: Option<NativeRecallInfo>,
     pub direction: Option<String>,
     pub body: Option<String>,
@@ -416,6 +419,8 @@ pub fn typescript() -> String {
         NativeMentions::decl(),
         NativeQuoteReference::decl(),
         wechat_core::LinkCard::decl(),
+        wechat_core::LocationCoordinateSystem::decl(),
+        wechat_core::LocationCard::decl(),
         NativeRecallInfo::decl(),
         NativeMessage::decl(),
         wechat_core::PeerCategory::decl(),
@@ -657,6 +662,22 @@ mod tests {
 #[cfg(test)]
 mod read_contract_tests {
     use super::*;
+    #[test]
+    fn location_is_additive_and_keeps_coordinate_system_unknown() {
+        let mut value = serde_json::json!({"id":"pin","accountId":"a","threadId":"t","serverId":"42",
+            "senderId":"u","type":48,"direction":"incoming","body":"[Location]",
+            "createdAt":null,"mentions":{"state":"unknown","userIds":[],"self":null,"all":null,"source":null},"version":"v","media":[]});
+        let old: NativeMessage = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.location.is_none());
+        value["location"] = serde_json::json!({"latitude":12.5,"longitude":-45.25,"name":"Example park","address":null,"scale":-2,"mapType":"supplied","poiId":null,"coordinateSystem":"unknown"});
+        let parsed: NativeMessage = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["location"],
+            value["location"]
+        );
+        value["location"]["coordinateSystem"] = serde_json::json!("wgs84");
+        assert!(serde_json::from_value::<NativeMessage>(value).is_err());
+    }
     #[test]
     fn message_contract_keeps_embedded_quote_content_without_an_original_local_id() {
         let value = serde_json::json!({"id":"reply","accountId":"a","threadId":"t","serverId":"42",

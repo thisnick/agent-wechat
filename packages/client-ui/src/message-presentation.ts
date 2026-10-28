@@ -18,9 +18,10 @@ export function recallText(message: NativeMessage) {
 export function messagePresentation(message: NativeMessage) {
   if (message.recall) return "recalled";
   if ([1, 10000, 10002].includes(message.type)) return "text";
+  if (message.type === 48 && message.location && message.body?.trim()) return "location";
   if (message.type === 49) {
     if (
-      [1, 74, 87].includes(message.appMessageType ?? 0) &&
+      [1, 17, 74, 87].includes(message.appMessageType ?? 0) &&
       message.body?.trim()
     )
       return "text";

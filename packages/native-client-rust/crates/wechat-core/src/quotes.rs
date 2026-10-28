@@ -71,6 +71,9 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
         .filter(|s| s.len() <= 16384 && !s.contains('\0'));
     let text = match subtype {
         1 | 57 => title.clone(),
+        // Supplied notice text only; this does not join live-location sharing.
+        17 => crate::links::text(app, "title", 16384)
+            .map(|title| format!("[Location sharing notice]\n{title}")),
         // A retained notice does not establish the current transfer state.
         74 => title
             .as_ref()
@@ -288,6 +291,25 @@ mod tests {
     use super::*;
     use crate::Core;
     const LINK: &str = "<msg><appmsg><type>5</type><title><![CDATA[Article <title>]]></title><des>A &amp; B</des><url>https://example.com/article?a=1&amp;b=2</url><appattach><cdnattachurl>private-transport</cdnattachurl></appattach></appmsg></msg>";
+
+    #[test]
+    fn location_sharing_notice_exposes_only_the_supplied_title() {
+        let xml = "<msg><appmsg><type>17</type><title>Example &amp; location sharing</title><fromusername>private-sender</fromusername></appmsg></msg>";
+        let parsed = app_message(xml).unwrap();
+        assert_eq!(parsed.subtype, 17);
+        assert_eq!(
+            parsed.text.as_deref(),
+            Some("[Location sharing notice]\nExample & location sharing")
+        );
+        assert!(parsed.link.is_none() && parsed.reference.is_none());
+        for bad in [
+            xml.replace("<title>", "<title/><title>"),
+            xml.replace("Example &amp; location sharing", ""),
+            xml.replace("Example &amp; location sharing", "<nested>Example</nested>"),
+        ] {
+            assert!(app_message(&bad).unwrap().text.is_none());
+        }
+    }
 
     #[test]
     fn upload_notice_and_announcement_use_plain_fields_and_embedded_quotes() {

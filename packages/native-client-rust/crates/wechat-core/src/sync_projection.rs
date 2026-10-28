@@ -253,8 +253,11 @@ fn fields(message: &AddMessage, body: &[u8], sort: i64) -> Result<(RawFields, St
     if message.content.len() > 4 * 1024 * 1024 {
         bail!("message_content_too_large")
     }
-    if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
+    if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type) {
         bail!("unsupported_message_projection_type")
+    }
+    if message.message_type == 48 && crate::locations::parse(std::str::from_utf8(body)?).is_none() {
+        bail!("invalid_location_metadata")
     }
     let (subtype, title) = if message.message_type == 49 {
         app_fields(body)?
@@ -501,7 +504,7 @@ impl Core {
                 self.store.put_runtime(account, receipt, b"1")?;
                 return Ok(());
             }
-            if ![1, 3, 34, 43, 47, 49, 10000].contains(&message.message_type) {
+            if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type) {
                 let blocked = message_blocker(&message);
                 if matches!(message.message_type, 51 | 10002) {
                     self.store.append_event_once(
@@ -1263,6 +1266,146 @@ mod encrypted_roundtrip {
             ])
             .unwrap(),
         }
+    }
+    #[test]
+    fn retained_locations_recover_into_encrypted_history_without_completing_tracking_controls() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("data");
+        let store = Arc::new(Store::open(&root).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let pin = "<msg><location x='12.5' y='-45.25' scale='15' label='Example address' poiname='Example park' maptype='supplied' poiid='example-poi' cityname='retained-extra'/></msg>";
+        let group_pin = format!("member:\n{}", pin.replace("Example address", ""));
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            continuation: false,
+            commands: vec![
+                add(48, "peer", "synthetic_self", pin.as_bytes(), 42, 100),
+                add(
+                    48,
+                    "room@chatroom",
+                    "synthetic_self",
+                    group_pin.as_bytes(),
+                    43,
+                    101,
+                ),
+                add(
+                    49,
+                    "peer",
+                    "synthetic_self",
+                    b"<msg><appmsg><type>17</type><title>Location sharing</title></appmsg></msg>",
+                    44,
+                    102,
+                ),
+                add(
+                    10002,
+                    "peer",
+                    "synthetic_self",
+                    b"<sysmsg type='trackmsg'><trackmsg><trackroominfo/></trackmsg></sysmsg>",
+                    45,
+                    103,
+                ),
+                add(1, "peer", "synthetic_self", b"Later ordinary text", 46, 104),
+                add(
+                    48,
+                    "peer",
+                    "synthetic_self",
+                    b"<msg><location x='NaN' y='1'/></msg>",
+                    47,
+                    105,
+                ),
+            ],
+        };
+        store
+            .stage_sync(
+                "one",
+                "location-upgrade",
+                &core
+                    .vault
+                    .seal(
+                        "one",
+                        "apply:location-upgrade",
+                        &serde_json::to_vec(&batch).unwrap(),
+                    )
+                    .unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &batch.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
+        store.block_sync("one", "location-upgrade").unwrap();
+        let before = store.runtime("one", "projected-cursor").unwrap();
+        let result = core.recover_projection("one").unwrap();
+        assert_eq!(result["projectedCommands"], 4);
+        assert_eq!(result["pendingCommands"], 2);
+        let events = store.events("one", 0, 100).unwrap();
+        let committed: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == "message.committed")
+            .collect();
+        assert_eq!(committed.len(), 4);
+        let ids: Vec<_> = committed
+            .iter()
+            .map(|e| e.data["messageId"].as_str().unwrap().to_owned())
+            .collect();
+        for (index, id) in ids.iter().take(2).enumerate() {
+            let value = core.message("one", id).unwrap();
+            assert_eq!(value["type"], 48);
+            assert_eq!(value["location"]["latitude"], 12.5);
+            assert_eq!(value["location"]["mapType"], "supplied");
+            assert_eq!(value["location"]["coordinateSystem"], "unknown");
+            assert!(!value["body"].as_str().unwrap().contains("<msg>"));
+            let raw = core
+                .profile_reader("one")
+                .unwrap()
+                .message(
+                    &crate::source_message_id(id).unwrap(),
+                    Some("synthetic_self"),
+                )
+                .unwrap();
+            assert_eq!(
+                raw.content.text.as_deref(),
+                Some(if index == 0 { pin } else { &group_pin })
+            );
+        }
+        assert_eq!(
+            core.message("one", &ids[2]).unwrap()["body"],
+            "[Location sharing notice]\nLocation sharing"
+        );
+        assert_eq!(
+            core.message("one", &ids[3]).unwrap()["body"],
+            "Later ordinary text"
+        );
+        assert_eq!(
+            core.recover_projection("one").unwrap()["projectedCommands"],
+            0
+        );
+        assert_eq!(
+            store
+                .events("one", 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "message.committed")
+                .count(),
+            4
+        );
+        assert!(store.pending_cursor_projection("one").unwrap());
+        assert_eq!(store.runtime("one", "projected-cursor").unwrap(), before);
+        drop(core);
+        drop(store);
+        let store = Arc::new(Store::open_existing(&root).unwrap());
+        let core = Core::new(store, None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        assert_eq!(
+            core.message("one", &ids[0]).unwrap()["location"]["name"],
+            "Example park"
+        );
     }
     #[test]
     fn supported_status_controls_recover_blocked_batch_without_session_mutation() {

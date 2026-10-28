@@ -69,6 +69,7 @@ import "./style.css";
 import "./onboarding.css";
 import "./client.css";
 import { SharedLink } from "./shared-link.tsx";
+import { LocationMessage } from "./location-message.tsx";
 import { MentionEditor } from "./mention-editor.tsx";
 import { validMentionTokens, type MentionToken } from "./mentions.ts";
 const EMPTY_MENTIONS: MentionToken[] = [];
@@ -2050,6 +2051,8 @@ function Message({
               </div>
             ) : presentation === "link" && m.link ? (
               <SharedLink message={m} connection={connection} />
+            ) : presentation === "location" && m.location ? (
+              <LocationMessage location={m.location} />
             ) : presentation === "media" ? (
               <MediaCard message={m} connection={connection} />
             ) : (

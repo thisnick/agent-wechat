@@ -4,6 +4,8 @@ mod format;
 mod forwarded;
 mod links;
 pub use links::{LinkCard, ShareSendRequest};
+mod locations;
+pub use locations::{LocationCard, LocationCoordinateSystem};
 mod media;
 mod mention_send;
 pub use mention_send::{TextMentionPosition, TextMentions};

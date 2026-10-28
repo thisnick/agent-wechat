@@ -72,6 +72,38 @@ test("upload progress notices do not start model work before a final attachment"
   assert.equal(value.runs.length, 0);
   assert.equal(value.state.get("m1")?.readPending, undefined);
 });
+
+test("location context respects mention gates, read policy and source rechecks", async t => {
+  const location = { latitude: 12.5, longitude: -45.25, name: "Example park", address: null, scale: null, mapType: null, poiId: null, coordinateSystem: "unknown" as const };
+  const body = "[Location]\nExample park\nLatitude: 12.5\nLongitude: -45.25\nCoordinate system: unknown";
+  for (const group of [false, true]) {
+    const value = fixture(t, { group, readPolicy: "on_model_dispatch" });
+    Object.assign(value.message, { type: 48, location, body });
+    assert.equal(await dispatchNativeMessage(value), group ? "ignored" : "completed");
+    assert.equal(value.runs.length, group ? 0 : 1);
+    if (!group) {
+      assert.ok(value.runs[0].ctx.BodyForAgent.includes(body));
+      assert.equal(value.state.get("m1")?.readPending, true);
+    }
+  }
+  const stale = fixture(t);
+  Object.assign(stale.message, { type: 48, location, body });
+  stale.client.message = async () => ({ ...stale.message, location: { ...location, latitude: 13 } });
+  assert.equal(await dispatchNativeMessage(stale), "needs_review");
+  assert.equal(stale.runs.length, 0);
+  const malformed = fixture(t);
+  Object.assign(malformed.message, { type: 48, body });
+  assert.equal(await dispatchNativeMessage(malformed), "ignored");
+});
+
+test("location-sharing subtype 17 supplies a passive notice to the model", async t => {
+  const value = fixture(t, { readPolicy: "on_model_dispatch" });
+  const body = "[Location sharing notice]\nSharing location";
+  Object.assign(value.message, { type: 49, appMessageType: 17, body });
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  assert.ok(value.runs[0].ctx.BodyForAgent.includes(body));
+  assert.equal(value.state.get("m1")?.readPending, true);
+});
 test("embedded quoted links reach prepared model input without original resolution", async t => {
   const value = fixture(t, { readPolicy: "on_model_dispatch" });
   const link = "[Link] Article title\nArticle description\nhttps://example.com/article?a=1&b=2";

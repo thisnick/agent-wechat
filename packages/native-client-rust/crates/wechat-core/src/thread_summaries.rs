@@ -107,7 +107,9 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
             .unwrap_or("Message recalled")
     } else {
         match (kind, app) {
-            (1, _) | (49, Some(1 | 57 | 74 | 87)) => message["body"].as_str().unwrap_or("Message"),
+            (1, _) | (49, Some(1 | 17 | 57 | 74 | 87)) => {
+                message["body"].as_str().unwrap_or("Message")
+            }
             (3, _) => "Photo",
             (34, _) => "Voice message",
             (43 | 62, _) => "Video",
