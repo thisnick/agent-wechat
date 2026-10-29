@@ -9,5 +9,9 @@
     "@agent-wechat/agent-wechat": "1.3.0",
     "@agent-wechat/shared": "1.1.0"
   },
-  "changesets": []
+  "changesets": [
+    "bright-videos-travel",
+    "quoted-stickers-mention-members",
+    "scroll-conversation-history"
+  ]
 }
