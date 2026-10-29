@@ -41,7 +41,15 @@ test("two private preview hubs keep credentials separate and remain selectable w
   const child = spawn(process.execPath, [fileURLToPath(new URL("../scripts/connect.mjs", import.meta.url)), "--connections-file", config, "--state-dir", directory], {
     env: { PATH: process.env.PATH, HOME: directory, CLIENT_UI_PORT: String(port), CLIENT_UI_ORIGIN: "" }, stdio: ["ignore", "pipe", "pipe"],
   });
-  t.after(async () => { if (child.exitCode === null) { child.kill("SIGTERM"); await new Promise(resolve => child.once("exit", resolve)); } });
+  t.after(async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise(resolve => child.once("exit", resolve));
+    child.kill("SIGTERM");
+    // A failed assertion may leave a proxy connection open. Teardown must still
+    // finish so the test runner can report the original failure instead of hanging.
+    const forceStop = setTimeout(() => child.kill("SIGKILL"), 2000);
+    try { await exited; } finally { clearTimeout(forceStop); }
+  });
   let output = "", diagnostics = "";
   child.stderr.on("data", chunk => { diagnostics += chunk; });
   const ready = await new Promise((resolve, reject) => {

@@ -82,6 +82,11 @@ struct Settings {
 }
 impl Desktop {
     async fn start_local(&self, inner: &mut Inner, key: Zeroizing<String>) -> Result<()> {
+        // Bootstrap may be queued by a WebView reload while Quit drains the hub.
+        // Check under the same inner lock used by shutdown before starting it again.
+        if self.quit.load(Ordering::Acquire) != 0 {
+            bail!("The desktop app is shutting down");
+        }
         if inner
             .hub
             .as_mut()
@@ -626,6 +631,53 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn queued_local_start_cannot_launch_a_hub_after_quit_begins() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for quit in [1, 2] {
+            let temporary = tempfile::tempdir().unwrap();
+            let marker = temporary.path().join("hub-launched");
+            let executable = temporary.path().join("wx");
+            std::fs::write(
+                &executable,
+                format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let desktop = Desktop {
+                inner: Mutex::new(Inner {
+                    config: Config {
+                        local_port: 0,
+                        ..Config::default()
+                    },
+                    hub: None,
+                    active: None,
+                }),
+                config_file: temporary.path().join("desktop.json"),
+                data: temporary.path().join("hub"),
+                binaries: temporary.path().to_owned(),
+                uploads: Mutex::new(HashMap::new()),
+                requests: Arc::new(Mutex::new(HashMap::new())),
+                quit: AtomicU8::new(quit),
+                notifications: notifications::Notifications::default(),
+                updates: updates::Updates::default(),
+            };
+            let mut inner = desktop.inner.lock().await;
+            assert!(desktop
+                .start_local(&mut inner, hub::fresh_key())
+                .await
+                .is_err());
+            assert!(
+                !marker.exists(),
+                "a queued bootstrap launched a hub during quit"
+            );
+            assert!(!desktop.data.exists(), "shutdown must not create hub state");
+            assert!(inner.hub.is_none());
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires WX_BINARY and an isolated, unlocked system credential store"]
