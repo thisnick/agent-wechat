@@ -256,7 +256,7 @@ fn validate_base_response(input: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn decode_fields(input: &[u8]) -> Result<Vec<Field>> {
+pub(super) fn decode_fields(input: &[u8]) -> Result<Vec<Field>> {
     ensure!(
         input.len() <= MAX_SIGNALING_BYTES,
         "Call envelope too large"
@@ -266,7 +266,7 @@ fn decode_fields(input: &[u8]) -> Result<Vec<Field>> {
     Ok(fields)
 }
 
-fn optional_u32(fields: &[Field], number: u32) -> Result<Option<u32>> {
+pub(super) fn optional_u32(fields: &[Field], number: u32) -> Result<Option<u32>> {
     match p::optional(fields, number)? {
         None => Ok(None),
         Some(Value::Varint(value)) => Ok(Some(u32::try_from(*value)?)),
@@ -282,7 +282,7 @@ fn optional_i32(fields: &[Field], number: u32) -> Result<Option<i32>> {
     }
 }
 
-fn unknown_fields(fields: Vec<Field>, last_known: u32) -> Vec<Field> {
+pub(super) fn unknown_fields(fields: Vec<Field>, last_known: u32) -> Vec<Field> {
     fields
         .into_iter()
         .filter(|field| field.number > last_known)

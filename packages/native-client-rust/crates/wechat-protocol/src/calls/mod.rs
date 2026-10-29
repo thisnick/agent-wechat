@@ -5,4 +5,5 @@
 //! Live negotiation, key lifecycle and peer interoperability remain unverified.
 
 pub mod channel;
+pub mod incoming;
 pub mod signaling;
