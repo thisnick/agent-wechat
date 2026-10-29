@@ -32,6 +32,8 @@ const moved = {
   'use/quoted-replies': 'use/cli',
   'use/downloads': 'use/settings',
   'reference/environment-vars': 'reference/configuration',
+  'reference/rust-protocol': 'reference/rust-libraries#send-one-text-message',
+  'reference/rust-profile': 'reference/rust-libraries#profile-writes',
 };
 
 export default defineConfig({
@@ -94,8 +96,6 @@ export default defineConfig({
           { label: 'Configuration', slug: 'reference/configuration' },
           { label: 'API tokens', slug: 'reference/tokens' },
           { label: 'Rust libraries', slug: 'reference/rust-libraries' },
-          { label: 'Rust protocol client', slug: 'reference/rust-protocol' },
-          { label: 'Rust profile storage', slug: 'reference/rust-profile' },
           { label: 'Troubleshooting', slug: 'reference/troubleshooting' },
           { label: 'Build from source', slug: 'reference/build' },
         ] },

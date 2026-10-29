@@ -44,7 +44,7 @@ A task ID is not a server idempotency guarantee: investigate an uncertain send
 before running it again. Production applications must save the operation and
 its timestamp before submitting and keep secret account state encrypted.
 
-See the [Rust protocol guide](https://thisnick.github.io/agent-wechat/reference/rust-protocol/)
+See the [Rust libraries guide](https://thisnick.github.io/agent-wechat/reference/rust-libraries/#send-one-text-message)
 for a short text-send example using an already authenticated account.
 
 ## Transport and supported operations

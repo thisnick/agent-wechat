@@ -22,7 +22,7 @@ saved recovery record; the library checks the supplied reference, but cannot
 prove the record exists or another process stopped. Those hooks do not add a
 new official profile format or supply the daemon's recovery journal.
 
-See the [Rust profile guide](https://thisnick.github.io/agent-wechat/reference/rust-profile/)
+See the [Rust libraries guide](https://thisnick.github.io/agent-wechat/reference/rust-libraries/#profile-writes)
 for the API boundary and write-phase terminology.
 
 ## Read a stopped profile

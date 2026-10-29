@@ -5,47 +5,32 @@ description: Use the native WeChat protocol and official-profile libraries from 
 
 import { Aside } from '@astrojs/starlight/components';
 
-Use `wechat-protocol` to implement a native WeChat client, or `wechat-profile`
-to read a supported official Linux profile. Neither needs the daemon or an
-official WeChat executable. Applications using an existing daemon can call the
-[HTTP API](/use/api/) instead.
+Use these libraries for supported WeChat server operations and official profile
+storage. They run without the daemon or an official executable. Applications
+connecting to an existing daemon can use the [HTTP API](/use/api/).
 
 | Crate | Purpose |
 | --- | --- |
-| `wechat-protocol` | Blocking transport, authentication, sync and message codecs |
-| `wechat-profile` | Profile keys, snapshots, history, contacts and checked writers |
-| `wechat-media` | Shared image inspection and decoding |
-| `wechat-platform` | Shared private files, temporary directories and OS support |
-
-The libraries implement supported WeChat behavior. Daemon jobs, token policies,
-event delivery and OpenClaw behavior stay in separate, unpublished crates.
+| [wechat-protocol](https://docs.rs/wechat-protocol) | Transport, authentication, sync and message codecs |
+| [wechat-profile](https://docs.rs/wechat-profile) | Profile keys, history, contacts, cached media and checked writers |
+| [wechat-media](https://docs.rs/wechat-media) | Shared image inspection and decoding |
+| [wechat-platform](https://docs.rs/wechat-platform) | Private files and OS support |
 
 ## Add dependencies
 
-1. Choose a published version from [wechat-protocol](https://crates.io/crates/wechat-protocol)
-   or [wechat-profile](https://crates.io/crates/wechat-profile). The first registry
-   release is `1.3.0`.
-
-2. Add the libraries at that version:
+1. Add the libraries; `1.3.0` is their first crates.io release:
 
    ```bash
    cargo add wechat-protocol@=1.3.0 wechat-profile@=1.3.0
    ```
 
-   Cargo adds the two dependencies and resolves their supporting crates. All
-   four follow the native release version. Select beta versions explicitly.
-
-3. Follow [the protocol guide](/reference/rust-protocol/) for login, sending and
-   sync, or [the profile guide](/reference/rust-profile/) for local reads and writes.
-
-Building needs Rust 1.93.1+, a C compiler, Make and Perl for the bundled native
-dependencies. Some image decoding paths also need FFmpeg at runtime.
+2. Build with Rust 1.93.1+, a C compiler, Make and Perl. All four crates follow
+   the native release version; Cargo resolves the supporting crates automatically.
 
 ## Read a stopped profile
 
-The caller must stop the profile's writer or provide a consistent copy before
-setting `stopped_or_consistent_snapshot`. This flag records that assertion; it
-does not stop another process.
+Stop the profile's writer or provide a consistent copy, then load your protected
+keys file. The snapshot flag records that assertion; it does not stop a process.
 
 ```rust
 use wechat_profile::{KeyFile, ListQuery, ProfileLocation, ProfileReader, ReadOptions};
@@ -62,27 +47,82 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
 }
 ```
 
-Supply your own protected keys file. The library does not discover passwords
-or obtain keys from another process. Profile writers require exclusive
-ownership and a supported schema.
+Reading cached media never initiates a download. An application already owning
+the profile can use `OwnedReaderCache` with its own synchronization.
 
-## Use the protocol library
+## Send one text message
 
-`NativeClient` owns native transport and authentication. Its network methods
-block, so async applications must call them on a blocking worker. The library
-does not supply the daemon's send queue, idempotency records or recovery policy;
-an embedding application owns those responsibilities.
+Server operations are mostly **methods on
+[`NativeClient`](https://docs.rs/wechat-protocol/1.3.0/wechat_protocol/struct.NativeClient.html)**,
+rather than entries in the crate's Functions list. The daemon calls the same
+library; the caller owns credential storage, recovery and profile writeback.
 
-API details are available through `cargo doc --open`,
-[protocol API docs](https://docs.rs/wechat-protocol) and
-[profile API docs](https://docs.rs/wechat-profile).
-The source tree also has compiled
-[protocol](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/crates/wechat-protocol/examples/protobuf.rs)
-and [profile](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/crates/wechat-profile/examples/contacts.rs)
-examples.
+1. Call `start_qr_login`, display the QR privately, poll until
+   `LoginStatus::Approved`, then call `complete_login` for secret `AccountState`.
+2. Save the intended operation, unique task ID and Unix-seconds timestamp before
+   submitting. Pass the recipient's exact WeChat username:
+
+   ```rust
+   use wechat_protocol::{wire, AccountState, NativeClient, TextSendResult};
+
+   fn send_once(
+       client: &NativeClient,
+       state: &mut AccountState,
+       recipient: &str,
+       text: &str,
+       task_id: &str,
+       created_at: u32,
+   ) -> anyhow::Result<TextSendResult> {
+       let client_id = wire::client_message_id(task_id.as_bytes());
+       anyhow::ensure!(client_id != 0, "Choose another task ID");
+       client.send_text(state, recipient, text, created_at, client_id)
+   }
+   ```
+
+3. Check `accepted`, `returned_destination_matches` and
+   `returned_client_id_matches`. An accepted receipt includes a decimal-string
+   `server_message_id`; it does not establish recipient playback or history writeback.
+
+## Run the source examples
+
+From a repository checkout:
+
+```bash
+cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example send_text -- RECIPIENT UNIQUE_TASK_ID "Hello from the Rust example"
+```
+
+After QR approval, the example submits once and prints a receipt with
+`"accepted": true` on server acceptance. `qr_login` demonstrates login alone;
+`sync_once` summarizes one page; `protobuf` demonstrates a local codec.
+`--help` makes no network requests. A persistent receiver must handle and retain
+sync commands before committing the next cursor; `sync_once` saves no checkpoint.
+
+## Profile writes
+
+The library implements official storage formats; account policy and recovery
+belong to its caller. These prefixes describe our API, not official-client names:
+
+| Prefix | Usual meaning |
+| --- | --- |
+| `stage_*` | Prepare bytes without changing the profile |
+| `apply_*` | Apply a logical profile update |
+| `publish_*` | Install bytes at local profile paths |
+
+Both `apply_*` and `publish_*` write data, with overlap: `publish_saved_key_info`
+can change a database and a file. Neither prefix guarantees whole-operation
+atomicity. New mutations use `apply_*`; existing `publish_*` names stay compatible.
+
+For MMKV, staging constructs encrypted data and matching `.crc` metadata in
+memory. Publication installs those bytes through temporary files into the
+profile's existing paths. `WriteOptions::durable_intent_id` references the caller's
+previously saved recovery record; the library cannot prove that record exists.
 
 <Aside title="Good to know">
-Beta Rust APIs may change between releases; pin a version and read its changes.
-Support for the Linux profile format does not establish compatibility with
-official Windows or macOS profiles. Treat keys and profile contents as private.
+Network calls block; async callers need a blocking worker. Examples use fresh
+test-account logins, which may replace another desktop session, and keep credentials
+only in memory. Encrypt saved credentials. An uncertain send must be investigated
+before resubmission; a client ID does not guarantee deduplication. Writers require
+exclusive ownership, matching keys and supported schemas. Linux profile support
+does not establish official Windows/macOS compatibility. Some media paths need
+FFmpeg. Pin versions and review API changes.
 </Aside>
