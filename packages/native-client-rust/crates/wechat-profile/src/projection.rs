@@ -992,6 +992,9 @@ pub struct NativeRosterPatch {
     pub username: String,
     pub members: Vec<NativeMemberPatch>,
     pub complete_roster: bool,
+    /// None preserves the saved list. Some replaces it, including an empty list.
+    #[serde(default)]
+    pub administrator_ids: Option<Vec<String>>,
 }
 
 /// Effects established for ordinary Linux group controls. This writer never
@@ -1320,6 +1323,15 @@ pub fn apply_native_roster_patch(
         return Err(ProfileError::InvalidMetadata);
     }
     let mut patches = std::collections::BTreeMap::new();
+    if let Some(ids) = &input.administrator_ids {
+        let mut seen = std::collections::BTreeSet::new();
+        for id in ids {
+            identity(id)?;
+            if !seen.insert(id) || seen.len() > 10000 {
+                return Err(ProfileError::InvalidMetadata);
+            }
+        }
+    }
     for member in &input.members {
         identity(&member.username)?;
         if patches.insert(member.username.clone(), member).is_some() {
@@ -1369,6 +1381,12 @@ pub fn apply_native_roster_patch(
     let mut packed = vec![];
     let mut written = std::collections::BTreeSet::new();
     for chunk in chunks {
+        if chunk.field == 5 && input.administrator_ids.is_some() {
+            if chunk.wire != 2 {
+                return Err(ProfileError::InvalidMetadata);
+            }
+            continue;
+        }
         if chunk.field != 1 {
             packed.extend_from_slice(chunk.raw);
             continue;
@@ -1397,6 +1415,11 @@ pub fn apply_native_roster_patch(
         proto_bytes(1, &patch_member(None, patch)?, &mut packed);
     }
     let mut fields = RawFields::new();
+    if let Some(ids) = &input.administrator_ids {
+        for id in ids {
+            proto_bytes(5, id.as_bytes(), &mut packed);
+        }
+    }
     fields.insert("ext_buffer".into(), SqlValue::Blob(STANDARD.encode(packed)));
     drop(c);
     apply_group_patch(

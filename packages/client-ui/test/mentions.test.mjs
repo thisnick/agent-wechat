@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mentionOptions, mentionQuery, validMentionReceipt, validMentionTokens } from "../src/mentions.ts";
+import { allMentionProblem, canMentionAll, mentionOptions, mentionQuery, removeAllMentions, validMentionReceipt, validMentionTokens } from "../src/mentions.ts";
 
 const token = (userId, label, start) => ({ userId, label, start, end: start + label.length + 2 });
 test("inline recipients preserve UTF-16 positions, repeated people and surrounding text", () => {
@@ -19,6 +19,32 @@ test("inline recipients preserve UTF-16 positions, repeated people and surroundi
 test("Everyone is separate from individual recipients", () => {
   assert.deepEqual(mentionOptions("Hi @all\u2005!", [token(null, "all", 3)]), { all: true, positions: [{ start: 3, end: 8, index: 0 }] });
   assert.equal(validMentionTokens("@all\u2005@Jin\u2005", [token(null, "all", 0), token("jin", "Jin", 5)]), false);
+});
+
+test("Everyone follows new server permission and preserves legacy group response behavior", () => {
+  const group = { id: "room@chatroom", roomId: "room@chatroom", isInGroup: true, ownerId: "wxid_me" };
+  for (const permission of [false, null, "true", 1])
+    assert.equal(canMentionAll({ ...group, canMentionAll: permission }, group.id), false);
+  assert.equal(canMentionAll(group, group.id), true, "a legacy server omits the field");
+  assert.equal(canMentionAll({ ...group, ownerId: "someone_else" }, group.id), true, "legacy behavior does not infer roles");
+  assert.equal(canMentionAll({ ...group, canMentionAll: true }, group.id), true);
+  assert.equal(canMentionAll({ ...group, ownerId: "someone_else", canMentionAll: true }, group.id), true, "server may grant a non-owner role");
+  assert.equal(canMentionAll({ ...group, canMentionAll: true, isInGroup: false }, group.id), false);
+  assert.equal(canMentionAll({ ...group, canMentionAll: true }, "other@chatroom"), false);
+  assert.equal(canMentionAll({ ...group, id: "peer", canMentionAll: true }, "peer"), false);
+  assert.equal(canMentionAll(null, group.id), false);
+  assert.match(allMentionProblem({ ...group, canMentionAll: false }, group.id), /can’t mention everyone/);
+  assert.match(allMentionProblem({ ...group, canMentionAll: null }, group.id), /permissions are unavailable/);
+  assert.equal(allMentionProblem({ ...group, canMentionAll: true }, group.id), "");
+});
+
+test("removing a blocked Everyone selection preserves the authored body and ordinary recipients", () => {
+  const text = "😀 Before @all\u2005 after", tokens = [token(null, "all", text.indexOf("@all"))];
+  assert.deepEqual(removeAllMentions(text, tokens), { text: "😀 Before  after", tokens: [] });
+  assert.equal(text.slice(tokens[0].start, tokens[0].end), "@all\u2005", "removal does not mutate saved draft inputs");
+  const members = "Ask @Jin\u2005 about it", selected = [token("wxid_jin", "Jin", 4)];
+  assert.deepEqual(removeAllMentions(members, selected), { text: members, tokens: selected });
+  assert.throws(() => removeAllMentions("edited", tokens), /Choose/);
 });
 
 test("edited, overlapping, corrupt and incomplete persisted identities fail closed", () => {

@@ -784,6 +784,9 @@ pub struct RoomRoster {
     pub full_member_ids: Option<Vec<String>>,
     #[serde(default)]
     pub owner: Option<String>,
+    /// None preserves the cached list; Some replaces it, including an empty list.
+    #[serde(default)]
+    pub administrator_ids: Option<Vec<String>>,
 }
 pub fn room_request(state: &AccountState, room_id: &str, version: u32) -> Result<Vec<u8>> {
     ensure!(room_id.ends_with("@chatroom"), "Invalid room identity");
@@ -856,16 +859,35 @@ pub fn decode_room(input: &[u8], room_id: &str) -> Result<RoomRoster> {
         None if full_ids.is_empty() => None,
         _ => bail!("Invalid full member count"),
     };
-    match p::optional(&f, 8)? {
-        None | Some(p::Value::Varint(0)) => {}
-        _ => bail!("Unsupported member deletion metadata"),
-    }
-    for field in f.iter().filter(|v| v.number == 9) {
+    let administrator_control = match p::optional(&f, 8)? {
+        None => 0,
+        Some(p::Value::Varint(value)) => u32::try_from(*value)?,
+        _ => bail!("Invalid administrator control"),
+    };
+    let mut administrator_ids = vec![];
+    let mut administrator_seen = HashSet::new();
+    for (index, field) in f.iter().filter(|v| v.number == 9).enumerate() {
+        ensure!(index < 10000, "Excessive administrator identities");
+        let p::Value::Bytes(raw) = &field.value else {
+            bail!("Invalid administrator identity");
+        };
+        let nested = p::decode(raw)?;
+        let name = raw_text(p::optional_data(&nested, 1)?.unwrap_or_default())?;
+        // Empty SKString entries are sentinels, not administrator identities.
+        if name.is_empty() {
+            continue;
+        }
         ensure!(
-            matches!(&field.value,p::Value::Bytes(raw) if raw.is_empty()),
-            "Unsupported member deletion metadata"
+            name.len() <= 256
+                && !name.chars().any(|c| c.is_control() || c.is_whitespace())
+                && administrator_seen.insert(name.clone()),
+            "Invalid administrator identity"
         );
+        administrator_ids.push(name);
     }
+    // The supported native consumer uses field 8 as a nonzero replacement
+    // control, not as a count of the field 9 SKString entries.
+    let administrator_ids = (administrator_control != 0).then_some(administrator_ids);
     let owner = p::optional_data(&f, 5)?
         .map(raw_text)
         .transpose()?
@@ -876,6 +898,7 @@ pub fn decode_room(input: &[u8], room_id: &str) -> Result<RoomRoster> {
         members,
         full_member_ids,
         owner,
+        administrator_ids,
     })
 }
 
@@ -1101,13 +1124,110 @@ mod tests {
             "room@chatroom"
         )
         .is_err());
-        let mut unknown_deletion = full;
-        unknown_deletion.push(p::uint(8, 1));
-        assert!(decode_room(&roster(nested.clone(), unknown_deletion), "room@chatroom").is_err());
+        let mut administrator_clear = full;
+        administrator_clear.push(p::uint(8, 1));
+        assert_eq!(
+            decode_room(
+                &roster(nested.clone(), administrator_clear),
+                "room@chatroom"
+            )
+            .unwrap()
+            .administrator_ids,
+            Some(vec![])
+        );
         assert!(decode_room(&roster(nested, vec![]), "room@chatroom")
             .unwrap()
             .full_member_ids
             .is_none());
+    }
+
+    fn room_administrator_fixture(extra: &[u8]) -> Vec<u8> {
+        // CGI551 response: BaseResponse{ret=0}, version=7,
+        // ChatRoomMemberData{member_count=0}. These tags are independent of
+        // the codec under test and retain an empty changed-member list.
+        let mut raw = vec![0x0a, 0x02, 0x08, 0x00, 0x18, 0x07, 0x22, 0x02, 0x08, 0x00];
+        raw.extend_from_slice(extra);
+        raw
+    }
+
+    #[test]
+    fn room_administrator_control_replaces_list_without_count_semantics() {
+        // Field 8=42; repeated field 9 SKString values: alice, empty, bob.
+        // The native consumer filters empty strings and replaces the list
+        // whenever field 8 is nonzero, without comparing it to a count.
+        let raw = room_administrator_fixture(&[
+            0x40, 0x2a, 0x4a, 0x07, 0x0a, 0x05, b'a', b'l', b'i', b'c', b'e', 0x4a, 0x00, 0x4a,
+            0x05, 0x0a, 0x03, b'b', b'o', b'b',
+        ]);
+        let roster = decode_room(&raw, "room@chatroom").unwrap();
+        assert_eq!(roster.administrator_ids.unwrap(), ["alice", "bob"]);
+        assert!(roster.members.is_empty());
+        assert!(roster.full_member_ids.is_none());
+    }
+
+    #[test]
+    fn room_administrator_absent_or_zero_control_preserves_list() {
+        for extra in [
+            vec![],
+            vec![0x40, 0x00],
+            vec![0x4a, 0x07, 0x0a, 0x05, b'a', b'l', b'i', b'c', b'e'],
+            vec![
+                0x40, 0x00, 0x4a, 0x07, 0x0a, 0x05, b'a', b'l', b'i', b'c', b'e',
+            ],
+        ] {
+            assert!(
+                decode_room(&room_administrator_fixture(&extra), "room@chatroom")
+                    .unwrap()
+                    .administrator_ids
+                    .is_none()
+            );
+        }
+        // Persisted metadata receipts from before this field was understood
+        // preserve the cached administrator list when deserialized.
+        let old: RoomRoster = serde_json::from_value(serde_json::json!({
+            "room_id":"room@chatroom", "version":7, "members":[]
+        }))
+        .unwrap();
+        assert!(old.administrator_ids.is_none());
+    }
+
+    #[test]
+    fn room_administrator_control_clears_absent_and_empty_entries() {
+        for extra in [
+            vec![0x40, 0x01],
+            vec![0x40, 0x01, 0x4a, 0x00],
+            vec![0x40, 0x01, 0x4a, 0x02, 0x0a, 0x00],
+        ] {
+            assert_eq!(
+                decode_room(&room_administrator_fixture(&extra), "room@chatroom")
+                    .unwrap()
+                    .administrator_ids,
+                Some(vec![])
+            );
+        }
+    }
+
+    #[test]
+    fn room_administrator_fields_reject_malformed_and_unbounded_values() {
+        let string = |value: &[u8]| p::bytes(9, &p::bytes(1, value));
+        let repeated = string(b"alice");
+        for extra in [
+            p::bytes(8, &[]),
+            p::uint(8, u64::from(u32::MAX) + 1),
+            [p::uint(8, 1), p::uint(8, 1)].concat(),
+            p::uint(9, 1),
+            p::bytes(9, &[0x0a, 0x01]),
+            p::bytes(9, &p::uint(1, 1)),
+            p::bytes(9, &[p::bytes(1, b"a"), p::bytes(1, b"b")].concat()),
+            string(&[0xff]),
+            string(b"alice bob"),
+            string(b"alice\n"),
+            string(&[b'a'; 257]),
+            [repeated.clone(), repeated].concat(),
+            p::bytes(9, &[]).repeat(10001),
+        ] {
+            assert!(decode_room(&room_administrator_fixture(&extra), "room@chatroom").is_err());
+        }
     }
     fn cursor(k: u64, v: u64) -> Vec<u8> {
         p::message(&[

@@ -180,6 +180,13 @@ pub struct NativeGroup {
     pub classification: Option<wechat_core::PeerClassification>,
     pub display_name: Option<String>,
     pub owner_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub administrator_ids: Option<Vec<String>>,
+    // Missing on legacy servers; null means permission is not established.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub can_mention_all: Option<bool>,
     pub announcement: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]

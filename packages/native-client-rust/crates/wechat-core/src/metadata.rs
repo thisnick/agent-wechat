@@ -1221,6 +1221,7 @@ impl Core {
             username: value.room_id.clone(),
             members,
             complete_roster: complete,
+            administrator_ids: value.administrator_ids.clone(),
         };
         wechat_profile::apply_native_roster_patch(location, keys, &patch, options)?;
         if let Some(owner) = &value.owner {

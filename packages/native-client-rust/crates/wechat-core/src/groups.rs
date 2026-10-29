@@ -109,7 +109,13 @@ impl Core {
         );
         value["source"] = json!("cached");
         value["rosterCoverage"] = json!("partial");
-        if let Some(own) = self.profile_username(account)? {
+        let own = self.profile_username(account)?;
+        let permissions = self
+            .profile_reader_owned(account)?
+            .group_mention_permissions(id, own.as_deref())?;
+        value["administratorIds"] = json!(permissions.administrator_ids);
+        value["canMentionAll"] = json!(permissions.can_mention_all);
+        if let Some(own) = own {
             let member = self.group_member(account, id, &own)?;
             value["myDisplayName"] = member["member"]["roomDisplayName"].clone();
         }
@@ -834,6 +840,7 @@ impl Core {
                         username: group.into(),
                         members,
                         complete_roster: false,
+                        administrator_ids: None,
                     },
                     &options,
                 )?;

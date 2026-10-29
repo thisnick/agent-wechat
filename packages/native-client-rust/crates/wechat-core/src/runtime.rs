@@ -1346,6 +1346,23 @@ impl Core {
             let payload: SendPayload = serde_json::from_slice(&plain)?;
             let mut state = core.account_state(&account)?;
             let native = &core.upstream;
+            if payload.mentions.as_ref().is_some_and(|m| m.request.all) {
+                if let Err(error) =
+                    core.require_mention_all(&account, &payload.thread_id, &state.own_username)
+                {
+                    // Role changes can arrive while a send is queued. Recheck
+                    // before claiming/submitting; never retry an accepted send.
+                    let code = match error.to_string().as_str() {
+                        "mention_all_forbidden" => "mention_all_forbidden",
+                        _ => "mention_all_permission_unavailable",
+                    };
+                    if core.store.claim_send(&account, &id)? {
+                        core.store
+                            .update_send(&account, &id, "failed", None, Some(code))?;
+                    }
+                    return Ok(());
+                }
+            }
             if let Some(quote) = &payload.quote {
                 if core
                     .quote_target(&account, &payload.thread_id, &quote.target)
@@ -2696,6 +2713,171 @@ mod tests {
                 .unwrap()["direction"],
             "incoming"
         );
+    }
+    #[tokio::test]
+    async fn all_mentions_require_current_owner_or_admin_and_recheck_before_submission() {
+        use wechat_profile::{GroupProjection, NativeRosterPatch, RawFields, SqlValue};
+        struct NoSend;
+        impl crate::upstream::Upstream for NoSend {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn send_text_with_source(
+                &self,
+                _: &mut AccountState,
+                _: &str,
+                _: &str,
+                _: u32,
+                _: u32,
+                _: &str,
+            ) -> Result<wechat_protocol::wire::TextSendResult> {
+                panic!("permission rejection must not submit a message")
+            }
+        }
+        let (_temp, mut core) = super::groups::tests::fixture();
+        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(NoSend);
+        super::groups::tests::make_group(&core);
+        core.stopping.store(true, Ordering::SeqCst);
+        core.store
+            .put_runtime("one", "desired", b"connected")
+            .unwrap();
+        core.store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        let options = core.write_options("one", "all-mention-roles").unwrap();
+        let set_owner = |owner: &str| {
+            wechat_profile::apply_group_patch(
+                &location,
+                &keys,
+                &GroupProjection {
+                    username: "synthetic@chatroom".into(),
+                    fields: RawFields::from([("owner".into(), SqlValue::Text(owner.into()))]),
+                    detail_fields: None,
+                    members: vec![],
+                    complete_roster: false,
+                },
+                &options,
+            )
+            .unwrap();
+        };
+        let set_admins = |ids: Vec<String>| {
+            wechat_profile::apply_native_roster_patch(
+                &location,
+                &keys,
+                &NativeRosterPatch {
+                    username: "synthetic@chatroom".into(),
+                    members: vec![],
+                    complete_roster: false,
+                    administrator_ids: Some(ids),
+                },
+                &options,
+            )
+            .unwrap();
+        };
+        let request = crate::TextMentions {
+            all: true,
+            user_ids: vec![],
+            positions: vec![],
+        };
+        set_owner("");
+        set_admins(vec![]);
+        assert_eq!(
+            core.group_info("one", "synthetic@chatroom").unwrap()["canMentionAll"],
+            Value::Null
+        );
+        assert_eq!(
+            core.send_mentioned_text(
+                "one",
+                "unknown",
+                "synthetic@chatroom",
+                "bot test",
+                request.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "mention_all_permission_unavailable"
+        );
+        assert!(core.store.send_by_key("one", "unknown").is_err());
+        set_owner("peer");
+        assert_eq!(
+            core.group_info("one", "synthetic@chatroom").unwrap()["canMentionAll"],
+            false
+        );
+        assert_eq!(
+            core.send_mentioned_text(
+                "one",
+                "member",
+                "synthetic@chatroom",
+                "bot test",
+                request.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "mention_all_forbidden"
+        );
+        assert!(core.store.send_by_key("one", "member").is_err());
+        set_owner("synthetic_self");
+        let owner = core
+            .send_mentioned_text(
+                "one",
+                "owner",
+                "synthetic@chatroom",
+                "bot test",
+                request.clone(),
+            )
+            .await
+            .unwrap();
+        // Accepted outcomes remain retrievable after a role change; a replay
+        // must not reinterpret them or cause another network submission.
+        assert!(core.store.claim_send("one", &owner.id).unwrap());
+        core.store
+            .update_send("one", &owner.id, "accepted", Some("777"), None)
+            .unwrap();
+        set_owner("peer");
+        set_admins(vec!["synthetic_self".into()]);
+        let info = core.group_info("one", "synthetic@chatroom").unwrap();
+        assert_eq!(info["administratorIds"], json!(["synthetic_self"]));
+        assert_eq!(info["canMentionAll"], true);
+        let queued = core
+            .send_mentioned_text(
+                "one",
+                "admin",
+                "synthetic@chatroom",
+                "bot test",
+                request.clone(),
+            )
+            .await
+            .unwrap();
+        set_admins(vec![]);
+        assert_eq!(
+            core.send_mentioned_text(
+                "one",
+                "owner",
+                "synthetic@chatroom",
+                "bot test",
+                request.clone()
+            )
+            .await
+            .unwrap()
+            .id,
+            owner.id
+        );
+        assert_eq!(
+            core.send_mentioned_text("one", "admin", "synthetic@chatroom", "bot test", request)
+                .await
+                .unwrap()
+                .id,
+            queued.id
+        );
+        core.stopping.store(false, Ordering::SeqCst);
+        core.perform_send("one", &queued.id).await.unwrap();
+        let failed = core.store.send("one", &queued.id).unwrap();
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("mention_all_forbidden"));
+        assert_eq!(core.store.send("one", &owner.id).unwrap().state, "accepted");
     }
     #[tokio::test]
     async fn mentioned_text_freezes_names_replays_and_projects_official_source() {

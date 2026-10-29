@@ -13,7 +13,7 @@ import {
   type NativeThreadMessage,
   type TextMentions,
 } from "@agent-wechat/shared";
-import { mentionOptions, type MentionToken } from "./mentions.ts";
+import { allMentionProblem, canMentionAll, mentionOptions, type MentionToken } from "./mentions.ts";
 import type { BrowserCache } from "./browser-cache.ts";
 import { HISTORY_TTL_MS, HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
@@ -110,6 +110,8 @@ export function readableError(error: unknown): string {
           mentions_require_group: "Mentions are available in groups only.",
           mention_member_unavailable: "A mentioned member is unavailable. Remove the mention or choose them again.",
           mention_group_membership_unavailable: "Refresh the group’s members before sending mentions.",
+          mention_all_forbidden: "You can’t mention everyone in this group.",
+          mention_all_permission_unavailable: "Group permissions are unavailable. Refresh the group before mentioning everyone.",
           quote_mentions_unsupported: "Send mentions separately from quoted replies.",
           quote_target_unavailable:
             "That message is no longer available to quote.",
@@ -291,6 +293,7 @@ export class HubSession {
   };
   private generation = 0;
   private threadGeneration = 0;
+  private groupRequest = 0;
   private accountRequest = 0;
   private accountsCheckedAt = -Infinity;
   private catalogRequest = 0;
@@ -730,7 +733,7 @@ export class HubSession {
       this.current(account, generation) && selected === this.threadGeneration;
     this.publish({
       selected: threadId,
-      selectedGroup: previousGroup,
+      selectedGroup: previousGroup ? { ...previousGroup, canMentionAll: null } : null,
       messages: fromDisk ? [] : cached?.messages ?? [],
       nextMessages: cached?.nextMessages ?? null,
       loading: true,
@@ -1021,15 +1024,25 @@ export class HubSession {
     generation: number,
     selected: number,
   ): Promise<void> {
+    const request = this.invalidateAllMentionPermission();
     const group = await this.client.group(account, thread);
     if (
       this.current(account, generation) &&
       selected === this.threadGeneration &&
-      thread === this.value.selected
+      thread === this.value.selected &&
+      request === this.groupRequest &&
+      group.id === thread
     ) {
       this.publish({ selectedGroup: group });
       this.remember();
     }
+  }
+  private invalidateAllMentionPermission(): number {
+    const request = ++this.groupRequest;
+    const group = this.value.selectedGroup;
+    if (group && group.canMentionAll !== null)
+      this.publish({ selectedGroup: { ...group, canMentionAll: null } });
+    return request;
   }
   async markRead(threadId: string): Promise<unknown> {
     const account = this.value.account,
@@ -1128,6 +1141,8 @@ export class HubSession {
     catalog = true,
   ): Promise<string> {
     if (!account) return "0";
+    if (catalog && this.current(account, generation) && this.value.selected?.endsWith("@chatroom"))
+      this.invalidateAllMentionPermission();
     const request = ++this.catalogRequest;
     const revisions = new Map(this.threadRequests);
     const threads = await inventory((cursor) =>
@@ -1171,6 +1186,8 @@ export class HubSession {
     const generation = this.generation;
     if (!account || !this.current(account, generation))
       return Promise.resolve();
+    if (this.value.selected?.endsWith("@chatroom") && (catalog || group === this.value.selected))
+      this.invalidateAllMentionPermission();
     // Invalidate older inventories and point reads immediately, before the timer.
     this.catalogRequest++;
     const previous = this.conversationRefresh;
@@ -1397,7 +1414,8 @@ export class HubSession {
       await this.refreshConversations(
         account,
         false,
-        typeof event.data.groupId === "string" ? event.data.groupId : undefined,
+        typeof event.data.groupId === "string" ? event.data.groupId
+          : event.kind === "group.updated" && typeof event.data.threadId === "string" ? event.data.threadId : undefined,
       );
     } else if (
       ["account.updated", "account.connection", "auth.updated"].includes(
@@ -1539,6 +1557,10 @@ export class HubSession {
       this.publish({ error: replyTo ? "Send mentions separately from quoted replies." : "This hub cannot send inline mentions. Remove them or update the hub." });
       return false;
     }
+    if (mentions?.all && !canMentionAll(this.value.selectedGroup, threadId)) {
+      this.publish({ error: allMentionProblem(this.value.selectedGroup, threadId) });
+      return false;
+    }
     if (this.value.selectedGroup?.isInGroup === false) {
       this.publish({
         error:
@@ -1632,17 +1654,19 @@ export class HubSession {
           "quote_target_ambiguous",
           "quote_content_unavailable",
           "quote_sender_unavailable",
-          "invalid_mentions", "invalid_mention_text", "mentions_require_group", "mention_member_unavailable", "mention_group_membership_unavailable", "quote_mentions_unsupported", "invalid_request",
+          "invalid_mentions", "invalid_mention_text", "mentions_require_group", "mention_member_unavailable", "mention_group_membership_unavailable", "mention_all_forbidden", "mention_all_permission_unavailable", "quote_mentions_unsupported", "invalid_request",
         ].includes(error.code)
       ) {
         // These admission errors occur before an intent exists. Preserve the
         // composer's text/reference instead of showing an uncertain send.
-        if (this.current(account, generation))
+        if (this.current(account, generation)) {
+          if (this.value.selected === threadId && ["mention_all_forbidden", "mention_all_permission_unavailable"].includes(error.code))
+            this.invalidateAllMentionPermission();
           this.publish({
             sends: this.value.sends.filter((send) => send.key !== key),
             error: readableError(error),
           });
-        else {
+        } else {
           const sends = (this.pending.get(account) ?? []).filter(
             (send) => send.key !== key,
           );

@@ -10,7 +10,7 @@ import { editorDraft, editorSelection, focusEditor, insertEditorText, insertMent
 
 type Draft = { text: string; tokens: MentionToken[] };
 type Choice = { id: string | null; label: string; secondary?: string };
-export function MentionEditor({ connection, account, thread, inputRef, value, tokens, disabled, allowMentions, openRequest, placeholder, onChange, onSend, onFocus, onEscape }: {
+export function MentionEditor({ connection, account, thread, inputRef, value, tokens, disabled, allowMentions, canMentionAll, openRequest, placeholder, onChange, onSend, onFocus, onEscape }: {
   connection: Connection;
   account: string;
   thread: string;
@@ -19,6 +19,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
   tokens: MentionToken[];
   disabled: boolean;
   allowMentions: boolean;
+  canMentionAll: boolean;
   openRequest: number;
   placeholder: string;
   onChange: (text: string, tokens: MentionToken[]) => void;
@@ -26,8 +27,8 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
   onFocus: () => void;
   onEscape: () => void;
 }) {
-  const props = useRef({ onChange, onSend, onFocus, onEscape, disabled, allowMentions });
-  props.current = { onChange, onSend, onFocus, onEscape, disabled, allowMentions };
+  const props = useRef({ onChange, onSend, onFocus, onEscape, disabled, allowMentions, canMentionAll });
+  props.current = { onChange, onSend, onFocus, onEscape, disabled, allowMentions, canMentionAll };
   const [picker, setPicker] = useState(false), [query, setQuery] = useState("");
   const [members, setMembers] = useState<NativeGroupMember[]>([]), [next, setNext] = useState<string | null>(null);
   const [loading, setLoading] = useState(false), [error, setError] = useState("");
@@ -49,7 +50,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     label: member.mentionName || member.roomDisplayName || member.username,
     secondary: member.displayName && member.displayName !== (member.mentionName || member.roomDisplayName || member.username) ? member.displayName : undefined,
   }));
-  if (loadedQuery === query && !tokens.length && (!query || "everyone all".includes(query.toLocaleLowerCase()))) choices.push({ id: null, label: "all", secondary: "Everyone in this group" });
+  if (canMentionAll && loadedQuery === query && !tokens.length && (!query || "everyone all".includes(query.toLocaleLowerCase()))) choices.push({ id: null, label: "all", secondary: "Everyone in this group" });
   const current = choices[Math.min(active, Math.max(0, choices.length - 1))];
   function close() {
     setPicker(false); setLoadedQuery(null); queryRange.current = null;
@@ -144,6 +145,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     firstOpen.current = openRequest; queryRange.current = null; open("", true);
   }, [openRequest]);
   useEffect(() => { if (!allowMentions || disabled) close(); }, [allowMentions, disabled]);
+  useEffect(() => { setActive(0); }, [canMentionAll]);
   function detect() {
     const root = inputRef.current;
     if (!root || composing.current || !props.current.allowMentions) return;
@@ -200,6 +202,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
   function choose(choice: Choice) {
     const root = inputRef.current;
     if (!root || props.current.disabled || !props.current.allowMentions) return;
+    if (choice.id === null && !props.current.canMentionAll) { setError("Mentioning everyone is unavailable. Choose a member instead."); return; }
     const draft = readEditor(root), at = queryRange.current ?? selection.current;
     if (draft.tokens.length >= 256 || (choice.id !== null && !draft.tokens.some(token => token.userId === choice.id) && new Set(draft.tokens.map(token => token.userId)).size >= 128)) { setError("Too many mentions in this message."); return; }
     if ((choice.id === null && draft.tokens.length) || draft.tokens.some(token => token.userId === null)) { setError("Remove existing mentions before choosing Everyone."); return; }
@@ -236,7 +239,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     if (cut) { range.deleteContents(); emit(); }
   }
   return <>
-    <div ref={inputRef} className="mention-editor" contentEditable={!disabled} suppressContentEditableWarning role="textbox" aria-label="Message" aria-multiline="true" aria-disabled={disabled} aria-haspopup="listbox" aria-expanded={picker} aria-controls={listId} aria-activedescendant={picker && current ? `${listId}-${Math.min(active, choices.length - 1)}` : undefined} data-placeholder={placeholder}
+    <div ref={inputRef} className="mention-editor" contentEditable={!disabled} suppressContentEditableWarning role="textbox" aria-label="Message" aria-multiline="true" aria-disabled={disabled} aria-invalid={hasAll && !canMentionAll || undefined} aria-haspopup="listbox" aria-expanded={picker} aria-controls={listId} aria-activedescendant={picker && current ? `${listId}-${Math.min(active, choices.length - 1)}` : undefined} data-placeholder={placeholder}
       onFocus={onFocus} onClick={onFocus} onInput={() => { emit(!composing.current); detect(); }}
       onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; emit(); detect(); }} onBlur={() => { composing.current = false; }} onKeyDown={keyboard}
       onCopy={event => copy(event, false)} onCut={event => copy(event, true)}

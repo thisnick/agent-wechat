@@ -142,6 +142,12 @@ async function pinJourney(streams) {
     members: ["sim_mei", "sim_daniel"], name: "Simulator pin regression",
   }, "pin-regression-create"));
   const room = created.result.groupId;
+  assert.equal((await a.group("personal", room)).canMentionAll, true);
+  await finishOperation("refresh owner and administrator metadata", await a.refreshGroupMembers("personal", room));
+  const groupInfo = await b.group("personal", room);
+  assert.deepEqual(groupInfo.administratorIds, []);
+  assert.equal(groupInfo.canMentionAll, true);
+  assert.equal((await cli("groups", "get", room)).canMentionAll, true);
   await waitFor("pin regression group thread", async () => (await b.thread("personal", room)).pinned === false);
   await waitFor("both clients see created group", () => streams.every(stream => stream.events.some(event => event.kind === "message.committed" && event.data.threadId === room)));
   for (const threadId of ["sim_mei", room]) {
@@ -180,6 +186,11 @@ async function pinJourney(streams) {
   }
   await assert.rejects(a.setThreadPinned("personal", "filehelper", true, "pin-unsupported-filehelper"), error => error.status === 409 && ["ordinary_contact_required", "ordinary_thread_required"].includes(error.code));
   await finishOperation("leave pin regression group", await a.leaveGroup("personal", room, "pin-regression-leave"));
+  assert.equal((await b.group("personal", room)).canMentionAll, false);
+  await assert.rejects(a.sendText("personal", room, "Synthetic rejected mention", "all-after-leave", {
+    mentions: { all: true },
+  }), error => error.status === 403 && error.code === "mention_all_forbidden");
+  await assert.rejects(a.sendByKey("personal", "all-after-leave"), error => error.status === 404);
 }
 
 try {
@@ -354,7 +365,7 @@ try {
   if (process.platform !== "win32") assert.equal(launcher.child.exitCode, 0);
   await assert.rejects(stat(launcher.ready.dataDir), error => error.code === "ENOENT");
   await assert.rejects(fetch(launcherRemote));
-  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
+  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
 } finally {
   for (const subscription of subscriptions) subscription.controller.abort();
   await Promise.allSettled(subscriptions.map(subscription => subscription.done));

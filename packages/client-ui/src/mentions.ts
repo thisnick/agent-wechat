@@ -1,4 +1,4 @@
-import type { TextMentions } from "@agent-wechat/shared";
+import type { NativeGroup, TextMentions } from "@agent-wechat/shared";
 
 export type MentionToken = {
   userId: string | null;
@@ -9,6 +9,37 @@ export type MentionToken = {
 export const MENTION_SEPARATOR = "\u2005";
 const identity = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_@.-]{1,256}$/.test(value) && value !== "notify@all";
+
+/** New hubs own role policy. Older group responses retain the existing picker. */
+export function canMentionAll(group: NativeGroup | null, thread: string | null): boolean {
+  return !!thread?.endsWith("@chatroom") && group?.id === thread
+    && group.isInGroup !== false
+    && (group.canMentionAll === undefined || group.canMentionAll === true);
+}
+
+export function allMentionProblem(group: NativeGroup | null, thread: string | null): string {
+  if (canMentionAll(group, thread)) return "";
+  return group?.id === thread && group.canMentionAll === false
+    ? "You can’t mention everyone in this group."
+    : "Group permissions are unavailable. Refresh the group before mentioning everyone.";
+}
+
+/** Remove only selected Everyone spans; retain the authored body and other tokens. */
+export function removeAllMentions(text: string, tokens: MentionToken[]): { text: string; tokens: MentionToken[] } {
+  if (!validMentionTokens(text, tokens)) throw new Error("Choose the mentioned members again.");
+  let removed = 0, offset = 0, output = "";
+  const kept: MentionToken[] = [];
+  for (const token of tokens) {
+    output += text.slice(offset, token.start);
+    if (token.userId === null) removed += token.end - token.start;
+    else {
+      output += text.slice(token.start, token.end);
+      kept.push({ ...token, start: token.start - removed, end: token.end - removed });
+    }
+    offset = token.end;
+  }
+  return { text: output + text.slice(offset), tokens: kept };
+}
 
 /** Offsets belong to the draft's UTF-16 text, never to DOM text containing controls. */
 export function validMentionTokens(text: string, value: unknown): value is MentionToken[] {

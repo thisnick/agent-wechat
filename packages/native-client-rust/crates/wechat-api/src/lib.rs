@@ -119,6 +119,9 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
+        if message == "mention_all_forbidden" {
+            return Self(StatusCode::FORBIDDEN, "mention_all_forbidden");
+        }
         if message == "unsupported_simulator_operation" {
             return Self(
                 StatusCode::NOT_IMPLEMENTED,
@@ -157,6 +160,7 @@ impl From<anyhow::Error> for ApiError {
             "quote_sender_unavailable",
             "mention_member_unavailable",
             "mention_group_membership_unavailable",
+            "mention_all_permission_unavailable",
         ] {
             if message == code {
                 return Self(StatusCode::CONFLICT, code);
@@ -1378,6 +1382,26 @@ mod tests {
             "unsupported_attachment_transport https://private.invalid/file"
         ));
         assert_eq!(actual, "unsupported_profile");
+    }
+    #[test]
+    fn all_mention_errors_are_definite_permission_rejections() {
+        for (code, expected) in [
+            ("mention_all_forbidden", StatusCode::FORBIDDEN),
+            ("mention_all_permission_unavailable", StatusCode::CONFLICT),
+        ] {
+            let ApiError(status, actual) = ApiError::from(anyhow::anyhow!(code));
+            assert_eq!(status, expected);
+            assert_eq!(actual, code);
+        }
+        let group: contracts::NativeGroup = serde_json::from_value(json!({
+            "id":"room@chatroom", "roomId":"room@chatroom", "displayName":null,
+            "ownerId":null,"announcement":null,
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(group).unwrap();
+        // New servers never omit the unknown capability: omission means legacy
+        // behavior to a backwards-compatible frontend.
+        assert_eq!(serialized.get("canMentionAll"), Some(&Value::Null));
     }
     #[test]
     fn quote_errors_keep_stable_public_codes() {

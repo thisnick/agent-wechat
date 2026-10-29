@@ -116,6 +116,14 @@ pub struct GroupMember {
     pub contact: Contact,
 }
 
+/// Derived from the official room owner, administrator list and SQL membership.
+/// Missing profile evidence stays unknown; no separate permission state is saved.
+#[derive(Clone, Debug)]
+pub struct GroupMentionPermissions {
+    pub administrator_ids: Option<Vec<String>>,
+    pub can_mention_all: Option<bool>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedBytes {

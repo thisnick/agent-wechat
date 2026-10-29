@@ -1,5 +1,5 @@
 use crate::Core;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use ts_rs::TS;
@@ -175,6 +175,20 @@ pub(crate) fn mention_name(member: &wechat_profile::GroupMember) -> &str {
 }
 
 impl Core {
+    pub(crate) fn require_mention_all(&self, account: &str, room: &str, own: &str) -> Result<()> {
+        let reader = self
+            .profile_reader_owned(account)
+            .context("mention_all_permission_unavailable")?;
+        let permission = reader
+            .group_mention_permissions(room, Some(own))
+            .context("mention_all_permission_unavailable")?;
+        match permission.can_mention_all {
+            Some(true) => Ok(()),
+            Some(false) => bail!("mention_all_forbidden"),
+            None => bail!("mention_all_permission_unavailable"),
+        }
+    }
+
     pub(crate) fn resolve_mentions(
         &self,
         account: &str,
@@ -185,6 +199,9 @@ impl Core {
     ) -> Result<ResolvedMentions> {
         request.validate()?;
         ensure!(room.ends_with("@chatroom"), "mentions_require_group");
+        if request.all {
+            self.require_mention_all(account, room, own)?;
+        }
         let reader = self.profile_reader_owned(account)?;
         let mut cursor = None;
         let mut names = BTreeMap::new();

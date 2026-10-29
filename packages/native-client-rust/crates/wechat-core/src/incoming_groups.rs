@@ -453,12 +453,12 @@ mod tests {
                     4,
                     &p::message(&[p::uint(1, 1), p::bytes(2, &changed)]).unwrap(),
                 ),
-                p::bytes(5, b"synthetic_self"),
+                p::bytes(5, b"peer"),
                 p::uint(6, 2),
                 p::bytes(7, &p::bytes(1, b"synthetic_self")),
                 p::bytes(7, &p::bytes(1, b"peer")),
-                p::uint(8, 0),
-                p::bytes(9, b""),
+                p::uint(8, 1),
+                p::bytes(9, &p::bytes(1, b"synthetic_self")),
             ])
             .unwrap(),
         );
@@ -498,6 +498,9 @@ mod tests {
         assert_eq!(updated["name"], "Fresh phone title");
         assert_eq!(updated["announcement"], "Phone announcement");
         assert_eq!(updated["myDisplayName"], "Phone display");
+        assert_eq!(updated["ownerId"], "peer");
+        assert_eq!(updated["administratorIds"], json!(["synthetic_self"]));
+        assert_eq!(updated["canMentionAll"], true);
         assert_eq!(
             core.group_member("one", ROOM, "peer").unwrap()["state"],
             "present"

@@ -32,6 +32,100 @@ fn options() -> WriteOptions {
     }
 }
 #[test]
+fn group_all_mentions_derive_roles_and_follow_official_admin_replacement() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["owner", "admin", "member", "room@chatroom"] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    apply_group_patch(
+        &loc,
+        &keys,
+        &GroupProjection {
+            username: "room@chatroom".into(),
+            fields: RawFields::from([("owner".into(), SqlValue::Text("owner".into()))]),
+            detail_fields: None,
+            members: vec!["owner".into(), "admin".into(), "member".into()],
+            complete_roster: false,
+        },
+        &o,
+    )
+    .unwrap();
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    // Independent official-format bytes: root5 is an administrator string;
+    // root3 and unknown root100 must survive list replacement unchanged.
+    let original = [
+        0x18, 0x4d, 0x2a, 5, b'a', b'd', b'm', b'i', b'n', 0xa2, 6, 1, 0xff,
+    ];
+    c.execute("UPDATE chat_room SET ext_buffer=?1", [original.as_slice()])
+        .unwrap();
+    let read = |own| {
+        ProfileReader::open(
+            loc.clone(),
+            keys.clone(),
+            ReadOptions {
+                stopped_or_consistent_snapshot: true,
+                allow_plaintext: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .group_mention_permissions("room@chatroom", own)
+        .unwrap()
+    };
+    assert_eq!(read(Some("owner")).can_mention_all, Some(true));
+    assert_eq!(read(Some("admin")).can_mention_all, Some(true));
+    assert_eq!(read(Some("member")).can_mention_all, Some(false));
+    assert_eq!(read(Some("absent")).can_mention_all, None);
+    assert_eq!(read(None).can_mention_all, None);
+    assert_eq!(read(None).administrator_ids, Some(vec!["admin".into()]));
+    let mut patch = NativeRosterPatch {
+        username: "room@chatroom".into(),
+        members: vec![],
+        complete_roster: false,
+        administrator_ids: None,
+    };
+    apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
+    assert_eq!(read(Some("admin")).can_mention_all, Some(true));
+    patch.administrator_ids = Some(vec!["member".into()]);
+    apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
+    assert_eq!(read(Some("admin")).can_mention_all, Some(false));
+    assert_eq!(read(Some("member")).can_mention_all, Some(true));
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert!(packed.starts_with(&[0x18, 0x4d, 0xa2, 6, 1, 0xff]));
+    patch.administrator_ids = Some(vec![]);
+    patch.members = vec![NativeMemberPatch {
+        username: "member".into(),
+        display: None,
+        flags: Some(u32::MAX),
+        opaque: None,
+    }];
+    apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
+    assert_eq!(read(Some("member")).can_mention_all, Some(false));
+    assert_eq!(read(None).administrator_ids, Some(vec![]));
+    // Neither the stale owner nor administrator list grants after self-leave.
+    c.execute(
+        "UPDATE contact SET is_in_chat_room=2 WHERE username='room@chatroom'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(read(Some("owner")).can_mention_all, Some(false));
+    c.execute(
+        "UPDATE contact SET is_in_chat_room=1 WHERE username='room@chatroom'",
+        [],
+    )
+    .unwrap();
+    c.execute("DELETE FROM chatroom_member WHERE member_id=(SELECT id FROM contact WHERE username='owner')", []).unwrap();
+    assert_eq!(read(Some("owner")).can_mention_all, None);
+    c.execute("UPDATE chat_room SET ext_buffer=NULL", [])
+        .unwrap();
+    assert_eq!(read(Some("member")).can_mention_all, None);
+}
+#[test]
 fn direct_mute_projection_preserves_other_flags_and_unknown_contacts() {
     let d = fixture();
     let loc = ProfileLocation::new(d.path().join("account")).unwrap();
@@ -172,6 +266,7 @@ fn group_control_edits_preserve_unknown_chunks_other_members_and_history() {
                 })
                 .collect(),
             complete_roster: true,
+            administrator_ids: None,
         },
         &o,
     )
@@ -816,6 +911,7 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
             display: Some("Per-room label".into()),
         }],
         complete_roster: true,
+        administrator_ids: None,
     };
     apply_native_roster_patch(&loc, &keys, &initial, &o).unwrap();
     // Synthetic opaque native extension fields: keep complete encoded chunks, not
@@ -842,6 +938,7 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
             display: Some("Other room label".into()),
         }],
         complete_roster: false,
+        administrator_ids: None,
     };
     apply_native_roster_patch(&loc, &keys, &partial, &o).unwrap();
     let packed: Vec<u8> = c
@@ -865,6 +962,7 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
             display: None,
         }],
         complete_roster: true,
+        administrator_ids: None,
     };
     apply_native_roster_patch(&loc, &keys, &complete, &o).unwrap();
     let packed: Vec<u8> = c
@@ -923,6 +1021,7 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
             2
         ],
         complete_roster: true,
+        administrator_ids: None,
     };
     assert!(apply_native_roster_patch(&loc, &keys, &duplicate, &o).is_err());
 }

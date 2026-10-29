@@ -1242,6 +1242,53 @@ impl ProfileReader {
             name: v.username.clone(),
         })
     }
+    pub fn group_mention_permissions(
+        &self,
+        room: &str,
+        own: Option<&str>,
+    ) -> Result<GroupMentionPermissions> {
+        validate_name(room)?;
+        let c = self.snapshot.open(self.role("contact.db", "groups")?)?;
+        let (id, owner, packed, membership) = c
+            .query_row(
+                "SELECT r.id,r.owner,r.ext_buffer,c.is_in_chat_room FROM chat_room r LEFT JOIN contact c ON c.username=r.username WHERE r.username=?1",
+                [room],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<Vec<u8>>>(2)?, r.get::<_, Option<i64>>(3)?)),
+            )
+            .optional()?
+            .ok_or(ProfileError::NotCached)?;
+        let administrator_ids = packed.as_deref().map(room_administrators).transpose()?;
+        let can_mention_all = if membership == Some(2) {
+            // Official self-leave can retain the former owner/admin bytes.
+            Some(false)
+        } else if let Some(own) = own {
+            validate_name(own)?;
+            let is_member: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chatroom_member m JOIN contact c ON c.id=m.member_id WHERE m.room_id=?1 AND c.username=?2)",
+                params![id, own],
+                |r| r.get(0),
+            )?;
+            if !is_member {
+                None
+            } else if owner.as_deref() == Some(own) {
+                Some(true)
+            } else {
+                administrator_ids.as_ref().and_then(|ids| {
+                    if ids.iter().any(|id| id == own) {
+                        Some(true)
+                    } else {
+                        owner.as_ref().filter(|id| !id.is_empty()).map(|_| false)
+                    }
+                })
+            }
+        } else {
+            None
+        };
+        Ok(GroupMentionPermissions {
+            administrator_ids,
+            can_mention_all,
+        })
+    }
     pub fn group_members(&self, room: &str, q: &ListQuery) -> Result<Page<GroupMember>> {
         validate_name(room)?;
         let n = limit(q.limit)?;
@@ -1443,6 +1490,28 @@ pub(crate) fn protobuf_fields(b: &[u8]) -> Result<Vec<(u32, u8, &[u8])>> {
         }
     }
     Ok(out)
+}
+
+fn room_administrators(b: &[u8]) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    // The supported Linux room model stores the administrator vector as
+    // repeated string field5 of chat_room.ext_buffer, separate from member flags.
+    for (n, w, v) in protobuf_fields(b)? {
+        if n != 5 {
+            continue;
+        }
+        if w != 2 {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        let id = std::str::from_utf8(v).map_err(|_| ProfileError::InvalidMetadata)?;
+        validate_name(id)?;
+        if !seen.insert(id.to_owned()) || ids.len() >= 10000 {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
 }
 
 fn room_displays(b: &[u8]) -> Result<BTreeMap<String, Option<String>>> {

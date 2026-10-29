@@ -1230,6 +1230,165 @@ test("definitive mention admission rejection returns the draft and removes the p
   assert.match(hub.snapshot().error, /member|again/i);
 });
 
+test("Everyone honors new group permissions and ordinary member mentions remain available", async (t) => {
+  let permission, posts = 0;
+  const room = "room@chatroom", text = "Hi @all\u2005!", tokens = [{ userId: null, label: "all", start: 3, end: 8 }];
+  const hub = session(t, {
+    capabilities: async () => ({ inlineTextMentions: true }),
+    group: async () => ({ id: room, roomId: room, ownerId: "me", isInGroup: true, canMentionAll: permission }),
+    sendText: async () => { posts++; return receipt("needs_review", { destination: room }); },
+    send: async () => receipt("needs_review", { destination: room }),
+  });
+  await hub.activate("a"); await hub.select(room);
+  await eventually(() => hub.snapshot().capabilities.inlineTextMentions === true);
+  for (const value of [null, false]) {
+    permission = value;
+    await hub.refresh();
+    assert.equal(await hub.send(text, undefined, tokens), false);
+    assert.equal(hub.snapshot().sends.length, 0);
+  }
+  assert.equal(posts, 0, "an owner ID never substitutes for a positive permission");
+  assert.equal(await hub.send("Hi @Jin\u2005!", undefined, [{ userId: "wxid_jin", label: "Jin", start: 3, end: 8 }]), true);
+  assert.equal(posts, 1, "ordinary mentions do not need Everyone permission");
+  permission = true; await hub.refresh();
+  assert.equal(await hub.send(text, undefined, tokens), true);
+  assert.equal(posts, 2);
+});
+
+test("legacy servers can still send Everyone, while explicit unknown permission fails closed across accounts", async (t) => {
+  const room = "room@chatroom", text = "@all\u2005 old server", tokens = [{ userId: null, label: "all", start: 0, end: 5 }];
+  let posts = 0;
+  const hub = session(t, {
+    capabilities: async () => ({ inlineTextMentions: true }),
+    group: async account => ({ id: room, roomId: room, isInGroup: true, ...(account === "a" ? { canMentionAll: null } : {}) }),
+    sendText: async account => { posts++; return receipt("needs_review", { accountId: account, destination: room }); },
+    send: async account => receipt("needs_review", { accountId: account, destination: room }),
+  });
+  await hub.activate("a"); await hub.select(room);
+  assert.equal(await hub.send(text, undefined, tokens), false);
+  await hub.activate("b"); await hub.select(room);
+  await eventually(() => hub.snapshot().capabilities.inlineTextMentions === true);
+  assert.equal(await hub.send(text, undefined, tokens), true);
+  assert.equal(posts, 1);
+  await hub.activate("a"); await hub.select(room);
+  assert.equal(await hub.send(text, undefined, tokens), false);
+  assert.equal(posts, 1, "a legacy response from another account cannot erase an explicit unknown");
+});
+
+test("permission refresh blocks temporarily and an actual legacy response restores its existing behavior", async (t) => {
+  const updated = deferred(), room = "room@chatroom";
+  let refresh = false, reads = 0;
+  const hub = session(t, {
+    group: async () => { reads++; return refresh ? updated.promise : { id: room, roomId: room, isInGroup: true, canMentionAll: true }; },
+  });
+  await hub.activate("a"); await hub.select(room);
+  refresh = true;
+  const reading = hub.refresh();
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, null);
+  await eventually(() => reads >= 2);
+  updated.resolve({ id: room, roomId: room, isInGroup: true });
+  await reading;
+  assert.equal(Object.hasOwn(hub.snapshot().selectedGroup, "canMentionAll"), false, "do not invent an explicit denial for an old server");
+});
+
+for (const [kind, data] of [
+  ["group.updated", { groupId: "room@chatroom" }],
+  ["group.updated", { threadId: "room@chatroom" }],
+  ["contacts.updated", { origin: "contact_sync" }],
+]) test(`${kind} immediately invalidates Everyone before refreshed group info arrives`, async (t) => {
+  const update = deferred(), room = "room@chatroom";
+  let changed = false, reads = 0, posts = 0;
+  const hub = session(t, {
+    capabilities: async () => ({ inlineTextMentions: true }),
+    group: async () => { reads++; return changed ? update.promise : { id: room, roomId: room, isInGroup: true, canMentionAll: true }; },
+    sendText: async () => { posts++; return receipt(); },
+  });
+  await hub.activate("a"); await hub.select(room);
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, true);
+  changed = true;
+  const event = hub.consume({ kind, data, cursor: "21" }, "a");
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, null, "invalidate before coalescing or HTTP reads");
+  assert.equal(await hub.send("@all\u2005 Keep this draft", undefined, [{ userId: null, label: "all", start: 0, end: 5 }]), false);
+  assert.equal(posts, 0);
+  await eventually(() => reads >= 2);
+  update.resolve({ id: room, roomId: room, isInGroup: true, canMentionAll: false });
+  await event;
+  await eventually(() => hub.snapshot().selectedGroup?.canMentionAll === false);
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, false);
+  assert.equal(hub.snapshot().selectedGroup.isInGroup, true);
+});
+
+test("a late group response cannot regrant Everyone after a newer role result", async (t) => {
+  const old = deferred(), fresh = deferred(), room = "room@chatroom";
+  let reads = 0;
+  const group = permission => ({ id: room, roomId: room, isInGroup: true, canMentionAll: permission });
+  const hub = session(t, {
+    group: async () => (++reads === 1 ? group(true) : reads === 2 ? old.promise : fresh.promise),
+  });
+  await hub.activate("a"); await hub.select(room);
+  const first = hub.refresh(); await eventually(() => reads === 2);
+  const second = hub.refresh(); await eventually(() => reads === 3);
+  fresh.resolve(group(false)); await second;
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, false);
+  old.resolve(group(true)); await first;
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, false);
+});
+
+test("reopening cached group history and switching accounts never reuse an Everyone grant", async (t) => {
+  const next = deferred(), room = "room@chatroom";
+  let defer = false, posts = 0;
+  const hub = session(t, {
+    capabilities: async () => ({ inlineTextMentions: true }),
+    group: async () => defer ? next.promise : { id: room, roomId: room, isInGroup: true, canMentionAll: true },
+    sendText: async () => { posts++; return receipt(); },
+  });
+  await hub.activate("a"); await hub.select(room);
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, true);
+  await hub.select("peer"); defer = true;
+  await hub.select(room);
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, null);
+  assert.equal(await hub.send("@all\u2005 draft", undefined, [{ userId: null, label: "all", start: 0, end: 5 }]), false);
+  await hub.activate("b"); await hub.select(room);
+  next.resolve({ id: room, roomId: room, isInGroup: true, canMentionAll: false });
+  await eventually(() => hub.snapshot().selectedGroup?.canMentionAll === false);
+  assert.equal(posts, 0);
+});
+
+for (const [status, code] of [[403, "mention_all_forbidden"], [409, "mention_all_permission_unavailable"]])
+  test(`${code} is a definitive admission rejection and keeps the draft reusable without a receipt or retry`, async (t) => {
+    const room = "room@chatroom", text = "Keep @all\u2005 this", tokens = [{ userId: null, label: "all", start: 5, end: 10 }];
+    let posts = 0;
+    const hub = session(t, {
+      capabilities: async () => ({ inlineTextMentions: true }),
+      group: async () => ({ id: room, roomId: room, isInGroup: true, canMentionAll: true }),
+      sendText: async () => { posts++; throw new NativeApiError(status, code, false); },
+    });
+    await hub.activate("a"); await hub.select(room);
+    assert.equal(await hub.send(text, undefined, tokens), false);
+    assert.equal(hub.snapshot().sends.length, 0);
+    assert.equal(hub.snapshot().selectedGroup.canMentionAll, null);
+    assert.match(hub.snapshot().error, /mention everyone|permissions are unavailable/);
+    assert.deepEqual(tokens, [{ userId: null, label: "all", start: 5, end: 10 }]);
+    assert.equal(await hub.send(text, undefined, tokens), false);
+    assert.equal(posts, 1, "permission rejection never submits again without a refresh");
+  });
+
+test("a late Everyone rejection does not invalidate another conversation’s permission", async (t) => {
+  const response = deferred();
+  const hub = session(t, {
+    capabilities: async () => ({ inlineTextMentions: true }),
+    group: async (_account, room) => ({ id: room, roomId: room, isInGroup: true, canMentionAll: true }),
+    sendText: async () => { await response.promise; throw new NativeApiError(403, "mention_all_forbidden", false); },
+  });
+  await hub.activate("a"); await hub.select("room@chatroom");
+  const sending = hub.send("@all\u2005 draft", undefined, [{ userId: null, label: "all", start: 0, end: 5 }]);
+  await hub.select("other@chatroom");
+  response.resolve();
+  assert.equal(await sending, false);
+  assert.equal(hub.snapshot().selected, "other@chatroom");
+  assert.equal(hub.snapshot().selectedGroup.canMentionAll, true);
+});
+
 test("switching accounts during a send retains its receipt only for the original account", async (t) => {
   const admission = deferred();
   const hub = session(t, {

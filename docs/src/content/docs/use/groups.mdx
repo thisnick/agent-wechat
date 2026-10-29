@@ -27,7 +27,7 @@ Use `wx groups` to manage ordinary groups and members, `wx chats mute/unmute` fo
    wx groups members refresh '123456@chatroom'
    ```
 
-   Group refresh reads the shared name, notifications and announcement. Member refresh reads the roster and reports whether it is complete.
+   Group refresh reads the shared name, notifications and announcement. Member refresh reads the roster, owner and administrator list, and reports whether the roster is complete.
 
 ## Edit
 
@@ -70,6 +70,8 @@ Use member IDs for real WeChat mentions. Plain `@name` text is not a mention; th
 
 Type `@` or choose **Mention someone** beside the attachment button. Pick a member to insert a mention at the cursor; remove it with × or Backspace. Recipients are saved with the draft.
 
+**Everyone** is available to the group owner and administrators. If your permission changes, the app keeps the draft and lets you remove Everyone or refresh the group. Older servers that omit the permission field retain their existing behavior.
+
 ### CLI
 
 Use IDs from `wx groups members list GROUP_ID`:
@@ -80,7 +82,7 @@ wx messages send GROUP_ID --text "Please check this" \
 wx messages send GROUP_ID --text "Meeting starts now" --mention-all
 ```
 
-Repeat `--mention` for several members in order. Use `--mention-all` instead to address everyone, subject to WeChat permissions. Output includes the send ID, `state` and `receiptPath`.
+Repeat `--mention` for several members in order. Only the group owner and administrators can use `--mention-all`. Output includes the send ID, `state` and `receiptPath`.
 
 ### OpenClaw
 
@@ -113,6 +115,8 @@ Send to `POST /v1/accounts/ACCOUNT_ID/sends` with `Idempotency-Key`:
 ```
 
 Use either `userIds` or `all: true`. Check the send receipt with `GET /sends/SEND_ID`.
+
+`GET /groups/GROUP_ID` includes `ownerId`, `administratorIds` (excluding the owner unless listed by WeChat), and `canMentionAll`. A `null` permission means the saved data cannot establish eligibility; refresh the members before retrying. New `all: true` sends return `403 mention_all_forbidden` for ordinary members or `409 mention_all_permission_unavailable` when permission is unknown. A queued send checks permission again before submission. Reusing an existing send key still returns that send.
 
 ```ts
 await client.sendText(accountId, groupId, "Please check this", "mention-001", {

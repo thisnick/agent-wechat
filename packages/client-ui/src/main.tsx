@@ -74,7 +74,7 @@ import { SharedLink } from "./shared-link.tsx";
 import { LocationMessage } from "./location-message.tsx";
 import { SystemNotice } from "./system-notice.tsx";
 import { MentionEditor } from "./mention-editor.tsx";
-import { validMentionTokens, type MentionToken } from "./mentions.ts";
+import { allMentionProblem, canMentionAll, removeAllMentions, validMentionTokens, type MentionToken } from "./mentions.ts";
 const EMPTY_MENTIONS: MentionToken[] = [];
 
 function date(value: string | null): Date {
@@ -873,6 +873,8 @@ function Chats({
   const draftKey = `${state.account}:${state.selected}`,
     draft = drafts[draftKey] ?? "";
   const draftMentions = mentionDrafts[draftKey] ?? EMPTY_MENTIONS;
+  const allowAllMention = canMentionAll(state.selectedGroup, state.selected);
+  const allMentionBlocked = draftMentions.some(token => token.userId === null) && !allowAllMention;
   const inlineCapable = state.capabilities.inlineTextMentions === true && !!state.selected?.endsWith("@chatroom");
   const inlineEditor = inlineCapable || draftMentions.length > 0;
   function changeDraft(text: string, tokens: MentionToken[] = []) {
@@ -997,6 +999,7 @@ function Chats({
       replyInvalid ||
       pendingQuote.current
       || mentionProblems[draftKey]
+      || allMentionBlocked
     )
       return;
     if (state.account)
@@ -1529,6 +1532,7 @@ function Chats({
                       {inlineEditor && state.account && state.selected ? <MentionEditor
                         key={draftKey} connection={connection} account={state.account} thread={state.selected} inputRef={mentionInput}
                         value={draft} tokens={draftMentions} disabled={!active} allowMentions={inlineCapable && active && !reply && !pendingQuote.current}
+                        canMentionAll={allowAllMention}
                         openRequest={mentionOpen} placeholder={`Message ${selectedName}…`} onChange={changeDraft} onSend={send} onFocus={acknowledgeComposer} onEscape={clearReply}
                       /> : <textarea
                         ref={messageInput}
@@ -1576,6 +1580,7 @@ function Chats({
                         }}
                       />}
                       {mentionProblems[draftKey] && <p className="mention-error" role="alert">Saved mention recipients could not be restored. Choose recipients again, or <button onClick={() => { setMentionProblems(values => ({ ...values, [draftKey]: false })); changeDraft(draft); }}>keep only the text</button>.</p>}
+                      {allMentionBlocked && <p className="mention-error" role="alert">{allMentionProblem(state.selectedGroup, state.selected)} <button type="button" onClick={() => { const next = removeAllMentions(draft, draftMentions); changeDraft(next.text, next.tokens); }}>Remove Everyone</button> <button type="button" disabled={!active || state.opening} onClick={() => { void session.refreshConversations(state.account, false, state.selected ?? undefined).catch(() => {}); }}>Refresh</button></p>}
                       {composerNotice && <p className="mention-error" role="alert">{composerNotice}</p>}
                       <div className="composer-bottom">
                         <div className="composer-tools" role="group" aria-label="Message actions">
@@ -1596,7 +1601,7 @@ function Chats({
                             !draft.trim() ||
                             !active ||
                             !!pendingQuote.current ||
-                            replyInvalid || mentionProblems[draftKey]
+                            replyInvalid || mentionProblems[draftKey] || allMentionBlocked
                           }
                           onClick={send}
                         >
