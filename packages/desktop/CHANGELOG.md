@@ -1,5 +1,12 @@
 # @agent-wechat/desktop
 
+## 1.3.0-beta.1
+
+### Patch Changes
+
+- Updated dependencies [[`bb2c31b`](https://github.com/thisnick/agent-wechat/commit/bb2c31bbe003647bbacbd9da03161c950281bc88)]:
+  - @agent-wechat/client-ui@0.3.2-beta.1
+
 ## 1.3.0-beta.0
 
 ### Minor Changes

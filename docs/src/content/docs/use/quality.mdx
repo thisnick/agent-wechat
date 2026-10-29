@@ -18,6 +18,8 @@ Choose outgoing preparation when sending, then select a received variant when do
 
 **Images:** the sender preserves a JPEG source only when it is at most 65,520 bytes. Otherwise it creates a JPEG starting at a 1,280-pixel longest edge. Standard and thumbnail copies start at 640 and 160 pixels. Preparation lowers JPEG quality and, if needed, dimensions to fit each copy within 65,520 bytes. The image source limit is 26,214,383 bytes.
 
+Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution before preparation. Other image formats keep the 16,777,216-pixel limit. To preserve a larger photo unchanged, send it as a file attachment.
+
 **Video:** MP4 sources allow **50 MiB (52,428,800 bytes)**. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them.
 
 ## Send images and videos

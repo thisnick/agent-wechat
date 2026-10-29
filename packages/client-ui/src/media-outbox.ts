@@ -169,7 +169,13 @@ export class MediaOutbox {
       job,
       stage: "job",
       uncertain: job.state === "needs_review",
-      error: undefined,
+      error: job.state === "failed"
+        ? job.reason === "image_decode_limit"
+          ? "Image is too large to process. Resize it or send it as a file."
+          : job.reason === "image_decode_failed"
+            ? "Couldn't read this image. Try exporting it as JPEG or PNG."
+            : undefined
+        : undefined,
     });
   }
   async check(key: string): Promise<void> {

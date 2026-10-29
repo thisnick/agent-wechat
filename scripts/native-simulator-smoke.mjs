@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
+import { zstdDecompressSync } from "node:zlib";
 import { NativeWeChatClient } from "../packages/shared/src/native-client.ts";
 import { assertSameUnavailableMedia } from "./native-ci-media-assertions.mjs";
 
@@ -339,6 +341,34 @@ try {
     assert.notEqual((await a.mediaAsset("personal", candidate.id)).state, "available");
   }
 
+  const photo = zstdDecompressSync(await readFile(join(repository, "packages/native-client-rust/crates/wechat-core/tests/fixtures/send-images/50mp-baseline.jpg.zst")));
+  const photoSource = await a.upload("personal", photo, "synthetic-50mp.jpg", "image/jpeg");
+  const photoRequest = { threadId: "sim_mei", kind: "image", sourceId: photoSource.id,
+    standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null };
+  const photoSend = await a.sendMedia("personal", photoRequest, "large-photo-send");
+  const photoDone = await waitFor("50 MP image accepted and projected", async () => {
+    const job = await a.job("personal", photoSend.id);
+    assert.ok(!["failed", "cancelled", "needs_review"].includes(job.state), job.reason);
+    return job.state === "accepted" && job.result?.messageIds?.length && job;
+  });
+  assert.equal(photoDone.result.imagePreparation.sourceSha256, createHash("sha256").update(photo).digest("hex"));
+  assert.equal(photoDone.result.imagePreparation.sourcePreserved, false);
+  assert.ok(photoDone.result.imagePreparation.width <= 1280);
+  assert.ok(photoDone.result.imagePreparation.height <= 1280);
+  for (const id of photoDone.result.messageIds) {
+    const assets = await a.mediaAssets("personal", id);
+    for (const quality of ["original", "standard", "thumbnail"]) {
+      const asset = assets.items.find(asset => asset.variant === quality);
+      assert.equal(asset?.state, "available");
+      const content = await a.mediaContent("personal", asset.id);
+      assert.equal(content.contentType, "image/jpeg");
+      assert.ok(content.bytes.length <= 65520);
+      assert.equal(createHash("sha256").update(content.bytes).digest("hex"), asset.sha256);
+    }
+  }
+  assert.equal((await a.sendMedia("personal", photoRequest, "large-photo-send")).id, photoDone.id);
+  assert.equal((await a.sendByKey("personal", "large-photo-send")).id, photoDone.id);
+
   const controlCursor = streamA.events.at(-1).cursor;
   await control({ op: "status_notification", account: "personal", operation_id: 2 });
   await control({ op: "status_notification", account: "personal", operation_id: 11 });
@@ -378,7 +408,7 @@ try {
   if (process.platform !== "win32") assert.equal(launcher.child.exitCode, 0);
   await assert.rejects(stat(launcher.ready.dataDir), error => error.code === "ENOENT");
   await assert.rejects(fetch(launcherRemote));
-  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
+  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
 } finally {
   for (const subscription of subscriptions) subscription.controller.abort();
   await Promise.allSettled(subscriptions.map(subscription => subscription.done));

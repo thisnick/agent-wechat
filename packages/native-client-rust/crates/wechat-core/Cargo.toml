@@ -28,6 +28,7 @@ libc.workspace = true
 zeroize.workspace = true
 tempfile.workspace = true
 ts-rs = "10"
+jpeg-decoder = { version = "0.3.2", default-features = false }
 
 [dev-dependencies]
 rusqlite.workspace = true

@@ -1,5 +1,11 @@
 # @agent-wechat/client-ui
 
+## 0.3.2-beta.1
+
+### Patch Changes
+
+- [#338](https://github.com/thisnick/agent-wechat/pull/338) [`bb2c31b`](https://github.com/thisnick/agent-wechat/commit/bb2c31bbe003647bbacbd9da03161c950281bc88) Thanks [@thisnick](https://github.com/thisnick)! - Prepare large JPEG photos with reduced-resolution decoding, including 50-megapixel camera images, while retaining source, dimension and output limits. Show an actionable error when an image exceeds processing limits or cannot be decoded, without retrying its send automatically.
+
 ## 0.3.2-beta.0
 
 ### Patch Changes
