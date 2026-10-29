@@ -91,13 +91,32 @@ impl Store {
         expected: &[u8],
         epoch: Option<&[u8]>,
     ) -> Result<()> {
+        self.save_network_authorization(account, encrypted, expected, epoch, Some(b"connected"))
+    }
+    /// Manual requests may start while disconnected. Require their original
+    /// connection preference and accepted credentials to remain unchanged.
+    pub fn save_network_authorization(
+        &self,
+        account: &str,
+        encrypted: &[u8],
+        expected: &[u8],
+        epoch: Option<&[u8]>,
+        desired: Option<&[u8]>,
+    ) -> Result<()> {
         self.control(account, |db| {
             let tx = db.transaction()?;
-            let connected: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key='desired' AND value=CAST('connected' AS BLOB))", [], |r| r.get(0))?;
-            if !connected || !saved_login_generation(&tx, expected, epoch)? {
+            let current: Option<Vec<u8>> = tx
+                .query_row("SELECT value FROM runtime WHERE key='desired'", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if current.as_deref() != desired || !saved_login_generation(&tx, expected, epoch)? {
                 bail!("push_session_superseded");
             }
-            tx.execute("UPDATE runtime SET value=?1 WHERE key='account-state'", [encrypted])?;
+            tx.execute(
+                "UPDATE runtime SET value=?1 WHERE key='account-state'",
+                [encrypted],
+            )?;
             accepted_projection_needed(&tx, encrypted)?;
             tx.commit()?;
             Ok(())
@@ -285,6 +304,39 @@ fn saved_login_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_response_preserves_disconnected_mode_and_rejects_changed_preferences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        store
+            .save_accepted_authorization("one", b"accepted")
+            .unwrap();
+        store
+            .save_network_authorization("one", b"response", b"accepted", None, None)
+            .unwrap();
+        assert_eq!(
+            store.runtime("one", "account-state").unwrap().as_deref(),
+            Some(b"response".as_slice())
+        );
+        store
+            .put_runtime("one", "desired", b"disconnected")
+            .unwrap();
+        assert!(store
+            .save_network_authorization("one", b"late", b"response", None, None)
+            .is_err());
+        assert!(store
+            .save_network_authorization("one", b"late", b"accepted", None, Some(b"disconnected"))
+            .is_err());
+        store
+            .save_network_authorization("one", b"next", b"response", None, Some(b"disconnected"))
+            .unwrap();
+        assert_eq!(
+            store.runtime("one", "desired").unwrap().as_deref(),
+            Some(b"disconnected".as_slice())
+        );
+    }
     #[test]
     fn persistent_connection_updates_require_current_accepted_connected_generation() {
         let tmp = tempfile::tempdir().unwrap();

@@ -11,6 +11,7 @@ mod operations;
 mod outbox;
 mod outgoing_recall;
 mod pagination;
+mod read_snapshot;
 mod recalls;
 mod settings;
 pub mod vault;
@@ -29,7 +30,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 pub struct Lease(Vec<File>);
@@ -144,7 +145,8 @@ pub struct Store {
     pub server_id: String,
     db: Mutex<Connection>,
     admitted: Mutex<admission::AdmissionCache>,
-    _lease: Lease,
+    _lease: Arc<Lease>,
+    snapshot: Option<(String, Mutex<Connection>)>,
 }
 
 impl Store {
@@ -181,7 +183,8 @@ impl Store {
             server_id,
             db: Mutex::new(db),
             admitted: Mutex::new(Default::default()),
-            _lease: lease,
+            _lease: Arc::new(lease),
+            snapshot: None,
         })
     }
     fn prepare_registry(db: &mut Connection, initialize: bool) -> Result<String> {

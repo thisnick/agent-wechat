@@ -202,8 +202,13 @@ async fn asset(
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "media")?;
     Ok(Json(
-        serde_json::to_value(work(move || app.core.media_asset(&a, &id)).await?)
-            .map_err(anyhow::Error::from)?,
+        serde_json::to_value(
+            app.core
+                .read(&a.clone(), move |core| core.media_asset(&a, &id))
+                .await
+                .map_err(ApiError::from)?,
+        )
+        .map_err(anyhow::Error::from)?,
     ))
 }
 async fn job(
@@ -287,12 +292,15 @@ async fn content(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "media")?;
-    let media = work(move || match query.representation {
-        ContentRepresentation::Original => app.core.media_content(&a, &id),
-        ContentRepresentation::Preview => app.core.media_preview_content(&a, &id),
-    })
-    .await?;
-    content_response(media, &headers)
+    let (media, timing) = app
+        .core
+        .read_timed(&a.clone(), move |core| match query.representation {
+            ContentRepresentation::Original => core.media_content(&a, &id),
+            ContentRepresentation::Preview => core.media_preview_content(&a, &id),
+        })
+        .await
+        .map_err(ApiError::from)?;
+    Ok(timed_response(content_response(media, &headers)?, timing))
 }
 fn content_response(
     media: wechat_core::media_types::MediaContent,

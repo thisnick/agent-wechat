@@ -27,25 +27,8 @@ mod identity;
 #[path = "media_video.rs"]
 mod video;
 
-struct MediaAccountPermit {
-    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-    runtime: tokio::runtime::Handle,
-}
-impl MediaAccountPermit {
-    /// Video preparation and CDN I/O run without the account mutation guard. The independent
-    /// media-job guard remains held, so another queued file cannot start.
-    fn transfer<T>(
-        &mut self,
-        core: &Core,
-        account: &str,
-        action: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        drop(self.guard.take().context("media account guard missing")?);
-        let result = action();
-        self.guard = Some(self.runtime.block_on(core.lock_account(account))?);
-        result
-    }
-}
+use crate::account_network::AccountNetworkPermit as MediaAccountPermit;
+
 #[derive(Clone, Serialize, Deserialize)]
 struct MediaAuthorizationFence {
     authorization: [u8; 32],
@@ -1171,7 +1154,17 @@ impl Core {
         Ok(disconnected || auto_disabled)
     }
     async fn run_media_worker(self: Arc<Self>, account: &str, id: &str) -> Result<()> {
-        let media_guard = self.lock_media_job(account).await?;
+        let incoming = self.store.media_job(account, id)?.kind == "download";
+        let download_permit = if incoming {
+            Some(self.download_permit(account).await?)
+        } else {
+            None
+        };
+        let media_guard = if incoming {
+            None
+        } else {
+            Some(self.lock_media_job(account).await?)
+        };
         let guard = self.lock_account(account).await?;
         if self.media_network_suspended(account)? {
             return Ok(());
@@ -1182,6 +1175,7 @@ impl Core {
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let _media_guard = media_guard;
+            let _download_permit = download_permit;
             let mut permit = MediaAccountPermit {
                 guard: Some(guard),
                 runtime,
@@ -1373,7 +1367,7 @@ impl Core {
         &self,
         account: &str,
         id: &str,
-        permit: Option<&mut MediaAccountPermit>,
+        mut permit: Option<&mut MediaAccountPermit>,
     ) -> Result<()> {
         let row = self.store.media_job(account, id)?;
         let asset_id = row.data["assetId"]
@@ -1418,15 +1412,28 @@ impl Core {
                 };
                 let cdn = self.upstream.media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
-                let unlocked =
-                    permit.is_some() && matches!(asset.kind, MediaKind::File | MediaKind::Video);
+                let unlocked = permit.is_some();
                 let fence = unlocked
                     .then(|| self.media_authorization_fence(account))
                     .transpose()?;
-                let media =
-                    cdn_transfer(if unlocked { permit } else { None }, self, account, || {
-                        cdn.download(&descriptor, &progress)
-                    })?;
+                let (media, mime, frames) = cdn_transfer(
+                    if unlocked {
+                        permit.as_deref_mut()
+                    } else {
+                        None
+                    },
+                    self,
+                    account,
+                    || {
+                        let media = cdn.download(&descriptor, &progress)?;
+                        let (mime, frames) =
+                            validate_asset_bytes(asset.kind, asset.variant, &media.bytes)?;
+                        if mime == "image/x-wxgf" {
+                            self.cache_wxgf_preview(account, asset_id, &media.bytes)?;
+                        }
+                        Ok((media, mime, frames))
+                    },
+                )?;
                 if let Some(fence) = fence {
                     self.resume_media_state(account, id, &fence)?;
                 }
@@ -1436,7 +1443,6 @@ impl Core {
                         "link_thumbnail_size_limit"
                     );
                 }
-                let (mime, frames) = validate_asset_bytes(asset.kind, asset.variant, &media.bytes)?;
                 let actual = if media
                     .substituted_filetype
                     .is_none_or(|v| v == descriptor.quality.filetype())
@@ -1465,17 +1471,34 @@ impl Core {
                 source: crate::links::LinkThumbnail::Http(url),
             } => {
                 crate::upstream::require_native(self.upstream.kind())?;
-                let bytes = wechat_protocol::media::fetch_link_thumbnail(&url, progress)?;
+                let fence = permit
+                    .as_ref()
+                    .map(|_| self.media_authorization_fence(account))
+                    .transpose()?;
+                let bytes = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                    wechat_protocol::media::fetch_link_thumbnail(&url, progress)
+                })?;
+                if let Some(fence) = fence {
+                    self.resume_media_state(account, id, &fence)?;
+                }
                 let (mime, frames) =
                     validate_asset_bytes(MediaKind::Image, MediaVariant::Thumbnail, &bytes)?;
                 (bytes, mime, Some(MediaVariant::Thumbnail), frames)
             }
             DownloadPlan::Sticker { descriptor } => {
-                let (bytes, inspection) = self.upstream.download_sticker(
-                    &mut self.account_state(account)?,
-                    &descriptor,
-                    &progress,
-                )?;
+                let mut state = self.account_state(account)?;
+                let fence = permit
+                    .as_ref()
+                    .map(|_| self.media_authorization_fence(account))
+                    .transpose()?;
+                let (bytes, inspection) =
+                    cdn_transfer(permit.as_deref_mut(), self, account, || {
+                        self.upstream
+                            .download_sticker(&mut state, &descriptor, &progress)
+                    })?;
+                if let Some(fence) = fence {
+                    self.resume_media_state(account, id, &fence)?;
+                }
                 (
                     bytes,
                     inspection.content_type,
@@ -1497,12 +1520,26 @@ impl Core {
                     let mut renewed = false;
                     while bytes.len() < length as usize {
                         progress(bytes.len() as u64, Some(length as u64))?;
-                        let reply = self.upstream.download_voice(
-                            &mut state,
-                            server_id,
-                            length,
-                            bytes.len() as u32,
-                        );
+                        let fence = permit
+                            .as_ref()
+                            .map(|_| self.media_authorization_fence(account))
+                            .transpose()?;
+                        let before = serde_json::to_vec(&state)?;
+                        let reply = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                            self.upstream.download_voice(
+                                &mut state,
+                                server_id,
+                                length,
+                                bytes.len() as u32,
+                            )
+                        });
+                        if let Some(fence) = fence {
+                            let current = self.resume_media_state(account, id, &fence)?;
+                            // A push may refresh cookies while a chunk is in flight.
+                            if serde_json::to_vec(&current)? != before {
+                                state = current;
+                            }
+                        }
                         self.save_state(account, &state)?;
                         let chunk = match reply {
                             Ok(chunk) => chunk,
@@ -1621,7 +1658,7 @@ impl Core {
                             .as_deref()
                             .context("media_message_missing")?,
                     )?;
-                    let reader = self.profile_reader(account)?;
+                    let reader = self.profile_reader_owned(account)?;
                     let own = self.profile_username(account)?;
                     let message = reader.message(&source, own.as_deref())?;
                     let chat = message.peer.as_deref().context("media_message_missing")?;
@@ -1677,7 +1714,7 @@ impl Core {
                     .as_deref()
                     .context("media_message_missing")?,
             )?;
-            let reader = self.profile_reader(account)?;
+            let reader = self.profile_reader_owned(account)?;
             let own = self.profile_username(account)?;
             let message = reader.message(&source, own.as_deref())?;
             let chat = message.peer.context("media_message_missing")?;
@@ -1725,7 +1762,7 @@ impl Core {
                     .as_deref()
                     .context("media_message_missing")?,
             )?;
-            let reader = self.profile_reader(account)?;
+            let reader = self.profile_reader_owned(account)?;
             let own = self.profile_username(account)?;
             let message = reader.message(&source, own.as_deref())?;
             let chat = message.peer.context("media_message_missing")?;
@@ -1763,7 +1800,7 @@ impl Core {
                     .as_deref()
                     .context("media_message_missing")?,
             )?;
-            let reader = self.profile_reader(account)?;
+            let reader = self.profile_reader_owned(account)?;
             let own = self.profile_username(account)?;
             let message = reader.message(&source, own.as_deref())?;
             let chat = message.peer.context("media_message_missing")?;
@@ -3574,6 +3611,10 @@ fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Resul
 }
 
 #[cfg(test)]
+#[path = "media_concurrency_tests.rs"]
+mod concurrency_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -3994,7 +4035,7 @@ mod tests {
             }
         }
     }
-    fn accepted_media_state() -> wechat_protocol::AccountState {
+    pub(super) fn accepted_media_state() -> wechat_protocol::AccountState {
         wechat_protocol::AccountState {
             schema: 1,
             device: wechat_protocol::DeviceProfile {

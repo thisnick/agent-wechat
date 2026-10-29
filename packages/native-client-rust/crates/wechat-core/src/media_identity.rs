@@ -120,7 +120,9 @@ impl Core {
                 bail!("message_recalled");
             }
         }
-        let reader = self.profile_reader(account)?;
+        // API readers supply a pinned view; mutation callers hold the account
+        // writer. Neither path needs to copy the entire profile per asset.
+        let reader = self.profile_reader_owned(account)?;
         let own = self.profile_username(account)?;
         let mut current = match reader.message(&crate::source_message_id(source)?, own.as_deref()) {
             Ok(message) => message,

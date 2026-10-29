@@ -38,10 +38,22 @@ flowchart LR
 | --- | --- |
 | Account worker | One per account: holds the connection to WeChat, keeps the login alive, and runs one change at a time |
 | Sync | Receives new messages through a push connection, falling back to polling if the connection drops |
-| Profile reader/writer | Reads history from consistent snapshots; writes only the database layouts it recognizes |
+| Profile reader/writer | Reads history through a small pool of consistent snapshots; keeps one writer for supported database layouts |
 | Job queue | Runs sends, downloads, recalls and read notices, and remembers them across restarts |
 | Event log | Records every committed change so clients can replay what they missed |
 | HTTP server | Serves `/v1`, checks tokens and scopes, streams events |
+
+For an owned profile using SQLite's WAL journal mode, the worker briefly pauses
+writes to capture each request's database and event position. It then releases
+the writer while the request reads and formats its results. Up to four reads
+per account can run together, with eight across the daemon. Profiles using
+other journal modes keep serialized reads; the daemon does not change their
+journal mode.
+
+Downloads have a separate limit: two per account and four across the daemon.
+Network waits release the account writer, which checks the login and job state
+again before saving a result. Sends keep their existing queue. Discovering and
+registering saved media still uses the writer.
 
 The Rust crates in [`packages/native-client-rust`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust) follow the same split: `wechat-protocol`, `wechat-profile`, `wechat-store`, `wechat-core`, `wechat-api` and the `wx` binary.
 

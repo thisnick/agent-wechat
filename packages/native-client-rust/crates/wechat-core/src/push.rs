@@ -107,7 +107,10 @@ impl Core {
         let core = self.clone();
         let owned = account.to_owned();
         let (mut connection, fence, heartbeat) = blocking(move || {
-            let _guard = guard;
+            let mut permit = crate::account_network::AccountNetworkPermit {
+                guard: Some(guard),
+                runtime: tokio::runtime::Handle::current(),
+            };
             if !core.push_allowed(&owned)? {
                 bail!("push_session_superseded");
             }
@@ -117,8 +120,11 @@ impl Core {
                 .runtime(&owned, "account-state")?
                 .context("auth_required")?;
             let cursor = core.cursor(&owned)?;
-            let mut connection = core.upstream.push_connection(&state)?;
-            let heartbeat = connection.heartbeat(&mut state, &cursor)?;
+            let (connection, heartbeat) = permit.transfer(&core, &owned, || {
+                let mut connection = core.upstream.push_connection(&state)?;
+                let heartbeat = connection.heartbeat(&mut state, &cursor)?;
+                Ok((connection, heartbeat))
+            })?;
             core.save_push_state(&owned, &state, &expected, &fence)?;
             Ok((connection, fence, heartbeat))
         })
@@ -144,13 +150,18 @@ impl Core {
                 let owned = account.to_owned();
                 let active = fence.clone();
                 let result = blocking(move || {
-                    let _guard = guard;
+                    let mut permit = crate::account_network::AccountNetworkPermit {
+                        guard: Some(guard),
+                        runtime: tokio::runtime::Handle::current(),
+                    };
                     let mut state = core.push_state(&owned, &active)?;
                     let expected = core
                         .store
                         .runtime(&owned, "account-state")?
                         .context("auth_required")?;
-                    let beat = connection.heartbeat(&mut state, &core.cursor(&owned)?)?;
+                    let cursor = core.cursor(&owned)?;
+                    let beat = permit
+                        .transfer(&core, &owned, || connection.heartbeat(&mut state, &cursor))?;
                     core.save_push_state(&owned, &state, &expected, &active)?;
                     Ok((connection, beat))
                 })
@@ -199,13 +210,19 @@ impl Core {
             let active = fence.clone();
             let trigger = trigger.to_owned();
             let (next, continuation) = blocking(move || {
-                let _guard = guard;
+                let mut permit = crate::account_network::AccountNetworkPermit {
+                    guard: Some(guard),
+                    runtime: tokio::runtime::Handle::current(),
+                };
                 let mut state = core.push_state(&owned, &active)?;
                 let expected = core
                     .store
                     .runtime(&owned, "account-state")?
                     .context("auth_required")?;
-                let batch = connection.sync(&mut state, &core.cursor(&owned)?, scene)?;
+                let cursor = core.cursor(&owned)?;
+                let batch = permit.transfer(&core, &owned, || {
+                    connection.sync(&mut state, &cursor, scene)
+                })?;
                 core.save_push_state(&owned, &state, &expected, &active)?;
                 let continuation = batch.continuation;
                 core.commit_sync_batch(&owned, batch, "longlink", &trigger)?;

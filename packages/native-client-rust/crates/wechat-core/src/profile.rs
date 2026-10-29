@@ -111,8 +111,15 @@ impl Core {
             },
         )?)
     }
-    /// The caller holds the account gate across this view and its event boundary.
-    pub(crate) fn profile_reader_owned(&self, account: &str) -> Result<ProfileReader> {
+    /// Use the request's pinned reader, or retain the account gate for an ordinary view.
+    pub(crate) fn profile_reader_owned(
+        &self,
+        account: &str,
+    ) -> Result<std::sync::Arc<ProfileReader>> {
+        if let Some((bound, reader)) = &self.snapshot_reader {
+            anyhow::ensure!(bound == account, "read snapshot account mismatch");
+            return Ok(reader.clone());
+        }
         let (location, keys) = self.profile_location_keys(account)?;
         let owned = self.owns_profile(account)?;
         let options = ReadOptions {
@@ -138,9 +145,11 @@ impl Core {
                 .entry(account.into())
                 .or_insert_with(|| (std::time::Instant::now(), Default::default()));
             *used = std::time::Instant::now();
-            return Ok(reader.read(location, keys, options)?);
+            return Ok(std::sync::Arc::new(reader.read(location, keys, options)?));
         }
-        Ok(ProfileReader::open(location, keys, options)?)
+        Ok(std::sync::Arc::new(ProfileReader::open(
+            location, keys, options,
+        )?))
     }
     pub fn read_state_version(
         &self,

@@ -76,26 +76,48 @@ pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
 }
 
 pub struct Core {
-    pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub store: Arc<Store>,
+    pub(crate) shared: Arc<CoreShared>,
+    pub(crate) snapshot_reader: Option<(String, Arc<wechat_profile::ProfileReader>)>,
+    pub(crate) live_store: Option<Arc<Store>>,
+}
+impl std::ops::Deref for Core {
+    type Target = CoreShared;
+    fn deref(&self) -> &CoreShared {
+        &self.shared
+    }
+}
+
+#[doc(hidden)]
+pub struct CoreShared {
+    pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub ownership_generation: String,
-    leases: Mutex<BTreeMap<String, Vec<wechat_store::Lease>>>,
+    pub(crate) leases: Mutex<BTreeMap<String, Vec<wechat_store::Lease>>>,
     pub(crate) vault: Arc<Vault>,
     pub(crate) cursor_vault: Arc<Vault>,
-    password_proofs: Mutex<BTreeMap<String, String>>,
+    pub(crate) password_proofs: Mutex<BTreeMap<String, String>>,
+    pub(crate) recall_read_rechecks: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) recall_sync_cache: Mutex<BTreeMap<String, crate::recall_evidence::RecallSyncCache>>,
     pub(crate) profile_readers:
         Mutex<BTreeMap<String, (std::time::Instant, wechat_profile::OwnedReaderCache)>>,
-    profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
-    bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
-    startup_profiles_recovered: AtomicBool,
-    gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
-    media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
-    cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
-    workers: Mutex<std::collections::BTreeSet<String>>,
-    push_health: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
-    official_profiles: AsyncMutex<()>,
+    pub(crate) profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
+    pub(crate) bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
+    pub(crate) startup_profiles_recovered: AtomicBool,
+    pub(crate) gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    pub(crate) media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    media_downloads: Mutex<BTreeMap<String, Arc<tokio::sync::Semaphore>>>,
+    media_download_limit: Arc<tokio::sync::Semaphore>,
+    pub(crate) read_limit: Arc<tokio::sync::Semaphore>,
+    pub(crate) cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    pub(crate) workers: Mutex<std::collections::BTreeSet<String>>,
+    pub(crate) push_health: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    pub(crate) official_profiles: AsyncMutex<()>,
     pub stopping: AtomicBool,
+    pub(crate) read_pools: Mutex<BTreeMap<String, Arc<crate::read_view::ReadPool>>>,
+}
+pub(crate) struct DownloadPermit {
+    _account: tokio::sync::OwnedSemaphorePermit,
+    _global: tokio::sync::OwnedSemaphorePermit,
 }
 #[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -287,25 +309,34 @@ impl Core {
             .map(|a| a.id)
             .collect();
         let core = Arc::new(Self {
-            upstream,
             store,
-            leases: Mutex::new(leases),
-            vault: Arc::new(vault),
-            cursor_vault: Arc::new(cursor_vault),
-            password_proofs: Mutex::new(BTreeMap::new()),
-            recall_sync_cache: Mutex::new(BTreeMap::new()),
-            profile_readers: Mutex::new(BTreeMap::new()),
-            profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
-            bootstrap_leases: Mutex::new(bootstrap_leases),
-            startup_profiles_recovered: AtomicBool::new(false),
-            ownership_generation: uuid::Uuid::new_v4().to_string(),
-            gates: Mutex::new(BTreeMap::new()),
-            media_gates: Mutex::new(BTreeMap::new()),
-            cancels: Mutex::new(BTreeMap::new()),
-            workers: Mutex::new(std::collections::BTreeSet::new()),
-            push_health: Mutex::new(BTreeMap::new()),
-            official_profiles: AsyncMutex::new(()),
-            stopping: AtomicBool::new(false),
+            snapshot_reader: None,
+            live_store: None,
+            shared: Arc::new(CoreShared {
+                upstream,
+                leases: Mutex::new(leases),
+                vault: Arc::new(vault),
+                cursor_vault: Arc::new(cursor_vault),
+                password_proofs: Mutex::new(BTreeMap::new()),
+                recall_read_rechecks: Mutex::new(Default::default()),
+                recall_sync_cache: Mutex::new(BTreeMap::new()),
+                profile_readers: Mutex::new(BTreeMap::new()),
+                profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
+                bootstrap_leases: Mutex::new(bootstrap_leases),
+                startup_profiles_recovered: AtomicBool::new(false),
+                ownership_generation: uuid::Uuid::new_v4().to_string(),
+                gates: Mutex::new(BTreeMap::new()),
+                media_gates: Mutex::new(BTreeMap::new()),
+                media_downloads: Mutex::new(BTreeMap::new()),
+                media_download_limit: Arc::new(tokio::sync::Semaphore::new(4)),
+                read_limit: Arc::new(tokio::sync::Semaphore::new(8)),
+                cancels: Mutex::new(BTreeMap::new()),
+                workers: Mutex::new(std::collections::BTreeSet::new()),
+                push_health: Mutex::new(BTreeMap::new()),
+                official_profiles: AsyncMutex::new(()),
+                stopping: AtomicBool::new(false),
+                read_pools: Mutex::new(BTreeMap::new()),
+            }),
         });
         for account in core.store.accounts()? {
             if core.store.runtime(&account.id, "account-state")?.is_some() {
@@ -358,6 +389,27 @@ impl Core {
         let _media = media_gate
             .try_lock()
             .map_err(|_| anyhow::anyhow!("operation_in_progress"))?;
+        let downloads = self
+            .media_downloads
+            .lock()
+            .map_err(|_| anyhow::anyhow!("media manager unavailable"))?
+            .get(account)
+            .cloned();
+        if downloads
+            .as_ref()
+            .is_some_and(|limit| limit.available_permits() != 2)
+        {
+            bail!("operation_in_progress");
+        }
+        if self
+            .read_pools
+            .lock()
+            .map_err(|_| anyhow::anyhow!("read pool unavailable"))?
+            .get(account)
+            .is_some_and(|pool| pool.active())
+        {
+            bail!("operation_in_progress");
+        }
         // Login/logout admission shares this lock, including before its worker owns
         // the account gate. Sidecar admission is serialized by the registry lock.
         let cancels = self
@@ -372,6 +424,10 @@ impl Core {
         self.profile_readers
             .lock()
             .map_err(|_| anyhow::anyhow!("profile reader unavailable"))?
+            .remove(account);
+        self.read_pools
+            .lock()
+            .map_err(|_| anyhow::anyhow!("read pool unavailable"))?
             .remove(account);
         self.store.remove_account(account)?;
         // Keep the existing gates: requests already waiting on one must never
@@ -414,6 +470,22 @@ impl Core {
     }
     pub async fn lock_account(&self, account: &str) -> Result<tokio::sync::OwnedMutexGuard<()>> {
         Ok(self.gate(account)?.lock_owned().await)
+    }
+    pub(crate) async fn download_permit(&self, account: &str) -> Result<DownloadPermit> {
+        self.store.account(account)?;
+        let semaphore = self
+            .media_downloads
+            .lock()
+            .map_err(|_| anyhow::anyhow!("media manager unavailable"))?
+            .entry(account.into())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(2)))
+            .clone();
+        let account = semaphore.acquire_owned().await?;
+        let global = self.media_download_limit.clone().acquire_owned().await?;
+        Ok(DownloadPermit {
+            _account: account,
+            _global: global,
+        })
     }
     pub(crate) async fn lock_media_job(
         &self,
@@ -1067,16 +1139,24 @@ impl Core {
             .await
     }
     async fn sync_session(self: &Arc<Self>, account: &str, fence: SessionFence) -> Result<Value> {
-        let gate = self.gate(account)?;
-        let _guard = gate.lock().await;
+        let guard = self.lock_account(account).await?;
         let core = self.clone();
         let account = account.to_owned();
         blocking(move || {
+            let mut permit = crate::account_network::AccountNetworkPermit {
+                guard: Some(guard),
+                runtime: tokio::runtime::Handle::current(),
+            };
+            let expected = core
+                .store
+                .runtime(&account, "account-state")?
+                .context("auth_required")?;
+            let desired = core.store.runtime(&account, "desired")?;
             let mut state = core.session_state(&account, &fence)?;
             let cursor = core.cursor(&account)?;
             let native = &core.upstream;
-            let batch = native.sync(&mut state, &cursor)?;
-            core.save_state(&account, &state)?;
+            let batch = permit.transfer(&core, &account, || native.sync(&mut state, &cursor))?;
+            core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
             core.store.put_runtime(
                 &account,
                 "validated-generation",
@@ -1878,13 +1958,15 @@ impl Core {
             self.drain_queued_sends(account).await?;
             return Ok(5);
         }
-        let gate = self.gate(account)?;
         let heartbeat = {
-            let _guard = gate.lock().await;
+            let guard = self.lock_account(account).await?;
             let core = self.clone();
             let account = account.to_string();
             blocking(move || {
-                let mut state = core.session_state(&account, &fence)?;
+                let mut permit = crate::account_network::AccountNetworkPermit {
+                    guard: Some(guard),
+                    runtime: tokio::runtime::Handle::current(),
+                };
                 let _ = core.recover_text_projections(&account)?;
                 if core.refresh_incoming_groups(&account, true)? > 0 {
                     core.store.retry_blocked(&account)?;
@@ -1893,10 +1975,16 @@ impl Core {
                 if core.store.pending_sync_count(&account)? == 0 {
                     let _ = core.publish_profile_checkpoint(&account);
                 }
+                let expected = core
+                    .store
+                    .runtime(&account, "account-state")?
+                    .context("auth_required")?;
+                let mut state = core.session_state(&account, &fence)?;
                 let cursor = core.cursor(&account)?;
                 let native = &core.upstream;
-                let beat = native.heartbeat(&mut state, &cursor)?;
-                core.save_state(&account, &state)?;
+                let beat =
+                    permit.transfer(&core, &account, || native.heartbeat(&mut state, &cursor))?;
+                core.save_network_state(&account, &state, &expected, &fence, Some(b"connected"))?;
                 core.store.put_runtime(
                     &account,
                     "validated-generation",

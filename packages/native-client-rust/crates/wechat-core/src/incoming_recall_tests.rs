@@ -1061,6 +1061,56 @@ fn projection_failure_keeps_suppression_and_repair_never_resubmits_a_command() {
     assert_eq!(recall_count(&store), 1);
 }
 
+#[tokio::test]
+async fn snapshot_recall_suppression_retains_the_writers_local_repair_obligation() {
+    let (temporary, store, core) = fixture();
+    core.apply_sync_command(
+        "one",
+        &add(1, "peer", "synthetic_self", b"Original", 200, 100),
+        "original",
+        "live",
+    )
+    .unwrap();
+    let id = first(&core)["id"].as_str().unwrap().to_owned();
+    core.apply_sync_command("one", &recall(200), "recall", "live")
+        .unwrap();
+    core.reconcile_recall_markers("one").unwrap();
+    let source = crate::source_message_id(&id).unwrap();
+    let db = synthetic_database(&core, &temporary, &source.database);
+    db.execute(
+        &format!(
+            "UPDATE {} SET local_type=1,message_content='Restored original' WHERE local_id=?1",
+            source.table
+        ),
+        [source.local_id.parse::<i64>().unwrap()],
+    )
+    .unwrap();
+    drop(db);
+    let target = id.clone();
+    core.read("one", move |view| {
+        assert!(view.store.is_read_snapshot());
+        let message = view.message("one", &target)?;
+        assert_eq!(message["body"], crate::recalls::RECALLED_BODY);
+        assert!(!message.to_string().contains("Restored original"));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(core.recall_read_rechecks.lock().unwrap().contains("one"));
+    assert_eq!(recall_count(&store), 1);
+    core.reconcile_recall_markers("one").unwrap();
+    assert_eq!(
+        core.profile_reader("one")
+            .unwrap()
+            .message(&source, None)
+            .unwrap()
+            .message_type,
+        10000
+    );
+    assert!(!core.recall_read_rechecks.lock().unwrap().contains("one"));
+    assert_eq!(recall_count(&store), 1);
+}
+
 #[test]
 fn native_official_recall_outside_quote_page_is_observed_before_embedded_fallback() {
     let (_temporary, store, core) = fixture();

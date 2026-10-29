@@ -213,6 +213,13 @@ impl Store {
         id: &str,
         f: impl FnOnce(&mut Connection) -> Result<T>,
     ) -> Result<T> {
+        if let Some((account, db)) = &self.snapshot {
+            anyhow::ensure!(account == id, "read snapshot account mismatch");
+            let mut db = db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("read snapshot unavailable"))?;
+            return f(&mut db);
+        }
         self.account(id)?;
         // Serialize sidecar operations through the store lock as well as SQLite.
         let guard = self

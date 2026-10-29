@@ -73,13 +73,14 @@ impl Core {
             let owned = account.to_owned();
             let active = fence.clone();
             let more = blocking(move || {
-                let _guard = guard;
+                let mut permit = crate::account_network::AccountNetworkPermit { guard: Some(guard), runtime: tokio::runtime::Handle::current() };
                 let mut state = core.push_state(&owned, &active)?;
                 core.project_contact_pending(&owned)?;
                 core.publish_contact_checkpoint(&owned, &active)?;
                 let expected = core.store.runtime(&owned, "account-state")?.context("auth_required")?;
                 let cursor = core.contact_cursor(&owned)?;
-                let batch = core.upstream.contact_sync(&mut state, &cursor, &core.cursor(&owned)?, page != 0)?;
+                let sync_cursor = core.cursor(&owned)?;
+                let batch = permit.transfer(&core, &owned, || core.upstream.contact_sync(&mut state, &cursor, &sync_cursor, page != 0))?;
                 core.save_push_state(&owned, &state, &expected, &active)?;
                 let more = batch.continuation.iter().any(|value| *value != 0);
                 let stalled = more && batch.cursor == cursor;

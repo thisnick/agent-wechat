@@ -1,5 +1,5 @@
 //! Reusable connections for an exclusively owned profile. The caller's account
-//! gate spans the entire read and its event boundary, including all databases.
+//! gate spans ordinary reads, or just snapshot pinning for request-owned readers.
 use crate::{
     schema::inspect,
     snapshot::{walk, Snapshot},
@@ -43,9 +43,71 @@ fn same_database_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 pub struct OwnedReaderCache {
     root: Option<std::path::PathBuf>,
     databases: BTreeMap<String, CachedDatabase>,
+    nested: BTreeMap<String, Arc<Mutex<Connection>>>,
 }
 
 impl OwnedReaderCache {
+    /// Establish every database snapshot while the caller excludes profile writes.
+    /// Each checked-out cache belongs to one request; nested queries use a second
+    /// connection pinned at the same barrier rather than opening a later view.
+    pub fn read_snapshot(
+        &mut self,
+        location: ProfileLocation,
+        keys: KeyFile,
+        options: ReadOptions,
+    ) -> Result<ProfileReader> {
+        let mut reader = self.read(location, keys, options)?;
+        let mut pinned = crate::snapshot::PinnedTransactions {
+            connections: BTreeMap::new(),
+        };
+        let deadline = std::time::Instant::now() + reader.snapshot.options.query_timeout;
+        for entry in reader
+            .snapshot
+            .inventory
+            .iter()
+            .filter(|entry| entry.state == DatabaseState::Readable)
+        {
+            let Some(primary) = reader.snapshot.owned.get(&entry.relative_path) else {
+                return Err(ProfileError::ParallelSnapshotUnavailable);
+            };
+            if !self.nested.contains_key(&entry.relative_path) {
+                self.nested.insert(
+                    entry.relative_path.clone(),
+                    Arc::new(Mutex::new(
+                        reader
+                            .snapshot
+                            .open_connection(&entry.relative_path, true)?,
+                    )),
+                );
+            }
+            let pair = vec![primary.clone(), self.nested[&entry.relative_path].clone()];
+            pinned
+                .connections
+                .insert(entry.relative_path.clone(), pair.clone());
+            for connection in pair {
+                let connection = connection.lock().map_err(|_| ProfileError::Database)?;
+                let mode: String = connection.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+                if !mode.eq_ignore_ascii_case("wal") {
+                    return Err(ProfileError::ParallelSnapshotUnavailable);
+                }
+                connection
+                    .progress_handler(1000, Some(move || std::time::Instant::now() > deadline));
+                connection.set_limit(
+                    rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
+                    reader.snapshot.options.max_blob_bytes as i32,
+                );
+                connection.execute_batch("BEGIN DEFERRED")?;
+                connection.query_row("SELECT count(*) FROM sqlite_schema", [], |r| {
+                    r.get::<_, i64>(0)
+                })?;
+            }
+        }
+        self.nested
+            .retain(|relative, _| reader.snapshot.paths.contains_key(relative));
+        reader.snapshot.pinned = Some(pinned);
+        Ok(reader)
+    }
+
     /// The caller must own the profile and hold its account gate until the
     /// returned reader is dropped. This path may update SQLite's WAL index.
     /// Offline inspection must continue to use `ProfileReader::open` instead.
@@ -71,6 +133,7 @@ impl OwnedReaderCache {
         }
         if self.root.as_ref() != Some(&location.root) {
             self.databases.clear();
+            self.nested.clear();
             self.root = Some(location.root.clone());
         }
         let mut files = Vec::new();
@@ -87,6 +150,7 @@ impl OwnedReaderCache {
             paths: BTreeMap::new(),
             _temp: None,
             owned: BTreeMap::new(),
+            pinned: None,
         };
         let mut generation = Sha256::new();
         generation.update(snapshot.location.root.as_os_str().as_encoded_bytes());
@@ -171,6 +235,7 @@ impl OwnedReaderCache {
             });
             if !reuse {
                 self.databases.remove(&relative);
+                self.nested.remove(&relative);
                 match snapshot.open_connection(&relative, true) {
                     Ok(connection) => {
                         let schema = inspect(&connection, &relative)
@@ -220,8 +285,9 @@ impl OwnedReaderCache {
                         .map_err(|_| ProfileError::UnsupportedSchema(relative.clone()))?;
                     cached.schema_version = schema_version;
                 }
-                let version: i64 = connection.query_row("PRAGMA data_version", [], |r| r.get(0))?;
-                stamp.update(version.to_le_bytes());
+                // data_version is local to a connection, so it cannot identify
+                // a profile generation across independent reader-pool slots.
+                // Main/WAL file stamps above identify the same committed bytes.
                 schemas.push(cached.schema.clone());
                 if retained {
                     snapshot
@@ -274,6 +340,98 @@ mod tests {
             .unwrap()
             .query_row("SELECT value FROM sample", [], |r| r.get(0))
             .unwrap()
+    }
+
+    fn pinned(cache: &mut OwnedReaderCache, location: &ProfileLocation) -> ProfileReader {
+        cache
+            .read_snapshot(
+                location.clone(),
+                KeyFile::empty("account"),
+                ReadOptions {
+                    stopped_or_consistent_snapshot: true,
+                    allow_plaintext: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+    #[test]
+    fn request_snapshots_pin_all_databases_and_nested_queries_at_one_boundary() {
+        let (_temp, location, writer) = fixture();
+        let other = Connection::open(location.storage.join("other.db")).unwrap();
+        other.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(10)").unwrap();
+        let mut cache = OwnedReaderCache::default();
+        let first = pinned(&mut cache, &location);
+        writer.execute("UPDATE sample SET value=2", []).unwrap();
+        other.execute("UPDATE sample SET value=20", []).unwrap();
+        let held = first.snapshot.open("sample.db").unwrap();
+        assert_eq!(
+            held.query_row("SELECT value FROM sample", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(value(&first), 1); // Uses the independently pinned nested connection.
+        assert_eq!(
+            first
+                .snapshot
+                .open("other.db")
+                .unwrap()
+                .query_row("SELECT value FROM sample", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        drop(held);
+        drop(first);
+        let second = pinned(&mut cache, &location);
+        assert_eq!(value(&second), 2);
+        assert_eq!(
+            second
+                .snapshot
+                .open("other.db")
+                .unwrap()
+                .query_row("SELECT value FROM sample", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+    }
+    #[test]
+    fn independent_pool_connections_agree_on_source_generation() {
+        let (_temp, location, writer) = fixture();
+        let mut a = OwnedReaderCache::default();
+        let before = pinned(&mut a, &location);
+        drop(before);
+        writer.execute("UPDATE sample SET value=2", []).unwrap();
+        let a = pinned(&mut a, &location);
+        let mut b = OwnedReaderCache::default();
+        let b = pinned(&mut b, &location);
+        assert_eq!(a.generation(), b.generation());
+    }
+    #[test]
+    fn rollback_journal_fallback_does_not_change_mode_or_leave_transactions_open() {
+        let (_temp, location, writer) = fixture();
+        writer.execute_batch("PRAGMA journal_mode=DELETE").unwrap();
+        let mut cache = OwnedReaderCache::default();
+        let error = cache.read_snapshot(
+            location.clone(),
+            KeyFile::empty("account"),
+            ReadOptions {
+                stopped_or_consistent_snapshot: true,
+                allow_plaintext: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            error,
+            Err(ProfileError::ParallelSnapshotUnavailable)
+        ));
+        writer.execute("UPDATE sample SET value=3", []).unwrap();
+        assert_eq!(value(&read(&mut cache, &location)), 3);
+        assert_eq!(
+            writer
+                .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "delete"
+        );
     }
 
     #[test]

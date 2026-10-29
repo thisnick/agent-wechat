@@ -48,6 +48,8 @@ pub enum ProfileError {
     InvalidProfile,
     #[error("a stopped profile or consistent snapshot must be explicitly confirmed")]
     SnapshotRequired,
+    #[error("parallel snapshots are unavailable for this profile layout")]
+    ParallelSnapshotUnavailable,
     #[error("profile changed while the read snapshot was being copied")]
     SourceChanged,
     #[error("source contains an unsupported link or special file")]

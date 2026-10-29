@@ -134,7 +134,7 @@ impl Core {
         }
         Ok(item)
     }
-    /// The account actor must be held around the profile snapshot and boundary.
+    /// Caller holds the account writer or a request-owned profile/control snapshot.
     pub fn catalog_page(
         &self,
         account: &str,
@@ -363,7 +363,9 @@ impl Core {
                     &format!("pagination-view:{id}"),
                     &serde_json::to_vec(&view)?,
                 )?;
-                self.store
+                self.live_store
+                    .as_ref()
+                    .unwrap_or(&self.store)
                     .save_pagination_view(account, &id, query, &boundary, expires, &payload)?;
             }
             (id, view, boundary, expires, 0)

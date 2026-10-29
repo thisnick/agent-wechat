@@ -94,18 +94,36 @@ pub(crate) struct Snapshot {
     pub paths: BTreeMap<String, PathBuf>,
     pub(crate) _temp: Option<wechat_platform::PrivateTempDir>,
     pub(crate) owned: BTreeMap<String, Arc<Mutex<Connection>>>,
+    pub(crate) pinned: Option<PinnedTransactions>,
+}
+
+pub(crate) struct PinnedTransactions {
+    pub(crate) connections: BTreeMap<String, Vec<Arc<Mutex<Connection>>>>,
+}
+impl Drop for PinnedTransactions {
+    fn drop(&mut self) {
+        for connections in self.connections.values() {
+            for connection in connections {
+                if let Ok(connection) = connection.lock() {
+                    connection.progress_handler(0, None::<fn() -> bool>);
+                    let _ = connection.execute_batch("ROLLBACK");
+                }
+            }
+        }
+    }
 }
 
 pub(crate) enum ReadConnection<'a> {
     Copied(Connection),
     Owned(MutexGuard<'a, Connection>),
+    Pinned(MutexGuard<'a, Connection>),
 }
 impl std::ops::Deref for ReadConnection<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection {
         match self {
             Self::Copied(connection) => connection,
-            Self::Owned(connection) => connection,
+            Self::Owned(connection) | Self::Pinned(connection) => connection,
         }
     }
 }
@@ -320,6 +338,7 @@ impl Snapshot {
             paths,
             _temp: Some(temp),
             owned: BTreeMap::new(),
+            pinned: None,
         };
         for i in 0..result.inventory.len() {
             let rel = result.inventory[i].relative_path.clone();
@@ -334,6 +353,21 @@ impl Snapshot {
         Ok(result)
     }
     pub fn open(&self, rel: &str) -> Result<ReadConnection<'_>> {
+        if let Some(pinned) = &self.pinned {
+            let connections = pinned
+                .connections
+                .get(rel)
+                .ok_or(ProfileError::InvalidQuery)?;
+            for connection in connections {
+                match connection.try_lock() {
+                    Ok(connection) => return Ok(ReadConnection::Pinned(connection)),
+                    Err(TryLockError::WouldBlock) => continue,
+                    Err(TryLockError::Poisoned(_)) => return Err(ProfileError::Database),
+                }
+            }
+            // Never fall back to a fresh connection with a different snapshot.
+            return Err(ProfileError::ResourceLimit);
+        }
         if let Some(connection) = self.owned.get(rel) {
             let connection = match connection.try_lock() {
                 Ok(connection) => connection,

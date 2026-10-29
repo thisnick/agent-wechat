@@ -461,6 +461,15 @@ async fn work<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))?
         .map_err(Into::into)
 }
+fn timed_response(response: impl IntoResponse, timing: wechat_core::ReadTimings) -> Response {
+    let mut response = response.into_response();
+    response.headers_mut().insert(
+        "server-timing",
+        timing.server_timing().parse().expect("fixed timing header"),
+    );
+    response
+}
+
 fn checked<T: serde::de::DeserializeOwned>(value: Value) -> ApiResult<Json<Value>> {
     Ok(Json(contracts::checked::<T>(value).map_err(|_| {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_server_response")
@@ -753,16 +762,17 @@ macro_rules! listing {
             Extension(c): Extension<Claims>,
             Path(a): Path<String>,
             Query(q): Query<PageQuery>,
-        ) -> ApiResult<Json<Value>> {
+        ) -> ApiResult<Response> {
             c.require(Some(&a), "read")?;
             let q = q.catalog()?;
-            let guard = app.core.lock_account(&a).await?;
-            let value = work(move || {
-                let _guard = guard;
-                app.core.catalog_page(&a, stringify!($method), None, &q)
-            })
-            .await?;
-            match stringify!($method) {
+            let (value, timing) = app
+                .core
+                .read_timed(&a.clone(), move |core| {
+                    core.catalog_page(&a, stringify!($method), None, &q)
+                })
+                .await
+                .map_err(ApiError::from)?;
+            let value = match stringify!($method) {
                 "threads" => checked::<contracts::NativePage<contracts::NativeThread>>(value),
                 "contacts" => checked::<contracts::NativePage<contracts::NativeContact>>(value),
                 "groups" => checked::<contracts::NativePage<contracts::NativeGroup>>(value),
@@ -770,7 +780,8 @@ macro_rules! listing {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "invalid_server_response",
                 )),
-            }
+            }?;
+            Ok(timed_response(value, timing))
         }
     };
 }
@@ -783,13 +794,11 @@ async fn schema(
     Path(a): Path<String>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let guard = app.core.lock_account(&a).await?;
     Ok(Json(
-        work(move || {
-            let _guard = guard;
-            app.core.profile_schema(&a)
-        })
-        .await?,
+        app.core
+            .read(&a.clone(), move |core| core.profile_schema(&a))
+            .await
+            .map_err(ApiError::from)?,
     ))
 }
 async fn members(
@@ -800,15 +809,15 @@ async fn members(
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
     let q = q.catalog()?;
-    let guard = app.core.lock_account(&a).await?;
     Ok(Json(contracts::checked::<
         contracts::NativePage<contracts::NativeGroupMember>,
     >(
-        work(move || {
-            let _guard = guard;
-            app.core.catalog_page(&a, "members", Some(&room), &q)
-        })
-        .await?,
+        app.core
+            .read(&a.clone(), move |core| {
+                core.catalog_page(&a, "members", Some(&room), &q)
+            })
+            .await
+            .map_err(ApiError::from)?,
     )?))
 }
 async fn messages(
@@ -816,19 +825,20 @@ async fn messages(
     Extension(c): Extension<Claims>,
     Path((a, thread)): Path<(String, String)>,
     Query(q): Query<PageQuery>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
     c.require(Some(&a), "read")?;
     let q = q.catalog()?;
-    let guard = app.core.lock_account(&a).await?;
-    Ok(Json(contracts::checked::<
-        contracts::NativePage<contracts::NativeMessage>,
-    >(
-        work(move || {
-            let _guard = guard;
-            app.core.catalog_page(&a, "messages", Some(&thread), &q)
+    let (value, timing) = app
+        .core
+        .read_timed(&a.clone(), move |core| {
+            core.catalog_page(&a, "messages", Some(&thread), &q)
         })
-        .await?,
-    )?))
+        .await
+        .map_err(ApiError::from)?;
+    Ok(timed_response(
+        checked::<contracts::NativePage<contracts::NativeMessage>>(value)?,
+        timing,
+    ))
 }
 async fn archive_messages(
     State(app): State<App>,
@@ -838,13 +848,13 @@ async fn archive_messages(
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
     let q = q.catalog()?;
-    let guard = app.core.lock_account(&a).await?;
     checked::<contracts::NativePage<contracts::NativeMessage>>(
-        work(move || {
-            let _guard = guard;
-            app.core.catalog_page(&a, "messages", None, &q)
-        })
-        .await?,
+        app.core
+            .read(&a.clone(), move |core| {
+                core.catalog_page(&a, "messages", None, &q)
+            })
+            .await
+            .map_err(ApiError::from)?,
     )
 }
 async fn message(
@@ -853,13 +863,11 @@ async fn message(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let guard = app.core.lock_account(&a).await?;
     checked::<contracts::NativeMessage>(
-        work(move || {
-            let _guard = guard;
-            app.core.message(&a, &id)
-        })
-        .await?,
+        app.core
+            .read(&a.clone(), move |core| core.message(&a, &id))
+            .await
+            .map_err(ApiError::from)?,
     )
 }
 async fn avatar(
@@ -868,12 +876,11 @@ async fn avatar(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "media")?;
-    let guard = app.core.lock_account(&a).await?;
-    let media = work(move || {
-        let _guard = guard;
-        app.core.avatar(&a, &id)
-    })
-    .await?;
+    let media = app
+        .core
+        .read(&a.clone(), move |core| core.avatar(&a, &id))
+        .await
+        .map_err(ApiError::from)?;
     Ok((
         [
             ("content-type", media.media_type),
@@ -902,12 +909,11 @@ async fn image(
         "thumbnail" => wechat_profile::ImageQuality::Thumbnail,
         _ => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_quality")),
     };
-    let guard = app.core.lock_account(&a).await?;
-    let media = work(move || {
-        let _guard = guard;
-        app.core.image(&a, &id, quality)
-    })
-    .await?;
+    let media = app
+        .core
+        .read(&a.clone(), move |core| core.image(&a, &id, quality))
+        .await
+        .map_err(ApiError::from)?;
     Ok((
         [
             ("content-type", media.media.media_type),

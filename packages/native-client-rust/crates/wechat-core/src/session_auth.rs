@@ -36,6 +36,31 @@ impl Core {
         Ok(state)
     }
 
+    /// Commit a response only to the exact credential state that issued it.
+    pub(super) fn save_network_state(
+        &self,
+        account: &str,
+        state: &AccountState,
+        expected: &[u8],
+        fence: &SessionFence,
+        desired: Option<&[u8]>,
+    ) -> Result<()> {
+        self.session_state(account, fence)?;
+        self.check_state_profile(account, state)?;
+        let sealed = self
+            .vault
+            .seal(account, "account-state", &serde_json::to_vec(state)?)?;
+        self.store.save_network_authorization(
+            account,
+            &sealed,
+            expected,
+            fence.logout_epoch.as_deref(),
+            desired,
+        )?;
+        let _ = self.project_saved_login(account, state);
+        Ok(())
+    }
+
     pub(super) async fn session_request<T, F, Fut>(
         self: &Arc<Self>,
         account: &str,

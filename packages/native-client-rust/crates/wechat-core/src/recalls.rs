@@ -255,11 +255,20 @@ pub(crate) fn public_recall(marker: &RecallMarker) -> Value {
 }
 impl Core {
     pub(crate) fn reconcile_recall_markers(&self, account: &str) -> Result<()> {
-        let first = self
-            .store
-            .runtime(account, "recall-reconciled-generation")?
-            .as_deref()
-            != Some(self.ownership_generation.as_bytes());
+        // Snapshot readers can observe a restored row while the writer is idle.
+        // Keep a per-account local repair hint; startup already rechecks every
+        // marker after a crash. No read request writes through its snapshot.
+        let recheck = self
+            .recall_read_rechecks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recall repair queue unavailable"))?
+            .contains(account);
+        let first = recheck
+            || self
+                .store
+                .runtime(account, "recall-reconciled-generation")?
+                .as_deref()
+                != Some(self.ownership_generation.as_bytes());
         for marker in self.store.recall_markers(account)? {
             if first || marker.projection_state == "pending" {
                 use sha2::Digest;
@@ -279,6 +288,12 @@ impl Core {
                 "recall-reconciled-generation",
                 self.ownership_generation.as_bytes(),
             )?;
+        }
+        if recheck {
+            self.recall_read_rechecks
+                .lock()
+                .map_err(|_| anyhow::anyhow!("recall repair queue unavailable"))?
+                .remove(account);
         }
         Ok(())
     }
@@ -502,6 +517,15 @@ impl Core {
                 if marker.projection_state == "applied" && official_recall(msg).is_none() {
                     // An operation receipt is not canonical settled state. If
                     // a restored row needs repair, track that obligation again.
+                    if self.store.is_read_snapshot() {
+                        self.recall_read_rechecks
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("recall repair queue unavailable"))?
+                            .insert(account.into());
+                        let mut pending = marker;
+                        pending.projection_state = "pending".into();
+                        return Ok(Some(pending));
+                    }
                     self.store
                         .begin_recall_projection(account, thread, server)?;
                     return self.store.recall_marker(account, thread, server);
@@ -537,6 +561,18 @@ impl Core {
             return Ok(None);
         };
         if let Some(time) = official_recall(msg) {
+            if self.store.is_read_snapshot() {
+                return Ok(Some(RecallMarker {
+                    thread_id: thread.into(),
+                    server_id: server.into(),
+                    message_id: Some(message_id(&msg.id)?),
+                    source_created_at: Some(msg.create_time),
+                    observed_at: chrono::Utc::now().to_rfc3339(),
+                    recalled_at: time,
+                    origin: "profile_import".into(),
+                    projection_state: "applied".into(),
+                }));
+            }
             return Ok(Some(self.store.record_recall(
                 account,
                 thread,

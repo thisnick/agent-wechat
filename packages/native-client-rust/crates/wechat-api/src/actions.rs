@@ -234,16 +234,17 @@ async fn exact(
     kind: &'static str,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let guard = app.core.lock_account(&a).await?;
-    let value = work(move || {
-        let _guard = guard;
-        if kind == "groups" {
-            app.core.group_info(&a, &id)
-        } else {
-            app.core.catalog_item(&a, kind, &id)
-        }
-    })
-    .await?;
+    let value = app
+        .core
+        .read(&a.clone(), move |core| {
+            if kind == "groups" {
+                core.group_info(&a, &id)
+            } else {
+                core.catalog_item(&a, kind, &id)
+            }
+        })
+        .await
+        .map_err(ApiError::from)?;
     match kind {
         "threads" => checked::<contracts::NativeThread>(value),
         "contacts" => checked::<contracts::NativeContact>(value),

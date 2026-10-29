@@ -106,6 +106,19 @@ async function login(account, scanned = false) {
   await waitFor(`${account} push connected`, async () => (await a.account(account)).incomingTransport === "simulator_push");
   await waitFor(`${account} baseline`, async () => (await a.messages(account, "sim_mei")).items.length === 1);
   assert.ok((await a.contacts(account)).items.some(contact => contact.id === "sim_mei"));
+  for (const path of ["threads", "threads/sim_mei/messages"]) {
+    const response = await fetch(`${hub.ready.endpoint}/v1/accounts/${account}/${path}`, {
+      headers: { Authorization: `Bearer ${(await readFile(hub.ready.tokenFile, "utf8")).trim()}` },
+    });
+    assert.equal(response.status, 200);
+    const timing = response.headers.get("server-timing");
+    assert.match(timing, /read_queue;dur=\d+\.\d+/);
+    assert.match(timing, /account_wait;dur=\d+\.\d+/);
+    assert.match(timing, /snapshot;dur=\d+\.\d+/);
+    assert.match(timing, /query;dur=\d+\.\d+/);
+    assert.match(timing, /read_mode;desc="(?:parallel|serialized)"/);
+    await response.json();
+  }
 }
 function subscribe(client, account, cursor = "0") {
   const controller = new AbortController();

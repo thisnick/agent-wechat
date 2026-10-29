@@ -211,12 +211,13 @@ async fn member(
     Path((a, id, username)): Path<(String, String, String)>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
-    let guard = app.core.lock_account(&a).await?;
-    let value = work(move || {
-        let _guard = guard;
-        app.core.group_member(&a, &id, &username)
-    })
-    .await?;
+    let value = app
+        .core
+        .read(&a.clone(), move |core| {
+            core.group_member(&a, &id, &username)
+        })
+        .await
+        .map_err(ApiError::from)?;
     checked::<contracts::NativeGroupMemberLookup>(value)
 }
 #[derive(Deserialize)]

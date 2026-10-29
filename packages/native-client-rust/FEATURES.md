@@ -38,7 +38,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Text, metadata, media and local read-state official writeback | Implemented for supported schemas | Supported encrypted-family fixtures, accepted outgoing history rows and image/voice/file/video cache/resource joins pass, including cold reads. Selective recall deletion supports the verified contentful message-search layout; general index maintenance, external-content indexes, unknown packed resources and arbitrary official schemas remain outside the writers. Existing unknown files are retained |
 | Independent local image keys, DAT encoding and hardlink hashes | Implemented | Identity-derived image keys decrypt all 185 retained image files; native hash rule matches 84 hardlink records; fresh image cache projection also checked |
 | Cursor-bound online resource pagination | Implemented | Persisted signed views, independent key, expiry/mutation tests and typed tombstone contracts. Unfiltered message views retain IDs/order and normalize only delivered rows; search still matches normalized content. Message/quote normalization reuses the request snapshot; quoted-original recall checks use one page-scoped journal lookup and grouped conversation/shard queries, with no cross-request quote cache; a synthetic source-unavailability regression preserves embedded quote display and current recall-receipt suppression without reopening the source |
-| Owned-profile online reads with reusable read-only connections | Implemented; synthetic and isolated-copy validation | Query-scoped SQLite read transactions under account guards, schema/key/file invalidation, bounded reads and unchanged offline source-preserving inspection. Tests cover WAL snapshot isolation and connection reuse; write preflights that need frozen copies retain them |
+| Owned-profile online reads with reusable read-only connections | Implemented; synthetic and isolated-copy validation | Request-owned WAL transactions pin all admitted databases and operational/event state under a short account barrier, then query without the writer. Pools allow four reads/account and eight globally; paired pinned connections cover nested queries without mixing snapshots. Non-WAL or uncached-shard layouts retain the serialized adapter without changing official journal modes. Schema/key/file invalidation, connection-independent generations, bounded reads and source-preserving offline inspection remain. Synthetic tests cover overlapping queries and writer progress, pool saturation/release, rollback-mode fallback and recall repair; write preflights that need frozen copies retain them |
 | Batched message media metadata | Implemented; synthetic validation | Up to 40 message IDs share one account guard and reader; individual recall/unsupported errors retain per-message results without downloading content. API scope and input bounds, SDK identity checks and compatibility fallback are covered |
 | Durable event replay/SSE and independent consumer acknowledgements | Implemented | Cursor gap/account scope/restart tests, immediate quiet-stream heartbeat without advancing the cursor, actual CLI emission checkpoint, real pinned Gateway SSE cancellation |
 | Metadata catalogs distinct from message threads | Implemented | Exact group lookup succeeds without an existing thread and does not fabricate a visible conversation |
@@ -140,6 +140,20 @@ runner speed:
   page one. Requesting those bodies still reports an error.
 - Search retains normalized content matching. Continuations preserve their
   original membership while resolving later recalls from fresh profile state.
+- Paused request-owned reads retain the same database and event boundary while
+  another read and the single writer advance. Exhausted pools queue before the
+  writer; failures return their connections. Rollback profiles remain serialized.
+- Two paused incoming image downloads can overlap independently of the send
+  queue, while history reads and writer events still complete. A third download
+  waits; cancellation and logout prevent late results from becoming available.
+  Sync/contact/heartbeat network waits also release the writer and retain their
+  credential-state checks. These fixtures do not establish live server behavior.
+- Thread lists, chat history and cached media responses include `Server-Timing`
+  durations for the read queue, account wait, blocking-worker queue, snapshot and
+  query, plus the parallel/serialized mode. The header contains no account IDs,
+  paths, SQL, message content or credentials. Media discovery still registers
+  existing local files under the writer; content reads reuse the owned reader
+  instead of copying the entire profile for each asset.
 
 For a latency gate, use a quiet release builder with temporary files on the
 filesystem being measured:

@@ -1124,7 +1124,9 @@ pub(super) mod tests {
                 ])
             }
         }
-        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(Snapshot(0x201));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(Snapshot(0x201));
         let (location, keys) = core.profile_location_keys("one").unwrap();
         let options = core.write_options("one", "pin-fixture").unwrap();
         let reader = core.profile_reader("one").unwrap();
@@ -1152,8 +1154,9 @@ pub(super) mod tests {
             .unwrap()
         };
         for pinned in [true, false] {
-            Arc::get_mut(&mut core).unwrap().upstream =
-                Arc::new(Snapshot(if pinned { 0x201 } else { 0xa01 }));
+            Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+                .unwrap()
+                .upstream = Arc::new(Snapshot(if pinned { 0x201 } else { 0xa01 }));
             let action = GroupMutation::Pin {
                 thread_id: "peer".into(),
                 pinned,
@@ -1191,7 +1194,9 @@ pub(super) mod tests {
                 )
                 .is_err());
         }
-        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(Snapshot(0x201));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(Snapshot(0x201));
         let action = GroupMutation::Pin {
             thread_id: "peer".into(),
             pinned: true,
@@ -1261,7 +1266,9 @@ pub(super) mod tests {
                 ])
             }
         }
-        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(ContactSnapshot(baseline as u64));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(ContactSnapshot(baseline as u64));
         for muted in [true, false] {
             let key = if muted {
                 "direct-mute"
