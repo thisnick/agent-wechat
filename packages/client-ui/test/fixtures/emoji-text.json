@@ -32,5 +32,9 @@
   ["<https://example.test/[Smile]>[Smile]", "<https://example.test/[Smile]>🙂"],
   ["[<script>alert(1)</script>] [微笑]", "[<script>alert(1)</script>] 🙂"],
   ["-)-) :) /missing", "-)-) :) /missing"],
-  ["[流泪][Sob] [大哭][Cry]", "😢😢 😭😭"]
+  ["[流泪][Sob] [大哭][Cry]", "😢😢 😭😭"],
+  [
+    "HTTPS://example.test/[Smile] WWW.example.test/[微笑] [Smile]",
+    "HTTPS://example.test/[Smile] WWW.example.test/[微笑] 🙂"
+  ]
 ]

@@ -6,7 +6,7 @@ const escaped = Object.keys(aliases)
   .sort((a, b) => b.length - a.length)
   .map((alias) => alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 const tokens = new RegExp(
-  `(?:https?:\\/\\/|www\\.)[^\\s<>]+|${escaped.join("|")}`,
+  `(?:[hH][tT][tT][pP][sS]?:\\/\\/|[wW][wW][wW]\\.)[^\\s<>]+|${escaped.join("|")}`,
   "g",
 );
 const catalog: Readonly<Record<string, string>> = aliases;

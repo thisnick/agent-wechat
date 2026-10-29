@@ -28,10 +28,11 @@ pub fn emoji_text(text: &str) -> String {
     let mut remaining = text;
     while !remaining.is_empty() {
         // Keep URL spellings intact, including bracketed path/query values.
-        if ["https://", "http://", "www."]
-            .iter()
-            .any(|prefix| remaining.starts_with(prefix))
-        {
+        if ["https://", "http://", "www."].iter().any(|prefix| {
+            remaining
+                .get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        }) {
             let end = remaining
                 .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '\u{feff}'))
                 .unwrap_or(remaining.len());
