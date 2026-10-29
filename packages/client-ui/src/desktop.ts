@@ -2,6 +2,7 @@ import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { connect, type Connection } from "./connection.ts";
 import type { NativeStatus } from "@agent-wechat/shared";
+import { desktopMultipart } from "./desktop-multipart.ts";
 export const desktop = isTauri();
 export type DesktopSession = { id: string; endpoint: string; local: boolean; status?: NativeStatus };
 export type DesktopSettings = {
@@ -50,6 +51,12 @@ export function desktopNotifications(connection: Connection, open: () => void): 
 export const desktopInvoke = invoke;
 export function desktopFetch(session: DesktopSession): typeof fetch {
   return async (input, init) => {
+    const multipart = init?.body instanceof FormData ? desktopMultipart(init.body) : undefined;
+    if (multipart) {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.set("Content-Type", multipart.contentType);
+      init = { ...init, headers, body: null };
+    }
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (url.origin !== new URL(session.endpoint).origin)
@@ -92,10 +99,10 @@ export function desktopFetch(session: DesktopSession): typeof fetch {
     request.signal.addEventListener("abort", abort, { once: true });
     try {
       request.signal.throwIfAborted();
-      const body = request.body !== null;
+      const body = !!multipart || request.body !== null;
       if (body) {
         await invoke("http_body_begin", { id });
-        const reader = request.body!.getReader();
+        const reader = (multipart ? multipart.body.stream() : request.body!).getReader();
         try {
           for (;;) {
             request.signal.throwIfAborted();

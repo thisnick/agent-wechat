@@ -4,3 +4,5 @@
 ---
 
 Detect image, MP4 video and file attachments automatically. Paste or drop files into either message editor, preview them before sending, and preserve text drafts when cancelling or changing conversations.
+
+Keep desktop file uploads working on WebKit versions that cannot stream FormData directly.

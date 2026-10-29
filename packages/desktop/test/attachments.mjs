@@ -71,18 +71,14 @@ export async function attachmentsAcceptance({
     await script(`return ${modal}.querySelectorAll('select').length`),
     0
   );
-  assert.equal(
-    await script(`return Boolean(${modal}.querySelector('img[src^="blob:"]'))`),
-    true
+  await until(
+    `return Boolean(${modal}?.querySelector('img[src^="blob:"]'))`,
+    Boolean
   );
   assert.equal(uploadedFiles.length, 0, "reviewing is entirely local");
   await capture?.("attachment-review");
   await cancel();
-  assert.equal(
-    await script(`return document.activeElement===${inline}`),
-    true,
-    "cancel restores editor focus"
-  );
+  await until(`return document.activeElement===${inline}`, Boolean);
   assert.equal(await script(`return ${inline}.textContent`), draft);
 
   await event("dragenter", inline);
@@ -113,7 +109,8 @@ export async function attachmentsAcceptance({
     await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(
     uploadedFiles.map((file) => file.name),
-    ["photo.PNG", "movie.MP4", "notes.pdf"]
+    ["photo.PNG", "movie.MP4", "notes.pdf"],
+    await script("return document.querySelector('main')?.innerText")
   );
   assert.deepEqual(
     sentMedia.map((item) => item.kind),
@@ -132,7 +129,7 @@ export async function attachmentsAcceptance({
   assert.equal(await event("paste", plain, ["plain-editor.jpg"]), true);
   await review();
   await cancel();
-  assert.equal(await script(`return document.activeElement===${plain}`), true);
+  await until(`return document.activeElement===${plain}`, Boolean);
   assert.equal(sentMedia.length, 3);
   // Ordinary text is still handled by the inline editor, with its mention rules.
   await click(
