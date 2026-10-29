@@ -6,6 +6,9 @@ resolver = "2"
 version = "1.3.0-beta.0"
 edition = "2021"
 license = "MIT"
+rust-version = "1.93.1"
+repository = "https://github.com/thisnick/agent-wechat"
+homepage = "https://thisnick.github.io/agent-wechat/reference/rust-libraries/"
 publish = false
 
 [workspace.dependencies]

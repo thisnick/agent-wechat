@@ -61,6 +61,9 @@ jobs:
               - '.github/workflows/native-*.yml'
               - '.github/workflows/desktop.yml'
             release:
+              - 'scripts/native-crates*'
+              - 'scripts/native-sync-version.mjs'
+              - '.github/workflows/rust-crates.yml'
               - '.node-version'
               - '.github/workflows/release.yml'
               - '.github/workflows/native-release.yml'
@@ -113,6 +116,7 @@ jobs:
           node --test scripts/native-release-policy.test.mjs
           node --test scripts/native-release-orchestration.test.mjs
           node --test scripts/native-release-trigger.test.mjs
+          node --test scripts/native-crates.test.mjs
           node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
           node scripts/verify-ci-publisher.mjs
 

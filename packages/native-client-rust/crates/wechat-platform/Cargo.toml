@@ -3,7 +3,15 @@ name = "wechat-platform"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = ["crates-io"]
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Platform support for the agent-wechat protocol and profile libraries"
+keywords = ["wechat", "protocol", "profile"]
+categories = ["network-programming"]
+include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
 
 [dependencies]
 libc.workspace = true

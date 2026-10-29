@@ -406,9 +406,9 @@ mod codec_tests {
 
     #[test]
     fn additional_image_formats_use_shared_bounded_inspection() {
-        let webp = include_bytes!("../../wechat-media/tests/fixtures/two-frame.webp");
+        let webp = include_bytes!("../tests/fixtures/two-frame.webp");
         assert_eq!(validate_image(webp).unwrap(), ("image/webp".into(), 12, 8));
-        let wxgf = include_bytes!("../../wechat-media/tests/fixtures/static.wxgf");
+        let wxgf = include_bytes!("../tests/fixtures/static.wxgf");
         if std::process::Command::new("ffmpeg")
             .arg("-version")
             .stdout(std::process::Stdio::null())

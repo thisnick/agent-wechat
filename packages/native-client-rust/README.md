@@ -248,4 +248,10 @@ Use `tokens create NAME --accounts ACCOUNT --scopes read` to issue a restricted 
 
 The supported existing-profile workflow has explicit compatibility limits. It is not ready to replace arbitrary production official profiles. No deployment, release publication or production profile handoff is part of the validation performed here.
 
-The workspace crates have `publish = false`. They are reusable within the workspace or through pinned git/path dependencies; this release does not publish crates.io packages. The executable distribution is GitHub release assets, the npm launcher and the native container. A separately versioned public crate API can be designed later without blocking binary delivery.
+`wechat-protocol` and `wechat-profile` are the public library entry points.
+Their supporting `wechat-media` and `wechat-platform` crates are also configured
+for crates.io publication. All four use the native release version; the other
+workspace crates remain unpublished. Registry publication starts with the next
+release containing this change. Tagged Git/path dependencies remain usable.
+See the [Rust libraries reference](https://thisnick.github.io/agent-wechat/reference/rust-libraries/)
+for installation, examples and compatibility, and `RELEASING.md` for publication.

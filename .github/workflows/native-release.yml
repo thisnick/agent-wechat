@@ -197,3 +197,14 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
       confirm_publish: true
+
+  crates:
+    needs: [plan, image]
+    if: needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/rust-crates.yml
+    with:
+      version: ${{ needs.plan.outputs.version }}
+    secrets: inherit

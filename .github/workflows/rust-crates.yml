@@ -1,0 +1,104 @@
+name: Rust library packages
+
+on:
+  pull_request:
+    paths:
+      - 'packages/native-client-rust/**'
+      - 'packages/cli/package.json'
+      - 'packages/openclaw-extension/package.json'
+      - '.changeset/**'
+      - 'rust-toolchain.toml'
+      - 'scripts/native-crates*'
+      - 'scripts/native-sync-version.mjs'
+      - '.github/workflows/rust-crates.yml'
+      - '.github/workflows/native-release.yml'
+  workflow_call:
+    inputs:
+      version:
+        description: Exact version from the native release plan
+        required: true
+        type: string
+    secrets:
+      CRATES_IO_BOOTSTRAP_TOKEN:
+        description: One-time first-publication token; remove after configuring trusted publishing
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          key: rust-library-packages
+      - name: Check publication boundaries and package recovery
+        run: node --test scripts/native-crates.test.mjs
+      - name: Build all four distributable source packages
+        run: node scripts/native-crates.mjs package
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+      - name: Build public examples from the libraries
+        run: |
+          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile
+          cargo test --doc --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rust-library-packages
+          path: packages/native-client-rust/target/package/*.crate
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: package
+    environment: native-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          key: rust-library-packages
+      - uses: actions/download-artifact@v8
+        with:
+          name: rust-library-packages
+          path: ${{ runner.temp }}/rust-library-packages
+      - name: Verify exact release source and existing registry state
+        id: plan
+        run: node scripts/native-crates.mjs plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          CRATE_ARCHIVE_DIR: ${{ runner.temp }}/rust-library-packages
+          CRATES_IO_BOOTSTRAP_AVAILABLE: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN != '' }}
+      - name: Authenticate with crates.io trusted publishing
+        if: steps.plan.outputs.pending == 'true' && steps.plan.outputs.bootstrap == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish and verify native libraries
+        run: node scripts/native-crates.mjs publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          CRATE_ARCHIVE_DIR: ${{ runner.temp }}/rust-library-packages
+          CARGO_REGISTRY_TOKEN: ${{ steps.plan.outputs.bootstrap == 'true' && secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.auth.outputs.token }}

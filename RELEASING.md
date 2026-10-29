@@ -3,11 +3,13 @@
 > **Package renamed (2026-08-31):** the OpenClaw extension moved from `@agent-wechat/wechat` to `@agent-wechat/agent-wechat` so the unscoped package basename matches the plugin id `agent-wechat` (OpenClaw validates plugin ids against the npm basename and hard-fails updates on mismatch; the official catalog also reserves the `wechat` id). The first version (0.11.15) was published manually with a one-off granular token — OIDC trusted publishing only covers packages that already exist — and the token was revoked afterward. The trusted publisher for the new package is configured at https://www.npmjs.com/package/@agent-wechat/agent-wechat/access (GitHub Actions: thisnick/agent-wechat, workflow release.yml), so CI publishes via OIDC as before. Once rollout is done, deprecate the old `@agent-wechat/wechat`: `npm deprecate @agent-wechat/wechat "Renamed to @agent-wechat/agent-wechat (plugin id agent-wechat); openclaw >=2026.8 reserves the wechat id for the official Tencent plugin."`
 
 
-The native/npm release process publishes three artifacts:
+The native/npm release process publishes these artifacts:
 
 1. npm CLI package: `@agent-wechat/cli`
 2. npm OpenClaw extension: `@agent-wechat/agent-wechat`
 3. Native executables and a checksum manifest on the matching GitHub release
+4. Rust libraries on crates.io: `wechat-protocol`, `wechat-profile` and their
+   required `wechat-media` and `wechat-platform` dependencies
 
 ## Prepare A Release
 
@@ -47,11 +49,76 @@ pnpm changeset
    them into the versioned multi-architecture tag. Stable versions also update
    `latest`. npm waits until image manifest publication succeeds.
 
-7. Successful completion automatically retries the original Release push run for
+7. The same native release run packages and publishes the four Rust libraries,
+   after the runtime image succeeds and the `native-release` environment permits
+   publication. Each crate uses the native version and exact release source.
+   Cargo publishes dependencies before their consumers. The other workspace
+   crates and desktop package keep `publish = false`.
+
+8. Successful completion automatically retries the original Release push run for
    the same source commit. That run verifies the native assets, embeds their
    manifest in the CLI package, and publishes both npm packages with provenance.
    Prereleases use their Changesets channel (such as `beta`); stable releases use
    `latest`.
+
+## Rust library release contract
+
+`wechat-protocol` and `wechat-profile` implement verified WeChat protocol and
+official-profile behavior. Preserve that boundary: daemon scheduling,
+authorization policy, event delivery, sidecar coordination and OpenClaw features
+belong in the higher layers. Do not add alternative settled storage, retention
+or feature semantics to these libraries merely because the daemon needs them.
+Use the repository's protocol-evidence and official-state rules when behavior
+changes; incomplete analysis is not a reason to invent replacement behavior.
+
+For each release affecting the public libraries:
+
+- Review public functions, types, fields, error variants, feature flags and
+  documented behavior for compatibility. Preserve existing callers when it makes
+  sense; explain intentional breaks in the changeset and use a compatible release
+  version. Beta APIs may change, but changes still need release notes.
+- Review dependencies as part of the public interface. Prefer dependencies that
+  fit the library's job, avoid leaking daemon internals through public types,
+  and assess new native build/runtime requirements and licenses. Do not upgrade
+  unrelated dependencies just to cut a release.
+- Keep the four public crates' versions and internal dependency requirements
+  synchronized through `pnpm version-packages`. A public library may not depend
+  on an unpublished workspace crate. Required support crates remain published
+  even when users normally depend only on protocol/profile.
+- Run the pinned formatter, warning-denying Clippy, relevant library tests and
+  public examples. `node scripts/native-crates.mjs package` builds the actual
+  four source archives, including their packaged native sources and licenses;
+  a workspace build alone is insufficient. Keep the reference page and crate
+  documentation aligned with the shipped API and supported profile layouts.
+
+### One-time crates.io setup
+
+The names must be owned by this project's maintainer. crates.io currently
+requires an API token for a crate's first publication. Before the first release,
+create a short-lived token with only the permissions required to publish these
+four crates and store it as `CRATES_IO_BOOTSTRAP_TOKEN` in GitHub's protected
+`native-release` environment. Never commit or print it. The workflow uses this
+token only while at least one of the four crate names has not been created.
+
+After the first publication, configure each crate's Settings → Trusted
+Publishing with repository owner `thisnick`, repository `agent-wechat`, workflow
+filename `native-release.yml`, and environment `native-release`. The caller
+workflow supplies the OIDC identity even though its job uses `rust-crates.yml`.
+Then revoke the bootstrap token and remove the environment secret. Later
+releases use the official Rust trusted-publishing action and its temporary token.
+
+PRs build packages without credentials or registry writes. Publication requires
+the exact native release tag, clean source checkout, matching channel and the
+protected environment. Do not manually publish an old binary version from newer
+source. The first crate version is the next release containing this change.
+
+For a failed or uncertain upload, inspect crates.io before retrying the failed
+native release job at the same commit. The job verifies existing versions against
+the exact validated archive checksums and Git source, then publishes only missing
+versions. A different existing source/checksum, registry outage or yanked version
+stops recovery. Never overwrite, delete or bump another version to hide a partial
+publication. The npm completion handoff waits for the native run, including this
+crate job, to succeed.
 
 ## Switch to a prerelease channel
 

@@ -57,6 +57,8 @@ registering saved media still uses the writer.
 
 The Rust crates in [`packages/native-client-rust`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust) follow the same split: `wechat-protocol`, `wechat-profile`, `wechat-store`, `wechat-core`, `wechat-api` and the `wx` binary.
 
+For direct library use, see [Rust libraries](/reference/rust-libraries/).
+
 <Aside title="Good to know">
 - **One daemon can host several accounts**, each with its own worker, login and event log.
 - **Unknown data is kept, not guessed at.** If WeChat sends something the daemon doesn't understand, it's stored and not written to the profile, so nothing is lost or corrupted.

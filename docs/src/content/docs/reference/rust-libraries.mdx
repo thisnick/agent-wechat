@@ -1,0 +1,94 @@
+---
+title: Rust libraries
+description: Use the native WeChat protocol and official-profile libraries from Rust.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Use `wechat-protocol` to implement a native WeChat client, or `wechat-profile`
+to read a supported official Linux profile. Neither needs the daemon or an
+official WeChat executable. Applications using an existing daemon can call the
+[HTTP API](/use/api/) instead.
+
+| Crate | Purpose |
+| --- | --- |
+| `wechat-protocol` | Blocking transport, authentication, sync and message codecs |
+| `wechat-profile` | Profile keys, snapshots, history, contacts and checked writers |
+| `wechat-media` | Shared image inspection and decoding |
+| `wechat-platform` | Shared private files, temporary directories and OS support |
+
+The libraries implement supported WeChat behavior. Daemon jobs, token policies,
+event delivery and OpenClaw behavior stay in separate, unpublished crates.
+
+## Add dependencies
+
+1. Choose a published version from [wechat-protocol](https://crates.io/crates/wechat-protocol)
+   or [wechat-profile](https://crates.io/crates/wechat-profile). Crate publication
+   starts with the next release containing this feature; the existing binary
+   release does not imply that its crates are available.
+
+2. Replace `VERSION` with that version, including any beta suffix:
+
+   ```bash
+   cargo add wechat-protocol@=VERSION wechat-profile@=VERSION
+   ```
+
+   Cargo adds the two dependencies and resolves their supporting crates. All
+   four follow the native release version. Select beta versions explicitly.
+
+3. Until the first registry publication, use the existing source release:
+
+   ```toml
+   [dependencies]
+   wechat-protocol = { git = "https://github.com/thisnick/agent-wechat", tag = "v1.3.0-beta.0" }
+   wechat-profile = { git = "https://github.com/thisnick/agent-wechat", tag = "v1.3.0-beta.0" }
+   ```
+
+Building needs Rust 1.93.1+, a C compiler, Make and Perl for the bundled native
+dependencies. Some image decoding paths also need FFmpeg at runtime.
+
+## Read a stopped profile
+
+The caller must stop the profile's writer or provide a consistent copy before
+setting `stopped_or_consistent_snapshot`. This flag records that assertion; it
+does not stop another process.
+
+```rust
+use wechat_profile::{KeyFile, ListQuery, ProfileLocation, ProfileReader, ReadOptions};
+
+fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
+    let location = ProfileLocation::new(profile)?;
+    let keys = KeyFile::load(keys_path)?;
+    let reader = ProfileReader::open(location, keys, ReadOptions {
+        stopped_or_consistent_snapshot: true,
+        ..Default::default()
+    })?;
+    println!("{} contacts", reader.contacts(&ListQuery::default())?.items.len());
+    Ok(())
+}
+```
+
+Supply your own protected keys file. The library does not discover passwords
+or obtain keys from another process. Profile writers require exclusive
+ownership and a supported schema.
+
+## Use the protocol library
+
+`NativeClient` owns native transport and authentication. Its network methods
+block, so async applications must call them on a blocking worker. The library
+does not supply the daemon's send queue, idempotency records or recovery policy;
+an embedding application owns those responsibilities.
+
+API details are available through `cargo doc --open` and, after publication,
+[protocol API docs](https://docs.rs/wechat-protocol) and
+[profile API docs](https://docs.rs/wechat-profile).
+The source tree also has compiled
+[protocol](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/crates/wechat-protocol/examples/protobuf.rs)
+and [profile](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/crates/wechat-profile/examples/contacts.rs)
+examples.
+
+<Aside title="Good to know">
+Beta Rust APIs may change between releases; pin a version and read its changes.
+Support for the Linux profile format does not establish compatibility with
+official Windows or macOS profiles. Treat keys and profile contents as private.
+</Aside>
