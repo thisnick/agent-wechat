@@ -53,6 +53,24 @@ pnpm changeset
    Prereleases use their Changesets channel (such as `beta`); stable releases use
    `latest`.
 
+## Switch to a prerelease channel
+
+The prerelease channel is `beta`. From stable mode, run:
+
+```bash
+pnpm changeset pre enter beta
+```
+
+Changesets reports `Entered pre mode with tag beta` and creates
+`.changeset/pre.json`. Merge that file before merging the Version Packages PR.
+The release action updates that PR with versions such as `1.3.0-beta.0` and
+synchronizes the CLI, Rust and desktop versions. Entering prerelease mode alone
+does not change package versions or publish anything.
+
+Review the regenerated Version Packages PR before merging it. Beta releases use
+npm's `beta` tag, a versioned runtime image tag and a GitHub prerelease. They do
+not move the stable npm or runtime image `latest` tags.
+
 ## Switch to a stable release
 
 Run `pnpm changeset pre exit` and merge the generated `.changeset/pre.json`
