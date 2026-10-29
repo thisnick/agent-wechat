@@ -18,6 +18,7 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    container: rust:1.93.1-bookworm
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
@@ -28,6 +29,10 @@ jobs:
         working-directory: packages/native-client-rust
     steps:
       - uses: actions/checkout@v7
+      - name: Install diagnostic test tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends python3 ripgrep
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -41,7 +46,7 @@ jobs:
       - run: cargo test --locked -p wechat-platform -p wechat-store -p wechat-profile
       - name: Exercise timing output with synthetic stores
         run: |
-          AGENT_WECHAT_TRACE_TIMINGS=1 cargo test --locked -p wechat-store readers_retain_their_boundary_without_blocking_writes -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-timing-smoke.log"
+          AGENT_WECHAT_TRACE_TIMINGS=1 cargo test --locked -p wechat-platform -p wechat-store -p wechat-profile readers_retain_their_boundary_without_blocking_writes -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-timing-smoke.log"
           rg -q 'wx_timing .*operation=store.admission.validate' "$RUNNER_TEMP/native-timing-smoke.log"
       - run: cargo build --release --locked -p wx-native
       - name: Exercise the built CLI and HTTP daemon with synthetic files
