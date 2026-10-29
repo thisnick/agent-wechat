@@ -79,12 +79,20 @@ async function attach() {
   assert.equal(status.version.nativeLogin, false);
   return status;
 }
-async function runCli(args) {
-  const { stdout } = await execute(cliBinary, ["--json", "--config", join(temporary, "client", "client.toml"), ...args], {
-    timeout: 10000,
-    env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("AGENT_WECHAT_"))),
-  });
-  return JSON.parse(stdout);
+async function runCli(args, allowNeedsReview = false) {
+  try {
+    const { stdout } = await execute(cliBinary, ["--json", "--config", join(temporary, "client", "client.toml"), ...args], {
+      timeout: 10000,
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("AGENT_WECHAT_"))),
+    });
+    return JSON.parse(stdout);
+  } catch (error) {
+    if (!allowNeedsReview || error.code !== 8) throw error;
+    const result = JSON.parse(error.stdout);
+    assert.equal(result.state, "needs_review");
+    assert.equal(result.errorCode, "submission_outcome_unknown");
+    return result;
+  }
 }
 async function cli(...args) {
   return runCli(["--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile, "--account", "personal", ...args]);
@@ -231,9 +239,9 @@ async function quoteMentionJourney() {
   const source = await settle(await a.sendText(account, room, "Original synthetic quote target", "quote-mentions-source"));
   const original = await a.message(account, source.localMessageId);
   const quote = { messageId: original.id, serverId: original.serverId };
-  const cliSend = (text, key, mentions, reference = quote, threadId = room) => runCli(["--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile, "--account", account,
+  const cliSend = (text, key, mentions, reference = quote, threadId = room, allowNeedsReview = false) => runCli(["--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile, "--account", account,
     "messages", "send", threadId, "--text", text, "--quote-message-id", reference.messageId, "--quote-server-id", reference.serverId,
-    ...(mentions ? mentions.all ? ["--mention-all"] : mentions.userIds.flatMap(id => ["--mention", id]) : []), "--idempotency-key", key, "--detach"]);
+    ...(mentions ? mentions.all ? ["--mention-all"] : mentions.userIds.flatMap(id => ["--mention", id]) : []), "--idempotency-key", key, "--detach"], allowNeedsReview);
   const accepted = [];
   for (const [index, path, text, mentions] of [
     [0, "sdk", "SDK quoted members", { userIds: ["sim_mei", "sim_daniel"] }],
@@ -285,10 +293,10 @@ async function quoteMentionJourney() {
   for (const path of ["sdk", "cli"]) {
     const text = `Lost acknowledgment for ${path} quoted mentions`, key = `quote-mentions-lost-${path}`, mentions = { userIds: ["sim_mei"] };
     await control({ op: "send_fault", account, fault: "lost_acknowledgment" });
-    const intent = await settle(path === "sdk" ? await a.sendText(account, room, text, key, { quote, mentions }) : await cliSend(text, key, mentions), "needs_review");
+    const intent = await settle(path === "sdk" ? await a.sendText(account, room, text, key, { quote, mentions }) : await cliSend(text, key, mentions, quote, room, true), "needs_review");
     assert.equal((await b.sendByKey(account, key)).id, intent.id);
     assert.equal((await b.sendText(account, room, text, key, { quote, mentions })).id, intent.id);
-    if (path === "cli") assert.equal((await cliSend(text, key, mentions)).id, intent.id);
+    if (path === "cli") assert.equal((await cliSend(text, key, mentions, quote, room, true)).id, intent.id);
     uncertain.push({ key, id: intent.id });
   }
   // The remote accepted each logical send exactly once, including lost ACKs.
