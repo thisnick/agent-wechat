@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.3.1
+
+### Patch Changes
+
+- [#343](https://github.com/thisnick/agent-wechat/pull/343) [`139e9e8`](https://github.com/thisnick/agent-wechat/commit/139e9e85a9180fac8e40a4f139bafacbbd3cd396) Thanks [@thisnick](https://github.com/thisnick)! - Recognize MOV, 3GP, 3G2 and MJ2 attachments as videos and prepare them as MP4 playback, including older QuickTime movies without an `ftyp` header. Add an Original video choice in the desktop and web attachment review to include the unchanged source alongside playback. Use the verified container type for original-video download extensions and show a fallback when the browser cannot preview a selected video.
+
+- [#345](https://github.com/thisnick/agent-wechat/pull/345) [`956459a`](https://github.com/thisnick/agent-wechat/commit/956459a75980a6099b1472bdceb1cdd72a4c1f47) Thanks [@thisnick](https://github.com/thisnick)! - Allow group mentions in quoted text replies, retaining the original mention names and quote reference across recovery. Add quotes for ordinary/shared stickers, music/video cards, shared contacts, static locations and forwarded-message summaries while keeping unsupported or recalled targets blocked.
+
 ## 1.3.1-beta.0
 
 ### Patch Changes

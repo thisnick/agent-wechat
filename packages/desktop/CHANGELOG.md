@@ -1,5 +1,20 @@
 # @agent-wechat/desktop
 
+## 1.3.1
+
+### Patch Changes
+
+- [#345](https://github.com/thisnick/agent-wechat/pull/345) [`956459a`](https://github.com/thisnick/agent-wechat/commit/956459a75980a6099b1472bdceb1cdd72a4c1f47) Thanks [@thisnick](https://github.com/thisnick)! - Allow group mentions in quoted text replies, retaining the original mention names and quote reference across recovery. Add quotes for ordinary/shared stickers, music/video cards, shared contacts, static locations and forwarded-message summaries while keeping unsupported or recalled targets blocked.
+
+- [#348](https://github.com/thisnick/agent-wechat/pull/348) [`0a20c2b`](https://github.com/thisnick/agent-wechat/commit/0a20c2b6b15e5e73cc1cbe4e08752970ef6ce472) Thanks [@thisnick](https://github.com/thisnick)! - Keep following new messages after scrolling downward at the end of a conversation. Load older history automatically when scrolling upward near the beginning, preserving the reading position and a manual retry button.
+
+- [#349](https://github.com/thisnick/agent-wechat/pull/349) [`5ab40ed`](https://github.com/thisnick/agent-wechat/commit/5ab40ede5f43427ad25e9f157747f573c79ffe9e) Thanks [@thisnick](https://github.com/thisnick)! - Stage attached, pasted and dropped files in the message composer with previews and remove controls. The composer's Send action queues text and each selected file as separate messages, retaining each chat's unsent attachments until sent or removed.
+
+  Use the hub's per-type source limits for larger attachments and display local validation errors accurately. Upload browser File/Blob sources without first copying the whole file into memory. Show optional keyboard and original media quality guidance on demand.
+
+- Updated dependencies [[`139e9e8`](https://github.com/thisnick/agent-wechat/commit/139e9e85a9180fac8e40a4f139bafacbbd3cd396), [`956459a`](https://github.com/thisnick/agent-wechat/commit/956459a75980a6099b1472bdceb1cdd72a4c1f47), [`0a20c2b`](https://github.com/thisnick/agent-wechat/commit/0a20c2b6b15e5e73cc1cbe4e08752970ef6ce472), [`5ab40ed`](https://github.com/thisnick/agent-wechat/commit/5ab40ede5f43427ad25e9f157747f573c79ffe9e)]:
+  - @agent-wechat/client-ui@0.3.3
+
 ## 1.3.1-beta.0
 
 ### Patch Changes
