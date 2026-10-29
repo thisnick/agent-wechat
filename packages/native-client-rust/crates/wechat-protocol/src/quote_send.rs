@@ -42,7 +42,7 @@ impl QuoteReference {
     pub fn validate(&self) -> Result<()> {
         let server_id = self.server_id.parse::<u64>();
         ensure!(
-            matches!(self.message_type, 1 | 3 | 34 | 43 | 47 | 49)
+            matches!(self.message_type, 1 | 3 | 34 | 42 | 43 | 47 | 48 | 49)
                 && server_id.is_ok_and(|value| value > 0 && value.to_string() == self.server_id)
                 && self.created_at > 0
                 && self.created_at <= i32::MAX as u32
@@ -130,16 +130,31 @@ pub fn quote_send_request(
     created_at: u32,
     content: &str,
 ) -> Result<Vec<u8>> {
+    quote_send_request_with_source(state, destination, client_id, created_at, content, None)
+}
+
+/// Outgoing source belongs to this reply; embedded reference source stays in XML.
+pub fn quote_send_request_with_source(
+    state: &AccountState,
+    destination: &str,
+    client_id: &str,
+    created_at: u32,
+    content: &str,
+    source: Option<&str>,
+) -> Result<Vec<u8>> {
     ensure!(
         identity(&state.own_username, false)
             && identity(destination, false)
             && valid_text(client_id, 1024, false)
             && !client_id.chars().any(char::is_control)
             && created_at > 0
-            && valid_text(content, MAX_QUOTE_XML_BYTES, false),
+            && valid_text(content, MAX_QUOTE_XML_BYTES, false)
+            && source.is_none_or(|value| {
+                destination.ends_with("@chatroom") && valid_text(value, 64 * 1024, false)
+            }),
         "invalid_quote_request"
     );
-    let app = p::message(&[
+    let mut fields = vec![
         p::bytes(1, state.own_username.as_bytes()),
         p::bytes(2, &[]),
         p::uint(3, 0),
@@ -149,10 +164,12 @@ pub fn quote_send_request(
         p::uint(7, u64::from(created_at)),
         p::bytes(8, client_id.as_bytes()),
         p::int32(10, 1),
-        p::bytes(13, &[]),
-        p::bytes(14, &[]),
-        p::bytes(15, &[]),
-    ])?;
+    ];
+    if let Some(source) = source {
+        fields.push(p::bytes(12, source.as_bytes()));
+    }
+    fields.extend([p::bytes(13, &[]), p::bytes(14, &[]), p::bytes(15, &[])]);
+    let app = p::message(&fields)?;
     p::message(&[
         p::bytes(1, &base_request(&state.device, state.uin, 0)?),
         p::bytes(2, &app),
@@ -248,13 +265,65 @@ mod tests {
     }
 
     #[test]
+    fn outgoing_mentions_use_app_source_independently_of_embedded_reference_source() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/synthetic-quoted-mentions-wire.json"
+        ))
+        .unwrap();
+        let mut selected = reference();
+        selected.msg_source =
+            Some("<msgsource><atuserlist>old_member</atuserlist></msgsource>".into());
+        let xml = quote_xml("synthetic-user", "@Current\u{2005}Reply", &selected).unwrap();
+        assert_eq!(xml, fixture["xml"]);
+        let source = "<msgsource><atuserlist>current_member</atuserlist><alnode><fr>1</fr></alnode></msgsource>";
+        let request = quote_send_request_with_source(
+            &state(),
+            "example@chatroom",
+            "quote-client",
+            1234567,
+            &xml,
+            Some(source),
+        )
+        .unwrap();
+        assert_eq!(source, fixture["outgoingSource"]);
+        assert_eq!(hex::encode(&request), fixture["requestHex"]);
+        let outer = p::decode(&request).unwrap();
+        assert_eq!(
+            outer.iter().map(|field| field.number).collect::<Vec<_>>(),
+            [1, 2, 5, 9, 10, 11]
+        );
+        let app = p::decode(p::data(&outer, 2).unwrap()).unwrap();
+        assert_eq!(p::scalar(&app, 5).unwrap(), 57);
+        assert_eq!(p::data(&app, 12).unwrap(), source.as_bytes());
+        let body = std::str::from_utf8(p::data(&app, 6).unwrap()).unwrap();
+        assert!(body.contains("old_member"));
+        assert!(!body.contains("current_member"));
+        assert!(body.contains("<title>@Current\u{2005}Reply</title>"));
+        for invalid in ["", "bad\0source"] {
+            assert!(quote_send_request_with_source(
+                &state(),
+                "example@chatroom",
+                "client",
+                1,
+                &xml,
+                Some(invalid)
+            )
+            .is_err());
+        }
+        assert!(
+            quote_send_request_with_source(&state(), "peer", "client", 1, &xml, Some(source))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn reference_validation_rejects_lossy_or_unsupported_values() {
         for id in ["0", "01", "+1", "18446744073709551616", "1\n"] {
             let mut selected = reference();
             selected.server_id = id.into();
             assert!(selected.validate().is_err(), "{id:?}");
         }
-        for kind in [0, -1, 2, 42, 57, 10002] {
+        for kind in [0, -1, 2, 57, 10002] {
             let mut selected = reference();
             selected.message_type = kind;
             assert!(selected.validate().is_err());

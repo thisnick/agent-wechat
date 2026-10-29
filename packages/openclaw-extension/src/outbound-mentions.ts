@@ -24,7 +24,7 @@ export function validateWeChatMentionSend(mentions: WeChatTextMentions | undefin
   parseWeChatTextMentions(mentions);
   if (!input.to.endsWith("@chatroom")) throw Error("WeChat mentions require a group conversation");
   if (typeof input.text !== "string" || !input.text.trim()) throw Error("WeChat mentions require a text message");
-  if (input.mediaUrl || input.mediaUrls?.length || input.audioAsVoice || input.forceDocument || input.videoQuality != null || input.replyToId != null) {
-    throw Error("WeChat mentions support group text only; do not combine with attachments, voice, document, video quality or quoted replies");
+  if (input.mediaUrl || input.mediaUrls?.length || input.audioAsVoice || input.forceDocument || input.videoQuality != null) {
+    throw Error("WeChat mentions support group text only; do not combine with attachments, voice, document or video quality");
   }
 }

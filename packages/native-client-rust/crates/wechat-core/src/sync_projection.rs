@@ -2512,11 +2512,39 @@ impl Core {
         server_message_id: &str,
         receipt: &str,
     ) -> Result<wechat_profile::SourceMessageId> {
+        self.project_accepted_media_source(
+            account,
+            destination,
+            message_type,
+            content,
+            summary,
+            created_at,
+            server_message_id,
+            receipt,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn project_accepted_media_source(
+        &self,
+        account: &str,
+        destination: &str,
+        message_type: u32,
+        content: &str,
+        summary: &str,
+        created_at: u64,
+        server_message_id: &str,
+        receipt: &str,
+        outgoing_source: Option<&str>,
+    ) -> Result<wechat_profile::SourceMessageId> {
         identity(destination)?;
         if ![3, 34, 43, 49].contains(&message_type)
             || content.is_empty()
             || content.len() > 4 * 1024 * 1024
             || summary.len() > 65536
+            || outgoing_source
+                .is_some_and(|s| message_type != 49 || s.len() > 64 * 1024 || s.contains('\0'))
         {
             bail!("invalid_accepted_media")
         }
@@ -2557,7 +2585,11 @@ impl Core {
                 .is_none()
                 && (existing.local_type != local_type.to_string()
                     || existing.sender.as_deref() != Some(&state.own_username)
-                    || existing.content.text.as_deref() != Some(content))
+                    || existing.content.text.as_deref() != Some(content)
+                    || outgoing_source.is_some_and(|source| {
+                        crate::mentions(existing.source.text.as_deref(), Some(&state.own_username))
+                            != crate::mentions(Some(source), Some(&state.own_username))
+                    }))
             {
                 bail!("accepted_media_identity_conflict")
             }
@@ -2587,7 +2619,9 @@ impl Core {
             ] {
                 fields.insert(k.into(), SqlValue::Integer(n.to_string()));
             }
-            let local_source = b"<msgsource><alnode><fr>1</fr></alnode></msgsource>";
+            let local_source = outgoing_source
+                .unwrap_or("<msgsource><alnode><fr>1</fr></alnode></msgsource>")
+                .as_bytes();
             fields.insert(
                 "message_content".into(),
                 wechat_profile::compressed_profile_field(content.as_bytes())?,

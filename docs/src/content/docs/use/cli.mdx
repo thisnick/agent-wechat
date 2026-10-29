@@ -43,7 +43,7 @@ wx messages send CHAT_ID --share https://example.com/post --title "Worth a read"
 ```
 
 Sends wait up to 30 seconds for WeChat to accept them. Use `--detach` to return right away.
-Use `--mention MEMBER_ID` or `--mention-all` with ordinary group text to
+Use `--mention MEMBER_ID` or `--mention-all` with group text or quoted replies to
 [mention group members](/use/groups/#mention-group-members).
 For larger files, use `--wait 3600` to allow an hour. See [attachment limits and progress](/use/media/).
 
@@ -59,13 +59,18 @@ For larger files, use `--wait 3600` to allow an hour. See [attachment limits and
 
    A queued reply includes `id`, `"state":"queued"` and `receiptPath`. Check `wx messages sends get SEND_ID`.
 
+For a group reply, add `--mention MEMBER_ID` or `--mention-all` to the same command.
+
 Requires `read` and `send`, and an original saved in the same chat. See the [API and SDK example](/use/api/#send).
 
 | Original | Can be quoted |
 | --- | --- |
-| Text, image, voice, video, shared link or file | Supported saved forms |
+| Text, image, voice, video or file | Supported saved forms |
+| Sticker, shared sticker, shared text, music/video/link/Channels card or plain announcement | Supported saved forms |
+| Shared contact or static location | Validated saved forms |
 | Existing quoted reply | Its own comment is quoted |
-| Sticker, forwarded history, system or unknown message | Rejected |
+| Forwarded history | Its summary is quoted; nested messages are omitted |
+| System/control, upload notice, specialized or unknown card | Rejected |
 
 ## Download media
 
@@ -105,7 +110,7 @@ wx config server use box
 - **A lost response doesn't mean a lost send.** Before sending, `wx` saves a receipt with an idempotency key. If the network drops, check with `wx messages sends lookup --idempotency-key KEY` instead of sending again. See [Sends and recovery](/how-it-works/sends/).
 - **Voice** is encoded by `wx` itself. A note can be up to 60 seconds; longer audio is split into equal notes. **Video** must be MP4. Both need FFmpeg on the daemon host.
 - **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the 512 MiB file limit, video, image and voice limits and current validation status. Stickers can't be sent.
-- **Quoted replies are experimental.** Server acceptance and phone rendering remain unverified. Missing, recalled or mismatched sources are rejected. Only text replies accept quotes: non-whitespace text up to 16 KiB and escaped messages up to 256 KiB. Quoting media doesn't ensure it can be downloaded.
+- **Quoted replies are experimental.** Server acceptance and phone rendering remain unverified. Missing, recalled or mismatched sources are rejected; source content must fit 128 KiB. Only text replies accept quotes: non-whitespace text up to 16 KiB, including resolved mention names, and escaped messages up to 256 KiB. Quoting media doesn't ensure it can be downloaded.
 - **Pinning a folded group unfolds it.** Built-in chats are unsupported. Folded-group behavior has offline coverage; phone checks covered an ordinary direct chat and an unfolded group.
 - **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
 </Aside>

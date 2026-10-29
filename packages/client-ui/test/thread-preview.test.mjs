@@ -56,6 +56,20 @@ test("missing history and missing member names have honest fallbacks", () => {
   );
 });
 
+test("reply and thread excerpts for stickers and location pins never expose transport XML", () => {
+  const raw = "<msg>transport metadata</msg>";
+  for (const message of [{ type: 47 }, { type: 49, appMessageType: 8 }])
+    assert.equal(messageSummary({ ...message, body: raw }, "Peer").text, "Sticker");
+  for (const [location, expected] of [[{ name: "Park", address: "Main Street" }, "Park"],
+    [{ name: null, address: "Main Street" }, "Main Street"], [{ name: null, address: null }, "Location"]]) {
+    assert.equal(messageSummary({ type: 48, body: raw, location }, "Peer").text, expected);
+  }
+  assert.equal(messageSummary({ type: 48, body: raw }, "Peer").text, "Location");
+  assert.equal(messageSummary({ type: 42, body: raw }, "Peer").text, "Shared contact");
+  assert.equal(messageSummary({ type: 49, appMessageType: 19, body: null }, "Peer").text, "Forwarded messages");
+  assert.equal(messageSummary({ type: 49, appMessageType: 19, body: "[Forwarded messages]\nShared summary" }, "Peer").text, "[Forwarded messages] Shared summary");
+});
+
 test("system-notice previews keep supplied wording without a transport-peer author", () => {
   const message = { id: "system", type: 10000, senderId: "peer", direction: "incoming", body: "Location sharing has ended." };
   const lastMessage = messageSummary(message, "Peer name");

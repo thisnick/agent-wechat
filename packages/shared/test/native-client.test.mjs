@@ -142,7 +142,7 @@ test('quoted text preserves exact source IDs and rejects invalid references befo
   assert.equal(requests[0].url,'http://127.0.0.1:6174/v1/accounts/a/sends');
   assert.equal(requests[0].init.headers.get('Idempotency-Key'),'quote-key');
   assert.deepEqual(JSON.parse(requests[0].init.body),{kind:'text',threadId:'room@chatroom',text:'Reply',quote});
-  for(const invalid of [null,[],{}, {messageId:'',serverId:'42'}, {messageId:'source',serverId:9007199254740992},
+  for(const invalid of [null,[], {messageId:'',serverId:'42'}, {messageId:'source',serverId:9007199254740992},
     ...['0','01','-1','1.0','18446744073709551616'].map(serverId=>({messageId:'source',serverId})),
     {...quote,content:'caller-selected source'}, {...quote,threadId:'another-chat'}]) {
     assert.throws(()=>client.sendText('a','room@chatroom','Reply','quote-key',invalid),/quote message identity/);
@@ -164,12 +164,34 @@ test('text mention options preserve member IDs and reject ambiguous requests bef
     assert.throws(()=>client.sendText('a','room@chatroom','Hello','key',{mentions}),/Invalid text mentions/);
   }
   assert.throws(()=>client.sendText('a','peer','Hello','key',{mentions:{userIds:['a']}}),/Invalid text mentions/);
-  assert.throws(()=>client.sendText('a','room@chatroom','Hello','key',{mentions:{all:true},quote:{messageId:'m',serverId:'1'}}),/Invalid text mentions/);
   assert.equal(requests.length,2);
   let attempts=0;
   const lost=new NativeWeChatClient({...options,fetch:async()=>{attempts++;throw Error('lost response');}});
   await assert.rejects(lost.sendText('a','room@chatroom','Hello','key',{mentions:{userIds:['a']}}),/lost response/);
   assert.equal(attempts,1);
+});
+
+test('combined text options preserve quote and mention identities with independent validation', async () => {
+  const requests=[];
+  const client=new NativeWeChatClient({...options,fetch:async(_url,init)=>{requests.push(init);return Response.json({id:'combined-send',state:'queued'});}});
+  const quote={messageId:'source',serverId:'18446744073709551615'};
+  const text='Hi @Jin\u2005!';
+  for (const mentions of [{userIds:['member_a']},{all:true},{userIds:['member_a'],positions:[{start:3,end:8,index:0}]}]) {
+    await client.sendText('a','room@chatroom',text,'combined-key',{quote,mentions});
+    assert.deepEqual(JSON.parse(requests.at(-1).body),{kind:'text',threadId:'room@chatroom',text,quote,mentions});
+    assert.equal(requests.at(-1).headers.get('Idempotency-Key'),'combined-key');
+  }
+  await client.sendText('a','peer','Reply','quote-options-key',{quote});
+  assert.deepEqual(JSON.parse(requests.at(-1).body),{kind:'text',threadId:'peer',text:'Reply',quote});
+  for (const invalid of [{quote:null},{quote:{...quote,serverId:'0'}},{quote:{...quote,content:'forged'}}])
+    assert.throws(()=>client.sendText('a','room@chatroom',text,'key',{...invalid,mentions:{all:true}}),/quote message identity/);
+  for (const mentions of [null,{all:true,userIds:['a']},{userIds:['member_a'],positions:[{start:3,end:7,index:0}]}])
+    assert.throws(()=>client.sendText('a','room@chatroom',text,'key',{quote,mentions}),/Invalid text mentions/);
+  assert.throws(()=>client.sendText('a','peer',text,'key',{quote,mentions:{all:true}}),/Invalid text mentions/);
+  assert.throws(()=>client.sendText('a','room@chatroom',text,'key',{quote,mentions:{all:true},extra:true}),/Invalid text send options/);
+  await client.sendText('a','peer','Plain','empty-options-key',{});
+  assert.deepEqual(JSON.parse(requests.at(-1).body),{threadId:'peer',text:'Plain'});
+  assert.equal(requests.length,5);
 });
 
 test('inline mentions retain UTF-16 positions and reject malformed spans before transport', async () => {

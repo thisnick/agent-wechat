@@ -1117,15 +1117,30 @@ test("quoted sends retain exact references and their preview across an uncertain
   assert.equal(await hub.send("A reply", target), true);
   const pending = hub.snapshot().sends[0];
   assert.deepEqual(calls[0].slice(0, 3), ["a", "peer", "A reply"]);
-  assert.deepEqual(calls[0][4], {
+  assert.deepEqual(calls[0][4], { quote: {
     messageId: target.id,
     serverId: target.serverId,
-  });
-  assert.deepEqual(pending.quote, calls[0][4]);
+  } });
+  assert.deepEqual(pending.quote, calls[0][4].quote);
   assert.equal(pending.quotePreview.text, "target");
   await hub.checkSend(pending.key);
   assert.equal(calls.length, 1);
   assert.deepEqual(hub.snapshot().sends[0].quote, pending.quote);
+});
+
+test("forwarded pending reply previews exclude nested messages from the source body", async (t) => {
+  const target = { ...message("forwarded"), serverId: "99", type: 49, appMessageType: 19,
+    body: "[Chat History] Summary\nAlice: Nested private text" };
+  const hub = session(t, {
+    capabilities: async () => ({ quotedTextSend: true }),
+    messages: async () => page([target]),
+    sendText: async () => { throw new Error("lost response"); },
+  });
+  await hub.activate("a");
+  await eventually(() => hub.snapshot().capabilities.quotedTextSend === true);
+  assert.equal(await hub.send("Reply about this summary", target), true);
+  assert.equal(hub.snapshot().sends[0].quotePreview.text, "[Chat History] Summary");
+  assert.equal(hub.snapshot().messages[0].body, target.body, "the source remains unchanged for its ordinary renderer");
 });
 
 test("quoted send rejects foreign, recalled and changed targets instead of silently sending ordinary text", async (t) => {
@@ -1174,14 +1189,18 @@ test("definitive quote admission errors preserve the draft without an uncertain 
   assert.match(hub.snapshot().error, /no longer available to quote/);
 });
 
-test("inline mention receipts persist before submission and recover with the original key and identities", async (t) => {
+test("quoted inline mention receipts persist before submission and recover with the original key and identities", async (t) => {
   const saved = new Map(), posts = [], lookups = [];
   const text = "Hi @Jin\u2005!", tokens = [{ userId: "wxid_jin", label: "Jin", start: 3, end: 8 }];
+  const target = { ...message("target", "a", "room@chatroom"), serverId: "99" };
+  const quote = { messageId: target.id, serverId: target.serverId };
   const mentions = { userIds: ["wxid_jin"], positions: [{ start: 3, end: 8, index: 0 }] };
   const storage = { read: account => structuredClone(saved.get(account) ?? []), write: (account, sends) => saved.set(account, structuredClone(sends)) };
   const api = client({
-    capabilities: async () => ({ inlineTextMentions: true }),
+    capabilities: async () => ({ inlineTextMentions: true, quotedTextSend: true }),
+    messages: async () => page([target]),
     sendText: async (...args) => {
+      assert.deepEqual(saved.get("a")[0].quote, quote, "save the quote identity before POST");
       assert.deepEqual(saved.get("a")[0].mentions, mentions, "save the identity and key before POST");
       posts.push(args); throw new Error("lost response");
     },
@@ -1190,20 +1209,21 @@ test("inline mention receipts persist before submission and recover with the ori
   const first = new HubSession(api, storage); t.after(() => first.close());
   await first.activate("a"); await first.select("room@chatroom");
   await eventually(() => first.snapshot().capabilities.inlineTextMentions === true);
-  assert.equal(await first.send(text, undefined, tokens), true);
+  assert.equal(await first.send(text, target, tokens), true);
   const pending = first.snapshot().sends[0];
   assert.deepEqual(posts[0].slice(0, 3), ["a", "room@chatroom", text]);
-  assert.deepEqual(posts[0][4], { mentions });
+  assert.deepEqual(posts[0][4], { quote, mentions });
   first.close();
   const reopened = new HubSession(api, storage); t.after(() => reopened.close());
   await reopened.activate("a");
   await eventually(() => reopened.snapshot().sends[0]?.intent?.state === "needs_review");
+  assert.deepEqual(reopened.snapshot().sends[0].quote, quote);
   assert.deepEqual(reopened.snapshot().sends[0].mentions, mentions);
   assert.deepEqual(lookups, [["a", pending.key]]);
   assert.equal(posts.length, 1, "uncertainty never sends with another key");
 });
 
-test("mentions reject unsupported hubs, direct chats, quotes and changed text before sending", async (t) => {
+test("mentions reject unsupported hubs, direct chats and changed text before sending", async (t) => {
   let posts = 0, capability = false;
   const hub = session(t, { capabilities: async () => ({ inlineTextMentions: capability, quotedTextSend: true }), sendText: async () => { posts++; return receipt(); } });
   const text = "@Jin\u2005", tokens = [{ userId: "jin", label: "Jin", start: 0, end: 5 }];
@@ -1212,7 +1232,6 @@ test("mentions reject unsupported hubs, direct chats, quotes and changed text be
   capability = true; await hub.activate("b"); await hub.activate("a");
   await eventually(() => hub.snapshot().capabilities.inlineTextMentions === true);
   assert.equal(await hub.send("changed", undefined, tokens), false);
-  assert.equal(await hub.send(text, message("target", "a", "room@chatroom"), tokens), false);
   await hub.select("peer");
   assert.equal(await hub.send(text, undefined, tokens), false);
   assert.equal(posts, 0);

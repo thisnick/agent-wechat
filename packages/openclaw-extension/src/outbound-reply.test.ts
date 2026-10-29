@@ -103,4 +103,12 @@ test("real SDK submits quote identities and refuses unsafe targets without a pla
   assert.equal((await sendReply()).messageId, "msg_reply");
   assert.equal(submissions.length, 4); assert.equal(recoveries, 1);
   assert.ok(submissions.every(item => item.body.quote.messageId === original.id && item.key === "retained-reply-key"));
+  for (const mentions of [{ userIds: ["wxid_member"] }, { all: true }]) {
+    const delivered = await sendWeChatMedia(cfg, "g@chatroom", "Agreed", undefined, false, "retained-reply-key", { replyToId: original.id, mentions });
+    assert.equal(delivered.messageId, "msg_reply");
+    assert.deepEqual(submissions.at(-1), { key: "retained-reply-key", body: {
+      kind: "text", threadId: "g@chatroom", text: "Agreed", quote: { messageId: original.id, serverId: original.serverId }, mentions,
+    } });
+  }
+  assert.equal(recoveries, 3, "combined sends recover the same key after a lost POST response");
 });

@@ -80,17 +80,20 @@ await assert.rejects(runMessageAction({ cfg, action: 'send', forceCoreDelivery: 
   mediaAccess: { localRoots: [join(root, 'workspace')] } }), /cannot also request/);
 assert.equal(calls.length, before); assert.equal(networkCalls, 0);
 const mentionChecks = [];
-for (const [name, forceCoreDelivery, requireQueuePersistence, mentions] of [
+for (const [name, forceCoreDelivery, requireQueuePersistence, mentions, replyTo] of [
   ['prepared-members', false, false, { userIds: ['wxid_a', 'wxid_b'] }],
   ['prepared-all', false, false, { all: true }],
   ['forced-core-members', true, false, { userIds: ['wxid_a'] }],
   ['queued-members', true, true, { userIds: ['wxid_b'] }],
   ['queued-all', true, true, { all: true }],
+  ['prepared-quoted-members', false, false, { userIds: ['wxid_a'] }, 'msg_source'],
+  ['forced-core-quoted-all', true, false, { all: true }, 'msg_source'],
+  ['queued-quoted-members', true, true, { userIds: ['wxid_b'] }, 'msg_source'],
 ]) {
   const before = calls.length, beforePreparation = preparations;
-  await runMessageAction({ cfg, action: 'send', params: { channel: 'agent-wechat', to: 'g@chatroom', message: 'please check', channelData: { 'agent-wechat': { mentions } } },
+  await runMessageAction({ cfg, action: 'send', params: { channel: 'agent-wechat', to: 'g@chatroom', message: 'please check', ...(replyTo && { replyTo }), channelData: { 'agent-wechat': { mentions } } },
     forceCoreDelivery, requireQueuePersistence, agentId: 'main', senderIsOwner: true });
-  assert.equal(calls.length, before + 1); assert.deepEqual(calls.at(-1), { mentions, forceDocument: false });
+  assert.equal(calls.length, before + 1); assert.deepEqual(calls.at(-1), { mentions, forceDocument: false, ...(replyTo && { replyToId: replyTo }) });
   assert.equal(handoffs.at(-1).to, 'g@chatroom'); assert.equal(handoffs.at(-1).text, 'please check');
   if (requireQueuePersistence) assert.match(handoffs.at(-1).key, /^[a-f0-9]{64}$/);
   assert.equal(preparations - beforePreparation, forceCoreDelivery ? 0 : 1);
@@ -103,7 +106,6 @@ for (const [params, expected] of [
   [{ mentions: { userIds: ['A Name'] } }, /Invalid WeChat mentions/],
   [{ mentions: { all: true }, media: fixture }, /group text only/],
   [{ mentions: { all: true }, audioAsVoice: true }, /group text only/],
-  [{ mentions: { all: true }, replyTo: 'quoted-message' }, /group text only/],
 ]) {
   const { mentions, ...extra } = params, before = calls.length;
   for (const forceCoreDelivery of [false, true]) {

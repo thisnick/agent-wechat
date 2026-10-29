@@ -1255,7 +1255,22 @@ impl Core {
         text: &str,
         quote: crate::QuoteSendReference,
     ) -> Result<SendIntent> {
+        self.send_quoted_text_with_mentions(account, key, destination, text, quote, None)
+            .await
+    }
+    pub async fn send_quoted_text_with_mentions(
+        self: &Arc<Self>,
+        account: &str,
+        key: &str,
+        destination: &str,
+        text: &str,
+        quote: crate::QuoteSendReference,
+        mentions: Option<crate::TextMentions>,
+    ) -> Result<SendIntent> {
         quote.validate()?;
+        if let Some(mentions) = &mentions {
+            mentions.validate()?;
+        }
         self.queue_message_send(
             account,
             key,
@@ -1263,6 +1278,7 @@ impl Core {
             text,
             SendOptions {
                 quote: Some(quote),
+                mentions,
                 ..Default::default()
             },
         )
@@ -1327,6 +1343,19 @@ impl Core {
         }
         let client_id =
             wechat_protocol::wire::client_message_id(format!("{account}:{key}").as_bytes()).max(1);
+        let resolved_mentions = mentions
+            .as_ref()
+            .map(|request| {
+                self.resolve_mentions(
+                    account,
+                    destination,
+                    text,
+                    request.clone(),
+                    &state.own_username,
+                )
+            })
+            .transpose()?;
+        let rendered_text = resolved_mentions.as_ref().map_or(text, |m| m.text.as_str());
         let payload = SendPayload {
             thread_id: destination.into(),
             text: text.into(),
@@ -1335,29 +1364,25 @@ impl Core {
             share,
             quote: quote
                 .as_ref()
-                .map(|q| self.resolve_quote(account, destination, text, q, &state.own_username))
-                .transpose()?,
-            mentions: mentions
-                .as_ref()
-                .map(|request| {
-                    self.resolve_mentions(
-                        account,
-                        destination,
-                        text,
-                        request.clone(),
-                        &state.own_username,
-                    )
+                .map(|q| {
+                    self.resolve_quote(account, destination, rendered_text, q, &state.own_username)
                 })
                 .transpose()?,
+            mentions: resolved_mentions,
         };
         let hash = format!(
             "{:x}",
             Sha256::digest(match &payload.share {
                 Some(share) => serde_json::to_vec(share)?,
                 None => match &quote {
-                    Some(reference) => serde_json::to_vec(
-                        &json!({"threadId":destination,"text":text,"quote":reference})
-                    )?,
+                    Some(reference) => {
+                        let mut input =
+                            json!({"threadId":destination,"text":text,"quote":reference});
+                        if let Some(mentions) = &mentions {
+                            input["mentions"] = serde_json::to_value(mentions)?;
+                        }
+                        serde_json::to_vec(&input)?
+                    }
                     None => match &mentions {
                         Some(request) => serde_json::to_vec(
                             &json!({"threadId":destination,"text":text,"mentions":request})
@@ -1426,15 +1451,22 @@ impl Core {
             let payload: SendPayload = serde_json::from_slice(&plain)?;
             let mut state = core.account_state(&account)?;
             let native = &core.upstream;
-            if payload.mentions.as_ref().is_some_and(|m| m.request.all) {
-                if let Err(error) =
-                    core.require_mention_all(&account, &payload.thread_id, &state.own_username)
-                {
-                    // Role changes can arrive while a send is queued. Recheck
-                    // before claiming/submitting; never retry an accepted send.
+            if let Some(mentions) = &payload.mentions {
+                if let Err(error) = core.validate_mention_recipients(
+                    &account,
+                    &payload.thread_id,
+                    &mentions.request,
+                    &state.own_username,
+                ) {
+                    // Membership and roles may change while queued. Check them
+                    // without replacing the frozen visible names or source.
                     let code = match error.to_string().as_str() {
                         "mention_all_forbidden" => "mention_all_forbidden",
-                        _ => "mention_all_permission_unavailable",
+                        "mention_all_permission_unavailable" => {
+                            "mention_all_permission_unavailable"
+                        }
+                        "mention_member_unavailable" => "mention_member_unavailable",
+                        _ => "mention_group_membership_unavailable",
                     };
                     if core.store.claim_send(&account, &id)? {
                         core.store
@@ -1473,6 +1505,7 @@ impl Core {
                         &payload.client_id.to_string(),
                         payload.created_at,
                         &quote.xml,
+                        payload.mentions.as_ref().map(|m| m.source.as_str()),
                     )
                     .map(|result| SendReceipt {
                         accepted: result.status
@@ -1579,15 +1612,19 @@ impl Core {
             serde_json::from_slice(&self.vault.open_record(account, "send-payload", &sealed)?)?;
         let receipt = format!("send-projection:{id}");
         let source = if let Some(quote) = &payload.quote {
-            self.project_accepted_media(
+            self.project_accepted_media_source(
                 account,
                 &payload.thread_id,
                 49,
                 &format!("<msg>{}</msg>", quote.xml),
-                &payload.text,
+                payload
+                    .mentions
+                    .as_ref()
+                    .map_or(payload.text.as_str(), |m| m.text.as_str()),
                 u64::from(payload.created_at),
                 server,
                 &receipt,
+                payload.mentions.as_ref().map(|m| m.source.as_str()),
             )?
         } else if let Some(share) = &payload.share {
             let state = self.account_state(account)?;
@@ -2970,7 +3007,182 @@ mod tests {
         assert_eq!(core.store.send("one", &owner.id).unwrap().state, "accepted");
     }
     #[tokio::test]
-    async fn mentioned_text_freezes_names_replays_and_projects_official_source() {
+    async fn queued_mentions_keep_frozen_wire_material_when_current_names_exceed_text_limits() {
+        use wechat_profile::{ContactProjection, GroupProjection, RawFields, SqlValue};
+        type Captured = Arc<Mutex<Vec<(String, String)>>>;
+        struct Capture(Captured);
+        impl crate::upstream::Upstream for Capture {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn send_text_with_source(
+                &self,
+                _: &mut AccountState,
+                _: &str,
+                text: &str,
+                _: u32,
+                _: u32,
+                source: &str,
+            ) -> Result<wechat_protocol::wire::TextSendResult> {
+                self.0.lock().unwrap().push((text.into(), source.into()));
+                Ok(wechat_protocol::wire::TextSendResult {
+                    accepted: true,
+                    outer_code: 0,
+                    item_code: Some(0),
+                    server_message_id: Some("9001".into()),
+                    returned_destination_matches: true,
+                    returned_client_id_matches: true,
+                })
+            }
+            fn send_quote(
+                &self,
+                _: &mut AccountState,
+                _: &str,
+                _: &str,
+                _: u32,
+                xml: &str,
+                source: Option<&str>,
+            ) -> Result<wechat_protocol::media_send::MediaSendResult> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((xml.into(), source.unwrap().into()));
+                Ok(wechat_protocol::media_send::MediaSendResult {
+                    status: wechat_protocol::media_send::SendStatus::ServerAccepted,
+                    service_code: 0,
+                    server_message_id: Some("9002".into()),
+                    client_id_matches: Some(true),
+                })
+            }
+        }
+        let (_temp, mut core) = super::groups::tests::fixture();
+        let captured: Captured = Arc::new(Mutex::new(vec![]));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(Capture(captured.clone()));
+        super::groups::tests::make_group(&core);
+        core.stopping.store(true, Ordering::SeqCst);
+        core.store
+            .put_runtime("one", "desired", b"connected")
+            .unwrap();
+        core.store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        let options = core.write_options("one", "frozen-name-fixture").unwrap();
+        wechat_profile::apply_group_patch(
+            &location,
+            &keys,
+            &GroupProjection {
+                username: "synthetic@chatroom".into(),
+                fields: RawFields::new(),
+                detail_fields: None,
+                members: vec!["synthetic_self".into(), "peer".into()],
+                complete_roster: false,
+            },
+            &options,
+        )
+        .unwrap();
+        let rename = |name: &str| {
+            wechat_profile::apply_contact_patch(
+                &location,
+                &keys,
+                &ContactProjection {
+                    username: "peer".into(),
+                    fields: RawFields::from([("nick_name".into(), SqlValue::Text(name.into()))]),
+                },
+                &options,
+            )
+            .unwrap()
+        };
+        rename("A");
+        let mentions = crate::TextMentions {
+            user_ids: vec!["peer".into()],
+            all: false,
+            positions: vec![],
+        };
+        let long_text = "x".repeat(65_531);
+        let text_send = core
+            .send_mentioned_text(
+                "one",
+                "frozen-long-text",
+                "synthetic@chatroom",
+                &long_text,
+                mentions.clone(),
+            )
+            .await
+            .unwrap();
+        let original = core
+            .project_accepted_text(
+                "one",
+                "synthetic@chatroom",
+                "Original",
+                42,
+                "8999",
+                "frozen-quote-source",
+            )
+            .unwrap();
+        let quote_send = core
+            .send_quoted_text_with_mentions(
+                "one",
+                "frozen-quote",
+                "synthetic@chatroom",
+                "Reply",
+                crate::QuoteSendReference {
+                    message_id: crate::message_id(&original).unwrap(),
+                    server_id: "8999".into(),
+                },
+                Some(mentions.clone()),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        rename(&"Long shared name".repeat(40));
+        assert!(core
+            .resolve_mentions(
+                "one",
+                "synthetic@chatroom",
+                &long_text,
+                mentions.clone(),
+                "synthetic_self"
+            )
+            .is_err());
+        core.stopping.store(false, Ordering::SeqCst);
+        core.perform_send("one", &text_send.id).await.unwrap();
+        core.perform_send("one", &quote_send.id).await.unwrap();
+        assert_eq!(
+            core.store.send("one", &text_send.id).unwrap().state,
+            "accepted"
+        );
+        assert_eq!(
+            core.store.send("one", &quote_send.id).unwrap().state,
+            "accepted"
+        );
+        let sent = captured.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        let text = &sent
+            .iter()
+            .find(|(text, _)| !text.starts_with("<appmsg "))
+            .unwrap()
+            .0;
+        let quote = &sent
+            .iter()
+            .find(|(text, _)| text.starts_with("<appmsg "))
+            .unwrap()
+            .0;
+        assert_eq!(text.len(), 65_536);
+        assert!(text == &format!("@A\u{2005}{long_text}"));
+        assert!(quote.contains("<title>@A\u{2005}Reply</title>"));
+        assert!(sent
+            .iter()
+            .all(|(_, source)| source.contains("<atuserlist>peer</atuserlist>")));
+        assert!(sent
+            .iter()
+            .all(|(text, source)| !text.contains("Long shared name")
+                && !source.contains("Long shared name")));
+    }
+    #[tokio::test]
+    async fn mentioned_text_and_quotes_freeze_names_replay_and_project_official_source() {
         use wechat_profile::{ContactProjection, GroupProjection, RawFields, SqlValue};
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
@@ -3224,6 +3436,195 @@ mod tests {
                 .filter(|e| e.kind == "message.committed")
                 .count(),
             1
+        );
+
+        let old_source = "<msgsource><atuserlist>old_member</atuserlist></msgsource>";
+        let original = core
+            .project_accepted_text_source(
+                "one",
+                "room@chatroom",
+                ("Old reference", old_source),
+                44,
+                "780",
+                "combined-original",
+            )
+            .unwrap();
+        let target = crate::QuoteSendReference {
+            message_id: crate::message_id(&original).unwrap(),
+            server_id: "780".into(),
+        };
+        let mentions = crate::TextMentions {
+            user_ids: vec!["member_a".into()],
+            all: false,
+            positions: vec![],
+        };
+        let combined = core
+            .send_quoted_text_with_mentions(
+                "one",
+                "combined-key",
+                "room@chatroom",
+                "Quoted hello",
+                target.clone(),
+                Some(mentions.clone()),
+            )
+            .await
+            .unwrap();
+        let sealed = store.send_payload("one", &combined.id).unwrap();
+        let payload: SendPayload = serde_json::from_slice(
+            &core
+                .vault
+                .open_record("one", "send-payload", &sealed)
+                .unwrap(),
+        )
+        .unwrap();
+        let resolved = payload.mentions.as_ref().unwrap();
+        assert_eq!(resolved.text, "@Changed name\u{2005}Quoted hello");
+        let xml = &payload.quote.as_ref().unwrap().xml;
+        assert!(xml.contains("<title>@Changed name\u{2005}Quoted hello</title>"));
+        assert!(xml.contains("old_member"));
+        assert!(!xml.contains("member_a"));
+        assert!(resolved.source.contains("member_a") && !resolved.source.contains("old_member"));
+        wechat_profile::apply_contact_patch(
+            &location,
+            &keys,
+            &contact("Newer shared name"),
+            &options,
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&core) > 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(core);
+        let restarted = Core::new(store.clone(), None).unwrap();
+        restarted.configure_profile_format_key(&[9; 16]).unwrap();
+        restarted.stopping.store(true, Ordering::SeqCst);
+        assert_eq!(
+            restarted
+                .send_quoted_text_with_mentions(
+                    "one",
+                    "combined-key",
+                    "room@chatroom",
+                    "Quoted hello",
+                    target.clone(),
+                    Some(mentions.clone())
+                )
+                .await
+                .unwrap()
+                .id,
+            combined.id
+        );
+        assert_eq!(store.send_payload("one", &combined.id).unwrap(), sealed);
+        assert!(restarted
+            .send_quoted_text(
+                "one",
+                "combined-key",
+                "room@chatroom",
+                "Quoted hello",
+                target.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(restarted
+            .send_mentioned_text(
+                "one",
+                "combined-key",
+                "room@chatroom",
+                "Quoted hello",
+                mentions.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
+        assert!(store.claim_send("one", &combined.id).unwrap());
+        store
+            .update_send("one", &combined.id, "accepted", Some("781"), None)
+            .unwrap();
+        restarted.project_message_send("one", &combined.id).unwrap();
+        restarted.project_message_send("one", &combined.id).unwrap();
+        let row = restarted
+            .profile_reader("one")
+            .unwrap()
+            .messages_by_server_id("room@chatroom", "781", Some("synthetic_self"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.message_type, 49);
+        assert_eq!(row.source.text.as_deref(), Some(resolved.source.as_str()));
+        let normalized = restarted
+            .message("one", &crate::message_id(&row.id).unwrap())
+            .unwrap();
+        assert_eq!(normalized["body"], resolved.text);
+        assert_eq!(normalized["quote"]["serverId"], "780");
+        assert_eq!(
+            normalized["mentions"]["userIds"],
+            serde_json::json!(["member_a"])
+        );
+        // Replays above need no current authentication. A new admission below
+        // requires this restarted owner to have accepted synthetic credentials.
+        restarted
+            .install_login_state("one", &accepted, None)
+            .unwrap();
+        store
+            .mark_validated_if_active("one", &restarted.ownership_generation)
+            .unwrap();
+        let queued = restarted
+            .send_quoted_text_with_mentions(
+                "one",
+                "combined-roster-change",
+                "room@chatroom",
+                "Roster changed",
+                target.clone(),
+                Some(mentions.clone()),
+            )
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        wechat_profile::apply_native_roster_patch(
+            &location,
+            &keys,
+            &wechat_profile::NativeRosterPatch {
+                username: "room@chatroom".into(),
+                members: vec![wechat_profile::NativeMemberPatch {
+                    username: "synthetic_self".into(),
+                    display: None,
+                    flags: None,
+                    opaque: None,
+                }],
+                complete_roster: true,
+                administrator_ids: None,
+            },
+            &options,
+        )
+        .unwrap();
+        restarted.stopping.store(false, Ordering::SeqCst);
+        restarted.perform_send("one", &queued.id).await.unwrap();
+        restarted.stopping.store(true, Ordering::SeqCst);
+        assert_eq!(
+            store.send("one", &queued.id).unwrap().error_code.as_deref(),
+            Some("mention_member_unavailable")
+        );
+        restarted.logout_local("one").unwrap();
+        assert_eq!(
+            restarted
+                .send_quoted_text_with_mentions(
+                    "one",
+                    "combined-key",
+                    "room@chatroom",
+                    "Quoted hello",
+                    target,
+                    Some(mentions)
+                )
+                .await
+                .unwrap()
+                .id,
+            combined.id
         );
     }
     #[tokio::test]

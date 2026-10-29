@@ -61,7 +61,8 @@ export async function submitNativeText(client: NativeWeChatClient, accountId: st
     return { ...intent, accountId, destination: threadId } as NativeSendIntent;
   };
   let intent: NativeSendIntent;
-  try { intent = inspect(await client.sendText(accountId, threadId, text, key, options.quote ?? (mentions ? { mentions } : undefined))); }
+  try { intent = inspect(await client.sendText(accountId, threadId, text, key,
+    options.quote || mentions ? { ...(options.quote && { quote: options.quote }), ...(mentions && { mentions }) } : undefined)); }
   catch (error) {
     if (error instanceof NativeTextSendInspectionError || error instanceof NativeApiError && error.status < 500 && error.code !== "timeout") throw error;
     // The POST may have reached the daemon. Recover only by the original key;

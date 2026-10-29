@@ -11,14 +11,17 @@ const message = {
   body: "Hello",
 };
 test("reply eligibility matches native supported types and preserves full unsigned identities", () => {
-  for (const type of [1, 3, 34, 43])
+  for (const type of [1, 3, 34, 43, 47])
     assert.equal(canReply({ ...message, type }), true);
-  for (const appMessageType of [1, 5, 6, 57, 87])
+  for (const appMessageType of [1, 3, 4, 5, 6, 8, 19, 57, 87])
     assert.equal(canReply({ ...message, type: 49, appMessageType }), true);
   for (const change of [
-    { type: 47 },
+    { type: 48 },
+    { type: 42, body: null },
+    { type: 42, body: " " },
     { type: 10000 },
-    { type: 49, appMessageType: 19 },
+    { type: 49, appMessageType: 19, body: null },
+    { type: 49, appMessageType: 19, body: " " },
     { recall: {} },
     { senderId: null },
     { direction: null },
@@ -29,6 +32,8 @@ test("reply eligibility matches native supported types and preserves full unsign
   ])
     assert.equal(canReply({ ...message, ...change }), false);
   assert.equal(canReply({ ...message, direction: "outgoing" }), true);
+  assert.equal(canReply({ ...message, type: 48, location: { latitude: 1, longitude: 2, name: "Park" } }), true);
+  assert.equal(canReply({ ...message, type: 42, body: "[Shared contact]\nMei" }), true);
   assert.equal(
     canReply({
       ...message,

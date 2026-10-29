@@ -116,7 +116,7 @@ Send to `POST /v1/accounts/ACCOUNT_ID/sends` with `Idempotency-Key`:
 
 Use either `userIds` or `all: true`. Check the send receipt with `GET /sends/SEND_ID`.
 
-`GET /groups/GROUP_ID` includes `ownerId`, `administratorIds` (excluding the owner unless listed by WeChat), and `canMentionAll`. A `null` permission means the saved data cannot establish eligibility; refresh the members before retrying. New `all: true` sends return `403 mention_all_forbidden` for ordinary members or `409 mention_all_permission_unavailable` when permission is unknown. A queued send checks permission again before submission. Reusing an existing send key still returns that send.
+`GET /groups/GROUP_ID` includes `ownerId`, `administratorIds` (excluding the owner unless listed by WeChat), and `canMentionAll`. A `null` permission means the saved data cannot establish eligibility; refresh the members before retrying. New `all: true` sends return `403 mention_all_forbidden` for ordinary members or `409 mention_all_permission_unavailable` when permission is unknown. A queued send checks current membership and permission again before submission, while keeping its original names. Reusing an existing send key still returns that send.
 
 ```ts
 await client.sendText(accountId, groupId, "Please check this", "mention-001", {
@@ -156,5 +156,5 @@ Message GET/list responses include:
 - Saved group changes emit `group.updated`; version notifications can trigger roster and announcement reads. Contact sync carries group mute state. Group mute/unmute stream handling has fixtures; standalone phone toggles and automatic delivery of every other-device edit remain unverified.
 - Unknown sync fields stay pending. Unreconstructed local notices, search indexes and settings can leave `profileProjection: "partial"` after supported fields are saved.
 - Notification edits support ordinary direct contacts and groups. Personal group remarks, announcement publication, invitation links, ownership transfer and administrator changes are unsupported. OpenClaw has an owner-only [group information tool](/openclaw/tools/), with no group mutation tools.
-- Mentions support ordinary text in saved groups. Unknown or duplicate IDs, direct chats, quoted replies and media are rejected. Text including names must fit 64 KiB. Keep the original key after a timeout; see [Sends and recovery](/how-it-works/sends/).
+- Mentions support ordinary text in saved groups. Unknown or duplicate IDs, direct chats and media are rejected. Mentions can accompany [quoted text replies](/use/cli/#quoted-replies); the quote comment including names must fit 16 KiB. Other text including names must fit 64 KiB. Keep the original key after a timeout; see [Sends and recovery](/how-it-works/sends/).
 </Aside>

@@ -18,7 +18,7 @@ import type { BrowserCache } from "./browser-cache.ts";
 import { HISTORY_TTL_MS, HistoryCache } from "./history-cache.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
-import { quoteTargetMatches } from "./quote-preview.ts";
+import { quotedText, quoteTargetMatches } from "./quote-preview.ts";
 
 export type Account = {
   id: string;
@@ -112,7 +112,7 @@ export function readableError(error: unknown): string {
           mention_group_membership_unavailable: "Refresh the group’s members before sending mentions.",
           mention_all_forbidden: "You can’t mention everyone in this group.",
           mention_all_permission_unavailable: "Group permissions are unavailable. Refresh the group before mentioning everyone.",
-          quote_mentions_unsupported: "Send mentions separately from quoted replies.",
+          quote_mentions_unsupported: "This hub cannot combine mentions with quoted replies. Update the hub or remove one.",
           quote_target_unavailable:
             "That message is no longer available to quote.",
           quote_target_mismatch: "The quoted message changed. Select it again.",
@@ -1553,8 +1553,8 @@ export class HubSession {
     let mentions: TextMentions | undefined;
     try { mentions = mentionOptions(text, tokens); }
     catch (error) { this.publish({ error: error instanceof Error ? error.message : "Choose the mentioned members again." }); return false; }
-    if (mentions && (replyTo || !threadId.endsWith("@chatroom") || this.value.capabilities.inlineTextMentions !== true)) {
-      this.publish({ error: replyTo ? "Send mentions separately from quoted replies." : "This hub cannot send inline mentions. Remove them or update the hub." });
+    if (mentions && (!threadId.endsWith("@chatroom") || this.value.capabilities.inlineTextMentions !== true)) {
+      this.publish({ error: "This hub cannot send inline mentions. Remove them or update the hub." });
       return false;
     }
     if (mentions?.all && !canMentionAll(this.value.selectedGroup, threadId)) {
@@ -1601,6 +1601,8 @@ export class HubSession {
               )?.displayName ?? target.senderId,
         )
       : undefined;
+    if (quotePreview && target?.type === 49 && target.appMessageType === 19)
+      quotePreview.text = quotedText(target).replace(/\s+/g, " ").slice(0, 240);
     const key = crypto.randomUUID();
     this.publish({
       sends: [
@@ -1616,7 +1618,7 @@ export class HubSession {
         threadId,
         text,
         key,
-        mentions ? { mentions } : quote,
+        quote || mentions ? { ...(quote && { quote }), ...(mentions && { mentions }) } : undefined,
       );
       if (this.current(account, generation)) {
         await this.acceptReceipt(intent, account, generation, key);

@@ -43,10 +43,7 @@ import { HistorySearch } from "./history-search.ts";
 import { MediaCard, PendingAttachments } from "./media.tsx";
 import { AttachmentPicker } from "./attachment-picker.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
-import {
-  messageSummary,
-  orderThreads,
-} from "./thread-preview.ts";
+import { orderThreads } from "./thread-preview.ts";
 import {
   messagePresentation,
   recallText,
@@ -55,6 +52,7 @@ import {
 import { AccountSettings, ProfileDialog } from "./account-settings.tsx";
 import { NewChat } from "./new-chat.tsx";
 import { QuotedReply } from "./quoted-reply.tsx";
+import { quotedText } from "./quote-preview.ts";
 import { PhotoViewer } from "./photo-viewer.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
@@ -840,7 +838,6 @@ function Chats({
   draftsNow.current = drafts;
   const [mentionDrafts, setMentionDrafts] = useState<Record<string, MentionToken[]>>({});
   const [mentionProblems, setMentionProblems] = useState<Record<string, boolean>>({});
-  const [composerNotice, setComposerNotice] = useState("");
   const [mentionOpen, setMentionOpen] = useState(0);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, NativeMessage>>(
     {},
@@ -881,7 +878,6 @@ function Chats({
     draftsNow.current = { ...draftsNow.current, [draftKey]: text };
     setDrafts(values => ({ ...values, [draftKey]: text }));
     setMentionDrafts(values => ({ ...values, [draftKey]: tokens }));
-    setComposerNotice("");
   }
   useEffect(() => {
     if (!state.account || !state.selected) return;
@@ -894,7 +890,6 @@ function Chats({
     }>(account, thread, "drafts");
     let cancelled = false;
     setDraftReady("");
-    setComposerNotice("");
     const validMentions = saved?.mentionTokens === undefined || (typeof saved.text === "string" && validMentionTokens(saved.text, saved.mentionTokens));
     setMentionDrafts(values => ({ ...values, [draftKey]: validMentions ? saved ? saved.mentionTokens ?? [] : values[draftKey] ?? [] : [] }));
     setMentionProblems(values => ({ ...values, [draftKey]: !validMentions }));
@@ -1394,7 +1389,6 @@ function Chats({
                   !canReply(message)
                 )
                   return;
-                if (draftMentions.length) { setComposerNotice("Remove mentions before quoting a message."); return; }
                 pendingQuote.current = undefined;
                 setQuoteRestoring(false);
                 setReplyDrafts((replies) => ({
@@ -1531,7 +1525,7 @@ function Chats({
                       )}
                       {inlineEditor && state.account && state.selected ? <MentionEditor
                         key={draftKey} connection={connection} account={state.account} thread={state.selected} inputRef={mentionInput}
-                        value={draft} tokens={draftMentions} disabled={!active} allowMentions={inlineCapable && active && !reply && !pendingQuote.current}
+                        value={draft} tokens={draftMentions} disabled={!active} allowMentions={inlineCapable && active}
                         canMentionAll={allowAllMention}
                         openRequest={mentionOpen} placeholder={`Message ${selectedName}…`} onChange={changeDraft} onSend={send} onFocus={acknowledgeComposer} onEscape={clearReply}
                       /> : <textarea
@@ -1581,15 +1575,14 @@ function Chats({
                       />}
                       {mentionProblems[draftKey] && <p className="mention-error" role="alert">Saved mention recipients could not be restored. Choose recipients again, or <button onClick={() => { setMentionProblems(values => ({ ...values, [draftKey]: false })); changeDraft(draft); }}>keep only the text</button>.</p>}
                       {allMentionBlocked && <p className="mention-error" role="alert">{allMentionProblem(state.selectedGroup, state.selected)} <button type="button" onClick={() => { const next = removeAllMentions(draft, draftMentions); changeDraft(next.text, next.tokens); }}>Remove Everyone</button> <button type="button" disabled={!active || state.opening} onClick={() => { void session.refreshConversations(state.account, false, state.selected ?? undefined).catch(() => {}); }}>Refresh</button></p>}
-                      {composerNotice && <p className="mention-error" role="alert">{composerNotice}</p>}
                       <div className="composer-bottom">
                         <div className="composer-tools" role="group" aria-label="Message actions">
                           {state.account && <AttachmentPicker key={JSON.stringify([state.account, state.selected])} connection={connection} account={state.account} threadId={state.selected} recipient={selectedName}
                             composerRef={composerInput} mediaKinds={Array.isArray(state.capabilities.mediaKinds) ? state.capabilities.mediaKinds : []}
                             enabled={active && !reply && !pendingQuote.current && !draftMentions.length && Array.isArray(state.capabilities.mediaKinds) && state.capabilities.mediaKinds.length > 0} />}
                           <Button icon="mention" label="Mention someone"
-                            title={!state.selected?.endsWith("@chatroom") ? "Mentions are available in group chats" : !inlineCapable ? "Update the hub to use inline mentions" : reply || pendingQuote.current ? "Remove the reply to mention someone" : "Mention someone"}
-                            disabled={!inlineCapable || !active || !!reply || !!pendingQuote.current} onClick={() => setMentionOpen(value => value + 1)} />
+                            title={!state.selected?.endsWith("@chatroom") ? "Mentions are available in group chats" : !inlineCapable ? "Update the hub to use inline mentions" : "Mention someone"}
+                            disabled={!inlineCapable || !active} onClick={() => setMentionOpen(value => value + 1)} />
                         </div>
                         <span className="composer-hint">
                           {simulator ? "Messages stay in the simulator." : "Enter to send · Shift + Enter for a new line"}
@@ -1959,7 +1952,7 @@ function ReplyPreview({
             ? message.recall
               ? "Message recalled"
               : "Message unavailable"
-            : emojiText(messageSummary(message, sender).text)}
+            : emojiText(quotedText(message).replace(/\s+/g, " ").slice(0, 240))}
         </span>
       </button>
       <Button icon="close" label="Cancel reply" onClick={cancel} />

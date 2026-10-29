@@ -121,7 +121,23 @@ test("quoted text preserves both quote IDs through queued status and lost-respon
       sendByKey: async (...args: unknown[]) => { calls.push(["recover", ...args]); return receipt; },
     } as unknown as NativeWeChatClient;
     assert.deepEqual(await submitNativeText(client, "a", "peer", "Agreed", "quote-key", { quote, initialDelayMs: 1 }), receipt);
-    assert.deepEqual(calls, [["submit", "a", "peer", "Agreed", "quote-key", quote], lost ? ["recover", "a", "quote-key"] : ["poll", "a", "send_quote"]]);
+    assert.deepEqual(calls, [["submit", "a", "peer", "Agreed", "quote-key", { quote }], lost ? ["recover", "a", "quote-key"] : ["poll", "a", "send_quote"]]);
+  }
+});
+
+test("quoted mentions retain both options through queued status and lost-response recovery", async () => {
+  const quote = { messageId: "msg_source", serverId: "18446744073709551615" };
+  for (const mentions of [{ userIds: ["wxid_a", "wxid_b"] }, { all: true }]) for (const lost of [false, true]) {
+    const calls: unknown[][] = [];
+    const receipt = { id: "send_combined", accountId: "a", destination: "g@chatroom", state: "accepted" };
+    const client = {
+      sendText: async (...args: unknown[]) => { calls.push(["submit", ...args]); if (lost) throw Error("lost response"); return { ...receipt, state: "queued" }; },
+      send: async (...args: unknown[]) => { calls.push(["poll", ...args.slice(0, 2)]); return receipt; },
+      sendByKey: async (...args: unknown[]) => { calls.push(["recover", ...args]); return receipt; },
+    } as unknown as NativeWeChatClient;
+    assert.deepEqual(await submitNativeText(client, "a", "g@chatroom", "Agreed", "combined-key", { quote, mentions, initialDelayMs: 1 }), receipt);
+    assert.deepEqual(calls, [["submit", "a", "g@chatroom", "Agreed", "combined-key", { quote, mentions }],
+      lost ? ["recover", "a", "combined-key"] : ["poll", "a", "send_combined"]]);
   }
 });
 

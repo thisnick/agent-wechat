@@ -197,6 +197,27 @@ impl Core {
         request: TextMentions,
         own: &str,
     ) -> Result<ResolvedMentions> {
+        let names = self.mention_names(account, room, &request, own)?;
+        render(request, text, &names)
+    }
+
+    pub(crate) fn validate_mention_recipients(
+        &self,
+        account: &str,
+        room: &str,
+        request: &TextMentions,
+        own: &str,
+    ) -> Result<()> {
+        self.mention_names(account, room, request, own).map(|_| ())
+    }
+
+    fn mention_names(
+        &self,
+        account: &str,
+        room: &str,
+        request: &TextMentions,
+        own: &str,
+    ) -> Result<BTreeMap<String, String>> {
         request.validate()?;
         ensure!(room.ends_with("@chatroom"), "mentions_require_group");
         if request.all {
@@ -223,7 +244,7 @@ impl Core {
                 }
             }
             if is_member && names.len() == request.user_ids.len() {
-                return render(request, text, &names);
+                return Ok(names);
             }
             cursor = page.next_cursor;
             if cursor.is_none() {

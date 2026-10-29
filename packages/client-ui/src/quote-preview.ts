@@ -70,6 +70,12 @@ export function embeddedQuotePreview(
     ? "Sticker unavailable"
     : quote?.type === 49 && quote.appMessageType === 6
     ? "File unavailable"
+    : quote?.type === 48
+    ? "Location unavailable"
+    : quote?.type === 42
+    ? "Shared contact unavailable"
+    : quote?.type === 49 && quote.appMessageType === 19
+    ? "Forwarded messages unavailable"
     : "Quoted message unavailable";
   return {
     text,
@@ -93,9 +99,14 @@ export function embeddedQuotePreview(
 export function quotedText(message: NativeMessage): string {
   const kind = messagePresentation(message);
   if (kind === "recalled") return "Message recalled";
-  if (["text", "reply", "forwarded"].includes(kind))
+  if (kind === "forwarded")
+    return message.body?.split(/\r\n|\r|\n/).map(line => line.trim()).find(Boolean) || "Forwarded messages";
+  if (["text", "reply"].includes(kind))
     return message.body || "Message text unavailable";
   if (kind === "link") return message.link?.title || "Link";
+  if (message.type === 48 && message.location)
+    return message.location.name || message.location.address || "Location";
+  if (message.type === 42) return "Shared contact";
   if (message.type === 49 && message.appMessageType === 8) return "Sticker";
   return (
     (
@@ -104,6 +115,7 @@ export function quotedText(message: NativeMessage): string {
         34: "Voice message",
         43: "Video",
         47: "Sticker",
+        48: "Location",
         49: "Attachment",
         62: "Video",
       } as Record<number, string>

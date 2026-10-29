@@ -62,6 +62,8 @@ pub enum Request {
         content: String,
         created_at: u32,
         client_id: u32,
+        #[serde(default)]
+        source: Option<String>,
     },
     Poll {
         session: Session,

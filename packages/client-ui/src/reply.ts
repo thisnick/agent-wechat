@@ -28,15 +28,17 @@ export function canReply(message: NativeMessage): boolean {
       serverId: message.serverId,
     }) &&
     ((message.type === 1 && !!message.body?.trim()) ||
-      [3, 34, 43].includes(message.type) ||
+      (message.type === 42 && !!message.body?.trim()) ||
+      [3, 34, 43, 47].includes(message.type) ||
+      (message.type === 48 && !!message.location) ||
       (message.type === 49 &&
-        [1, 87].includes(message.appMessageType ?? 0) &&
+        [1, 19, 87].includes(message.appMessageType ?? 0) &&
         !!message.body?.trim()) ||
       (message.type === 49 &&
         message.appMessageType === 51 &&
         !!message.link) ||
       (message.type === 49 &&
-        [5, 6, 57].includes(
+        [3, 4, 5, 6, 8, 57].includes(
           message.appMessageType ?? (message.quote ? 57 : 0)
         )))
   );

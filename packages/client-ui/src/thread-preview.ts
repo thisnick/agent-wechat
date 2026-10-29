@@ -21,10 +21,16 @@ export function messageSummary(
       ? recallText(message)
       : kind === "system"
       ? message.body || "System message"
-      : ["text", "reply", "forwarded"].includes(kind)
+      : kind === "forwarded"
+      ? message.body?.trim() || "Forwarded messages"
+      : ["text", "reply"].includes(kind)
       ? message.body || "Message"
       : kind === "link"
       ? message.link?.title || "Link"
+      : message.type === 48 && message.location
+      ? message.location.name || message.location.address || "Location"
+      : message.type === 42
+      ? "Shared contact"
       : message.type === 49 && message.appMessageType === 8
       ? "Sticker"
       : (
@@ -33,6 +39,7 @@ export function messageSummary(
             34: "Voice message",
             43: "Video",
             47: "Sticker",
+            48: "Location",
             49: "Attachment",
             62: "Video",
           } as Record<number, string>

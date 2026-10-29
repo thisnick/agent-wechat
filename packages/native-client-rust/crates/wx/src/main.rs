@@ -603,10 +603,10 @@ struct MessageSendArgs {
     #[arg(long, requires_all = ["text", "quote_message_id"], conflicts_with_all = ["share", "image", "file", "video", "voice"])]
     quote_server_id: Option<String>,
     /// Mention a group member by account ID; repeat for multiple members.
-    #[arg(long, requires = "text", conflicts_with_all = ["mention_all", "quote_message_id", "quote_server_id", "share", "image", "file", "video", "voice"])]
+    #[arg(long, requires = "text", conflicts_with_all = ["mention_all", "share", "image", "file", "video", "voice"])]
     mention: Vec<String>,
     /// Mention all group members (WeChat enforces the account's permissions).
-    #[arg(long, requires = "text", conflicts_with_all = ["mention", "quote_message_id", "quote_server_id", "share", "image", "file", "video", "voice"])]
+    #[arg(long, requires = "text", conflicts_with_all = ["mention", "share", "image", "file", "video", "voice"])]
     mention_all: bool,
     #[arg(long, group = "payload")]
     image: Option<PathBuf>,

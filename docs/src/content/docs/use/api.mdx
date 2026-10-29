@@ -222,6 +222,17 @@ The token needs `read` and `send`. The daemon reads the original from the same c
 await client.sendText(accountId, threadId, "Agreed", key, { messageId, serverId });
 ```
 
+To mention members in a quoted group reply, include both options:
+
+```ts
+await client.sendText(accountId, groupId, "Agreed", key, {
+  quote: { messageId, serverId },
+  mentions: { userIds: [memberId] },
+});
+```
+
+The HTTP request likewise accepts `quote` and `mentions` together for group text.
+
 See [quoted replies in the CLI guide](/use/cli/#quoted-replies) for supported originals and limits.
 
 For files, images, video and voice, stage bytes with `POST /uploads` and send the returned source ID. [Send attachments](/use/media/) covers the request, SDK methods, per-kind capability limits and longer job polling.

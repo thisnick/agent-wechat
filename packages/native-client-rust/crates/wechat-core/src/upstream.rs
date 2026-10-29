@@ -207,14 +207,10 @@ pub trait Upstream: Send + Sync {
         client_id: &str,
         created_at: u32,
         content: &str,
+        source: Option<&str>,
     ) -> Result<MediaSendResult> {
-        self.native(NativeOptions::default())?.send_quote(
-            state,
-            destination,
-            client_id,
-            created_at,
-            content,
-        )
+        self.native(NativeOptions::default())?
+            .send_quote_with_source(state, destination, client_id, created_at, content, source)
     }
     fn send_share(
         &self,

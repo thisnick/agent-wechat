@@ -1124,12 +1124,24 @@ impl NativeClient {
         created_at: u32,
         content: &str,
     ) -> Result<crate::media_send::MediaSendResult> {
-        let request = crate::quote_send::quote_send_request(
+        self.send_quote_with_source(state, destination, client_id, created_at, content, None)
+    }
+    pub fn send_quote_with_source(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        client_id: &str,
+        created_at: u32,
+        content: &str,
+        source: Option<&str>,
+    ) -> Result<crate::media_send::MediaSendResult> {
+        let request = crate::quote_send::quote_send_request_with_source(
             state,
             destination,
             client_id,
             created_at,
             content,
+            source,
         )?;
         crate::media_send::decode_file_send(
             &self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?,

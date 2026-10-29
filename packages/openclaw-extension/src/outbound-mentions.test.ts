@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseWeChatTextMentions } from "./outbound-mentions.ts";
 import { createWeChatMediaHandlers, nativePayloadMediaOptions, wechatMediaActions } from "./outbound-options.ts";
+import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-outbound";
 import type { sendWeChatMedia } from "./outbound-media.ts";
 
 test("mention recipients retain exact IDs and reject ambiguous or editor-only input", () => {
@@ -35,7 +36,7 @@ test("mention combinations fail at prepare and forced-core boundaries before any
   const handlers = createWeChatMediaHandlers((async () => { sends++; throw Error("must not dispatch"); }) as typeof sendWeChatMedia);
   const payload = { text: "hi", channelData: { "agent-wechat": { mentions: { userIds: ["wxid_a"] } } } };
   for (const extra of [{ to: "wxid_dm" }, { mediaUrl: "/fixture/a.png" }, { mediaUrls: ["/fixture/a.mp4"] },
-    { audioAsVoice: true }, { forceDocument: true }, { replyToId: "message-id" },
+    { audioAsVoice: true }, { forceDocument: true },
     { channelData: { "agent-wechat": { mentions: { all: true }, videoQuality: "original" } } }, { text: " " }]) {
     const ctx = { cfg: {}, to: "g@chatroom", text: "hi", ...extra, payload: { ...payload, ...extra } };
     assert.throws(() => wechatMediaActions.prepareSendPayload!({ ctx: { params: extra } as any, to: ctx.to, payload: ctx.payload, replyToId: (extra as any).replyToId }), /WeChat mentions/);
@@ -45,4 +46,25 @@ test("mention combinations fail at prepare and forced-core boundaries before any
   }
   assert.throws(() => nativePayloadMediaOptions({ channelData: { "agent-wechat": { mentions: { userIds: ["wxid_a"] }, invalid: true } } }), /Invalid WeChat/);
   assert.equal(sends, 0);
+});
+
+
+test("quoted mentions survive prepared and queued adapter payloads with one send key", async () => {
+  const calls: any[][] = [];
+  const handlers = createWeChatMediaHandlers((async (...args: any[]) => {
+    calls.push(args); return { messageId: "sent", meta: { outcome: "sent" } };
+  }) as typeof sendWeChatMedia);
+  const adapter = createChannelMessageAdapterFromOutbound({ id: "agent-wechat", outbound: handlers });
+  for (const mentions of [{ userIds: ["wxid_a"] }, { all: true }]) {
+    const payload = { text: "please check", replyToId: "msg_source", channelData: { "agent-wechat": { mentions } } };
+    assert.equal(wechatMediaActions.prepareSendPayload!({ ctx: { params: {} } as any, to: "g@chatroom", payload }), payload);
+    const ctx = { cfg: {}, to: "g@chatroom", text: payload.text, deliveryQueueId: "quoted-mention-queue", payload };
+    await handlers.sendPayload(ctx);
+    await adapter.send!.text!({ ...ctx, replyToId: payload.replyToId });
+    await adapter.send!.payload!({ ...ctx, payload: JSON.parse(JSON.stringify(payload)) });
+    for (const call of calls.slice(-3)) {
+      assert.deepEqual(call[6], { mentions, forceDocument: undefined, replyToId: payload.replyToId });
+      assert.equal(call[5], calls.at(-1)![5]);
+    }
+  }
 });

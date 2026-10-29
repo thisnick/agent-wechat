@@ -1,6 +1,7 @@
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
 import type { TextMentions } from "./native.generated.js";
-export type NativeTextMentionOptions = { mentions: TextMentions };
+export type NativeTextSendOptions = { quote?: QuoteSendReference; mentions?: TextMentions };
+export type NativeTextMentionOptions = NativeTextSendOptions & { mentions: TextMentions };
 import type { AccountSettings, NativeAccountRemoval, OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
@@ -223,17 +224,18 @@ export class NativeWeChatClient {
     }
     return result;
   }
-  /** Send text with optional group mentions, or quote a locally stored message in the same chat.
+  /** Send text with optional group mentions and a quote of a locally stored message in the same chat.
    * Quoted-reply live acceptance and recipient rendering remain unverified; unsupported targets are rejected.
    */
-  sendText(accountId: string, threadId: string, text: string, idempotencyKey: string, quoteOrOptions?: QuoteSendReference | NativeTextMentionOptions): Promise<NativeSendIntent> {
+  sendText(accountId: string, threadId: string, text: string, idempotencyKey: string, quoteOrOptions?: QuoteSendReference | NativeTextSendOptions): Promise<NativeSendIntent> {
     if (!idempotencyKey || /[\r\n]/.test(idempotencyKey)) throw new Error("An idempotency key is required");
-    const options = quoteOrOptions && typeof quoteOrOptions === "object" && "mentions" in quoteOrOptions ? quoteOrOptions as NativeTextMentionOptions : undefined;
-    const quote = options === undefined ? quoteOrOptions as QuoteSendReference | undefined : undefined;
-    if (options !== undefined) {
-      const mentions = options.mentions;
+    const options = quoteOrOptions && typeof quoteOrOptions === "object" && !Array.isArray(quoteOrOptions) && ("mentions" in quoteOrOptions || "quote" in quoteOrOptions || Object.keys(quoteOrOptions).length === 0) ? quoteOrOptions as NativeTextSendOptions : undefined;
+    const quote = options === undefined ? quoteOrOptions as QuoteSendReference | undefined : options.quote;
+    if (options && Object.keys(options).some(key => key !== "mentions" && key !== "quote")) throw new Error("Invalid text send options");
+    const mentions = options?.mentions;
+    if (mentions !== undefined) {
       const ids = mentions?.userIds ?? [];
-      if (Object.keys(options).some(key => key !== "mentions") || !threadId.endsWith("@chatroom")
+      if (!threadId.endsWith("@chatroom")
         || !mentions || typeof mentions !== "object" || Array.isArray(mentions)
         || Object.keys(mentions).some(key => key !== "userIds" && key !== "all" && key !== "positions")
         || (mentions.userIds !== undefined && !Array.isArray(mentions.userIds))
@@ -272,8 +274,8 @@ export class NativeWeChatClient {
       || typeof quote.messageId !== "string" || !quote.messageId || quote.messageId.length > 8192
       || typeof quote.serverId !== "string" || !/^[1-9]\d{0,19}$/.test(quote.serverId)
       || BigInt(quote.serverId) > 18446744073709551615n)) throw new Error("Invalid quote message identity");
-    const input = options !== undefined ? { kind: "text", threadId, text, mentions: options.mentions }
-      : quote === undefined ? { threadId, text } : { kind: "text", threadId, text, quote };
+    const input = quote === undefined && mentions === undefined ? { threadId, text }
+      : { kind: "text", threadId, text, ...(quote !== undefined && { quote }), ...(mentions !== undefined && { mentions }) };
     return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(input) });
   }
   send(accountId: string, sendId: string, signal?: AbortSignal): Promise<NativeSendIntent> { return this.request(`v1/accounts/${id(accountId)}/sends/${id(sendId)}`, { signal }); }

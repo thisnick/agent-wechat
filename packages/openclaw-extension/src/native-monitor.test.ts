@@ -249,8 +249,20 @@ test("buffered group replies retain structured mention IDs instead of dropping t
   assert.equal(await dispatchNativeMessage(value), "completed"); assert.equal(calls.length, 1);
   assert.deepEqual(calls[0][4], { mentions: { userIds: ["wxid_member"] } }); assert.match(calls[0][3] as string, /^[a-f0-9]{64}$/);
 });
+test("buffered quoted group replies retain both the source identity and mention recipients", async t => {
+  const value = fixture(t, { group: true, mention: true }), calls: unknown[][] = [];
+  value.client.sendText = (async (...args: unknown[]) => {
+    calls.push(args); return { id: "send_quoted_mentions", accountId: "a", destination: value.message.threadId, state: "accepted" };
+  }) as any;
+  value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {
+    await params.dispatcherOptions.deliver({ text: "please check", replyToId: value.message.id,
+      channelData: { "agent-wechat": { mentions: { userIds: ["wxid_member"] } } } });
+  };
+  assert.equal(await dispatchNativeMessage(value), "completed"); assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][4], { quote: { messageId: value.message.id, serverId: value.message.serverId }, mentions: { userIds: ["wxid_member"] } });
+});
 test("buffered reply mention conflicts fail before any message or attachment send", async t => {
-  for (const payload of [{ text: "hi", mediaUrl: "/fixture/a.png" }, { text: "hi", audioAsVoice: true }, { text: "hi", replyToId: "quoted" }]) {
+  for (const payload of [{ text: "hi", mediaUrl: "/fixture/a.png" }, { text: "hi", audioAsVoice: true }]) {
     const value = fixture(t, { group: true, mention: true }); let sends = 0;
     value.client.sendText = async () => { sends++; throw Error("must not send"); };
     value.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async (params: any) => {

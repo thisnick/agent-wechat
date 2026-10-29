@@ -363,6 +363,7 @@ impl Upstream for SimulatorUpstream {
         client_id: &str,
         created_at: u32,
         content: &str,
+        source: Option<&str>,
     ) -> Result<wechat_protocol::media_send::MediaSendResult> {
         let parsed = client_id.parse::<u32>()?;
         ensure!(
@@ -375,6 +376,7 @@ impl Upstream for SimulatorUpstream {
             content: content.into(),
             created_at,
             client_id: parsed,
+            source: source.map(str::to_owned),
         })?;
         Ok(wechat_protocol::media_send::MediaSendResult {
             status: if reply.accepted {

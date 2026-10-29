@@ -208,6 +208,117 @@ async function pinJourney(streams) {
   await assert.rejects(a.sendByKey("personal", "all-after-leave"), error => error.status === 404);
 }
 
+
+// This journey owns a separate synthetic account so send counts and lost-ACK
+// faults cannot affect the existing personal/work account acceptance checks.
+async function quoteMentionJourney() {
+  const account = "quote_mentions";
+  await login(account);
+  const creation = await a.createGroup(account, { members: ["sim_mei", "sim_daniel"], name: "Synthetic quoted mentions" }, "quote-mentions-create");
+  const created = await waitFor("quoted mention group", async () => {
+    const operation = await a.operation(account, creation.id);
+    if (["failed", "needs_review", "cancelled"].includes(operation.state)) throw new Error(JSON.stringify(operation));
+    return operation.state === "succeeded" && operation;
+  });
+  const room = created.result.groupId;
+  assert.equal((await a.group(account, room)).canMentionAll, true);
+  const settle = async (intent, state = "accepted") => waitFor(`quoted mention send ${state}`, async () => {
+    const current = await a.send(account, intent.id);
+    if (["failed", "cancelled"].includes(current.state)) throw new Error(JSON.stringify(current));
+    return current.state === state && current;
+  });
+  const source = await settle(await a.sendText(account, room, "Original synthetic quote target", "quote-mentions-source"));
+  const original = await a.message(account, source.localMessageId);
+  const quote = { messageId: original.id, serverId: original.serverId };
+  const cliSend = (text, key, mentions, reference = quote, threadId = room) => runCli(["--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile, "--account", account,
+    "messages", "send", threadId, "--text", text, "--quote-message-id", reference.messageId, "--quote-server-id", reference.serverId,
+    ...(mentions ? mentions.all ? ["--mention-all"] : mentions.userIds.flatMap(id => ["--mention", id]) : []), "--idempotency-key", key, "--detach"]);
+  const accepted = [];
+  for (const [index, path, text, mentions] of [
+    [0, "sdk", "SDK quoted members", { userIds: ["sim_mei", "sim_daniel"] }],
+    [1, "sdk", "Hi @old name\u2005SDK quoted inline member", { userIds: ["sim_mei"], positions: [{ start: 3, end: 13, index: 0 }] }],
+    [2, "sdk", "SDK quoted everyone", { all: true }],
+    [3, "cli", "CLI quoted member", { userIds: ["sim_mei"] }],
+    [4, "cli", "CLI quoted everyone", { all: true }],
+  ]) {
+    const key = `quote-mentions-${index}`;
+    const intent = await settle(path === "sdk" ? await a.sendText(account, room, text, key, { quote, mentions }) : await cliSend(text, key, mentions));
+    const message = await b.message(account, intent.localMessageId);
+    assert.equal(message.type, 49);
+    assert.equal(message.appMessageType, 57);
+    assert.equal(message.quote.serverId, quote.serverId);
+    assert.equal(message.quote.embeddedText, original.body);
+    assert.equal(message.mentions.state, "known");
+    if (mentions.all) assert.equal(message.mentions.all, true);
+    else assert.deepEqual(message.mentions.userIds, mentions.userIds);
+    assert.ok(message.body.includes(path === "sdk" && mentions.positions ? "SDK quoted inline member" : text));
+    assert.ok(!message.body.includes("<appmsg>"));
+    assert.equal((await b.sendText(account, room, text, key, { quote, mentions })).id, intent.id);
+    if (path === "cli") assert.equal((await cliSend(text, key, mentions)).id, intent.id);
+    accepted.push({ key, id: intent.id, localMessageId: intent.localMessageId, threadId: room, quote, quoteType: 1, mentions });
+  }
+  // The media control emits a direct incoming message without a group-member
+  // envelope. Quote its stored descriptor without requesting sticker bytes.
+  const stickerPeer = "sim_mei";
+  await control({ op: "receive_media", account, peer: stickerPeer, kind: "sticker" });
+  const sticker = await waitFor("stored synthetic sticker quote target", async () =>
+    (await a.messages(account, stickerPeer)).items.find(message => message.type === 47));
+  const stickerQuote = { messageId: sticker.id, serverId: sticker.serverId };
+  for (const path of ["sdk", "cli"]) {
+    const text = `${path} quoted sticker reference`, key = `quote-sticker-${path}`;
+    const intent = await settle(path === "sdk" ? await a.sendText(account, stickerPeer, text, key, { quote: stickerQuote })
+      : await cliSend(text, key, undefined, stickerQuote, stickerPeer));
+    const message = await b.message(account, intent.localMessageId);
+    assert.equal(message.threadId, stickerPeer);
+    assert.equal(message.type, 49);
+    assert.equal(message.appMessageType, 57);
+    assert.equal(message.quote.type, 47);
+    assert.equal(message.quote.serverId, stickerQuote.serverId);
+    assert.equal(message.body, text);
+    assert.equal((await b.sendByKey(account, key)).id, intent.id);
+    assert.equal((await b.sendText(account, stickerPeer, text, key, { quote: stickerQuote })).id, intent.id);
+    if (path === "cli") assert.equal((await cliSend(text, key, undefined, stickerQuote, stickerPeer)).id, intent.id);
+    accepted.push({ key, id: intent.id, localMessageId: intent.localMessageId, threadId: stickerPeer, quote: stickerQuote, quoteType: 47 });
+  }
+  const uncertain = [];
+  for (const path of ["sdk", "cli"]) {
+    const text = `Lost acknowledgment for ${path} quoted mentions`, key = `quote-mentions-lost-${path}`, mentions = { userIds: ["sim_mei"] };
+    await control({ op: "send_fault", account, fault: "lost_acknowledgment" });
+    const intent = await settle(path === "sdk" ? await a.sendText(account, room, text, key, { quote, mentions }) : await cliSend(text, key, mentions), "needs_review");
+    assert.equal((await b.sendByKey(account, key)).id, intent.id);
+    assert.equal((await b.sendText(account, room, text, key, { quote, mentions })).id, intent.id);
+    if (path === "cli") assert.equal((await cliSend(text, key, mentions)).id, intent.id);
+    uncertain.push({ key, id: intent.id });
+  }
+  // The remote accepted each logical send exactly once, including lost ACKs.
+  const remoteAccount = (await remoteState()).accounts.find(item => item.id === account);
+  assert.equal(remoteAccount.acceptedSends, 10);
+  assert.equal(remoteAccount.acceptedMediaSends, 0);
+  return { account, quote, accepted, uncertain };
+}
+async function verifyQuoteMentionRestart(journey) {
+  for (const retained of journey.accepted) {
+    const intent = await b.sendByKey(journey.account, retained.key);
+    assert.equal(intent.id, retained.id);
+    const message = await b.message(journey.account, retained.localMessageId);
+    assert.equal(message.threadId, retained.threadId);
+    assert.equal(message.type, 49);
+    assert.equal(message.quote.serverId, retained.quote.serverId);
+    assert.equal(message.quote.type, retained.quoteType);
+    assert.equal(message.appMessageType, 57);
+    if (retained.mentions?.all) assert.equal(message.mentions.all, true);
+    else if (retained.mentions) assert.deepEqual(message.mentions.userIds, retained.mentions.userIds);
+  }
+  for (const retained of journey.uncertain) {
+    const intent = await b.sendByKey(journey.account, retained.key);
+    assert.equal(intent.id, retained.id);
+    assert.equal(intent.state, "needs_review");
+  }
+  const remoteAccount = (await remoteState()).accounts.find(item => item.id === journey.account);
+  assert.equal(remoteAccount.acceptedSends, 10);
+  assert.equal(remoteAccount.acceptedMediaSends, 0);
+}
+
 try {
   remote = await start("upstream");
   controlToken = (await readFile(remote.ready.controlTokenFile, "utf8")).trim();
@@ -268,6 +379,7 @@ try {
   assert.equal((await cli("messages", "get", "filehelper", selfMessage.id)).body, selfMessage.body);
 
   await pinJourney([streamA, streamB]);
+  const quoteMentionReceipts = await quoteMentionJourney();
 
   const beforeInbound = streamA.events.at(-1).cursor;
   await control({ op: "inbound", account: "personal", peer: "sim_mei", body: "Incoming through real sync" });
@@ -291,6 +403,7 @@ try {
   const restarted = await attach();
   assert.equal(restarted.serverId, initialStatus.serverId);
   assert.notEqual(restarted.ownershipGeneration, initialStatus.ownershipGeneration);
+  await verifyQuoteMentionRestart(quoteMentionReceipts);
   await waitFor("durable catch-up after hub restart", async () => (await a.messages("personal", "sim_mei")).items.some(item => item.body === "Arrived while the hub was stopped"));
   const caughtUp = (await a.messages("personal", "sim_mei")).items.find(item => item.body === "Arrived while the hub was stopped");
   assert.equal((await a.events("personal", resumeCursor, 200)).items.find(event => event.kind === "message.committed" && event.data.messageId === caughtUp.id).data.origin, "catchup");
@@ -461,7 +574,7 @@ try {
   if (process.platform !== "win32") assert.equal(launcher.child.exitCode, 0);
   await assert.rejects(stat(launcher.ready.dataDir), error => error.code === "ENOENT");
   await assert.rejects(fetch(launcherRemote));
-  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "legacy MOV normal/original CLI/API sends, exact original download and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
+  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "quoted SDK and CLI member/Everyone mentions, inline positions, lost ACKs and restart recovery", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "legacy MOV normal/original CLI/API sends, exact original download and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
 } finally {
   for (const subscription of subscriptions) subscription.controller.abort();
   await Promise.allSettled(subscriptions.map(subscription => subscription.done));

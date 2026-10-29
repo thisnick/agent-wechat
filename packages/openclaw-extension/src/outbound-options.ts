@@ -27,12 +27,12 @@ export function nativePayloadMediaOptions(payload: MediaPayload): WeChatOutbound
 
 export const wechatMediaActions: NonNullable<ChannelPlugin["actions"]> = {
   describeMessageTool: () => ({ actions: ["send"], schema: { actions: ["send"], visibility: "all-configured", properties: {
-    replyTo: { type: "string", minLength: 1, maxLength: 4096, description: "Quote a stored WeChat message in this same chat. Use its exact id from wechat_history, wechat_search or wechat_message, or the current inbound message ID; not a server ID or send/job ID. Text replies only; cannot combine with attachments or mentions. The hub validates the original message." },
-    channelData: { type: "object", description: "WeChat send options: mentions for ordinary group text, or videoQuality for one video attachment.", additionalProperties: true, properties: {
+    replyTo: { type: "string", minLength: 1, maxLength: 4096, description: "Quote a stored WeChat message in this same chat. Use its exact id from wechat_history, wechat_search or wechat_message, or the current inbound message ID; not a server ID or send/job ID. Text replies only; group replies may include mentions. Send attachments separately. The hub validates the original message." },
+    channelData: { type: "object", description: "WeChat send options: mentions for group text and quoted group replies, or videoQuality for one video attachment.", additionalProperties: true, properties: {
       "agent-wechat": { type: "object", additionalProperties: false, anyOf: [{ required: ["videoQuality"] }, { required: ["mentions"] }], properties: {
         videoQuality: { type: "string", enum: ["normal", "original"], description: "WeChat video mode: normal prepares playback; original also retains the unchanged source video. Cannot combine with forceDocument." },
         mentions: { type: "object", additionalProperties: false,
-          description: "Mention exact members in an ordinary group text message. Get userIds from wechat_group_info, not display names. The hub adds visible @names and metadata. Use all=true only when the sender has permission. Cannot combine with DMs, media, voice, video quality or quoted replies.",
+          description: "Mention exact members in a group text message or quoted text reply. Get userIds from wechat_group_info, not display names. The hub adds visible @names and metadata. Use all=true only when the sender has permission. Cannot combine with DMs, media, voice or video quality.",
           properties: { userIds: { type: "array", minItems: 1, maxItems: 128, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 256, pattern: "^[A-Za-z0-9_@.-]+$" } },
             all: { type: "boolean", const: true } },
           oneOf: [{ required: ["userIds"], not: { required: ["all"] } }, { required: ["all"], not: { required: ["userIds"] } }],

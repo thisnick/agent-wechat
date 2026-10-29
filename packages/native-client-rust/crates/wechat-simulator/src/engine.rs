@@ -137,6 +137,7 @@ impl Engine {
         };
         let source = match &request {
             Request::SendTextWithSource { source, .. } => Some(source.clone()),
+            Request::SendQuote { source, .. } => source.clone(),
             _ => None,
         };
         match request {
@@ -365,6 +366,7 @@ impl Engine {
                 content,
                 created_at,
                 client_id,
+                source: _,
             } => {
                 check_session(&db, &session)?;
                 validate_destination(&db, &session.account, &destination)?;
@@ -1314,6 +1316,7 @@ mod tests {
             content: xml.into(),
             created_at: INITIAL_TIME,
             client_id: 777,
+            source: None,
         };
         let accepted = engine.request(quote()).unwrap();
         assert_eq!(accepted["accepted"], true);

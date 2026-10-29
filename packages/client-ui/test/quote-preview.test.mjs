@@ -218,6 +218,32 @@ test("quoted replies show normalized text and recalls suppress their old content
   );
 });
 
+test("quoted stickers and location pins keep readable labels when media is unavailable", () => {
+  const raw = "<msg>transport metadata</msg>";
+  for (const message of [{ type: 47 }, { type: 49, appMessageType: 8 }]) {
+    assert.equal(quotedText({ ...message, body: raw }), "Sticker");
+    assert.equal(embeddedQuotePreview({ type: 49, quote: { ...message, state: "unsupported" } }).text, "Sticker unavailable");
+  }
+  for (const [location, expected] of [[{ name: "Park", address: "Main Street" }, "Park"],
+    [{ name: null, address: "Main Street" }, "Main Street"], [{ name: null, address: null }, "Location"]]) {
+    assert.equal(quotedText({ type: 48, body: raw, location }), expected);
+  }
+  assert.equal(quotedText({ type: 48, body: raw }), "Location");
+  assert.equal(embeddedQuotePreview({ type: 49, quote: { type: 48, state: "unsupported" } }).text, "Location unavailable");
+  assert.equal(quotedText({ type: 42, body: raw }), "Shared contact");
+  assert.equal(embeddedQuotePreview({ type: 49, quote: { type: 42, state: "unsupported" } }).text, "Shared contact unavailable");
+  assert.equal(quotedText({ type: 49, appMessageType: 19, body: null }), "Forwarded messages");
+  assert.equal(quotedText({ type: 49, appMessageType: 19, body: "[Forwarded messages]\nShared summary" }), "[Forwarded messages]");
+  assert.equal(embeddedQuotePreview({ type: 49, quote: { type: 49, appMessageType: 19, state: "unsupported" } }).text, "Forwarded messages unavailable");
+});
+
+test("forwarded reply banners keep only the outer summary without nested message text", () => {
+  const forwarded = { type: 49, appMessageType: 19, body: "[Chat History] Summary\nAlice: Nested private text" };
+  assert.equal(quotedText(forwarded), "[Chat History] Summary");
+  assert.equal(quotedText({ ...forwarded, body: "\n  [Chat History] Summary\r\nAlice: Nested private text" }), "[Chat History] Summary");
+  assert.equal(quotedText({ ...forwarded, body: "\n \r\n" }), "Forwarded messages");
+});
+
 test("compact link quotes use embedded structured cards and keep the parent media identity", () => {
   for (const appMessageType of [3, 4, 5]) {
     const link = {

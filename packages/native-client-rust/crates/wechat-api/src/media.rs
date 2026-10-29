@@ -426,12 +426,6 @@ pub(super) async fn send(
     }
     let request: TextSend = serde_json::from_value(input)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    if request.quote.is_some() && request.mentions.is_some() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "quote_mentions_unsupported",
-        ));
-    }
     if let Some(mentions) = &request.mentions {
         mentions
             .validate()
@@ -443,7 +437,14 @@ pub(super) async fn send(
     let send = if let Some(reference) = request.quote {
         c.require(Some(&a), "read")?;
         app.core
-            .send_quoted_text(&a, key, &request.thread_id, &request.text, reference)
+            .send_quoted_text_with_mentions(
+                &a,
+                key,
+                &request.thread_id,
+                &request.text,
+                reference,
+                request.mentions,
+            )
             .await?
     } else if let Some(mentions) = request.mentions {
         app.core

@@ -127,7 +127,7 @@ export async function connect(
                     (s.dismissed === undefined ||
                       typeof s.dismissed === "boolean") &&
                     (s.quote === undefined || validQuoteReference(s.quote)) &&
-                    (s.mentions === undefined || (!s.quote && s.threadId.endsWith("@chatroom") && validMentionReceipt(s.text, s.mentions))),
+                    (s.mentions === undefined || (s.threadId.endsWith("@chatroom") && validMentionReceipt(s.text, s.mentions))),
                 )
                 .slice(-50)
             : [];

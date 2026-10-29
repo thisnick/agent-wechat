@@ -34,6 +34,103 @@ pub(crate) fn leaf(node: roxmltree::Node<'_, '_>) -> Option<String> {
             .collect(),
     )
 }
+
+/// A small readable view of the supported attribute-only shared-contact form.
+pub(crate) fn contact_card_text(content: &str) -> Option<String> {
+    if content.len() > 128 * 1024
+        || content.to_ascii_uppercase().contains("<!DOCTYPE")
+        || content.to_ascii_uppercase().contains("<!ENTITY")
+    {
+        return None;
+    }
+    let doc = roxmltree::Document::parse_with_options(
+        content,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 4096,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "msg"
+        || root.tag_name().namespace().is_some()
+        || root
+            .children()
+            .any(|n| n.is_element() || n.text().is_some_and(|s| !s.trim().is_empty()))
+        || root.attributes().any(|a| a.namespace().is_some())
+    {
+        return None;
+    }
+    let username = root.attribute("username")?;
+    if username.is_empty()
+        || username.len() > 256
+        || username
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    let nickname = root.attribute("nickname").unwrap_or("");
+    if nickname.len() > 4096 || nickname.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!(
+        "[Shared contact]\n{}",
+        if nickname.trim().is_empty() {
+            username
+        } else {
+            nickname
+        }
+    ))
+}
+
+fn forwarded_summary(app: roxmltree::Node<'_, '_>) -> Option<String> {
+    fn summary(record: roxmltree::Node<'_, '_>) -> Option<String> {
+        if record.tag_name().name() != "recordinfo" || record.tag_name().namespace().is_some() {
+            return None;
+        }
+        let values: Vec<_> = ["title", "desc"]
+            .into_iter()
+            .filter_map(|name| child(record, name).and_then(leaf))
+            .filter(|value| {
+                !value.trim().is_empty() && value.len() <= 16384 && !value.contains('\0')
+            })
+            .collect();
+        let text = values.join("\n");
+        (!text.is_empty() && text.len() <= 16384).then_some(text)
+    }
+    if let Some(title) = crate::links::text(app, "title", 16384) {
+        return Some(title);
+    }
+    let record = child(app, "recorditem")?;
+    if let Some(record) = child(record, "recordinfo") {
+        return summary(record).or_else(|| crate::links::text(app, "des", 16384));
+    }
+    let xml = leaf(record)?;
+    if xml.len() > 128 * 1024
+        || xml.to_ascii_uppercase().contains("<!DOCTYPE")
+        || xml.to_ascii_uppercase().contains("<!ENTITY")
+    {
+        return None;
+    }
+    let doc = roxmltree::Document::parse_with_options(
+        &xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 4096,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    if doc
+        .descendants()
+        .any(|n| n.ancestors().take(34).count() > 32)
+    {
+        return None;
+    }
+    summary(doc.root_element()).or_else(|| crate::links::text(app, "des", 16384))
+}
 pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
     if content.len() > 256 * 1024
         || content.to_ascii_uppercase().contains("<!DOCTYPE")
@@ -71,6 +168,7 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
         .filter(|s| s.len() <= 16384 && !s.contains('\0'));
     let text = match subtype {
         1 | 57 => title.clone(),
+        19 => forwarded_summary(app),
         // Supplied notice text only; this does not join live-location sharing.
         17 => crate::links::text(app, "title", 16384)
             .map(|title| format!("[Location sharing notice]\n{title}")),
@@ -200,13 +298,20 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
     let card = (*kind == 49)
         .then(|| app_message(embedded_content(app)?))
         .flatten();
-    let text = if *kind == 1 {
+    let text = if *kind == 42 {
+        embedded_content(app).and_then(contact_card_text)
+    } else if *kind == 48 {
+        embedded_content(app)
+            .and_then(crate::locations::parse)
+            .map(|location| location.body())
+    } else if *kind == 1 {
         app.embedded.clone()
     } else {
         card.as_ref().and_then(|card| match card.subtype {
             1 | 74 | 87 => card.text.clone(),
             3..=5 | 51 => card.link.as_ref().map(|link| link.card.body()),
             6 | 57 => card.title.clone(),
+            19 => card.text.clone(),
             _ => None,
         })
     }
@@ -217,11 +322,11 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
             .and_then(crate::stickers::ordinary)
             .is_some())
         || card.as_ref().is_some_and(|c| c.sticker.is_some());
-    let supported = matches!(*kind, 1 | 3 | 47)
+    let supported = matches!(*kind, 1 | 3 | 42 | 47 | 48)
         || sticker
         || card
             .as_ref()
-            .is_some_and(|c| matches!(c.subtype, 1 | 3..=5 | 51 | 74 | 87));
+            .is_some_and(|c| matches!(c.subtype, 1 | 3..=5 | 19 | 51 | 74 | 87));
     let state = if !supported {
         "unsupported"
     } else if text.is_some() || image || sticker {
@@ -291,6 +396,63 @@ mod tests {
     use super::*;
     use crate::Core;
     const LINK: &str = "<msg><appmsg><type>5</type><title><![CDATA[Article <title>]]></title><des>A &amp; B</des><url>https://example.com/article?a=1&amp;b=2</url><appattach><cdnattachurl>private-transport</cdnattachurl></appattach></appmsg></msg>";
+
+    #[test]
+    fn forwarded_summary_uses_outer_description_when_nested_record_has_only_private_items() {
+        let content = "<msg><appmsg><type>19</type><title/><des>Outer summary only</des><recorditem><recordinfo><datalist><dataitem><datadesc>Private nested text</datadesc></dataitem></datalist></recordinfo></recorditem></appmsg></msg>";
+        let app = app_message(content).unwrap();
+        assert_eq!(app.text.as_deref(), Some("Outer summary only"));
+        let escaped = content
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let parent = app_message(&format!("<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>49</type><svrid>123</svrid><content>{escaped}</content></refermsg></appmsg></msg>")).unwrap();
+        let quote = embedded_quote(&parent, None).unwrap();
+        assert_eq!(quote["state"], "embedded");
+        assert_eq!(quote["embeddedText"], "Outer summary only");
+        assert!(!quote["embeddedText"].as_str().unwrap().contains("Private"));
+    }
+
+    #[test]
+    fn shared_contact_and_location_quotes_use_only_validated_embedded_fields() {
+        let contact =
+            "<msg username='shared_user' nickname='Shared &amp; contact' unknown='kept'/>";
+        assert_eq!(
+            contact_card_text(contact).as_deref(),
+            Some("[Shared contact]\nShared & contact")
+        );
+        assert_eq!(
+            contact_card_text("<msg username='shared_user'/>").as_deref(),
+            Some("[Shared contact]\nshared_user")
+        );
+        for malformed in [
+            "<msg/>",
+            "<msg username='two words'/>",
+            "<msg username='user' xmlns='foreign'/>",
+            "<msg username='user'><appmsg/></msg>",
+            "<!DOCTYPE msg><msg username='user'/>",
+        ] {
+            assert!(contact_card_text(malformed).is_none());
+        }
+        for (kind, content, excerpt) in [
+            (42, contact, "[Shared contact]\nShared & contact"),
+            (
+                48,
+                "<msg><location x='12.5' y='-45.25' poiname='Example park'/></msg>",
+                "Example park",
+            ),
+        ] {
+            let escaped = content
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let parent = app_message(&format!("<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>{kind}</type><svrid>123</svrid><content>{escaped}</content></refermsg></appmsg></msg>")).unwrap();
+            let quote = embedded_quote(&parent, None).unwrap();
+            assert_eq!(quote["state"], "embedded");
+            assert!(quote["embeddedText"].as_str().unwrap().contains(excerpt));
+            assert!(!quote["embeddedText"].as_str().unwrap().contains("<msg"));
+        }
+    }
 
     #[test]
     fn location_sharing_notice_exposes_only_the_supplied_title() {

@@ -40,6 +40,127 @@ fn escape(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+// A quote copies an owned descriptor; it does not require a supported/downloadable
+// source URL. Keep alternative/expired representations available for references.
+fn sticker_identity(content: &str, shared: bool) -> Option<()> {
+    if content.to_ascii_uppercase().contains("<!DOCTYPE")
+        || content.to_ascii_uppercase().contains("<!ENTITY")
+    {
+        return None;
+    }
+    let doc = roxmltree::Document::parse_with_options(
+        content,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 4096,
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "msg"
+        || root.tag_name().namespace().is_some()
+        || doc
+            .descendants()
+            .any(|n| n.ancestors().take(34).count() > 32)
+    {
+        return None;
+    }
+    let md5 = if shared {
+        let app = crate::quotes::child(root, "appmsg")?;
+        let attach = crate::quotes::child(app, "appattach")?;
+        crate::quotes::leaf(crate::quotes::child(attach, "emoticonmd5")?)?
+    } else {
+        crate::quotes::child(root, "emoji")?
+            .attribute("md5")?
+            .to_owned()
+    };
+    (md5.len() == 32 && md5.bytes().all(|b| b.is_ascii_hexdigit())).then_some(())
+}
+
+fn forwarded_reference_content(content: &str) -> Result<String> {
+    fn parse(value: &str) -> Result<roxmltree::Document<'_>> {
+        ensure!(
+            value.len() <= 128 * 1024
+                && !value.to_ascii_uppercase().contains("<!DOCTYPE")
+                && !value.to_ascii_uppercase().contains("<!ENTITY"),
+            "quote_content_unavailable"
+        );
+        let doc = roxmltree::Document::parse_with_options(
+            value,
+            roxmltree::ParsingOptions {
+                allow_dtd: false,
+                nodes_limit: 4096,
+                ..Default::default()
+            },
+        )
+        .context("quote_content_unavailable")?;
+        ensure!(
+            doc.descendants()
+                .all(|n| n.ancestors().take(34).count() <= 32),
+            "quote_content_unavailable"
+        );
+        Ok(doc)
+    }
+    fn field(node: roxmltree::Node<'_, '_>, name: &str) -> Result<String> {
+        let nodes: Vec<_> = node
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == name)
+            .collect();
+        if nodes.is_empty() {
+            return Ok(String::new());
+        }
+        ensure!(
+            nodes.len() == 1 && nodes[0].tag_name().namespace().is_none(),
+            "quote_content_unavailable"
+        );
+        let value = crate::quotes::leaf(nodes[0]).context("quote_content_unavailable")?;
+        ensure!(
+            value.len() <= 16384 && !value.contains('\0'),
+            "quote_content_unavailable"
+        );
+        Ok(value)
+    }
+    let doc = parse(content)?;
+    let app =
+        crate::quotes::child(doc.root_element(), "appmsg").context("quote_content_unavailable")?;
+    let title = field(app, "title")?;
+    let description = field(app, "des")?;
+    let record = crate::quotes::child(app, "recorditem").context("quote_content_unavailable")?;
+    let embedded;
+    let embedded_doc;
+    let record = if let Some(node) = crate::quotes::child(record, "recordinfo") {
+        node
+    } else {
+        embedded = crate::quotes::leaf(record).context("quote_content_unavailable")?;
+        embedded_doc = parse(&embedded)?;
+        embedded_doc.root_element()
+    };
+    ensure!(
+        record.tag_name().name() == "recordinfo"
+            && record.tag_name().namespace().is_none()
+            && crate::quotes::child(record, "datalist").is_some(),
+        "quote_content_unavailable"
+    );
+    let record_title = field(record, "title")?;
+    let record_description = field(record, "desc")?;
+    ensure!(
+        !title.trim().is_empty()
+            || !record_title.trim().is_empty()
+            || !description.trim().is_empty()
+            || !record_description.trim().is_empty(),
+        "quote_content_unavailable"
+    );
+    let mut summary = String::from("<recordinfo><fromscene>0</fromscene><favcreatetime>0</favcreatetime><isChatRoom>0</isChatRoom>");
+    for (name, value) in [("title", record_title), ("desc", record_description)] {
+        if !value.is_empty() {
+            summary.push_str(&format!("<{name}>{}</{name}>", escape(&value)));
+        }
+    }
+    summary.push_str("<datalist count=\"0\"/></recordinfo>");
+    Ok(format!("<msg><appmsg><title>{}</title><des>{}</des><type>19</type><recorditem>{}</recorditem></appmsg></msg>", escape(&title), escape(&description), escape(&summary)))
+}
 fn source_content(message: &Message) -> Result<String> {
     let content = message
         .content
@@ -76,6 +197,7 @@ fn source_content(message: &Message) -> Result<String> {
     if message.message_type == 49 {
         let app = crate::quotes::message_app(message).context("unsupported_quote_type")?;
         match app.subtype {
+            19 => return forwarded_reference_content(content),
             1 | 87 => {
                 ensure!(
                     app.text
@@ -89,7 +211,16 @@ fn source_content(message: &Message) -> Result<String> {
                 ensure!(app.link.is_some(), "quote_content_unavailable");
                 return Ok(raw_content.into());
             }
-            5 | 6 => return Ok(raw_content.into()),
+            3..=6 => return Ok(raw_content.into()),
+            8 => {
+                sticker_identity(content, true).context("quote_content_unavailable")?;
+                return Ok(if message.outgoing == Some(true) {
+                    raw_content
+                } else {
+                    content
+                }
+                .into());
+            }
             57 => {
                 let title = app.title.context("quote_content_unavailable")?;
                 // The official content adapter retains the immediate quoted
@@ -101,6 +232,31 @@ fn source_content(message: &Message) -> Result<String> {
             }
             _ => bail!("unsupported_quote_type"),
         }
+    }
+    if message.message_type == 47 {
+        sticker_identity(content, false).context("quote_content_unavailable")?;
+        return Ok(if message.outgoing == Some(true) {
+            raw_content
+        } else {
+            content
+        }
+        .into());
+    }
+    if message.message_type == 42 {
+        crate::quotes::contact_card_text(content).context("quote_content_unavailable")?;
+        return Ok(if message.outgoing == Some(true) {
+            raw_content
+        } else {
+            content
+        }
+        .into());
+    }
+    if message.message_type == 48 {
+        ensure!(
+            crate::locations::parse(content).is_some(),
+            "quote_content_unavailable"
+        );
+        return Ok(raw_content.into());
     }
     let expected = match message.message_type {
         3 => "img",
@@ -281,6 +437,9 @@ mod tests {
             (3, 0, "<msg><img aeskey='synthetic-key'/></msg>"),
             (34, 0, "<msg><voicemsg voiceformat='4'/></msg>"),
             (43, 0, "<msg><videomsg playlength='3'/></msg>"),
+            (48, 0, "<msg><location x='12.5' y='-45.25' label='Example park'/></msg>"),
+            (49, 3, "<msg><appmsg><type>3</type><title>Music</title></appmsg></msg>"),
+            (49, 4, "<msg><appmsg><type>4</type><title>Shared video</title></appmsg></msg>"),
             (
                 49,
                 1,
@@ -329,9 +488,30 @@ mod tests {
         assert!(
             !pruned.contains("refermsg") && !pruned.contains("999") && !pruned.contains("Older")
         );
+        for (kind, subtype, content) in [
+            (42, 0, "<msg username='contact_user' nickname='Shared &amp; contact' unknown='preserved'/>"),
+            (47, 0, "<msg><emoji md5='0123456789abcdef0123456789abcdef' expiretime='1' encrypturl='https://example.invalid/alternate'/></msg>"),
+            (49, 8, "<msg><appmsg><type>8</type><title>Shared sticker</title><appattach><emoticonmd5>0123456789abcdef0123456789abcdef</emoticonmd5><unknown>preserved</unknown></appattach></appmsg></msg>"),
+        ] {
+            let prefixed = format!("sender:\n{content}");
+            assert_eq!(source_content(&message(kind, subtype, &prefixed)).unwrap(), content);
+            let mut own = message(kind, subtype, &prefixed);
+            own.outgoing = Some(true);
+            assert_eq!(source_content(&own).unwrap(), prefixed);
+            let mut direct = message(kind, subtype, content);
+            direct.peer = Some("sender".into());
+            assert_eq!(source_content(&direct).unwrap(), content);
+        }
         for (kind, subtype, body) in [
             (10002, 0, "system"),
             (47, 0, "<msg><emoji/></msg>"),
+            (42, 0, "<msg nickname='Missing identity'/>"),
+            (42, 0, "<msg username='contact_user'><appmsg><type>5</type></appmsg></msg>"),
+            (47, 0, "<msg><emoji md5='0123456789abcdef0123456789abcdef'/><emoji md5='0123456789abcdef0123456789abcdef'/></msg>"),
+            (49, 8, "<msg><appmsg><type>8</type><appattach><emoticonmd5>bad</emoticonmd5></appattach></appmsg></msg>"),
+            (48, 0, "<msg><location x='91' y='0'/></msg>"),
+            (48, 0, "<msg><location x='0' y='0'/><location x='1' y='1'/></msg>"),
+            (49, 135, "<msg><appmsg><type>135</type><title>Special adapter required</title></appmsg></msg>"),
             (49, 19, "<msg><appmsg><type>19</type></appmsg></msg>"),
             (
                 49,
@@ -374,5 +554,50 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn forwarded_references_copy_only_the_immediate_summary_into_a_fresh_carrier() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/synthetic-forwarded-quote.json"
+        ))
+        .unwrap();
+        let content = fixture["source"].as_str().unwrap();
+        for selected in [
+            message(49, 19, content),
+            message(49, 19, &format!("sender:\n{content}")),
+        ] {
+            let pruned = source_content(&selected).unwrap();
+            assert_eq!(pruned, fixture["expected"]);
+            assert!(!pruned.contains("Private") && !pruned.contains("Nested"));
+            let app = crate::quotes::app_message(&pruned).unwrap();
+            assert_eq!(app.subtype, 19);
+            assert_eq!(app.title.as_deref(), Some("Forwarded & bundle"));
+        }
+        let no_outer_title = content.replace("Forwarded &amp; bundle", "");
+        let pruned = source_content(&message(49, 19, &no_outer_title)).unwrap();
+        let app = crate::quotes::app_message(&pruned).unwrap();
+        assert_eq!(
+            app.text.as_deref(),
+            Some("Summary & title\nSummary description")
+        );
+        assert!(!app.text.as_deref().unwrap().contains("Nested"));
+        let parent = crate::quotes::app_message(&format!("<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>49</type><svrid>123</svrid><content>{}</content></refermsg></appmsg></msg>", escape(&pruned))).unwrap();
+        let embedded = crate::quotes::embedded_quote(&parent, None).unwrap();
+        assert_eq!(embedded["state"], "embedded");
+        assert_eq!(
+            embedded["embeddedText"],
+            "Summary & title\nSummary description"
+        );
+        for invalid in [
+            content.replace("<recorditem>", "<recorditem/><recorditem>"),
+            content.replace("Summary description", "<nested/>"),
+            content.replace("&lt;recordinfo&gt;", "&lt;recordinfo xmlns='foreign'&gt;"),
+            content
+                .replace("&lt;datalist count='1'&gt;", "&lt;not-datalist&gt;")
+                .replace("&lt;/datalist&gt;", "&lt;/not-datalist&gt;"),
+        ] {
+            assert!(source_content(&message(49, 19, &invalid)).is_err());
+        }
     }
 }
