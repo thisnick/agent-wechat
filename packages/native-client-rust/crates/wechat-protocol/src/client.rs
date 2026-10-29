@@ -462,6 +462,12 @@ impl Default for NativeOptions {
         }
     }
 }
+/// Blocking client for supported WeChat server operations.
+///
+/// Construct with [`Self::new`], obtain an [`AccountState`] through approved login,
+/// then use methods such as [`Self::send_text`] or [`Self::sync`]. The state is
+/// passed mutably because authenticated responses can update credentials/routing.
+/// This client does not own a daemon, profile, send queue or recovery journal.
 pub struct NativeClient {
     options: NativeOptions,
 }
@@ -499,6 +505,7 @@ pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
     })
 }
 impl NativeClient {
+    /// Validate transport options. Construction itself makes no network request.
     pub fn new(options: NativeOptions) -> Result<Self> {
         mmtls::validate_host(&options.long_host)?;
         mmtls::validate_host(&options.short_host)?;
@@ -558,6 +565,9 @@ impl NativeClient {
         let plain = prepared.decrypt_reply(&envelope.payload)?;
         Ok((plain, envelope.cookie, profile.version))
     }
+    /// Request one QR challenge for the supplied device. Display
+    /// [`LoginAttempt::qr_png`] privately, poll for phone approval, then call
+    /// [`Self::complete_login`]. This does not grant authorization by itself.
     pub fn start_qr_login(
         &self,
         device: DeviceProfile,
@@ -712,6 +722,8 @@ impl NativeClient {
             lan_challenge: None,
         })
     }
+    /// Poll an existing challenge. Only [`LoginStatus::Approved`] permits
+    /// [`Self::complete_login`]; expired/rejected/cancelled attempts must stop.
     pub fn poll_login(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
         self.poll_login_guarded(
             attempt,
@@ -801,6 +813,8 @@ impl NativeClient {
         }
         Ok(challenge)
     }
+    /// Exchange an approved challenge for secret account credentials once.
+    /// Keep the returned state in memory or an encrypted application vault.
     pub fn complete_login(&self, attempt: &mut LoginAttempt) -> Result<AccountState> {
         attempt.stop_lan_login();
         attempt.validate()?;
@@ -928,6 +942,10 @@ impl NativeClient {
         }
         Ok(plain)
     }
+    /// Fetch one scene-6 sync page. An empty cursor starts an initial sync.
+    /// Returned commands include their original payloads. Persist and handle all
+    /// required commands before committing the returned cursor; this call does
+    /// not write history or manage a checkpoint for the application.
     pub fn sync(&self, state: &mut AccountState, cursor: &[u8]) -> Result<SyncBatch> {
         self.sync_scene(state, cursor, 6)
     }
@@ -945,6 +963,8 @@ impl NativeClient {
             cursor,
         )
     }
+    /// Request heartbeat hints for a committed sync cursor. Hints are not message
+    /// contents; the application still needs to fetch and handle sync commands.
     pub fn heartbeat(&self, state: &mut AccountState, cursor: &[u8]) -> Result<Heartbeat> {
         let request = wire::heartbeat_request(state, cursor)?;
         wire::decode_heartbeat(&self.authenticated_rpc(
@@ -956,6 +976,12 @@ impl NativeClient {
     }
     /// Submit exactly once. An I/O error after submission is an uncertain outcome;
     /// services must persist the intent and must not automatically retry this call.
+    ///
+    /// `destination` is an exact WeChat username, not a display name or daemon
+    /// account ID. `created_at` is Unix seconds; `client_message_id` is a nonzero
+    /// protocol ID derived with [`wire::client_message_id`] from the caller's task
+    /// ID. Check acceptance and both returned-identity matches in the receipt.
+    /// No official-profile history is written by this method.
     pub fn send_text(
         &self,
         state: &mut AccountState,
@@ -973,6 +999,8 @@ impl NativeClient {
             None,
         )
     }
+    /// Submit text with optional native message-source XML. For a simple send use
+    /// [`Self::send_text`]. This has the same single-submission/uncertainty contract.
     pub fn send_text_with_source(
         &self,
         state: &mut AccountState,
@@ -995,6 +1023,8 @@ impl NativeClient {
             client_message_id,
         )
     }
+    /// Look up exact usernames on the server. The returned records are not
+    /// automatically written into a local profile.
     pub fn lookup_contacts(
         &self,
         state: &mut AccountState,

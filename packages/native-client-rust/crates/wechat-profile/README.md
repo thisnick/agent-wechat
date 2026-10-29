@@ -1,4 +1,31 @@
-# Offline official-profile library
+# Official-profile storage library
+
+Read and update supported official profile files. Start with `ProfileReader`
+for queries; checked writers serve applications that exclusively own the profile.
+The format adapter preserves supported WeChat storage behavior. The embedding
+application owns network operations, account policy and crash recovery.
+
+`stage_*` prepares bytes without changing files. Both `apply_*` and `publish_*`
+perform writes: the former usually names a logical record update, while the
+latter usually installs bytes at local paths. These names do not define different
+transaction levels. For example, `publish_saved_key_info` can update a database
+and a legacy file. An MMKV update stages new encrypted data and matching CRC
+metadata in memory, then publishes those bytes into the existing profile paths.
+No server upload is implied.
+
+New profile mutations use `apply_*`. Existing `publish_*` APIs retain their names
+for compatibility.
+
+The existing public API also exposes coordination hooks such as
+`WriteOptions::durable_intent_id`. This is a reference to the caller's previously
+saved recovery record; the library checks the supplied reference, but cannot
+prove the record exists or another process stopped. Those hooks do not add a
+new official profile format or supply the daemon's recovery journal.
+
+See the [Rust profile guide](https://thisnick.github.io/agent-wechat/reference/rust-profile/)
+for the API boundary and write-phase terminology.
+
+## Read a stopped profile
 
 `wechat-profile` reads an explicitly selected stopped Linux account profile. It
 runs without an official executable, agent-server, network connection or native

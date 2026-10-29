@@ -5,6 +5,39 @@
 //! while serializing profile operations. This crate neither launches WeChat nor connects
 //! to the network or acquires keys from a process. Checked write functions require
 //! explicit ownership and a durable caller intent.
+//!
+//! # API guide
+//!
+//! Start with [`ProfileReader`] for history, contacts, groups and local media.
+//! [`ReadOptions`] requires a stopped writer or a consistent copy. The library
+//! understands supported official file layouts; it supplies no account daemon,
+//! network requests or alternative settled-state database.
+//!
+//! Advanced writers use the following naming conventions. These are names for
+//! this adapter's operations, not official-client API names.
+//!
+//! | Prefix | Effect | Example |
+//! | --- | --- | --- |
+//! | `stage_*` | Prepare validated bytes in memory without changing files | [`stage_mmkv_values`] |
+//! | `apply_*` | Usually a logical update to supported profile records | [`apply_message_projection`] |
+//! | `publish_*` | Usually installation of prepared bytes at local paths | [`publish_mmkv_append`], [`publish_cache_file`] |
+//!
+//! Both `apply_*` and `publish_*` perform writes. Their names are descriptive,
+//! not separate transaction levels: [`publish_saved_key_info`] can change both a
+//! database and a file, and media apply operations can also install cache files.
+//! New profile mutations use `apply_*`; existing `publish_*` names are retained
+//! for compatibility. `stage_*` remains the convention for preparing a change
+//! without writing to the profile.
+//! "Prepared" means bytes already constructed and checked, such as the encrypted
+//! data and CRC metadata returned by [`stage_mmkv_values`]. It does not mean an
+//! additional profile or a network publication.
+//!
+//! A SQLite transaction or an atomic file replacement does not make a change
+//! across several databases/files atomic. The caller owns exclusive access and
+//! recovery ordering. [`WriteOptions::durable_intent_id`] references a recovery
+//! record the caller has already saved; the crate neither creates that record nor
+//! proves its existence. Unrecognized layouts remain unsupported for writes.
+// API naming policy for future changes is recorded in this crate's AGENTS.md.
 mod dat;
 mod images;
 mod initialize;

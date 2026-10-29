@@ -94,6 +94,8 @@ export default defineConfig({
           { label: 'Configuration', slug: 'reference/configuration' },
           { label: 'API tokens', slug: 'reference/tokens' },
           { label: 'Rust libraries', slug: 'reference/rust-libraries' },
+          { label: 'Rust protocol client', slug: 'reference/rust-protocol' },
+          { label: 'Rust profile storage', slug: 'reference/rust-profile' },
           { label: 'Troubleshooting', slug: 'reference/troubleshooting' },
           { label: 'Build from source', slug: 'reference/build' },
         ] },

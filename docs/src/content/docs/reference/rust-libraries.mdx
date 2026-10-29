@@ -23,26 +23,20 @@ event delivery and OpenClaw behavior stay in separate, unpublished crates.
 ## Add dependencies
 
 1. Choose a published version from [wechat-protocol](https://crates.io/crates/wechat-protocol)
-   or [wechat-profile](https://crates.io/crates/wechat-profile). Crate publication
-   starts with the next release containing this feature; the existing binary
-   release does not imply that its crates are available.
+   or [wechat-profile](https://crates.io/crates/wechat-profile). The first registry
+   release is `1.3.0`.
 
-2. Replace `VERSION` with that version, including any beta suffix:
+2. Add the libraries at that version:
 
    ```bash
-   cargo add wechat-protocol@=VERSION wechat-profile@=VERSION
+   cargo add wechat-protocol@=1.3.0 wechat-profile@=1.3.0
    ```
 
    Cargo adds the two dependencies and resolves their supporting crates. All
    four follow the native release version. Select beta versions explicitly.
 
-3. Until the first registry publication, use the existing source release:
-
-   ```toml
-   [dependencies]
-   wechat-protocol = { git = "https://github.com/thisnick/agent-wechat", tag = "v1.3.0-beta.0" }
-   wechat-profile = { git = "https://github.com/thisnick/agent-wechat", tag = "v1.3.0-beta.0" }
-   ```
+3. Follow [the protocol guide](/reference/rust-protocol/) for login, sending and
+   sync, or [the profile guide](/reference/rust-profile/) for local reads and writes.
 
 Building needs Rust 1.93.1+, a C compiler, Make and Perl for the bundled native
 dependencies. Some image decoding paths also need FFmpeg at runtime.
@@ -79,7 +73,7 @@ block, so async applications must call them on a blocking worker. The library
 does not supply the daemon's send queue, idempotency records or recovery policy;
 an embedding application owns those responsibilities.
 
-API details are available through `cargo doc --open` and, after publication,
+API details are available through `cargo doc --open`,
 [protocol API docs](https://docs.rs/wechat-protocol) and
 [profile API docs](https://docs.rs/wechat-profile).
 The source tree also has compiled

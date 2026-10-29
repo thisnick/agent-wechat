@@ -4,6 +4,51 @@ Blocking native protocol library for the Linux 4.1.13.26 profile. This is Rust
 protocol code using OpenSSL primitives; it does not execute Node or load an
 official WeChat executable/library. Async callers must use a blocking worker.
 
+## Start with NativeClient
+
+Most server operations are methods on
+[`NativeClient`](https://docs.rs/wechat-protocol/latest/wechat_protocol/struct.NativeClient.html).
+The crate-level Functions list mainly contains helper functions.
+
+| Task | API |
+| --- | --- |
+| Login | `start_qr_login`, `poll_login`, `complete_login` |
+| Receive | `sync`, `sync_scene`, `heartbeat`, `push_connection` |
+| Send | `send_text`, `send_share`, `send_quote`, `send_file`, `send_image`, `send_video`, `send_voice` |
+| Contacts | `lookup_contacts`, `lookup_room`, `init_contacts` |
+| Lower-level operations | `wire`, `media`, group request builders and response decoders |
+
+`AccountState` holds the accepted credentials and is passed mutably because
+responses can update credentials and routing. The daemon's native upstream
+adapter calls these APIs; it adds account coordination, recovery and profile
+writeback above them. Some operations use a request builder, a client RPC method
+and a decoder instead of one convenience method.
+
+From a repository checkout, run one of these examples:
+
+```bash
+cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example qr_login
+cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example send_text -- RECIPIENT UNIQUE_TASK_ID "Hello from the Rust example"
+cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example sync_once
+```
+
+Each requests a fresh QR login for a test account, prints a private temporary
+PNG path to open and waits for phone approval. The QR is removed after login;
+credentials stay in memory. `send_text` submits once and prints the receipt;
+`sync_once` summarizes one page without saving history or a cursor. These are
+standalone examples, not consumers of an existing daemon session. A fresh login
+may replace another active desktop login. `--help` makes no network requests.
+
+The sender requires an exact username rather than a contact's display name.
+A task ID is not a server idempotency guarantee: investigate an uncertain send
+before running it again. Production applications must save the operation and
+its timestamp before submitting and keep secret account state encrypted.
+
+See the [Rust protocol guide](https://thisnick.github.io/agent-wechat/reference/rust-protocol/)
+for a short text-send example using an already authenticated account.
+
+## Transport and supported operations
+
 The transport authenticates the configured public server pins, handshake
 Finished values, every GCM record, business signatures (credential 1), and
 business GCM envelopes before decoding service messages. No insecure peer or
