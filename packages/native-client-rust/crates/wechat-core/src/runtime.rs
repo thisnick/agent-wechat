@@ -2823,7 +2823,9 @@ mod tests {
             }
         }
         let (_temp, mut core) = super::groups::tests::fixture();
-        Arc::get_mut(&mut core).unwrap().upstream = Arc::new(NoSend);
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(NoSend);
         super::groups::tests::make_group(&core);
         core.stopping.store(true, Ordering::SeqCst);
         core.store
