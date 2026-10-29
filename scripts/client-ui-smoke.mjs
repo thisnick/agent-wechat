@@ -40,6 +40,17 @@ async function wait(label, condition, timeout = 30000) {
   }
   throw new Error(`Timed out: ${label}`, { cause: last });
 }
+async function successfulOperation(label, operation) {
+  const result = await wait(label, async () => {
+    const current = await client.operation(operation.accountId, operation.id);
+    return (
+      ["succeeded", "failed", "cancelled", "needs_review"].includes(current.state) &&
+      current
+    );
+  });
+  assert.equal(result.state, "succeeded", `${label}: ${JSON.stringify(result)}`);
+  return result;
+}
 async function start(command, args = []) {
   const child = spawn(binary, [command, "--data-dir", data, ...args], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -580,6 +591,13 @@ try {
       .length,
     1
   );
+  // Exercise manual history sync independently of the restarted push loop.
+  // Push/replay assertions above and below keep their normal connected account.
+  await client.disconnect("personal");
+  assert.equal(
+    (await client.account("personal")).incomingTransport,
+    "disconnected"
+  );
   await control({ op: "advance", seconds: 1 });
   for (let index = 0; index < 110; index++)
     await control({
@@ -589,12 +607,20 @@ try {
       body: `History pagination fixture ${index}`,
       notify: false,
     });
-  const searchSync = await client.sync("personal");
-  await wait(
-    "search history synchronized",
-    async () =>
-      (await client.operation("personal", searchSync.id)).state === "succeeded"
-  );
+  let historyDrained = false;
+  // Manual sync exposes continuation pages; the fixture must drain them itself.
+  for (let page = 0; page < 8; page++) {
+    const synced = await successfulOperation(
+      `search history page ${page + 1} synchronized`,
+      await client.sync("personal")
+    );
+    assert.equal(typeof synced.result.continuation, "boolean");
+    if (!synced.result.continuation) {
+      historyDrained = true;
+      break;
+    }
+  }
+  assert.ok(historyDrained, "search fixture history drained within eight pages");
   await wait(
     "all search fixtures committed",
     async () =>
@@ -621,6 +647,13 @@ try {
   while (historySearch.snapshot().nextCursor) await historySearch.more();
   assert.equal(historySearch.snapshot().items.length, 110);
   historySearch.close();
+  await successfulOperation(
+    "search fixture account reconnected",
+    await client.connect("personal")
+  );
+  await wait("search fixture push resumed", async () =>
+    (await client.account("personal")).incomingTransport === "simulator_push"
+  );
   await client.createAccount("login-resume");
   let savedLogin = null;
   const loginStorage = {
