@@ -32,7 +32,7 @@ jobs:
       - name: Install diagnostic test tools
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends python3 ripgrep
+          apt-get install --yes --no-install-recommends python3 ripgrep ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
