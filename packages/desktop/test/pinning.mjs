@@ -64,7 +64,7 @@ export async function pinningAcceptance({
     histories = [],
     reads = [];
   const sentTexts = [];
-  const uploadedFiles = [], sentMedia = [];
+  const uploadedFiles = [], sentMedia = [], sendRequests = [];
   const memberQueries = [];
   const textIntents = new Map();
   let queueNextText = false, textCancellations = 0;
@@ -162,10 +162,12 @@ export async function pinningAcceptance({
       for await (const chunk of req) body += chunk;
       const input = JSON.parse(body);
       if (input.sourceId) {
+        sendRequests.push(input);
         sentMedia.push(input);
         return json({ id: `media-${sentMedia.length}`, accountId: account, kind: "send", state: "accepted", phase: "completed", result: {} });
       }
       sentTexts.push(input);
+      sendRequests.push(input);
       if (queueNextText) {
         queueNextText = false;
         const intent = {
@@ -816,7 +818,7 @@ export async function pinningAcceptance({
       cancelledSends: () => textCancellations,
     });
     await mentionsAcceptance({ script, until, key, resize, sentTexts, memberQueries, capture });
-    await attachmentsAcceptance({ script, until, uploadedFiles, sentMedia, capture });
+    await attachmentsAcceptance({ script, until, uploadedFiles, sentMedia, sentTexts, sendRequests, queueNextSend: () => { queueNextText = true; }, capture });
     console.log(
       "Pinning interface: unread badges, hover actions/info, direct pin/mute, shared details, keyboard/context/touch access, optimistic pins, server order, unknown state, pending projection, rejection, reload recovery, phone updates, stable focus/drafts/history/unreads/scroll passed",
     );

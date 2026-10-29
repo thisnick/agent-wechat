@@ -1552,7 +1552,7 @@ function Chats({
                         />
                       )}
                       <AttachmentTray draft={attachments}
-                        remove={id => connection.attachmentDrafts.remove(state.account!, state.selected!, id)}
+                        remove={id => { connection.attachmentDrafts.remove(state.account!, state.selected!, id); focusMessage(); }}
                         quality={original => connection.attachmentDrafts.quality(state.account!, state.selected!, original ? "original" : "normal")} />
                       {attachmentSendError?.target === draftKey && <p className="attachment-error" role="alert">{attachmentSendError.message}</p>}
                       {attachments.files.length > 0 && reply && !draft.trim() && <p className="field-help">Write text for the quoted reply. Files send as separate messages.</p>}
