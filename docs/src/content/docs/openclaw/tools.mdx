@@ -18,6 +18,14 @@ Besides replying, the agent gets tools for the **current chat**. They can't see 
 
 For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
 
+## Choose a message destination
+
+For OpenClaw's built-in `message` tool, use the contact or chat ID returned by
+`wx contacts find NAME` or `wx chats find NAME` as `target`. Both `wechat:ID` and
+`agent-wechat:ID` are accepted. Contact IDs without a `wxid_` prefix are supported
+when the daemon has that exact contact or direct conversation. Nicknames and
+changeable WeChat aliases are not destination IDs.
+
 ## Quote a message
 
 Use OpenClaw's built-in `message` tool with `replyTo` set to the stored message's

@@ -51,7 +51,7 @@ You need a daemon that is running and logged in. If you haven't set one up, see 
    }
    ```
 
-   IDs look like `wxid_…`. Find a friend's with `wx contacts find NAME`, and a group's (ending in `@chatroom`) with `wx chats find NAME`. Your own ID is the `senderId` on any message you sent, for example in `wx messages list filehelper --limit 1`.
+   Find a friend's ID with `wx contacts find NAME`, and a group's (ending in `@chatroom`) with `wx chats find NAME`. Contact IDs often start with `wxid_`, but some do not. Use the returned ID rather than a nickname or changeable WeChat alias. Your own ID is the `senderId` on any message you sent, for example in `wx messages list filehelper --limit 1`.
 
 4. **Give the Gateway the token** by setting `AGENT_WECHAT_TOKEN` in its environment, then restart the Gateway.
 

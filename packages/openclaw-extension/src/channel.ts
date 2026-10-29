@@ -15,6 +15,7 @@ import { ensureNativeHost } from "./native-host.ts";
 import { startNativeMonitor } from "./native-monitor.ts";
 import { nativeLoginStart, nativeLoginWait } from "./native-login.ts";
 import { createWeChatDurableFinal } from "./native-outbound-recovery.ts";
+import { createWeChatMessagingAdapter } from "./native-target.ts";
 
 const mediaHandlers = createWeChatMediaHandlers();
 const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
@@ -166,16 +167,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   },
 
   // ---- Messaging adapter ----
-  messaging: {
-    normalizeTarget: (raw) => raw.replace(/^(agent-)?wechat:/i, "").trim() || undefined,
-    targetResolver: {
-      looksLikeId: (raw) => {
-        const stripped = raw.replace(/^(agent-)?wechat:/i, "").trim();
-        return stripped.includes("@chatroom") || stripped.startsWith("wxid_");
-      },
-      hint: "WeChat ID (wxid_xxx or xxx@chatroom)",
-    },
-  },
+  messaging: createWeChatMessagingAdapter(),
 
   // ---- Outbound adapter for OpenClaw hosts using the outbound hook ----
   outbound: {
