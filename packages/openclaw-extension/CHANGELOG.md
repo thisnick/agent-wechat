@@ -1,5 +1,30 @@
 # @agent-wechat/wechat
 
+## 1.3.0
+
+### Minor Changes
+
+- [#328](https://github.com/thisnick/agent-wechat/pull/328) [`28f8ea8`](https://github.com/thisnick/agent-wechat/commit/28f8ea85f08d2811b162dc84b228a3ab6c25f690) Thanks [@thisnick](https://github.com/thisnick)! - Receive and read static location pins from profile history as structured coordinates, place names and addresses, with a readable text body. Location cards provide a place search near the shared coordinates, a direct Google Maps pin and coordinate copying, without converting coordinates. Preserve the supplied map type and leave the coordinate system unknown. Show location-sharing notices (application subtype 17) as supplied text without joining live tracking. OpenClaw applies its existing sender, mention and recall rules. Retained static pins can recover into ordinary profile history; live-tracking controls remain separate and unsupported. Location thumbnails and official preview-cache compatibility are not implemented.
+
+- [#340](https://github.com/thisnick/agent-wechat/pull/340) [`5aef80e`](https://github.com/thisnick/agent-wechat/commit/5aef80ef4c3b43ac655ff7c4900690b87dafeff6) Thanks [@thisnick](https://github.com/thisnick)! - Publish the Rust protocol and official-profile libraries, with their media and
+  platform dependencies, as part of the native release. Add Rust library reference
+  documentation, standalone package validation and checks for aligned dependency
+  versions and safe publication recovery.
+
+### Patch Changes
+
+- [#332](https://github.com/thisnick/agent-wechat/pull/332) [`a064296`](https://github.com/thisnick/agent-wechat/commit/a064296263ddf11f0c26c30ef40d70f280bccdac) Thanks [@thisnick](https://github.com/thisnick)! - Restrict group-wide mentions to the group owner and administrators. Refresh the administrator list from WeChat into the official profile and expose administrator IDs and mention eligibility through group info. Check permission before queuing and submitting a new message, while retaining existing send receipts and idempotency.
+
+  Show Everyone in the composer when the server permits it, preserve drafts after permission changes, and retain the existing behavior with older servers that omit the permission field.
+
+- [`7527cfc`](https://github.com/thisnick/agent-wechat/commit/7527cfc455be74b258cba34f75f38523b59ba1c7) Thanks [@thisnick](https://github.com/thisnick)! - Declare the project MIT license in package metadata and include its text with npm packages, native release notices, desktop resources, and the native container. Preserve all existing third-party license notices.
+
+- [#335](https://github.com/thisnick/agent-wechat/pull/335) [`e43e174`](https://github.com/thisnick/agent-wechat/commit/e43e1745f8beda37d560cb71eb2a8cdc46508c7a) Thanks [@thisnick](https://github.com/thisnick)! - Resolve OpenClaw message targets for native WeChat contacts whose IDs do not start with `wxid_`. Validate exact contact or direct-conversation identities and prevent display names or mutable aliases from redirecting sends.
+
+- [#328](https://github.com/thisnick/agent-wechat/pull/328) [`28f8ea8`](https://github.com/thisnick/agent-wechat/commit/28f8ea85f08d2811b162dc84b228a3ab6c25f690) Thanks [@thisnick](https://github.com/thisnick)! - Show plain system notices, including location-sharing end notices, with their supplied text and without attributing the transport peer as their author. Desktop and web clients display them as centered notices without an avatar or sender name. Recall messages retain their separate author-evidence handling, and raw system XML is not exposed as message text.
+
+- [#328](https://github.com/thisnick/agent-wechat/pull/328) [`28f8ea8`](https://github.com/thisnick/agent-wechat/commit/28f8ea85f08d2811b162dc84b228a3ab6c25f690) Thanks [@thisnick](https://github.com/thisnick)! - Correct the cancellation and codec-format fields in outgoing voice uploads so SILK notes declare format 4 in the transmitted request, including continuation and final ranges.
+
 ## 1.3.0-beta.1
 
 ## 1.3.0-beta.0
