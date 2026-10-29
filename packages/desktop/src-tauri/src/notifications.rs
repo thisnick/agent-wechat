@@ -155,7 +155,8 @@ fn preview(message: &Value) -> Option<String> {
         _ => return None,
     };
     Some(
-        text.split_whitespace()
+        crate::emoji::emoji_text(&text)
+            .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
             .chars()
@@ -775,6 +776,24 @@ mod tests {
             &target,
             false
         ));
+    }
+    #[test]
+    fn face_aliases_are_displayed_before_notification_truncation() {
+        for (kind, subtype) in [(1, Value::Null), (49, json!(57))] {
+            let raw = "[Smile]".repeat(181);
+            let message = json!({
+                "type": kind, "appMessageType": subtype,
+                "body": raw, "direction": "incoming"
+            });
+            assert_eq!(preview(&message), Some("🙂".repeat(180)));
+            assert_eq!(message["body"], raw);
+        }
+        assert_eq!(
+            preview(
+                &json!({"type":1,"body":"Hello [微笑] [future face] ❤️", "direction":"incoming"})
+            ),
+            Some("Hello 🙂 [future face] ❤️".into())
+        );
     }
     #[test]
     fn previews_never_show_protocol_xml_recalled_content_or_outgoing_messages() {

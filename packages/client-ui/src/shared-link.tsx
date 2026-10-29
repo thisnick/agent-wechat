@@ -7,6 +7,7 @@ import { cachedVariant } from "./media-variants.ts";
 import { mediaPreviewIdentity } from "./media-preview-cache.ts";
 import { useVisible } from "./visible.tsx";
 import "./shared-link.css";
+import { emojiText } from "./emoji-text.ts";
 
 export function SharedLink({
   message,
@@ -42,9 +43,9 @@ export function SharedLink({
         <LinkThumbnail asset={thumbnail} connection={connection} />
       </span>
       <span className="shared-link-copy">
-        <strong>{title}</strong>
+        <strong>{emojiText(title)}</strong>
         {!compact && link.description?.trim() && (
-          <span className="shared-link-description">{link.description}</span>
+          <span className="shared-link-description">{emojiText(link.description!)}</span>
         )}
         <span className="shared-link-source">
           <span>

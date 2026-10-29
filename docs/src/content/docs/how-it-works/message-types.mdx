@@ -22,6 +22,15 @@ import { Aside } from '@astrojs/starlight/components';
 | Recalled message | `[Message recalled]` | Removed from pending work |
 | Anything else | Marked unsupported | Not sent to the agent |
 
+## Text emoji
+
+The desktop and web apps display recognized WeChat face aliases, such as
+`[微笑]` and `[Lol]`, as Unicode emoji. Some faces use approximate equivalents;
+their appearance depends on your device. Desktop notifications use the same
+mapping. Unknown aliases and existing Unicode emoji stay unchanged, and URLs
+keep their spelling. Sending, copying, search and API responses retain the
+original message text.
+
 ## Locations
 
 Static pins expose `location.latitude`,

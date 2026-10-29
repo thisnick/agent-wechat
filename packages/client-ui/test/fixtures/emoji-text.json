@@ -1,0 +1,36 @@
+[
+  ["", ""],
+  ["你好[微笑]", "你好🙂"],
+  ["[破涕为笑][Lol][破涕為笑]", "😂😂😂"],
+  ["[微笑] [Smile] /::)", "🙂 🙂 🙂"],
+  ["[捂脸][Facepalm][掩面]", "🤦🤦🤦"],
+  ["谢谢[握手][爱心]", "谢谢🤝❤️"],
+  ["[Happy][笑脸][笑臉]", "😄😄😄"],
+  ["[666][Awesome]", "🆒🆒"],
+  ["[Let Down][失望]", "😞😞"],
+  ["[叹气][Sigh]", "😮‍💨😮‍💨"],
+  ["[让我看看][LetMeSee]", "👀👀"],
+  ["/:|-) /::| /::D", "🥱 😶 😁"],
+  ["a/::)b[Smile]c", "a🙂b🙂c"],
+  [
+    "[哭笑] [unknown] [smile] [SMILE] [Smile ]",
+    "[哭笑] [unknown] [smile] [SMILE] [Smile ]"
+  ],
+  ["[Smile][future face]", "🙂[future face]"],
+  ["[[Smile]] [prefix[Smile]]", "[🙂] [prefix🙂]"],
+  ["[Smi [Smile [微笑", "[Smi [Smile [微笑"],
+  ["😂 ❤️ 👨‍👩‍👧‍👦 👍🏽 🇨🇦 1️⃣", "😂 ❤️ 👨‍👩‍👧‍👦 👍🏽 🇨🇦 1️⃣"],
+  ["𠮷[Smile]é[微笑]\n[Facepalm]", "𠮷🙂é🙂\n🤦"],
+  [
+    "https://example.test/[Smile]?q=[微笑] [Lol]",
+    "https://example.test/[Smile]?q=[微笑] 😂"
+  ],
+  [
+    "http://example.test/::) www.example.test/[Smile]\n[微笑]",
+    "http://example.test/::) www.example.test/[Smile]\n🙂"
+  ],
+  ["<https://example.test/[Smile]>[Smile]", "<https://example.test/[Smile]>🙂"],
+  ["[<script>alert(1)</script>] [微笑]", "[<script>alert(1)</script>] 🙂"],
+  ["-)-) :) /missing", "-)-) :) /missing"],
+  ["[流泪][Sob] [大哭][Cry]", "😢😢 😭😭"]
+]

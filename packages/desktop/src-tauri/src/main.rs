@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod config;
 mod credentials;
+mod emoji;
 mod files;
 mod hub;
 mod notification_sound;

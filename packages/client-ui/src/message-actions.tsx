@@ -14,6 +14,7 @@ import { useMediaViewer } from "./media-viewer-context.ts";
 import { useReply } from "./reply-context.ts";
 import { canReply } from "./reply.ts";
 import { messageSummary } from "./thread-preview.ts";
+import { emojiText } from "./emoji-text.ts";
 import { Button, Icon } from "./ui.tsx";
 
 export function MessageActions({
@@ -222,7 +223,7 @@ function RecallConfirmation({
       <h2 id={heading}>Recall this message?</h2>
       <p id={description}>This can’t be undone.</p>
       <blockquote className="recall-preview">
-        {messageSummary(message, "You").text.slice(0, 240)}
+        {emojiText(messageSummary(message, "You").text).slice(0, 240)}
       </blockquote>
       <div className="recall-confirm-actions">
         <button className="secondary" autoFocus onClick={close}>

@@ -5,6 +5,7 @@ import { embeddedQuotePreview, localQuote } from "./quote-preview.ts";
 import { MediaCard } from "./media.tsx";
 import { SharedLink } from "./shared-link.tsx";
 import { useConversationNavigation } from "./conversation-navigation.tsx";
+import { emojiText } from "./emoji-text.ts";
 
 export function QuotedReply({
   message,
@@ -65,7 +66,7 @@ export function QuotedReply({
           previewOnly
         />
       ) : (
-        <p>{quote.text}</p>
+        <p>{emojiText(quote.text)}</p>
       )}
       {(jumping || jumpFailed) && (
         <small role="status">

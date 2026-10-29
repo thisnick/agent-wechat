@@ -1,6 +1,7 @@
 import { ConversationRow } from "./conversation-row.tsx";
 import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
+import { emojiText } from "./emoji-text.ts";
 import { DesktopUpdates } from "./desktop-updates.tsx";
 import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
 import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
@@ -1878,10 +1879,10 @@ function Pending({
               <strong>
                 {send.quotePreview?.senderName || "Quoted message"}
               </strong>
-              <span>{send.quotePreview?.text || "Reply"}</span>
+              <span>{emojiText(send.quotePreview?.text || "Reply")}</span>
             </div>
           )}
-          <p>{send.text}</p>
+          <p>{emojiText(send.text)}</p>
         </div>
         <div
           className={`delivery ${
@@ -1950,7 +1951,7 @@ function ReplyPreview({
             ? message.recall
               ? "Message recalled"
               : "Message unavailable"
-            : messageSummary(message, sender).text}
+            : emojiText(messageSummary(message, sender).text)}
         </span>
       </button>
       <Button icon="close" label="Cancel reply" onClick={cancel} />
@@ -2030,7 +2031,7 @@ function Message({
                     <a href={textLink.href} target="_blank" rel="noopener noreferrer">
                       {m.body}
                     </a>
-                  ) : m.body || (m.type >= 10000 ? "System message" : "")}
+                  ) : emojiText(m.body || (m.type >= 10000 ? "System message" : ""))}
                 </p>
               </div>
             ) : presentation === "reply" || presentation === "forwarded" ? (
@@ -2048,10 +2049,10 @@ function Message({
                   </div>
                 )}
                 <p>
-                  {m.body ||
+                  {emojiText(m.body ||
                     (presentation === "reply"
                       ? "Reply text is unavailable."
-                      : "Forwarded content is unavailable.")}
+                      : "Forwarded content is unavailable."))}
                 </p>
               </div>
             ) : presentation === "link" && m.link ? (
