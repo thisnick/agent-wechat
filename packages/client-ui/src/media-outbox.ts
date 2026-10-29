@@ -5,7 +5,7 @@ import {
   type VideoSendQuality,
 } from "@agent-wechat/shared";
 import { pause, readableError } from "./session.ts";
-import { COMPOSER_MAX_SOURCE_BYTES } from "./composer-attachments.ts";
+import { validateAttachmentSource } from "./composer-attachments.ts";
 
 export type PendingMedia = {
   key: string;
@@ -100,13 +100,9 @@ export class MediaOutbox {
     videoQuality: VideoSendQuality = "normal",
   ): Promise<void> {
     if (this.controller.signal.aborted) return;
-    if (
-      !file.size ||
-      file.size > COMPOSER_MAX_SOURCE_BYTES
-    )
-      throw new Error("Choose a file smaller than 25 MB.");
     if (!threadId || !["file", "image", "video", "voice"].includes(kind))
       throw new Error("Choose a conversation and attachment type.");
+    validateAttachmentSource(file, kind === "voice" ? "image" : kind as "image" | "video" | "file");
     const key = crypto.randomUUID();
     this.value = [
       ...this.value,
@@ -127,7 +123,7 @@ export class MediaOutbox {
     try {
       const source = await this.client.upload(
         this.account,
-        new Uint8Array(await file.arrayBuffer()),
+        file instanceof Blob ? file : new Uint8Array(await file.arrayBuffer()),
         file.name,
         file.type || "application/octet-stream",
         AbortSignal.any([upload.signal, this.controller.signal]),

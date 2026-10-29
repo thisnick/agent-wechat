@@ -4,9 +4,10 @@ import type { AttachmentDraft } from "./attachment-drafts.ts";
 import { Button, Icon } from "./ui.tsx";
 import {
   bindComposerAttachments,
+  accountAttachmentLimits,
   type ReviewedAttachment,
 } from "./composer-attachments.ts";
-import { readableError } from "./session.ts";
+import { ComposerHelp } from "./composer-help.tsx";
 
 export function AttachmentPicker({
   connection,
@@ -14,6 +15,7 @@ export function AttachmentPicker({
   threadId,
   enabled,
   mediaKinds,
+  capabilities,
   composerRef,
   focusMessage,
 }: {
@@ -22,6 +24,7 @@ export function AttachmentPicker({
   threadId: string | null;
   enabled: boolean;
   mediaKinds: readonly string[];
+  capabilities: Record<string, unknown>;
   composerRef: RefObject<HTMLDivElement | null>;
   focusMessage: () => void;
 }) {
@@ -34,11 +37,21 @@ export function AttachmentPicker({
       return;
     }
     try {
-      connection.attachmentDrafts.add(account, threadId, files, mediaKinds);
+      connection.attachmentDrafts.add(
+        account,
+        threadId,
+        files,
+        mediaKinds,
+        accountAttachmentLimits(capabilities),
+      );
       setError("");
       focusMessage();
     } catch (error) {
-      setError(readableError(error));
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Couldn't select these files. Choose them again.",
+      );
     }
   }
   useEffect(() => {
@@ -47,7 +60,15 @@ export function AttachmentPicker({
       return bindComposerAttachments(root, choose, (value) =>
         setDragging(value && enabled && !!threadId),
       );
-  }, [connection, account, threadId, enabled, mediaKinds, composerRef]);
+  }, [
+    connection,
+    account,
+    threadId,
+    enabled,
+    mediaKinds,
+    capabilities,
+    composerRef,
+  ]);
   useEffect(() => {
     if (!enabled) setDragging(false);
   }, [enabled]);
@@ -102,7 +123,6 @@ export function AttachmentTray({
           {draft.files.length}{" "}
           {draft.files.length === 1 ? "attachment" : "attachments"}
         </span>
-        <small>Each file sends as a separate message.</small>
       </div>
       <ul className="composer-attachment-list">
         {draft.files.map((item) => (
@@ -118,16 +138,20 @@ export function AttachmentTray({
         ))}
       </ul>
       {draft.files.some((item) => item.kind === "video") && (
-        <label className="composer-original-video">
-          <input
-            type="checkbox"
-            checked={draft.videoQuality === "original"}
-            disabled={!!draft.submission}
-            onChange={(event) => quality(event.target.checked)}
-          />
-          Original video{" "}
-          <small>Include the unchanged file alongside playback.</small>
-        </label>
+        <div className="composer-original-video">
+          <label>
+            <input
+              type="checkbox"
+              checked={draft.videoQuality === "original"}
+              disabled={!!draft.submission}
+              onChange={(event) => quality(event.target.checked)}
+            />
+            Original media quality
+          </label>
+          <ComposerHelp label="About original media quality">
+            Include the unchanged video file alongside the playback copy.
+          </ComposerHelp>
+        </div>
       )}
     </section>
   );

@@ -1,26 +1,90 @@
 import {
   NATIVE_MAX_ORDINARY_SOURCE_BYTES,
   NATIVE_MAX_SOURCE_BYTES,
+  NATIVE_MAX_VIDEO_SOURCE_BYTES,
 } from "@agent-wechat/shared";
 
 export type AttachmentKind = "image" | "video" | "file";
-export const COMPOSER_MAX_SOURCE_BYTES = Math.min(
-  NATIVE_MAX_SOURCE_BYTES,
-  NATIVE_MAX_ORDINARY_SOURCE_BYTES
-);
+export const COMPOSER_MAX_SOURCE_BYTES = NATIVE_MAX_SOURCE_BYTES;
 export const MAX_COMPOSER_ATTACHMENTS = 10;
+export type AttachmentLimits = Record<AttachmentKind, number>;
+
+/** Source limits differ from the smaller prepared playback/image variants. */
+export function attachmentSourceLimit(kind: AttachmentKind): number {
+  return kind === "file"
+    ? NATIVE_MAX_SOURCE_BYTES
+    : kind === "video"
+    ? NATIVE_MAX_VIDEO_SOURCE_BYTES
+    : NATIVE_MAX_ORDINARY_SOURCE_BYTES;
+}
+
+/** Older hubs without per-kind limits retain the conservative ordinary limit. */
+export function accountAttachmentLimits(
+  capabilities: Record<string, unknown>,
+): AttachmentLimits {
+  const advertised = capabilities.mediaSendMaxBytes as
+    | Partial<AttachmentLimits>
+    | undefined;
+  const positive = (value: unknown): value is number =>
+    Number.isSafeInteger(value) && Number(value) > 0;
+  return Object.fromEntries(
+    (["image", "video", "file"] as const).map((kind) => {
+      const limit = advertised?.[kind];
+      return [
+        kind,
+        Math.min(
+          attachmentSourceLimit(kind),
+          positive(limit) ? limit : NATIVE_MAX_ORDINARY_SOURCE_BYTES,
+          positive(capabilities.mediaUploadMaxBytes)
+            ? capabilities.mediaUploadMaxBytes
+            : NATIVE_MAX_ORDINARY_SOURCE_BYTES,
+        ),
+      ];
+    }),
+  ) as AttachmentLimits;
+}
+
+export function validateAttachmentSource(
+  file: { name: string; size: number },
+  kind: AttachmentKind,
+  limits?: AttachmentLimits,
+) {
+  if (!Number.isSafeInteger(file.size) || file.size <= 0)
+    throw new Error(`${file.name || "This file"}: choose a nonempty file.`);
+  const limit = Math.min(
+    attachmentSourceLimit(kind),
+    limits?.[kind] ?? attachmentSourceLimit(kind),
+  );
+  if (file.size > limit) {
+    const bound =
+      limit === NATIVE_MAX_ORDINARY_SOURCE_BYTES
+        ? "just under 25 MiB"
+        : limit % (1024 * 1024) === 0
+        ? `${limit / 1024 / 1024} MiB`
+        : `${limit.toLocaleString("en-US")} bytes`;
+    throw new Error(
+      `${
+        file.name || "This file"
+      }: this hub's ${kind} source limit is ${bound}. Choose a smaller file.`,
+    );
+  }
+}
 
 /** Select supported send formats; the hub still validates the actual bytes. */
 export function attachmentKind(
-  file: Pick<File, "name" | "type">
+  file: Pick<File, "name" | "type">,
 ): AttachmentKind {
   const mime = file.type.toLowerCase().split(";", 1)[0].trim();
   if (["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mime))
     return "image";
   if (
-    ["video/mp4", "video/quicktime", "video/3gpp", "video/3gpp2", "video/mj2"].includes(
-      mime
-    )
+    [
+      "video/mp4",
+      "video/quicktime",
+      "video/3gpp",
+      "video/3gpp2",
+      "video/mj2",
+    ].includes(mime)
   )
     return "video";
   if (mime && mime !== "application/octet-stream") return "file";
@@ -35,21 +99,17 @@ export function attachmentKind(
 export type ReviewedAttachment = { file: File; kind: AttachmentKind };
 export function reviewAttachments(
   files: readonly File[],
-  supported: readonly string[]
+  supported: readonly string[],
+  limits?: AttachmentLimits,
 ): ReviewedAttachment[] {
   if (!files.length) throw new Error("Choose a file to attach.");
   if (files.length > MAX_COMPOSER_ATTACHMENTS)
     throw new Error("Choose up to 10 files at a time.");
   return files.map((file) => {
-    if (!file.size || file.size > COMPOSER_MAX_SOURCE_BYTES)
-      throw new Error(
-        `${
-          file.name || "This file"
-        }: choose a nonempty file smaller than 25 MB.`
-      );
     const kind = attachmentKind(file);
     if (!supported.includes(kind))
       throw new Error(`This hub doesn't support ${kind} attachments.`);
+    validateAttachmentSource(file, kind, limits);
     return { file, kind };
   });
 }
@@ -75,7 +135,7 @@ export function transferredFiles(data: DataTransfer): File[] {
 export function bindComposerAttachments(
   root: HTMLElement,
   receive: (files: File[]) => void,
-  hover: (value: boolean) => void
+  hover: (value: boolean) => void,
 ): () => void {
   let depth = 0;
   const capture = { capture: true };

@@ -4,6 +4,7 @@ import {
   MAX_COMPOSER_ATTACHMENTS,
   reviewAttachments,
   type ReviewedAttachment,
+  type AttachmentLimits,
 } from "./composer-attachments.ts";
 
 export type StagedAttachment = ReviewedAttachment & { id: string };
@@ -46,11 +47,12 @@ export class AttachmentDrafts {
     thread: string,
     files: readonly File[],
     supported: readonly string[],
+    limits?: AttachmentLimits,
   ) {
     const draft = this.get(account, thread);
     if (draft.submission)
       throw new Error("Wait for the current message to be queued.");
-    const reviewed = reviewAttachments(files, supported);
+    const reviewed = reviewAttachments(files, supported, limits);
     if (draft.files.length + reviewed.length > MAX_COMPOSER_ATTACHMENTS)
       throw new Error("Stage up to 10 files in one message draft.");
     this.put(account, thread, {

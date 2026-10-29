@@ -20,9 +20,9 @@ Choose outgoing preparation when sending, then select a received variant when do
 
 Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution before preparation. Other image formats keep the 16,777,216-pixel limit. To preserve a larger photo unchanged, send it as a file attachment.
 
-**Video:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow **50 MiB (52,428,800 bytes)** through the CLI and API. The desktop and web attachment picker currently allows 25 MB. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them. Container support depends on the codecs inside the file.
+**Video:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow **50 MiB (52,428,800 bytes)**. The desktop and web attachment picker checks the connected hub's limit; the synthetic preview has a smaller limit. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them. Container support depends on the codecs inside the file.
 
-In the desktop or web client's attachment review, select **Original video** to include the unchanged source alongside the prepared playback copy. This applies to all videos in the selected batch. Leave it unchecked to send playback and thumbnail only.
+In the desktop or web composer, select **Original media quality** to include the unchanged video source alongside the prepared playback copy. The adjacent hint explains this option. It applies to all videos in the staged batch. Leave it unchecked to send playback and thumbnail only.
 
 ## Send images and videos
 

@@ -115,7 +115,7 @@ test("original video keeps its quality and key through uncertain admission and r
   assert.equal(submissions[0].request.kind, "video");
   assert.equal(submissions[0].request.sourceId, "mov-source");
   assert.equal(submissions[0].key, pending.key);
-  assert.deepEqual(uploads[0].bytes, new Uint8Array(await selected.arrayBuffer()));
+  assert.equal(uploads[0].bytes, selected, "File/Blob sources are uploaded without a full in-memory copy");
   assert.equal(uploads[0].mime, "video/quicktime");
   first.close();
   const reopened = new MediaOutbox(client, "a", saved);

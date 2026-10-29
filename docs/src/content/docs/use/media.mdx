@@ -5,7 +5,7 @@ description: File, image, video and voice limits, longer sends, and the CLI, API
 
 import { Aside } from '@astrojs/starlight/components';
 
-In the desktop or web client, use the attachment button, paste a file or image, or drop files into the message box. Review them before sending. JPEG, PNG, GIF and WebP files become images; MOV, MP4, 3GP, 3G2 and MJ2 files become videos; other formats become file attachments.
+In the desktop or web client, use the attachment button, paste a file or image, or drop files into the message box. Review or remove the staged files, then select **Send** to send your text and each file as separate messages. JPEG, PNG, GIF and WebP files become images; MOV, MP4, 3GP, 3G2 and MJ2 files become videos; other formats become file attachments. The client checks the connected hub's limits; the synthetic preview has a smaller file limit than a native hub.
 
 Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source limit is **512 MiB (536,870,912 bytes)**. Limits depend on the selected send kind:
 

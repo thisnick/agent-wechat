@@ -577,7 +577,6 @@ input:focus-visible {
 /* Selected files are draft content until the composer is sent. */
 .composer-attachments { padding: 12px 14px 0; min-width: 0; }
 .composer-attachments-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 8px; font-size: 12px; }
-.composer-attachments-head small { color: var(--muted); font-size: 11px; }
 .composer-attachment-list { display: flex; gap: 9px; overflow-x: auto; list-style: none; padding: 0 0 5px; margin: 0; }
 .composer-attachment { position: relative; display: flex; align-items: center; gap: 9px; flex: 0 0 235px; min-width: 0; padding: 8px 30px 8px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .composer-attachment > button { position: absolute; top: 3px; right: 3px; width: 25px; height: 25px; }
@@ -586,8 +585,16 @@ input:focus-visible {
 .composer-attachment .attachment-file > .icon { width: 22px; height: 22px; }
 .composer-attachment .attachment-file strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; font-size: 12px; }
 .composer-attachment .field-help { max-width: 75px; font-size: 10px; margin: 0; }
-.composer-original-video { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; font-size: 12px; }
-.composer-original-video small { color: var(--muted); font-size: 11px; }
+.composer-original-video { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; font-size: 12px; }
+.composer-original-video label { display: inline-flex; align-items: center; gap: 6px; }
+.composer-help { position: relative; display: inline-flex; }
+.composer-help > .icon-btn { width: 26px; height: 26px; color: var(--muted); }
+.composer-help > .icon-btn .icon { width: 15px; height: 15px; }
+.composer-help-content { position: absolute; z-index: 15; bottom: calc(100% + 7px); right: 0; width: max-content; max-width: min(260px, 70vw); padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 20px #0003; background: var(--surface); color: var(--ink); font-size: 12px; line-height: 1.6; }
+.composer-help-content > span { display: block; }
+.composer-help-content kbd { padding: 1px 4px; border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+.composer-original-video .composer-help-content { left: 0; right: auto; }
+.composer-original-video .composer-help { position: static; }
 .composer > .attachment-error, .composer > .field-help { margin: 0; padding: 8px 14px 0; }
 .composer {
   position: relative;

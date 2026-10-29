@@ -43,6 +43,7 @@ import { HistorySearch } from "./history-search.ts";
 import { MediaCard, PendingAttachments } from "./media.tsx";
 import { AttachmentPicker, AttachmentTray } from "./attachment-picker.tsx";
 import { sendAttachmentBatch } from "./attachment-drafts.ts";
+import { ComposerHelp } from "./composer-help.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
 import { orderThreads } from "./thread-preview.ts";
 import {
@@ -1611,15 +1612,15 @@ function Chats({
                         <div className="composer-tools" role="group" aria-label="Message actions">
                           {state.account && <AttachmentPicker key={JSON.stringify([state.account, state.selected])} connection={connection} account={state.account} threadId={state.selected}
                             composerRef={composerInput} mediaKinds={Array.isArray(state.capabilities.mediaKinds) ? state.capabilities.mediaKinds : []}
+                            capabilities={state.capabilities}
                             focusMessage={focusMessage}
                             enabled={active && !attachments.submission && Array.isArray(state.capabilities.mediaKinds) && state.capabilities.mediaKinds.length > 0} />}
                           <Button icon="mention" label="Mention someone"
                             title={!state.selected?.endsWith("@chatroom") ? "Mentions are available in group chats" : !inlineCapable ? "Update the hub to use inline mentions" : "Mention someone"}
                             disabled={!inlineCapable || !active} onClick={() => setMentionOpen(value => value + 1)} />
                         </div>
-                        <span className="composer-hint">
-                          {simulator ? "Messages stay in the simulator." : "Enter to send · Shift + Enter for a new line"}
-                        </span>
+                        {simulator && <span className="composer-hint">Messages stay in the simulator.</span>}
+                        <ComposerHelp label="Keyboard shortcuts"><span><kbd>Enter</kbd> to send</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span></ComposerHelp>
                         <button
                           className="send-btn"
                           disabled={
