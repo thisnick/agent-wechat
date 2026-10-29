@@ -225,7 +225,8 @@ async function quoteMentionJourney() {
   const settle = async (intent, state = "accepted") => waitFor(`quoted mention send ${state}`, async () => {
     const current = await a.send(account, intent.id);
     if (["failed", "cancelled"].includes(current.state)) throw new Error(JSON.stringify(current));
-    return current.state === state && current;
+    // Acceptance precedes the local projection receipt used by message reads.
+    return current.state === state && (state !== "accepted" || current.localMessageId) && current;
   });
   const source = await settle(await a.sendText(account, room, "Original synthetic quote target", "quote-mentions-source"));
   const original = await a.message(account, source.localMessageId);
