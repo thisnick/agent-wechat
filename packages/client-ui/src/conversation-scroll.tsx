@@ -8,6 +8,11 @@ import {
 import type { BrowserCache } from "./browser-cache.ts";
 import { Icon } from "./ui.tsx";
 import { ScrollToQuotedMessage } from "./conversation-navigation.tsx";
+import {
+  HistoryPaging,
+  HISTORY_SCROLL_EDGE,
+  type HistoryPage,
+} from "./history-paging.ts";
 
 export const ConversationItem = MessageScroller.Item;
 
@@ -20,7 +25,7 @@ export function ConversationScroll({
 }: {
   children: ReactNode;
   searching: boolean;
-  history: { hasMore: boolean; loading: boolean; load: () => void };
+  history: HistoryPage;
   leading?: ReactNode;
   position?: { cache: BrowserCache; account: string; thread: string };
 }) {
@@ -38,35 +43,134 @@ export function ConversationScroll({
       {position && (
         <CachedScroll position={position} loading={history.loading} />
       )}
-      <MessageScroller.Root className="message-scroller">
-        <MessageScroller.Viewport className="messages">
-          {showedHistory.current ? (
-            <button
-              className="load-history"
-              disabled={history.loading || !history.hasMore}
-              onClick={history.load}
-            >
-              {!history.hasMore
-                ? "Beginning of conversation"
-                : history.loading
-                ? "Loading older messages…"
-                : "Load older messages"}
-            </button>
-          ) : history.loading ? (
-            <p className="date-label">Loading messages…</p>
-          ) : null}
-          {/* A prepended page must not remove a date prefix from an existing message row. */}
-          {leading}
-          <MessageScroller.Content>{children}</MessageScroller.Content>
-        </MessageScroller.Viewport>
-        <MessageScroller.Button
-          className="jump-to-latest"
-          aria-label="Jump to latest message"
-        >
-          <Icon name="down" /> Latest messages
-        </MessageScroller.Button>
-      </MessageScroller.Root>
+      <ConversationViewport
+        history={history}
+        showedHistory={showedHistory.current}
+        leading={leading}
+      >
+        {children}
+      </ConversationViewport>
     </MessageScroller.Provider>
+  );
+}
+
+function ConversationViewport({
+  children,
+  history,
+  showedHistory,
+  leading,
+}: {
+  children: ReactNode;
+  history: HistoryPage;
+  showedHistory: boolean;
+  leading?: ReactNode;
+}) {
+  const { scrollToEnd } = useMessageScroller();
+  const [paging] = useState(() => new HistoryPaging());
+  const upward = useRef(false);
+  const previousTop = useRef<number | null>(null);
+  const touchY = useRef<number | null>(null);
+  // HubSession reports page errors. Automatic paging waits for another visit
+  // to the edge after an error; the button always permits an intentional retry.
+  const load = (automatic: boolean) =>
+    void paging.request(history, automatic).catch(() => {});
+  function olderNearStart(element: HTMLDivElement) {
+    if (element.scrollTop <= HISTORY_SCROLL_EDGE) load(true);
+  }
+  function followIfAtEnd(element: HTMLDivElement) {
+    if (element.scrollHeight - element.scrollTop - element.clientHeight <= 8)
+      scrollToEnd({ behavior: "instant" });
+  }
+  return (
+    <MessageScroller.Root className="message-scroller">
+      <MessageScroller.Viewport
+        className="messages"
+        onScroll={(event) => {
+          const element = event.currentTarget,
+            top = element.scrollTop;
+          paging.observe(top);
+          if (
+            upward.current &&
+            previousTop.current !== null &&
+            top < previousTop.current
+          )
+            olderNearStart(element);
+          previousTop.current = top;
+        }}
+        onWheel={(event) => {
+          if (event.defaultPrevented || event.ctrlKey) return;
+          upward.current = event.deltaY < 0;
+          if (upward.current) olderNearStart(event.currentTarget);
+          // The library releases following on every wheel event, including
+          // a downward wheel at the bottom that produces no scroll event.
+          else followIfAtEnd(event.currentTarget);
+        }}
+        onPointerDown={(event) => {
+          // Scrollbar dragging counts as user scrolling; clicking a quote
+          // or restoring a cached position must not fetch older pages.
+          upward.current = event.target === event.currentTarget;
+          previousTop.current = event.currentTarget.scrollTop;
+        }}
+        onKeyDown={(event) => {
+          if (
+            event.defaultPrevented ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.altKey ||
+            (event.key === " " && event.target !== event.currentTarget)
+          )
+            return;
+          upward.current =
+            ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+            (event.key === " " && event.shiftKey);
+          if (upward.current) olderNearStart(event.currentTarget);
+          else if (["ArrowDown", "PageDown", "End", " "].includes(event.key))
+            followIfAtEnd(event.currentTarget);
+        }}
+        onTouchStart={(event) => {
+          upward.current = false;
+          touchY.current =
+            event.touches.length === 1 ? event.touches[0].clientY : null;
+        }}
+        onTouchMove={(event) => {
+          const next =
+            event.touches.length === 1 ? event.touches[0].clientY : null;
+          upward.current =
+            next !== null && touchY.current !== null && next > touchY.current;
+          touchY.current = next;
+          if (upward.current) olderNearStart(event.currentTarget);
+        }}
+        onTouchEnd={(event) => {
+          touchY.current = null;
+          followIfAtEnd(event.currentTarget);
+        }}
+      >
+        {showedHistory ? (
+          <button
+            className="load-history"
+            disabled={history.loading || !history.hasMore}
+            onClick={() => load(false)}
+          >
+            {!history.hasMore
+              ? "Beginning of conversation"
+              : history.loading
+              ? "Loading older messages…"
+              : "Load older messages"}
+          </button>
+        ) : history.loading ? (
+          <p className="date-label">Loading messages…</p>
+        ) : null}
+        {/* A prepended page must not remove a date prefix from an existing message row. */}
+        {leading}
+        <MessageScroller.Content>{children}</MessageScroller.Content>
+      </MessageScroller.Viewport>
+      <MessageScroller.Button
+        className="jump-to-latest"
+        aria-label="Jump to latest message"
+      >
+        <Icon name="down" /> Latest messages
+      </MessageScroller.Button>
+    </MessageScroller.Root>
   );
 }
 
