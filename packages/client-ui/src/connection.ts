@@ -8,6 +8,7 @@ import { BrowserCache } from "./browser-cache.ts";
 import { HubSession, type Account, type PendingSend } from "./session.ts";
 import { LoginAttempt, type SavedLogin } from "./login-attempt.ts";
 import { MediaOutbox, type PendingMedia } from "./media-outbox.ts";
+import { AttachmentDrafts } from "./attachment-drafts.ts";
 import { AvatarCache } from "./avatar-cache.ts";
 import { MediaInbox } from "./media-inbox.ts";
 import { MessageRecall } from "./message-recall.ts";
@@ -25,6 +26,7 @@ export type Connection = {
   endpoint: string;
   loginAttempt: (account: string) => LoginAttempt;
   mediaOutbox: (account: string) => MediaOutbox;
+  attachmentDrafts: AttachmentDrafts;
   close: () => void;
   avatars: AvatarCache;
   incomingMedia: MediaInbox;
@@ -168,6 +170,7 @@ export async function connect(
   globalThis.document?.addEventListener("visibilitychange", resume);
   const logins = new Map<string, SavedLogin>();
   const media = new Map<string, MediaOutbox>();
+  const attachmentDrafts = new AttachmentDrafts();
   const avatars = new AvatarCache(
     client,
     Date.now,
@@ -192,6 +195,7 @@ export async function connect(
   const pins = new Map<string, ThreadPinning>();
   const mutes = new Map<string, ThreadMuting>();
   const stopSignOut = session.onSignedOut((account) => {
+    attachmentDrafts.clear(account);
     incomingMedia.clear(account);
     avatars.clear(account);
     media.get(account)?.close();
@@ -263,7 +267,9 @@ export async function connect(
   return {
     session,
     cache: persistent,
+    attachmentDrafts,
     async clearCache(account) {
+      attachmentDrafts.clear(account);
       incomingMedia.clear(account);
       avatars.clear(account);
       await session.clearLocalCache(account);
@@ -276,6 +282,7 @@ export async function connect(
       globalThis.removeEventListener?.("focus", resume);
       globalThis.document?.removeEventListener("visibilitychange", resume);
       session.close();
+      attachmentDrafts.clear();
       void persistent.close();
       for (const queue of media.values()) queue.close();
       avatars.close();

@@ -574,29 +574,21 @@ input:focus-visible {
 .attachment-input {
   display: none;
 }
-.attachment-review {
-  max-width: 430px;
-}
-.attachment-review .modal-body > p {
-  margin: 0 0 20px;
-}
-.attachment-review-list {
-  display: grid;
-  gap: 20px;
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  max-height: min(55vh, 480px);
-  overflow-y: auto;
-}
-.attachment-review-preview {
-  display: block;
-  max-width: 100%;
-  max-height: 260px;
-  margin: 0 auto 12px;
-  border-radius: 8px;
-  object-fit: contain;
-}
+/* Selected files are draft content until the composer is sent. */
+.composer-attachments { padding: 12px 14px 0; min-width: 0; }
+.composer-attachments-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 8px; font-size: 12px; }
+.composer-attachments-head small { color: var(--muted); font-size: 11px; }
+.composer-attachment-list { display: flex; gap: 9px; overflow-x: auto; list-style: none; padding: 0 0 5px; margin: 0; }
+.composer-attachment { position: relative; display: flex; align-items: center; gap: 9px; flex: 0 0 235px; min-width: 0; padding: 8px 30px 8px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.composer-attachment > button { position: absolute; top: 3px; right: 3px; width: 25px; height: 25px; }
+.composer-attachment .attachment-review-preview { width: 60px; height: 60px; flex: none; border-radius: 5px; object-fit: cover; }
+.composer-attachment .attachment-file { flex: 1; min-width: 0; gap: 7px; }
+.composer-attachment .attachment-file > .icon { width: 22px; height: 22px; }
+.composer-attachment .attachment-file strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; font-size: 12px; }
+.composer-attachment .field-help { max-width: 75px; font-size: 10px; margin: 0; }
+.composer-original-video { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; font-size: 12px; }
+.composer-original-video small { color: var(--muted); font-size: 11px; }
+.composer > .attachment-error, .composer > .field-help { margin: 0; padding: 8px 14px 0; }
 .composer {
   position: relative;
 }
@@ -638,28 +630,6 @@ input:focus-visible {
 .attachment-file small {
   font-size: 11px;
   color: var(--muted);
-}
-.attachment-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 24px;
-}
-.attachment-video-quality {
-  margin-top: 20px;
-}
-.attachment-video-quality label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-.attachment-actions button {
-  padding: 10px 16px;
-  border-radius: 7px;
-}
-.attachment-review .field-help {
-  margin: 14px 0 0;
 }
 .attachment-job-actions {
   display: flex;
