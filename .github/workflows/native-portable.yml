@@ -190,6 +190,9 @@ jobs:
           cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-profile --test initialize --test projection --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-dev --target ${{ matrix.target }}
+      - name: Install verified media helpers for simulator sends
+        if: inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)
+        run: node scripts/native-ci-media-runtime.mjs "$RUNNER_TEMP/native-simulator-media"
       - name: Verify the simulator and real hub on this native platform
         if: inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)
         env:
