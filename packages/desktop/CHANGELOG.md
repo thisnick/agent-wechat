@@ -1,5 +1,34 @@
 # @agent-wechat/desktop
 
+## 1.3.0-beta.0
+
+### Minor Changes
+
+- [#328](https://github.com/thisnick/agent-wechat/pull/328) [`28f8ea8`](https://github.com/thisnick/agent-wechat/commit/28f8ea85f08d2811b162dc84b228a3ab6c25f690) Thanks [@thisnick](https://github.com/thisnick)! - Receive and read static location pins from profile history as structured coordinates, place names and addresses, with a readable text body. Location cards provide a place search near the shared coordinates, a direct Google Maps pin and coordinate copying, without converting coordinates. Preserve the supplied map type and leave the coordinate system unknown. Show location-sharing notices (application subtype 17) as supplied text without joining live tracking. OpenClaw applies its existing sender, mention and recall rules. Retained static pins can recover into ordinary profile history; live-tracking controls remain separate and unsupported. Location thumbnails and official preview-cache compatibility are not implemented.
+
+### Patch Changes
+
+- [#327](https://github.com/thisnick/agent-wechat/pull/327) [`199a33a`](https://github.com/thisnick/agent-wechat/commit/199a33a8e510d6de0885f710b589cd23f9810f8e) Thanks [@thisnick](https://github.com/thisnick)! - Prevent a queued window reload from restarting the local hub while the desktop app quits.
+
+- [#331](https://github.com/thisnick/agent-wechat/pull/331) [`623cd81`](https://github.com/thisnick/agent-wechat/commit/623cd81f52c636e2ffc9ee6e58269bf6c3f04dbf) Thanks [@thisnick](https://github.com/thisnick)! - Detect image, MP4 video and file attachments automatically. Paste or drop files into either message editor, preview them before sending, and preserve text drafts when cancelling or changing conversations.
+
+  Keep desktop file uploads working on WebKit versions that cannot stream FormData directly.
+
+- [#329](https://github.com/thisnick/agent-wechat/pull/329) [`f94a66a`](https://github.com/thisnick/agent-wechat/commit/f94a66a714f5492b4032b392e2ded9d54d7611ff) Thanks [@thisnick](https://github.com/thisnick)! - Display recognized WeChat face aliases as Unicode emoji in messages, quotes, chat previews and desktop notifications. Preserve original text for sending, copying, search and storage.
+
+- [#332](https://github.com/thisnick/agent-wechat/pull/332) [`a064296`](https://github.com/thisnick/agent-wechat/commit/a064296263ddf11f0c26c30ef40d70f280bccdac) Thanks [@thisnick](https://github.com/thisnick)! - Restrict group-wide mentions to the group owner and administrators. Refresh the administrator list from WeChat into the official profile and expose administrator IDs and mention eligibility through group info. Check permission before queuing and submitting a new message, while retaining existing send receipts and idempotency.
+
+  Show Everyone in the composer when the server permits it, preserve drafts after permission changes, and retain the existing behavior with older servers that omit the permission field.
+
+- [`7527cfc`](https://github.com/thisnick/agent-wechat/commit/7527cfc455be74b258cba34f75f38523b59ba1c7) Thanks [@thisnick](https://github.com/thisnick)! - Declare the project MIT license in package metadata and include its text with npm packages, native release notices, desktop resources, and the native container. Preserve all existing third-party license notices.
+
+- [#328](https://github.com/thisnick/agent-wechat/pull/328) [`28f8ea8`](https://github.com/thisnick/agent-wechat/commit/28f8ea85f08d2811b162dc84b228a3ab6c25f690) Thanks [@thisnick](https://github.com/thisnick)! - Show plain system notices, including location-sharing end notices, with their supplied text and without attributing the transport peer as their author. Desktop and web clients display them as centered notices without an avatar or sender name. Recall messages retain their separate author-evidence handling, and raw system XML is not exposed as message text.
+
+- [#328](https://github.com/thisnick/agent-wechat/pull/328) [`28f8ea8`](https://github.com/thisnick/agent-wechat/commit/28f8ea85f08d2811b162dc84b228a3ab6c25f690) Thanks [@thisnick](https://github.com/thisnick)! - Correct the cancellation and codec-format fields in outgoing voice uploads so SILK notes declare format 4 in the transmitted request, including continuation and final ranges.
+
+- Updated dependencies [[`623cd81`](https://github.com/thisnick/agent-wechat/commit/623cd81f52c636e2ffc9ee6e58269bf6c3f04dbf), [`f94a66a`](https://github.com/thisnick/agent-wechat/commit/f94a66a714f5492b4032b392e2ded9d54d7611ff), [`a064296`](https://github.com/thisnick/agent-wechat/commit/a064296263ddf11f0c26c30ef40d70f280bccdac)]:
+  - @agent-wechat/client-ui@0.3.2-beta.0
+
 ## 1.2.0
 
 ### Minor Changes

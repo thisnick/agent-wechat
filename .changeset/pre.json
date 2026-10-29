@@ -9,5 +9,16 @@
     "@agent-wechat/agent-wechat": "1.2.0",
     "@agent-wechat/shared": "1.1.0"
   },
-  "changesets": []
+  "changesets": [
+    "concurrent-profile-reads",
+    "desktop-quit-bootstrap",
+    "easy-composer-attachments",
+    "friendly-emoji-aliases",
+    "group-all-mention-permissions",
+    "location-message-parsing",
+    "mit-project-license",
+    "native-peer-targets",
+    "plain-system-notices",
+    "voice-upload-format"
+  ]
 }

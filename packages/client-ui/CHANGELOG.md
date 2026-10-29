@@ -1,5 +1,19 @@
 # @agent-wechat/client-ui
 
+## 0.3.2-beta.0
+
+### Patch Changes
+
+- [#331](https://github.com/thisnick/agent-wechat/pull/331) [`623cd81`](https://github.com/thisnick/agent-wechat/commit/623cd81f52c636e2ffc9ee6e58269bf6c3f04dbf) Thanks [@thisnick](https://github.com/thisnick)! - Detect image, MP4 video and file attachments automatically. Paste or drop files into either message editor, preview them before sending, and preserve text drafts when cancelling or changing conversations.
+
+  Keep desktop file uploads working on WebKit versions that cannot stream FormData directly.
+
+- [#329](https://github.com/thisnick/agent-wechat/pull/329) [`f94a66a`](https://github.com/thisnick/agent-wechat/commit/f94a66a714f5492b4032b392e2ded9d54d7611ff) Thanks [@thisnick](https://github.com/thisnick)! - Display recognized WeChat face aliases as Unicode emoji in messages, quotes, chat previews and desktop notifications. Preserve original text for sending, copying, search and storage.
+
+- [#332](https://github.com/thisnick/agent-wechat/pull/332) [`a064296`](https://github.com/thisnick/agent-wechat/commit/a064296263ddf11f0c26c30ef40d70f280bccdac) Thanks [@thisnick](https://github.com/thisnick)! - Restrict group-wide mentions to the group owner and administrators. Refresh the administrator list from WeChat into the official profile and expose administrator IDs and mention eligibility through group info. Check permission before queuing and submitting a new message, while retaining existing send receipts and idempotency.
+
+  Show Everyone in the composer when the server permits it, preserve drafts after permission changes, and retain the existing behavior with older servers that omit the permission field.
+
 ## 0.3.1
 
 ### Patch Changes
