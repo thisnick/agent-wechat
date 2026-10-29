@@ -255,6 +255,7 @@ pub(crate) fn public_recall(marker: &RecallMarker) -> Value {
 }
 impl Core {
     pub(crate) fn reconcile_recall_markers(&self, account: &str) -> Result<()> {
+        let _timing = wechat_platform::timing::Timing::start("recovery.recalls");
         // Snapshot readers can observe a restored row while the writer is idle.
         // Keep a per-account local repair hint; startup already rechecks every
         // marker after a crash. No read request writes through its snapshot.

@@ -90,6 +90,8 @@ impl Family {
         Ok(true)
     }
     fn copy_to(&self, source: &Path, destination: &Path) -> Result<()> {
+        let mut timing = wechat_platform::timing::Timing::start("store.family.copy");
+        timing.counts(self.0.values().map(|m| m.length).sum(), self.0.len());
         for (suffix, member) in &self.0 {
             let mut input = member.file.try_clone()?;
             input.seek(SeekFrom::Start(0))?;
@@ -212,6 +214,8 @@ pub(crate) fn open_prepared<T>(
         return Ok((db, value));
     }
     let family = Family::read(path)?;
+    let mut timing = wechat_platform::timing::Timing::start("store.admission.validate");
+    timing.counts(family.0.values().map(|m| m.length).sum(), family.0.len());
     let parent = path.parent().context("database needs a parent")?;
     let scratch = wechat_platform::private_tempdir_in(parent, ".sqlite-admission-")?;
     let original = scratch.path().join("original");

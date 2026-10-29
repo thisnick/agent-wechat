@@ -241,7 +241,9 @@ fn candidates(storage: &Path, options: &ReadOptions) -> Result<Vec<PathBuf>> {
 }
 
 impl Snapshot {
+    #[track_caller]
     pub fn create(location: ProfileLocation, keys: KeyFile, options: ReadOptions) -> Result<Self> {
+        let mut timing = wechat_platform::timing::Timing::start("profile.snapshot.create");
         if !options.stopped_or_consistent_snapshot {
             return Err(ProfileError::SnapshotRequired);
         }
@@ -268,6 +270,7 @@ impl Snapshot {
         let mut manifest = BTreeMap::new();
         let mut total = options.max_total_bytes;
         let files = candidates(&location.storage, &options)?;
+        let copy = wechat_platform::timing::Timing::start("profile.snapshot.copy");
         for source in &files {
             let rel = relative(&location.storage, source)?;
             let dest = temp_root.join(&rel);
@@ -276,12 +279,15 @@ impl Snapshot {
                 hash_copy(source, Some(&dest), &mut total, options.max_database_bytes)?;
             manifest.insert(rel, (bytes, hash));
         }
+        drop(copy);
+        timing.counts(manifest.values().map(|(bytes, _)| bytes).sum(), files.len());
         // Re-inventory catches newly created/deleted WAL files as well as main
         // changes. A stable double scan still requires the caller's quiescence.
         if files != candidates(&location.storage, &options)? {
             return Err(ProfileError::SourceChanged);
         }
         let mut total = options.max_total_bytes;
+        let recheck = wechat_platform::timing::Timing::start("profile.snapshot.recheck");
         for source in &files {
             let rel = relative(&location.storage, source)?;
             if manifest.get(&rel)
@@ -295,6 +301,8 @@ impl Snapshot {
                 return Err(ProfileError::SourceChanged);
             }
         }
+        drop(recheck);
+        let _open = wechat_platform::timing::Timing::start("profile.snapshot.open");
         let mut h = Sha256::new();
         h.update(location.root.as_os_str().as_encoded_bytes());
         for (rel, (bytes, digest)) in &manifest {

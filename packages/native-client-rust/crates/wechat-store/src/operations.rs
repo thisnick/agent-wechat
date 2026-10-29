@@ -208,11 +208,13 @@ impl Store {
         db.execute("INSERT INTO account_settings(account_id,keys_file) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET keys_file=excluded.keys_file",params![id,path.to_str().context("keys path must be UTF-8")?])?;
         Ok(())
     }
+    #[track_caller]
     pub(crate) fn control<T>(
         &self,
         id: &str,
         f: impl FnOnce(&mut Connection) -> Result<T>,
     ) -> Result<T> {
+        let _timing = wechat_platform::timing::Timing::slow("store.control");
         if let Some((account, db)) = &self.snapshot {
             anyhow::ensure!(account == id, "read snapshot account mismatch");
             let mut db = db
@@ -222,10 +224,12 @@ impl Store {
         }
         self.account(id)?;
         // Serialize sidecar operations through the store lock as well as SQLite.
+        let waiting = wechat_platform::timing::Timing::slow("store.registry_lock");
         let guard = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?;
+        drop(waiting);
         // Recheck after taking the registry lock: a removal may have raced admission.
         Self::require_registered(&guard, id)?;
         let path = self.account_dir(id)?.join("agent/control.sqlite");
@@ -239,7 +243,9 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("database admission lock poisoned"))?;
         let (mut db, ()) =
             crate::admission::open_prepared(&path, Some(&admitted), Self::prepare_account)?;
+        let operation = wechat_platform::timing::Timing::slow("store.control.operation");
         let result = f(&mut db);
+        drop(operation);
         db.close().map_err(|(_, error)| error)?;
         if result.is_ok() {
             crate::admission::remember(&mut admitted, &path)?;

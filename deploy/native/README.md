@@ -131,6 +131,14 @@ docker compose -f deploy/native/compose.yaml config --quiet
 
 This validates configuration; it does not prove native login, account synchronization or successful image execution. `docker compose up`, registry pushes, production restarts and profile registration are deployment actions and are deliberately not included in the implementation validation.
 
+## Timing a slow restart
+
+Set `AGENT_WECHAT_TRACE_TIMINGS=1` on the daemon process to write `wx_timing` records to stderr. The default is off. Enable it on the existing service owner; do not start a second writer for the same profile.
+
+Records identify code operations and call sites, elapsed microseconds, snapshot/database-family byte counts, and item counts. For `profile.owned_reader`, items means the number of cached databases when the read began. Records omit account identifiers, filesystem paths, SQL, message content, credentials, and error details. Pair `begin` and `end` records by span; `slow` records report operations taking at least 100 ms. An unmatched begin can indicate work still in progress, a process exit, or dropped output; it does not prove a deadlock.
+
+The trace stops after 30 minutes or 20,000 attempted records. A separate writer uses a queue of 256 records; a full queue drops diagnostics instead of waiting on log I/O. The cumulative `dropped` count identifies missing records. Disable the flag after diagnosis and keep the ordinary container log rotation configured. These records explain local timing; account push state and successful conversation reads must still be checked separately from process health.
+
 ## systemd user unit
 
 `agent-wechat-native.service` is an optional systemd **user** unit. It runs `wx serve` for one signed-in OS user and lets systemd handle stop/restart and permissions. It is an alternative process owner to foreground `serve`, `wx daemon start`, Compose or OpenClaw managed mode; choose one. Nothing copies, enables or starts the unit automatically.

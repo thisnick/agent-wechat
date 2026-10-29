@@ -47,6 +47,7 @@ pub(crate) fn open_write(
     keys: &KeyFile,
     allow_plaintext: bool,
 ) -> Result<Connection> {
+    let _timing = wechat_platform::timing::Timing::slow("profile.open_write");
     if !crate::keys::valid_relative_path(rel) {
         return Err(ProfileError::InvalidQuery);
     }

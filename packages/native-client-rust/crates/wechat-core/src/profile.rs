@@ -100,6 +100,7 @@ impl Core {
         let location = ProfileLocation::new(path)?;
         Ok((location, keys))
     }
+    #[track_caller]
     pub fn profile_reader(&self, account: &str) -> Result<ProfileReader> {
         let (location, keys) = self.profile_location_keys(account)?;
         Ok(ProfileReader::open(

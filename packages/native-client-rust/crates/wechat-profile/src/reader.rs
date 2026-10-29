@@ -270,6 +270,7 @@ fn validate_name(s: &str) -> Result<()> {
 }
 
 impl ProfileReader {
+    #[track_caller]
     pub fn open(location: ProfileLocation, keys: KeyFile, options: ReadOptions) -> Result<Self> {
         let snapshot = Snapshot::create(location, keys, options)?;
         let mut schemas = Vec::new();

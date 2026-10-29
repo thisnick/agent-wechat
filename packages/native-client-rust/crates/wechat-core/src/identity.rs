@@ -181,6 +181,7 @@ impl Core {
         }
     }
     pub(super) fn check_state_profile(&self, account: &str, state: &AccountState) -> Result<()> {
+        let _timing = wechat_platform::timing::Timing::slow("profile.identity.check");
         let Some(binding) = self.identity_binding(account)? else {
             if self.populated_profile(account)? {
                 bail!("profile_identity_unavailable");
@@ -261,6 +262,7 @@ impl Core {
                 .get(account)
                 != Some(&stamp)
             {
+                let _proof = wechat_platform::timing::Timing::start("profile.password.verify");
                 wechat_profile::verify_profile_password(&location, &keys, &state.database_password)
                     .map_err(password_admission_error)?;
                 self.password_proofs

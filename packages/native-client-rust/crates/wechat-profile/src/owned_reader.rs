@@ -117,6 +117,8 @@ impl OwnedReaderCache {
         keys: KeyFile,
         options: ReadOptions,
     ) -> Result<ProfileReader> {
+        let mut timing = wechat_platform::timing::Timing::slow("profile.owned_reader");
+        timing.counts(0, self.databases.len());
         if !options.stopped_or_consistent_snapshot {
             return Err(ProfileError::SnapshotRequired);
         }

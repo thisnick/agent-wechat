@@ -8,6 +8,7 @@ use std::{
     process::Command,
 };
 mod network;
+pub mod timing;
 #[cfg(windows)]
 mod windows;
 pub use network::local_ipv4_addresses;

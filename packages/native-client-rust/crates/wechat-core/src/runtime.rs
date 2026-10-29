@@ -469,6 +469,7 @@ impl Core {
             .clone())
     }
     pub async fn lock_account(&self, account: &str) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        let _timing = wechat_platform::timing::Timing::slow("account.lock_wait");
         Ok(self.gate(account)?.lock_owned().await)
     }
     pub(crate) async fn download_permit(&self, account: &str) -> Result<DownloadPermit> {
@@ -1671,6 +1672,7 @@ impl Core {
         Ok(done)
     }
     pub fn recover_projection(&self, account: &str) -> Result<Value> {
+        let _timing = wechat_platform::timing::Timing::start("recovery.projection");
         self.repair_group_mutations(account)?;
         self.refresh_incoming_groups(account, false)?;
         if self.store.pending_sync(account)?.is_empty() {
@@ -1682,6 +1684,7 @@ impl Core {
         self.project_pending_with_media(account, false)
     }
     fn project_pending_with_media(&self, account: &str, download_voice: bool) -> Result<Value> {
+        let _timing = wechat_platform::timing::Timing::start("recovery.pending_batches");
         let mut projected = 0;
         let mut unsupported = 0;
         self.account_state(account)?;

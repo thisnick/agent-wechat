@@ -1124,6 +1124,7 @@ impl Core {
         options: &wechat_profile::WriteOptions,
         _complete: bool,
     ) -> Result<()> {
+        let _timing = wechat_platform::timing::Timing::start("recovery.group_roster");
         let decoded = wechat_protocol::wire::decode_room(&reply.raw, &reply.value.room_id)?;
         let value = &decoded;
         wechat_profile::apply_contact_patch(

@@ -1,0 +1,61 @@
+name: Native recovery trace binary
+
+on:
+  push:
+    branches: [codex/startup-recovery-timing]
+    paths:
+      - packages/native-client-rust/**
+      - .github/workflows/native-recovery-trace.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-recovery-trace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    defaults:
+      run:
+        working-directory: packages/native-client-rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          shared-key: native-recovery-trace
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --locked -p wechat-platform -p wechat-store -p wechat-profile
+      - name: Exercise timing output with synthetic stores
+        run: |
+          AGENT_WECHAT_TRACE_TIMINGS=1 cargo test --locked -p wechat-store readers_retain_their_boundary_without_blocking_writes -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-timing-smoke.log"
+          rg -q 'wx_timing .*operation=store.admission.validate' "$RUNNER_TEMP/native-timing-smoke.log"
+      - run: cargo build --release --locked -p wx-native
+      - name: Exercise the built CLI and HTTP daemon with synthetic files
+        run: python3 scripts/smoke.py target/release/wx
+      - name: Record diagnostic artifact identity
+        run: |
+          mkdir -p trace-artifact
+          cp target/release/wx trace-artifact/wx
+          git rev-parse HEAD > trace-artifact/source-commit.txt
+          printf '%s\n' 'Diagnostic binary; not a published release asset.' > trace-artifact/README.txt
+          cd trace-artifact
+          sha256sum wx > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-recovery-trace-linux-x64
+          path: packages/native-client-rust/trace-artifact/
+          retention-days: 7

@@ -120,6 +120,7 @@ impl Core {
         Ok(())
     }
     pub(super) fn project_contact_pending(&self, account: &str) -> Result<()> {
+        let _timing = wechat_platform::timing::Timing::start("recovery.contacts");
         for (id, sealed) in self.store.pending_contact_sync(account)? {
             let raw = self
                 .vault

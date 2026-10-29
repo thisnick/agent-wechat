@@ -103,6 +103,7 @@ impl Core {
         ready: &AtomicBool,
         fence: SessionFence,
     ) -> Result<()> {
+        let bootstrap = wechat_platform::timing::Timing::start("push.bootstrap");
         let guard = self.lock_account(account).await?;
         let core = self.clone();
         let owned = account.to_owned();
@@ -131,16 +132,21 @@ impl Core {
         .await?;
         // Catch-up uses the same durable staging/projection path as manual sync.
         // Only a fully drained baseline makes later commits live inbound events.
+        let catchup = wechat_platform::timing::Timing::start("push.initial_sync");
         connection = self
             .drain_push_sync(account, connection, &fence, 6, "catchup")
             .await?;
+        drop(catchup);
+        let contacts = wechat_platform::timing::Timing::start("push.initial_contacts");
         self.drain_contact_sync(account, &fence).await?;
+        drop(contacts);
         ready.store(true, Ordering::Release);
         self.store.append_event(
             account,
             "account.push",
             &json!({"state":"connected","transport":if self.upstream.kind() == crate::upstream::UpstreamKind::Simulator {"simulator"} else {"native_longlink"}}),
         )?;
+        drop(bootstrap);
         let mut next_heartbeat = Instant::now() + heartbeat_interval(&heartbeat);
         loop {
             self.push_state(account, &fence)?;
