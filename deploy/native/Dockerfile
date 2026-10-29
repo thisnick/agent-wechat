@@ -40,6 +40,7 @@ RUN apt-get update \
     && chmod 0700 /var/lib/agent-wechat /var/cache/agent-wechat
 COPY --from=builder /build/target/release/wx /usr/local/bin/wx
 COPY LICENSE /usr/share/doc/agent-wechat-native/LICENSE
+COPY packages/cli/THIRD_PARTY_NOTICES.txt /usr/share/doc/agent-wechat-native/THIRD-PARTY-NOTICES.txt
 COPY --from=builder /build/crates/wechat-protocol/NOTICE /usr/share/doc/agent-wechat-native/NOTICE
 COPY --from=builder /build/crates/wechat-protocol/fixtures/LICENSE-CITIZENLAB /usr/share/doc/agent-wechat-native/LICENSE-CITIZENLAB
 COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-MIT /usr/share/doc/agent-wechat-native/LICENSE-SILK-MIT

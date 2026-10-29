@@ -3295,23 +3295,15 @@ fn image_variants(
     standard: Option<Vec<u8>>,
     thumbnail: Option<Vec<u8>>,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
-    let decoded = reader.decode()?;
-    ensure!(
-        decoded.width() as u64 * decoded.height() as u64 <= 16_777_216,
-        "image_decode_limit"
-    );
-    let original =
-        if bytes.len() <= 65520 && image::guess_format(bytes)? == image::ImageFormat::Jpeg {
-            bytes.to_vec()
-        } else {
-            fit_jpeg(&decoded, 1280, 65520)?
-        };
+    let decoded = decode_send_image(bytes)?;
+    let original = if bytes.len() <= 65520
+        && image::guess_format(bytes)? == image::ImageFormat::Jpeg
+        && wechat_protocol::media::inspect_image(bytes).is_ok()
+    {
+        bytes.to_vec()
+    } else {
+        fit_jpeg(&decoded, 1280, 65520)?
+    };
     let original_image = image::load_from_memory(&original)?;
     let supplied_jpeg = |raw: Vec<u8>| -> Result<Vec<u8>> {
         ensure!(
@@ -3331,6 +3323,76 @@ fn image_variants(
         None => fit_jpeg(&standard_image, 160, 65520)?,
     };
     Ok((original, standard, thumbnail))
+}
+
+fn image_decode_error(error: image::ImageError) -> anyhow::Error {
+    anyhow::anyhow!(match error {
+        image::ImageError::Limits(_) => "image_decode_limit",
+        image::ImageError::Unsupported(_) => "unsupported_media",
+        _ => "image_decode_failed",
+    })
+}
+
+fn decode_send_image(bytes: &[u8]) -> Result<image::DynamicImage> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_ORDINARY_SOURCE_BYTES,
+        "source_size_limit"
+    );
+    let format = image::guess_format(bytes).map_err(image_decode_error)?;
+    let (width, height) = image::ImageReader::with_format(std::io::Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(image_decode_error)?;
+    let pixels = u64::from(width) * u64::from(height);
+    ensure!(
+        width > 0 && height > 0 && width <= 8192 && height <= 8192,
+        "image_decode_limit"
+    );
+    if format == image::ImageFormat::Jpeg && pixels > 16_777_216 {
+        // Bound source/coefficient work separately from the reduced pixel buffer.
+        // JPEG IDCT scaling avoids allocating a full 50 MP RGB image just to
+        // resize it to the existing 1280-pixel send representation.
+        ensure!(pixels <= 64_000_000, "image_decode_limit");
+        return decode_large_send_jpeg(bytes);
+    }
+    ensure!(pixels <= 16_777_216, "image_decode_limit");
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().map_err(image_decode_error)
+}
+
+fn decode_large_send_jpeg(bytes: &[u8]) -> Result<image::DynamicImage> {
+    use jpeg_decoder::PixelFormat;
+
+    let failure = |_| anyhow::anyhow!("image_decode_failed");
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_max_decoding_buffer_size(128 * 1024 * 1024);
+    decoder.read_info().map_err(failure)?;
+    let info = decoder.info().context("image_decode_failed")?;
+    ensure!(
+        matches!(info.pixel_format, PixelFormat::L8 | PixelFormat::RGB24),
+        "unsupported_media"
+    );
+    let (width, height) = decoder.scale(1280, 1280).map_err(failure)?;
+    let (width, height) = (u32::from(width), u32::from(height));
+    ensure!(
+        u64::from(width) * u64::from(height) <= 16_777_216,
+        "image_decode_limit"
+    );
+    let pixels = decoder.decode().map_err(failure)?;
+    match info.pixel_format {
+        PixelFormat::L8 => {
+            image::GrayImage::from_raw(width, height, pixels).map(image::DynamicImage::ImageLuma8)
+        }
+        PixelFormat::RGB24 => {
+            image::RgbImage::from_raw(width, height, pixels).map(image::DynamicImage::ImageRgb8)
+        }
+        _ => unreachable!(),
+    }
+    .context("image_decode_failed")
 }
 fn fit_jpeg(image: &image::DynamicImage, max_edge: u32, max_bytes: usize) -> Result<Vec<u8>> {
     for edge in [max_edge, max_edge / 2, max_edge / 4, max_edge / 8] {
@@ -5220,6 +5282,81 @@ mod tests {
             wechat_protocol::media::inspect_image(bytes).unwrap();
         }
         assert_ne!(digest(&a), digest(&c));
+    }
+    #[test]
+    fn large_jpeg_preparation_scales_before_allocating_output_pixels() {
+        for compressed in [
+            include_bytes!("../tests/fixtures/send-images/50mp-baseline.jpg.zst").as_slice(),
+            include_bytes!("../tests/fixtures/send-images/50mp-progressive.jpg.zst").as_slice(),
+        ] {
+            let source = zstd::stream::decode_all(compressed).unwrap();
+            let decoded = decode_send_image(&source).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (1532, 2040));
+            assert!(decoded.as_bytes().len() < 10 * 1024 * 1024);
+            let top = decoded.to_rgb8().get_pixel(0, 0).0;
+            assert!(top[2] > top[0] + 100, "lost the synthetic blue pixels");
+            let (original, standard, thumbnail) = image_variants(&source, None, None).unwrap();
+            for (bytes, edge) in [(&original, 1280), (&standard, 640), (&thumbnail, 160)] {
+                let inspected = wechat_protocol::media::inspect_image(bytes).unwrap();
+                assert!(inspected.width <= edge && inspected.height <= edge);
+                assert!(bytes.len() <= 65520);
+            }
+            assert_ne!(digest(&source), digest(&original));
+            assert!(decode_send_image(&source[..source.len() / 2]).is_err());
+        }
+    }
+    #[test]
+    fn image_source_limits_are_checked_before_decoding_pixels() {
+        let source = zstd::stream::decode_all(
+            include_bytes!("../tests/fixtures/send-images/50mp-baseline.jpg.zst").as_slice(),
+        )
+        .unwrap();
+        let marker = source.windows(2).position(|b| b == [0xff, 0xc0]).unwrap();
+        for (width, height) in [(8192u16, 8192u16), (8193, 100)] {
+            let mut oversized = source.clone();
+            oversized[marker + 5..marker + 7].copy_from_slice(&height.to_be_bytes());
+            oversized[marker + 7..marker + 9].copy_from_slice(&width.to_be_bytes());
+            let error = decode_send_image(&oversized).unwrap_err();
+            assert_eq!(classify_error(&error), "image_decode_limit");
+        }
+        let mut oversized_png = std::io::Cursor::new(vec![]);
+        image::DynamicImage::new_luma8(4097, 4096)
+            .write_to(&mut oversized_png, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(
+            classify_error(&decode_send_image(oversized_png.get_ref()).unwrap_err()),
+            "image_decode_limit"
+        );
+        assert_eq!(
+            classify_error(&image_decode_error(image::ImageError::Limits(
+                image::error::LimitError::from_kind(
+                    image::error::LimitErrorKind::InsufficientMemory
+                )
+            ))),
+            "image_decode_limit"
+        );
+    }
+    #[test]
+    fn large_grayscale_jpeg_preparation_retains_luminance() {
+        let source = zstd::stream::decode_all(
+            include_bytes!("../tests/fixtures/send-images/50mp-gray.jpg.zst").as_slice(),
+        )
+        .unwrap();
+        let decoded = decode_send_image(&source).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1532, 2040));
+        assert_eq!(decoded.as_luma8().unwrap().get_pixel(0, 0).0, [128]);
+        let (original, _, _) = image_variants(&source, None, None).unwrap();
+        wechat_protocol::media::inspect_image(&original).unwrap();
+    }
+    #[test]
+    fn small_jpeg_source_bytes_are_still_preserved() {
+        let mut source = std::io::Cursor::new(vec![]);
+        image::DynamicImage::new_rgb8(80, 60)
+            .write_to(&mut source, image::ImageFormat::Jpeg)
+            .unwrap();
+        let source = source.into_inner();
+        let (original, _, _) = image_variants(&source, None, None).unwrap();
+        assert_eq!(source, original);
     }
     #[test]
     fn accepted_local_xml_preserves_distinct_variants_and_escapes_opaque_ids() {

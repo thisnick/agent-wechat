@@ -143,3 +143,31 @@ test("needs-review media cannot be retried", async (t) => {
   await outbox.retry(outbox.snapshot()[0].key);
   assert.equal(retries, 0);
 });
+
+test("image preparation failures explain the error without resending", async (t) => {
+  for (const [reason, explanation] of [
+    ["image_decode_limit", /Resize it or send it as a file/],
+    ["image_decode_failed", /Try exporting it as JPEG or PNG/],
+  ]) {
+    let submissions = 0;
+    const saved = storage();
+    const client = {
+      upload: async () => ({ id: "source-1" }),
+      sendMedia: async () => {
+        submissions++;
+        return { ...job("failed"), reason };
+      },
+      job: async () => ({ ...job("failed"), reason }),
+    };
+    const first = new MediaOutbox(client, "a", saved);
+    await first.send("mei", new File(["image"], "photo.jpg", { type: "image/jpeg" }), "image");
+    assert.match(first.snapshot()[0].error, explanation);
+    first.close();
+    const reopened = new MediaOutbox(client, "a", saved);
+    t.after(() => reopened.close());
+    await reopened.check(reopened.snapshot()[0].key);
+    assert.match(reopened.snapshot()[0].error, explanation);
+    assert.equal(reopened.snapshot()[0].uncertain, false);
+    assert.equal(submissions, 1);
+  }
+});
