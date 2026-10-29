@@ -126,8 +126,16 @@ impl Store {
             )? as usize)
         })
     }
-    /// Rechecking a restored official generation is a new local projection
-    /// obligation, even when an older generation had completed this marker.
+    pub fn pending_recall_markers(&self, account: &str) -> Result<Vec<RecallMarker>> {
+        self.control(account, |db| {
+            let mut query = db.prepare(&format!(
+                "SELECT {COLUMNS} FROM message_recalls WHERE projection_state='pending' ORDER BY thread_id,server_id"
+            ))?;
+            let rows = query.query_map([], marker)?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+    /// Track an attempted local recall write until its profile changes finish.
     pub fn begin_recall_projection(&self, account: &str, thread: &str, server: &str) -> Result<()> {
         self.control(account, |db| {
             anyhow::ensure!(db.execute("UPDATE message_recalls SET projection_state='pending' WHERE thread_id=?1 AND server_id=?2",params![thread,server])? == 1,"recall_marker_missing");

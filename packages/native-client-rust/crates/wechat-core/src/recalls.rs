@@ -255,45 +255,15 @@ pub(crate) fn public_recall(marker: &RecallMarker) -> Value {
 }
 impl Core {
     pub(crate) fn reconcile_recall_markers(&self, account: &str) -> Result<()> {
-        // Snapshot readers can observe a restored row while the writer is idle.
-        // Keep a per-account local repair hint; startup already rechecks every
-        // marker after a crash. No read request writes through its snapshot.
-        let recheck = self
-            .recall_read_rechecks
-            .lock()
-            .map_err(|_| anyhow::anyhow!("recall repair queue unavailable"))?
-            .contains(account);
-        let first = recheck
-            || self
-                .store
-                .runtime(account, "recall-reconciled-generation")?
-                .as_deref()
-                != Some(self.ownership_generation.as_bytes());
-        for marker in self.store.recall_markers(account)? {
-            if first || marker.projection_state == "pending" {
-                use sha2::Digest;
-                let hash = format!(
-                    "{:x}",
-                    sha2::Sha256::digest(serde_json::to_vec(&(
-                        &marker.thread_id,
-                        &marker.server_id
-                    ))?)
-                );
-                self.project_recall_marker(account, &marker, &format!("recall-reconcile:{hash}"))?;
-            }
-        }
-        if first {
-            self.store.put_runtime(
-                account,
-                "recall-reconciled-generation",
-                self.ownership_generation.as_bytes(),
-            )?;
-        }
-        if recheck {
-            self.recall_read_rechecks
-                .lock()
-                .map_err(|_| anyhow::anyhow!("recall repair queue unavailable"))?
-                .remove(account);
+        // Completed recalls are not replayed against every new process/profile
+        // generation. Only known unfinished writes require local recovery.
+        for marker in self.store.pending_recall_markers(account)? {
+            use sha2::Digest;
+            let hash = format!(
+                "{:x}",
+                sha2::Sha256::digest(serde_json::to_vec(&(&marker.thread_id, &marker.server_id))?)
+            );
+            self.project_recall_marker(account, &marker, &format!("recall-reconcile:{hash}"))?;
         }
         Ok(())
     }
@@ -515,20 +485,9 @@ impl Core {
         if let Some(thread) = msg.peer.as_deref() {
             if let Some(marker) = self.store.recall_marker(account, thread, server)? {
                 if marker.projection_state == "applied" && official_recall(msg).is_none() {
-                    // An operation receipt is not canonical settled state. If
-                    // a restored row needs repair, track that obligation again.
-                    if self.store.is_read_snapshot() {
-                        self.recall_read_rechecks
-                            .lock()
-                            .map_err(|_| anyhow::anyhow!("recall repair queue unavailable"))?
-                            .insert(account.into());
-                        let mut pending = marker;
-                        pending.projection_state = "pending".into();
-                        return Ok(Some(pending));
-                    }
-                    self.store
-                        .begin_recall_projection(account, thread, server)?;
-                    return self.store.recall_marker(account, thread, server);
+                    // A completed receipt does not override a restored official
+                    // row or create another recovery obligation during a read.
+                    return Ok(None);
                 }
                 return Ok(Some(marker));
             }

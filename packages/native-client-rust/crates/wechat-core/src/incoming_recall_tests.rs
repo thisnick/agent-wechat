@@ -1034,6 +1034,8 @@ fn projection_failure_keeps_suppression_and_repair_never_resubmits_a_command() {
     store
         .put_runtime("one", "profile-write-binding", &binding)
         .unwrap();
+    drop(core);
+    let core = Core::new(store.clone(), None).unwrap();
     core.reconcile_recall_markers("one").unwrap();
     assert_eq!(store.pending_recall_projections("one").unwrap(), 0);
     assert_eq!(recall_count(&store), 1);
@@ -1045,24 +1047,116 @@ fn projection_failure_keeps_suppression_and_repair_never_resubmits_a_command() {
             .message_type,
         10000
     );
-    // A failed recheck after an older applied receipt must become a pending
-    // obligation again, rather than permitting complete profile handoff.
+    // A completed write does not become pending again after a process restart.
     store.clear_runtime("one", "profile-write-binding").unwrap();
-    store
-        .clear_runtime("one", "recall-reconciled-generation")
-        .unwrap();
-    assert!(core.reconcile_recall_markers("one").is_err());
-    assert_eq!(store.pending_recall_projections("one").unwrap(), 1);
-    store
-        .put_runtime("one", "profile-write-binding", &binding)
-        .unwrap();
+    let generation = core.ownership_generation.clone();
+    drop(core);
+    let core = Core::new(store.clone(), None).unwrap();
+    assert_ne!(core.ownership_generation, generation);
     core.reconcile_recall_markers("one").unwrap();
     assert_eq!(store.pending_recall_projections("one").unwrap(), 0);
     assert_eq!(recall_count(&store), 1);
 }
 
+// Count expensive full-profile reader opens instead of using a wall-clock budget.
+// The account is synthetic and no workers or upstream requests are started.
+#[test]
+fn populated_profile_startup_has_bounded_snapshot_work() {
+    let mut baseline = None;
+    for completed_recalls in [0, 256] {
+        let (temporary, store, core) = fixture();
+        core.apply_sync_command(
+            "one",
+            &add(
+                1,
+                "peer",
+                "synthetic_self",
+                "Synthetic history ".repeat(64).as_bytes(),
+                123,
+                10000,
+            ),
+            "ordinary-seed",
+            "live",
+        )
+        .unwrap();
+        let source = crate::source_message_id(first(&core)["id"].as_str().unwrap()).unwrap();
+        core.apply_sync_command(
+            "one",
+            &add(1, "peer", "synthetic_self", b"Recalled seed", 124, 100),
+            "recall-seed",
+            "live",
+        )
+        .unwrap();
+        core.apply_sync_command("one", &recall(124), "seed-recall", "live")
+            .unwrap();
+        let db = synthetic_database(&core, &temporary, &source.database);
+        db.execute_batch(&format!(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2000) \
+             INSERT INTO {table}(server_id,local_type,real_sender_id,create_time,message_content,source,WCDB_CT_message_content,WCDB_CT_source) \
+             SELECT 1000+x,local_type,real_sender_id,10000+x,message_content,source,WCDB_CT_message_content,WCDB_CT_source FROM {table},n WHERE server_id=123",
+            table=source.table,
+        )).unwrap();
+        if completed_recalls > 0 {
+            db.execute_batch(&format!(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{completed_recalls}) \
+                 INSERT INTO {table}(server_id,local_type,real_sender_id,create_time,message_content,source,WCDB_CT_message_content,WCDB_CT_source) \
+                 SELECT 100000+x,local_type,real_sender_id,100+x,message_content,source,WCDB_CT_message_content,WCDB_CT_source FROM {table},n WHERE server_id=124",
+                table=source.table,
+            )).unwrap();
+        }
+        let rows: usize = db
+            .query_row(
+                &format!("SELECT count(*) FROM {}", source.table),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2002 + completed_recalls);
+        drop(db);
+        for number in 1..=completed_recalls {
+            let server = (100000 + number).to_string();
+            store
+                .record_recall("one", "peer", &server, None, None, None, "local_recall")
+                .unwrap();
+            store
+                .finish_recall_projection("one", "peer", &server, "applied")
+                .unwrap();
+        }
+        assert_eq!(store.pending_recall_projections("one").unwrap(), 0);
+        drop(core);
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        let recovered = core.recover_projection("one").unwrap();
+        assert_eq!(recovered["pendingBatches"], 0);
+        let page = core.messages("one", "peer", Some(20), None).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 20);
+        assert!(page["items"][0]["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("Synthetic history"));
+        let opens = core
+            .profile_snapshot_opens
+            .load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "startup rows={rows} completed_recalls={} full_profile_opens={opens}",
+            completed_recalls + 1
+        );
+        assert!(
+            opens <= 2,
+            "startup and first page exceeded the full-profile read budget: {opens}"
+        );
+        match baseline {
+            None => baseline = Some(opens),
+            Some(count) => assert_eq!(
+                opens, count,
+                "startup work grew with completed recall history"
+            ),
+        }
+    }
+}
+
 #[tokio::test]
-async fn snapshot_recall_suppression_retains_the_writers_local_repair_obligation() {
+async fn reading_a_restored_original_does_not_restart_completed_recall_recovery() {
     let (temporary, store, core) = fixture();
     core.apply_sync_command(
         "one",
@@ -1090,13 +1184,13 @@ async fn snapshot_recall_suppression_retains_the_writers_local_repair_obligation
     core.read("one", move |view| {
         assert!(view.store.is_read_snapshot());
         let message = view.message("one", &target)?;
-        assert_eq!(message["body"], crate::recalls::RECALLED_BODY);
-        assert!(!message.to_string().contains("Restored original"));
+        assert_eq!(message["body"], "Restored original");
+        assert!(message["recall"].is_null());
         Ok(())
     })
     .await
     .unwrap();
-    assert!(core.recall_read_rechecks.lock().unwrap().contains("one"));
+    assert_eq!(store.pending_recall_projections("one").unwrap(), 0);
     assert_eq!(recall_count(&store), 1);
     core.reconcile_recall_markers("one").unwrap();
     assert_eq!(
@@ -1105,9 +1199,13 @@ async fn snapshot_recall_suppression_retains_the_writers_local_repair_obligation
             .message(&source, None)
             .unwrap()
             .message_type,
-        10000
+        1
     );
-    assert!(!core.recall_read_rechecks.lock().unwrap().contains("one"));
+    assert_eq!(
+        core.message("one", &id).unwrap()["body"],
+        "Restored original"
+    );
+    assert_eq!(store.pending_recall_projections("one").unwrap(), 0);
     assert_eq!(recall_count(&store), 1);
 }
 
