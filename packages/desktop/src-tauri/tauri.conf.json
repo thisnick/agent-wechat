@@ -12,6 +12,7 @@
     "windows": [
       {
         "label": "main",
+        "dragDropEnabled": false,
         "title": "AgentWechat",
         "width": 1120,
         "height": 800,

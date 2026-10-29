@@ -577,6 +577,44 @@ input:focus-visible {
 .attachment-review {
   max-width: 430px;
 }
+.attachment-review .modal-body > p {
+  margin: 0 0 20px;
+}
+.attachment-review-list {
+  display: grid;
+  gap: 20px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: min(55vh, 480px);
+  overflow-y: auto;
+}
+.attachment-review-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  margin: 0 auto 12px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+.composer {
+  position: relative;
+}
+.composer-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: inherit;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  pointer-events: none;
+}
 .attachment-file {
   display: flex;
   align-items: center;

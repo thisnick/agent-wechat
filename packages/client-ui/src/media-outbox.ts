@@ -1,10 +1,10 @@
 import {
-  NATIVE_MAX_SOURCE_BYTES,
   type MediaJob,
   type MediaKind,
   type NativeWeChatClient,
 } from "@agent-wechat/shared";
 import { pause, readableError } from "./session.ts";
+import { COMPOSER_MAX_SOURCE_BYTES } from "./composer-attachments.ts";
 
 export type PendingMedia = {
   key: string;
@@ -99,7 +99,7 @@ export class MediaOutbox {
     if (this.controller.signal.aborted) return;
     if (
       !file.size ||
-      file.size > Math.min(NATIVE_MAX_SOURCE_BYTES, 25 * 1024 * 1024 - 17)
+      file.size > COMPOSER_MAX_SOURCE_BYTES
     )
       throw new Error("Choose a file smaller than 25 MB.");
     if (!threadId || !["file", "image", "video", "voice"].includes(kind))

@@ -40,7 +40,8 @@ import {
 } from "./session.ts";
 import { Avatar, Button, Icon, Logo, Welcome } from "./ui.tsx";
 import { HistorySearch } from "./history-search.ts";
-import { AttachmentPicker, MediaCard, PendingAttachments } from "./media.tsx";
+import { MediaCard, PendingAttachments } from "./media.tsx";
+import { AttachmentPicker } from "./attachment-picker.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
 import {
   messageSummary,
@@ -851,6 +852,7 @@ function Chats({
   >(undefined);
 
   const messageInput = useRef<HTMLTextAreaElement>(null);
+  const composerInput = useRef<HTMLDivElement>(null);
   const mentionInput = useRef<HTMLDivElement>(null);
   function focusMessage() { (mentionInput.current ?? messageInput.current)?.focus({ preventScroll: true }); }
   const composing = useRef(false);
@@ -1501,7 +1503,7 @@ function Chats({
                     )}
                   </ConversationScroll>
                   <div className="composer-wrap">
-                    <div className="composer">
+                    <div className="composer" ref={composerInput}>
                       {!reply && pendingQuote.current && (
                         <div className="composer-reply">
                           <span className="reply-source">
@@ -1577,7 +1579,8 @@ function Chats({
                       {composerNotice && <p className="mention-error" role="alert">{composerNotice}</p>}
                       <div className="composer-bottom">
                         <div className="composer-tools" role="group" aria-label="Message actions">
-                          {state.account && <AttachmentPicker key={state.account} connection={connection} account={state.account} threadId={state.selected} recipient={selectedName}
+                          {state.account && <AttachmentPicker key={JSON.stringify([state.account, state.selected])} connection={connection} account={state.account} threadId={state.selected} recipient={selectedName}
+                            composerRef={composerInput} mediaKinds={Array.isArray(state.capabilities.mediaKinds) ? state.capabilities.mediaKinds : []}
                             enabled={active && !reply && !pendingQuote.current && !draftMentions.length && Array.isArray(state.capabilities.mediaKinds) && state.capabilities.mediaKinds.length > 0} />}
                           <Button icon="mention" label="Mention someone"
                             title={!state.selected?.endsWith("@chatroom") ? "Mentions are available in group chats" : !inlineCapable ? "Update the hub to use inline mentions" : reply || pendingQuote.current ? "Remove the reply to mention someone" : "Mention someone"}
