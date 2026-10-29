@@ -22,13 +22,19 @@ export function releaseChannel(version, preState) {
   return { version, distTag: preState.tag, prerelease: true };
 }
 
-export async function readReleasePolicy({ root = process.cwd(), version } = {}) {
+// Alignment checks are also used by PR packaging while a channel switch is staged.
+export async function readReleaseVersion({ root = process.cwd(), version } = {}) {
   const cli = JSON.parse(await readFile(join(root, publicPackages[0][0], 'package.json'), 'utf8'));
   version ??= cli.version;
   for (const [directory, name] of publicPackages) {
     const pkg = JSON.parse(await readFile(join(root, directory, 'package.json'), 'utf8'));
     if (pkg.name !== name || pkg.private === true || pkg.version !== version) throw new Error('Release channel package/version mismatch');
   }
+  return version;
+}
+
+export async function readReleasePolicy({ root = process.cwd(), version } = {}) {
+  version = await readReleaseVersion({ root, version });
   let preState;
   try { preState = JSON.parse(await readFile(join(root, '.changeset/pre.json'), 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }

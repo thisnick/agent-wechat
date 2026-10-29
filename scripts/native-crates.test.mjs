@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { crateNames, isReleaseContext, publicationPlan, syncCrateVersions, validateCrates, verifyReleaseSource } from './native-crates.mjs';
+import { crateNames, isReleaseContext, publicationPlan, releaseVersionInput, syncCrateVersions, validateCrates, verifyReleaseSource } from './native-crates.mjs';
+import { readReleasePolicy, readReleaseVersion } from './native-release-policy.mjs';
 
 const version = '1.4.0-beta.2';
 const sourceCommit = 'a'.repeat(40);
@@ -13,6 +14,33 @@ const checksum = createHash('sha256').update(bytes).digest('hex');
 const checksums = Object.fromEntries(crateNames.map(name => [name, checksum]));
 const missing = () => new Response(null, { status: 404 });
 const readSource = async (_bytes, name) => ({ git: { sha1: sourceCommit }, path_in_vcs: `packages/native-client-rust/crates/${name}` });
+
+test('PR validation uses the committed version when GitHub supplies an empty release input', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'wechat-crate-pr-input-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const [directory, name] of [['packages/cli', '@agent-wechat/cli'], ['packages/openclaw-extension', '@agent-wechat/agent-wechat']]) {
+    await mkdir(join(root, directory), { recursive: true });
+    await writeFile(join(root, directory, 'package.json'), JSON.stringify({ name, version }));
+  }
+  await mkdir(join(root, '.changeset'));
+  await writeFile(join(root, '.changeset/pre.json'), JSON.stringify({ mode: 'pre', tag: 'beta' }));
+  for (const command of ['check', 'package']) {
+    for (const input of ['', undefined]) {
+      assert.equal(await readReleaseVersion({ root, version: releaseVersionInput(command, input) }), version);
+    }
+    await assert.rejects(readReleaseVersion({ root, version: releaseVersionInput(command, '1.0.0') }), /version mismatch/);
+  }
+  await writeFile(join(root, '.changeset/pre.json'), JSON.stringify({ mode: 'exit', tag: 'beta' }));
+  assert.equal(await readReleaseVersion({ root, version: releaseVersionInput('package', '') }), version);
+  await assert.rejects(readReleasePolicy({ root, version }), /matching Changesets prerelease mode/);
+});
+
+test('publication still requires an explicit release version', () => {
+  for (const command of ['plan', 'publish']) {
+    for (const input of ['', undefined]) assert.throws(() => releaseVersionInput(command, input), /explicit RELEASE_VERSION/);
+    assert.equal(releaseVersionInput(command, version), version);
+  }
+});
 
 test('only the main-branch native release workflow can publish', () => {
   const env = { GITHUB_REPOSITORY: 'thisnick/agent-wechat', GITHUB_REF: 'refs/heads/main',

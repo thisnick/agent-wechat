@@ -6,12 +6,19 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readReleasePolicy } from './native-release-policy.mjs';
+import { readReleasePolicy, readReleaseVersion } from './native-release-policy.mjs';
 
 export const crateNames = ['wechat-platform', 'wechat-media', 'wechat-protocol', 'wechat-profile'];
 export const repository = 'thisnick/agent-wechat';
 const workspace = 'packages/native-client-rust/Cargo.toml';
 const selections = names => names.flatMap(name => ['-p', name]);
+
+export function releaseVersionInput(command, version) {
+  if (!version && ['plan', 'publish'].includes(command)) throw new Error('Registry publication requires an explicit RELEASE_VERSION');
+  // GitHub sets a missing workflow_call input to an empty string on pull_request.
+  // Local/PR validation uses the committed CLI version; publication stays explicit.
+  return version || undefined;
+}
 
 export function isReleaseContext(env) {
   return env.GITHUB_REPOSITORY === repository && env.GITHUB_REF === 'refs/heads/main'
@@ -130,7 +137,11 @@ export async function publicationPlan({ version, sourceCommit, checksums, fetchI
 }
 
 export async function main(command, { root = process.cwd(), allowDirty = false } = {}) {
-  const policy = await readReleasePolicy({ root, version: process.env.RELEASE_VERSION });
+  const options = { root, version: releaseVersionInput(command, process.env.RELEASE_VERSION) };
+  // A PR may stage entry/exit from beta before Changesets cuts the next version.
+  // Only actual publication requires a completed channel transition.
+  const policy = ['plan', 'publish'].includes(command)
+    ? await readReleasePolicy(options) : { version: await readReleaseVersion(options) };
   const cargo = args => execFileSync('cargo', [...args, '--manifest-path', join(root, workspace)],
     { cwd: root, stdio: 'inherit' });
   const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--locked', '--format-version', '1',
