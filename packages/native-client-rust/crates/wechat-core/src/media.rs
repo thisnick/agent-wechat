@@ -1073,6 +1073,20 @@ impl Core {
         asset.animation_frames = if mime == "image/x-wxgf" { None } else { frames };
         if mime == "image/x-wxgf" {
             asset.filename = Some(format!("{id}.wxgf"));
+        } else if asset.kind == MediaKind::Video
+            && asset.variant == MediaVariant::Original
+            && asset.filename.as_deref() == Some("original.mp4")
+        {
+            let extension = match mime {
+                "video/quicktime" => Some("mov"),
+                "video/3gpp" => Some("3gp"),
+                "video/3gpp2" => Some("3g2"),
+                "video/mj2" => Some("mj2"),
+                _ => None,
+            };
+            if let Some(extension) = extension {
+                asset.filename = Some(format!("original.{extension}"));
+            }
         }
         let sealed = self
             .vault
@@ -2025,11 +2039,9 @@ fn validate_media_bytes(kind: MediaKind, bytes: &[u8]) -> Result<(String, Option
             Ok((result.content_type, frames))
         }
         MediaKind::Video => {
-            ensure!(
-                bytes.len() >= 12 && bytes[4..8] == *b"ftyp",
-                "media_integrity_failed"
-            );
-            Ok(("video/mp4".into(), None))
+            let content_type = wechat_media::inspect_video_container(bytes)
+                .map_err(|_| anyhow::anyhow!("media_integrity_failed"))?;
+            Ok((content_type.into(), None))
         }
         MediaKind::File => Ok(("application/octet-stream".into(), None)),
         MediaKind::Voice => {
@@ -2817,11 +2829,7 @@ impl Core {
                     self.phase_media(account, id, "uploading")?;
                     let fence = self.media_authorization_fence(account)?;
                     let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                        raw_cdn.native()?.upload_video_original_with_progress(
-                            &prepared,
-                            raw_material.task_id,
-                            callback,
-                        )
+                        raw_cdn.upload_video_original(&prepared, raw_material.task_id, &callback)
                     })?;
                     plan.uploaded_video.as_mut().unwrap().original = Some(uploaded);
                     self.save_send_plan(account, id, &plan)?;
@@ -3242,7 +3250,11 @@ impl Core {
                                     .original
                                     .as_ref()
                                     .context("uploaded_media_missing")?;
-                                (bytes.clone().into(), original.sha256.clone(), "video/mp4")
+                                (
+                                    bytes.clone().into(),
+                                    original.sha256.clone(),
+                                    wechat_media::inspect_video_container(&bytes)?,
+                                )
                             } else {
                                 continue;
                             }
@@ -3411,6 +3423,7 @@ fn fit_jpeg(image: &image::DynamicImage, max_edge: u32, max_bytes: usize) -> Res
 fn run_ffmpeg(
     input: &[u8],
     output: &str,
+    input_formats: &str,
     options: &[&str],
     mut cancelled: impl FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
@@ -3429,20 +3442,34 @@ fn run_ffmpeg(
     f.write_all(input)?;
     drop(f);
     let mut command = Command::new("ffmpeg");
+    command.args([
+        "-v",
+        "error",
+        "-nostdin",
+        "-y",
+        "-protocol_whitelist",
+        if input_formats == "mov" {
+            "file"
+        } else {
+            "file,pipe"
+        },
+        "-format_whitelist",
+        input_formats,
+        "-threads",
+        "1",
+    ]);
+    if input_formats == "mov" {
+        command.args([
+            "-max_alloc",
+            "67108864",
+            "-enable_drefs",
+            "0",
+            "-use_absolute_path",
+            "0",
+        ]);
+    }
     command
-        .args([
-            "-v",
-            "error",
-            "-nostdin",
-            "-y",
-            "-protocol_whitelist",
-            "file,pipe",
-            "-format_whitelist",
-            "wav,mp3,flac,ogg,aac,mov,matroska,webm",
-            "-threads",
-            "1",
-            "-i",
-        ])
+        .arg("-i")
         .arg(&input_path)
         .args(options)
         .args(["-fs", "33554432"])
@@ -3556,6 +3583,7 @@ fn audio_pcm(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<
     let raw = run_ffmpeg(
         bytes,
         "audio.pcm",
+        "wav,mp3,flac,ogg,aac,mov,matroska,webm",
         &[
             "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-t", "301",
         ],
@@ -3575,6 +3603,8 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
         io::Write,
         process::{Command, Stdio},
     };
+    cancelled()?;
+    wechat_media::inspect_video_container(input)?;
     let dir = wechat_platform::private_tempdir("wechat-media-")?;
     let input_path = dir.path().join("input.bin");
     let result_path = dir.path().join("probe.json");
@@ -3594,10 +3624,16 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
         .args([
             "-v",
             "error",
+            "-max_alloc",
+            "67108864",
             "-protocol_whitelist",
-            "file,pipe",
+            "file",
             "-format_whitelist",
             "mov",
+            "-enable_drefs",
+            "0",
+            "-use_absolute_path",
+            "0",
             "-show_entries",
             "format=duration",
             "-of",
@@ -3655,9 +3691,11 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
     Ok(duration.ceil() as u32)
 }
 fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<u8>> {
+    wechat_media::inspect_video_container(bytes)?;
     let jpeg = run_ffmpeg(
         bytes,
         "thumb.jpg",
+        "mov",
         &[
             "-frames:v",
             "1",
@@ -4989,6 +5027,130 @@ mod tests {
             raw
         );
         assert!(core.media_content("two", "asset_synthetic").is_err());
+    }
+    #[test]
+    fn verified_original_video_cache_uses_its_container_extension_without_renaming_other_files() {
+        let (_dir, core) = test_core();
+        fn movie(brand: &[u8; 4]) -> Vec<u8> {
+            fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+                let mut bytes = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+                bytes.extend_from_slice(kind);
+                bytes.extend_from_slice(payload);
+                bytes
+            }
+            [
+                atom(b"ftyp", &[brand.as_slice(), &[0; 4]].concat()),
+                atom(b"moov", &[0; 8]),
+                atom(b"mdat", b"synthetic container media"),
+            ]
+            .concat()
+        }
+        for (index, (brand, mime, kind, variant, name, expected)) in [
+            (
+                b"qt  ",
+                "video/quicktime",
+                "video",
+                "original",
+                "original.mp4",
+                "original.mov",
+            ),
+            (
+                b"3gp4",
+                "video/3gpp",
+                "video",
+                "original",
+                "original.mp4",
+                "original.3gp",
+            ),
+            (
+                b"3g2a",
+                "video/3gpp2",
+                "video",
+                "original",
+                "original.mp4",
+                "original.3g2",
+            ),
+            (
+                b"mjp2",
+                "video/mj2",
+                "video",
+                "original",
+                "original.mp4",
+                "original.mj2",
+            ),
+            (
+                b"isom",
+                "video/mp4",
+                "video",
+                "original",
+                "original.mp4",
+                "original.mp4",
+            ),
+            (
+                b"qt  ",
+                "video/quicktime",
+                "file",
+                "original",
+                "original.mp4",
+                "original.mp4",
+            ),
+            (
+                b"qt  ",
+                "video/quicktime",
+                "video",
+                "normal",
+                "video.mp4",
+                "video.mp4",
+            ),
+            (
+                b"qt  ",
+                "video/quicktime",
+                "video",
+                "original",
+                "custom.mp4",
+                "custom.mp4",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = movie(brand);
+            assert_eq!(wechat_media::inspect_video_container(&bytes).unwrap(), mime);
+            let id = format!("asset_movie_filename_{index}");
+            let asset: MediaAsset = serde_json::from_value(json!({
+                "id":id, "accountId":"one", "kind":kind, "variant":variant,
+                "filename":name, "state":"pending", "retryable":true,
+                "officialWriteback":"unsupported"
+            }))
+            .unwrap();
+            core.store
+                .put_media_asset(
+                    "one",
+                    &MediaAssetRecord {
+                        id: id.clone(),
+                        message_id: None,
+                        variant: variant.into(),
+                        kind: kind.into(),
+                        metadata: serde_json::to_value(&asset).unwrap(),
+                        plan: vec![],
+                        payload: None,
+                    },
+                )
+                .unwrap();
+            let available = core
+                .cache_asset("one", &id, &bytes, mime, Some(asset.variant), None)
+                .unwrap();
+            assert_eq!(available.filename.as_deref(), Some(expected));
+            assert_eq!(available.content_type.as_deref(), Some(mime));
+            assert_eq!(
+                core.media_asset("one", &id).unwrap().filename.as_deref(),
+                Some(expected)
+            );
+            let content = core.media_content("one", &id).unwrap();
+            assert_eq!(content.bytes, bytes);
+            assert_eq!(content.content_type, mime);
+            assert_eq!(content.filename.as_deref(), Some(expected));
+        }
     }
     #[test]
     fn wxgf_source_and_preview_remain_distinct_encrypted_account_scoped_and_restartable() {

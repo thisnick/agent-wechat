@@ -13,6 +13,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use wechat_media::inspect_video_container;
 
 const OUTPUT_LIMIT: usize = wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES;
 const REPORT_LIMIT: usize = 65_536;
@@ -33,10 +34,7 @@ pub(super) fn prepare_normal(
 ) -> Result<Vec<u8>> {
     cancelled()?;
     validate_input_length(input.len())?;
-    ensure!(
-        input.len() >= 12 && input[4..8] == *b"ftyp",
-        "invalid_video_source"
-    );
+    inspect_video_container(input)?;
     ensure!((1..=3600).contains(&seconds), "video_duration_limit");
     let deadline = Instant::now() + PREPARE_TIMEOUT;
     let dir = wechat_platform::private_tempdir("wechat-video-")?;
@@ -403,6 +401,157 @@ fn execute(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn synthetic_video(muxer: &str, codec: &str, brand: Option<&str>) -> Vec<u8> {
+        let dir = wechat_platform::private_tempdir("wechat-video-source-test-").unwrap();
+        let path = dir.path().join("source.bin");
+        let mut command = Command::new("ffmpeg");
+        command.args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x120:rate=5:duration=1",
+            "-c:v",
+            codec,
+            "-threads",
+            "1",
+            "-f",
+            muxer,
+        ]);
+        if let Some(brand) = brand {
+            command.args(["-brand", brand]);
+        }
+        assert!(command.arg(&path).status().unwrap().success());
+        std::fs::read(path).unwrap()
+    }
+
+    fn legacy_quicktime(mut source: Vec<u8>) -> Vec<u8> {
+        // Removing the optional file-type box also shifts the actual sample
+        // bytes. Correct the synthetic movie's chunk table to keep it playable.
+        fn shift_chunk_offsets(boxes: &mut [u8], removed: u32) {
+            let mut offset = 0;
+            while offset < boxes.len() {
+                let size =
+                    u32::from_be_bytes(boxes[offset..offset + 4].try_into().unwrap()) as usize;
+                let current = &mut boxes[offset..offset + size];
+                match &current[4..8] {
+                    b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" => {
+                        shift_chunk_offsets(&mut current[8..], removed);
+                    }
+                    b"stco" => {
+                        let count = u32::from_be_bytes(current[12..16].try_into().unwrap());
+                        assert_eq!(current.len(), 16 + count as usize * 4);
+                        for value in current[16..].chunks_exact_mut(4) {
+                            let position = u32::from_be_bytes(value.try_into().unwrap());
+                            value.copy_from_slice(
+                                &position.checked_sub(removed).unwrap().to_be_bytes(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                offset += size;
+            }
+        }
+        assert_eq!(&source[4..8], b"ftyp");
+        let removed = u32::from_be_bytes(source[..4].try_into().unwrap());
+        source.drain(..removed as usize);
+        shift_chunk_offsets(&mut source, removed);
+        source
+    }
+
+    #[test]
+    fn movie_family_sources_prepare_playback_and_preserve_original_upload_bytes() {
+        use wechat_protocol::media::{decrypt_cdn, MediaQuality, PreparedUpload};
+        for (muxer, codec, brand, expected_type) in [
+            ("mp4", "libx264", None, "video/mp4"),
+            ("mov", "mjpeg", None, "video/quicktime"),
+            ("3gp", "mpeg4", None, "video/3gpp"),
+            ("3g2", "mpeg4", None, "video/3gpp2"),
+            ("mov", "jpeg2000", Some("mjp2"), "video/mj2"),
+        ] {
+            let source = synthetic_video(muxer, codec, brand);
+            let sources = if muxer == "mov" && brand.is_none() {
+                vec![source.clone(), legacy_quicktime(source)]
+            } else {
+                vec![source]
+            };
+            for source in sources {
+                assert_eq!(inspect_video_container(&source).unwrap(), expected_type);
+                let source_hash = openssl::sha::sha256(&source);
+                let seconds = super::super::video_duration(&source, || Ok(())).unwrap();
+                let normal = prepare_normal(&source, seconds, || Ok(())).unwrap();
+                assert_eq!(inspect_video_container(&normal).unwrap(), "video/mp4");
+                assert!(normal.len() <= OUTPUT_LIMIT);
+                let thumbnail = super::super::video_thumbnail(&normal, || Ok(())).unwrap();
+                assert_eq!(
+                    wechat_media::inspect_image(&thumbnail)
+                        .unwrap()
+                        .content_type,
+                    "image/jpeg"
+                );
+                assert_eq!(
+                    super::super::validate_media_bytes(super::super::MediaKind::Video, &source)
+                        .unwrap()
+                        .0,
+                    expected_type
+                );
+                let original = PreparedUpload::with_material(
+                    &source,
+                    MediaQuality::Video,
+                    "source",
+                    "filehelper",
+                    &[7; 16],
+                    "00112233445566778899aabbccddeeff",
+                )
+                .unwrap();
+                assert_eq!(
+                    decrypt_cdn(&original.encrypted, &original.aes_key).unwrap(),
+                    source
+                );
+                assert_eq!(openssl::sha::sha256(&source), source_hash);
+                assert_ne!(normal, source);
+            }
+        }
+    }
+
+    #[test]
+    fn movie_preparation_rejects_audio_only_and_other_containers() {
+        let dir = wechat_platform::private_tempdir("wechat-video-reject-test-").unwrap();
+        let audio = dir.path().join("audio.m4a");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&audio)
+            .status()
+            .unwrap()
+            .success());
+        let source = std::fs::read(audio).unwrap();
+        assert!(inspect_video_container(&source).is_ok());
+        assert!(prepare_normal(&source, 1, || Ok(()))
+            .unwrap_err()
+            .to_string()
+            .contains("video_stream_limit"));
+        let avi = synthetic_video("avi", "mpeg4", None);
+        assert!(prepare_normal(&avi, 1, || Ok(()))
+            .unwrap_err()
+            .to_string()
+            .contains("invalid_video_source"));
+        let source = synthetic_video("mov", "mjpeg", None);
+        assert!(prepare_normal(&source[..source.len() / 2], 1, || Ok(())).is_err());
+    }
 
     fn report() -> serde_json::Value {
         json!({"streams":[{"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":640,"height":360,"duration":"6.000000","avg_frame_rate":"30/1","nb_read_frames":"180"}],"format":{"duration":"6.000000"}})

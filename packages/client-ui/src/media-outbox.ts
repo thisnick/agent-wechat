@@ -2,6 +2,7 @@ import {
   type MediaJob,
   type MediaKind,
   type NativeWeChatClient,
+  type VideoSendQuality,
 } from "@agent-wechat/shared";
 import { pause, readableError } from "./session.ts";
 import { COMPOSER_MAX_SOURCE_BYTES } from "./composer-attachments.ts";
@@ -12,6 +13,7 @@ export type PendingMedia = {
   name: string;
   kind: MediaKind;
   size: number;
+  videoQuality?: VideoSendQuality;
   stage:
     | "uploading"
     | "submitting"
@@ -95,6 +97,7 @@ export class MediaOutbox {
     threadId: string,
     file: FileSource,
     kind: MediaKind,
+    videoQuality: VideoSendQuality = "normal",
   ): Promise<void> {
     if (this.controller.signal.aborted) return;
     if (
@@ -113,6 +116,7 @@ export class MediaOutbox {
         name: file.name,
         kind,
         size: file.size,
+        ...(kind === "video" ? { videoQuality } : {}),
         stage: "uploading",
       },
     ];
@@ -141,6 +145,7 @@ export class MediaOutbox {
           thumbnailSourceId: null,
           playSeconds: null,
           durationMs: null,
+          ...(kind === "video" ? { videoQuality } : {}),
         },
         key,
       );

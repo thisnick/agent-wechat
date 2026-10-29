@@ -814,21 +814,37 @@ fn pending_file_resource_adds_only_local_name_and_preserves_access_time() {
             .changed
     );
 }
+fn movie_container_fixture(brand: Option<&[u8; 4]>, media: &[u8]) -> Vec<u8> {
+    // Container-shape fixtures; core encoder tests cover playable source streams.
+    fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+    let mut bytes = Vec::new();
+    if let Some(brand) = brand {
+        bytes.extend(atom(b"ftyp", &[brand.as_slice(), &[0; 4]].concat()));
+    }
+    bytes.extend(atom(b"moov", &[0; 8]));
+    bytes.extend(atom(b"mdat", media));
+    bytes
+}
 #[test]
 fn video_resource_variants_share_basename_and_preserve_other_variants() {
     let d = fixture();
     let location = ProfileLocation::new(d.path().join("account")).unwrap();
     let keys = KeyFile::empty("account");
     let o = options();
-    let normal = b"\x00\x00\x00\x18ftypisomnormal";
-    let original = b"\x00\x00\x00\x18ftypisomoriginal";
+    let normal = movie_container_fixture(Some(b"isom"), b"normal");
+    let original = movie_container_fixture(None, b"legacy original");
     let mut jpeg = Cursor::new(vec![]);
     image::DynamicImage::new_rgb8(3, 2)
         .write_to(&mut jpeg, image::ImageFormat::Jpeg)
         .unwrap();
     let jpeg = jpeg.into_inner();
     let mut message = row(43);
-    message.fields.insert("message_content".into(),SqlValue::Text(format!("<msg><videomsg length=\"{}\" md5=\"{:x}\" rawlength=\"{}\" rawmd5=\"{:x}\" cdnthumblength=\"{}\"/></msg>",normal.len(),Md5::digest(normal),original.len(),Md5::digest(original),jpeg.len())));
+    message.fields.insert("message_content".into(),SqlValue::Text(format!("<msg><videomsg length=\"{}\" md5=\"{:x}\" rawlength=\"{}\" rawmd5=\"{:x}\" cdnthumblength=\"{}\"/></msg>",normal.len(),Md5::digest(&normal),original.len(),Md5::digest(&original),jpeg.len())));
     let source = apply_message_projection(&location, &keys, &message, &o)
         .unwrap()
         .source_id;
@@ -838,7 +854,7 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
         &source,
         "peer",
         VideoQuality::Normal,
-        normal,
+        &normal,
         &o,
     )
     .unwrap();
@@ -848,7 +864,7 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
         &source,
         "peer",
         VideoQuality::Original,
-        original,
+        &original,
         &o,
     )
     .unwrap();
@@ -877,7 +893,7 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
             &source,
             "peer",
             VideoQuality::Normal,
-            normal,
+            &normal,
             &o
         )
         .unwrap()
@@ -889,7 +905,7 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
         &source,
         "peer",
         VideoQuality::Original,
-        normal,
+        &normal,
         &o
     )
     .is_err());
@@ -899,7 +915,7 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
         &source,
         "peer",
         VideoQuality::Thumbnail,
-        normal,
+        &normal,
         &o
     )
     .is_err());
@@ -938,6 +954,57 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
             bytes
         );
     }
+    assert_eq!(
+        reader
+            .cached_hardlink_file(
+                HardlinkKind::Video,
+                &format!("{:x}", Md5::digest(&original))
+            )
+            .unwrap()
+            .media_type,
+        "video/quicktime"
+    );
+}
+#[test]
+fn legacy_quicktime_hardlink_cache_preserves_bytes_and_reports_its_container_type() {
+    let d = fixture();
+    let location = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    let source = apply_message_projection(&location, &keys, &row(43), &o)
+        .unwrap()
+        .source_id;
+    let original = movie_container_fixture(None, b"legacy original");
+    cache_hardlink_media_projection(
+        &location,
+        &keys,
+        &source,
+        "peer",
+        HardlinkKind::Video,
+        "legacy.mov",
+        &original,
+        &o,
+    )
+    .unwrap();
+    assert!(cache_hardlink_media_projection(
+        &location,
+        &keys,
+        &source,
+        "peer",
+        HardlinkKind::Video,
+        "wrong.mov",
+        b"RIFFxxxxAVI ",
+        &o,
+    )
+    .is_err());
+    let cached = reader(location, keys)
+        .cached_hardlink_file(
+            HardlinkKind::Video,
+            &format!("{:x}", Md5::digest(&original)),
+        )
+        .unwrap();
+    assert_eq!(cached.bytes, original);
+    assert_eq!(cached.media_type, "video/quicktime");
 }
 #[test]
 fn malformed_attachment_metadata_does_not_create_cache_or_resource_rows() {

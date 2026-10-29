@@ -645,6 +645,15 @@ input:focus-visible {
   gap: 10px;
   margin-top: 24px;
 }
+.attachment-video-quality {
+  margin-top: 20px;
+}
+.attachment-video-quality label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
 .attachment-actions button {
   padding: 10px 16px;
   border-radius: 7px;

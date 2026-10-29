@@ -147,6 +147,29 @@ impl MediaTransport for SimulatorMedia {
             original: None,
         })
     }
+    fn upload_video_original(
+        &self,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        progress: Progress<'_>,
+    ) -> Result<UploadedMedia> {
+        ensure!(
+            prepared.kind == MediaQuality::Video && task_id != 0,
+            "Expected an original video upload and task ID"
+        );
+        ensure!(
+            prepared.aes_key.len() == 16
+                && prepared.file_key.len() == 32
+                && prepared
+                    .file_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                && prepared.plaintext_bytes > 0
+                && prepared.plaintext_bytes as usize <= wechat_core::MAX_VIDEO_SOURCE_BYTES,
+            "Invalid prepared original video"
+        );
+        self.upload(prepared, progress)
+    }
 }
 pub(super) fn submit(
     upstream: &SimulatorUpstream,
@@ -276,4 +299,58 @@ pub(super) fn sticker(
     let inspection = wechat_protocol::media::inspect_image(&bytes)?;
     progress(bytes.len() as u64, Some(bytes.len() as u64))?;
     Ok((bytes, inspection))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_video_upload_requires_its_persisted_task_and_video_material_before_rpc() {
+        let upstream =
+            SimulatorUpstream::new("127.0.0.1:9".parse().unwrap(), "t".repeat(32)).unwrap();
+        let media = SimulatorMedia::new(
+            upstream,
+            Session {
+                account: "one".into(),
+                generation: 1,
+            },
+        );
+        let prepared = PreparedUpload::with_material(
+            include_bytes!("../fixtures/sample.mp4"),
+            MediaQuality::Video,
+            "original.mp4",
+            "sim_mei",
+            &[7; 16],
+            "00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
+        assert!(media
+            .upload_video_original(&prepared, 0, &|_, _| Ok(()))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("original video upload and task ID"));
+        let mut wrong_kind = prepared.clone();
+        wrong_kind.kind = MediaQuality::File;
+        assert!(media
+            .upload_video_original(&wrong_kind, 1, &|_, _| Ok(()))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("original video upload and task ID"));
+        for (index, mut invalid) in [prepared.clone(), prepared].into_iter().enumerate() {
+            if index == 0 {
+                invalid.aes_key.pop();
+            } else {
+                invalid.file_key.replace_range(..1, "z");
+            }
+            assert!(media
+                .upload_video_original(&invalid, 1, &|_, _| Ok(()))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Invalid prepared original video"));
+        }
+    }
 }

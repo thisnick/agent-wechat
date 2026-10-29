@@ -5,7 +5,7 @@ description: File, image, video and voice limits, longer sends, and the CLI, API
 
 import { Aside } from '@astrojs/starlight/components';
 
-In the desktop or web client, use the attachment button, paste a file or image, or drop files into the message box. Review them before sending. JPEG, PNG, GIF and WebP files become images; MP4 files become videos; other formats become file attachments.
+In the desktop or web client, use the attachment button, paste a file or image, or drop files into the message box. Review them before sending. JPEG, PNG, GIF and WebP files become images; MOV, MP4, 3GP, 3G2 and MJ2 files become videos; other formats become file attachments.
 
 Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source limit is **512 MiB (536,870,912 bytes)**. Limits depend on the selected send kind:
 
@@ -107,6 +107,7 @@ Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary 
 Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinary file. Video quality options apply only to video sends.
 
 <Aside title="Good to know">
+- File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
 - See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
 - Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.

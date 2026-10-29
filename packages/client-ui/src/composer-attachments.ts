@@ -17,12 +17,19 @@ export function attachmentKind(
   const mime = file.type.toLowerCase().split(";", 1)[0].trim();
   if (["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mime))
     return "image";
-  if (mime === "video/mp4") return "video";
+  if (
+    ["video/mp4", "video/quicktime", "video/3gpp", "video/3gpp2", "video/mj2"].includes(
+      mime
+    )
+  )
+    return "video";
   if (mime && mime !== "application/octet-stream") return "file";
   const extension = file.name.split(".").at(-1)?.toLowerCase();
   if (["jpg", "jpeg", "png", "gif", "webp"].includes(extension ?? ""))
     return "image";
-  return extension === "mp4" ? "video" : "file";
+  return ["mov", "mp4", "3gp", "3g2", "mj2"].includes(extension ?? "")
+    ? "video"
+    : "file";
 }
 
 export type ReviewedAttachment = { file: File; kind: AttachmentKind };

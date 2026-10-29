@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import type { VideoSendQuality } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { Button, Icon } from "./ui.tsx";
 import {
@@ -13,6 +14,7 @@ type Review = {
   files: ReviewedAttachment[];
   threadId: string;
   recipient: string;
+  videoQuality: VideoSendQuality;
 };
 export function AttachmentPicker({
   connection,
@@ -48,7 +50,12 @@ export function AttachmentPicker({
     try {
       const filesToSend = reviewAttachments(files, mediaKinds);
       setError("");
-      setReview({ files: filesToSend, threadId, recipient });
+      setReview({
+        files: filesToSend,
+        threadId,
+        recipient,
+        videoQuality: "normal",
+      });
     } catch (error) {
       setError(readableError(error));
     }
@@ -85,13 +92,13 @@ export function AttachmentPicker({
         setReview(null);
       }
       if (event.key !== "Tab") return;
-      const buttons = Array.from(
-        dialog.current?.querySelectorAll<HTMLButtonElement>(
-          "button:not(:disabled)"
+      const controls = Array.from(
+        dialog.current?.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), video[controls]"
         ) ?? []
       );
-      const first = buttons[0],
-        last = buttons.at(-1);
+      const first = controls[0],
+        last = controls.at(-1);
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last?.focus();
@@ -106,7 +113,7 @@ export function AttachmentPicker({
       if (previous instanceof HTMLElement && previous.isConnected)
         previous.focus({ preventScroll: true });
     };
-  }, [review]);
+  }, [review?.files]);
   function send() {
     const target = pending.current;
     if (!enabled || !target) return;
@@ -117,7 +124,12 @@ export function AttachmentPicker({
     // if navigation changes while an earlier file is uploading.
     void (async () => {
       for (const item of target.files)
-        await outbox.send(target.threadId, item.file, item.kind);
+        await outbox.send(
+          target.threadId,
+          item.file,
+          item.kind,
+          target.videoQuality
+        );
     })().catch((error) => setError(readableError(error)));
   }
   return (
@@ -185,6 +197,29 @@ export function AttachmentPicker({
                     </li>
                   ))}
                 </ul>
+                {review.files.some((item) => item.kind === "video") && (
+                  <div className="attachment-video-quality">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={review.videoQuality === "original"}
+                        onChange={(event) => {
+                          const videoQuality = event.target.checked
+                            ? "original"
+                            : "normal";
+                          setReview(
+                            (current) => current && { ...current, videoQuality }
+                          );
+                        }}
+                      />
+                      Original video
+                    </label>
+                    <p className="field-help">
+                      Include the original file for download alongside the
+                      playback copy.
+                    </p>
+                  </div>
+                )}
                 <div className="attachment-actions">
                   <button className="secondary" onClick={() => setReview(null)}>
                     Cancel
@@ -211,8 +246,10 @@ function AttachmentPreview({
 }: {
   item: ReviewedAttachment;
 }) {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(""),
+    [previewFailed, setPreviewFailed] = useState(false);
   useEffect(() => {
+    setPreviewFailed(false);
     if (kind === "file") return;
     const object = URL.createObjectURL(file);
     setUrl(object);
@@ -231,14 +268,20 @@ function AttachmentPreview({
           alt="Image to send"
         />
       )}
-      {url && kind === "video" && (
+      {url && kind === "video" && !previewFailed && (
         <video
           className="attachment-review-preview"
           src={url}
           controls
           preload="metadata"
           aria-label="Video to send"
+          onError={() => setPreviewFailed(true)}
         />
+      )}
+      {kind === "video" && previewFailed && (
+        <p className="field-help">
+          Video preview unavailable. You can still send this file.
+        </p>
       )}
       <div className="attachment-file">
         <Icon

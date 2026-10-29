@@ -23,6 +23,15 @@ pub trait MediaTransport {
         prepared: &PreparedVideoUpload,
         progress: Progress<'_>,
     ) -> Result<UploadedVideo>;
+    fn upload_video_original(
+        &self,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        progress: Progress<'_>,
+    ) -> Result<UploadedMedia> {
+        self.native()?
+            .upload_video_original_with_progress(prepared, task_id, progress)
+    }
 }
 impl MediaTransport for CdnClient {
     fn native(&self) -> Result<&CdnClient> {

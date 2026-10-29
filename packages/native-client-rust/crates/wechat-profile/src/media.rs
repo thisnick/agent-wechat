@@ -314,8 +314,10 @@ impl ProfileReader {
             media_type: crate::images::validate_image(&bytes)
                 .map(|v| v.0)
                 .unwrap_or_else(|_| {
-                    if kind == HardlinkKind::Video && bytes.get(4..8) == Some(b"ftyp") {
-                        "video/mp4".into()
+                    if kind == HardlinkKind::Video {
+                        wechat_media::inspect_video_container(&bytes)
+                            .unwrap_or("application/octet-stream")
+                            .into()
                     } else {
                         "application/octet-stream".into()
                     }
@@ -1689,7 +1691,7 @@ pub fn cache_file_projection(
 }
 
 /// Cache one video representation using the resource basename plus its exact
-/// native suffix. Plain MP4 and JPEG thumbnail bytes are never interchanged, and
+/// native suffix. Movie and JPEG thumbnail bytes are never interchanged, and
 /// adding one quality preserves every other resource detail and basename.
 #[allow(clippy::too_many_arguments)]
 pub fn cache_video_projection(
@@ -1724,7 +1726,7 @@ pub fn cache_video_projection(
         if crate::images::validate_image(plaintext)?.0 != "image/jpeg" {
             return Err(ProfileError::InvalidMetadata);
         }
-    } else if plaintext.len() < 12 || plaintext.get(4..8) != Some(b"ftyp") {
+    } else if wechat_media::inspect_video_container(plaintext).is_err() {
         return Err(ProfileError::InvalidMetadata);
     }
     let existing = resource_snapshot(location, keys, &binding, chat, options)?;
@@ -1828,7 +1830,7 @@ pub fn cache_hardlink_media_projection(
     {
         return Err(ProfileError::InvalidQuery);
     }
-    if kind == HardlinkKind::Video && plaintext.get(4..8) != Some(b"ftyp") {
+    if kind == HardlinkKind::Video && wechat_media::inspect_video_container(plaintext).is_err() {
         return Err(ProfileError::InvalidMetadata);
     }
     let hash = format!("{:x}", Md5::digest(plaintext));

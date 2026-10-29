@@ -88,6 +88,60 @@ test("reload recovers only receipt metadata and does not upload or send again", 
   assert.equal(saved.read()[0].sourceId, "source-1");
   assert.equal("bytes" in saved.read()[0], false);
 });
+test("original video keeps its quality and key through uncertain admission and reload", async (t) => {
+  const saved = storage();
+  const selected = new File(["synthetic MOV"], "camera.mov", { type: "video/quicktime" });
+  const submissions = [], uploads = [], lookups = [];
+  const client = {
+    upload: async (account, bytes, name, mime) => {
+      uploads.push({ account, bytes, name, mime });
+      return { id: "mov-source" };
+    },
+    sendMedia: async (account, request, key) => {
+      submissions.push({ account, request, key });
+      throw new Error("lost response");
+    },
+    sendByKey: async (account, key) => {
+      lookups.push({ account, key });
+      return job();
+    },
+  };
+  const first = new MediaOutbox(client, "a", saved);
+  await first.send("mei", selected, "video", "original");
+  const pending = first.snapshot()[0];
+  assert.equal(pending.videoQuality, "original");
+  assert.equal(pending.uncertain, true);
+  assert.equal(submissions[0].request.videoQuality, "original");
+  assert.equal(submissions[0].request.kind, "video");
+  assert.equal(submissions[0].request.sourceId, "mov-source");
+  assert.equal(submissions[0].key, pending.key);
+  assert.deepEqual(uploads[0].bytes, new Uint8Array(await selected.arrayBuffer()));
+  assert.equal(uploads[0].mime, "video/quicktime");
+  first.close();
+  const reopened = new MediaOutbox(client, "a", saved);
+  t.after(() => reopened.close());
+  await eventually(() => reopened.snapshot()[0].job?.state === "accepted");
+  assert.deepEqual(lookups, [{ account: "a", key: pending.key }]);
+  assert.equal(reopened.snapshot()[0].videoQuality, "original");
+  assert.equal(submissions.length, 1);
+  assert.equal(uploads.length, 1);
+});
+test("normal video is the default and mixed attachments do not receive video quality", async (t) => {
+  const requests = [];
+  const outbox = new MediaOutbox({
+    upload: async () => ({ id: "source-1" }),
+    sendMedia: async (_account, request) => {
+      requests.push(request);
+      return job();
+    },
+  }, "a", storage());
+  t.after(() => outbox.close());
+  await outbox.send("mei", file(), "video");
+  await outbox.send("mei", file(), "file", "original");
+  assert.equal(requests[0].videoQuality, "normal");
+  assert.equal("videoQuality" in requests[1], false);
+  assert.equal("videoQuality" in outbox.snapshot()[1], false);
+});
 test("late upload cancellation cannot submit an attachment", async (t) => {
   const late = deferred();
   let submissions = 0;

@@ -369,6 +369,59 @@ try {
   assert.equal((await a.sendMedia("personal", photoRequest, "large-photo-send")).id, photoDone.id);
   assert.equal((await a.sendByKey("personal", "large-photo-send")).id, photoDone.id);
 
+  const moviePath = join(repository, "packages/native-client-rust/crates/wechat-core/tests/fixtures/send-videos/legacy-mjpeg.mov");
+  const movie = await readFile(moviePath);
+  assert.notEqual(movie.subarray(4, 8).toString(), "ftyp");
+  const movieHash = createHash("sha256").update(movie).digest("hex");
+  const movieSource = await a.upload("personal", movie, "legacy.mov", "video/quicktime");
+  const movieRequest = { threadId: "sim_mei", kind: "video", sourceId: movieSource.id,
+    standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null,
+    videoQuality: "normal" };
+  for (const quality of ["normal", "original"]) {
+    const key = `legacy-mov-${quality}`;
+    const submitted = quality === "original"
+      ? await cli("messages", "send", "sim_mei", "--video", moviePath, "--video-quality", quality, "--idempotency-key", key, "--detach")
+      : await a.sendMedia("personal", movieRequest, key);
+    const done = await waitFor(`${quality} MOV accepted and projected`, async () => {
+      const current = await a.job("personal", submitted.id);
+      assert.ok(!["failed", "cancelled", "needs_review"].includes(current.state), current.reason);
+      return current.state === "accepted" && current.result?.messageIds?.length && current;
+    });
+    assert.equal(done.result.uploadReadbackVerified, true);
+    assert.equal(done.result.profileProjection, "complete");
+    assert.equal(done.result.officialMediaWriteback, "complete");
+    assert.equal(done.result.videoPreparation.quality, quality);
+    assert.equal(done.result.videoPreparation.sourceSha256, movieHash);
+    assert.equal(done.result.videoPreparation.originalIncluded, quality === "original");
+    assert.notEqual(done.result.videoPreparation.normalSha256, movieHash);
+    for (const id of done.result.messageIds) {
+      const assets = (await a.mediaAssets("personal", id)).items;
+      assert.equal(assets.some(asset => asset.variant === "original"), quality === "original");
+      for (const variant of quality === "original" ? ["normal", "thumbnail", "original"] : ["normal", "thumbnail"]) {
+        const asset = assets.find(asset => asset.variant === variant);
+        assert.equal(asset?.state, "available");
+        const content = await a.mediaContent("personal", asset.id);
+        assert.equal(createHash("sha256").update(content.bytes).digest("hex"), asset.sha256);
+        assert.equal(content.contentType, variant === "original" ? "video/quicktime" : variant === "normal" ? "video/mp4" : "image/jpeg");
+        if (variant === "original") {
+          assert.equal(asset.filename, "original.mov");
+          assert.deepEqual(content.bytes, new Uint8Array(movie));
+        }
+        if (variant === "normal") assert.equal(asset.sha256, done.result.videoPreparation.normalSha256);
+      }
+      if (quality === "original") {
+        const savedMovie = join(temporary, "downloaded-original.mov");
+        await cli("messages", "media", "sim_mei", id, "--quality", "original", "--output", savedMovie);
+        assert.deepEqual(await readFile(savedMovie), movie);
+      }
+    }
+    assert.equal((await a.sendByKey("personal", key)).id, done.id);
+    if (quality === "original")
+      assert.equal((await cli("messages", "send", "sim_mei", "--video", moviePath, "--video-quality", quality, "--idempotency-key", key, "--detach")).id, done.id);
+    else
+      assert.equal((await a.sendMedia("personal", movieRequest, key)).id, done.id);
+  }
+
   const controlCursor = streamA.events.at(-1).cursor;
   await control({ op: "status_notification", account: "personal", operation_id: 2 });
   await control({ op: "status_notification", account: "personal", operation_id: 11 });
@@ -408,7 +461,7 @@ try {
   if (process.platform !== "win32") assert.equal(launcher.child.exitCode, 0);
   await assert.rejects(stat(launcher.ready.dataDir), error => error.code === "ENOENT");
   await assert.rejects(fetch(launcherRemote));
-  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
+  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "legacy MOV normal/original CLI/API sends, exact original download and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
 } finally {
   for (const subscription of subscriptions) subscription.controller.abort();
   await Promise.allSettled(subscriptions.map(subscription => subscription.done));
