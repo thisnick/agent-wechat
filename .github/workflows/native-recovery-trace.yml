@@ -41,6 +41,7 @@ jobs:
         with:
           workspaces: packages/native-client-rust -> target
           shared-key: native-recovery-trace
+          cache-on-failure: true
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --locked -p wechat-platform -p wechat-store -p wechat-profile
@@ -55,7 +56,7 @@ jobs:
         run: |
           mkdir -p trace-artifact
           cp target/release/wx trace-artifact/wx
-          git rev-parse HEAD > trace-artifact/source-commit.txt
+          printf '%s\n' "$GITHUB_SHA" > trace-artifact/source-commit.txt
           printf '%s\n' 'Diagnostic binary; not a published release asset.' > trace-artifact/README.txt
           cd trace-artifact
           sha256sum wx > SHA256SUMS
