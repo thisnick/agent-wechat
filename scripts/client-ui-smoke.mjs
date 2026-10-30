@@ -6,7 +6,7 @@ import { readFile, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NativeWeChatClient } from "../packages/shared/dist/index.js";
+import { NativeApiError, NativeWeChatClient } from "../packages/shared/dist/index.js";
 import { HubSession } from "../packages/client-ui/src/session.ts";
 import { HistorySearch } from "../packages/client-ui/src/history-search.ts";
 import { LoginAttempt } from "../packages/client-ui/src/login-attempt.ts";
@@ -50,6 +50,27 @@ async function successfulOperation(label, operation) {
   });
   assert.equal(result.state, "succeeded", `${label}: ${JSON.stringify(result)}`);
   return result;
+}
+async function connectWhenIdle(account) {
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    try {
+      return await client.connect(account);
+    } catch (error) {
+      // A busy account rejects login before admitting an operation. Reads or
+      // the previous worker can briefly retain its gate after polling finishes.
+      // Never resubmit after a transport error or an uncertain admission.
+      if (
+        !(error instanceof NativeApiError) ||
+        error.status !== 409 ||
+        error.code !== "operation_in_progress" ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      await new Promise((done) => setTimeout(done, 40));
+    }
+  }
 }
 async function start(command, args = []) {
   const child = spawn(binary, [command, "--data-dir", data, ...args], {
@@ -649,7 +670,7 @@ try {
   historySearch.close();
   await successfulOperation(
     "search fixture account reconnected",
-    await client.connect("personal")
+    await connectWhenIdle("personal")
   );
   await wait("search fixture push resumed", async () =>
     (await client.account("personal")).incomingTransport === "simulator_push"
