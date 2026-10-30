@@ -81,7 +81,7 @@ jobs:
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
-          cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
+          cargo clippy --workspace "${packages[@]}" --all-targets --all-features --locked -- -D warnings
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache
@@ -120,7 +120,7 @@ jobs:
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
-          cargo test --workspace "${packages[@]}" --locked
+          cargo test --workspace "${packages[@]}" --all-features --locked
       - if: matrix.suite == 'test'
         run: |
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then

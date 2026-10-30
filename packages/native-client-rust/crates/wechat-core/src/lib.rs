@@ -1,6 +1,8 @@
 //! Account coordination, durable intents and profile application barriers.
 mod account_network;
 mod business_contacts;
+#[cfg(feature = "experimental-calls")]
+pub mod calls;
 mod format;
 mod forwarded;
 mod links;
