@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.3.2
+
+### Patch Changes
+
+- [#353](https://github.com/thisnick/agent-wechat/pull/353) [`e882dc3`](https://github.com/thisnick/agent-wechat/commit/e882dc3e2c8b4be4b1b6104a871aaf3152a48f4e) Thanks [@thisnick](https://github.com/thisnick)! - Fix slow startup by avoiding repeated full-profile reads for completed recall history.
+
 ## 1.3.1
 
 ### Patch Changes
