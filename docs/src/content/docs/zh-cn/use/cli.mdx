@@ -1,0 +1,115 @@
+---
+title: CLI 常用命令
+description: 用于读取会话、收发消息与媒体附件、编写自动化脚本的常用 wx 命令。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+所有命令默认输出标准 JSON 格式。多账号环境下，请在命令中添加 `--account ID`（或账号别名）。
+
+## 查看与读取
+
+```bash
+wx chats list --limit 20                  # 查看最近会话列表及未读消息数
+wx chats get CHAT_ID                     # 查看会话详情，包含静音与置顶设置
+wx chats find "读书俱乐部"                 # 按名称搜索会话
+wx messages list CHAT_ID --limit 50       # 分页获取消息（最新在前），可通过 --cursor 翻页
+wx contacts find Alice                    # 查找联系人
+wx groups members list 'family@chatroom'  # 列出群成员
+```
+
+会话通知静音设置直接读取自本地已保存的 Profile。Daemon 通过联系人同步流实时接收手机端联系人变更。若返回 `null`，表示该字段缺失或尚未确定，通知消费端在此期间应对该会话保持静音。可执行 `wx contacts refresh CONTACT_ID` 手动拉取最新信息。`wx chats mute/unmute` 可修改单聊或群聊设置，单聊修改会优先拉取当前联系人信息以保证无关字段不被覆盖。
+
+`filehelper` 为文件传输助手，非常适合用来测试。群聊编辑与成员查询请参考[管理群聊](/zh-cn/use/groups/)。
+
+## 置顶会话
+
+```bash
+wx chats pin CHAT_ID --idempotency-key pin-001
+wx chats unpin CHAT_ID --idempotency-key unpin-001
+```
+
+需要 `admin` 权限令牌，且目标需为已在本地会话列表中存在的普通单聊或活跃群聊。命令执行后将打印对应的操作记录和本地收据路径。请检查 `remoteOutcome` 和 `profileProjection`；若因网络异常未收到响应，请复用相同的参数与幂等键重试。重新调用 `chats list` 时置顶会话将排在最前。系统内置会话（如文件传输助手）不支持置顶修改。
+
+## 发送消息
+
+```bash
+wx messages send CHAT_ID --text "在路上了"
+wx messages send CHAT_ID --image ./photo.jpg
+wx messages send CHAT_ID --file ./report.pdf
+wx messages send CHAT_ID --video ./clip.mp4
+wx messages send CHAT_ID --voice ./note.wav       # 自动编码为微信语音消息
+wx messages send CHAT_ID --share https://example.com/post --title "值得一读"
+```
+
+消息发送最长等待微信服务端确认 30 秒。添加 `--detach` 参数可立即返回并在后台继续执行。
+在群聊普通文本或引用回复中配合 `--mention 成员ID` 或 `--mention-all` 可实现[群成员 @ 提醒](/zh-cn/use/groups/#mention-group-members)。
+发送较大文件时，可指定 `--wait 3600` 延长等待时间至一小时。更多信息请查看[附件大小限制与进度](/zh-cn/use/media/)。
+
+### 引用回复
+
+1. 在 `wx messages list CHAT_ID` 的返回结果中复制被引用消息的 `id` 与 `serverId`（保持为字符串）。
+2. 发送带有两项引用参数的文本回复：
+
+   ```bash
+   wx messages send CHAT_ID --text "收到，赞同" \
+     --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID --detach
+   ```
+
+   已进入队列的回复包含 `id`、`"state":"queued"` 以及本地 `receiptPath`。可通过 `wx messages sends get SEND_ID` 查询状态。
+
+对于群聊中的引用回复，可以在同一命令中添加 `--mention 成员ID` 或 `--mention-all`。
+
+需要 `read` 和 `send` 权限，且原消息必须存在于当前会话的本地记录中。参见 [API 与 SDK 示例](/zh-cn/use/api/#发送消息)。
+
+| 原消息类型 | 是否支持被引用 |
+| --- | --- |
+| 文本、图片、语音、视频或文件 | 支持已保存的标准格式 |
+| 表情、分享表情、分享文本、音乐/视频/链接/视频号卡片或纯文本群公告 | 支持已保存的标准格式 |
+| 名片分享或静态位置 | 支持经验证的已保存格式 |
+| 已是引用回复的消息 | 引用其自身的文本回复内容 |
+| 合并转发聊天记录 | 引用其摘要内容；嵌套消息被省略 |
+| 系统/控制消息、上传通知、专用或未知卡片 | 不支持引用 |
+
+## 下载媒体附件
+
+```bash
+wx messages media CHAT_ID MESSAGE_ID --output ./photo.jpg
+wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
+```
+
+默认 `--quality best` 会自动返回本地可用的最高质量副本。`--cached-only` 参数仅读取本地缓存，绝不发起网络下载。
+
+## 实时监听新消息
+
+```bash
+wx events watch --cursor-file ~/.cache/wx-events.cursor
+```
+
+在新消息到达时逐行打印 JSON 事件。配合游标文件可在意外中断后精准断点续传。
+
+## 标记已读与撤回消息
+
+```bash
+wx chats get CHAT_ID          # 获取会话当前的 "readStateVersion"
+wx chats read CHAT_ID --expected-version VERSION
+wx messages recall MESSAGE_ID --server-id SERVER_ID
+```
+
+标记已读会更新整个会话的已读状态，并同步至你的其他微信登录端。撤回消息需要传入 `messages list` 中对应的 `id` 与 `serverId`。
+
+## 连接远程机器上的 Daemon
+
+```bash
+wx config server add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
+wx config server use box
+```
+
+<Aside title="使用提示">
+- **未收到网络响应并不代表发送失败。** 在发送前，`wx` 会持久化保存带有幂等键的本地收据。若遇网络掉线，请使用 `wx messages sends lookup --idempotency-key KEY` 查询状态，切勿直接盲目重发。参见[消息发送与恢复机制](/zh-cn/how-it-works/sends/)。
+- **语音消息** 由 `wx` 自行采用 SILK 编码。单条语音最长支持 60 秒；超过部分会自动切分为等长的连续语音条。**视频文件** 必须为 MP4 格式。这两者均要求 Daemon 所在环境安装有 FFmpeg。
+- **附件体积限制视类型而定。** 参见[发送附件与媒体](/zh-cn/use/media/)获取 512 MiB 普通文件限制以及视频、图片、语音的对应规格。自定义表情包暂不支持发送。
+- **引用回复为实验性特性。** 微信服务端的兼容性与手机端渲染效果仍需持续验证。原消息缺失、已被撤回或会话不匹配的引用将被拒绝；被引用的原内容上限 128 KiB。引用仅支持附加纯文本回复：非空白内容（含解析后的被 @ 成员姓名）上限 16 KiB，转义后上限 256 KiB。引用媒体消息并不保证其附件可以被成功下载。
+- **置顶折叠群聊会将其展开移出折叠项。** 系统内置会话不支持置顶。折叠群聊行为已具有离线覆盖测试；手机端真机验证覆盖了普通单聊及展开的普通群聊。
+- **退出状态码 (Exit Codes)** 让你无需解析 JSON 即可快速感知执行结果。参考 [CLI 退出状态码参考](/zh-cn/reference/cli/#退出状态码)。
+</Aside>

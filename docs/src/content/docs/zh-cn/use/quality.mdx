@@ -1,0 +1,106 @@
+---
+title: 视频与图片画质
+description: 图片与视频不同画质版本的工作原理、发送机制，以及如何指定画质版本进行下载。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+在发送时可选择输出画质规格，在下载时可指定接收的具体副本。名称标注为 `original` 的版本并不总能 100% 保持原始字节完全不变。
+
+## 画质规格说明
+
+| 媒体类型 | 包含版本 |
+| --- | --- |
+| 图片 (Image) | 原图 (`original`)、高清 (`standard`)、缩略图 (`thumbnail`) |
+| 视频，普通发送 (默认) | 播放版 (`normal`)、缩略图 (`thumbnail`) |
+| 视频，原画发送 | 播放版、缩略图，以及完全未修改的原始视频 (`original`) |
+| 普通文件 (File) | 100% 保持原始字节不变 |
+
+**图片：** 发送方仅在 JPEG 图片不超过 65,520 字节时才保留原始源文件。否则会生成长边不超过 1,280 像素的 JPEG。高清和缩略图的长边分别限制在 640 和 160 像素。处理程序会适度降低 JPEG 质量，必要时缩小尺寸以确保每个副本均落在 65,520 字节内。图片原始文件体积上限为 26,214,383 字节。
+
+大型 RGB 或灰度 JPEG 照片最高支持 6400 万像素（两边均不超过 8,192 像素）。在预处理前会以降低的分辨率进行高效解码。其他图片格式保持 16,777,216 像素（约 1600 万像素）的限制。如需完整原封不动保留超大照片，请将其作为文件附件发送。
+
+**视频：** MOV、MP4、3GP、3G2 和 MJ2 源文件最高允许 **50 MiB (52,428,800 字节)**。桌面端与 Web 端的附件选择器会校验所连 Hub 节点的上限；本地合成预览的限制更小。播放版采用 H.264 Main 配置，长边不超过 720 像素，最高 30 fps，带 AAC 音频（若存在）。处理程序会严格检测输出体积，超出限制无法容纳的视频将被拒绝，绝不会擅自裁切视频时长。容器格式的支持还取决于文件内部的具体编解码器。
+
+在桌面端或 Web 端的输入框中，勾选 **原始媒体质量 (Original media quality)** 可在生成预处理播放副本的同时附带未经修改的原始视频文件。旁边的提示信息对此进行了说明。该选项适用于当前暂存批次中的所有视频。保持未勾选状态则仅发送播放版与缩略图。
+
+## 发送图片与视频
+
+1. 发送图片（自动生成所需副本）：
+
+   ```bash
+   wx messages send filehelper --image ./photo.jpg \
+     --idempotency-key photo --wait 3600
+   ```
+
+   图片不支持类似 `--video-quality` 的控制参数。如需原封不动发送图片字节，请使用 `--file ./photo.jpg`；对方将收到普通文件附件。
+
+2. 选择视频发送画质：
+
+   ```bash
+   wx messages send filehelper --video ./clip.mp4 --video-quality normal \
+     --idempotency-key clip-normal --wait 3600
+   wx messages send filehelper --video ./clip.mp4 --video-quality original \
+     --idempotency-key clip-original --wait 3600
+   ```
+
+3. 使用 `wx jobs get JOB_ID` 查询任务进度。成功提交后报告 `state: "accepted"`；可查看 `result.uploadReadbackVerified`。图片任务还会报告 `result.imagePreparation.sourcePreserved`。
+
+### HTTP API 与 SDK
+
+[先上传源文件](/zh-cn/use/media/#http-api-与-sdk)，随后向 `POST /sends` 发送请求并附带 `Idempotency-Key` 请求头：
+
+```json
+{
+  "threadId": "filehelper",
+  "kind": "video",
+  "sourceId": "SOURCE_ID",
+  "videoQuality": "original"
+}
+```
+
+普通视频可省略 `videoQuality`。图片消息使用 `kind: "image"` 且不传 `videoQuality`。可选的 `standardSourceId` 和 `thumbnailSourceId` 允许上传独立的 JPEG 副本（每个不得超过 65,520 字节）；未提供的版本将自动生成。这不会跳过主图的处理。SDK 的 `sendMedia` 接受相同的字段。
+
+### OpenClaw
+
+在普通消息工具的 `media` 字段中传入图片。对于视频，可添加对应参数：
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "to": "CHAT_ID",
+  "media": "/absolute/path/clip.mp4",
+  "channelData": {
+    "agent-wechat": { "videoQuality": "original" }
+  }
+}
+```
+
+请确保配置中的 `mediaMaxMb` 允许该文件体积。使用 `asDocument: true` 且不传 `videoQuality` 可将多媒体文件作为普通文件发送以保留原始字节。
+
+## 请求并下载指定画质
+
+1. 默认使用 `best` 自动选择本地已缓存的最高画质（若无缓存则触发下载），或显式指定特定版本：
+
+   ```bash
+   wx messages media CHAT_ID IMAGE_ID --quality standard --output ./standard.jpg
+   wx messages media CHAT_ID IMAGE_ID --quality original --output ./original.jpg
+   wx messages media CHAT_ID VIDEO_ID --quality normal --output ./playback.mp4
+   wx messages media CHAT_ID VIDEO_ID --quality original --output ./original.mp4
+   ```
+
+   `thumbnail` 获取预览缩略图。`--cached-only` 禁止发起网络下载。本地无缓存时返回 `state: "not_cached"`。
+
+2. 检查返回资源中的 `state` 和 `actualVariant`。`variant` 代表消息声明的版本，`actualVariant` 代表实际校验过的本地字节。严格的画质请求绝不会拿低清晰度副本充数。若传输仍在进行中，可查询对应的任务 ID。
+
+3. 通过 API 操作：先调用 `GET /messages/{id}/media` 列出资源，随后向 `POST /messages/{id}/media-transfers` 提交 `{"messageId":"MESSAGE_ID","quality":"original"}`，轮询 `GET /jobs/{id}`，就绪后访问其 `contentUrl`。对应路径均位于 `/v1/accounts/{account}` 下。SDK 对应方法为 `mediaAssets`、`transferMedia`、`job` 与 `mediaContentStream`。
+
+4. 在 OpenClaw 中调用 `wechat_media` 传入 `{"messageId":"MESSAGE_ID","quality":"original"}`。使用 `download: false` 可仅读取缓存。检查返回的 `status` 与实际 `variant`；准备好的图片将包含文件路径与图像内容，视频则返回文件路径。
+
+<Aside title="使用提示">
+- 接收端只能请求消息中实际提供的画质版本。请求原图无法逆向恢复发送方在发图前已丢失的细节。对方设备自主决定播放哪一个视频副本。
+- 自动缓存受下载策略管控，手动请求随时可用。参见[设置](/zh-cn/use/settings/)。
+- 遇到超时请保留任务 ID。复用原幂等键但改动画质参数会导致冲突；参见[消息发送与恢复机制](/zh-cn/how-it-works/sends/)。
+- 服务端接收、接收方播放与源文件字节完全一致是三个维度的验证。详见 [功能验证清单](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md)。
+</Aside>

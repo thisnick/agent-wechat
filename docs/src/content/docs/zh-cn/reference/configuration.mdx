@@ -1,0 +1,76 @@
+---
+title: 配置参考
+description: Daemon 服务端配置、OpenClaw 通道设置与环境变量全览。
+---
+
+## Daemon 服务端配置
+
+默认配置文件位于 `~/.config/agent-wechat/server/config.toml`。该文件为可选配置。
+
+```toml
+schemaVersion = 1
+listen = "127.0.0.1:6174"
+# dataDir = "/srv/agent-wechat"       # 默认：~/.local/share/agent-wechat
+# tokenFile = "/srv/secrets/api-token" # 默认：<dataDir>/api-token，初次启动时自动生成
+```
+
+| 配置键 | 启动标志 | 环境变量 |
+| --- | --- | --- |
+| 配置文件 | `--server-config` | `AGENT_WECHAT_SERVER_CONFIG` |
+| `dataDir` | `--data-dir` | `AGENT_WECHAT_DATA_DIR` |
+| `listen` | `--listen` | |
+| `networkListen` | `--network-listen` | |
+| `tlsCertFile` | `--tls-cert-file` | |
+| `tlsKeyFile` | `--tls-key-file` | |
+
+`listen` 仅限绑定在环回接口 (Loopback)。若需接收来自外部设备的 HTTPS 连接，需同时配置以下三项网络参数：
+
+```toml
+networkListen = "0.0.0.0:7443"
+tlsCertFile = "/srv/secrets/certificate.pem"
+tlsKeyFile = "/srv/secrets/private-key.pem"
+```
+
+建议使用独立的网络端口，并对 TLS 证书及私钥文件做好文件权限收紧保护，仅允许服务端用户读取。外部连接依然必须携带合法 API 令牌。CLI 默认信任系统公认 CA 根证书；传入 `--ca-cert-file` 可以在单次调用中引入自签名证书。
+
+配置文件中的相对路径相对于配置文件所在目录进行解析。设置 `XDG_CONFIG_HOME` 和 `XDG_DATA_HOME` 可重定向默认路径。未识别的配置键将被严格拒绝。
+
+## OpenClaw 通道配置
+
+配置位于 `openclaw.json` 中的 `channels.agent-wechat` 下。其中的 `native` 配置块也可以放置在 `plugins.entries.agent-wechat.config` 下。
+
+| 配置项 | 默认值 | 作用说明 |
+| --- | --- | --- |
+| `enabled` | | 开启或关闭该通道 |
+| `dmPolicy`, `allowFrom` | `disabled` | [单聊控制策略](/zh-cn/openclaw/access/#单聊控制-direct-messages) |
+| `groupPolicy`, `groupAllowFrom`, `groups` | `disabled` | [群聊控制策略](/zh-cn/openclaw/access/#群聊控制-groups) |
+| `mediaMaxMb` | `50` | 附件大小上限 (MiB)，同时作用于拉取与外发源文件；外发时仍受 Daemon 各类型的硬性上限约束。参见[附件大小限制](/zh-cn/use/media/)。 |
+| `native.mode` | | `external`（外部模式）或 `managed`（托管模式）。参见[托管与外部模式](/zh-cn/openclaw/modes/)。 |
+| `native.accountId` | | 账号 ID（通过 `wx accounts list` 获取） |
+| `native.endpoint` | | Daemon 服务 URL（仅用于外部模式） |
+| `native.executable`, `native.listen`, `native.dataDir`, `native.serverConfig` | | 仅用于托管模式的相关路径与参数 |
+| `native.token` | | 访问令牌引用声明（见下文） |
+| `native.consumerStateDir` | | 存放 OpenClaw 消费进度的目录；需做持久化挂载 |
+| `native.readPolicy` | `on_inbound` | [已读回执策略](/zh-cn/openclaw/read-receipts/) |
+| `native.gatewayFacade` | 关闭 | 设为 `{"enabled": true}` 时可通过 Gateway 在 `/plugins/agent-wechat/native` 代理暴露 Daemon API，并使用 Gateway 认证 |
+
+`native.token` 支持 OpenClaw 的任意 Secret 引用格式：
+
+```json
+"token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" }
+```
+
+也支持类似 `"${AGENT_WECHAT_TOKEN}"` 的语法。若引用的密钥无法被解析，通道将直接报错中断启动，而绝不静默降级为其他令牌。更改令牌后请重启 Gateway。
+
+## CLI 客户端配置
+
+`~/.config/agent-wechat/client.toml` 用于存储通过 `wx config server add` 添加的服务器列表以及每个服务器的默认账号。CLI 独立读取各服务器配置的令牌文件。`--token-stdin` 支持通过私有管道标准输入传入令牌（适用于单次 HTTP 调用或 `serve`），该标志不可与 `--token-file` 混用。环境变量对应关系参见[全局标志](/zh-cn/reference/cli/#全局标志-global-flags)。
+
+## 安装器相关环境变量
+
+| 环境变量 | 作用机制 |
+| --- | --- |
+| `AGENT_WECHAT_NATIVE_BINARY` | 强制使用指定的本地 `wx` 二进制文件，跳过自动下载 |
+| `AGENT_WECHAT_NATIVE_ARTIFACT_DIR` | 从指定的本地发布制品目录安装（用于离线部署） |
+| `AGENT_WECHAT_SKIP_NATIVE_INSTALL=1` | 在执行 `npm install` 期间跳过二进制下载 |
+| `TMPDIR` | Daemon 存放离线审查临时数据库快照的目录 |

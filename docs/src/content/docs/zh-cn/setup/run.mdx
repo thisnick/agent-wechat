@@ -1,0 +1,83 @@
+---
+title: 后台持续运行
+description: 通过 wx daemon、systemd 或 Docker Compose 在后台持续运行服务。
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+请选择 **其中一种** 方式来托管 Daemon 进程。每种方式都拥有进程的生命周期控制权，请勿混用。
+
+<Tabs>
+<TabItem label="wx daemon">
+
+在任何操作系统上都最简单的方案。它会为当前用户在后台守护启动 `wx serve`。
+
+```bash
+wx daemon start
+wx daemon status
+wx daemon logs --follow
+wx daemon stop
+```
+
+</TabItem>
+<TabItem label="systemd">
+
+支持异常崩溃自动重启，并随用户登录会话启动。安装官方示例 [用户服务文件](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/agent-wechat-native.service)：
+
+```bash
+mkdir -p ~/.config/systemd/user ~/.config/agent-wechat/server
+curl -fsSLo ~/.config/systemd/user/agent-wechat-native.service \
+  https://raw.githubusercontent.com/thisnick/agent-wechat/main/deploy/native/agent-wechat-native.service
+test -f ~/.config/agent-wechat/server/config.toml ||
+  echo 'schemaVersion = 1' > ~/.config/agent-wechat/server/config.toml
+```
+
+在启用服务前，请检查并调整配置：
+
+- `ExecStart=` 默认执行 `~/.local/bin/wx`。若 `command -v wx` 路径不同请修改。
+- 如果你是通过 `--official` 登录的，请将微信目录添加到 `ReadWritePaths=` 中，例如 `%h/xwechat_files %h/.xwechat`。默认配置下该服务单元仅对 `~/.local/share/agent-wechat` 拥有写权限。
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now agent-wechat-native
+```
+
+在无图形界面的服务器上，请执行 `loginctl enable-linger`，使 systemd 用户服务在未登录时依然保持运行。
+
+</TabItem>
+<TabItem label="Docker Compose" id="docker-compose">
+
+基于示例配置 [`compose.yaml`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/compose.yaml) 与 [`server.toml`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/server.toml) 开始：
+
+1. 将 `image:` 指定为 `ghcr.io/thisnick/agent-wechat-native:latest` 并移除 `build:` 部分。
+2. 创建 API 访问令牌：一份供本地 CLI 使用，一份归属容器内部用户（UID 10001）。
+
+   ```bash
+   umask 077; mkdir -p ~/.config/agent-wechat secrets
+   head -c 32 /dev/urandom | base64 > ~/.config/agent-wechat/box-token
+   sudo install -m 600 -o 10001 -g 10001 ~/.config/agent-wechat/box-token secrets/api-token
+   ```
+
+3. 启动容器并从宿主机登录：
+
+   ```bash
+   docker compose up -d
+   wx config server add box --url http://127.0.0.1:6174 \
+     --token-file ~/.config/agent-wechat/box-token
+   wx --server-name box accounts create --alias me
+   wx --server-name box auth login
+   ```
+
+如需使用现有的 Linux 版微信数据，将包含 `xwechat_files` 和 `.xwechat` 的目录以挂载卷的形式挂载到 `volumes:`（例如 `/home/you:/profiles/wechat`），然后使用 `--official=/profiles/wechat` 登录。容器以 UID 10001 运行，需确保该用户拥有目录读写权限。
+
+在 macOS 和 Windows 上，Docker Desktop 可以运行相同的镜像。由于示例采用了 host 网络模式，请在 **Settings › Resources › Network** 中启用对应支持。
+
+</TabItem>
+</Tabs>
+
+<Aside title="使用提示">
+- **停止服务不会导致微信退出登录。** 历史记录和登录会话在服务重启后依然有效。如需彻底下线，请使用 `wx auth logout`。
+- **默认监听仅绑定本地环回地址** (`127.0.0.1:6174`)。如需从其他机器远程连接，请配置额外的 [HTTPS 监听端口](/zh-cn/reference/configuration/#daemon)，或使用 HTTPS 反向代理与 SSH/VPN 隧道。
+- **OpenClaw 也可以为你托管运行 Daemon。** 详见[托管模式](/zh-cn/openclaw/modes/)。切换前请先停止其他守护进程。
+- 建议定期备份 Profile 目录和 Daemon 数据目录。参考[数据存储与备份](/zh-cn/how-it-works/storage/)。
+</Aside>

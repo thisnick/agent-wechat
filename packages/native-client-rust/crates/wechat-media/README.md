@@ -1,5 +1,7 @@
 # wechat-media
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Image inspection and decoding support shared by `wechat-protocol` and
 `wechat-profile`. It identifies supported image formats, checks their dimensions
 and handles supported WeChat image containers.

@@ -1,0 +1,48 @@
+---
+title: 故障排查
+description: 常见安装、登录、Profile 数据、多媒体及 OpenClaw 问题的排查指南。
+---
+
+遇到问题时，首先执行 `wx account status`。它会明确展示你是否已登录 (`authenticated`)、长连接状态 (`connection`) 以及是否有后台任务阻塞挂起。
+
+## 安装问题
+
+**`wx` 提示未安装 Native 运行时。** 说明 npm 安装过程中未能成功拉取二进制文件，或者构建脚本被系统跳过。可执行 `wx-native-install` 重新触发安装；如果使用的是 pnpm，请运行 `pnpm approve-builds -g`。在 Linux 上，请确认 glibc 版本不低于 2.36（通过 `ldd --version` 查看）。
+
+## 启动 Daemon 服务
+
+**地址已被占用 (Address already in use)。** 说明端口已有其他 Daemon 实例正在监听，可能是通过 `wx daemon`、systemd、Docker 或 OpenClaw 托管模式启动的。请停止冲突实例，或者直接连接到已存在的该实例。切勿因端口冲突而盲目强制杀掉未确认的系统进程。
+
+**旧版 `serverUrl` 或 `backend` 配置被拒绝。** 说明你正在使用 0.x 版本的旧配置。参考[从旧容器迁移](/zh-cn/setup/migrate/)进行升级调整。
+
+## 登录相关
+
+**提示 "Account mismatch" 或数据库无法解密解锁。** 说明当前扫码登录的微信账号与该 Profile 目录原本所属的账号不一致。必须使用该 Profile 原绑定的账号进行登录，重新扫码并不能混用不同账号的数据。
+
+**二维码过期。** 重新执行 `wx auth login` 获取全新的二维码。
+
+**手机端确认授权无响应/挂起。** 部分扫码授权流程需要手机能够通过局域网直接与 Daemon 通信。请确保手机与主机处于同一局域网内，并排查主机防火墙及路由器的 AP 隔离策略。
+
+**重启后 `wx` 提示需要重新登录。** 说明本地已保存的会话被微信服务端下线拒绝。请执行 `wx auth login`；通常只需在手机微信上点击确认即可恢复登录。
+
+## Profile 数据问题
+
+**提示 "Unsupported schema"（数据库版本不支持）。** 说明该 Profile 的内部数据库表结构尚未被当前版本的 Daemon 识别适配。请完整保留该目录现状，切勿打开官方客户端对其产生修改，并关注是否有更新版本的 `wx` 发布。
+
+**Profile 目录权限不足 (Permission denied)。** 运行 Daemon 的系统用户（Docker 容器内为 UID 10001）需要对 Profile 目录及其子文件具备读写权限。
+
+## 媒体与发送问题
+
+**媒体下载一直处于 `pending` 状态。** 说明下载任务仍在后台队列中执行；可稍后通过 `wx jobs get JOB_ID` 查看详情。若显示 `expired`，说明微信官方服务器上该文件已被清理过期，任何重试均无法挽回。
+
+**发送状态显示为 `needs_review`。** 说明消息是否成功送达微信服务端处于未决状态。在重新发送前，请务必先打开手机微信确认聊天记录中是否已经发出。参见[消息发送与恢复机制](/zh-cn/how-it-works/sends/)。
+
+## OpenClaw 相关
+
+**智能体从来不回复。** 检查 `dmPolicy` 与 `groupPolicy`（两者默认均为 `disabled` 关闭状态），确认发送方微信 ID 是否已添加进 `allowFrom` 白名单中；若是群聊，请确认对方是否正确 @ 提及了机器人。随后查看 Gateway 日志以确认是否有访问令牌授权错误。
+
+**消息始终显示未读。** 被访问策略拦截忽略的消息以及配置了 `readPolicy: "never"` 时这是正常现象。若配置了 `on_model_dispatch`，请参考[严格已读模式配置](/zh-cn/openclaw/read-receipts/#严格已读模式-strict-mode)。
+
+## 提交 Issue 缺陷报告
+
+在提交报告时，请附带 `wx --json version`、`wx account status` 的输出以及具体执行的命令。提交前请注意抹除敏感访问令牌、手机号及私密聊天文字。[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。

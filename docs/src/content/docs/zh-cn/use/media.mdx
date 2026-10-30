@@ -1,0 +1,116 @@
+---
+title: 发送与下载附件
+description: 文件、图片、视频与语音的大小限制，大文件发送，以及 CLI、API 和 SDK 使用指南。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+在桌面端或 Web 客户端中，可点击附件按钮、直接粘贴文件或图片，或将文件拖放到消息输入框中。可在发送前检查或移除已暂存的文件，点击 **发送 (Send)** 会将输入文本和各个文件作为独立消息分别发出。JPEG、PNG、GIF 和 WebP 文件将作为图片发送；MOV、MP4、3GP、3G2 和 MJ2 文件将作为视频发送；其他格式均作为普通文件附件发送。客户端会校验所连接 Hub 节点的规格上限；本地合成预览的限制较原生 Hub 更小。
+
+可通过 CLI、HTTP API 或 OpenClaw 发送各类附件。普通文件上限为 **512 MiB (536,870,912 字节)**。具体限制视选择的消息类型而定：
+
+| 附件类型 | 最大原始体积 |
+| --- | --- |
+| 普通文件 (File) | 536,870,912 字节 (512 MiB) |
+| 视频文件 (Video) | 52,428,800 字节 (50 MiB) |
+| 图片 (Image) 或语音 (Voice) | 各 26,214,383 字节 (25 MiB 减 17 字节) |
+| 自定义表情 (Sticker) | 暂不支持外发 |
+
+文件附件会严格保留源文件的每一个原始字节。发送图片时可能会按微信规范进行缩放与重编码。参考[视频与图片画质](/zh-cn/use/quality/)了解发送前转码处理及接收时的画质选择。
+
+## CLI 命令行
+
+1. 发送文件，并允许最长 1 小时用于上传、回读校验及提交：
+
+   ```bash
+   wx messages send filehelper --file ./report.pdf --wait 3600 \
+     --idempotency-key report-2026-10
+   ```
+
+   `--wait` 单位为秒；默认为 30 秒，附件发送任务支持最长等待 3,600 秒。`--detach` 可使命令立即返回。
+
+2. 等待结束后，可通过命令查询任务详情：
+
+   ```bash
+   wx jobs get JOB_ID
+   ```
+
+   在回读校验已上传字节期间，返回的 JSON 会包含：
+
+   ```json
+   { "state": "running", "phase": "readback" }
+   ```
+
+   请妥善保存任务 ID 和幂等键。退出本地等待并不影响 Daemon 在后台继续处理上传。
+
+## HTTP API 与 SDK
+
+1. 通过 `GET /v1/accounts/{account}/capabilities` 检查当前连接节点的限制指标：
+
+   ```json
+   {
+     "mediaUploadMaxBytes": 536870912,
+     "mediaSendMaxBytes": {
+       "file": 536870912,
+       "image": 26214383,
+       "video": 52428800,
+       "voice": 26214383
+     }
+   }
+   ```
+
+   `mediaUploadMaxBytes` 限制暂存大小。在为特定类型的发送暂存数据前，请检查 `mediaSendMaxBytes[kind]`。
+
+2. 先暂存单个文件，随后将其返回的 `id` 作为 `sourceId` 进行提交：
+
+   ```bash
+   curl -H "Authorization: Bearer $TOKEN" -F 'file=@report.pdf' \
+     "$WX/accounts/$ACCOUNT/uploads"
+   curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: report-2026-10' \
+     -d '{"threadId":"filehelper","kind":"file","sourceId":"SOURCE_ID"}' \
+     "$WX/accounts/$ACCOUNT/sends"
+   ```
+
+   此处 `WX` 变量以 `/v1` 结尾。发送接口返回 HTTP 202 及任务信息。轮询 `GET /jobs/{id}`；对于大文件最多可等待 1 小时。
+
+   TypeScript SDK 提供了相同的工作流封装：
+
+   ```ts
+   const source = await client.upload(accountId, bytes, "report.pdf");
+   const job = await client.sendMedia(accountId, {
+     threadId: "filehelper", kind: "file", sourceId: source.id,
+     standardSourceId: null, thumbnailSourceId: null,
+     playSeconds: null, durationMs: null,
+   }, "report-2026-10");
+   const progress = await client.job(accountId, job.id);
+   ```
+
+   SDK 上传支持字节数组或 `Blob`；使用 Node 的 `openAsBlob` 可以避免一次性将整个大文件读入内存。由 `@agent-wechat/shared` 导出的 `NATIVE_MAX_SOURCE_BYTES` 为全局暂存上限。
+
+## 下载文件
+
+普通文件下载同样最高支持 512 MiB：
+
+```bash
+wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
+```
+
+CLI 会在落盘输出前严格比对文件大小与 SHA-256 哈希值。SDK 客户端可以使用 `mediaContentStream` 并传入 `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`；默认拉取上限为 128 MiB。在消费数据流时请校验其大小与哈希。
+
+## OpenClaw
+
+在配置中设置 [`channels.agent-wechat.mediaMaxMb`](/zh-cn/reference/configuration/#openclaw) 以放行预期的附件大小。例如设为 `512` 允许最高 512 MiB 的文件。扩展在暂存前会取该配置与具体媒体类型上限的较小值。调高该值无法突破 Daemon 对各个媒体类型的硬性规格。
+
+普通音频文件将作为文件发送；若指定 `audioAsVoice` 则作为语音消息发送。对于较大的普通文件，OpenClaw 会进行最长一小时的任务轮询。若轮询超时，请记录返回的任务 ID 并主动查询，切勿直接重复发起发送。
+
+使用 OpenClaw 的 `asDocument`/`forceDocument` 选项可以将音视频作为普通文件发送。视频质量选项仅在视频模式下生效。
+
+<Aside title="使用提示">
+- **文件类型检测** 优先使用浏览器识别的媒体类型，当类型缺失或宽泛时则回退到文件扩展名判断。即使视频容器格式受支持，也可能包含不受支持的编码格式；若发送预处理失败，可导出为标准的 MP4 重新尝试。部分视频在发送前可能无法在浏览器中直接预览。
+- 查看 [功能验证清单](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) 了解已验证平台、发送目标以及剩余限制。
+- Daemon 会在正式向微信提交附件消息前先将已上传的云端字节回读校验。`accepted` 仅代表微信服务端已接收该消息，不代表对方已成功接收或打开。
+- 服务端秒传捷径暂不支持。存疑的预留与发送状态需要人工复核，绝不会自动盲目开启二次发送。
+- 若任务在回读校验阶段中断，可执行 `wx jobs retry JOB_ID --reuse-completed-upload` 复用已上传的数据对象。这需要确保此前从未发起过正式消息提交；API 客户端可向 `POST /jobs/{id}/retry-completed-upload` 提交 `reuseCompletedUpload: true`；SDK 的 `retryJob` 同样支持该参数。
+- 网关和代理超时同样适用。响应丢失后，请使用相同幂等键查询；详见[消息发送与恢复机制](/zh-cn/how-it-works/sends/)。
+</Aside>

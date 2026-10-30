@@ -1,0 +1,98 @@
+---
+title: 智能体工具
+description: OpenClaw 智能体可调用的微信工具集，以及如何开启跨会话检索权限。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+除了被动回复消息，智能体还会获得一套针对 **当前会话** 的专属工具。它们默认无法窥探其他会话或未绑定的账号。
+
+| 工具名称 | 功能描述 |
+| --- | --- |
+| `wechat_history` | 获取当前会话更早的历史消息（最新在前） |
+| `wechat_search` | 在当前会话中搜索包含指定关键词的消息 |
+| `wechat_message` | 按 ID 获取单条消息详情 |
+| `wechat_media` | 下载某条消息的图片、文件、视频或语音，并为智能体提供本地文件路径。图片还会直接作为多模态输入呈现给大模型。 |
+| `wechat_send_share` | 发送分享卡片（标题、链接、可选摘要及缩略图） |
+| `wechat_recall` | 撤回你在当前会话中刚发出的消息 |
+
+例如当用户提问“Sam 刚才发的地址是什么？”时，智能体可以调用 `wechat_search` 传入 `{"query": "地址"}`，并对匹配到的照片调用 `wechat_media` 提取图像内容。
+
+## 指定消息发送目标
+
+在使用 OpenClaw 内置的 `message` 工具时，请将 `wx contacts find 姓名` 或 `wx chats find 群名` 返回的联系人或会话 ID 作为 `target`。支持 `wechat:ID` 与 `agent-wechat:ID` 两种格式前缀。若 Daemon 本地已有该确切联系人或单聊会话记录，也支持不带 `wxid_` 前缀的联系人 ID。微信昵称和可修改的微信号不能作为发送目标 ID。
+
+## 引用某条消息
+
+使用 OpenClaw 内置的 `message` 工具，并将 `replyTo` 设为历史消息或搜索返回的存储消息 `id`：
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "target": "CHAT_ID",
+  "message": "好的，就按这个办。",
+  "replyTo": "STORED_MESSAGE_ID"
+}
+```
+
+这会在单聊或群聊中发送一条带引用的文本回复。Hub 节点会自动装填被引用消息的内容，并校验其确实属于当前账号与当前会话。请使用本地存储的消息 ID，而非其 `serverId` 或发送任务 ID。若目标消息不存在、已被撤回或格式不支持，将返回错误。引用回复不支持同时附带附件或群 @ 提醒。
+
+## 让智能体协助处理登录
+
+当微信掉线时，可以通过另一个通道调用 `wechat_login` 工具引导重新上线（需智能体具备相应工具权限）：
+
+1. 调用 `{"action":"status"}` 检查配置的微信账号在线状态。
+2. 调用 `{"action":"start"}` 获取并展示登录二维码。使用手机微信扫码并确认登录。
+3. 调用 `{"action":"wait","timeoutMs":30000}` 等待登录完成。结果将包含任务 ID、状态和 `connected` 标记。
+
+重复调用 `start` 将持续跟随当前登录流。若要强制重新扫码，传入 `force: true` 将使用新二维码而非沿用信任。`disconnect` 保持本地信任凭据断开网络；`logout` 彻底登出；`forget` 配合 `confirm: true` 抹除本地身份验证凭证但保留聊天历史。该工具需要令牌具备 `login` [权限范围](/zh-cn/reference/tokens/)。
+
+## 仅限所有者查询的群组信息
+
+`wechat_group_info` 用于查看指定群聊及其缓存的群成员单页列表，或使用 `username` 查阅特定成员。它严格要求 OpenClaw 具备受信任的 owner/admin 执行上下文，且 Daemon 令牌具备 `read` 权限。普通群主身份并不自动代表具备此权限。建议仅向私有管理智能体开放此工具；该工具不支持创建群或修改设置。
+
+```json
+{ "groupId": "123456@chatroom", "limit": 50 }
+```
+
+未在本地缓存中确认的成员将被标记为 `unconfirmed`。如需刷新最新数据，请参考 [CLI 或 API](/zh-cn/use/groups/)。本插件未注册任何群修改变更工具。
+
+## 跨会话全局检索工具
+
+系统还提供了 5 个可选的全局工具，能够检索当前微信账号下的 **所有** 历史会话。默认情况下处于禁用状态，除非你显式授权给特定智能体：
+
+| 全局工具名称 | 功能描述 |
+| --- | --- |
+| `wechat_archive_threads` | 列出全部会话及其未读数 |
+| `wechat_archive_search` | 在全部会话或指定会话中搜索消息 |
+| `wechat_archive_history` | 读取任意会话的聊天记录 |
+| `wechat_archive_message` | 跨会话按 ID 读取任意消息 |
+| `wechat_archive_media` | 跨会话下载任意消息的多媒体附件 |
+
+在 `~/.openclaw/openclaw.json` 中按需授权：
+
+```json
+{
+  "agents": {
+    "ownership": "explicit",
+    "entries": {
+      "main": { "tools": { "alsoAllow": ["wechat_archive_*"] } },
+      "group-bot": { "tools": { "deny": ["wechat_archive_*"] } }
+    }
+  }
+}
+```
+
+<Aside type="caution" title="全局存档工具拥有最高数据权限">
+获得全局存档工具的智能体能够查阅你整个微信账号的所有聊天内容（无论对话者是谁，包括群聊里的所有人）。请务必仅授权给只有你本人对话的私有智能体。`profile: "full"`、`"*"` 以及 `group:plugins` 同样会默认放行这些工具，请在无需暴露隐私的群聊机器人中显式配置 `deny`。
+</Aside>
+
+<Aside title="使用提示">
+- **搜索全部基于本地。** 仅检索已保存在本地 Profile 中的记录，绝不向微信发起全量旧历史同步。
+- **文件下载需要时间。** 若资源尚未缓存，`wechat_media` 会启动后台下载并返回 `pending`；稍后再次调用即可获取成品文件。已缓存的文件在微信服务器端文件过期后依旧有效。
+- **上述所有工具均不会将会话标为已读，** 也不会推动接收游标。
+- **消息发送与撤回** 使用确定性的幂等键，网络重试绝不会重复发送。存疑的执行结果将返回 `needs_review`，绝不盲目重发。
+- 在 OpenClaw 精简工具模式下，历史记录、搜索与消息查询可通过 `tool_search` 发现。`wechat_media` 保持直接可调用状态，以便图像能够直接作为图片送入大模型多模态视窗。
+- 工具必须搭配对应的 [令牌权限](/zh-cn/reference/tokens/)：查询需 `read`，下载需 `media`，分享卡片和撤回需 `send`。
+</Aside>

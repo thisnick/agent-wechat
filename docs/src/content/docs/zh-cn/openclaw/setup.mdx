@@ -1,0 +1,70 @@
+---
+title: OpenClaw 快速接入
+description: 将微信配置为 OpenClaw 通道，使智能体能够自动查阅会话并回复。
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import chat from '../../../../assets/wechat-chat.svg';
+
+`agent-wechat` 插件用于连接 OpenClaw 与正在运行的 `wx` Daemon。你的 AI 智能体可以接收来自微信的消息，并使用你的账号名义发送回复。
+
+<img src={chat.src} class="mock" alt="手机上的微信聊天界面：好友索取平面图设计，智能体通过主人的账号回复了对应的 PDF 文件" />
+
+前提条件是已启动 Daemon 并完成登录。若尚未配置，请参考[连接账号](/zh-cn/setup/connect/)。
+
+<Steps>
+
+1. **为 OpenClaw 创建访问令牌。**
+
+   ```bash
+   wx accounts list        # 获取账号对应 "id"
+   wx tokens create openclaw --accounts ACCOUNT_ID \
+     --scopes read --scopes media --scopes send --scopes login --scopes read-state
+   ```
+
+   妥善复制输出结果中的 `token` 字符串。该凭证仅展示一次。
+
+2. **安装插件。**
+
+   ```bash
+   openclaw plugins install @agent-wechat/agent-wechat
+   ```
+
+3. **在 `~/.openclaw/openclaw.json` 中添加通道配置。** 以下示例仅允许指定好友触发智能体：
+
+   ```json
+   {
+     "channels": {
+       "agent-wechat": {
+         "enabled": true,
+         "dmPolicy": "allowlist",
+         "allowFrom": ["wxid_friend"],
+         "native": {
+           "mode": "external",
+           "accountId": "ACCOUNT_ID",
+           "endpoint": "http://127.0.0.1:6174",
+           "token": { "source": "env", "provider": "default", "id": "AGENT_WECHAT_TOKEN" },
+           "consumerStateDir": "/home/you/.openclaw/agent-wechat"
+         }
+       }
+     }
+   }
+   ```
+
+   可通过 `wx contacts find 姓名` 查找好友 ID，通过 `wx chats find 群名` 查找群聊 ID（以 `@chatroom` 结尾）。联系人 ID 通常以 `wxid_` 开头，但也有部分例外。请使用命令返回的真实 ID，而不是昵称或可修改的微信号。你自己的 ID 可以通过发送过的消息中的 `senderId` 获取（例如执行 `wx messages list filehelper --limit 1`）。
+
+4. **注入令牌环境变量。** 在 Gateway 运行环境中设置 `AGENT_WECHAT_TOKEN`，然后重启 OpenClaw Gateway。
+
+5. **进行测试。** 让该好友向你发送一条微信消息。智能体将在相同的聊天窗口中自动生成回复。
+
+</Steps>
+
+下一步：配置[响应权限控制](/zh-cn/openclaw/access/)（包含群聊权限），并为智能体分配专属[工具](/zh-cn/openclaw/tools/)。
+
+<Aside title="使用提示">
+- **默认不响应任何消息。** 若未配置 `dmPolicy` 或 `groupPolicy`，智能体将对所有来信保持沉默。
+- **智能体代表你本人回复。** 所有外发消息均直接从你的微信账号发出，且 OpenClaw 处理完成后会自动将该会话标记为已读。详见[已读回执](/zh-cn/openclaw/read-receipts/)。
+- **`consumerStateDir`** 用于持久化记录 OpenClaw 已处理过的消息进度位点。请指定一个在重启后依然保留的持久化目录。
+- **若配置文件中启用了 `plugins.allow` 白名单，** 请将 `agent-wechat` 添加到该列表中。
+- 令牌可通过 OpenClaw 支持的任意 Secret Provider 获取，不局限于环境变量。参见[配置选项](/zh-cn/reference/configuration/#openclaw)。
+</Aside>

@@ -1,5 +1,7 @@
 # AgentWechat desktop
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 This workspace package builds the React client as a Tauri desktop app and bundles the native `wx`, FFmpeg and FFprobe executables. It is separate from `@agent-wechat/cli`: installing the npm CLI does not install the UI or desktop runtime.
 
 On first launch choose **Use this device** or **Connect to another hub**. Desktop connection keys stay in the operating system's credential store: Keychain on macOS, Credential Manager on Windows, and Secret Service on Linux. A Linux desktop needs an available, unlocked Secret Service implementation.
