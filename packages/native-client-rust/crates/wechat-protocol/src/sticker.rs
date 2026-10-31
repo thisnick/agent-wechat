@@ -29,6 +29,13 @@ pub(super) fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
+/// Sticker bytes come from Tencent CDN hosts. Classic stored and pack emoji
+/// carry a `wxapp.tc.qq.com` source, while shared stickers use
+/// `snsvideo.c2c.wechat.com`; both are reachable directly, unlike the
+/// encrypted attachment channels. Any other host stays refused so a crafted
+/// message cannot turn this into an arbitrary fetch.
+pub const STICKER_HOSTS: &[&str] = &["snsvideo.c2c.wechat.com", "wxapp.tc.qq.com"];
+
 pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
     ensure!(
         value.len() <= 8192 && !value.chars().any(|c| c.is_control()),
@@ -38,7 +45,9 @@ pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
         reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("sticker_source_not_allowed"))?;
     ensure!(
         ["http", "https"].contains(&url.scheme())
-            && url.host_str() == Some("snsvideo.c2c.wechat.com")
+            && url
+                .host_str()
+                .is_some_and(|host| STICKER_HOSTS.contains(&host))
             && url.username().is_empty()
             && url.password().is_none()
             && url.fragment().is_none()
@@ -68,8 +77,11 @@ pub fn fetch_sticker(
         ensure!(expiry > crate::wire::unix_time()? as u64, "media_expired");
     }
     progress(0, Some(descriptor.expected_bytes))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("sticker_source_not_allowed"))?;
     let port = if url.scheme() == "https" { 443 } else { 80 };
-    let addresses = ("snsvideo.c2c.wechat.com", port)
+    let addresses = (host, port)
         .to_socket_addrs()
         .map_err(|_| anyhow::anyhow!("sticker_dns_failed"))?
         .collect::<Vec<_>>();
@@ -89,7 +101,7 @@ pub fn fetch_sticker(
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .resolve("snsvideo.c2c.wechat.com", *address)
+        .resolve(host, *address)
         .build()?;
     let mut response = client
         .get(url)
@@ -139,6 +151,25 @@ pub fn fetch_sticker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn both_receiving_transports_are_allowed() {
+        for u in [
+            "https://snsvideo.c2c.wechat.com/x",
+            "http://wxapp.tc.qq.com/275/20304/stodownload?m=318341a160b08b297892a0e5741cc553&filekey=3035020101042130&bizid=1023",
+            "https://wxapp.tc.qq.com:443/x",
+        ] {
+            assert!(validate_sticker_url(u).is_ok(), "{u}");
+        }
+        for u in [
+            "http://wxapp.tc.qq.com.evil/x",
+            "https://wxapp.tc.qq.com.cn/x",
+            "http://evil.tc.qq.com/x",
+            "http://wxapp.tc.qq.com:8080/x",
+        ] {
+            assert!(validate_sticker_url(u).is_err(), "{u}");
+        }
+    }
+
     #[test]
     fn url_and_network_sources_are_strict() {
         for u in [
