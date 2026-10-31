@@ -7,9 +7,36 @@ import { resolve, dirname } from 'path';
 export const OG_WIDTH = 1200;
 export const OG_HEIGHT = 630;
 
-const fontRegular = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf');
-const fontBold = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf');
-const fontMono = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf');
+function findFont(candidates) {
+  for (const p of candidates) {
+    try {
+      return readFileSync(p);
+    } catch {}
+  }
+  return null;
+}
+
+const fontRegular = findFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/System/Library/Fonts/Supplemental/Arial.ttf',
+]);
+const fontBold = findFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+]);
+const fontMono = findFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+  '/System/Library/Fonts/Supplemental/Courier New.ttf',
+]);
+const fontCJK = findFont([
+  '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+  '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+  '/Library/Fonts/Arial Unicode.ttf',
+  '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+  '/System/Library/Fonts/Hiragino Sans GB.ttc',
+]);
 
 function ogTemplate(title, description, isRoot = false) {
   return {
@@ -170,6 +197,7 @@ async function renderOgImage(title, description, isRoot = false) {
       { name: 'DejaVu Sans', data: fontRegular, weight: 400, style: 'normal' },
       { name: 'DejaVu Sans', data: fontBold, weight: 700, style: 'normal' },
       { name: 'DejaVu Sans Mono', data: fontMono, weight: 400, style: 'normal' },
+      ...(fontCJK ? [{ name: 'DejaVu Sans', data: fontCJK, weight: 400, style: 'normal' }] : []),
     ],
   });
   return sharp(Buffer.from(svg)).png().toBuffer();
@@ -185,6 +213,11 @@ export function ogImage() {
     name: 'og-image',
     hooks: {
       'astro:config:setup': async ({ config }) => {
+        if (!fontRegular || !fontBold || !fontMono) {
+          console.warn('[og-image] Skipping OG image generation: required fonts not found');
+          return;
+        }
+
         const dir = fileURLToPath(config.root);
         const contentDir = resolve(dir, 'src/content/docs');
         const outDir = resolve(dir, 'public/og');
@@ -223,7 +256,7 @@ export function ogImage() {
           mkdirSync(dirname(pngPath), { recursive: true });
 
           try {
-            const png = await renderOgImage(title, description, slug === 'index');
+            const png = await renderOgImage(title, description, slug === 'index' || slug === 'zh-cn');
             await sharp(png).toFile(pngPath);
             generated++;
           } catch (err) {

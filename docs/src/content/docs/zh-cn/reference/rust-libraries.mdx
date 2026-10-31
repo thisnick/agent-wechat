@@ -1,0 +1,100 @@
+---
+title: Rust 开发库
+description: 在 Rust 中直接使用原生的微信协议与官方 Profile 存储库。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+通过这些底层库，可以直接执行受支持的微信服务端操作并读写官方 Profile 存储。它们在没有后台守护进程或官方可执行程序的情况下即可独立运行。若应用程序连接到已有的守护进程，请参考 [HTTP API](/zh-cn/use/api/)。
+
+| Crate | 职责与用途 |
+| --- | --- |
+| [wechat-protocol](https://docs.rs/wechat-protocol) | 传输协议、身份认证、消息同步与编解码器 |
+| [wechat-profile](https://docs.rs/wechat-profile) | Profile 密钥、历史记录、联系人、媒体缓存及安全写入器 |
+| [wechat-media](https://docs.rs/wechat-media) | 共享的图像检查与解码支持 |
+| [wechat-platform](https://docs.rs/wechat-platform) | 私有文件与操作系统级支撑 |
+
+## 添加依赖
+
+1. 引入开发库；`1.3.0` 是其在 crates.io 上的首个正式发布版本：
+
+   ```bash
+   cargo add wechat-protocol@=1.3.0 wechat-profile@=1.3.0
+   ```
+
+2. 使用 Rust 1.93.1+、C 编译器、Make 与 Perl 进行构建。四个 Crate 均与原生发布版本保持一致；Cargo 会自动解析依赖的支撑库。
+
+## 读取已停止的 Profile
+
+停止 Profile 的写入进程或提供一致性快照副本，然后加载受保护的密钥文件。快照标志表明调用方保证了这一前提；该函数不会主动终止外部进程。
+
+```rust
+use wechat_profile::{KeyFile, ListQuery, ProfileLocation, ProfileReader, ReadOptions};
+
+fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
+    let location = ProfileLocation::new(profile)?;
+    let keys = KeyFile::load(keys_path)?;
+    let reader = ProfileReader::open(location, keys, ReadOptions {
+        stopped_or_consistent_snapshot: true,
+        ..Default::default()
+    })?;
+    println!("{} contacts", reader.contacts(&ListQuery::default())?.items.len());
+    Ok(())
+}
+```
+
+读取本地缓存的媒体绝不会发起网络下载。已经独占拥有 Profile 访问权的应用可以使用附带自身并发同步协调的 `OwnedReaderCache`。
+
+## 发送单条文本消息
+
+服务端操作大多是 **[`NativeClient`](https://docs.rs/wechat-protocol/1.3.0/wechat_protocol/struct.NativeClient.html) 上的方法**，而非 Crate 顶层的普通函数列表。后台守护进程同样调用该库；凭据持久化、故障恢复与 Profile 数据回写由调用方自行负责。
+
+1. 调用 `start_qr_login`，在私密终端中展示二维码，轮询直至 `LoginStatus::Approved`，然后调用 `complete_login` 获取保密的 `AccountState`。
+2. 在提交前保存计划执行的操作、唯一任务 ID 以及 Unix 秒级时间戳。传入接收方的确切微信号：
+
+   ```rust
+   use wechat_protocol::{wire, AccountState, NativeClient, TextSendResult};
+
+   fn send_once(
+       client: &NativeClient,
+       state: &mut AccountState,
+       recipient: &str,
+       text: &str,
+       task_id: &str,
+       created_at: u32,
+   ) -> anyhow::Result<TextSendResult> {
+       let client_id = wire::client_message_id(task_id.as_bytes());
+       anyhow::ensure!(client_id != 0, "Choose another task ID");
+       client.send_text(state, recipient, text, created_at, client_id)
+   }
+   ```
+
+3. 检查回执中的 `accepted`、`returned_destination_matches` 与 `returned_client_id_matches`。已被接受的回执包含十进制字符串格式的 `server_message_id`；这并不代表接收方已打开播放或本地历史已完成回写。
+
+## 运行源码示例
+
+在本地代码仓库中直接运行：
+
+```bash
+cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example send_text -- RECIPIENT UNIQUE_TASK_ID "来自 Rust 示例的问候"
+```
+
+手机扫码确认后，示例仅提交一次请求，若服务端接收则输出 `"accepted": true` 的回执。`qr_login` 仅演示独立登录流程；`sync_once` 演示汇总一页同步消息；`protobuf` 演示本地编解码操作。运行 `--help` 不会发起任何网络请求。长连接接收方必须先处理并持久化同步命令，然后再提交下一个游标；`sync_once` 示例不保存任何检查点。
+
+## Profile 写入操作
+
+该库实现了微信官方存储格式；账号运行策略与故障恢复属于其调用方的职责。以下方法前缀用于描述我们的 API 设计，并非官方客户端的命名：
+
+| 方法前缀 | 通常含义 |
+| --- | --- |
+| `stage_*` | 在内存中准备数据，不修改 Profile 物理文件 |
+| `apply_*` | 应用逻辑 Profile 记录更新 |
+| `publish_*` | 将数据写入并安装到本地 Profile 既有路径中 |
+
+`apply_*` 与 `publish_*` 均会向磁盘写入数据，且存在交集：例如 `publish_saved_key_info` 可能会同时修改数据库和历史文件。任何前缀均不保证跨多资源的整笔操作原子性。新的变更推荐使用 `apply_*`；既有的 `publish_*` 名称继续保持兼容。
+
+对于 MMKV，暂存（stage）阶段会在内存中构建加密数据和对应的 `.crc` 元数据。发布（publish）阶段通过临时文件将这些数据原子替换写入 Profile 的既有路径中。`WriteOptions::durable_intent_id` 引用调用方预先保存的持久化恢复记录；本库无法自动证明该记录是否存在。
+
+<Aside title="使用提示">
+网络调用均为同步阻塞式；异步调用方需使用阻塞 Worker 线程。示例使用新的测试账号登录（这可能会顶掉已有的其他桌面端会话），且登录凭据仅保存在内存中。持久化保存凭据时请务必加密。遇到结果不确定的发送，在重新提交前必须先核实状态；客户端 ID 不保证服务端绝对幂等去重。写入操作需要独占所有权、匹配的密钥和受支持的数据架构。对 Linux Profile 的支持并不代表已兼容官方 Windows/macOS 布局。部分音视频路径需要系统安装 FFmpeg。建议锁定依赖版本并在升级前评估 API 变更。
+</Aside>

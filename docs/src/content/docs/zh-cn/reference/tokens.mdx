@@ -1,0 +1,33 @@
+---
+title: API 令牌
+description: 为 Daemon 的 HTTP API 创建、限制权限范围及撤销访问令牌。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Daemon 首次启动时会在 `dataDir/api-token` 自动生成一个管理员所有者令牌。运行在同一台设备上的 CLI 会默认自动读取使用。对于其他客户端或第三方系统，建议创建按需限定权限范围的独立令牌：
+
+```bash
+wx tokens create my-script --accounts ACCOUNT_ID --scopes read --scopes send
+wx tokens list
+wx tokens revoke TOKEN_ID
+```
+
+生成的全新令牌仅在创建时的 `token` 字段中展示一次，请妥善保存。
+
+| 权限范围 (Scope) | 赋予的操作权限 |
+| --- | --- |
+| `read` | 查阅会话、消息、联系人、群聊及事件流 |
+| `media` | 下载多媒体附件资源 |
+| `send` | 发送与撤回消息 |
+| `read-state` | 标记会话已读 |
+| `login` | 登录授权、连接与断开网络 |
+| `admin` | 管理令牌和账号体系，以及编辑群聊（只读群聊仅需 `read`） |
+
+OpenClaw 至少需要 `read`、`media`、`send` 与 `login` 权限；除非 `readPolicy` 设置为 `never`，否则还需要 `read-state` 权限。
+
+<Aside title="使用提示">
+- **API 令牌与微信登录状态相互独立。** 撤销某个 API 令牌不会导致微信账号被登出；反之微信账号退出登录也不会导致已签发的 API 令牌失效。
+- 令牌由 32 至 1,024 位可打印字符组成。切勿将其拼接入 URL 参数或提交到公共代码仓库中。
+- Daemon 默认仅监听本地环回地址。针对远程客户端，请务必启用 HTTPS 或加密网络隧道，防止令牌在局域网内明文传输。
+</Aside>

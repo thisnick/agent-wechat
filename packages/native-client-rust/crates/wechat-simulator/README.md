@@ -1,5 +1,7 @@
 # Local upstream simulator
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 The development simulator runs the actual Rust hub, authenticated API, account
 workers, encrypted profiles, outbox, projection journals and durable event/SSE
 stream. An injected upstream adapter exchanges local JSON with a separate Rust

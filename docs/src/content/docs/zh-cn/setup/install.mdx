@@ -1,0 +1,61 @@
+---
+title: 安装
+description: 通过 npm、pnpm、独立二进制或 Docker 镜像安装 wx 工具。
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+`wx` 是一个单文件独立可执行文件：它既用于启动服务后台（`wx serve`），也是日常操作的命令行工具。
+
+<Tabs syncKey="install">
+<TabItem label="npm">
+
+```bash
+npm install -g --allow-scripts=@agent-wechat/cli @agent-wechat/cli
+wx --json version
+```
+
+该 npm 包的安装脚本会根据你的操作系统和 CPU 架构自动下载对应的 `wx` 二进制文件，并比对包内提供的校验哈希。`--allow-scripts` 用于允许该脚本执行。
+
+</TabItem>
+<TabItem label="pnpm">
+
+```bash
+pnpm add -g @agent-wechat/cli
+pnpm approve-builds -g        # 选择 @agent-wechat/cli
+wx --json version
+```
+
+pnpm 默认不会自动执行安装脚本，需显式批准构建脚本后 `wx` 方可使用。
+
+</TabItem>
+<TabItem label="独立二进制">
+
+从 [最新发布页 (Releases)](https://github.com/thisnick/agent-wechat/releases/latest) 下载对应平台的二进制文件，重命名为 `wx`（Windows 命名为 `wx.exe`）并放置在系统的 `PATH` 路径下：
+
+| 平台环境 | 下载文件 |
+| --- | --- |
+| Linux x64 / ARM64 | `wx-vVERSION-linux-x64-gnu`, `wx-vVERSION-linux-arm64-gnu` |
+| macOS (Apple Silicon) | `wx-vVERSION-darwin-arm64` |
+| Windows x64 / ARM64 | `wx-vVERSION-win32-x64.exe`, `wx-vVERSION-win32-arm64.exe` |
+
+可将下载文件的 SHA-256 哈希值与同版本中的 `wx-vVERSION-checksums.json` 进行校验。
+
+</TabItem>
+<TabItem label="Docker">
+
+```bash
+docker pull ghcr.io/thisnick/agent-wechat-native:latest
+```
+
+该镜像内置了 `wx`、FFmpeg 以及 FFprobe，支持 `linux/amd64` 与 `linux/arm64` 架构。Compose 配置文件可参考[后台持续运行](/zh-cn/setup/run/#docker-compose)。
+
+</TabItem>
+</Tabs>
+
+下一步：[连接微信账号](/zh-cn/setup/connect/)。
+
+<Aside title="使用提示">
+- 如果 `wx` 提示未安装 Native 运行时，说明安装脚本未成功执行。可运行 `wx-native-install` 进行修复。
+- 如果需要发送语音或视频，请确保运行 Daemon 的机器上已安装 FFmpeg 和 FFprobe（例如通过 `apt install ffmpeg`、`brew install ffmpeg` 或 `winget install Gyan.FFmpeg`）。
+</Aside>

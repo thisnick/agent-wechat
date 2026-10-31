@@ -1,0 +1,44 @@
+---
+title: 源码构建
+description: 自行从源码编译与测试 wx 二进制程序、npm 依赖包与 Docker 镜像。
+---
+
+开发环境需准备 Rust 1.93.1 及 C 语言编译器、Node 24.22.1+ 以及 pnpm 9.15.4。官方 CI 覆盖 Linux、macOS 与 Windows 平台。
+
+```bash
+git clone https://github.com/thisnick/agent-wechat && cd agent-wechat
+pnpm install --frozen-lockfile
+pnpm native:build        # 编译 Rust 工作区，包含 wx 核心二进制
+pnpm native:test
+pnpm build               # 编译 TypeScript 各子包、OpenClaw 插件及当前文档站点
+```
+
+编译生成的二进制文件位于 `packages/native-client-rust/target/debug/wx`。构建 Docker 镜像：
+
+```bash
+pnpm build:image         # 打包镜像并打上 agent-wechat-native:local 标签
+```
+
+正式发布构建、CI 流程与制品发布机制可参考 [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md)。代码贡献规范请查阅 [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md)。
+
+## 体验 Web 浏览器端界面
+
+1. 启动本地模拟器及关联的浏览器 Web 客户端：
+
+   ```bash
+   pnpm client:dev
+   ```
+
+   终端将打印本地浏览器访问 URL 以及其虚拟测试数据的存储路径。
+
+2. 在浏览器中打开该地址，添加账号，随后体验 **模拟扫码 (Simulate scan)** 与 **模拟手机确认 (Simulate phone approval)**。确认授权后会话界面将自动呈现。
+
+3. 在对话窗口中打开 **模拟器控制面板 (Simulator controls)**，可测试接收新消息、从模拟手机端发送消息，或模拟遭服务端拒绝/未决的发送场景。
+
+4. 接收一张图片以观察标准画质的自动加载。**下载原图 (Download original)** 会将高清原图拉取到 agent-wechat Hub 节点；就绪后，点击 **保存原图 (Save original)** 可将其导出存盘到你的本地设备。进入会话并在聊天历史加载完毕后将自动清空未读徽标。位于底部时新消息会保持在视野中。向上滚动会自动加载更早历史而不会丢失阅读位置，点击 **最新消息 (Latest messages)** 可一键触底回到最新。若分页加载失败，点击 **加载更早消息 (Load older messages)** 还可以手动重试。
+
+5. 通过添加附件、剪贴板粘贴或拖拽文件到输入框中。文件类型将自动识别。检查或移除暂存文件，然后点击 **发送 (Send)** 将文本和每个文件作为独立消息发出。在客户端开启期间，未发送的文件会按账号和会话自动暂存保留。
+
+:::note[使用提示]
+该源码预览模式采用纯前端合成的模拟账号，完全不与微信线上服务器通信。文本与附件发送可针对模拟器进行测试验证。这并不能验证真实接收方的打开回放效果或真实已安装应用的行为。按 Ctrl+C 可停止预览服务进程。
+:::

@@ -1,5 +1,7 @@
 # wechat-protocol
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Blocking native protocol library for the Linux 4.1.13.26 profile. This is Rust
 protocol code using OpenSSL primitives; it does not execute Node or load an
 official WeChat executable/library. Async callers must use a blocking worker.

@@ -1,0 +1,231 @@
+---
+title: HTTP API
+description: 基于 Daemon 的 /v1 API 和事件流构建专属智能体插件、机器人或应用。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+CLI 与 OpenClaw 插件的所有操作均基于此套 API 构建，任何智能体框架、自建 Bot 或第三方应用都可以无缝接入。Daemon 在 `http://127.0.0.1:6174/v1` 提供 JSON API 服务。除 `GET /health` 外，所有请求都需要在请求头中携带 Bearer 令牌；可通过 [`wx tokens create`](/zh-cn/reference/tokens/) 创建。
+
+典型的接入集成方式是订阅[事件流](#接收事件)以监听新消息，拉取消息详情，并通过 [`/sends`](#发送消息) 发送回复。
+
+```bash
+export WX=http://127.0.0.1:6174/v1 TOKEN=...   # 以及 ACCOUNT=<从 /v1/accounts 获取的 id>
+curl -H "Authorization: Bearer $TOKEN" $WX/accounts
+```
+
+## 账号与 Profile 管理
+
+直接使用已有的 Daemon 连接密钥即可管理 Profile，无需配置额外的前端角色。
+
+| 操作 | 请求接口 |
+| --- | --- |
+| 列出 Profile | `GET /accounts` |
+| 添加 Profile | `POST /accounts`，请求体 `{ "alias": "Personal" }` |
+| 登录 | `POST /accounts/{id}/login-attempts`，附带 `Idempotency-Key` |
+| 退出登录 | `POST /accounts/{id}/auth/logout`，附带 `Idempotency-Key` |
+| 移除已登出的 Profile | `DELETE /accounts/{id}`，请求体 `{ "confirmAccountId": "<相同的id>" }` |
+
+注销移除将返回 `{ "accountId": "…", "removed": true, "filesRetained": true }`。这会取消该 Profile 的注册记录，但完整保留其本地文件和恢复日志。请先退出登录并等待所有活跃任务结束，否则将返回 `409` 冲突。已移除的 ID 和路径保持预留。权限范围同样适用：创建、重命名和移除需要 `admin` 权限；登录与登出需要 `login` 权限。
+
+## 查询与读取
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/threads?limit=20"
+curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/threads/filehelper/messages?limit=50"
+curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=发票"
+```
+
+列表接口返回 `{ "items": [...], "nextCursor": "..." }`。在相同查询条件下传入 `cursor=` 参数即可获取下一页数据。
+
+`GET /threads` 和 `GET /threads/{id}` 会从本地历史数据中包含侧边栏摘要：
+
+| 字段 | 说明 |
+| --- | --- |
+| `muted` | 单聊或群聊的免打扰设置：`true`、`false`，或在缺失/未决时为 `null`。 |
+| `pinned` | 普通单聊或活跃群聊的置顶状态：`true`、`false`，或在不可用时为 `null`。 |
+| `lastMessage` | 本地最新消息的 ID、发送者 ID/名称、流向、类型、时间，以及最长 160 字符的纯文本预览 `text`。`null` 表示本地无聊天历史；省略该字段表示预览暂不可用。 |
+| `avatarMembers` | 最多四位已缓存的群成员信息（含 `id` 与 `displayName`）；单聊或成员名单不可用时为空。可通过 `GET /avatars/{username}` 获取头像图片。 |
+
+此类读取操作不主动向微信服务端发送网络刷新，也不会自动下载多媒体文件。富媒体消息使用诸如“图片”、“表情”等文字标签占位；已撤回的消息内容会被自动屏蔽。建议在接收到消息、联系人或群聊变动事件后刷新会话列表以更新摘要。通知消费程序在弹出告警前，应先校验账号状态满足 `contactSyncReady: true` 且会话满足 `muted: false`。通过 `PUT /threads/{id}/notifications` 修改通知设置支持普通单聊与群聊。单聊修改前会自动拉取当前联系人信息以保证无关配置不被破坏。重试时请复用相同幂等键；对于不确定的执行结果切勿更换新键重试。
+
+置顶或取消置顶使用 `PUT /threads/{id}/pin`，请求体为 `{"pinned":true}` 或 `{"pinned":false}`，需要 `admin` 令牌与 `Idempotency-Key`。SDK 对应方法为 `setThreadPinned(accountId, threadId, pinned, key)`。返回结果为一个操作任务；可检查其 `remoteOutcome` 与 `profileProjection`。成功置顶后广播 `thread.updated` 事件。重新获取列表时置顶会话排在最前，其后按最近活动时间倒序排列。已有分页游标保持其原有的排序快照。
+
+## 联系人
+
+列出、搜索和读取特定微信 Profile 中保存的联系人。以下所有路径均以 `/v1/accounts/{account}` 起始，并需要该账号的 `read` 权限。URL 路径中的用户名请进行 URL 百分比编码。
+
+| 任务目标 | 请求接口 | TypeScript SDK |
+| --- | --- | --- |
+| 列出或搜索联系人 | `GET /contacts?search=Alice&limit=20` | `contacts(accountId, { query: "Alice", limit: 20 })` |
+| 读取单条联系人信息 | `GET /contacts/{username}` | `contact(accountId, username)` |
+| 刷新单个已知身份信息 | `POST /contacts/{username}/refresh` 带 `{}` | `refreshContact(accountId, username)` |
+| 获取联系人全量索引 | `POST /contact-sync` 带 `{}` | `syncContacts(accountId)` |
+| 向微信服务端查询已知身份 | `POST /contacts/lookup` 带 `{"ids":["wxid_alice"]}` | 无专用 SDK 封装 |
+
+### 读取已保存的联系人
+
+1. 支持按 ID、显示名称、昵称、备注或微信号进行不区分大小写的前缀/子串搜索。`query` 为 `search` 的别名，二选一即可。
+
+   ```bash
+   curl -G -H "Authorization: Bearer $TOKEN" \
+     --data-urlencode 'search=Alice' --data-urlencode 'limit=20' \
+     "$WX/accounts/$ACCOUNT/contacts" > contacts-page.json
+   ```
+
+   合成示例响应：
+
+   ```json
+   {
+     "items": [{
+       "id": "wxid_alice", "username": "wxid_alice",
+       "displayName": "Alice", "nickname": "Alice Chen",
+       "remark": "Alice", "alias": null, "relation": "unknown",
+       "classification": {
+         "category": "unknown", "namespace": "wechat",
+         "businessType": null, "businessKind": null, "openIm": null
+       }
+     }],
+     "nextCursor": "OPAQUE_CURSOR",
+     "sourceGeneration": "PROFILE_GENERATION",
+     "asOfEventCursor": "EVENT_CURSOR"
+   }
+   ```
+
+2. 若 `nextCursor` 非空，带上相同的搜索条件继续查询下一页，直至为 null：
+
+   ```bash
+   CURSOR=$(jq -r '.nextCursor' contacts-page.json)
+   curl -G -H "Authorization: Bearer $TOKEN" \
+     --data-urlencode 'search=Alice' --data-urlencode "cursor=$CURSOR" \
+     --data-urlencode 'limit=20' "$WX/accounts/$ACCOUNT/contacts" > contacts-page.json
+   ```
+
+   默认限制为 50 条；允许范围 1–200。搜索字符串最多 256 字节。游标有效期为 30 分钟，并锁定第一页查询时的 ID 顺序。遇到 `409 pagination_cursor_expired` 时请重新发起查询。
+
+3. 若已知微信号，可直接调用 `GET /contacts/wxid_alice`。未找到时返回 `404 not_found`。CLI 对应命令为 `wx --json contacts list --limit 20`、`wx --json contacts find Alice` 和 `wx --json contacts get wxid_alice`。
+
+`displayName` 依次优先使用非空备注、昵称和用户名。联系人列表不包含普通群聊；查看群成员请使用[群组读取接口](/zh-cn/use/groups/)。此 API 不支持主动加好友、删联系人或修改备注。
+
+### 刷新与同步联系人
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{}' \
+  "$WX/accounts/$ACCOUNT/contacts/wxid_alice/refresh"
+```
+
+刷新与全量索引请求返回 HTTP 202 及操作任务：`{"id":"OPERATION_ID","kind":"metadata","state":"queued"}`。轮询 `GET /operations/{id}` 或 `client.operation(accountId, op.id)`，完成后重新拉取联系人。操作结束后若 `result.profileProjection` 为 `"partial"`，请检查具体字段结果。
+
+单人刷新获取单个指定身份并保存所支持的字段。全量同步每次操作最多拉取 10 页或运行 2 分钟。可通过返回结果中的 `complete`、`catalogComplete` 和 `resumeAvailable` 获知进度，并再次调用以继续同步。
+
+这与 Daemon 自动监听的联系人变更流相互独立。变更流在写入本地后会触发 `contacts.updated`，同步时触发 `contacts.sync`。账号状态中 `contactSyncReady` 为 true 仅表明该连接已完成增量追赶，并不保证本地已有全量库存。
+
+`POST /contacts/lookup` 是实时的服务端单次查询接口：接受一至两个指定 ID，返回带有原始结果的 `items`，标记 `profileProjection: "pending"`，且不会落盘保存。若需要更新本地缓存，请优先使用刷新接口。
+
+### 理解身份分类 (classification)
+
+联系人、会话、群聊和群成员均从同一 Profile 中推导 `classification` 分类：
+
+| `category` | 对应说明 |
+| --- | --- |
+| `business` | 官方服务号 / 企业账号元数据。 |
+| `openim` / `openim_customer_service` | 企业微信联系人 / 独立客服身份。 |
+| `group` / `system` | 识别出的群聊 / 系统内置对象（如文件传输助手）。 |
+| `unknown` | 未明确分类；切勿随意假定为个人好友。 |
+
+<Aside title="使用提示">
+- 读取基于本地已存储数据，不会触发主动刷新。`coverage.partial` 反映的是本地数据库的就绪情况，不代表微信服务端的库存完整度。
+- 较旧的会话可能缺失 `classification`。标签并不代表劳动关系或账号管理权限。
+- 访问头像图片调用 `GET /avatars/{username}`（需 `media` 权限）。通过 `POST /avatars/{username}/refresh` 刷新新头像需要 `read` 与 `media` 权限。
+</Aside>
+
+## 发送消息
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-1234-confirmation" \
+  -d '{"threadId": "filehelper", "text": "订单 1234 已确认"}' \
+  "$WX/accounts/$ACCOUNT/sends"
+```
+
+每次发送均必须携带 `Idempotency-Key`。使用相同键重复提交将返回初次发送的记录，绝不重复外发。可通过 `GET /sends/{id}` 查看进度，或通过 `GET /sends/by-idempotency-key?key=...` 按键查找。
+
+群文本消息支持传入 `mentions: { userIds: ["MEMBER_ID"] }` 或 `mentions: { all: true }`。详情参考[群成员 @ 提醒](/zh-cn/use/groups/#mention-group-members)。
+
+如需引用某条已保存的消息，在请求中同时传入该消息在当前会话下的 `id` 与 `serverId`：
+
+```json
+{
+  "kind": "text",
+  "threadId": "filehelper",
+  "text": "赞同",
+  "quote": { "messageId": "MESSAGE_ID", "serverId": "SERVER_ID" }
+}
+```
+
+令牌需要 `read` 和 `send` 权限。Daemon 会直接在本地相同会话中读取被引用的原消息内容。在 TypeScript SDK 中：
+
+```ts
+await client.sendText(accountId, threadId, "赞同", key, { messageId, serverId });
+```
+
+在引用群消息时若需要同时 @ 群成员，可同时传入两项配置：
+
+```ts
+await client.sendText(accountId, groupId, "赞同", key, {
+  quote: { messageId, serverId },
+  mentions: { userIds: [memberId] },
+});
+```
+
+对于群聊纯文本，HTTP 请求同样支持同时携带 `quote` 与 `mentions` 字段。
+
+受支持的原消息类型及边界限制请参考 [CLI 指南中的引用回复](/zh-cn/use/cli/#引用回复)。
+
+发送文件、图片、视频和语音时，先通过 `POST /uploads` 上传暂存文件，随后将生成的 source ID 传入发送请求中。参考[发送附件与媒体](/zh-cn/use/media/)。
+
+## 接收事件
+
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/events/stream"
+```
+
+基于 Server-Sent Events (SSE) 的长连接事件流。新收到的消息将作为 `message.committed` 事件推送；随后可通过 `GET /messages/{messageId}` 获取详情。发生断线后，带上 `?after=CURSOR` 参数（或标准 `Last-Event-ID` 请求头）重连，Daemon 将自动补发期间错过的所有事件。向 `POST /consumers/{name}/ack` 提交 `{"cursor": "..."}` 可记录消费者的消费位点。
+
+连接建立时将立即收到心跳注释，随后会周期性发送保活信息。心跳注释不包含消息内容，不会推动事件游标前进。
+
+群聊信息更新并在本地保存后，将推送 `group.updated` 事件。`group.refresh_blocked` 表示后续读取无法顺利完成。这些事件共享同一个可重放的事件流。
+
+## 路由列表
+
+所有账号相关路由均以 `/v1/accounts/{account}` 起始。
+
+| 业务板块 | 核心接口路由 |
+| --- | --- |
+| 账号管理 | `GET /v1/accounts`, `GET /`, `GET /capabilities`, `POST /connect`, `POST /disconnect`, `POST /logout` |
+| 登录认证 | `POST /login-attempts`, `GET /login-attempts/{id}`, `GET /login-attempts/{id}/qr`, `POST /login-attempts/{id}/cancel` |
+| 会话与消息 | `GET /threads`, `GET /threads/{id}/messages`, `GET /messages?query=`, `GET /messages/{id}` |
+| [联系人](#联系人) | `GET /contacts`, `GET /contacts/{username}`, `POST /contacts/{username}/refresh`, `POST /contact-sync`, `POST /contacts/lookup` |
+| [群组管理](/zh-cn/use/groups/) | `GET /groups`, `GET /groups/{id}`, `GET /groups/{id}/members`, `GET /groups/{id}/members/{username}` |
+| [群组编辑](/zh-cn/use/groups/) 与设置 (admin) | `POST /groups`, `PATCH /groups/{id}`, `POST /groups/{id}/leave`, `POST/DELETE /groups/{id}/members`, `PUT /groups/{id}/my-name`, `DELETE /groups/{id}/announcement`, `PUT /threads/{id}/notifications`, `PUT /threads/{id}/pin` |
+| 消息发送 | `POST /uploads`, `POST /sends`, `GET /sends/{id}`, `POST /sends/{id}/cancel`, `POST /messages/{id}/recall` |
+| 媒体资源 | `GET /messages/{id}/media`, `POST /media/lookup`, `POST /messages/{id}/media-transfers`, `GET /media/{id}/content` |
+| 状态标记 | `POST /threads/{id}/read-state` 带 `{"expectedVersion": "..."}` |
+| 后台任务 | `GET /jobs/{id}`, `GET /operations/{id}` |
+| 事件流 | `GET /events`, `GET /events/stream`, `POST /consumers/{name}/ack` |
+| 访问令牌 | `GET /v1/tokens`, `POST /v1/tokens`, `DELETE /v1/tokens/{id}` |
+
+请求和响应的 TypeScript 类型定义直接由 Rust 源码生成在 [`native.generated.ts`](https://github.com/thisnick/agent-wechat/blob/main/packages/shared/src/native.generated.ts) 中。以 [`wechat-api`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust/crates/wechat-api) crate 为最终准则。
+
+如需批量获取附件元数据，可向 `POST /media/lookup` 提交 `{"messageIds":["ID_1","ID_2"]}`（需要 `media` 权限）。单次最多接受 40 个消息 ID，返回带有 `assets` 的列表，此接口不会直接下载文件。SDK 对应方法为 `client.mediaAssetsBatch(accountId, messageIds)`。
+
+<Aside title="使用提示">
+- **所有 ID 均为字符串。** 消息 ID 为内部不透明字符串，服务端 ID 可能超出 JavaScript 安全整数范围。切勿按数字类型解析。
+- **耗时任务返回 202** 并附带 Job 或 Operation ID：媒体发送、文件下载、消息撤回、登录授权等。请轮询任务状态；客户端断开 HTTP 连接并不会取消任务执行。
+- **`needs_review` 代表状态未决，而非执行失败。** 微信可能已经执行了该操作，请按任务或幂等键查询，切勿盲目重复提交。
+- **媒体下载** 可能会返回 `pending`、`expired` 或 `unsupported`。已缓存的本地文件在微信云端文件过期后依然有效，文件获取接口原生支持 HTTP `Range` 分片请求。
+- **已读状态与事件确认相互独立。** 提交事件 ACK 绝不会将消息标记为已读。
+- **远程访问安全：** Daemon 默认只监听 127.0.0.1 本地环回。请通过 HTTPS 或加密隧道连接。
+- 0.x 版本的 `/api` 已下线。`/v1` 使用了全新的路由与数据结构。
+</Aside>
