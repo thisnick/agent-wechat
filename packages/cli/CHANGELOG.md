@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.3.3
+
+### Patch Changes
+
+- [#356](https://github.com/thisnick/agent-wechat/pull/356) [`3433043`](https://github.com/thisnick/agent-wechat/commit/343304319d579f214d843d549ed23f209673cdd8) Thanks [@weirdseed](https://github.com/weirdseed)! - Improve outgoing voice-note quality with a higher SILK target bit rate and input peak limiting while preserving the 16 kHz sample rate and existing duration and splitting behavior.
+
+- [#355](https://github.com/thisnick/agent-wechat/pull/355) [`b370487`](https://github.com/thisnick/agent-wechat/commit/b3704875d6f16a8e360d4604e7df535f38cc179f) Thanks [@weirdseed](https://github.com/weirdseed)! - Receive original stickers from the Tencent wxapp CDN and preserve specific errors for invalid or unavailable sticker media metadata.
+
 ## 1.3.2
 
 ### Patch Changes
