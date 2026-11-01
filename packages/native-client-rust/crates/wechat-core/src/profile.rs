@@ -101,6 +101,9 @@ impl Core {
         Ok((location, keys))
     }
     pub fn profile_reader(&self, account: &str) -> Result<ProfileReader> {
+        #[cfg(test)]
+        self.profile_snapshot_opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (location, keys) = self.profile_location_keys(account)?;
         Ok(ProfileReader::open(
             location,

@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/cli",
-  "version": "1.3.1",
+  "version": "1.3.3",
   "license": "MIT",
   "type": "module",
   "bin": {

@@ -96,10 +96,11 @@ pub struct CoreShared {
     pub(crate) vault: Arc<Vault>,
     pub(crate) cursor_vault: Arc<Vault>,
     pub(crate) password_proofs: Mutex<BTreeMap<String, String>>,
-    pub(crate) recall_read_rechecks: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) recall_sync_cache: Mutex<BTreeMap<String, crate::recall_evidence::RecallSyncCache>>,
     pub(crate) profile_readers:
         Mutex<BTreeMap<String, (std::time::Instant, wechat_profile::OwnedReaderCache)>>,
+    #[cfg(test)]
+    pub(crate) profile_snapshot_opens: std::sync::atomic::AtomicUsize,
     pub(crate) profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     pub(crate) bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) startup_profiles_recovered: AtomicBool,
@@ -318,9 +319,10 @@ impl Core {
                 vault: Arc::new(vault),
                 cursor_vault: Arc::new(cursor_vault),
                 password_proofs: Mutex::new(BTreeMap::new()),
-                recall_read_rechecks: Mutex::new(Default::default()),
                 recall_sync_cache: Mutex::new(BTreeMap::new()),
                 profile_readers: Mutex::new(BTreeMap::new()),
+                #[cfg(test)]
+                profile_snapshot_opens: std::sync::atomic::AtomicUsize::new(0),
                 profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
                 bootstrap_leases: Mutex::new(bootstrap_leases),
                 startup_profiles_recovered: AtomicBool::new(false),
