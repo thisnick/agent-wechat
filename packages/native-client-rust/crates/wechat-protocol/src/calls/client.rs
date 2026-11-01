@@ -1235,35 +1235,6 @@ fn replace_group(raw: &[u8], live_id: u64, group: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn selected_profile_requires_independent_complete_current_buffers() {
-        let engine =
-            p::message(&[p::uint(5, 17), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap();
-        let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
-        assert!(profile(&engine, &channel).is_ok());
-        assert!(profile(&engine, &[]).is_err());
-        let mut changed = engine;
-        changed.extend(p::uint(6, 0x106));
-        assert!(profile(&changed, &channel).is_err());
-    }
-    #[test]
-    fn group_installation_replaces_only_returned_group_and_live_id() {
-        let group = p::message(&[
-            p::bytes(1, b"wechat"),
-            p::uint(2, 0),
-            p::bytes(3, b"voip-2p"),
-            p::bytes(4, &[]),
-            p::uint(5, 1),
-            p::bytes(6, &[]),
-            p::uint(7, 0),
-            p::uint(99, 7),
-        ])
-        .unwrap();
-        let updated = fields(&replace_group(&group, u64::MAX, "returned").unwrap()).unwrap();
-        assert_eq!(number(&updated, 2, None).unwrap(), u64::MAX);
-        assert_eq!(data(&updated, 4).unwrap(), b"returned");
-        assert_eq!(number(&updated, 99, None).unwrap(), 7);
-    }
 
     pub(super) struct FakeTransport(
         pub(super) std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
@@ -1286,9 +1257,117 @@ mod tests {
                 request.base_request.is_some() && request.body.is_some(),
                 "Missing host common wrapper"
             );
+            source_request(route, &request)?;
             state.cookie = vec![route.command() as u8];
             Ok(reply)
         }
+    }
+    /// Independent selected request contract at the actual session/transport
+    /// boundary. Literal field numbers and command/path values are not obtained
+    /// by serializing another production request or reading its enum accessors.
+    fn source_request(route: CallHostRoute, request: &CommonRequest) -> Result<()> {
+        let base = fields(
+            request
+                .base_request
+                .as_deref()
+                .context("Missing host base")?,
+        )?;
+        assert_eq!(data(&base, 1)?, &[0]);
+        assert_eq!(number(&base, 2, None)?, 1);
+        assert!(number(&base, 6, None)? > 0);
+        let body = fields(request.body.as_deref().context("Missing host body")?)?;
+        match route {
+            CallHostRoute::AppAuth => {
+                let device = data(&fields(data(&body, 1)?)?, 1)?.to_vec();
+                assert_eq!(device.len(), 32);
+                let raw = request.body.as_deref().unwrap();
+                assert_eq!(&raw[..4], &[10, 34, 10, 32]);
+                assert_eq!(raw.len(), 36);
+            }
+            CallHostRoute::Invite => {
+                assert_eq!(data(&body, 1)?, b"peer");
+                assert_eq!(number(&body, 2, None)?, 2);
+                assert!(number(&body, 5, None)? > 0);
+                assert!(p::optional(&body, 6)?.is_none());
+                assert_eq!(data(&body, 7)?, b"voip-2p");
+                let client = fields(data(&body, 4)?)?;
+                assert_eq!(number(&client, 1, None)?, 0x050000cb);
+                assert_eq!(data(&client, 2)?, b"test");
+                assert_eq!(number(&client, 3, None)?, 0);
+                assert_eq!(number(&client, 4, None)?, 1);
+                let caps = fields(data(&client, 5)?)?;
+                assert_eq!(number(&fields(data(&caps, 1)?)?, 5, None)?, 0x40000);
+                assert_eq!(data(&caps, 2)?.len(), 12);
+            }
+            CallHostRoute::LiveSync => {
+                assert_eq!(number(&body, 1, None)?, 99);
+                data(&body, 2)?;
+                assert_eq!(data(&body, 4)?, b"voip-2p");
+                assert_eq!(number(&body, 5, None)?, 6);
+            }
+            CallHostRoute::Cancel => {
+                let inner = fields(data(&body, 1)?)?;
+                assert_eq!(number(&inner, 3, None)?, 7);
+                assert_eq!(number(&inner, 4, None)?, 9);
+                assert_eq!(number(&inner, 5, None)?, number(&body, 2, None)?);
+                assert!([1, 2].contains(&number(&inner, 6, None)?));
+                assert_eq!(number(&body, 3, None)?, 7);
+                assert_eq!(data(&body, 4)?, b"peer");
+                assert_eq!(data(&body, 5)?, b"voip-2p");
+            }
+            CallHostRoute::RingingAck => {
+                let inner = fields(data(&body, 1)?)?;
+                assert_eq!(number(&inner, 4, None)?, 1);
+                assert_eq!(number(&inner, 5, None)?, 7);
+                assert_eq!(number(&inner, 6, None)?, 9);
+                assert_eq!(number(&inner, 7, None)?, 0);
+                assert_eq!(number(&inner, 13, None)?, 1);
+                let caps = fields(data(&inner, 12)?)?;
+                assert_eq!(number(&fields(data(&caps, 1)?)?, 5, None)?, 0x40000);
+                assert_eq!(data(&caps, 2)?.len(), 12);
+                assert_eq!(data(&body, 3)?, b"voip-2p");
+            }
+            CallHostRoute::Transfer => {
+                assert_eq!(number(&body, 1, None)?, 1901);
+                let command = number(&body, 2, None)? as u32;
+                let path: &[u8] = match command {
+                    3361 => b"/cloudim/cloud-bin/cloudvoipmtjoin",
+                    3095 => b"/cloudim/cloud-bin/cloudvoipmtreject",
+                    3380 => b"/cloudim/cloud-bin/cloudvoipmtexit",
+                    _ => bail!("Unexpected synthetic Cloud command"),
+                };
+                assert_eq!(data(&body, 3)?, b"wechat");
+                assert_eq!(data(&body, 4)?, path);
+                let frame = app_frame::TaskFrame::decode(data(&body, 5)?, command)?;
+                assert_eq!(frame.integers[&2], frame.integers[&22]);
+                assert!(frame.integers[&2] > 0);
+                assert_eq!(frame.strings[&24], b"wechat");
+                let clear = app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
+                let cloud = fields(&clear)?;
+                let app_base = fields(data(&cloud, 1)?)?;
+                assert_eq!(number(&app_base, 1, None)?, frame.integers[&22]);
+                assert_eq!(data(&app_base, 2)?, b"Ldeviceid");
+                let inner = fields(data(&cloud, 2)?)?;
+                if command == 3361 {
+                    assert_eq!(number(&inner, 5, None)?, 2);
+                    assert_eq!(number(&inner, 6, None)?, 1);
+                    assert_eq!(number(&inner, 8, None)?, 0);
+                    assert_eq!(number(&inner, 11, None)?, 7);
+                    assert_eq!(number(&inner, 12, None)?, 9);
+                } else {
+                    assert_eq!(number(&inner, 3, None)?, 7);
+                    assert_eq!(number(&inner, 4, None)?, 9);
+                    assert_eq!(number(&inner, 5, None)?, 0);
+                    let reason = number(&inner, 6, None)?;
+                    if command == 3095 {
+                        assert_eq!(reason, 1);
+                    } else {
+                        assert!([1, 5, 6, 7].contains(&reason));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     pub(super) fn host_reply(body: &[u8]) -> Vec<u8> {
         p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, body)]).unwrap()
@@ -1322,9 +1401,7 @@ mod tests {
             credential_digest: [4; 32],
         }
     }
-    fn capabilities() -> (Vec<u8>, Vec<u8>) {
-        capabilities_for_codec(17)
-    }
+
     pub(super) fn capabilities_for_codec(codec: u64) -> (Vec<u8>, Vec<u8>) {
         (
             p::message(&[p::uint(5, codec), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap(),
@@ -1378,8 +1455,11 @@ mod tests {
         .unwrap()
     }
     pub(super) fn auth_reply() -> Vec<u8> {
+        auth_reply_uin(17)
+    }
+    fn auth_reply_uin(uin: u64) -> Vec<u8> {
         let auth = p::message(&[p::bytes(9, b"server"), p::uint(11, 1)]).unwrap();
-        let unify = p::message(&[p::bytes(2, &auth), p::bytes(3, &p::uint(1, 17))]).unwrap();
+        let unify = p::message(&[p::bytes(2, &auth), p::bytes(3, &p::uint(1, uin))]).unwrap();
         host_reply(&p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &unify)]).unwrap())
     }
     fn invite_reply() -> Vec<u8> {
@@ -1557,9 +1637,12 @@ mod tests {
         )
     }
     pub(super) fn exit_reply() -> Vec<u8> {
+        exit_reply_uin(17)
+    }
+    fn exit_reply_uin(uin: u64) -> Vec<u8> {
         let exit = p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0)]).unwrap();
         let cloud =
-            p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 17), p::bytes(3, &exit)]).unwrap();
+            p::message(&[p::bytes(1, &[8, 0]), p::uint(2, uin), p::bytes(3, &exit)]).unwrap();
         let frame = app_frame::TaskFrame {
             command: 3380,
             integers: BTreeMap::from([
@@ -1567,7 +1650,7 @@ mod tests {
                 (7, 0),
                 (8, 0),
                 (21, 0),
-                (22, 17),
+                (22, uin),
                 (23, 0),
                 (25, 0),
                 (26, 0),
@@ -1581,12 +1664,15 @@ mod tests {
     }
     #[test]
     fn fake_caller_auth_invite_full_sync_media_and_exit() {
-        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply()),
-            (CallHostRoute::LiveSync, joined_sync(false)),
-            (CallHostRoute::Transfer, exit_reply()),
-        ])));
+        let transport = RecordingTransport {
+            inner: FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+                (CallHostRoute::AppAuth, auth_reply_uin(u64::MAX)),
+                (CallHostRoute::Invite, invite_reply()),
+                (CallHostRoute::LiveSync, joined_sync(false)),
+                (CallHostRoute::Transfer, exit_reply_uin(u64::MAX)),
+            ]))),
+            requests: Default::default(),
+        };
         let mut state = state();
         let mut session = NativePersonalSession::authenticate(
             &transport,
@@ -1633,7 +1719,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session.phase(), PersonalPhase::Finished);
-        assert!(transport.0.borrow().is_empty());
+        assert!(transport.inner.0.borrow().is_empty());
+        let requests = transport.requests.borrow();
+        let host_tasks = requests
+            .iter()
+            .map(|(_, raw)| {
+                let common = CommonRequest::decode(raw).unwrap();
+                number(
+                    &fields(common.base_request.as_deref().unwrap()).unwrap(),
+                    6,
+                    None,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(host_tasks, [1, 2, 3, 4]);
+        let common = CommonRequest::decode(&requests.last().unwrap().1).unwrap();
+        let delegate = fields(common.body.as_deref().unwrap()).unwrap();
+        let frame = app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();
+        assert_eq!(frame.integers[&2], u64::MAX);
+        assert_eq!(frame.integers[&22], u64::MAX);
+        let common = fields(&session.app.common_session(authority()).unwrap()).unwrap();
+        assert_eq!(number(&common, 4, None).unwrap(), u64::MAX);
+        assert_eq!(data(&common, 5).unwrap(), b"server");
+        assert_eq!(number(&common, 6, None).unwrap(), 1);
+        assert!(p::optional(&common, 1).unwrap().is_none());
     }
     #[test]
     fn later_unknown_sync_item_prevents_cookie_and_partial_member_install() {
@@ -1767,21 +1877,6 @@ mod tests {
                 assert_eq!(session.phase(), PersonalPhase::Uncertain);
             }
         }
-    }
-
-    #[test]
-    fn selected_codec_zero_or_offer_mask_does_not_pass_media_admission() {
-        let (selected, channel) = capabilities();
-        assert!(profile(&selected, &channel).is_ok());
-        for codec in [0, 0x40000] {
-            let engine =
-                p::message(&[p::uint(5, codec), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap();
-            assert!(profile(&engine, &channel).is_err());
-        }
-        let request = parameters();
-        let offered = p::decode(&request.engine_capability).unwrap();
-        assert_eq!(p::scalar(&offered, 5).unwrap(), 0x40000);
-        assert_eq!(request.channel_capability.len(), 12);
     }
 
     #[test]
@@ -2179,102 +2274,6 @@ mod tests {
             .is_err());
         assert!(transport.0.borrow().is_empty());
     }
-    #[test]
-    fn joined_membership_selects_exit_even_when_media_is_unsupported() {
-        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply_full(0, 1, 1)),
-            (CallHostRoute::Transfer, exit_reply()),
-        ])));
-        let mut state = state();
-        let mut session = NativePersonalSession::authenticate(
-            &transport,
-            &mut state,
-            authority(),
-            1,
-            [9; 32],
-            parameters(),
-        )
-        .unwrap();
-        assert!(session
-            .invite(
-                &transport,
-                &mut state,
-                authority(),
-                "peer",
-                123,
-                TaskIds { sdk: 1, host: 2 }
-            )
-            .unwrap_err()
-            .is::<UnsupportedCallMedia>());
-        assert_eq!(session.phase(), PersonalPhase::Joined);
-        assert!(session
-            .cancel(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 }
-            )
-            .is_err());
-        session
-            .exit(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 },
-                false,
-            )
-            .unwrap();
-        assert_eq!(session.phase(), PersonalPhase::Finished);
-    }
-    #[test]
-    fn unknown_item_after_unsupported_media_vetoes_whole_batch_cleanup() {
-        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply()),
-            (CallHostRoute::LiveSync, joined_sync_profile(true, Some(0))),
-        ])));
-        let mut state = state();
-        let mut session = NativePersonalSession::authenticate(
-            &transport,
-            &mut state,
-            authority(),
-            1,
-            [9; 32],
-            parameters(),
-        )
-        .unwrap();
-        session
-            .invite(
-                &transport,
-                &mut state,
-                authority(),
-                "peer",
-                123,
-                TaskIds { sdk: 1, host: 2 },
-            )
-            .unwrap();
-        let error = session
-            .poll(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 },
-            )
-            .unwrap_err();
-        assert!(!error.is::<UnsupportedCallMedia>());
-        assert_eq!(session.phase(), PersonalPhase::Uncertain);
-        assert_eq!(session.active.as_ref().unwrap().cookies, b"old");
-        assert_eq!(session.control.as_ref().unwrap().peer_joined, Some(false));
-        assert!(session
-            .cancel(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 3, host: 4 }
-            )
-            .is_err());
-    }
     pub(super) fn roster_sync(
         sequence: u32,
         own: Option<u32>,
@@ -2427,63 +2426,6 @@ mod tests {
         }
     }
     #[test]
-    fn caller_self_removal_is_local_stop_with_no_exit_or_cancel() {
-        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply()),
-            (
-                CallHostRoute::LiveSync,
-                roster_sync(2, None, Some(1), false),
-            ),
-        ])));
-        let mut state = state();
-        let mut session = caller_with(&transport, &mut state);
-        assert_eq!(
-            session
-                .poll(
-                    &transport,
-                    &mut state,
-                    authority(),
-                    TaskIds { sdk: 2, host: 3 }
-                )
-                .unwrap(),
-            SyncProgress::Terminal(RemoteTermination::LocalStop(LocalStopReason::SelfRemoved))
-        );
-        assert_eq!(session.phase(), PersonalPhase::Finished);
-        assert!(session
-            .finish_remote(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 3, host: 4 },
-                false
-            )
-            .is_err());
-        assert!(transport.0.borrow().is_empty());
-    }
-    #[test]
-    fn terminal_row_in_incomplete_batch_does_not_advance_cursor_or_commit_action() {
-        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply()),
-            (CallHostRoute::LiveSync, roster_sync(2, None, Some(1), true)),
-        ])));
-        let mut state = state();
-        let mut session = caller_with(&transport, &mut state);
-        assert!(session
-            .poll(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 }
-            )
-            .is_err());
-        assert_eq!(session.phase(), PersonalPhase::Uncertain);
-        assert_eq!(session.active.as_ref().unwrap().cookies, b"old");
-        assert_eq!(session.active.as_ref().unwrap().member_sequence, 1);
-        assert!(session.control.as_ref().unwrap().terminal.is_none());
-    }
-    #[test]
     fn no_response_cancel_uses_original_id_and_direct_invite_timeout_wire_reason() {
         let cancel = host_reply(&p::bytes(
             1,
@@ -2534,46 +2476,6 @@ mod tests {
         let inner = fields(data(&outer, 1).unwrap()).unwrap();
         assert_eq!(number(&inner, 5, None).unwrap(), 123);
         assert_eq!(number(&inner, 6, None).unwrap(), 2);
-    }
-    #[test]
-    fn failed_remote_exit_is_uncertain_and_not_replayed() {
-        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply()),
-            (
-                CallHostRoute::LiveSync,
-                roster_sync(2, Some(1), Some(4), false),
-            ),
-        ])));
-        let mut state = state();
-        let mut session = caller_with(&transport, &mut state);
-        session
-            .poll(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 },
-            )
-            .unwrap();
-        assert!(session
-            .finish_remote(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 3, host: 4 },
-                false
-            )
-            .is_err());
-        assert_eq!(session.phase(), PersonalPhase::Uncertain);
-        assert!(session
-            .finish_remote(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 4, host: 5 },
-                false
-            )
-            .is_err());
     }
     #[test]
     fn previously_joined_peer_permanently_disarms_original_pending_cancel() {

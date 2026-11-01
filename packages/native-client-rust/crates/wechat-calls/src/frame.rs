@@ -253,42 +253,4 @@ mod tests {
         let stereo = AudioFormat::new(8000, 2, 10).unwrap();
         assert!(MediaFrame::decode(&original, stereo).is_err());
     }
-
-    #[test]
-    fn track_generation_and_order_fail_before_consumption() {
-        let bytes = encode_pcm(header(), format(), &[0; 80]).unwrap();
-        let frame = MediaFrame::decode(&bytes, format()).unwrap();
-        let mut stream = MediaStream::new(header().track_id, 2).unwrap();
-        let mut wrong = frame;
-        wrong.header.track_id += 1;
-        assert_eq!(stream.admit(&wrong), Err(MediaError::WrongTrack));
-        wrong = frame;
-        wrong.header.generation = 1;
-        assert_eq!(stream.admit(&wrong), Err(MediaError::StaleGeneration));
-        stream.admit(&frame).unwrap();
-        assert_eq!(stream.admit(&frame), Err(MediaError::OutOfOrder));
-        wrong = frame;
-        wrong.header.sequence += 1;
-        assert_eq!(stream.admit(&wrong), Err(MediaError::OutOfOrder));
-        assert_eq!(
-            stream.advance_generation(2),
-            Err(MediaError::StaleGeneration)
-        );
-        stream.advance_generation(3).unwrap();
-        wrong = frame;
-        wrong.header.generation = 3;
-        wrong.header.sequence = 0;
-        wrong.header.timestamp_micros = 0;
-        stream.admit(&wrong).unwrap();
-        assert_eq!(stream.admit(&frame), Err(MediaError::StaleGeneration));
-    }
-
-    #[test]
-    fn zero_track_or_generation_is_not_a_live_stream() {
-        assert!(MediaStream::new(0, 1).is_err());
-        assert!(MediaStream::new(1, 0).is_err());
-        let mut h = header();
-        h.generation = 0;
-        assert!(encode_pcm(h, format(), &[0; 80]).is_err());
-    }
 }

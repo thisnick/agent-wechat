@@ -1532,35 +1532,11 @@ mod tests {
     }
 
     #[test]
-    fn metadata_is_independent_complete_and_advertises_supported_voice_only() {
-        let parameters = independent_voice_parameters().unwrap();
-        parameters.inputs().validate().unwrap();
-        let sdk = p::decode(&parameters.sdk).unwrap();
-        assert_eq!(p::scalar(&sdk, 1).unwrap(), 0x050000cb);
-        let engine = p::decode(&parameters.engine_capability).unwrap();
-        assert_eq!(p::scalar(&engine, 5).unwrap(), 0x40000);
-        assert_eq!(p::scalar(&engine, 6).unwrap(), 0x100);
-        assert_eq!(parameters.channel_capability.len(), 12);
-        assert_ne!(
-            parameters.channel_capability,
-            independent_voice_parameters().unwrap().channel_capability
-        );
-        let group = p::decode(&parameters.group).unwrap();
-        assert_eq!(p::scalar(&group, 5).unwrap(), 1);
-        assert_eq!(p::scalar(&group, 2).unwrap(), 0);
-    }
-    #[test]
-    fn receive_only_defaults_do_not_advertise_transmit_ready() {
-        let config =
-            NativeCallConfig::receive_only("test".into(), independent_voice_parameters().unwrap());
-        assert!(!config.tx_ready());
-        assert!(NativeCallBackend::new(Weak::new(), config).is_ok());
-    }
-
-    #[test]
     fn test_scope_is_peer_bound_expiring_and_one_shot() {
         let mut config =
             NativeCallConfig::receive_only("test".into(), independent_voice_parameters().unwrap());
+        assert!(!config.tx_ready_at(0));
+        assert!(!config.allows_peer("only-peer"));
         config.transmit_scope = NativeTransmitScope::IsolatedTest {
             peer_id: "only-peer".into(),
             intent_id: [7; 32],

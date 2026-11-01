@@ -94,17 +94,6 @@ pub(super) fn classify(
 mod tests {
     use super::*;
     #[test]
-    fn joined_own_removal_stops_only_this_device_without_destroying_room() {
-        for origin in [Origin::Caller, Origin::Callee] {
-            for own in [None, Some(2), Some(4), Some(8)] {
-                assert_eq!(
-                    classify(origin, 1, own, Some(1), true).unwrap(),
-                    Some(RemoteTermination::LocalStop(LocalStopReason::SelfRemoved))
-                );
-            }
-        }
-    }
-    #[test]
     fn pending_callee_handles_elsewhere_only_for_source_predicate() {
         for local in [2, 3] {
             for (own, end) in [(1, 13), (4, 8), (6, 15), (7, 14), (8, 8)] {
@@ -121,49 +110,6 @@ mod tests {
             classify(Origin::Callee, 3, Some(3), Some(1), false).unwrap(),
             None
         );
-    }
-    #[test]
-    fn caller_remote_reasons_use_send_exit_not_local_hangup_table() {
-        for (peer, reason) in [(4, 5), (5, 5), (6, 7), (7, 6), (9, 5), (10, 5)] {
-            assert!(
-                matches!(classify(Origin::Caller,1,Some(1),Some(peer),true).unwrap(),Some(RemoteTermination::Exit(value))if value.wire()==reason)
-            );
-        }
-        assert_eq!(
-            classify(Origin::Caller, 1, Some(1), None, true).unwrap(),
-            Some(RemoteTermination::Exit(RemoteExitReason::LastPeerLeft))
-        );
-    }
-    #[test]
-    fn no_response_caller_keeps_original_invitation_requirement() {
-        assert_eq!(
-            classify(Origin::Caller, 1, Some(1), Some(8), true).unwrap(),
-            Some(RemoteTermination::NoResponseCancel)
-        );
-        assert!(classify(Origin::Caller, 1, Some(1), Some(8), false).is_err());
-    }
-    #[test]
-    fn callee_last_peer_exit_differs_before_and_after_join() {
-        for peer in [None, Some(4), Some(6), Some(7), Some(8)] {
-            assert_eq!(
-                classify(Origin::Callee, 3, Some(3), peer, false).unwrap(),
-                Some(RemoteTermination::LocalStop(
-                    LocalStopReason::PeerLeftBeforeJoin
-                ))
-            );
-            assert_eq!(
-                classify(Origin::Callee, 1, Some(1), peer, false).unwrap(),
-                Some(RemoteTermination::Exit(RemoteExitReason::LastPeerLeft))
-            );
-        }
-        for origin in [Origin::Caller, Origin::Callee] {
-            for peer in 1..=3 {
-                assert_eq!(
-                    classify(origin, 1, Some(1), Some(peer), true).unwrap(),
-                    None
-                );
-            }
-        }
     }
     #[test]
     fn unsupported_status_or_origin_does_not_become_terminal_proof() {

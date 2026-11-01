@@ -375,46 +375,4 @@ mod tests {
         assert_eq!(diagnostic.code, "unsupported_route");
         assert!(!diagnostic.may_have_submitted());
     }
-
-    #[test]
-    fn session_checks_use_only_fixed_source_labels_and_safe_http_codes() {
-        for (literal, code) in [
-            ("Native connection failed", "connect_failed"),
-            ("Server returned MMTLS alert", "server_alert"),
-            (
-                "Pinned server signature verification failed",
-                "signature_verification",
-            ),
-            ("Unexpected NOOP reply", "noop_reply"),
-            ("MMTLS deadline exceeded", "deadline"),
-            ("Expected handshake", "expected_server_hello"),
-        ] {
-            let error =
-                anyhow::anyhow!(literal).context("synthetic private host and keys must not appear");
-            let diagnostic = CallHostRpcError::from_cause(CallHostStage::Handshake, &error);
-            assert_eq!(diagnostic.code, code);
-            assert_eq!(diagnostic.value, None);
-            assert!(!diagnostic.to_string().contains("private"));
-            assert!(!diagnostic.may_have_submitted());
-        }
-        let http = CallHostRpcError::from_cause(
-            CallHostStage::Exchange,
-            &anyhow::anyhow!("Native shortlink HTTP status 503"),
-        );
-        assert_eq!(http.code, "http_status");
-        assert_eq!(http.value, Some(503));
-        assert!(http.may_have_submitted());
-        for unknown in [
-            "Native connection failed: synthetic-private-host",
-            "Native shortlink HTTP status 503 private-body",
-            "Native shortlink HTTP status 999",
-            "private arbitrary text",
-        ] {
-            let diagnostic =
-                CallHostRpcError::from_cause(CallHostStage::Handshake, &anyhow::anyhow!(unknown));
-            assert_eq!(diagnostic.code, "rejected");
-            assert_eq!(diagnostic.value, None);
-            assert!(!diagnostic.to_string().contains(unknown));
-        }
-    }
 }

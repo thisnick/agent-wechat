@@ -89,9 +89,13 @@ async function until(label, condition) {
   }
   throw Error(`Timed out: ${label}`);
 }
-function watch(client) {
-  const reader = { events: [], closing: false, error: undefined };
-  reader.done = (async () => { try { for await (const event of client.events()) { reader.events.push(event); if (reader.events.length > 128) reader.events.shift(); } } catch (error) { reader.error = error; } })();
+function watch(client, paused = false) {
+  const reader = { events: [], closing: false, error: undefined, started: false };
+  reader.start = () => {
+    assert.equal(reader.started, false); reader.started = true;
+    reader.done = (async () => { try { for await (const event of client.events()) { reader.events.push(event); if (reader.events.length > 128) reader.events.shift(); } } catch (error) { reader.error = error; } })();
+  };
+  if (!paused) reader.start();
   readers.push(reader); sockets.push({ client, reader }); return reader;
 }
 function availability(reader) {
@@ -119,9 +123,9 @@ try {
   await assert.rejects(invalid.connect()); invalid.close();
 
   const left = new NativeCallsClient(options), right = new NativeCallsClient(options);
-  const leftEvents = watch(left), rightEvents = watch(right);
-  await Promise.all([left.connect(), right.connect()]);
-  await Promise.all([left.ready(randomUUID(), true), right.ready(randomUUID(), true)]);
+  const leftEvents = watch(left, true), rightEvents = watch(right);
+  const initialHello = await left.connect(); assert.equal(initialHello.currentOffer, null);
+  await left.ready(randomUUID(), true);
   let cli = process.argv.includes("--skip-cli") ? "explicitly-skipped" : "not-built", monitorEvents = [];
   const cliAvailable = await stat(cliBinary).then(value => value.isFile(), () => false);
   if (process.env.WX_BINARY) assert.ok(cliAvailable, "Requested WX_BINARY is missing");
@@ -140,8 +144,15 @@ try {
   }
 
   const offer = await control("offer", { callerId: "synthetic-peer" });
-  await until("SDK offer", () => leftEvents.events.some(event => event.type === "call.offered" && event.offer.callId === offer.callId)
-    && rightEvents.events.some(event => event.type === "call.offered" && event.offer.callId === offer.callId));
+  // A reply on the same control socket follows the already-queued offer.
+  // Start consuming late: both the initial hello and new offer must survive.
+  await left.ready(randomUUID(), true); leftEvents.start();
+  const currentHello = await right.connect();
+  assert.equal(currentHello.currentOffer?.callId, offer.callId);
+  await right.ready(randomUUID(), true);
+  await until("late SDK reader keeps hello and queued offer", () => leftEvents.events.some(event => event.type === "call.offered" && event.offer.callId === offer.callId));
+  assert.equal(leftEvents.events[0].type, "hello");
+  assert.ok(leftEvents.events.findIndex(event => event.type === "call.offered" && event.offer.callId === offer.callId) > 0);
   const claims = await Promise.allSettled([left.answer(randomUUID(), offer.callId, offer.revision), right.answer(randomUUID(), offer.callId, offer.revision)]);
   assert.equal(claims.filter(result => result.status === "fulfilled").length, 1);
   const winnerIndex = claims.findIndex(result => result.status === "fulfilled");
@@ -238,12 +249,15 @@ try {
   await control("hold_end", { enabled: true }); holdNextPcm = true;
   callbacks.audio(pcm(3400), { itemId: "in-flight-at-end" });
   await until("one SDK PCM frame held before network write", () => !!heldPcm);
-  await service.end();
+  const ending = service.end();
+  callbacks.audio(pcm(3600), { itemId: "after-local-end" });
+  await ending;
   await until("plugin observes Ending before backend terminal", () => pluginEvents.some(event => event.type === "call.state" && event.call.state === "ending"));
   assert.equal(service.status().owned, true); assert.equal(service.status().state, "busy"); assert.equal(providerCloses, 1);
   assert.throws(() => pluginMedia.sendPcm({ trackId: 1, generation: 2, sequence: 9n, timestampMicros: 180000n }, samples(pcm(3500))),
     error => error instanceof NativeCallError && error.code === "call_ending");
   heldPcm(); heldPcm = undefined;
+  callbacks.failed(); // A provider may close after local end but before upstream terminal.
   await delay(1200); // Past the real control socket's one-second validity tick.
   const heldEnd = (await control("stats")).stats;
   assert.equal(service.status().owned, true); assert.equal(service.status().state, "busy");

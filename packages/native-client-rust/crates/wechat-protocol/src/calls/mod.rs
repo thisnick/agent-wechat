@@ -9,7 +9,6 @@
 pub mod app_frame;
 pub mod app_session;
 pub mod audio_packet;
-pub mod channel;
 pub mod client;
 pub mod host_policy;
 pub mod host_transport;

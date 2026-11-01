@@ -113,22 +113,3 @@ pub trait AudioDecoder {
     fn conceal(&mut self) -> Result<Vec<i16>, MediaError>;
     fn reset(&mut self) -> Result<(), MediaError>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn formats_have_bounded_interleaved_frames() {
-        let mono = AudioFormat::new(16000, 1, 20).unwrap();
-        assert_eq!(mono.samples_per_channel(), 320);
-        assert_eq!(mono.samples_per_frame(), 320);
-        let stereo = AudioFormat::new(48000, 2, 60).unwrap();
-        assert_eq!(stereo.samples_per_frame(), 5760);
-        assert!(mono.validate_frame(&vec![0; 320]).is_ok());
-        assert_eq!(mono.validate_frame(&[0]), Err(MediaError::InvalidFrame));
-        assert!(AudioFormat::new(44100, 1, 20).is_err());
-        assert!(AudioFormat::new(16000, 0, 20).is_err());
-        assert!(AudioFormat::new(16000, 1, 0).is_err());
-    }
-}

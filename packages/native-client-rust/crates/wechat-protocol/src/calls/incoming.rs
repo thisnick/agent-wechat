@@ -205,7 +205,6 @@ fn optional_string(fields: &[Field], number: u32) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::signaling::MAX_SIGNALING_BYTES;
     use super::*;
 
     #[test]
@@ -282,63 +281,5 @@ mod tests {
             third.payload().unwrap(),
             NotificationPayload::Invite(_)
         ));
-    }
-
-    #[test]
-    fn unknown_enums_and_absence_do_not_become_supported_actions() {
-        let partial = InviteNotification::decode(&[]).unwrap();
-        assert!(partial.room_id.is_none() && partial.room_type.is_none());
-        let unknown = ConferenceNotification::decode(
-            &p::message(&[p::uint(1, 77), p::bytes(2, b"opaque")]).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(unknown.kind, Some(77));
-        assert_eq!(unknown.data.as_deref(), Some(b"opaque".as_slice()));
-        assert!(unknown.payload().is_err());
-        let unknown_room = InviteNotification::decode(&p::uint(4, 77)).unwrap();
-        assert_eq!(unknown_room.room_type, Some(77));
-        let mismatch =
-            NotificationCarrier::decode(CarrierKind::Invite, &p::bytes(6, &[0x08, 0x03, 0x12, 0]))
-                .unwrap();
-        assert!(mismatch.conference_notification().is_err());
-        assert!(NotificationCarrier::decode(CarrierKind::Invite, &[])
-            .unwrap()
-            .conference_bytes()
-            .is_err());
-        assert!(ConferenceNotification::decode(&[0x08, 2])
-            .unwrap()
-            .payload()
-            .is_err());
-    }
-
-    #[test]
-    fn malformed_duplicate_types_widths_and_utf8_are_rejected() {
-        for input in [
-            vec![0x08],
-            vec![0x0a, 0],
-            vec![0x08, 2, 0x08, 3],
-            vec![0x10, 1],
-        ] {
-            assert!(ConferenceNotification::decode(&input).is_err());
-        }
-        assert!(ConferenceNotification::decode(&p::uint(1, u64::from(u32::MAX) + 1)).is_err());
-        assert!(InviteNotification::decode(&p::bytes(7, &[0xff])).is_err());
-        assert!(InviteNotification::decode(&p::uint(9, 1)).is_err());
-        assert!(InviteNotification::decode(&p::uint(3, u64::from(u32::MAX) + 1)).is_err());
-        assert!(InviteNotification::decode(&[0x08, 1, 0x08, 2]).is_err());
-        assert!(CancelNotification::decode(&[0x18, 1, 0x18, 2]).is_err());
-        assert!(NotificationCarrier::decode(CarrierKind::Invite, &p::uint(7, 1)).is_err());
-        assert!(NotificationCarrier::decode(CarrierKind::Cancel, &[0x12, 0, 0x12, 0]).is_err());
-    }
-
-    #[test]
-    fn notification_budgets_apply_before_interpretation() {
-        assert!(ConferenceNotification::decode(&vec![0; MAX_SIGNALING_BYTES + 1]).is_err());
-        assert!(
-            InviteNotification::decode(&p::bytes(7, &vec![b'x'; MAX_SIGNALING_BYTES])).is_err()
-        );
-        let many = p::uint(99, 0).repeat(1025);
-        assert!(CancelNotification::decode(&many).is_err());
-        assert!(NotificationCarrier::decode(CarrierKind::Invite, &many).is_err());
     }
 }

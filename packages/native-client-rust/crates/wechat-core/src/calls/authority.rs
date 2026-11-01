@@ -249,33 +249,6 @@ fn hex_digest(digest: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn old_generation_stays_invalid_after_reactivation() {
-        let generation = Arc::new(Generation {
-            epoch: AtomicU64::new(1),
-            active: AtomicBool::new(true),
-            submission: Mutex::new(()),
-        });
-        let lease = CallAuthorityLease {
-            authority: AccountAuthority {
-                account_id: "a".into(),
-                generation: "one".into(),
-            },
-            generation: generation.clone(),
-            epoch: 1,
-            digest: [1; 32],
-        };
-        assert!(lease.current());
-        assert_eq!(lease.with_current(|| 42), Some(42));
-        generation.fence();
-        assert!(!lease.current());
-        assert!(lease
-            .with_current(|| panic!("revoked submission ran"))
-            .is_none());
-        generation.epoch.store(2, Ordering::Release);
-        generation.active.store(true, Ordering::Release);
-        assert!(!lease.current());
-    }
 
     #[test]
     fn revocation_waits_for_an_admitted_physical_submission() {

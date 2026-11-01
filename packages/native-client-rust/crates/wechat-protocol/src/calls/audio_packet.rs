@@ -521,6 +521,39 @@ mod tests {
         sender
     }
     #[test]
+    fn original_aead_matches_independent_literal_vectors() {
+        // Independent original eight-byte-nonce ChaCha/Poly1305 known answers.
+        // This tests the primitive only, not a relay envelope or key lifecycle.
+        let vectors = [
+            (
+                "43b718d5a398bf36a5f3904a469febac12f7b5b22efa1ae5cc5deb54e75f5574",
+                "f06be3d7749e299c",
+                "",
+                "a02210edb5c4fd736d7366ae81089103",
+            ),
+            (
+                "9456a10f0c4b0644e9524fedcc329f052c443f55df5d911f4c172e07121e3740",
+                "beb908121cb81960",
+                "67736a080137aef7b92f53145b6ec56622",
+                "4576fc20a665cd99f668062c319677cd82a2bbd02898dbd27db411e002570cf3d5",
+            ),
+            (
+                "4b0fdc9081934247c7e945a10ca2ef52989dad5a2477fe041a6780e06d9254ed",
+                "948fb8afa967f654",
+                "1169e988a0972d513ca73734aad2e21f053d292b78d3eb9d3a6486da320d3e9bc67871bb80fdceb0f18b197aa8862b69b2b83993bab8bff256ff7c87ff9a486beb",
+                "ff673095b4835ccdbbd73719c1351799309fca1063534ccd3fb8a5a5b4492b282ef72fa53cb0af85ed86900773e081dcd78ae54215970a122fef411d62561ad3dd67a359f949c8d666c180287b67f297d3",
+            ),
+        ];
+        for (key_hex, nonce_hex, plaintext_hex, expected_hex) in vectors {
+            let key = hex::decode(key_hex).unwrap().try_into().unwrap();
+            let nonce = hex::decode(nonce_hex).unwrap().try_into().unwrap();
+            let plaintext = hex::decode(plaintext_hex).unwrap();
+            let expected = hex::decode(expected_hex).unwrap();
+            assert_eq!(seal_original(&key, nonce, &plaintext).unwrap(), expected);
+            assert_eq!(&*open_original(&key, nonce, &expected).unwrap(), &plaintext);
+        }
+    }
+    #[test]
     fn literal_primary_layout_and_extent() {
         let raw = ordinary95_pair(3, 1, 320, &[1, 2], &[3]).unwrap();
         assert_eq!(

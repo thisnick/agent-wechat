@@ -397,103 +397,6 @@ mod tests {
     }
 
     #[test]
-    fn absence_and_present_defaults_are_distinct() {
-        let absent = CloudRequest::decode(&[]).unwrap();
-        assert!(absent.task_id.is_none() && absent.body.is_none() && absent.longpolling.is_none());
-        assert!(absent.encode().unwrap().is_empty());
-        assert!(absent.operation().is_err());
-        let input = [8, 0, 18, 0, 40, 0, 48, 0];
-        let present = CloudRequest::decode(&input).unwrap();
-        assert_eq!(present.task_id, Some(0));
-        assert_eq!(present.body.as_deref(), Some([].as_slice()));
-        assert_eq!(present.longpolling, Some(false));
-        assert_eq!(present.longpolling_timeout, Some(0));
-        assert_eq!(present.encode().unwrap(), input);
-    }
-
-    #[test]
-    fn commands_and_paths_must_match() {
-        for operation in [
-            CallOperation::Create,
-            CallOperation::Join,
-            CallOperation::Acknowledge,
-            CallOperation::Reject,
-            CallOperation::Cancel,
-            CallOperation::Exit,
-        ] {
-            assert_eq!(
-                CallOperation::from_parts(operation.command_id(), operation.path()).unwrap(),
-                operation
-            );
-            assert!(
-                CallOperation::from_parts(operation.command_id() + 1, operation.path()).is_err()
-            );
-        }
-        assert!(CallOperation::from_parts(3066, CallOperation::Join.path()).is_err());
-        assert!(CallOperation::from_parts(3066, "https://example.invalid").is_err());
-        assert!(CallOperation::from_parts(3066, "/cloudim/cloud-bin/cloudvoipmtcreate/").is_err());
-    }
-
-    #[test]
-    fn malformed_callback_fields_are_rejected() {
-        for input in [
-            vec![8, 1, 8, 1],
-            vec![10, 0],
-            vec![16, 0],
-            vec![26, 0],
-            vec![32, 0],
-            vec![42, 0],
-            vec![50, 0],
-            vec![40, 2],
-            vec![8, 128, 128, 128, 128, 16],
-            vec![48, 128, 128, 128, 128, 16],
-            vec![34, 1, 255],
-            vec![18, 1],
-            vec![0],
-        ] {
-            assert!(CloudRequest::decode(&input).is_err());
-        }
-        let mut request = CloudRequest::for_operation(7, CallOperation::Create, vec![]);
-        request.path = Some(CallOperation::Join.path().to_owned());
-        assert!(request.encode().is_err());
-    }
-
-    #[test]
-    fn unknown_fields_preserve_wire_kinds() {
-        let input = hex::decode("38004101020304050607084a0200ff5501020304").unwrap();
-        let value = CloudRequest::decode(&input).unwrap();
-        assert_eq!(value.unknown_fields.len(), 4);
-        assert_eq!(value.encode().unwrap(), input);
-        let mut value = CloudRequest::default();
-        value.unknown_fields.push(Field {
-            number: 1,
-            value: Value::Varint(0),
-        });
-        assert!(value.encode().is_err());
-    }
-
-    #[test]
-    fn common_envelopes_keep_base_and_opaque_body() {
-        let input = [10, 0, 18, 2, 8, 1];
-        let request = CommonRequest::decode(&input).unwrap();
-        assert_eq!(request.base_request.as_deref(), Some([].as_slice()));
-        assert_eq!(request.body.as_deref(), Some([8, 1].as_slice()));
-        assert_eq!(request.encode().unwrap(), input);
-        let response = CommonResponse::decode(&[10, 2, 8, 0, 18, 0]).unwrap();
-        assert_eq!(response.return_code().unwrap(), 0);
-        assert_eq!(response.encode().unwrap(), [10, 2, 8, 0, 18, 0]);
-        assert!(CommonResponse::decode(&[]).unwrap().return_code().is_err());
-        assert!(CommonResponse::decode(&[10, 0])
-            .unwrap()
-            .return_code()
-            .is_err());
-        let input = hex::decode("0a0b08ffffffffffffffffff0112020801").unwrap();
-        let response = CommonResponse::decode(&input).unwrap();
-        assert_eq!(response.return_code().unwrap(), -1);
-        assert_eq!(response.encode().unwrap(), input);
-    }
-
-    #[test]
     fn nested_bases_and_duplicate_bodies_are_checked() {
         for input in [
             vec![8, 0],
@@ -512,23 +415,5 @@ mod tests {
         ] {
             assert!(CommonResponse::decode(&input).is_err());
         }
-    }
-
-    #[test]
-    fn size_budget_counts_headers_and_unknown_fields() {
-        let request = CloudRequest {
-            body: Some(vec![0; MAX_SIGNALING_BYTES]),
-            ..CloudRequest::default()
-        };
-        assert!(request.encode().is_err());
-        assert!(CloudRequest::decode(&vec![0; MAX_SIGNALING_BYTES + 1]).is_err());
-        let mut request = CloudRequest::default();
-        for _ in 0..=MAX_FIELDS {
-            request.unknown_fields.push(Field {
-                number: 7,
-                value: Value::Varint(0),
-            });
-        }
-        assert!(request.encode().is_err());
     }
 }

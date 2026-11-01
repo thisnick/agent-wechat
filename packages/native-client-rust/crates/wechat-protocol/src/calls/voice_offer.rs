@@ -112,13 +112,14 @@ mod tests {
             next.advertised_channel_identity(),
             offer.advertised_channel_identity()
         );
-    }
-    #[test]
-    fn own_client_version_keeps_signed_engine_and_raw_hex_sdk_forms() {
-        let offer = VoiceOffer::from_owned_random(i32::MIN, [1; 32]).unwrap();
-        let fields = p::decode(offer.engine_advertisement()).unwrap();
-        assert_eq!(p::scalar(&fields, 27).unwrap() as i64, i64::from(i32::MIN));
-        let sdk = p::decode(offer.sdk_info()).unwrap();
-        assert_eq!(p::data(&sdk, 2).unwrap(), b"0x80000000");
+        let signed = VoiceOffer::from_owned_random(i32::MIN, [1; 32]).unwrap();
+        assert_eq!(
+            p::scalar(&p::decode(signed.engine_advertisement()).unwrap(), 27).unwrap() as i64,
+            i64::from(i32::MIN)
+        );
+        assert_eq!(
+            p::data(&p::decode(signed.sdk_info()).unwrap(), 2).unwrap(),
+            b"0x80000000"
+        );
     }
 }

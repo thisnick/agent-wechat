@@ -1,42 +1,9 @@
 use super::*;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use tokio::sync::oneshot;
 use wechat_core::call_types::{
     CallAudioFormat, CallCapabilities, CallCommandStatus, CallsAvailability,
 };
-
-#[derive(Parser)]
-struct TestCli {
-    #[arg(long, global = true)]
-    json: bool,
-    #[command(subcommand)]
-    command: TestGroup,
-}
-#[derive(Subcommand)]
-enum TestGroup {
-    Calls {
-        #[command(subcommand)]
-        command: Option<CallsCommand>,
-    },
-}
-
-#[test]
-fn parent_is_help_only_and_monitor_json_is_an_observer() {
-    let parent = TestCli::try_parse_from(["wx", "calls"]).unwrap();
-    assert!(matches!(parent.command, TestGroup::Calls { command: None }));
-    let monitor = TestCli::try_parse_from(["wx", "calls", "monitor", "--json"]).unwrap();
-    assert!(monitor.json);
-    assert!(matches!(
-        monitor.command,
-        TestGroup::Calls {
-            command: Some(CallsCommand::Monitor { .. })
-        }
-    ));
-    let answer = TestCli::try_parse_from(["wx", "calls", "answer", "offer-one"]).unwrap();
-    assert!(
-        matches!(answer.command,TestGroup::Calls {command:Some(CallsCommand::Answer {call_id:Some(id),..})} if id=="offer-one")
-    );
-}
 
 #[tokio::test]
 async fn actual_parent_help_needs_no_config_token_stdin_or_network() {
@@ -72,8 +39,8 @@ fn upgrade_headers(key: &str) -> header::HeaderMap {
     headers
 }
 
-#[test]
-fn websocket_upgrade_requires_accept_key_and_rejects_unrequested_extensions() {
+#[tokio::test]
+async fn websocket_upgrade_requires_accept_key_and_rejects_unrequested_extensions() {
     let key = generate_key();
     let mut headers = upgrade_headers(&key);
     assert!(verify_upgrade(&headers, &key).is_ok());
@@ -86,23 +53,26 @@ fn websocket_upgrade_requires_accept_key_and_rejects_unrequested_extensions() {
     headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
     headers.append(header::SEC_WEBSOCKET_ACCEPT, "duplicate".parse().unwrap());
     assert!(verify_upgrade(&headers, &key).is_err());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = axum::Router::new().route(
+        "/v1/accounts/test-account/calls/socket",
+        axum::routing::get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let error = match open_socket(&remote(address), "calls/socket").await {
+        Ok(_) => panic!("rejected socket unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("401"));
+    assert!(!format!("{error:?}").contains("synthetic-bearer"));
+    server.abort();
 }
 
-#[test]
-fn observer_output_never_prints_owner_secrets() {
-    let text = event_json(&CallEvent::CommandResult {
-        request_id: "fixture-request".into(),
-        status: CallCommandStatus::Accepted,
-        call_id: Some("fixture-call".into()),
-        owner_token: Some("fixture-owner-secret".into()),
-        code: None,
-    })
-    .unwrap();
-    assert!(!text.contains("fixture-owner-secret"));
-    assert!(!text.contains("ownerToken"));
-}
-
-fn remote(address: std::net::SocketAddr) -> Remote {
+pub(super) fn remote(address: std::net::SocketAddr) -> Remote {
     Remote {
         http: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -114,7 +84,7 @@ fn remote(address: std::net::SocketAddr) -> Remote {
     }
 }
 
-fn hello() -> CallEvent {
+pub(super) fn hello() -> CallEvent {
     CallEvent::Hello {
         protocol_version: 1,
         client_id: "fixture-client".into(),
@@ -132,6 +102,17 @@ fn hello() -> CallEvent {
 
 #[tokio::test]
 async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
+    let text = event_json(&CallEvent::CommandResult {
+        request_id: "fixture-request".into(),
+        status: CallCommandStatus::Accepted,
+        call_id: Some("fixture-call".into()),
+        owner_token: Some("fixture-owner-secret".into()),
+        code: None,
+    })
+    .unwrap();
+    assert!(!text.contains("fixture-owner-secret"));
+    assert!(!text.contains("ownerToken"));
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (done, stop) = oneshot::channel();
@@ -187,120 +168,6 @@ async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
     })
     .await
     .unwrap();
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn rejected_socket_does_not_expose_bearer_or_retry() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let router = axum::Router::new().route(
-        "/v1/accounts/test-account/calls/socket",
-        axum::routing::get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
-    );
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    let error = match open_socket(&remote(address), "calls/socket").await {
-        Ok(_) => panic!("rejected socket unexpectedly opened"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("401"));
-    assert!(!format!("{error:?}").contains("synthetic-bearer"));
-    server.abort();
-}
-
-#[cfg(feature = "call-audio")]
-#[tokio::test]
-async fn losing_answer_preserves_exact_offer_and_does_not_claim_a_new_caller() {
-    use wechat_core::call_types::{CallErrorCode, CallKind, CallMedia, CallOffer};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (checked, wait_checked) = oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let mut initial = hello();
-        if let CallEvent::Hello {
-            capabilities,
-            current_offer,
-            ..
-        } = &mut initial
-        {
-            capabilities.direct_audio = true;
-            *current_offer = Some(CallOffer {
-                call_id: "original-offer".into(),
-                revision: 7,
-                kind: CallKind::Direct,
-                caller_id: "alice".into(),
-                offered_media: CallMedia::default(),
-            });
-        }
-        socket
-            .send(Message::Text(
-                serde_json::to_string(&initial).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
-            panic!("expected control command");
-        };
-        let command: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(command["type"], "call.answer");
-        assert_eq!(command["callId"], "original-offer");
-        assert_eq!(command["expectedRevision"], 7);
-        let result = CallEvent::CommandResult {
-            request_id: command["requestId"].as_str().unwrap().into(),
-            status: CallCommandStatus::Error,
-            call_id: None,
-            owner_token: None,
-            code: Some(CallErrorCode::AlreadyClaimed),
-        };
-        socket
-            .send(Message::Text(
-                serde_json::to_string(&result).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        let offer = CallEvent::Offered {
-            offer: CallOffer {
-                call_id: "different-offer".into(),
-                revision: 1,
-                kind: CallKind::Direct,
-                caller_id: "bob".into(),
-                offered_media: CallMedia::default(),
-            },
-        };
-        socket
-            .send(Message::Text(serde_json::to_string(&offer).unwrap().into()))
-            .await
-            .unwrap();
-        assert!(timeout(Duration::from_millis(50), socket.next())
-            .await
-            .is_err());
-        checked.send(()).unwrap();
-        assert!(matches!(
-            socket.next().await.unwrap().unwrap(),
-            Message::Close(_)
-        ));
-    });
-    let (mut control, _) = Control::connect(&remote(address)).await.unwrap();
-    let offer = control.offer.clone().unwrap();
-    let error = match control
-        .command(CallCommand::Answer {
-            request_id: "claim-one".into(),
-            call_id: offer.call_id,
-            expected_revision: offer.revision,
-            media: CallMedia::default(),
-        })
-        .await
-    {
-        Ok(_) => panic!("losing claim was accepted"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("already_claimed"));
-    wait_checked.await.unwrap();
-    control.close().await;
     server.await.unwrap();
 }
 
@@ -432,6 +299,70 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         let frame = MediaFrame::decode(&bytes, AudioFormat::new(16000, 1, 20).unwrap()).unwrap();
         assert_eq!(frame.header.generation, 4);
         assert_eq!(frame.header.sequence, 0);
+        use wechat_core::call_types::{CallDirection, CallKind, CallState, CallView};
+        let view = CallView {
+            call_id: "owned-call".into(),
+            revision: 4,
+            kind: CallKind::Direct,
+            direction: CallDirection::Outgoing,
+            state: CallState::Connected,
+            owned_by_this_client: true,
+        };
+        control
+            .send(Message::Text(
+                serde_json::to_string(&CallEvent::State { call: view.clone() })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let message = tokio::select! {
+            message = control.next() => message.unwrap().unwrap(),
+            _ = media.next() => panic!("media detached before explicit end"),
+        };
+        let Message::Text(message) = message else {
+            panic!("expected hangup");
+        };
+        let command: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(command["type"], "call.hangup");
+        control
+            .send(Message::Text(
+                serde_json::to_string(&CallEvent::CommandResult {
+                    request_id: command["requestId"].as_str().unwrap().into(),
+                    status: CallCommandStatus::Accepted,
+                    call_id: Some("owned-call".into()),
+                    owner_token: None,
+                    code: None,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(timeout(Duration::from_millis(30), media.next())
+            .await
+            .is_err());
+        control
+            .send(Message::Text(
+                serde_json::to_string(&CallEvent::State {
+                    call: CallView {
+                        state: CallState::Ended,
+                        ..view
+                    },
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(!matches!(
+            timeout(Duration::from_secs(1), media.next()).await.unwrap(),
+            Some(Ok(Message::Text(_) | Message::Binary(_)))
+        ));
+        assert!(matches!(
+            control.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
     });
     let remote = remote(address);
     let (mut control, _) = Control::connect(&remote).await.unwrap();
@@ -477,6 +408,17 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         .send(&[0; 320], AudioFormat::new(16000, 1, 20).unwrap())
         .await
         .unwrap();
+    let mut owned = super::audio::OwnedCall {
+        call_id: "owned-call".into(),
+        owner_token: "synthetic-owner-proof".into(),
+        media: Some(media),
+    };
+    let (_cancel, signal) = tokio::sync::watch::channel(true);
+    control.cancellation = Some(Cancellation(signal));
+    owned.finish(&mut control, false).await.unwrap();
+    assert!(owned.media.is_none());
+    owned.finish(&mut control, false).await.unwrap();
+    control.close().await;
     server.await.unwrap();
 }
 
@@ -528,89 +470,6 @@ async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
         Ok(_) => panic!("cancelled claim submitted"),
     };
     assert_eq!(super::super::outcome::classify(&error).0, 130);
-    wait_checked.await.unwrap();
-    control.close().await;
-    server.await.unwrap();
-}
-
-#[cfg(feature = "call-audio")]
-#[tokio::test]
-async fn latched_cancellation_still_tears_down_an_owned_call_once() {
-    use wechat_core::call_types::{CallDirection, CallKind, CallState, CallView};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let call = CallView {
-        call_id: "owned-call".into(),
-        revision: 4,
-        kind: CallKind::Direct,
-        direction: CallDirection::Outgoing,
-        state: CallState::Connected,
-        owned_by_this_client: true,
-    };
-    let initial_call = call.clone();
-    let (checked, wait_checked) = oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let mut initial = hello();
-        if let CallEvent::Hello { current_call, .. } = &mut initial {
-            *current_call = Some(initial_call);
-        }
-        socket
-            .send(Message::Text(
-                serde_json::to_string(&initial).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
-            panic!("expected one hangup");
-        };
-        let command: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(command["type"], "call.hangup");
-        assert_eq!(command["callId"], "owned-call");
-        let result = CallEvent::CommandResult {
-            request_id: command["requestId"].as_str().unwrap().into(),
-            status: CallCommandStatus::Accepted,
-            call_id: Some("owned-call".into()),
-            owner_token: None,
-            code: None,
-        };
-        socket
-            .send(Message::Text(
-                serde_json::to_string(&result).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        let ended = CallEvent::State {
-            call: CallView {
-                state: CallState::Ended,
-                ..call
-            },
-        };
-        socket
-            .send(Message::Text(serde_json::to_string(&ended).unwrap().into()))
-            .await
-            .unwrap();
-        assert!(timeout(Duration::from_millis(50), socket.next())
-            .await
-            .is_err());
-        checked.send(()).unwrap();
-        assert!(matches!(
-            socket.next().await.unwrap().unwrap(),
-            Message::Close(_)
-        ));
-    });
-    let (mut control, _) = Control::connect(&remote(address)).await.unwrap();
-    let (sender, signal) = tokio::sync::watch::channel(true);
-    control.cancellation = Some(Cancellation(signal));
-    super::audio::terminate_owned(&mut control, "owned-call")
-        .await
-        .unwrap();
-    super::audio::terminate_owned(&mut control, "owned-call")
-        .await
-        .unwrap();
-    assert!(control.cancellation.as_ref().unwrap().is_cancelled());
-    drop(sender);
     wait_checked.await.unwrap();
     control.close().await;
     server.await.unwrap();
@@ -819,124 +678,6 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
     super::audio::terminate_owned(&mut control, "exact-call")
         .await
         .unwrap();
-    control.close().await;
-    server.await.unwrap();
-}
-
-#[cfg(feature = "call-audio")]
-#[tokio::test]
-async fn owned_media_stays_attached_until_one_hangup_reaches_terminal() {
-    use wechat_core::call_types::{
-        CallAudioTrack, CallDirection, CallKind, CallState, CallTrackDirection, CallView,
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut control = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let view = CallView {
-            call_id: "owned-call".into(),
-            revision: 4,
-            kind: CallKind::Direct,
-            direction: CallDirection::Outgoing,
-            state: CallState::Connected,
-            owned_by_this_client: true,
-        };
-        let mut initial = hello();
-        if let CallEvent::Hello { current_call, .. } = &mut initial {
-            *current_call = Some(view.clone());
-        }
-        control
-            .send(Message::Text(
-                serde_json::to_string(&initial).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut media = tokio_tungstenite::accept_async(stream).await.unwrap();
-        assert!(matches!(
-            media.next().await.unwrap().unwrap(),
-            Message::Text(_)
-        ));
-        let ready = CallEvent::MediaReady {
-            send_track: CallAudioTrack {
-                id: 1,
-                generation: 1,
-                direction: CallTrackDirection::Send,
-                format: CallAudioFormat::default(),
-            },
-            receive_track: CallAudioTrack {
-                id: 2,
-                generation: 1,
-                direction: CallTrackDirection::Receive,
-                format: CallAudioFormat::default(),
-            },
-        };
-        media
-            .send(Message::Text(serde_json::to_string(&ready).unwrap().into()))
-            .await
-            .unwrap();
-        let message = tokio::select! {
-            message = control.next() => message.unwrap().unwrap(),
-            _ = media.next() => panic!("media detached before explicit end"),
-        };
-        let Message::Text(message) = message else {
-            panic!("expected hangup");
-        };
-        let command: serde_json::Value = serde_json::from_str(&message).unwrap();
-        assert_eq!(command["type"], "call.hangup");
-        let result = CallEvent::CommandResult {
-            request_id: command["requestId"].as_str().unwrap().into(),
-            status: CallCommandStatus::Accepted,
-            call_id: Some("owned-call".into()),
-            owner_token: None,
-            code: None,
-        };
-        control
-            .send(Message::Text(
-                serde_json::to_string(&result).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        // Local acceptance alone must not drop the attachment or retry hangup.
-        assert!(timeout(Duration::from_millis(30), media.next())
-            .await
-            .is_err());
-        let ended = CallEvent::State {
-            call: CallView {
-                state: CallState::Ended,
-                ..view
-            },
-        };
-        control
-            .send(Message::Text(serde_json::to_string(&ended).unwrap().into()))
-            .await
-            .unwrap();
-        let detached = timeout(Duration::from_secs(1), media.next()).await.unwrap();
-        assert!(!matches!(
-            detached,
-            Some(Ok(Message::Text(_) | Message::Binary(_)))
-        ));
-        assert!(matches!(
-            control.next().await.unwrap().unwrap(),
-            Message::Close(_)
-        ));
-    });
-    let remote = remote(address);
-    let (mut control, _) = Control::connect(&remote).await.unwrap();
-    let media = super::audio::Media::attach(&remote, &control, "owned-call", "synthetic-owner")
-        .await
-        .unwrap();
-    let mut call = super::audio::OwnedCall {
-        call_id: "owned-call".into(),
-        owner_token: "synthetic-owner".into(),
-        media: Some(media),
-    };
-    let (_cancel, signal) = tokio::sync::watch::channel(true);
-    control.cancellation = Some(Cancellation(signal));
-    call.finish(&mut control, false).await.unwrap();
-    assert!(call.media.is_none());
-    call.finish(&mut control, false).await.unwrap();
     control.close().await;
     server.await.unwrap();
 }

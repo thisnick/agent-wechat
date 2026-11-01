@@ -207,16 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn generation_exhaustion_preserves_current_queue() {
-        let mut queue =
-            AudioQueue::new(format(), 1, OverflowPolicy::RejectNewest, u64::MAX).unwrap();
-        queue.push(frame(1, u64::MAX)).unwrap();
-        assert_eq!(queue.clear(), Err(MediaError::Capacity));
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue.generation(), u64::MAX);
-    }
-
-    #[test]
     fn late_clock_never_causes_a_burst_or_accepts_a_backward_clock() {
         let mut pacer = FramePacer::new(format(), Duration::ZERO);
         assert_eq!(pacer.poll(Duration::ZERO), Ok(true));

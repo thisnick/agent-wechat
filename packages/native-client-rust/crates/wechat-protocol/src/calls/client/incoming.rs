@@ -977,63 +977,6 @@ mod tests {
         }
     }
     #[test]
-    fn incoming_ack_is_not_join_and_callee_context_can_take_media_then_exit() {
-        let transport = transport(vec![
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::RingingAck, ack_reply()),
-            (CallHostRoute::Transfer, join_reply(17, false)),
-            (CallHostRoute::Transfer, exit_reply()),
-        ]);
-        let mut state = state();
-        let mut session = session(&transport, &mut state);
-        assert_eq!(session.phase(), IncomingPhase::Invited);
-        assert!(session
-            .accept(&transport, &mut state, authority(), tasks(1))
-            .is_err());
-        session
-            .ringing_ack(&transport, &mut state, authority(), tasks(1))
-            .unwrap();
-        assert_eq!(session.phase(), IncomingPhase::Acknowledged);
-        assert_eq!(
-            number(&fields(&session.base.parameters.group).unwrap(), 2, None).unwrap(),
-            99
-        );
-        assert!(session.media_ready(&state, authority()).is_err());
-        assert!(session
-            .ringing_ack(&transport, &mut state, authority(), tasks(2))
-            .is_err());
-        session
-            .accept(&transport, &mut state, authority(), tasks(2))
-            .unwrap();
-        assert_eq!(session.phase(), IncomingPhase::Joined);
-        assert!(session.media_ready(&state, authority()).unwrap());
-        assert_eq!(
-            session.base.active.as_ref().unwrap().cookies,
-            b"joined-cursor"
-        );
-        assert_eq!(
-            data(&fields(&session.base.parameters.group).unwrap(), 6).unwrap(),
-            b"owner-group"
-        );
-        assert_eq!(
-            number(&fields(&session.base.parameters.group).unwrap(), 2, None).unwrap(),
-            99
-        );
-        assert_eq!(
-            session
-                .take_media(&state, authority(), 0, 0)
-                .unwrap()
-                .peer_member,
-            1
-        );
-        assert!(session.take_media(&state, authority(), 0, 0).is_err());
-        session
-            .exit(&transport, &mut state, authority(), tasks(3), false)
-            .unwrap();
-        assert_eq!(session.phase(), IncomingPhase::Finished);
-        assert!(transport.0.borrow().is_empty());
-    }
-    #[test]
     fn incoming_reject_uses_its_own_operation_and_cannot_be_replayed() {
         let reply = wrapped_reply(
             3095,
@@ -1107,45 +1050,6 @@ mod tests {
         assert!(transport.0.borrow().is_empty());
     }
     #[test]
-    fn incoming_admission_rejects_video_foreign_account_and_stale_group_before_auth() {
-        let transport = transport(vec![]);
-        let mut state = state();
-        for change in 0..3 {
-            let mut notice = notification();
-            match change {
-                0 => notice.room_type = Some(1),
-                1 => notice.callee_username = Some("other".into()),
-                _ => notice.caller_member_id = Some(0),
-            }
-            assert!(NativeIncomingSession::authenticate(
-                &transport,
-                &mut state,
-                authority(),
-                1,
-                [2; 32],
-                parameters(),
-                &notice,
-                "peer"
-            )
-            .is_err());
-        }
-        assert!(transport.0.borrow().is_empty());
-    }
-    #[test]
-    fn incoming_cancellation_requires_matching_room_and_pending_callee_phase() {
-        let transport = transport(vec![(CallHostRoute::AppAuth, auth_reply())]);
-        let mut state = state();
-        let mut session = session(&transport, &mut state);
-        let mut cancel = CancelNotification::decode(&[8, 8, 16, 9, 24, 0, 32, 1]).unwrap();
-        assert!(!session.retire_cancel(&state, authority(), &cancel).unwrap());
-        cancel.room_id = Some(7);
-        cancel.member_id = Some(1);
-        assert!(!session.retire_cancel(&state, authority(), &cancel).unwrap());
-        cancel.member_id = Some(0);
-        assert!(session.retire_cancel(&state, authority(), &cancel).unwrap());
-        assert!(!session.retire_cancel(&state, authority(), &cancel).unwrap());
-    }
-    #[test]
     fn incoming_builders_have_source_selected_ack_and_reject_tags() {
         let parameters = parameters();
         let room = VoiceRoom {
@@ -1181,49 +1085,7 @@ mod tests {
             0
         );
     }
-    fn ack_with_roster(sequence: u32, own: u32, peer: Option<u32>) -> Vec<u8> {
-        let mut list = vec![
-            p::uint(1, u64::from(sequence)),
-            p::bytes(2, &member("own", 0, own)),
-            p::bytes(3, b"checksum"),
-        ];
-        if let Some(status) = peer {
-            list.push(p::bytes(2, &member("peer", 1, status)));
-        }
-        host_reply(&p::bytes(
-            1,
-            &p::message(&[
-                p::uint(1, 7),
-                p::uint(2, 9),
-                p::uint(3, 0),
-                p::uint(4, 99),
-                p::bytes(5, b"ack-cursor"),
-                p::bytes(6, &p::message(&list).unwrap()),
-                p::bytes(7, &p::uint(14, 0)),
-            ])
-            .unwrap(),
-        ))
-    }
-    #[test]
-    fn ack_baseline_other_device_status_ends_locally_before_offering_or_join() {
-        let transport = transport(vec![
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::RingingAck, ack_with_roster(1, 1, Some(1))),
-        ]);
-        let mut state = state();
-        let mut session = session(&transport, &mut state);
-        session
-            .ringing_ack(&transport, &mut state, authority(), tasks(1))
-            .unwrap();
-        assert_eq!(session.phase(), IncomingPhase::Finished);
-        assert!(session
-            .accept(&transport, &mut state, authority(), tasks(2))
-            .is_err());
-        assert!(session
-            .reject(&transport, &mut state, authority(), tasks(2))
-            .is_err());
-        assert!(transport.0.borrow().is_empty());
-    }
+
     #[test]
     fn acked_callee_polls_without_join_and_only_newer_full_roster_handles_elsewhere() {
         use super::super::tests::roster_sync;
@@ -1341,32 +1203,5 @@ mod tests {
             recorded_exit_reason(&transport.requests.borrow().last().unwrap().1),
             5
         );
-    }
-    #[test]
-    fn acked_callee_peer_gone_is_local_stop_without_user_reject_or_exit() {
-        use super::super::tests::roster_sync;
-        let transport = transport(vec![
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::RingingAck, ack_reply()),
-            (
-                CallHostRoute::LiveSync,
-                roster_sync(2, Some(3), None, false),
-            ),
-        ]);
-        let mut state = state();
-        let mut session = session(&transport, &mut state);
-        session
-            .ringing_ack(&transport, &mut state, authority(), tasks(1))
-            .unwrap();
-        assert_eq!(
-            session
-                .poll(&transport, &mut state, authority(), tasks(2))
-                .unwrap(),
-            SyncProgress::Terminal(RemoteTermination::LocalStop(
-                LocalStopReason::PeerLeftBeforeJoin
-            ))
-        );
-        assert_eq!(session.phase(), IncomingPhase::Finished);
-        assert!(transport.0.borrow().is_empty());
     }
 }

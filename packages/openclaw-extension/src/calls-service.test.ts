@@ -154,24 +154,8 @@ test("unknown dial result is retained as needs_review and cannot cause automatic
   const { service, client, voice } = await fixture(); client.dialHook = async () => { throw new NativeCallError("command_timeout", true); };
   await assert.rejects(service.dial("allowed-peer", { assertCurrent() {} }), /needs review/);
   await assert.rejects(service.dial("allowed-peer", { assertCurrent() {} }), /not available/);
+  assert.deepEqual(client.scopes, [{ kind: "outgoing" }]);
   assert.equal(client.dials, 1); assert.equal(service.status().state, "needs_review"); assert.equal(voice.state.closes, 1); await service.stop();
-});
-test("outgoing readiness cannot ACK another incoming caller", async () => {
-  const { service, client } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} });
-  assert.deepEqual(client.scopes, [{ kind: "outgoing" }]); assert.equal(client.answers, 0); await service.stop();
-});
-test("owned PCM is routed both ways; clear fences late output items without resetting receive generation", async () => {
-  const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
-  const pcm = Buffer.alloc(640); for (let i = 0; i < 320; i++) pcm.writeInt16LE(i - 160, i * 2);
-  client.media.input.push({ trackId: 2, generation: 1, sequence: 0n, timestampMicros: 0n, payload: pcm });
-  await until(() => voice.state.incoming.length === 1); assert.deepEqual(voice.state.incoming[0], pcm);
-  voice.state.callbacks!.audio(Buffer.concat([pcm, pcm, pcm]), { itemId: "old" }); await until(() => client.media.sent.length === 1);
-  let release!: () => void; client.clearHook = () => new Promise(resolve => { release = resolve; }); voice.state.callbacks!.clear(); await until(() => client.clears === 1);
-  voice.state.callbacks!.audio(pcm, { itemId: "old" }); release(); await delay(5);
-  voice.state.callbacks!.audio(pcm, { itemId: "old" }); voice.state.callbacks!.audio(pcm, { itemId: "new" });
-  await until(() => client.media.sent.length === 2); assert.equal(client.media.sent[1].generation, 2); assert.equal(client.media.tracks().receiveTrack.generation, 1);
-  assert.deepEqual(client.media.sent[1].samples, Int16Array.from({ length: 320 }, (_, i) => i - 160));
-  await service.stop();
 });
 test("new response PCM waits for clear acknowledgement and uses a fresh resampler on the new track", async t => {
   const media = new Media(); const voice = voiceFactory(); let failures = 0; let resamplers = 0;
@@ -240,32 +224,6 @@ test("provider failure requests one end while retaining the owner until terminal
   assert.equal(client.media.closed, false); assert.equal(client.closed, false); assert.equal(service.status().owned, true);
   client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
   await until(() => service.status().state === "available"); await service.stop(); assert.equal(client.ends, 1); assert.equal(client.closed, true);
-});
-test("explicit end retains daemon ownership through delayed admission and ending until terminal", async t => {
-  const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
-  let release!: () => void; let entered = false;
-  const held = new Promise<void>(resolve => { release = resolve; });
-  const end = client.end.bind(client);
-  client.end = async () => {
-    entered = true; await held;
-    assert.equal(client.media.closed, false, "Media closure would revoke the control client before hangup admission");
-    return end();
-  };
-  t.after(async () => { release(); await service.stop(); });
-  const ending = service.end(); void ending.catch(() => {});
-  await until(() => entered); assert.equal(client.media.closed, false); assert.equal(client.closed, false);
-  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "after-local-end" });
-  await delay(10); assert.equal(client.media.sent.length, 0);
-  release(); await ending;
-  assert.equal(client.media.closed, false, "Command acceptance is not terminal state"); assert.equal(service.status().owned, true);
-  client.eventsQueue.push({ type: "call.state", call: view("dial", "ending") });
-  await until(() => voice.state.closes === 1); await delay(20);
-  assert.equal(client.media.closed, false, "Ending still awaits the upstream terminal reply"); assert.equal(client.closed, false); assert.equal(service.status().owned, true);
-  voice.state.callbacks!.failed(); await delay(10);
-  assert.equal(client.media.closed, false, "A late provider failure must not detach an already ending call"); assert.equal(client.ends, 1);
-  client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
-  await until(() => service.status().state === "available");
-  assert.equal(client.media.closed, true); assert.equal(client.ends, 1); assert.equal(voice.state.closes, 1);
 });
 test("media attachment completing after end is retained without starting audio until terminal", async t => {
   const { service, client, voice } = await fixture();

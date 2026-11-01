@@ -758,21 +758,105 @@ impl Drop for LocalAudio {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{hello, remote};
     use super::*;
-    #[test]
-    fn late_answer_requires_the_original_offer() {
-        assert!(exact_offer(None, None).is_err());
-        let offer = CallOffer {
-            call_id: "offer-a".into(),
-            revision: 7,
-            kind: wechat_core::call_types::CallKind::Direct,
-            caller_id: "alice".into(),
-            offered_media: CallMedia::default(),
+    use tokio::sync::oneshot;
+    use wechat_core::call_types::CallCommandStatus;
+    #[cfg(feature = "call-audio")]
+    #[tokio::test]
+    async fn losing_answer_preserves_exact_offer_and_does_not_claim_a_new_caller() {
+        use wechat_core::call_types::{CallErrorCode, CallKind, CallMedia, CallOffer};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (checked, wait_checked) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut initial = hello();
+            if let CallEvent::Hello {
+                capabilities,
+                current_offer,
+                ..
+            } = &mut initial
+            {
+                capabilities.direct_audio = true;
+                *current_offer = Some(CallOffer {
+                    call_id: "original-offer".into(),
+                    revision: 7,
+                    kind: CallKind::Direct,
+                    caller_id: "alice".into(),
+                    offered_media: CallMedia::default(),
+                });
+            }
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&initial).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected control command");
+            };
+            let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(command["type"], "call.answer");
+            assert_eq!(command["callId"], "original-offer");
+            assert_eq!(command["expectedRevision"], 7);
+            let result = CallEvent::CommandResult {
+                request_id: command["requestId"].as_str().unwrap().into(),
+                status: CallCommandStatus::Error,
+                call_id: None,
+                owner_token: None,
+                code: Some(CallErrorCode::AlreadyClaimed),
+            };
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&result).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let offer = CallEvent::Offered {
+                offer: CallOffer {
+                    call_id: "different-offer".into(),
+                    revision: 1,
+                    kind: CallKind::Direct,
+                    caller_id: "bob".into(),
+                    offered_media: CallMedia::default(),
+                },
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&offer).unwrap().into()))
+                .await
+                .unwrap();
+            assert!(timeout(Duration::from_millis(50), socket.next())
+                .await
+                .is_err());
+            checked.send(()).unwrap();
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Close(_)
+            ));
+        });
+        let (mut control, _) = Control::connect(&remote(address)).await.unwrap();
+        assert!(super::exact_offer(None, None).is_err());
+        assert!(super::exact_offer(control.offer.as_ref(), Some("different-offer")).is_err());
+        let offer = super::exact_offer(control.offer.as_ref(), Some("original-offer"))
+            .unwrap()
+            .clone();
+        let error = match control
+            .command(CallCommand::Answer {
+                request_id: "claim-one".into(),
+                call_id: offer.call_id,
+                expected_revision: offer.revision,
+                media: CallMedia::default(),
+            })
+            .await
+        {
+            Ok(_) => panic!("losing claim was accepted"),
+            Err(error) => error,
         };
-        assert!(exact_offer(Some(&offer), Some("offer-b")).is_err());
-        assert_eq!(
-            exact_offer(Some(&offer), Some("offer-a")).unwrap().revision,
-            7
-        );
+        assert!(error.to_string().contains("already_claimed"));
+        wait_checked.await.unwrap();
+        control.close().await;
+        server.await.unwrap();
     }
 }

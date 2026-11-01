@@ -214,10 +214,7 @@ mod tests {
             assert_eq!(input.content, source.as_bytes());
             assert!(input.server_sequence.is_none());
         }
-    }
 
-    #[test]
-    fn cancellation_names_are_specific_to_the_root_family() {
         for (family, child) in [("ilinkvoip", "cancel"), ("voipmt", "cancelinvite")] {
             let control =
                 decode_system_control(&message(10002, &xml(family, child, &carrier(false))))
@@ -240,46 +237,8 @@ mod tests {
                     .is_err()
             );
         }
-    }
 
-    #[test]
-    fn history_and_other_controls_are_never_promoted_to_call_invites() {
-        let valid = xml("ilinkvoip", "invite", &carrier(true));
-        assert!(decode_system_control(&message(50, &valid))
-            .unwrap()
-            .is_none());
-        assert!(
-            decode_system_control(&message(10002, &valid.replace("ilinkvoip", "unhandled")))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            decode_system_control(&message(10002, "<msg type='ilinkvoip'/>"))
-                .unwrap()
-                .is_none()
-        );
-        assert!(decode_system_control(&message(
-            10002,
-            &valid.replace("sysmsg type='ilinkvoip'", "sysmsg")
-        ))
-        .unwrap()
-        .is_none());
-        assert!(decode_system_control(&message(
-            10002,
-            &xml("ilinkvoip", "invite", &carrier(false))
-        ))
-        .is_err());
-    }
-
-    #[test]
-    fn base64_is_standard_padded_and_does_not_trim() {
-        assert_eq!(decode_base64("//8=").unwrap(), vec![255, 255]);
-        assert_eq!(decode_base64("Zg==").unwrap(), b"f");
-        for invalid in ["__8=", "Zg", "Zg===", " Zg==", "Zg==\n", "Zh==", ""] {
-            assert!(decode_base64(invalid).is_err(), "accepted {invalid:?}");
-        }
-        let raw = carrier(true);
-        let encoded = STANDARD.encode(&raw);
+        let encoded = STANDARD.encode(carrier(true));
         let cdata = format!("<sysmsg type='ilinkvoip'><voipmt><invite><![CDATA[{encoded}]]></invite></voipmt></sysmsg>");
         assert!(decode_system_control(&message(10002, &cdata))
             .unwrap()
@@ -311,5 +270,38 @@ mod tests {
             "<invite/>".repeat(129)
         );
         assert!(decode_system_control(&message(10002, &many)).is_err());
+
+        let valid = xml("ilinkvoip", "invite", &carrier(true));
+        assert!(decode_system_control(&message(50, &valid))
+            .unwrap()
+            .is_none());
+        assert!(
+            decode_system_control(&message(10002, &valid.replace("ilinkvoip", "unhandled")))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_system_control(&message(10002, "<msg type='ilinkvoip'/>"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(decode_system_control(&message(
+            10002,
+            &valid.replace("sysmsg type='ilinkvoip'", "sysmsg")
+        ))
+        .unwrap()
+        .is_none());
+        assert!(decode_system_control(&message(
+            10002,
+            &xml("ilinkvoip", "invite", &carrier(false))
+        ))
+        .is_err());
+
+        for encoded in ["__8=", "Zg", "Zg===", " Zg==", "Zg==\n", "Zh==", ""] {
+            let source = format!(
+                "<sysmsg type='ilinkvoip'><voipmt><invite>{encoded}</invite></voipmt></sysmsg>"
+            );
+            assert!(decode_system_control(&message(10002, &source)).is_err());
+        }
     }
 }

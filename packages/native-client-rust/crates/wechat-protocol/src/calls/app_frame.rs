@@ -419,11 +419,8 @@ mod tests {
         let mut corrupt = raw;
         corrupt[0] = 1;
         assert!(TaskFrame::decode(&corrupt, 3361).is_err());
-    }
-    #[test]
-    fn noncanonical_header_varint_is_rejected() {
-        let mut raw = vec![0, 0, 0, 21, 0x11, 0x10, 7, 0x6d, 0, 0, 13, 33, 0, 0, 0, 0];
-        raw.extend([0x81, 0, 0, 0, 4]);
-        assert!(TaskFrame::decode(&raw, 3361).is_err());
+        let mut noncanonical = vec![0, 0, 0, 21, 0x11, 0x10, 7, 0x6d, 0, 0, 13, 33, 0, 0, 0, 0];
+        noncanonical.extend([0x81, 0, 0, 0, 4]);
+        assert!(TaskFrame::decode(&noncanonical, 3361).is_err());
     }
 }

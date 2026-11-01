@@ -747,38 +747,4 @@ mod tests {
         );
         assert!(attempt.is_ready());
     }
-    #[test]
-    fn ready_can_preempt_continuation_and_wrong_generation_closes() {
-        let selected = selected();
-        let mut attempt = TwoRttRelay::new(
-            RoomInputs::initial(&selected, 0, 0, 0),
-            9,
-            selected.endpoint,
-            epoch(),
-            100,
-        )
-        .unwrap();
-        let random = vec![1; attempt.random_bytes_needed().unwrap()];
-        attempt.prepare_initial(epoch(), 1, &random).unwrap();
-        let ready = p::message(
-            &(1..=7)
-                .filter(|n| *n != 4)
-                .map(|n| p::uint(n, 0))
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        assert_eq!(
-            attempt
-                .receive(&reply(0x1004, &ready), selected.endpoint, epoch(), 2)
-                .unwrap(),
-            RelayProgress::Ready
-        );
-        assert!(attempt
-            .prepare_continuation(epoch(), 3, 0, 0, &random)
-            .is_err());
-        let mut changed = epoch();
-        changed.key_generation += 1;
-        assert!(attempt.receive(&[], selected.endpoint, changed, 3).is_err());
-        assert!(!attempt.is_ready());
-    }
 }

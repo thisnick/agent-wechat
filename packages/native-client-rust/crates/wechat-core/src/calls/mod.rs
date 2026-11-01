@@ -4,7 +4,6 @@
 //! outgoing direct-voice path for an expiring isolated test; incoming calls,
 //! video and conferences are not enabled by this module alone.
 
-pub mod control;
 pub mod incoming;
 pub mod notifications;
 

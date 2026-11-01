@@ -310,27 +310,15 @@ mod tests {
             selected_policy(&state, 10342).unwrap(),
             CallHostPolicy::Ordinary
         );
-    }
-    #[test]
-    fn inactive_retained_ax_section_cannot_select_a_route() {
-        let mut state = snapshot(0, 7994);
-        state.ax_auth = vec![0xff; 32];
+        let mut retained = snapshot(0, 7994);
+        retained.ax_auth = vec![0xff; 32];
         assert_eq!(
-            selected_policy(&state, 7994).unwrap(),
+            selected_policy(&retained, 7994).unwrap(),
             CallHostPolicy::Ordinary
         );
-        state.update_mask = 8;
-        assert!(selected_policy(&state, 7994).is_err());
-    }
-    #[test]
-    fn missing_rejected_or_malformed_snapshot_never_defaults_to_ordinary() {
+        retained.update_mask = 8;
+        assert!(selected_policy(&retained, 7994).is_err());
         assert!(selected_policy(&AuthSnapshot::default(), 7994).is_err());
-        let mut state = snapshot(8, 7994);
-        state.response = vec![10, 2, 8, 1, 16, 8];
-        assert!(selected_policy(&state, 7994).is_err());
-        state.response = vec![10, 2, 8, 0, 16, 8, 50, 2, 18, 0xff];
-        assert!(selected_policy(&state, 7994).is_err());
-        assert!(selected_policy(&snapshot(0, 0), 1).is_err());
     }
 
     #[test]

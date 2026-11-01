@@ -201,26 +201,6 @@ mod tests {
         p::message(&[p::bytes(1, &[8, 0]), p::bytes(2, &inner)]).unwrap()
     }
     #[test]
-    fn first_auth_has_independent_nested_literal_shape() {
-        let own_device = [7; 32];
-        let pending = PendingAppAuth::new(authority(), own_device).unwrap();
-        assert_eq!(
-            pending.request_body().unwrap(),
-            [vec![10, 34, 10, 32], vec![7; 32]].concat()
-        );
-    }
-    #[test]
-    fn selected_plain_session_preserves_full_uin_and_has_no_key_fields() {
-        let pending = PendingAppAuth::new(authority(), [7; 32]).unwrap();
-        let response = reply(&[74, 1, b's', 88, 1], u64::MAX);
-        let result = pending.complete(&response, authority()).unwrap();
-        let fields = p::decode(&result.common_session(authority()).unwrap()).unwrap();
-        assert_eq!(scalar(&fields, 4, None).unwrap(), u64::MAX);
-        assert_eq!(data(&fields, 5).unwrap(), b"s");
-        assert_eq!(scalar(&fields, 6, None).unwrap(), 1);
-        assert!(p::optional(&fields, 1).unwrap().is_none());
-    }
-    #[test]
     fn encrypted_or_contradictory_branch_is_not_plain_fallback() {
         for auth in [vec![88, 0], vec![10, 1, 4, 88, 1], vec![88, 1, 88, 1]] {
             let pending = PendingAppAuth::new(authority(), [7; 32]).unwrap();

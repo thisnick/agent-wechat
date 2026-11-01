@@ -87,116 +87,37 @@ impl RtpOrder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn reordered_b_before_a_never_rewinds_decoder_input() {
+    fn authenticated_sequence_trace_drops_replay_overlap_and_loss_without_rewinding() {
         let mut order = RtpOrder::new();
-        // B contains primaries 2,3. A later arrives with 0,1.
+        // Arbitrary origin, wrap, late packet, replay with a new timestamp,
+        // overlapping primaries, a loss gap, then ordinary forward progress.
+        for (sequence, timestamp, count, skip, gap) in [
+            (65534, u32::MAX - 320, 2, 0, 0),
+            (0, 319, 2, 0, 0),
+            (65534, 0, 2, 2, 0),
+            (0, 999, 2, 2, 0),
+            (1, 0, 3, 2, 0),
+            (3, 0, 3, 1, 0),
+            (8, 7, 2, 0, 3),
+            (6, 100, 2, 2, 0),
+            (9, 0, 1, 0, 0),
+        ] {
+            assert_eq!(
+                order.admit(sequence, timestamp, count),
+                Ok(PrimaryAdmission { skip, gap })
+            );
+        }
+        assert_eq!(order.last, Some((9, 0)));
+        // A new call explicitly starts its own ordering epoch; loss across wrap
+        // must still be reported rather than hidden by sequence compression.
+        let mut next_call = RtpOrder::new();
+        next_call.admit(65534, 0, 1).unwrap();
         assert_eq!(
-            order.admit(3, 960, 2),
-            Ok(PrimaryAdmission { skip: 0, gap: 0 })
-        );
-        assert_eq!(
-            order.admit(1, 320, 2),
-            Ok(PrimaryAdmission { skip: 2, gap: 0 })
-        );
-        assert_eq!(order.last, Some((3, 960)));
-        assert_eq!(
-            order.admit(5, 1600, 2),
-            Ok(PrimaryAdmission { skip: 0, gap: 0 })
+            next_call.admit(2, 1, 2),
+            Ok(PrimaryAdmission { skip: 0, gap: 2 })
         );
     }
-
-    #[test]
-    fn fresh_envelope_cannot_replay_an_admitted_rtp_pair() {
-        let mut order = RtpOrder::new();
-        order.admit(81, 90_000, 2).unwrap();
-        assert_eq!(
-            order.admit(81, 90_000, 2),
-            Ok(PrimaryAdmission { skip: 2, gap: 0 })
-        );
-        // A changed timestamp does not make the same primaries new.
-        assert_eq!(
-            order.admit(81, 91_000, 2),
-            Ok(PrimaryAdmission { skip: 2, gap: 0 })
-        );
-        assert_eq!(order.last, Some((81, 90_000)));
-    }
-
-    #[test]
-    fn partial_overlap_admits_only_the_new_suffix() {
-        let mut order = RtpOrder::new();
-        order.admit(100, 10, 2).unwrap();
-        // Packet 99,100,101 contributes only 101.
-        assert_eq!(
-            order.admit(101, 20, 3),
-            Ok(PrimaryAdmission { skip: 2, gap: 0 })
-        );
-        // Packet 101,102,103 contributes 102,103.
-        assert_eq!(
-            order.admit(103, 30, 3),
-            Ok(PrimaryAdmission { skip: 1, gap: 0 })
-        );
-        assert_eq!(order.last, Some((103, 30)));
-    }
-
-    #[test]
-    fn reports_missing_primaries_without_hiding_them_in_sequence_compression() {
-        let mut order = RtpOrder::new();
-        order.admit(10, 100, 2).unwrap();
-        // Packet 14,15 follows 10: 11,12,13 are missing.
-        assert_eq!(
-            order.admit(15, 200, 2),
-            Ok(PrimaryAdmission { skip: 0, gap: 3 })
-        );
-        assert_eq!(
-            order.admit(16, 300, 1),
-            Ok(PrimaryAdmission { skip: 0, gap: 0 })
-        );
-    }
-
-    #[test]
-    fn sequence_wrap_keeps_late_and_overlapping_primaries_distinct() {
-        let mut order = RtpOrder::new();
-        // First packet has the arbitrary origin 65534,65535.
-        order.admit(65535, u32::MAX - 320, 2).unwrap();
-        assert_eq!(
-            order.admit(1, 319, 2),
-            Ok(PrimaryAdmission { skip: 0, gap: 0 })
-        );
-        assert_eq!(
-            order.admit(65535, u32::MAX - 320, 2),
-            Ok(PrimaryAdmission { skip: 2, gap: 0 })
-        );
-        assert_eq!(
-            order.admit(2, 639, 2),
-            Ok(PrimaryAdmission { skip: 1, gap: 0 })
-        );
-        assert_eq!(order.last, Some((2, 639)));
-
-        let mut gap = RtpOrder::new();
-        gap.admit(65534, 0, 1).unwrap();
-        // Missing 65535,0 precede the newly admitted 1,2.
-        assert_eq!(gap.admit(2, 1, 2), Ok(PrimaryAdmission { skip: 0, gap: 2 }));
-    }
-
-    #[test]
-    fn arbitrary_timestamps_are_metadata_not_an_inferred_ordering_contract() {
-        let mut order = RtpOrder::new();
-        order.admit(500, 12345, 2).unwrap();
-        // Neither a fixed increment, a zero origin nor strictly increasing
-        // timestamp values are inferred from the selected header alone.
-        assert_eq!(
-            order.admit(501, 12345, 1),
-            Ok(PrimaryAdmission { skip: 0, gap: 0 })
-        );
-        assert_eq!(
-            order.admit(502, 7, 1),
-            Ok(PrimaryAdmission { skip: 0, gap: 0 })
-        );
-        assert_eq!(order.last, Some((502, 7)));
-    }
-
     #[test]
     fn malformed_count_and_half_range_ambiguity_leave_high_water_unchanged() {
         let mut order = RtpOrder::new();

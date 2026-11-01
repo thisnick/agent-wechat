@@ -201,23 +201,20 @@ async fn ready(socket: &mut Socket, id: &str) {
 }
 
 #[tokio::test]
-async fn disabled_backend_advertises_no_live_call_capability() {
-    let f = Fixture::new(false).await;
-    let mut socket = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
-    let hello = json_event(&mut socket).await;
-    assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["capabilities"]["directAudio"], false);
-    assert_eq!(hello["currentOffer"], Value::Null);
-}
-
-#[tokio::test]
 async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
     let f = Fixture::new(false).await;
     f.grant("observer", &["calls.observe"], &["two"]);
     for (token, origin, status) in [
         ("wrong", None, 401),
         ("observer", None, 403),
+        (OWNER, Some("null"), 403),
         (OWNER, Some("https://elsewhere.example"), 403),
+        (OWNER, Some(&format!("http://{}/path", f.address)), 403),
+        (
+            OWNER,
+            Some(&format!("http://{}/?token=value", f.address)),
+            403,
+        ),
     ] {
         let mut request = format!("ws://{}/v1/accounts/one/calls/socket", f.address)
             .into_client_request()
@@ -239,12 +236,81 @@ async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
             _ => panic!("expected HTTP rejection"),
         }
     }
+
+    let mut request = format!("ws://{}/v1/accounts/one/calls/socket", f.address)
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {OWNER}").parse().unwrap(),
+    );
+    let origin = format!("http://{}", f.address);
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, origin.parse().unwrap());
+    let (mut socket, _) = connect_async(request.clone()).await.unwrap();
+    let hello = json_event(&mut socket).await;
+    assert_eq!(hello["capabilities"]["directAudio"], false);
+    assert_eq!(hello["currentOffer"], Value::Null);
+    socket.close(None).await.unwrap();
+    request
+        .headers_mut()
+        .append(header::ORIGIN, origin.parse().unwrap());
+    assert!(
+        matches!(connect_async(request).await, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == StatusCode::FORBIDDEN)
+    );
 }
 
 #[tokio::test]
 async fn observer_cannot_register_answer_readiness_and_revocation_closes_socket() {
     let f = Fixture::new(true).await;
     let grant = f.grant("observer", &["calls.observe"], &["one"]);
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    for (path, token, status) in [
+        ("/v1/accounts/one/calls/current", "observer", StatusCode::OK),
+        (
+            "/v1/accounts/two/calls/current",
+            "observer",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/v1/accounts/one/calls/current",
+            "wrong",
+            StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        let response = router(f.core.clone(), OWNER)
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        if status == StatusCode::OK {
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store"
+            );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let snapshot: CallSnapshot = serde_json::from_slice(&bytes).unwrap();
+            assert!(snapshot.capabilities.direct_audio);
+            assert!(!snapshot.availability.busy);
+        }
+    }
+    let mut malformed = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
+    json_event(&mut malformed).await;
+    command(
+        &mut malformed,
+        json!({"type":"call.ready","requestId":"malformed","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20},"unexpected":true}),
+    )
+    .await;
+    assert_eq!(json_event(&mut malformed).await["code"], "invalid_request");
     let mut socket = f.socket("/v1/accounts/one/calls/socket", "observer").await;
     assert_eq!(json_event(&mut socket).await["type"], "hello");
     command(&mut socket,json!({"type":"call.ready","requestId":"ready","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20}})).await;
@@ -313,7 +379,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     assert_eq!(loser["ownerToken"], Value::Null);
     let client_one = hello["clientId"].as_str().unwrap().to_owned();
     let owner_token = result["ownerToken"].as_str().unwrap().to_owned();
-    until(winner, |v| {
+    let incoming_state = until(winner, |v| {
         v["type"] == "call.state" && v["call"]["state"] == "connected"
     })
     .await;
@@ -327,6 +393,32 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     )
     .await;
     assert_eq!(json_event(&mut wrong).await["code"], "not_owner");
+    f.grant("other-media-principal", &["calls.media"], &["one"]);
+    for (path, bearer) in [
+        (
+            "/v1/accounts/one/calls/incoming-fixture/media",
+            "other-media-principal",
+        ),
+        ("/v1/accounts/two/calls/incoming-fixture/media", OWNER),
+    ] {
+        let mut foreign = f.socket(path, bearer).await;
+        command(
+            &mut foreign,
+            json!({"type":"media.attach","clientId":client_one,"ownerToken":owner_token}),
+        )
+        .await;
+        assert_eq!(json_event(&mut foreign).await["code"], "forbidden");
+    }
+    let mut malformed = f
+        .socket("/v1/accounts/one/calls/incoming-fixture/media", OWNER)
+        .await;
+    command(&mut malformed, json!({"type":"media.attach","clientId":client_one,"ownerToken":owner_token,"unexpected":true})).await;
+    assert!(matches!(
+        timeout(Duration::from_secs(1), malformed.next())
+            .await
+            .unwrap(),
+        None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_)))
+    ));
     let mut media = f
         .socket("/v1/accounts/one/calls/incoming-fixture/media", OWNER)
         .await;
@@ -374,50 +466,45 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         }
     }
     assert_eq!(f.backend.received.load(Ordering::SeqCst), 1);
-}
 
-#[tokio::test]
-async fn current_snapshot_is_authenticated_account_scoped_and_not_cached() {
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
-    let f = Fixture::new(false).await;
-    f.grant("observer", &["calls.observe"], &["one"]);
-    for (path, token, status) in [
-        ("/v1/accounts/one/calls/current", "observer", StatusCode::OK),
-        (
-            "/v1/accounts/two/calls/current",
-            "observer",
-            StatusCode::FORBIDDEN,
-        ),
-        (
-            "/v1/accounts/one/calls/current",
-            "wrong",
-            StatusCode::UNAUTHORIZED,
-        ),
-    ] {
-        let response = router(f.core.clone(), OWNER)
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), status);
-        if status == StatusCode::OK {
-            assert_eq!(
-                response.headers().get(header::CACHE_CONTROL).unwrap(),
-                "no-store"
-            );
-            let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            let snapshot: CallSnapshot = serde_json::from_slice(&bytes).unwrap();
-            assert!(!snapshot.capabilities.direct_audio);
-            assert!(!snapshot.availability.busy);
-        }
-    }
+    command(winner, json!({"type":"call.hangup","requestId":"end-incoming","callId":"incoming-fixture","expectedRevision":incoming_state["call"]["revision"]})).await;
+    until(winner, |v| {
+        v["type"] == "call.state" && v["call"]["state"] == "ended"
+    })
+    .await;
+    media.close(None).await.unwrap();
+    let dial = json!({"type":"call.dial","requestId":"outgoing-idempotent","target":{"kind":"direct","contactId":"synthetic-peer"},"media":{"audio":true,"video":false}});
+    command(winner, dial.clone()).await;
+    let result = until(winner, |v| {
+        v["type"] == "command.result" && v["requestId"] == "outgoing-idempotent"
+    })
+    .await;
+    assert_eq!(result["status"], "accepted");
+    let outgoing_state = until(winner, |v| {
+        v["type"] == "call.state" && v["call"]["state"] == "connected"
+    })
+    .await;
+    command(winner, dial.clone()).await;
+    assert_eq!(
+        until(winner, |v| v["type"] == "command.result"
+            && v["requestId"] == "outgoing-idempotent")
+        .await["status"],
+        "replayed"
+    );
+    assert_eq!(f.backend.submits.load(Ordering::SeqCst), 3);
+    command(winner, json!({"type":"call.hangup","requestId":"end-outgoing","callId":result["callId"],"expectedRevision":outgoing_state["call"]["revision"]})).await;
+    until(winner, |v| {
+        v["type"] == "call.state" && v["call"]["state"] == "ended"
+    })
+    .await;
+    command(winner, dial).await;
+    assert_eq!(
+        until(winner, |v| v["type"] == "command.result"
+            && v["requestId"] == "outgoing-idempotent")
+        .await["status"],
+        "replayed"
+    );
+    assert_eq!(f.backend.submits.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]

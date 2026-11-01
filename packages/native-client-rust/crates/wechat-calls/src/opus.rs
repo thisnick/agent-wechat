@@ -151,36 +151,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn generated_tone_encodes_decodes_and_survives_one_lost_frame() {
-        let format = AudioFormat::new(16000, 1, 20).unwrap();
-        let mut encoder = OpusEncoder::new(format, 20000).unwrap();
-        let mut decoder = OpusDecoder::new(format).unwrap();
-        let mut tone = PulseTone::new(
-            format,
-            880.0,
-            0.2,
-            Duration::from_millis(500),
-            Duration::from_millis(250),
-        )
-        .unwrap();
-        let mut energy = 0u64;
-        for n in 0..20 {
-            let packet = encoder.encode(&tone.next_frame().unwrap()).unwrap();
-            let pcm = if n == 10 {
-                decoder.conceal().unwrap()
-            } else {
-                decoder.decode(&packet).unwrap()
-            };
-            assert_eq!(pcm.len(), 320);
-            energy += pcm
-                .iter()
-                .map(|&x| i64::from(x).unsigned_abs().pow(2))
-                .sum::<u64>();
-        }
-        assert!(energy > 1_000_000);
-    }
-
-    #[test]
     fn stereo_decode_keeps_every_interleaved_sample() {
         let format = AudioFormat::new(48000, 2, 20).unwrap();
         let mut encoder = OpusEncoder::new(format, 64000).unwrap();

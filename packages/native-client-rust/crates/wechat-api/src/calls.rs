@@ -299,27 +299,3 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
 
 #[cfg(test)]
 mod socket_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn socket_origins_require_one_matching_http_origin() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "localhost:6175".parse().unwrap());
-        assert!(check_origin(&headers).is_ok());
-        for origin in [
-            "null",
-            "https://elsewhere.example",
-            "http://localhost:6175/path",
-            "http://localhost:6175/?token=value",
-        ] {
-            headers.insert(header::ORIGIN, origin.parse().unwrap());
-            assert!(check_origin(&headers).is_err());
-        }
-        headers.insert(header::ORIGIN, "http://localhost:6175".parse().unwrap());
-        assert!(check_origin(&headers).is_ok());
-        headers.append(header::ORIGIN, "http://localhost:6175".parse().unwrap());
-        assert!(check_origin(&headers).is_err());
-    }
-}

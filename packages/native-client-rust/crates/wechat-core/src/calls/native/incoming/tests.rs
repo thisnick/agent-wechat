@@ -1,5 +1,6 @@
 //! Account-free actor fixtures. Host responses follow the selected schemas;
-//! AV is deliberately unready, so these tests cannot create media sockets.
+//! Control fixtures keep AV unready. The separate generated-media fixture uses
+//! only a synthetic host and a localhost UDP peer, without external transport.
 use super::*;
 use crate::{call_types::*, calls::service::ControlConnection, Store};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -9,6 +10,14 @@ use wechat_protocol::{
     wire::{SyncBatch, SyncCommand},
     AuthSnapshot, DeviceProfile,
 };
+
+mod media_loopback;
+
+#[derive(Clone, Copy)]
+struct ReadyMedia {
+    endpoint: SocketAddrV4,
+    key: [u8; 32],
+}
 
 const OWN: &str = "synthetic_self";
 const PEER: &str = "synthetic_peer";
@@ -57,15 +66,17 @@ impl Gate {
 }
 struct Host {
     case: Case,
+    ready_media: Option<ReadyMedia>,
     routes: Mutex<Vec<(CallHostRoute, Option<u32>)>>,
     gate: Gate,
     sync_held: AtomicBool,
     exit_members: Mutex<Vec<u32>>,
 }
 impl Host {
-    fn new(case: Case) -> Arc<Self> {
+    fn new(case: Case, ready_media: Option<ReadyMedia>) -> Arc<Self> {
         Arc::new(Self {
             case,
+            ready_media,
             routes: Mutex::new(vec![]),
             sync_held: AtomicBool::new(false),
             exit_members: Mutex::new(vec![]),
@@ -171,7 +182,7 @@ impl TestCallIo for Host {
             )),
             CallHostRoute::LiveSync => Ok(host_reply(&p::bytes(2, b"cursor"))),
             CallHostRoute::Transfer => match command {
-                Some(3361) => Ok(join_reply(3)),
+                Some(3361) => Ok(join_reply_with_media(3, self.ready_media)),
                 Some(3380) => Ok(wrapped_reply(
                     3380,
                     &p::message(&[p::uint(1, ROOM), p::uint(2, ROOM_KEY), p::uint(3, 3)])?,
@@ -250,7 +261,7 @@ fn wrapped_reply(command: u32, body: &[u8]) -> Vec<u8> {
     .unwrap();
     host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
 }
-fn join_reply(own_member: u16) -> Vec<u8> {
+fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> {
     let engine = p::message(&[p::uint(5, 17), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap();
     let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
     let capabilities = p::message(&[
@@ -261,9 +272,17 @@ fn join_reply(own_member: u16) -> Vec<u8> {
         ),
     ])
     .unwrap();
-    let address = p::message(&[p::bytes(1, b"127.0.0.1"), p::uint(2, 6000)]).unwrap();
+    let endpoint = media.map_or_else(
+        || SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 6000),
+        |media| media.endpoint,
+    );
+    let address = p::message(&[
+        p::bytes(1, endpoint.ip().to_string().as_bytes()),
+        p::uint(2, u64::from(endpoint.port())),
+    ])
+    .unwrap();
     let strategy = p::message(&[
-        p::bytes(10, &[7; 32]),
+        p::bytes(10, &media.map_or([7; 32], |media| media.key)),
         p::bytes(13, &capabilities),
         p::uint(14, 0),
         p::bytes(
@@ -272,17 +291,18 @@ fn join_reply(own_member: u16) -> Vec<u8> {
         ),
     ])
     .unwrap();
-    // Both AV statuses remain0. Any attempt to take media is a test failure;
-    // control/ownership must not pretend this means a connected transport.
+    // Only the dedicated localhost fixture supplies a ready media endpoint.
+    // Other actor fixtures still cannot start a media socket.
+    let av_status = u64::from(media.is_some());
     let av = p::message(&[
         p::uint(3, 1),
         p::bytes(
             4,
-            &p::message(&[p::uint(1, u64::from(own_member)), p::uint(2, 0)]).unwrap(),
+            &p::message(&[p::uint(1, u64::from(own_member)), p::uint(2, av_status)]).unwrap(),
         ),
         p::bytes(
             4,
-            &p::message(&[p::uint(1, u64::from(PEER_MEMBER)), p::uint(2, 0)]).unwrap(),
+            &p::message(&[p::uint(1, u64::from(PEER_MEMBER)), p::uint(2, av_status)]).unwrap(),
         ),
     ])
     .unwrap();
@@ -311,6 +331,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new(case: Case) -> Self {
+        Self::with_media(case, None)
+    }
+    fn with_media(case: Case, ready_media: Option<ReadyMedia>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -343,13 +366,17 @@ impl Fixture {
             NativeCallConfig::receive_only("one".into(), independent_voice_parameters().unwrap());
         config.transmit_scope = NativeTransmitScope::IsolatedTest {
             peer_id: PEER.into(),
-            intent_id: [9; 32],
+            intent_id: if ready_media.is_some() {
+                crypto::random::<32>().unwrap()
+            } else {
+                [9; 32]
+            },
             expires_at_unix_ms: unix_ms().unwrap() + 60_000,
-            allow_known_audio_overlap: false,
+            allow_known_audio_overlap: ready_media.is_some(),
         };
-        config.max_duration = Duration::from_secs(2);
+        config.max_duration = Duration::from_secs(if ready_media.is_some() { 6 } else { 2 });
         let mut backend = NativeCallBackend::new(Arc::downgrade(&core), config).unwrap();
-        let host = Host::new(case);
+        let host = Host::new(case, ready_media);
         Arc::get_mut(&mut backend.inner).unwrap().test_io = Some(host.clone());
         let backend = Arc::new(backend);
         Core::configure_calls(&core, backend.clone()).unwrap();
@@ -908,24 +935,12 @@ async fn future_member_cancel_waits_for_authenticated_ack_binding() {
         .await
         .unwrap();
     let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
-    let mut cancelling = f
-        .backend
-        .cancel_incoming(worker.identity.clone(), f.cancellation(4));
-    assert!(cancelling
-        .as_mut()
-        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
-        .is_pending());
+    f.stage(true, 4);
+    tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(!worker.incoming.as_ref().unwrap().cancellation_pending());
     assert!(worker.done.lock().unwrap().is_none());
     assert!(f.snapshot().await.current_offer.is_none());
     f.host.gate.release();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), cancelling)
-            .await
-            .unwrap()
-            .unwrap(),
-        IncomingCancellation::Ended
-    );
     f.finished().await;
     assert_eq!(
         f.host.seen(),

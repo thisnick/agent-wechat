@@ -710,116 +710,6 @@ fn text(value: &[u8], maximum: usize, nonempty: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn inputs<'a>(sdk: &'a [u8], group: &'a [u8]) -> VoiceInputs<'a> {
-        VoiceInputs {
-            sdk,
-            group,
-            device: &[],
-            engine_capability: &[1],
-            channel_capability: &[2],
-            network_type: 1,
-            sim_type: 0,
-            video_length: 0,
-            video_ratio: 0,
-            nics: &[],
-        }
-    }
-    fn metadata() -> (Vec<u8>, Vec<u8>) {
-        (
-            vec![8, 1, 18, 1, b'x'],
-            vec![
-                10, 6, b'w', b'e', b'c', b'h', b'a', b't', 16, 0, 26, 7, b'v', b'o', b'i', b'p',
-                b'-', b'2', b'p', 34, 0, 40, 1, 50, 0, 56, 0,
-            ],
-        )
-    }
-    #[test]
-    fn literal_live_sync_has_distinct_inner_and_host_timeouts() {
-        let request = live_sync(7, &[0xab], 6, 9).unwrap();
-        assert_eq!(
-            request.body(),
-            &[8, 7, 18, 1, 0xab, 34, 7, b'v', b'o', b'i', b'p', b'-', b'2', b'p', 40, 6]
-        );
-        assert_eq!(request.longpoll_seconds, Some(11));
-        assert_eq!(request.operation.command(), 9262);
-    }
-    #[test]
-    fn invitation_preserves_absent_custom_auth_and_independent_tasks() {
-        let (sdk, group) = metadata();
-        let request = invite(&inputs(&sdk, &group), "peer", u64::MAX, 17, None).unwrap();
-        let body = fields(request.body()).unwrap();
-        assert_eq!(required_u64(&body, 5).unwrap(), u64::MAX);
-        assert!(p::optional(&body, 6).unwrap().is_none());
-        assert!(invite(&inputs(&sdk, &group), "peer", 1, 17, Some(&[])).is_err());
-        let base = vec![48, 99];
-        let common = CommonRequest::decode(&request.common(base.clone()).unwrap()).unwrap();
-        assert_eq!(common.base_request, Some(base));
-        assert_eq!(request.sdk_task, 17);
-    }
-    #[test]
-    fn cancel_preserves_duplicate_pending_names_and_zero_pre_room() {
-        let (sdk, group) = metadata();
-        let names = vec!["peer".to_owned(), "peer".to_owned()];
-        let request = cancel(
-            &inputs(&sdk, &group),
-            0,
-            0,
-            99,
-            &names,
-            CancelReason::Local,
-            2,
-        )
-        .unwrap();
-        let body = fields(request.body()).unwrap();
-        assert_eq!(body.iter().filter(|v| v.number == 4).count(), 2);
-        assert_eq!(required_u64(&body, 3).unwrap(), 0);
-        assert!(cancel(
-            &inputs(&sdk, &group),
-            1,
-            0,
-            99,
-            &names,
-            CancelReason::Local,
-            2
-        )
-        .is_err());
-    }
-    #[test]
-    fn invalid_scalar_duplicate_and_utf8_never_coerce() {
-        let (sdk, mut group) = metadata();
-        group.extend_from_slice(&[40, 1]);
-        assert!(invite(&inputs(&sdk, &group), "peer", 1, 1, None).is_err());
-        assert!(live_sync(1, &[], 2, 1).is_err());
-        let (mut sdk, group) = metadata();
-        sdk[4] = 0xff;
-        assert!(invite(&inputs(&sdk, &group), "peer", 1, 1, None).is_err());
-    }
-    #[test]
-    fn cloud_join_and_exit_use_distinct_app_envelope_and_source_reason_mapping() {
-        let (sdk, group) = metadata();
-        let inputs = inputs(&sdk, &group);
-        let room = VoiceRoom {
-            room: 7,
-            room_key: 9,
-            own_member: 0,
-        };
-        let request = join(&inputs, room, 0, 3).unwrap();
-        assert_eq!(request.command_id, Some(3361));
-        let body = fields(request.body.as_deref().unwrap()).unwrap();
-        assert_eq!(required_u64(&body, 5).unwrap(), 2);
-        assert_eq!(required_u64(&body, 11).unwrap(), 7);
-        assert_eq!(required_u64(&body, 12).unwrap(), 9);
-        let cloud_base = [8, 9, 18, 1, b'd', 24, 1];
-        let info = fields(&cloud_request_info(&request, &cloud_base).unwrap()).unwrap();
-        assert_eq!(required_u64(&info, 1).unwrap(), 3361);
-        let request = exit(&inputs, room, 6, false, 4).unwrap();
-        assert_eq!(request.command_id, Some(3380));
-        let body = fields(request.body.as_deref().unwrap()).unwrap();
-        assert_eq!(required_u64(&body, 5).unwrap(), 0);
-        assert_eq!(required_u64(&body, 6).unwrap(), 8);
-        assert_eq!(required_u64(&body, 8).unwrap(), 1);
-    }
-
     #[test]
     fn full_sync_preserves_later_unknown_item_and_cookie_presence() {
         let first = message(&[p::uint(1, 1), p::bytes(2, b"a")]).unwrap();
@@ -868,37 +758,36 @@ mod tests {
         assert_eq!(result.original, response);
         response.extend(p::uint(3, u64::MAX));
         assert!(InviteResponse::decode(&response).is_err());
-    }
-    #[test]
-    fn invite_result_optional_zero_is_distinct_from_nonzero_and_invalid_wire() {
-        let base = message(&[
+        for (nested, expected) in [
+            (p::bytes(1, b"peer"), 0),
+            (message(&[p::bytes(1, b"peer"), p::uint(2, 7)]).unwrap(), 7),
+        ] {
+            let wire = message(&[
+                p::uint(1, 7),
+                p::uint(2, 9),
+                p::uint(3, 0),
+                p::bytes(4, b"group"),
+                p::bytes(5, &[8, 1]),
+                p::bytes(8, &nested),
+            ])
+            .unwrap();
+            assert_eq!(
+                InviteResponse::decode(&wire).unwrap().invite_results[0].1,
+                expected
+            );
+        }
+        let bad = message(&[
             p::uint(1, 7),
             p::uint(2, 9),
             p::uint(3, 0),
             p::bytes(4, b"group"),
             p::bytes(5, &[8, 1]),
+            p::bytes(
+                8,
+                &message(&[p::bytes(1, b"peer"), p::bytes(2, &[])]).unwrap(),
+            ),
         ])
         .unwrap();
-        let response = |nested: &[u8]| {
-            let mut bytes = base.clone();
-            bytes.extend(p::bytes(8, nested));
-            bytes
-        };
-        let absent = response(&p::bytes(1, b"peer"));
-        assert_eq!(
-            InviteResponse::decode(&absent).unwrap().invite_results,
-            vec![("peer".to_owned(), 0)]
-        );
-        let nonzero = response(&message(&[p::bytes(1, b"peer"), p::uint(2, 7)]).unwrap());
-        assert_eq!(
-            InviteResponse::decode(&nonzero).unwrap().invite_results[0].1,
-            7
-        );
-        for nested in [
-            message(&[p::bytes(1, b"peer"), p::bytes(2, &[])]).unwrap(),
-            message(&[p::bytes(1, b"peer"), p::uint(2, 0), p::uint(2, 0)]).unwrap(),
-        ] {
-            assert!(InviteResponse::decode(&response(&nested)).is_err());
-        }
+        assert!(InviteResponse::decode(&bad).is_err());
     }
 }

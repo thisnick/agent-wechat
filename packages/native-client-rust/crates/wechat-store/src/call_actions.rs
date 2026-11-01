@@ -177,34 +177,6 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
-    fn unresolved_actions_survive_restart_and_never_authorize_resubmission() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("data");
-        {
-            let store = Store::open(&path).unwrap();
-            store.create_account("a").unwrap();
-            assert!(store.begin_call("a", "call1", "generation1").unwrap());
-            assert!(store
-                .begin_call_action("a", "call1", "invite", 10342, &"a".repeat(64), &[1; 30])
-                .unwrap());
-            assert!(!store
-                .begin_call_action("a", "call1", "invite", 10342, &"a".repeat(64), &[1; 30])
-                .unwrap());
-            assert!(store
-                .begin_call_action("a", "call1", "invite", 10342, &"b".repeat(64), &[1; 30])
-                .is_err());
-        }
-        let store = Store::open_existing(&path).unwrap();
-        store.recover_call_sessions("a").unwrap();
-        assert!(store.has_unresolved_call("a").unwrap());
-        assert!(!store.begin_call("a", "call2", "generation1").unwrap());
-        assert!(store
-            .begin_call_action("a", "call1", "invite", 10342, &"a".repeat(64), &[1; 30])
-            .is_err());
-        store.finish_call("a", "call1", true).unwrap();
-        assert!(store.begin_call("a", "call2", "generation2").unwrap());
-    }
-    #[test]
     fn exact_request_is_sealed_before_claim_and_preserved_on_duplicate() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(&tmp.path().join("data")).unwrap();
@@ -228,55 +200,33 @@ mod tests {
             request
         );
         assert!(!retained.windows(request.len()).any(|w| w == request));
+        assert!(store
+            .begin_call_action("a", "c", "1", 10342, &"b".repeat(64), &sealed)
+            .is_err());
+        let reply = vault
+            .seal("a", "call-reply:c:1", b"synthetic receipt")
+            .unwrap();
+        store
+            .finish_call_action("a", "c", "1", "received", Some(&reply))
+            .unwrap();
+        assert!(store
+            .finish_call_action("a", "c", "1", "needs_review", None)
+            .is_err());
+        store.finish_call("a", "c", false).unwrap();
+        drop(store);
+        let store = Store::open_existing(&tmp.path().join("data")).unwrap();
         store.recover_call_sessions("a").unwrap();
+        let record = store.call_action_records("a", "c").unwrap().remove(0);
+        assert_eq!(record.outcome, "received");
+        assert_eq!(record.encrypted_reply.as_deref(), Some(reply.as_slice()));
+        assert!(!store.begin_call("a", "next", "generation2").unwrap());
         assert!(store.has_unresolved_call("a").unwrap());
         assert!(store
             .begin_call_action("a", "c", "1", 10342, &"a".repeat(64), &sealed)
             .is_err());
-    }
-    #[test]
-    fn legacy_call_intents_migrate_without_fabricating_request_context() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("data");
-        {
-            let store = Store::open(&root).unwrap();
-            store.create_account("a").unwrap();
-            store.begin_call("a", "old", "generation").unwrap();
-            store.control("a",|db|{db.execute_batch("ALTER TABLE call_actions DROP COLUMN encrypted_request; PRAGMA user_version=9;")?;db.execute("INSERT INTO call_actions(call_id,action_id,route,request_digest,outcome,updated_at) VALUES('old','1',10342,?1,'prepared',1)",["a".repeat(64)])?;Ok(())}).unwrap();
-        }
-        let store = Store::open_existing(&root).unwrap();
-        let records = store.call_action_records("a", "old").unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(records[0].encrypted_request.is_none());
-        store.recover_call_sessions("a").unwrap();
-        let record = store.call_action_records("a", "old").unwrap().remove(0);
-        assert_eq!(record.outcome, "needs_review");
-        assert!(record.encrypted_request.is_none());
-        assert!(!store.begin_call("a", "new", "new-generation").unwrap());
-    }
-    #[test]
-    fn received_receipt_is_immutable_and_local_cleanup_cannot_claim_terminal() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(&tmp.path().join("data")).unwrap();
-        store.create_account("a").unwrap();
-        store.begin_call("a", "call", "generation").unwrap();
-        store
-            .begin_call_action("a", "call", "auth", 7994, &"a".repeat(64), &[1; 30])
-            .unwrap();
-        store
-            .finish_call_action(
-                "a",
-                "call",
-                "auth",
-                "received",
-                Some(b"synthetic-sealed-reply"),
-            )
-            .unwrap();
-        assert!(store
-            .finish_call_action("a", "call", "auth", "needs_review", None)
-            .is_err());
-        store.finish_call("a", "call", false).unwrap();
-        assert!(store.has_unresolved_call("a").unwrap());
+
+        store.finish_call("a", "c", true).unwrap();
+        assert!(store.begin_call("a", "next", "generation2").unwrap());
     }
     #[test]
     fn proven_non_submission_preserves_intent_and_never_reuses_the_action() {
@@ -308,6 +258,29 @@ mod tests {
         assert!(store
             .begin_call_action("a", "call", "2", 11421, &"b".repeat(64), &request)
             .unwrap());
+        store
+            .begin_call_action("a", "call", "received", 11421, &"d".repeat(64), &request)
+            .unwrap();
+        store
+            .finish_call_action(
+                "a",
+                "call",
+                "received",
+                "received",
+                Some(b"synthetic-sealed-reply"),
+            )
+            .unwrap();
+        store
+            .finish_call_action("a", "call", "2", "needs_review", None)
+            .unwrap();
+        for action in ["2", "received", "missing"] {
+            assert!(store
+                .finish_call_action_not_submitted("a", "call", action)
+                .is_err());
+        }
+        assert!(store
+            .begin_call_action("a", "call", "cleanup", 11421, &"e".repeat(64), &request)
+            .is_err());
         assert!(!store.begin_call("a", "another", "generation").unwrap());
         drop(store);
 
@@ -321,96 +294,72 @@ mod tests {
             .is_err());
     }
     #[test]
-    fn non_submission_cannot_clear_another_unknown_or_replace_a_recorded_outcome() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(&tmp.path().join("data")).unwrap();
-        store.create_account("a").unwrap();
-        store.begin_call("a", "call", "generation").unwrap();
-        for action in ["unknown", "unsent", "received"] {
+    fn legacy_migrations_preserve_evidence_and_never_fabricate_request_context() {
+        for version in [9, 10] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("data");
+            {
+                let store = Store::open(&root).unwrap();
+                store.create_account("a").unwrap();
+                store.control("a", |db| {
+                    db.execute_batch("DROP TABLE call_actions; DROP TABLE call_sessions;")?;
+                    db.execute_batch(include_str!("../migrations/account/V009__call_actions.sql"))?;
+                    if version == 10 {
+                        db.execute_batch(include_str!("../migrations/account/V010__call_request_context.sql"))?;
+                    }
+                    db.execute("INSERT INTO call_sessions VALUES('old','generation','active',1)", [])?;
+                    db.execute("INSERT INTO call_actions(rowid,call_id,action_id,route,request_digest,outcome,encrypted_reply,updated_at) VALUES(4,'old','first',9262,?1,'prepared',NULL,1)", ["a".repeat(64)])?;
+                    db.execute("INSERT INTO call_actions(rowid,call_id,action_id,route,request_digest,outcome,encrypted_reply,updated_at) VALUES(42,'old','last',11421,?1,'received',?2,2)", params!["b".repeat(64), &[2_u8; 30][..]])?;
+                    if version == 10 {
+                        db.execute("UPDATE call_actions SET encrypted_request=?1 WHERE action_id='last'", [&[1_u8; 30][..]])?;
+                    }
+                    db.pragma_update(None, "user_version", version)?;
+                    Ok(())
+                }).unwrap();
+            }
+            let store = Store::open_existing(&root).unwrap();
+            let records = store.call_action_records("a", "old").unwrap();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].action_id, "first");
+            assert!(records[0].encrypted_request.is_none());
+            assert!(records[0].encrypted_reply.is_none());
+            assert_eq!(records[1].action_id, "last");
+            assert_eq!(
+                records[1].encrypted_request.as_deref(),
+                (version == 10).then_some([1; 30].as_slice())
+            );
+            assert_eq!(
+                records[1].encrypted_reply.as_deref(),
+                Some([2; 30].as_slice())
+            );
             store
-                .begin_call_action("a", "call", action, 11421, &"a".repeat(64), &[1; 30])
+                .control("a", |db| {
+                    assert_eq!(
+                        db.pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))?,
+                        11
+                    );
+                    let rows = db
+                        .prepare("SELECT rowid FROM call_actions ORDER BY rowid")?
+                        .query_map([], |r| r.get::<_, u64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert_eq!(rows, [4, 42]);
+                    assert!(db
+                        .prepare("PRAGMA foreign_key_check")?
+                        .query([])?
+                        .next()?
+                        .is_none());
+                    Ok(())
+                })
                 .unwrap();
-        }
-        store
-            .finish_call_action(
-                "a",
-                "call",
-                "received",
-                "received",
-                Some(b"synthetic-sealed-reply"),
-            )
-            .unwrap();
-        store
-            .finish_call_action("a", "call", "unknown", "needs_review", None)
-            .unwrap();
-        store
-            .finish_call_action_not_submitted("a", "call", "unsent")
-            .unwrap();
-        for action in ["unknown", "received", "missing"] {
+            store.recover_call_sessions("a").unwrap();
+            let records = store.call_action_records("a", "old").unwrap();
+            assert_eq!(records[0].outcome, "needs_review");
+            assert!(records[0].encrypted_request.is_none());
+            assert_eq!(records[1].outcome, "received");
+            assert!(!store.begin_call("a", "new", "new-generation").unwrap());
             assert!(store
-                .finish_call_action_not_submitted("a", "call", action)
+                .finish_call_action_not_submitted("a", "old", "first")
                 .is_err());
         }
-        assert!(store
-            .begin_call_action("a", "call", "cleanup", 11421, &"b".repeat(64), &[1; 30])
-            .is_err());
-        assert!(!store.begin_call("a", "another", "generation").unwrap());
-        assert!(store.has_unresolved_call("a").unwrap());
-    }
-    #[test]
-    fn v10_migration_retains_row_order_and_nullable_encrypted_evidence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("data");
-        {
-            let store = Store::open(&root).unwrap();
-            store.create_account("a").unwrap();
-            store.control("a", |db| {
-                db.execute_batch("DROP TABLE call_actions; DROP TABLE call_sessions;")?;
-                db.execute_batch(include_str!("../migrations/account/V009__call_actions.sql"))?;
-                db.execute_batch(include_str!("../migrations/account/V010__call_request_context.sql"))?;
-                db.execute("INSERT INTO call_sessions VALUES('old','generation','active',1)", [])?;
-                db.execute("INSERT INTO call_actions(rowid,call_id,action_id,route,request_digest,outcome,encrypted_reply,updated_at,encrypted_request) VALUES(4,'old','first',9262,?1,'prepared',NULL,1,NULL)", ["a".repeat(64)])?;
-                db.execute("INSERT INTO call_actions(rowid,call_id,action_id,route,request_digest,outcome,encrypted_reply,updated_at,encrypted_request) VALUES(42,'old','last',11421,?1,'received',?2,2,?3)", params!["b".repeat(64), &[2_u8; 30][..], &[1_u8; 30][..]])?;
-                Ok(())
-            }).unwrap();
-        }
-        let store = Store::open_existing(&root).unwrap();
-        let records = store.call_action_records("a", "old").unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].action_id, "first");
-        assert!(records[0].encrypted_request.is_none());
-        assert!(records[0].encrypted_reply.is_none());
-        assert_eq!(records[1].action_id, "last");
-        assert_eq!(
-            records[1].encrypted_request.as_deref(),
-            Some([1; 30].as_slice())
-        );
-        assert_eq!(
-            records[1].encrypted_reply.as_deref(),
-            Some([2; 30].as_slice())
-        );
-        store
-            .control("a", |db| {
-                let version: u32 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-                assert_eq!(version, 11);
-                let rows = db
-                    .prepare("SELECT rowid FROM call_actions ORDER BY rowid")?
-                    .query_map([], |r| r.get::<_, u64>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                assert_eq!(rows, [4, 42]);
-                assert!(db
-                    .prepare("PRAGMA foreign_key_check")?
-                    .query([])?
-                    .next()?
-                    .is_none());
-                Ok(())
-            })
-            .unwrap();
-        store
-            .finish_call_action_not_submitted("a", "old", "first")
-            .unwrap();
-        assert!(store
-            .finish_call_action_not_submitted("a", "old", "last")
-            .is_err());
     }
 }

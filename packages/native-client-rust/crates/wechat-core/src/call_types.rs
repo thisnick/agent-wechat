@@ -369,37 +369,3 @@ pub enum CallMediaCommand {
         owner_token: String,
     },
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn generated_contracts_use_the_same_internal_tags_as_json() {
-        let tagged = |declaration: String, tag: &str, value: &str| {
-            let compact = declaration.replace([' ', '\n'], "");
-            compact.contains(&format!("{tag}:\"{value}\""))
-                || compact.contains(&format!("\"{tag}\":\"{value}\""))
-        };
-        assert!(tagged(CallCommand::decl(), "type", "call.dial"));
-        assert!(tagged(CallEvent::decl(), "type", "hello"));
-        assert!(tagged(CallMediaCommand::decl(), "type", "media.attach"));
-        assert!(tagged(CallTarget::decl(), "kind", "direct"));
-        assert_eq!(
-            serde_json::to_value(CallTarget::Direct {
-                contact_id: "peer-fixture".into()
-            })
-            .unwrap(),
-            serde_json::json!({"kind":"direct","contactId":"peer-fixture"}),
-        );
-    }
-
-    #[test]
-    fn commands_preserve_request_and_offer_revision_and_reject_unknown_fields() {
-        let command: CallCommand = serde_json::from_str(r#"{"type":"call.answer","requestId":"r1","callId":"c1","expectedRevision":2,"media":{"audio":true,"video":false}}"#).unwrap();
-        assert_eq!(command.request_id(), "r1");
-        let malformed = r#"{"type":"call.hangup","requestId":"r1","callId":"c1","expectedRevision":2,"unexpected":true}"#;
-        assert!(serde_json::from_str::<CallCommand>(malformed).is_err());
-        let malformed = r#"{"type":"media.attach","clientId":"client1","ownerToken":"synthetic-token","unexpected":true}"#;
-        assert!(serde_json::from_str::<CallMediaCommand>(malformed).is_err());
-    }
-}

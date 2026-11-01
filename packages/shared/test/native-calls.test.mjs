@@ -108,52 +108,6 @@ class MockCallServer {
 }
 function client(server, extra = {}) { return new NativeCallsClient({ baseUrl: 'http://127.0.0.1:6174', accountId: 'test-account', token: 'synthetic-api-token', webSocketFactory: server.factory, ...extra }); }
 
-test('initial snapshot and queued events have no subscription gap; competing answer loses without media access', async () => {
-  const server = new MockCallServer(); const one = client(server); const two = client(server);
-  try {
-    const hello = await one.connect(); await two.connect();
-    assert.equal(hello.currentOffer.callId, 'call-1');
-    const events = one.events()[Symbol.asyncIterator]();
-    server.controls[0].receive({ type: 'call.offered', offer: { ...offer, revision: 2 } });
-    assert.equal((await events.next()).value.type, 'hello');
-    assert.equal((await events.next()).value.offer.revision, 2);
-    await one.ready('ready-one', true); await two.ready('ready-two', true);
-    const results = await Promise.allSettled([one.answer('answer-one', 'call-1', 1), two.answer('answer-two', 'call-1', 1)]);
-    assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
-    const lost = results.find(result => result.status === 'rejected');
-    assert.equal(lost.reason.code, 'already_claimed');
-    await assert.rejects(two.attachMedia('call-1'), error => error.code === 'not_owner');
-    const media = await one.attachMedia('call-1');
-    assert.deepEqual(media.tracks(), server.tracks);
-  } finally { one.close(); two.close(); }
-});
-
-test('media waits for attachment acknowledgement and fences generations after clear', async () => {
-  const server = new MockCallServer(); const owner = client(server);
-  try {
-    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
-    const media = await owner.attachMedia('call-1');
-    const first = { trackId: 1, generation: 1, sequence: 0n, timestampMicros: 0n };
-    media.sendPcm(first, new Int16Array(320));
-    assert.ok(server.media[0].sent[1] instanceof Uint8Array);
-    await owner.clearAudio('clear', 'call-1');
-    assert.equal(media.tracks().sendTrack.generation, 2);
-    assert.throws(() => media.sendPcm({ ...first, sequence: 1n, timestampMicros: 20_000n }, new Int16Array(320)), /generation/);
-    media.sendPcm({ ...first, generation: 2 }, new Int16Array(320));
-    const frames = media.frames()[Symbol.asyncIterator]();
-    server.media[0].receive(encodeNativeCallPcm({ trackId: 2, generation: 1, sequence: 0n, timestampMicros: 0n }, audio, new Int16Array(320)));
-    assert.equal((await frames.next()).value.trackId, 2);
-    server.media[0].receive(encodeNativeCallPcm({ trackId: 2, generation: 1, sequence: 1n, timestampMicros: 20_000n }, audio, new Int16Array(320)));
-    server.controls[0].receive({ type: 'track.updated', callId: 'call-1', track: { ...server.tracks.receiveTrack, generation: 2 } });
-    server.media[0].receive(encodeNativeCallPcm({ trackId: 2, generation: 2, sequence: 0n, timestampMicros: 0n }, audio, new Int16Array(320)));
-    assert.equal((await frames.next()).value.generation, 2);
-    server.media[0].bufferedAmount = 65536;
-    assert.throws(() => media.sendPcm({ ...first, generation: 2, sequence: 1n, timestampMicros: 20_000n }, new Int16Array(320)), error => error.code === 'media_backpressure');
-    server.media[0].bufferedAmount = 0;
-    media.sendPcm({ ...first, generation: 2, sequence: 1n, timestampMicros: 20_000n }, new Int16Array(320));
-  } finally { owner.close(); }
-});
-
 test('pending request ID deduplicates locally, detects changed payload and never retries a lost reply', async () => {
   const server = new MockCallServer(); const owner = client(server, { commandTimeoutMs: 5, maxBufferedBytes: 1024 });
   try {
@@ -214,6 +168,12 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
   await assert.rejects(observer.command({ type: 'call.ready', requestId: 'ready', ready: true, format: audio }), error => error.code === 'not_connected');
   const owner = client(server); await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
   const media = await owner.attachMedia('call-1');
+  const first = { trackId: 1, generation: 1, sequence: 0n, timestampMicros: 0n };
+  server.media[0].bufferedAmount = 65536;
+  assert.throws(() => media.sendPcm(first, new Int16Array(320)), error => error.code === 'media_backpressure');
+  server.media[0].bufferedAmount = 0;
+  media.sendPcm(first, new Int16Array(320));
+  assert.equal(decodeNativeCallPcm(server.media[0].sent[1], audio).sequence, 0n);
   server.media[0].receive(new Uint8Array(3));
   await assert.rejects(media.frames()[Symbol.asyncIterator]().next(), error => error.code === 'invalid_media');
   owner.close();

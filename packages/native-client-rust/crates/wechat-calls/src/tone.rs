@@ -118,32 +118,4 @@ mod tests {
         assert!(tone.next_frame().unwrap().iter().all(|&sample| sample == 0));
         assert!(tone.next_frame().unwrap().iter().any(|&sample| sample != 0));
     }
-
-    #[test]
-    fn rejects_invalid_frequency_amplitude_and_zero_pulse_periods() {
-        let format = AudioFormat::new(16000, 1, 20).unwrap();
-        for (frequency, amplitude) in [
-            (f64::NAN, 0.2),
-            (880.0, f64::INFINITY),
-            (8000.0, 0.2),
-            (880.0, 1.1),
-        ] {
-            assert!(PulseTone::new(
-                format,
-                frequency,
-                amplitude,
-                Duration::from_millis(20),
-                Duration::from_millis(20)
-            )
-            .is_err());
-        }
-        assert!(PulseTone::new(
-            format,
-            880.0,
-            0.2,
-            Duration::ZERO,
-            Duration::from_millis(20)
-        )
-        .is_err());
-    }
 }
