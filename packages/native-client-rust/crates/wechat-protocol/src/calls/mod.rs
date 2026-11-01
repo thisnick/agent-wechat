@@ -4,6 +4,9 @@
 //! codecs have no socket, account, capture-device or call-session integration.
 //! Live negotiation, key lifecycle and peer interoperability remain unverified.
 
+pub mod app_session;
 pub mod channel;
+pub mod host_policy;
 pub mod incoming;
+pub mod personal;
 pub mod signaling;

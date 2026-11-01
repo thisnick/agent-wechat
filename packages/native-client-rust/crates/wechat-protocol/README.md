@@ -109,7 +109,9 @@ See [FEATURES.md](../../FEATURES.md) for the current validation record.
 ## Experimental call codecs
 
 The opt-in Rust feature `experimental-calls` exposes offline signaling and
-incoming notification envelopes and relay packet codecs under `calls`. It does
+incoming notification envelopes, personal Invite/Cancel/LiveSync codecs, selected
+app-session negotiation and relay packet codecs under `calls`. These prepare and
+validate owned bytes with account-generation bindings. The feature does
 not enable voice or video calls.
 There is no call transport, codec negotiation, microphone/camera access or
 `NativeClient` call method. Keys, media framing and session lifetimes must be
