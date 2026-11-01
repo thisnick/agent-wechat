@@ -168,7 +168,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-14, windows-latest]
+        runner: [ubuntu-24.04, macos-15, windows-latest]
     defaults:
       run:
         working-directory: packages/native-client-rust

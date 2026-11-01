@@ -579,7 +579,7 @@ impl CallService {
     }
     /// Record only the source-verified current own member after authenticated
     /// ACK/Join admission. Original invitation and receipt bytes remain intact.
-    #[cfg(any(feature = "native-calls", test))]
+    #[cfg(feature = "native-calls")]
     pub(crate) fn set_incoming_member(
         &self,
         authority: &AccountAuthority,
