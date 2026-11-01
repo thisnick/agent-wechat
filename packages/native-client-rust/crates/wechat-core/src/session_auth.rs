@@ -2,9 +2,9 @@ use super::*;
 use std::future::Future;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct SessionFence {
-    pub(super) authorization: [u8; 32],
-    pub(super) logout_epoch: Option<Vec<u8>>,
+pub(crate) struct SessionFence {
+    pub(crate) authorization: [u8; 32],
+    pub(crate) logout_epoch: Option<Vec<u8>>,
 }
 
 pub(super) fn authentication_required(error: &anyhow::Error) -> bool {
@@ -22,7 +22,7 @@ impl Core {
         })
     }
 
-    pub(super) fn session_state(
+    pub(crate) fn session_state(
         &self,
         account: &str,
         fence: &SessionFence,
@@ -37,7 +37,7 @@ impl Core {
     }
 
     /// Commit a response only to the exact credential state that issued it.
-    pub(super) fn save_network_state(
+    pub(crate) fn save_network_state(
         &self,
         account: &str,
         state: &AccountState,

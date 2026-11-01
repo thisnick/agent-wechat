@@ -186,6 +186,46 @@ impl BackendSink {
         };
         service.ticket_current(&s, &self.ticket)
     }
+    /// A pre-media Answer can lose its original controller while Join is in
+    /// flight. This identifies that narrow cleanup case; generic uncertainty
+    /// or a stale ticket does not grant another remote operation.
+    #[cfg(feature = "native-calls")]
+    pub(crate) fn lost_incoming_answer_owner(&self) -> bool {
+        let Some(service) = self.service.upgrade() else {
+            return false;
+        };
+        let Ok(s) = service.lock() else {
+            return false;
+        };
+        if self.ticket.operation() != Operation::Answer
+            || !s.ownership.pending_ticket_matches(&self.ticket)
+        {
+            return false;
+        }
+        let Some(call) = s.call.as_ref().filter(|call| {
+            call.identity == self.ticket.identity()
+                && &call.authority == self.ticket.authority()
+                && call.direction == CallDirection::Incoming
+                && call.state == CallState::Connecting
+                && !call.revoked
+                && !call.cancellation_requested
+        }) else {
+            return false;
+        };
+        let Some(owner) = call.owner.as_ref() else {
+            return false;
+        };
+        let disconnected = match s.clients.get(owner) {
+            Some(peer) => peer.authority == call.authority && peer.events.is_closed(),
+            None => true,
+        };
+        disconnected
+            && service
+                .backend
+                .authority(&call.authority.account_id)
+                .as_ref()
+                == Some(&call.authority)
+    }
     /// Admission for the current owner's exact accepted terminal action.
     /// Owner-loss cleanup uses its separately verified native context instead.
     pub fn is_terminal_current(&self) -> bool {

@@ -623,7 +623,28 @@ impl Actor {
                     }
                     return Err(error);
                 }
-                self.register_member()?;
+                if let Err(error) = self.register_member() {
+                    let stale_binding = error
+                        .downcast_ref::<CallServiceError>()
+                        .is_some_and(|error| error.0 == CallErrorCode::Stale);
+                    if stale_binding
+                        && self.phase() == IncomingPhase::Joined
+                        && self.worker.lease.current()
+                        && self
+                            .sink
+                            .as_ref()
+                            .is_some_and(BackendSink::lost_incoming_answer_owner)
+                    {
+                        // Join is already accepted, but its original controller
+                        // disappeared before any media was admitted. Clean up
+                        // once instead of reviving it through the normal owner
+                        // grace period. Established calls keep their own grace.
+                        self.worker.media_stop.store(true, Ordering::Release);
+                        self.exit()?;
+                        return Ok(BackendOutcome::Ended);
+                    }
+                    return Err(error);
+                }
                 self.joined_deadline = Some(Instant::now() + self.inner.config.max_duration);
                 Ok(BackendOutcome::Admitted)
             }

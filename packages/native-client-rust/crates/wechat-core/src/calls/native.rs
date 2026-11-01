@@ -58,7 +58,11 @@ use wechat_protocol::NativeOptions;
 
 mod incoming;
 mod rtp_order;
+mod transport_state;
+#[cfg(test)]
+mod transport_tests;
 use rtp_order::RtpOrder;
+use transport_state::CallNetworkState;
 
 type BackendFuture<T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, CallServiceError>> + Send + 'static>>;
@@ -569,6 +573,67 @@ impl FencedTransport {
             && scope_current(self.scope_deadline, self.scope_expires_unix_ms)
     }
 }
+impl FencedTransport {
+    /// Operational evidence is independent of account-state adoption. In
+    /// particular a valid reply survives a later writer/authority failure.
+    fn retain_host_result(
+        &self,
+        core: &Core,
+        action: &str,
+        route: CallHostRoute,
+        result: &Result<Vec<u8>>,
+        handed_off: bool,
+    ) -> Result<()> {
+        match result {
+            Ok(reply) => {
+                let label = format!("call-reply:{}:{action}", self.call_id);
+                let encrypted = core.vault.seal(&self.account, &label, reply)?;
+                core.store.finish_call_action(
+                    &self.account,
+                    &self.call_id,
+                    action,
+                    "received",
+                    Some(&encrypted),
+                )?;
+                Ok(())
+            }
+            Err(error) => {
+                let local_stop = error.is::<CallRpcNotSubmitted>() && !handed_off;
+                if local_stop {
+                    core.store.put_runtime(&self.account,&format!("call-host-diagnostic:{}:{action}",self.call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"admission_revoked","mayHaveSubmitted":false}))?)?;
+                }
+                if let Some(error) =
+                    error.downcast_ref::<wechat_protocol::calls::host_transport::CallHostRpcError>()
+                {
+                    let diagnostic = serde_json::to_vec(
+                        &serde_json::json!({"cgi":route.command(),"stage":error.stage.as_str(),"code":error.code,"value":error.value,"mayHaveSubmitted":handed_off || error.may_have_submitted()}),
+                    )?;
+                    core.store.put_runtime(
+                        &self.account,
+                        &format!("call-host-diagnostic:{}:{action}", self.call_id),
+                        &diagnostic,
+                    )?;
+                }
+                if local_stop {
+                    core.store.finish_call_action_not_submitted(
+                        &self.account,
+                        &self.call_id,
+                        action,
+                    )?;
+                    return Ok(());
+                }
+                core.store.finish_call_action(
+                    &self.account,
+                    &self.call_id,
+                    action,
+                    "needs_review",
+                    None,
+                )?;
+                Ok(())
+            }
+        }
+    }
+}
 impl PersonalTransport for FencedTransport {
     fn call_rpc(
         &self,
@@ -577,11 +642,10 @@ impl PersonalTransport for FencedTransport {
         request: &[u8],
     ) -> Result<Vec<u8>> {
         let core = self.core.upgrade().context("Call core closed")?;
-        let _guard = self.runtime.block_on(core.lock_account(&self.account))?;
-        ensure!(
-            self.lease.current() && !core.stopping.load(Ordering::Acquire),
-            "Call account authority revoked"
-        );
+        let guard = self.runtime.block_on(core.lock_account(&self.account))?;
+        if !self.lease.current() || core.stopping.load(Ordering::Acquire) {
+            return Err(CallRpcNotSubmitted.into());
+        }
         let teardown = is_teardown_request(route, request)?;
         let rejecting = is_reject_request(route, request)?;
         if !self.admits(teardown, rejecting) {
@@ -592,9 +656,11 @@ impl PersonalTransport for FencedTransport {
             authorization(&latest)? == authorization(state)?,
             "Call accepted credentials changed"
         );
-        *state = latest;
+        let snapshot = CallNetworkState::capture(&core, &self.account, &self.lease, &latest)?;
+        *state = latest.clone();
+        let mut exchanged = latest;
         ensure!(
-            selected_policy(&state.auth_snapshot, route.command())? == CallHostPolicy::Ordinary,
+            selected_policy(&exchanged.auth_snapshot, route.command())? == CallHostPolicy::Ordinary,
             "Selected call host route unsupported"
         );
         #[cfg(not(test))]
@@ -625,14 +691,18 @@ impl PersonalTransport for FencedTransport {
             )?,
             "Call action already spent"
         );
+        // The account writer is not a network-lifetime lock. A fresh owner or
+        // account change can now be accepted while this one exchange waits.
+        drop(guard);
+        let handed_off = AtomicBool::new(false);
         let handoff = || {
-            ensure!(
-                self.lease.current() && !core.stopping.load(Ordering::Acquire),
-                "Call account authority revoked before submission"
-            );
+            if !self.lease.current() || core.stopping.load(Ordering::Acquire) {
+                return Err(CallRpcNotSubmitted.into());
+            }
             if !self.admits(teardown, rejecting) {
                 return Err(CallRpcNotSubmitted.into());
             }
+            handed_off.store(true, Ordering::Release);
             if !matches!(route, CallHostRoute::AppAuth | CallHostRoute::LiveSync) {
                 self.worker
                     .mutations_submitted
@@ -646,66 +716,30 @@ impl PersonalTransport for FencedTransport {
             let mut handoff = handoff;
             self.test_io
                 .as_ref()
-                .context("Missing synthetic call host")?
-                .call(state, route, request, &mut handoff)
+                .context("Missing synthetic call host")
+                .and_then(|io| io.call(&mut exchanged, route, request, &mut handoff))
         };
         #[cfg(not(test))]
-        let result = native.experimental_call_rpc_guarded(state, route, request, handoff);
+        let result = native.experimental_call_rpc_guarded(&mut exchanged, route, request, handoff);
+        // Retain the response before trying to reacquire: a poisoned/closed
+        // writer must not discard an authenticated reply. These are operational
+        // sealed receipts, never account/profile state or mutation permission.
+        let handed_off = handed_off.load(Ordering::Acquire);
+        let retained = self.retain_host_result(&core, &action, route, &result, handed_off);
+        let reacquired = self.runtime.block_on(core.lock_account(&self.account));
+        retained?;
+        let _guard = reacquired?;
         match result {
             Ok(reply) => {
-                let label = format!("call-reply:{}:{action}", self.call_id);
-                let encrypted = core.vault.seal(&self.account, &label, &reply)?;
-                core.store.finish_call_action(
-                    &self.account,
-                    &self.call_id,
-                    &action,
-                    "received",
-                    Some(&encrypted),
-                )?;
-                ensure!(
-                    self.lease.current(),
-                    "Call authority changed during host operation"
-                );
-                core.save_state(&self.account, state)?;
+                *state = snapshot.accept(&core, &self.account, &self.lease, &exchanged)?;
                 Ok(reply)
             }
-            Err(error) => {
-                let local_stop = error.is::<CallRpcNotSubmitted>();
-                if local_stop {
-                    core.store.put_runtime(&self.account,&format!("call-host-diagnostic:{}:{action}",self.call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"admission_revoked","mayHaveSubmitted":false}))?)?;
-                }
-                if let Some(error) =
-                    error.downcast_ref::<wechat_protocol::calls::host_transport::CallHostRpcError>()
-                {
-                    let diagnostic = serde_json::to_vec(
-                        &serde_json::json!({"cgi":route.command(),"stage":error.stage.as_str(),"code":error.code,"value":error.value,"mayHaveSubmitted":error.may_have_submitted()}),
-                    )?;
-                    core.store.put_runtime(
-                        &self.account,
-                        &format!("call-host-diagnostic:{}:{action}", self.call_id),
-                        &diagnostic,
-                    )?;
-                }
-                if local_stop {
-                    core.store.finish_call_action_not_submitted(
-                        &self.account,
-                        &self.call_id,
-                        &action,
-                    )?;
-                    return Err(error);
-                }
-                core.store.finish_call_action(
-                    &self.account,
-                    &self.call_id,
-                    &action,
-                    "needs_review",
-                    None,
-                )?;
-                bail!("Call host outcome unknown")
-            }
+            Err(error) if error.is::<CallRpcNotSubmitted>() && !handed_off => Err(error),
+            Err(_) => bail!("Call host outcome unknown"),
         }
     }
 }
+
 struct Tasks {
     host: u32,
     sdk: u32,

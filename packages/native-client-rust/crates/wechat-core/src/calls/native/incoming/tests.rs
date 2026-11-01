@@ -28,6 +28,8 @@ enum Case {
     HoldReject,
     HoldChangedAck,
     HoldPreAuth,
+    HoldJoinReply,
+    LostOwnerExit,
 }
 struct Gate {
     released: Mutex<bool>,
@@ -58,6 +60,7 @@ struct Host {
     routes: Mutex<Vec<(CallHostRoute, Option<u32>)>>,
     gate: Gate,
     sync_held: AtomicBool,
+    exit_members: Mutex<Vec<u32>>,
 }
 impl Host {
     fn new(case: Case) -> Arc<Self> {
@@ -65,6 +68,7 @@ impl Host {
             case,
             routes: Mutex::new(vec![]),
             sync_held: AtomicBool::new(false),
+            exit_members: Mutex::new(vec![]),
             gate: Gate {
                 released: Mutex::new(false),
                 changed: Condvar::new(),
@@ -130,6 +134,25 @@ impl TestCallIo for Host {
         }
         handoff()?;
         self.routes.lock().unwrap().push((route, command));
+        if route == CallHostRoute::Transfer
+            && command == Some(3361)
+            && matches!(self.case, Case::HoldJoinReply | Case::LostOwnerExit)
+        {
+            self.gate.wait()?;
+        }
+        if route == CallHostRoute::Transfer && command == Some(3380) {
+            let frame = TaskFrame::decode(p::data(&fields, 5)?, 3380)?;
+            let clear = wechat_protocol::calls::app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
+            let cloud = p::decode(&clear)?;
+            let exit = p::decode(p::data(&cloud, 2)?)?;
+            self.exit_members
+                .lock()
+                .unwrap()
+                .push(u32::try_from(p::scalar(&exit, 5)?)?);
+            if matches!(self.case, Case::LostOwnerExit) {
+                bail!("Synthetic missing Exit receipt");
+            }
+        }
         state.cookie = vec![route.command() as u8];
         match route {
             CallHostRoute::AppAuth => {
@@ -964,4 +987,150 @@ async fn unknown_cancel_fields_fence_even_a_foreign_member() {
         .conference
         .unknown_fields = p::decode(&p::uint(99, 1)).unwrap();
     assert!(mailbox.fences_submission(&note));
+}
+
+#[derive(Clone, Copy)]
+enum JoinReplyChange {
+    Disconnect,
+    DisconnectAndFence,
+    Uncertain,
+    UncertainThenDisconnect,
+}
+
+async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
+    let f = Fixture::new(case);
+    let mut client = f.client().await;
+    let mut observer = f
+        .core
+        .call_service()
+        .connect("one", "observer", false)
+        .await
+        .unwrap();
+    f.stage(false, 0);
+    let offer = f.offer().await;
+    f.core
+        .call_service()
+        .command(
+            &client.client_id,
+            CallCommand::Answer {
+                request_id: "answer".into(),
+                call_id: offer.call_id.clone(),
+                expected_revision: offer.revision,
+                media: CallMedia::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut client, "answer").await,
+        CallCommandStatus::Accepted
+    );
+    tokio::time::timeout(Duration::from_secs(2), f.host.gate.entered.notified())
+        .await
+        .unwrap();
+    let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
+    assert!(f
+        .host
+        .seen()
+        .iter()
+        .any(|(_, command)| *command == Some(3361)));
+    if matches!(
+        change,
+        JoinReplyChange::Uncertain | JoinReplyChange::UncertainThenDisconnect
+    ) {
+        f.core
+            .call_service()
+            .incoming_uncertain(worker.lease.authority(), &worker.identity)
+            .unwrap();
+    }
+    if !matches!(change, JoinReplyChange::Uncertain) {
+        f.core.call_service().disconnect(&client.client_id).await;
+    }
+    if matches!(change, JoinReplyChange::DisconnectAndFence) {
+        f.core.fence_call_authority("one");
+    }
+    f.host.gate.release();
+    f.finished().await;
+    let cleanup = matches!(change, JoinReplyChange::Disconnect);
+    let confirmed = cleanup && !matches!(case, Case::LostOwnerExit);
+    let outcome = *worker.done.lock().unwrap();
+    assert!(if confirmed {
+        matches!(outcome, Some(BackendOutcome::Ended))
+    } else {
+        matches!(outcome, Some(BackendOutcome::Uncertain))
+    });
+    assert_eq!(f.snapshot().await.availability.busy, !confirmed);
+    let seen = f.host.seen();
+    assert_eq!(
+        seen.iter()
+            .filter(|(_, operation)| *operation == Some(3361))
+            .count(),
+        1
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|(_, operation)| *operation == Some(3380))
+            .count(),
+        usize::from(cleanup)
+    );
+    assert_eq!(
+        f.host.exit_members.lock().unwrap().as_slice(),
+        if cleanup { &[3][..] } else { &[][..] }
+    );
+    assert_eq!(
+        worker.metrics.rx_delivered_frames.load(Ordering::Acquire),
+        0
+    );
+    assert_eq!(
+        worker
+            .metrics
+            .tx_submitted_datagrams
+            .load(Ordering::Acquire),
+        0
+    );
+    assert_eq!(worker.metrics.tx_enqueued_frames.load(Ordering::Acquire), 0);
+    while let Ok(event) = observer.events.try_recv() {
+        assert!(!matches!(&event, CallEvent::State { call } if call.state == CallState::Connected));
+        assert!(!matches!(event, CallEvent::TrackAdded { .. }));
+    }
+    let records = f
+        .core
+        .store
+        .call_action_records("one", &offer.call_id)
+        .unwrap();
+    assert!(records
+        .iter()
+        .any(|record| record.route == 11421 && record.encrypted_reply.is_some()));
+    assert_eq!(f.core.store.has_unresolved_call("one").unwrap(), !confirmed);
+}
+
+#[tokio::test]
+async fn owner_disconnect_after_join_handoff_exits_once_with_returned_member() {
+    // This pre-media in-flight Answer exception does not change established
+    // calls' normal disconnect grace or create a controller that can resume it.
+    held_join_reply_change(Case::HoldJoinReply, JoinReplyChange::Disconnect).await;
+}
+
+#[tokio::test]
+async fn lost_owner_cleanup_failure_keeps_unknown_without_retry() {
+    held_join_reply_change(Case::LostOwnerExit, JoinReplyChange::Disconnect).await;
+}
+
+#[tokio::test]
+async fn owner_disconnect_and_revoked_authority_never_submits_cleanup() {
+    held_join_reply_change(Case::HoldJoinReply, JoinReplyChange::DisconnectAndFence).await;
+}
+
+#[tokio::test]
+async fn same_authority_uncertainty_without_owner_loss_never_submits_cleanup() {
+    held_join_reply_change(Case::HoldJoinReply, JoinReplyChange::Uncertain).await;
+}
+
+#[tokio::test]
+async fn later_owner_loss_does_not_clear_preexisting_uncertainty() {
+    held_join_reply_change(
+        Case::HoldJoinReply,
+        JoinReplyChange::UncertainThenDisconnect,
+    )
+    .await;
 }

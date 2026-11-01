@@ -37,7 +37,8 @@ mod read_sync;
 mod saved_login;
 #[path = "session_auth.rs"]
 mod session_auth;
-use session_auth::{authentication_required, SessionFence};
+use session_auth::authentication_required;
+pub(crate) use session_auth::SessionFence;
 #[path = "status_control.rs"]
 mod status_control;
 #[path = "system_control.rs"]

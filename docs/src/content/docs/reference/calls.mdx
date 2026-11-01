@@ -44,7 +44,8 @@ the server emits `call.offered`.
 The first successful `call.answer` owns an incoming call. `call.dial` gives
 ownership to its initiating client. Other clients see busy state and cannot start
 another call. The owner attaches its separate media socket using the returned
-owner token; observers receive no audio. Stale offer revisions and owner tokens
+owner token; observers receive no audio. Keep the owning control socket connected;
+reconnecting does not reclaim ownership. Stale offer revisions and owner tokens
 are rejected. An uncertain result must be inspected rather than dialed again.
 An accepted end command starts termination. Keep both sockets open until the
 terminal state arrives; losing confirmation leaves the outcome unknown.
