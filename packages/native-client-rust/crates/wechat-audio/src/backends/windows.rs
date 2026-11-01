@@ -55,7 +55,7 @@ impl Backend {
         };
         let mut input = input_device.get_iaudioclient().map_err(error)?;
         let mut output = output_device.get_iaudioclient().map_err(error)?;
-        let desired = WaveFormat::new(32, 32, &SampleType::Float, NATIVE_RATE, 1, None);
+        let desired = WaveFormat::new(32, 32, &SampleType::Float, NATIVE_RATE as usize, 1, None);
         // Require the shared engine conversion to our fixed f32/mono/48k contract.
         // Never reinterpret an unsupported device's native format as this one.
         let input_format = desired.clone();
