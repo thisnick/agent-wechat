@@ -242,7 +242,7 @@
             "maximum": 3600
           }
         },
-        "description": "Optional experimental direct voice using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
+        "description": "Direct voice calling using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
       }
     }
   },
@@ -512,7 +512,7 @@
                 "maximum": 3600
               }
             },
-            "description": "Optional experimental direct voice using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
+            "description": "Direct voice calling using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
           }
         }
       }

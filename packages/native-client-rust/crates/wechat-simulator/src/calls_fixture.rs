@@ -406,17 +406,24 @@ async fn run(root: &Path) -> Result<()> {
     store.create_account(ACCOUNT)?;
     let token_file = root.join("api-token");
     let token = wechat_api::provision_token(&token_file, true)?;
-    let observer_token_file = root.join("observer-token");
-    let observer = wechat_api::provision_token(&observer_token_file, true)?;
+    let calls_token_file = root.join("calls-token");
+    let calls_token = wechat_api::provision_token(&calls_token_file, true)?;
+    let non_calls_token_file = root.join("non-calls-token");
+    let non_calls_token = wechat_api::provision_token(&non_calls_token_file, true)?;
     {
         use sha2::{Digest, Sha256};
-        store.issue_token(
-            "call fixture observer",
-            &format!("{:x}", Sha256::digest(&observer)),
-            &[ACCOUNT.into()],
-            &["calls.observe".into()],
-            None,
-        )?;
+        for (name, token, scope) in [
+            ("call fixture participant", &calls_token, "calls"),
+            ("call fixture non-participant", &non_calls_token, "read"),
+        ] {
+            store.issue_token(
+                name,
+                &format!("{:x}", Sha256::digest(token)),
+                &[ACCOUNT.into()],
+                &[scope.into()],
+                None,
+            )?;
+        }
     }
     let core = Core::with_upstream(store, None, Arc::new(NoNetworkUpstream))?;
     let backend = Arc::new(Backend::new());
@@ -434,7 +441,7 @@ async fn run(root: &Path) -> Result<()> {
     });
     emit(
         &json!({"event":"ready","baseUrl":format!("http://{address}"),"accountId":ACCOUNT,
-        "tokenFile":token_file,"observerTokenFile":observer_token_file}),
+        "tokenFile":token_file,"callsTokenFile":calls_token_file,"nonCallsTokenFile":non_calls_token_file}),
     )?;
     let mut input = BufReader::new(tokio::io::stdin());
     while let Some(line) = input_line(&mut input).await? {

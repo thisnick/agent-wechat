@@ -24,9 +24,12 @@ adds the CLI checks; `WX_BINARY` selects it explicitly. The script starts and
 stops its own fixture and uses a synthetic in-process voice provider.
 
 Run the resulting `wx-calls-fixture` executable with no arguments. Its first
-stdout line is JSON with `event: "ready"`, `baseUrl`, `accountId`, `tokenFile`, and
-`observerTokenFile`. Read a token from its private file and send it in the
-Authorization header. The observer token has only `calls.observe` permission.
+stdout line is JSON with `event: "ready"`, `baseUrl`, `accountId`, `tokenFile`,
+`callsTokenFile`, and `nonCallsTokenFile`. Read a token from its private file and
+send it in the Authorization header. `tokenFile` holds the owner test token;
+`callsTokenFile` has only `calls` permission and supports passive observation and
+participation. `nonCallsTokenFile` has only `read` permission and cannot use the
+call routes.
 Token contents and PCM samples are never printed by the fixture.
 
 Each stdin line is JSON with a nonempty string `id` and an `op`. Responses echo
@@ -60,8 +63,8 @@ stop. It performs no remote operation.
 With the printed values, the actual CLI can observe the same broker:
 
 ```sh
-wx --server "$baseUrl" --account "$accountId" --token-file "$observerTokenFile" calls status
-wx --server "$baseUrl" --account "$accountId" --token-file "$observerTokenFile" calls monitor --json
+wx --server "$baseUrl" --account "$accountId" --token-file "$callsTokenFile" calls status
+wx --server "$baseUrl" --account "$accountId" --token-file "$callsTokenFile" calls monitor --json
 ```
 
 Give automation a private client configuration directory when launching the

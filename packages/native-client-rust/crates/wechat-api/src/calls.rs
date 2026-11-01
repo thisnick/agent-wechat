@@ -56,7 +56,7 @@ async fn current(
     Extension(claims): Extension<Claims>,
     Path(account): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    claims.require(Some(&account), "calls.observe")?;
+    claims.require(Some(&account), "calls")?;
     ensure_current(&app, &claims).await?;
     app.core.store.account(&account)?;
     let snapshot: CallSnapshot = app
@@ -77,7 +77,7 @@ async fn control(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    claims.require(Some(&account), "calls.observe")?;
+    claims.require(Some(&account), "calls")?;
     ensure_current(&app, &claims).await?;
     check_origin(&headers)?;
     app.core.store.account(&account)?;
@@ -94,7 +94,7 @@ async fn media(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    claims.require(Some(&account), "calls.media")?;
+    claims.require(Some(&account), "calls")?;
     ensure_current(&app, &claims).await?;
     check_origin(&headers)?;
     app.core.store.account(&account)?;
@@ -168,7 +168,7 @@ async fn send_event(
 
 async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: String) {
     let service = app.core.call_service();
-    let control_allowed = claims.require(Some(&account), "calls.control").is_ok();
+    let control_allowed = claims.require(Some(&account), "calls").is_ok();
     let Ok(mut connection) = service
         .connect(&account, &principal(&claims), control_allowed)
         .await
@@ -205,7 +205,7 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
                             break;
                         };
                         let passive = matches!(&command, CallCommand::Ready { ready: false, .. });
-                        if !passive && claims.require(Some(&account), "calls.control").is_err() {
+                        if !passive && claims.require(Some(&account), "calls").is_err() {
                             let _ = send_event(&mut sink, &CallEvent::Error { code: CallErrorCode::Forbidden }).await;
                             break;
                         }

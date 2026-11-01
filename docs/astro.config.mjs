@@ -95,7 +95,7 @@ export default defineConfig({
           { label: 'CLI', slug: 'reference/cli' },
           { label: 'Configuration', slug: 'reference/configuration' },
           { label: 'API tokens', slug: 'reference/tokens' },
-          { label: 'Calling preview', slug: 'reference/calls' },
+          { label: 'Calling', slug: 'reference/calls' },
           { label: 'Rust libraries', slug: 'reference/rust-libraries' },
           { label: 'Troubleshooting', slug: 'reference/troubleshooting' },
           { label: 'Build from source', slug: 'reference/build' },

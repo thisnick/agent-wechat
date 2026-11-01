@@ -39,7 +39,7 @@ export function resolveWeChatCallsConfig(value: WeChatCallsConfig | undefined): 
 }
 export const callsConfigSchema = {
   type: "object", additionalProperties: false,
-  description: "Optional experimental direct voice using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported.",
+  description: "Direct voice calling using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported.",
   properties: {
     enabled: { type: "boolean", default: false },
     inboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, inboundAllowFrom: { type: "array", maxItems: 128, items: { type: "string", minLength: 1, maxLength: 200 } },

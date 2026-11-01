@@ -110,15 +110,19 @@ try {
   const url = new URL(ready.baseUrl);
   assert.equal(url.protocol, "http:"); assert.equal(url.hostname, "127.0.0.1"); assert.ok(url.port);
   assert.equal(url.username, ""); assert.equal(url.password, ""); assert.equal(ready.accountId, "calls-fixture");
-  const token = (await readFile(ready.tokenFile, "utf8")).trim();
-  const observerToken = (await readFile(ready.observerTokenFile, "utf8")).trim();
+  const token = (await readFile(ready.callsTokenFile, "utf8")).trim();
+  const nonCallsToken = (await readFile(ready.nonCallsTokenFile, "utf8")).trim();
   const webSocketFactory = await nativeCallSocketFactory();
   const options = { baseUrl: ready.baseUrl, token, accountId: ready.accountId, webSocketFactory, commandTimeoutMs: 5000 };
-  const observer = new NativeCallsClient({ ...options, token: observerToken }); const observing = watch(observer);
+  const observer = new NativeCallsClient(options); const observing = watch(observer);
   const observedHello = await observer.connect(); assert.equal(observedHello.currentCall, null);
-  observing.closing = true;
-  await assert.rejects(observer.ready(randomUUID(), true), error => error instanceof NativeCallError && error.code === "forbidden");
-  observer.close();
+  // The same calls grant permits participation, but connecting alone stays passive.
+  const blocked = new NativeCallsClient({ ...options, token: nonCallsToken }); const blockedEvents = watch(blocked); blockedEvents.closing = true;
+  await assert.rejects(blocked.connect()); blocked.close();
+  const deniedCurrent = await fetch(new URL(`v1/accounts/${ready.accountId}/calls/current`, ready.baseUrl), {
+    headers: { Authorization: `Bearer ${nonCallsToken}` }, signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(deniedCurrent.status, 403); await deniedCurrent.arrayBuffer();
   const invalid = new NativeCallsClient({ ...options, token: "invalid-synthetic-bearer" }); const denied = watch(invalid); denied.closing = true;
   await assert.rejects(invalid.connect()); invalid.close();
 
@@ -131,7 +135,7 @@ try {
   if (process.env.WX_BINARY) assert.ok(cliAvailable, "Requested WX_BINARY is missing");
   if (cliAvailable && !process.argv.includes("--skip-cli")) {
     const config = join(temporary, "client.toml"); await writeFile(config, "schemaVersion = 1\n", { mode: 0o600 });
-    const args = ["--json", "--config", config, "--server", ready.baseUrl, "--token-file", ready.observerTokenFile, "--account", ready.accountId, "calls"];
+    const args = ["--json", "--config", config, "--server", ready.baseUrl, "--token-file", ready.callsTokenFile, "--account", ready.accountId, "calls"];
     const status = JSON.parse((await execute(cliBinary, [...args, "status"], { env: environment, timeout: 10000 })).stdout);
     assert.equal(status.availability.busy, false);
     monitor = spawn(cliBinary, [...args, "monitor"], { stdio: ["ignore", "pipe", "pipe"], env: environment });
@@ -162,6 +166,8 @@ try {
   const rejected = claims[1 - winnerIndex].reason;
   assert.ok(rejected instanceof NativeCallError); assert.equal(rejected.code, "already_claimed");
   const winnerResult = claims[winnerIndex].value;
+  await until("passive SDK observes busy state", () => availability(observing)?.busy === true);
+  assert.equal(availability(observing).ownedByThisClient, false);
   await until("Rust connected state", () => winnerEvents.events.some(event => event.type === "call.state" && event.call.callId === offer.callId && event.call.state === "connected"));
   assert.equal((await control("stats")).stats.answer, 1, "The losing claim must not reach the backend");
   await assert.rejects(loser.dial(randomUUID(), "synthetic-peer"), error => error instanceof NativeCallError && error.code === "busy");

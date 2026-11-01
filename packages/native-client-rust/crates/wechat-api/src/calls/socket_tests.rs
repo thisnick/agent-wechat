@@ -203,10 +203,12 @@ async fn ready(socket: &mut Socket, id: &str) {
 #[tokio::test]
 async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
     let f = Fixture::new(false).await;
-    f.grant("observer", &["calls.observe"], &["two"]);
+    f.grant("other-account", &["calls"], &["two"]);
+    f.grant("non-calls", &["read"], &["one"]);
     for (token, origin, status) in [
         ("wrong", None, 401),
-        ("observer", None, 403),
+        ("other-account", None, 403),
+        ("non-calls", None, 403),
         (OWNER, Some("null"), 403),
         (OWNER, Some("https://elsewhere.example"), 403),
         (OWNER, Some(&format!("http://{}/path", f.address)), 403),
@@ -262,17 +264,27 @@ async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
 }
 
 #[tokio::test]
-async fn observer_cannot_register_answer_readiness_and_revocation_closes_socket() {
+async fn calls_grant_stays_passive_until_ready_and_revocation_closes_socket() {
     let f = Fixture::new(true).await;
-    let grant = f.grant("observer", &["calls.observe"], &["one"]);
+    let grant = f.grant("calls-grant", &["calls"], &["one"]);
+    f.grant("non-calls", &["read"], &["one"]);
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     for (path, token, status) in [
-        ("/v1/accounts/one/calls/current", "observer", StatusCode::OK),
+        (
+            "/v1/accounts/one/calls/current",
+            "calls-grant",
+            StatusCode::OK,
+        ),
         (
             "/v1/accounts/two/calls/current",
-            "observer",
+            "calls-grant",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/v1/accounts/one/calls/current",
+            "non-calls",
             StatusCode::FORBIDDEN,
         ),
         (
@@ -311,14 +323,30 @@ async fn observer_cannot_register_answer_readiness_and_revocation_closes_socket(
     )
     .await;
     assert_eq!(json_event(&mut malformed).await["code"], "invalid_request");
-    let mut socket = f.socket("/v1/accounts/one/calls/socket", "observer").await;
+    f.core
+        .call_service()
+        .offer(
+            f.backend.authority("one").unwrap(),
+            "passive-offer".into(),
+            "peer-fixture".into(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    let mut socket = f
+        .socket("/v1/accounts/one/calls/socket", "calls-grant")
+        .await;
     assert_eq!(json_event(&mut socket).await["type"], "hello");
-    command(&mut socket,json!({"type":"call.ready","requestId":"ready","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20}})).await;
-    let error = until(&mut socket, |v| v["type"] == "call.error").await;
-    assert_eq!(error["code"], "forbidden");
+    command(&mut socket,json!({"type":"call.answer","requestId":"not-ready","callId":"passive-offer","expectedRevision":1,"media":{"audio":true,"video":false}})).await;
+    let result = until(&mut socket, |v| {
+        v["type"] == "command.result" && v["requestId"] == "not-ready"
+    })
+    .await;
+    assert_eq!(result["code"], "media_not_ready");
+    assert_eq!(result["ownerToken"], Value::Null);
     assert_eq!(f.backend.submits.load(Ordering::SeqCst), 0);
-    let mut socket = f.socket("/v1/accounts/one/calls/socket", "observer").await;
-    assert_eq!(json_event(&mut socket).await["type"], "hello");
+    ready(&mut socket, "ready").await;
+    assert_eq!(f.backend.submits.load(Ordering::SeqCst), 0);
     f.core.store.revoke_token(&grant.id).unwrap();
     let closed = timeout(Duration::from_secs(3), async {
         loop {
@@ -337,6 +365,8 @@ async fn observer_cannot_register_answer_readiness_and_revocation_closes_socket(
 #[tokio::test]
 async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     let f = Fixture::new(true).await;
+    let calls_token = "calls-participant";
+    f.grant(calls_token, &["calls"], &["one", "two"]);
     let authority = f.backend.authority("one").unwrap();
     f.core
         .call_service()
@@ -348,8 +378,8 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         )
         .await
         .unwrap();
-    let mut one = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
-    let mut two = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
+    let mut one = f.socket("/v1/accounts/one/calls/socket", calls_token).await;
+    let mut two = f.socket("/v1/accounts/one/calls/socket", calls_token).await;
     let hello_one = json_event(&mut one).await;
     let hello_two = json_event(&mut two).await;
     assert_eq!(hello_one["currentOffer"]["callId"], "incoming-fixture");
@@ -385,7 +415,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     .await;
     assert_eq!(f.backend.submits.load(Ordering::SeqCst), 1);
     let mut wrong = f
-        .socket("/v1/accounts/one/calls/incoming-fixture/media", OWNER)
+        .socket("/v1/accounts/one/calls/incoming-fixture/media", calls_token)
         .await;
     command(
         &mut wrong,
@@ -393,13 +423,13 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     )
     .await;
     assert_eq!(json_event(&mut wrong).await["code"], "not_owner");
-    f.grant("other-media-principal", &["calls.media"], &["one"]);
+    f.grant("other-media-principal", &["calls"], &["one"]);
     for (path, bearer) in [
         (
             "/v1/accounts/one/calls/incoming-fixture/media",
             "other-media-principal",
         ),
-        ("/v1/accounts/two/calls/incoming-fixture/media", OWNER),
+        ("/v1/accounts/two/calls/incoming-fixture/media", calls_token),
     ] {
         let mut foreign = f.socket(path, bearer).await;
         command(
@@ -410,7 +440,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         assert_eq!(json_event(&mut foreign).await["code"], "forbidden");
     }
     let mut malformed = f
-        .socket("/v1/accounts/one/calls/incoming-fixture/media", OWNER)
+        .socket("/v1/accounts/one/calls/incoming-fixture/media", calls_token)
         .await;
     command(&mut malformed, json!({"type":"media.attach","clientId":client_one,"ownerToken":owner_token,"unexpected":true})).await;
     assert!(matches!(
@@ -420,7 +450,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_)))
     ));
     let mut media = f
-        .socket("/v1/accounts/one/calls/incoming-fixture/media", OWNER)
+        .socket("/v1/accounts/one/calls/incoming-fixture/media", calls_token)
         .await;
     command(
         &mut media,

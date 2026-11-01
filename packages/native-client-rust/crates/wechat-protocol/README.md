@@ -106,7 +106,7 @@ recipient opening and complete local writeback. Cold CLI/SDK byte and range
 checks passed; recipient-exported SHA-256 remains unavailable.
 See [FEATURES.md](../../FEATURES.md) for the current validation record.
 
-## Experimental call codecs
+## Call codecs
 
 The opt-in Rust feature `experimental-calls` exposes offline signaling and
 incoming notification envelopes, personal Invite/Cancel/LiveSync codecs, selected

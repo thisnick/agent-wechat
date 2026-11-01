@@ -83,15 +83,7 @@ impl Store {
             || scopes.iter().any(|s| {
                 !matches!(
                     s.as_str(),
-                    "read"
-                        | "media"
-                        | "send"
-                        | "read-state"
-                        | "login"
-                        | "admin"
-                        | "calls.observe"
-                        | "calls.control"
-                        | "calls.media"
+                    "read" | "media" | "send" | "read-state" | "login" | "admin" | "calls"
                 )
             })
         {
@@ -1088,13 +1080,18 @@ mod tests {
                 "synthetic",
                 "sha256",
                 &["test".into()],
-                &["read".into()],
+                &["calls".into()],
                 None,
             )
             .unwrap();
         let json = serde_json::to_string(&grant).unwrap();
         assert!(!json.contains("sha256"));
         assert!(!json.contains("digest"));
+        for scope in ["calls.observe", "calls.control", "calls.media"] {
+            assert!(store
+                .issue_token("retired", "hash", &["test".into()], &[scope.into()], None)
+                .is_err());
+        }
         assert!(store
             .issue_token("bad", "hash", &["test".into()], &["unknown".into()], None)
             .is_err());

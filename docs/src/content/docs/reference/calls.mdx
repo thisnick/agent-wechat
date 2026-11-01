@@ -1,12 +1,10 @@
 ---
-title: Calling preview
-description: Development call controls, ownership and audio connections.
+title: Calling
+description: Call controls, ownership and audio connections.
 ---
 
-Calling is a source-build preview, disabled in the default daemon. The native
-worker is restricted to an expiring isolated test. Integrated phone playback,
-media security across a call's lifetime, and ordinary microphone/speaker calling
-still need validation. Video and conference capabilities remain off.
+Check calling availability with `wx calls status`, then use the CLI, OpenClaw or
+the control and audio connections described below.
 
 ## Check availability
 
@@ -30,9 +28,9 @@ never appear in socket URLs. Use HTTPS/WSS or a trusted tunnel for remote access
 
 | Connection | Purpose | Token scope |
 | --- | --- | --- |
-| `GET /calls/current` | Read capabilities, current offer and busy state | `calls.observe` |
-| WebSocket `/calls/socket` | Observe call events and send control commands | `calls.observe`, plus `calls.control` for actions |
-| WebSocket `/calls/{callId}/media` | Exchange the owner's PCM audio | `calls.media`, plus the current owner token |
+| `GET /calls/current` | Read capabilities, current offer and busy state | `calls` |
+| WebSocket `/calls/socket` | Observe call events and send control commands | `calls` |
+| WebSocket `/calls/{callId}/media` | Exchange the owner's PCM audio | `calls`, plus the current owner token |
 
 The control socket starts with `hello`, including its client ID and current
 snapshot. Observing does not register readiness or answer a call. A client sends
@@ -71,8 +69,15 @@ to the selected offer; it must not answer a replacement caller.
 
 OpenClaw calling is also disabled by default. Its `calls` settings have separate
 `inboundAllowFrom`, `outboundAllowTo` and `outboundToolAllowFrom` lists; messaging
-permission grants none of them. The preview supports OpenClaw's OpenAI response
+permission grants none of them. The adapter supports OpenClaw's OpenAI response
 audio bridge. Call audio is streamed to that provider; the adapter uses no local
 microphone. Provider readiness is checked before claiming a call. Agent
 consultation is off by default; enabling safe read-only consultation also requires
 opting in to the host's separate per-call session storage.
+
+:::note[Good to know]
+Calling is disabled in the default daemon. The native worker is restricted to an
+expiring isolated test. Integrated phone playback, media security across a call's
+lifetime, and ordinary microphone/speaker calling still need validation. Video
+and conference capabilities remain off.
+:::

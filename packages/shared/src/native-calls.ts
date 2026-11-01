@@ -1,6 +1,8 @@
 /** Native call control and PCM media. Hosts supply a WebSocket implementation
  * that supports authenticated request headers; browser WebSocket alone cannot
- * provide this authentication flow. There are no device or codec dependencies. */
+ * provide this authentication flow. Call routes require the account's `calls`
+ * API scope. Connecting alone stays passive; readiness and ownership are separate
+ * protocol actions. There are no device or codec dependencies. */
 import { validateNativeBaseUrl } from "./native-client.ts";
 import type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallMediaCommand, CallSnapshot, CallReadyScope } from "./native.generated.js";
 export type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope } from "./native.generated.js";

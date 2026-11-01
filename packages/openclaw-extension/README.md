@@ -52,17 +52,18 @@ Managed startup sends the resolved token through a private stdin pipe; it create
 
 Keep `dataDir` and `consumerStateDir` on separate explicit persistent mounts. The daemon owns official-format profile/sidecar data; the consumer directory holds private intake/deduplication/model-handoff/read receipts bound to server and account identities. Executable upgrades do not remove either. One configured OpenClaw account maps to one selected native daemon account in this increment, while the daemon itself supports independent account slots.
 
-## Calling preview
+## Calling
 
-Calling is a separate, disabled-by-default development preview. Messaging
+Calling is disabled by default. Messaging
 allowlists do not permit calls: `calls.inboundAllowFrom`, `calls.outboundAllowTo`
-and `calls.outboundToolAllowFrom` grant separate permissions. The adapter supports
-the pinned host's OpenAI response audio bridge and requires provider readiness
+and `calls.outboundToolAllowFrom` grant separate permissions. The daemon API token
+also needs the account's `calls` scope in addition to its messaging scopes. The
+adapter supports the pinned host's OpenAI response audio bridge and requires provider readiness
 before claiming a call. Agent consultation is off by default; safe read-only
 consultation additionally requires `allowConsultSessionPersistence: true` because
 OpenClaw can store its separate per-call agent session. The native backend remains
 restricted to expiring isolated tests; integrated phone validation is incomplete.
-See the [calling preview](https://thisnick.github.io/agent-wechat/reference/calls/)
+See the [calling guide](https://thisnick.github.io/agent-wechat/reference/calls/)
 for connections and limits.
 
 ## Native messaging lifecycle and validation limits
