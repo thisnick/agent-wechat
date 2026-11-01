@@ -420,3 +420,21 @@ fn checked_client_identity_exhaustion_leaves_connections_unchanged() {
     assert!(h.requests.is_empty());
     assert!(h.session.is_none());
 }
+
+#[test]
+fn uncertain_callback_is_attempt_bound_and_keeps_the_slot() {
+    let mut h = Ownership::default();
+    client(&mut h, "owner", "a");
+    let old = h.offer(authority("a"), "same", 1000, 0).unwrap();
+    h.terminal(&authority("a"), &old).unwrap();
+    let current = h.offer(authority("a"), "same", 1000, 1).unwrap();
+    assert_eq!(h.uncertain(&authority("a"), &old), Err(Error::Stale));
+    h.session.as_mut().unwrap().revision = u64::MAX;
+    assert_eq!(h.uncertain(&authority("a"), &current), Err(Error::Capacity));
+    assert_eq!(h.session.as_ref().unwrap().phase, Phase::Ringing);
+    h.session.as_mut().unwrap().revision = 1;
+    h.uncertain(&authority("a"), &current).unwrap();
+    assert_eq!(h.session.as_ref().unwrap().phase, Phase::Uncertain);
+    assert!(h.session.as_ref().unwrap().pending.is_none());
+    assert!(h.snapshot("owner").unwrap().busy);
+}

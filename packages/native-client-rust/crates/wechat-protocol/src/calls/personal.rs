@@ -2,7 +2,7 @@
 //!
 //! Host requests and Cloud requests use different envelopes. SDK task identifiers
 //! are not host BaseRequest identifiers. The caller supplies current authenticated
-//! context, selected capabilities and device metadata; this module invents none.
+//! context, advertised capabilities and device metadata; this module invents none.
 
 use super::signaling::{self, CallOperation, CloudRequest, CommonRequest};
 use crate::protobuf::{self as p, Field, Value};
@@ -15,6 +15,7 @@ const MAX_MEMBERS: usize = 16;
 /// Host operation identity. Inner Cloud command IDs are a different namespace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostOperation {
+    RingingAck,
     Invite,
     Cancel,
     LiveSync,
@@ -23,6 +24,7 @@ pub enum HostOperation {
 impl HostOperation {
     pub const fn command(self) -> u16 {
         match self {
+            Self::RingingAck => 8069,
             Self::Invite => 10342,
             Self::Cancel => 9332,
             Self::LiveSync => 9262,
@@ -31,6 +33,7 @@ impl HostOperation {
 
     pub const fn path(self) -> &'static str {
         match self {
+            Self::RingingAck => "/cgi-bin/micromsg-bin/voipilinkack",
             Self::Invite => "/cgi-bin/micromsg-bin/voipilinkinvite",
             Self::Cancel => "/cgi-bin/micromsg-bin/voipilinkcancel",
             Self::LiveSync => "/cgi-bin/micromsg-bin/voipilinklivesync",
@@ -80,6 +83,10 @@ pub struct VoiceInputs<'a> {
 }
 
 impl VoiceInputs<'_> {
+    pub fn validate(&self) -> Result<()> {
+        self.checked().map(|_| ())
+    }
+
     fn checked(&self) -> Result<(u32, Vec<u8>, Vec<u8>)> {
         ensure!(
             self.network_type < 8 && self.nics.len() <= 8,
@@ -300,6 +307,64 @@ impl VoiceRoom {
     }
 }
 
+/// Ringing ACK type1 for the selected incoming voice role. This is not Join.
+pub fn acknowledge_voice(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    sdk_task: u32,
+) -> Result<HostRequest> {
+    inputs.checked()?;
+    room.validate()?;
+    ensure!(sdk_task != 0, "Missing incoming ACK task");
+    let caps = message(&[
+        p::bytes(1, inputs.engine_capability),
+        p::bytes(2, inputs.channel_capability),
+    ])?;
+    let mut values = vec![
+        p::bytes(1, inputs.sdk),
+        p::bytes(2, inputs.group),
+        p::uint(3, u64::from(inputs.network_type)),
+        p::uint(4, 1),
+        p::uint(5, room.room),
+        p::uint(6, room.room_key),
+        p::uint(7, u64::from(room.own_member)),
+    ];
+    values.extend(inputs.nics.iter().map(|nic| p::bytes(8, nic)));
+    values.extend([
+        p::uint(9, u64::from(inputs.sim_type)),
+        p::bytes(11, inputs.device),
+        p::bytes(12, &caps),
+        p::uint(13, 1),
+        p::uint(14, u64::from(inputs.video_length)),
+        p::uint(15, u64::from(inputs.video_ratio)),
+    ]);
+    Ok(HostRequest {
+        operation: HostOperation::RingingAck,
+        sdk_task,
+        body: message(&[p::bytes(1, &message(&values)?), p::bytes(3, b"voip-2p")])?,
+        longpoll_seconds: None,
+    })
+}
+/// Decline an already-ACKed callee with source Reject reason1. Pre-ACK busy uses
+/// a different operation and is not implied by this builder.
+pub fn reject(inputs: &VoiceInputs<'_>, room: VoiceRoom, sdk_task: u32) -> Result<CloudRequest> {
+    inputs.checked()?;
+    room.validate()?;
+    ensure!(sdk_task != 0, "Missing Reject task");
+    Ok(CloudRequest::for_operation(
+        sdk_task,
+        CallOperation::Reject,
+        message(&[
+            p::bytes(1, inputs.sdk),
+            p::bytes(2, inputs.group),
+            p::uint(3, room.room),
+            p::uint(4, room.room_key),
+            p::uint(5, u64::from(room.own_member)),
+            p::uint(6, 1),
+        ])?,
+    ))
+}
+
 /// Prepare callee Cloud Join3361. The caller obtains its context from Invite and
 /// must not manufacture a callee Join. Timestamp is an independently selected
 /// wire value; this codec does not assume its clock or unit.
@@ -429,7 +494,6 @@ impl InviteResponse {
             !client_response.is_empty(),
             "Missing caller client response"
         );
-        JoinClientResponse::decode(client_response)?;
         let mut results = Vec::new();
         for value in values.iter().filter(|value| value.number == 8) {
             ensure!(

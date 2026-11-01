@@ -1,5 +1,6 @@
 ---
 "@agent-wechat/cli": minor
+"@agent-wechat/agent-wechat": minor
 ---
 
-Add opt-in offline call signaling, app-session and incoming notification codecs, relay packet codecs and account/client ownership behind the Rust `experimental-calls` feature. Add internal call-media and native-audio libraries for codec, queue and device-adapter development. Voice and video calling remain unavailable; no live call transport, CLI or HTTP call action is enabled.
+Add a disabled-by-default direct voice calling preview: authenticated control/media WebSockets, single-call ownership, PCM SDK connections, CLI monitor/dial/answer controls, and an optional OpenClaw OpenAI audio bridge with separate calling allowlists. Add the opt-in native worker and internal call-media/audio libraries. Native phone validation and media security lifetime checks remain incomplete; the native worker is restricted to expiring isolated tests. Video and conference calling remain unavailable.

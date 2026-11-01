@@ -90,6 +90,10 @@ impl std::ops::Deref for Core {
 
 #[doc(hidden)]
 pub struct CoreShared {
+    #[cfg(feature = "experimental-calls")]
+    pub(crate) call_service: std::sync::OnceLock<Arc<crate::calls::service::CallService>>,
+    #[cfg(feature = "experimental-calls")]
+    pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub ownership_generation: String,
     pub(crate) leases: Mutex<BTreeMap<String, Vec<wechat_store::Lease>>>,
@@ -314,6 +318,10 @@ impl Core {
             snapshot_reader: None,
             live_store: None,
             shared: Arc::new(CoreShared {
+                #[cfg(feature = "experimental-calls")]
+                call_service: std::sync::OnceLock::new(),
+                #[cfg(feature = "experimental-calls")]
+                call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
                 leases: Mutex::new(leases),
                 vault: Arc::new(vault),
@@ -350,6 +358,7 @@ impl Core {
             core.store.recover_group_mutations(&account.id)?;
             core.recover_logout(&account.id)?;
             core.store.recover_interrupted_operations(&account.id)?;
+            core.store.recover_call_sessions(&account.id)?;
             let _ = core.recover_metadata(&account.id)?;
             let _ = core.recover_saved_login(&account.id);
             let _ = core.recover_outgoing_recall_projections(&account.id);
@@ -535,11 +544,19 @@ impl Core {
                 bail!("account_identity_mismatch");
             }
         }
+        #[cfg(feature = "experimental-calls")]
+        if accepted {
+            self.prepare_call_authorization(account, state)?;
+        } else {
+            self.fence_call_authority(account);
+        }
         let sealed = self
             .vault
             .seal(account, "account-state", &serde_json::to_vec(state)?)?;
         if accepted {
             self.store.save_accepted_authorization(account, &sealed)?;
+            #[cfg(feature = "experimental-calls")]
+            self.bind_call_authorization(account, state)?;
             let _ = self.project_saved_login(account, state);
             Ok(())
         } else {
@@ -570,6 +587,8 @@ impl Core {
                 bail!("account_identity_mismatch");
             }
         }
+        #[cfg(feature = "experimental-calls")]
+        self.fence_call_authority(account);
         self.store.commit_login_authorization_for_operation(
             account,
             &self
@@ -579,6 +598,8 @@ impl Core {
             &self.ownership_generation,
             operation,
         )?;
+        #[cfg(feature = "experimental-calls")]
+        self.accept_call_authorization(account, state)?;
         let _ = self.project_saved_login(account, state);
         Ok(())
     }
@@ -590,6 +611,8 @@ impl Core {
             Err(_) => AccountState::from_baseline_json(input)?,
         };
         self.persist_state(account, &state, false)?;
+        #[cfg(feature = "experimental-calls")]
+        self.fence_call_authority(account);
         self.store.clear_runtime(account, "validated-generation")?;
         self.store
             .put_runtime(account, "desired", b"disconnected")?;
@@ -645,6 +668,8 @@ impl Core {
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
+        #[cfg(feature = "experimental-calls")]
+        self.fence_call_authority(account);
         self.store.clear_runtime(account, "validated-generation")?;
         if let Ok(map) = self.cancels.lock() {
             if let Some(cancel) = map.get(&format!("login-active:{account}")) {
@@ -1164,6 +1189,8 @@ impl Core {
                 "validated-generation",
                 core.ownership_generation.as_bytes(),
             )?;
+            #[cfg(feature = "experimental-calls")]
+            core.bind_call_authorization(&account, &state)?;
             core.commit_sync_batch(&account, batch, "shortlink", "manual_or_fallback")
         })
         .await
@@ -2046,6 +2073,8 @@ impl Core {
                     "validated-generation",
                     core.ownership_generation.as_bytes(),
                 )?;
+                #[cfg(feature = "experimental-calls")]
+                core.bind_call_authorization(&account, &state)?;
                 Ok(beat)
             })
             .await?
@@ -2086,6 +2115,8 @@ impl Core {
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::SeqCst);
+        #[cfg(feature = "experimental-calls")]
+        self.fence_all_call_authorities();
         if let Ok(cancels) = self.cancels.lock() {
             for cancel in cancels.values() {
                 cancel.store(true, Ordering::SeqCst);
@@ -2159,6 +2190,29 @@ fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
     white.write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
 }
+#[cfg(feature = "experimental-calls")]
+impl Core {
+    pub fn call_service(&self) -> Arc<crate::calls::service::CallService> {
+        self.call_service
+            .get_or_init(|| Arc::new(crate::calls::service::CallService::default()))
+            .clone()
+    }
+    pub fn configure_calls(
+        core: &Arc<Self>,
+        backend: Arc<dyn crate::calls::service::CallBackend>,
+    ) -> Result<()> {
+        let service = Arc::new(crate::calls::service::CallService::new(backend));
+        for account in core.store.accounts()? {
+            if let Some(call_id) = core.store.unresolved_call(&account.id)? {
+                service.recover_unknown(&account.id, &call_id)?;
+            }
+        }
+        core.call_service
+            .set(service)
+            .map_err(|_| anyhow::anyhow!("call backend must be configured before starting the API"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2229,6 +2283,62 @@ mod tests {
             long_host: "long.weixin.qq.com".into(),
             short_host: "short.weixin.qq.com".into(),
         }
+    }
+    #[cfg(feature = "experimental-calls")]
+    #[test]
+    fn call_credentials_keep_cookies_but_fence_replacement_logout_and_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let first = state();
+        core.restore_credentials("one", &serde_json::to_vec(&first).unwrap())
+            .unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .put_runtime(
+                "one",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+        core.bind_call_authorization("one", &first).unwrap();
+        assert!(core.cached_call_authority("one").is_none());
+        core.accept_call_authorization("one", &first).unwrap();
+        let old = core.call_authority("one").unwrap();
+        let mut cookie = first.clone();
+        cookie.cookie = vec![99];
+        core.save_state("one", &cookie).unwrap();
+        assert!(old.current());
+        let mut changed = cookie.clone();
+        changed.session_key = vec![7; 16];
+        core.save_state("one", &changed).unwrap();
+        assert!(!old.current());
+        let replacement = core.call_authority("one").unwrap();
+        assert!(core.lease_for_call_state("one", &first).is_err());
+        assert!(
+            replacement.current(),
+            "stale reads must not rotate the accepted cache"
+        );
+        core.disconnect("one").unwrap();
+        assert!(!replacement.current());
+        // A late response and even stale connection flags cannot reopen the
+        // logout inhibit. Only a new accepted login may do that.
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .put_runtime(
+                "one",
+                "validated-generation",
+                core.ownership_generation.as_bytes(),
+            )
+            .unwrap();
+        core.save_state("one", &changed).unwrap();
+        assert!(core.cached_call_authority("one").is_none());
+        core.accept_call_authorization("one", &changed).unwrap();
+        let fresh = core.call_authority("one").unwrap();
+        assert!(fresh.current());
+        core.shutdown();
+        assert!(!fresh.current());
     }
     #[test]
     fn only_authenticated_saved_trust_rejections_permit_qr_fallback() {

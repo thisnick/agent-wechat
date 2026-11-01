@@ -7,14 +7,15 @@ publish.workspace = true
 
 [features]
 default = []
-experimental-calls = ["wechat-protocol/experimental-calls"]
+experimental-calls = ["wechat-protocol/experimental-calls", "dep:wechat-calls"]
+native-calls = ["experimental-calls", "wechat-calls/native-opus"]
 
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
 wechat-store = { path = "../wechat-store" }
 wechat-profile = { path = "../wechat-profile" }
 wechat-protocol = { path = "../wechat-protocol" }
@@ -39,3 +40,7 @@ rusqlite.workspace = true
 zstd = "0.13"
 
 crc32fast = "1"
+
+[dependencies.wechat-calls]
+path = "../wechat-calls"
+optional = true

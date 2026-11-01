@@ -1,14 +1,42 @@
 {
   "id": "agent-wechat",
   "contracts": {
-    "tools": ["wechat_history", "wechat_search", "wechat_message", "wechat_media", "wechat_archive_threads", "wechat_archive_search", "wechat_archive_history", "wechat_archive_message", "wechat_archive_media", "wechat_recall", "wechat_send_share", "wechat_group_info", "wechat_login"]
+    "tools": [
+      "wechat_history",
+      "wechat_search",
+      "wechat_message",
+      "wechat_media",
+      "wechat_archive_threads",
+      "wechat_archive_search",
+      "wechat_archive_history",
+      "wechat_archive_message",
+      "wechat_archive_media",
+      "wechat_recall",
+      "wechat_send_share",
+      "wechat_group_info",
+      "wechat_login",
+      "wechat_call"
+    ]
   },
   "toolMetadata": {
-    "wechat_archive_threads": { "optional": true },
-    "wechat_archive_search": { "optional": true },
-    "wechat_archive_history": { "optional": true },
-    "wechat_archive_message": { "optional": true },
-    "wechat_archive_media": { "optional": true }
+    "wechat_archive_threads": {
+      "optional": true
+    },
+    "wechat_archive_search": {
+      "optional": true
+    },
+    "wechat_archive_history": {
+      "optional": true
+    },
+    "wechat_archive_message": {
+      "optional": true
+    },
+    "wechat_archive_media": {
+      "optional": true
+    },
+    "wechat_call": {
+      "optional": true
+    }
   },
   "legacyPluginIds": [
     "wechat"
@@ -125,6 +153,96 @@
             }
           }
         }
+      },
+      "calls": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "inboundPolicy": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "allowlist"
+            ]
+          },
+          "inboundAllowFrom": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "outboundPolicy": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "allowlist"
+            ]
+          },
+          "outboundAllowTo": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "outboundToolAllowFrom": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Use openai with its existing OpenClaw authentication. Other providers fail preflight; there is no automatic fallback."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "voice": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "agentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "toolPolicy": {
+            "type": "string",
+            "enum": [
+              "none",
+              "safe-read-only"
+            ]
+          },
+          "allowConsultSessionPersistence": {
+            "type": "boolean",
+            "default": false,
+            "description": "Required for safe-read-only consultation: the host creates a separate per-call agent session, which can persist. No consultation or call transcript is stored by this adapter by default."
+          },
+          "maxDurationSeconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 3600
+          }
+        },
+        "description": "Optional experimental direct voice using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
       }
     }
   },
@@ -305,6 +423,96 @@
                 }
               }
             }
+          },
+          "calls": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false
+              },
+              "inboundPolicy": {
+                "type": "string",
+                "enum": [
+                  "disabled",
+                  "allowlist"
+                ]
+              },
+              "inboundAllowFrom": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "outboundPolicy": {
+                "type": "string",
+                "enum": [
+                  "disabled",
+                  "allowlist"
+                ]
+              },
+              "outboundAllowTo": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "outboundToolAllowFrom": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Use openai with its existing OpenClaw authentication. Other providers fail preflight; there is no automatic fallback."
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "voice": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "agentId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "toolPolicy": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "safe-read-only"
+                ]
+              },
+              "allowConsultSessionPersistence": {
+                "type": "boolean",
+                "default": false,
+                "description": "Required for safe-read-only consultation: the host creates a separate per-call agent session, which can persist. No consultation or call transcript is stored by this adapter by default."
+              },
+              "maxDurationSeconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 3600
+              }
+            },
+            "description": "Optional experimental direct voice using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
           }
         }
       }

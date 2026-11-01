@@ -23,6 +23,9 @@ The new token is printed once, in the `token` field.
 | `read-state` | Marking chats read |
 | `login` | Logging in, connecting and disconnecting |
 | `admin` | Managing tokens and accounts, and editing groups. Group reads use `read`. |
+| `calls.observe` | Reading call state and observing the [calling preview](/reference/calls/) |
+| `calls.control` | Registering call readiness and controlling calls in that preview |
+| `calls.media` | Attaching the current owner's call audio connection |
 
 OpenClaw needs `read`, `media`, `send` and `login`, plus `read-state` unless `readPolicy` is `never`.
 

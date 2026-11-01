@@ -920,6 +920,67 @@ impl NativeClient {
         }
         bail!("AutoAuth redirect limit reached")
     }
+    /// Perform one experimental call host RPC using its fixed CGI/path pair.
+    /// The owner must first retain its intent, hold account mutation authority and
+    /// fence account/logout generations. This method does not retry uncertain
+    /// operations. An active Ax policy is unsupported here; there is no ordinary
+    /// packing fallback. Returned CommonResponse/application results still need
+    /// their own checks. Accepted cookie updates follow normal native transport.
+    #[cfg(feature = "experimental-calls")]
+    pub fn experimental_call_rpc(
+        &self,
+        state: &mut AccountState,
+        route: crate::calls::host_policy::CallHostRoute,
+        request: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.experimental_call_rpc_guarded(state, route, request, || Ok(()))
+    }
+
+    /// As [`Self::experimental_call_rpc`], with one final owner check after
+    /// handshake/preparation and before handing business bytes to transport.
+    /// A guard cannot retract bytes after transport handoff. Handshake traffic
+    /// can already have occurred when this guard stops the business request.
+    #[cfg(feature = "experimental-calls")]
+    pub fn experimental_call_rpc_guarded(
+        &self,
+        state: &mut AccountState,
+        route: crate::calls::host_policy::CallHostRoute,
+        request: &[u8],
+        before_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        use crate::calls::{
+            host_policy::{selected_policy, CallHostPolicy},
+            host_transport::{CallHostRpcError, CallHostStage},
+        };
+        mmtls::validate_short_route(route.path())
+            .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Route, &error))?;
+        let policy = selected_policy(&state.auth_snapshot, route.command())
+            .map_err(|_| CallHostRpcError::new(CallHostStage::Route, "policy", None))?;
+        if policy != CallHostPolicy::Ordinary {
+            return Err(CallHostRpcError::new(CallHostStage::Route, "ax_unsupported", None).into());
+        }
+        let session = self
+            .session(&state.long_host)
+            .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error))?;
+        let packet = AuthenticatedPacket::prepare(state, route.command(), request)
+            .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Prepare, &error))?;
+        before_submit()?;
+        let reply = mmtls::short_exchange(
+            &session.short,
+            &state.short_host,
+            route.path(),
+            &packet.packet,
+            self.options.timeout,
+        )
+        .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Exchange, &error))?;
+        let (plain, cookie) =
+            crate::calls::host_transport::decode_verified_reply(state, route.command(), &reply)?;
+        if !cookie.is_empty() {
+            state.cookie = cookie;
+        }
+        Ok(plain)
+    }
+
     pub(crate) fn authenticated_rpc(
         &self,
         state: &mut AccountState,

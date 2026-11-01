@@ -1,3 +1,4 @@
+import { callsConfigSchema } from "./calls-config.ts";
 export const nativeConfigSchema = {
   type: "object", additionalProperties: false,
   required: ["mode", "accountId", "token", "consumerStateDir"],
@@ -18,5 +19,5 @@ export const nativeConfigSchema = {
 };
 export const nativePluginConfigSchema = {
   type: "object", additionalProperties: false,
-  properties: { backend: { type: "string", enum: ["native"] }, native: nativeConfigSchema },
+  properties: { backend: { type: "string", enum: ["native"] }, native: nativeConfigSchema, calls: callsConfigSchema },
 };

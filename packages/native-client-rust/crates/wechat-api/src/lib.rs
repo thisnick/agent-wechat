@@ -1,5 +1,7 @@
 //! Authenticated, account-scoped native daemon API.
 mod actions;
+#[cfg(feature = "experimental-calls")]
+mod calls;
 pub mod contracts;
 mod groups;
 mod media;
@@ -1158,6 +1160,16 @@ async fn revoke_token(
     }
     Ok(Json(json!({"revoked":app.core.store.revoke_token(&id)?})))
 }
+fn call_routes() -> Router<App> {
+    #[cfg(feature = "experimental-calls")]
+    {
+        calls::routes()
+    }
+    #[cfg(not(feature = "experimental-calls"))]
+    {
+        Router::new()
+    }
+}
 pub fn router(core: Arc<Core>, token: &str) -> Router {
     let app = App {
         core,
@@ -1221,6 +1233,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .merge(media::routes())
         .merge(actions::routes())
         .merge(groups::routes())
+        .merge(call_routes())
         .with_state(app.clone());
     // Resolve aliases before route matching so scope checks and vault AAD always
     // use the canonical account identifier.

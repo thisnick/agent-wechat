@@ -27,7 +27,7 @@
     "channel": {
       "id": "agent-wechat",
       "label": "WeChat",
-      "selectionLabel": "WeChat (微信)",
+      "selectionLabel": "WeChat (\u5fae\u4fe1)",
       "order": 80
     },
     "install": {
@@ -210,6 +210,96 @@
                   }
                 }
               }
+            },
+            "calls": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "inboundPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "disabled",
+                    "allowlist"
+                  ]
+                },
+                "inboundAllowFrom": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "outboundPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "disabled",
+                    "allowlist"
+                  ]
+                },
+                "outboundAllowTo": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "outboundToolAllowFrom": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "provider": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "Use openai with its existing OpenClaw authentication. Other providers fail preflight; there is no automatic fallback."
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "voice": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "agentId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "toolPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "safe-read-only"
+                  ]
+                },
+                "allowConsultSessionPersistence": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Required for safe-read-only consultation: the host creates a separate per-call agent session, which can persist. No consultation or call transcript is stored by this adapter by default."
+                },
+                "maxDurationSeconds": {
+                  "type": "integer",
+                  "minimum": 30,
+                  "maximum": 3600
+                }
+              },
+              "description": "Optional experimental direct voice using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported."
             }
           }
         }
@@ -224,5 +314,8 @@
     "type": "git",
     "url": "git+https://github.com/thisnick/agent-wechat.git",
     "directory": "packages/openclaw-extension"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
   }
 }

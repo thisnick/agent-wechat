@@ -1,5 +1,6 @@
 import type { SecretInput } from "openclaw/plugin-sdk/secret-input";
 import { bindNativeSecretContext } from "./native-secrets.ts";
+import { resolveWeChatCallsConfig, type ResolvedWeChatCallsConfig, type WeChatCallsConfig } from "./calls-config.ts";
 
 export type WeChatDmPolicy = "allowlist" | "open" | "disabled";
 export type WeChatGroupPolicy = "open" | "disabled" | "allowlist";
@@ -26,6 +27,7 @@ export type WeChatNativeConfig = {
 };
 
 export type WeChatConfig = {
+  calls?: WeChatCallsConfig;
   backend?: "native";
   native?: WeChatNativeConfig;
   enabled?: boolean;
@@ -39,6 +41,7 @@ export type WeChatConfig = {
 };
 
 export type ResolvedWeChatAccount = {
+  calls?: ResolvedWeChatCallsConfig;
   backend?: "native";
   native?: WeChatNativeConfig;
   accountId: string;
@@ -87,6 +90,7 @@ export function resolveWeChatAccount(
   if (!serverUrl) return null;
 
   return {
+    calls: resolveWeChatCallsConfig(wechat?.calls ?? plugin?.calls),
     backend: "native",
     native,
     accountId: accountId ?? DEFAULT_ACCOUNT_ID,

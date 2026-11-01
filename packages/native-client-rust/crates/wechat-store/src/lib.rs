@@ -2,6 +2,8 @@
 mod account_removal;
 mod admission;
 mod authorization;
+mod call_actions;
+pub use call_actions::CallActionRecord;
 mod checkpoint;
 pub mod copy;
 mod group_mutations;

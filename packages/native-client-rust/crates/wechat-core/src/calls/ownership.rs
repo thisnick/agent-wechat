@@ -249,6 +249,45 @@ impl Ownership {
             call_id: call_id.into(),
         })
     }
+    pub(super) fn offer_revision(
+        &mut self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+        revision: u64,
+    ) -> Result<(), Error> {
+        let session = self.session.as_mut().ok_or(Error::Stale)?;
+        if &session.authority != authority
+            || session.attempt != identity.attempt
+            || session.id != identity.call_id
+            || session.invalidated
+            || session.owner.is_some()
+            || session.phase != Phase::Ringing
+            || revision <= session.revision
+        {
+            return Err(Error::Stale);
+        }
+        session.revision = revision;
+        Ok(())
+    }
+    pub(super) fn pending_start(
+        &self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> Option<Operation> {
+        let session = self.session.as_ref()?;
+        if &session.authority != authority
+            || session.attempt != identity.attempt
+            || session.id != identity.call_id
+            || session.invalidated
+        {
+            return None;
+        }
+        session
+            .pending
+            .as_ref()
+            .map(|ticket| ticket.operation)
+            .filter(|operation| matches!(operation, Operation::Dial | Operation::Answer))
+    }
     /// Reserve the global slot for the initiating client before Invite.
     pub fn dial(
         &mut self,
@@ -464,6 +503,23 @@ impl Ownership {
         let revision = s.revision.checked_add(1).ok_or(Error::Capacity)?;
         s.revision = revision;
         s.phase = Phase::Connected;
+        Ok(())
+    }
+    /// Stop local work without claiming that the remote call has ended.
+    pub fn uncertain(
+        &mut self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> Result<(), Error> {
+        let s = self.session.as_mut().ok_or(Error::Stale)?;
+        if &s.authority != authority || s.attempt != identity.attempt || s.id != identity.call_id {
+            return Err(Error::Stale);
+        }
+        let revision = s.revision.checked_add(1).ok_or(Error::Capacity)?;
+        s.revision = revision;
+        s.phase = Phase::Uncertain;
+        s.pending = None;
+        s.resume_until = None;
         Ok(())
     }
     /// Verified terminal signaling from the accepted generation, including a

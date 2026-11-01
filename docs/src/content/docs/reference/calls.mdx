@@ -1,0 +1,75 @@
+---
+title: Calling preview
+description: Development call controls, ownership and audio connections.
+---
+
+Calling is a source-build preview, disabled in the default daemon. The native
+worker is restricted to an expiring isolated test. Integrated phone playback,
+media security across a call's lifetime, and ordinary microphone/speaker calling
+still need validation. Video and conference capabilities remain off.
+
+## Check availability
+
+1. In a source build, run `wx calls --help`. The parent command only prints help;
+   it does not connect, log in or open audio devices.
+2. Run `wx calls status` against your selected daemon. A disabled backend reports
+   `capabilities.directAudio: false`. A default build without the call routes
+   returns an unavailable route instead.
+3. Require the corresponding capability before participating. An API route or a
+   configured plugin does not make a call available.
+
+Source builds use `native-calls` for the daemon's native worker and `call-audio`
+for the CLI's local audio adapter. These are separate features: a headless daemon
+does not need access to a microphone or speaker.
+
+## API connections
+
+All paths below begin with `/v1/accounts/{account}`. Authenticate with an
+`Authorization: Bearer …` header, including on WebSocket upgrades. Tokens must
+never appear in socket URLs. Use HTTPS/WSS or a trusted tunnel for remote access.
+
+| Connection | Purpose | Token scope |
+| --- | --- | --- |
+| `GET /calls/current` | Read capabilities, current offer and busy state | `calls.observe` |
+| WebSocket `/calls/socket` | Observe call events and send control commands | `calls.observe`, plus `calls.control` for actions |
+| WebSocket `/calls/{callId}/media` | Exchange the owner's PCM audio | `calls.media`, plus the current owner token |
+
+The control socket starts with `hello`, including its client ID and current
+snapshot. Observing does not register readiness or answer a call. A client sends
+`call.ready` when it can handle calls, and prepares audio before claiming one.
+Readiness can apply to outgoing calls,
+one exact pending offer, or all calls. A pending offer cannot be answered until
+the server emits `call.offered`.
+
+The first successful `call.answer` owns an incoming call. `call.dial` gives
+ownership to its initiating client. Other clients see busy state and cannot start
+another call. The owner attaches its separate media socket using the returned
+owner token; observers receive no audio. Stale offer revisions and owner tokens
+are rejected. An uncertain result must be inspected rather than dialed again.
+
+Audio uses interleaved PCM16 little-endian samples in versioned binary frames.
+Follow the announced format, track and generation. `call.clear_audio` interrupts
+queued output and advances its generation; it does not place or answer a call.
+The TypeScript SDK accepts a header-capable WebSocket factory and needs no local
+audio devices or codec bindings. A browser WebSocket alone cannot supply these
+authentication headers.
+
+## CLI and OpenClaw
+
+| Command | Behavior |
+| --- | --- |
+| `wx calls monitor --json` | Observe events without opening audio devices |
+| `wx calls monitor` | Register readiness and show incoming prompts; open audio on acceptance |
+| `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
+| `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
+
+Interactive participation requires a `call-audio` build. A late answer stays tied
+to the selected offer; it must not answer a replacement caller.
+
+OpenClaw calling is also disabled by default. Its `calls` settings have separate
+`inboundAllowFrom`, `outboundAllowTo` and `outboundToolAllowFrom` lists; messaging
+permission grants none of them. The preview supports OpenClaw's OpenAI response
+audio bridge. Call audio is streamed to that provider; the adapter uses no local
+microphone. Provider readiness is checked before claiming a call. Agent
+consultation is off by default; enabling safe read-only consultation also requires
+opting in to the host's separate per-call session storage.

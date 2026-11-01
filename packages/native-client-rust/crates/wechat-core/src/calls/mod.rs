@@ -1,10 +1,18 @@
-//! Experimental offline call coordination.
+//! Call ownership, WebSocket media coordination and optional native workers.
 //!
-//! This module has no account worker, HTTP route, notification dispatcher, transport
-//! or capture-device adapter. Its local state transitions are not server enum
-//! values. Enabling the feature does not enable making or receiving calls.
+//! The default backend is disabled. The native backend currently implements the
+//! outgoing direct-voice path for an expiring isolated test; incoming calls,
+//! video and conferences are not enabled by this module alone.
 
 pub mod control;
 pub mod incoming;
+pub mod notifications;
 
 pub mod ownership;
+
+pub mod service;
+
+pub mod authority;
+
+#[cfg(feature = "native-calls")]
+pub mod native;
