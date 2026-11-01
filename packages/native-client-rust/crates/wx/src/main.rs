@@ -1318,7 +1318,11 @@ async fn run(cli: Cli) -> Result<()> {
             | Command::Tokens { .. }
             | Command::Config { .. }
     );
-    if requires_account {
+    // Calling grants can observe/control one selected account without also
+    // reading the account catalog. The API resolves aliases and checks scope.
+    let selected_call_account =
+        matches!(&cli.command, Command::Calls { .. }) && r.account.is_some();
+    if requires_account && !selected_call_account {
         let catalog = r.get("v1/accounts").await?;
         let items = catalog["items"]
             .as_array()

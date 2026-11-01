@@ -265,15 +265,18 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
     loop {
         tokio::select! {
             _ = valid_tick.tick() => {
-                if last_seen.elapsed() > IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err() { break; }
+                if last_seen.elapsed() > IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err()
+                    || service.validate_media(&connection.id).await.is_err() { break; }
             }
             _ = ping_tick.tick() => { if !send(&mut sink, Message::Ping(Default::default())).await { break; } }
             frame = connection.frames.recv() => {
                 let Some(frame) = frame else { break; };
-                if ensure_current(&app, &claims).await.is_err()
-                    || service.validate_media(&connection.id).await.is_err()
-                    || frame.len() > MEDIA_LIMIT
-                    || !send(&mut sink, Message::Binary(frame.into())).await { break; }
+                if ensure_current(&app, &claims).await.is_err() || frame.len() > MEDIA_LIMIT { break; }
+                match service.media_delivery_allowed(&connection.id).await {
+                    Ok(true) => { if !send(&mut sink, Message::Binary(frame.into())).await { break; } }
+                    Ok(false) => {},
+                    Err(_) => break,
+                }
             }
             message = input.next() => {
                 let Some(Ok(message)) = message else { break; };

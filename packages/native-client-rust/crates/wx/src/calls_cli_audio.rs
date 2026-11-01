@@ -277,30 +277,42 @@ async fn participate(
     let owner_token = claim
         .owner_token
         .context("call claim did not grant media ownership")?;
-    let outcome = owned_call(
-        remote,
-        control,
-        &call_id,
-        &owner_token,
-        &mut audio,
-        input,
-        cancellation,
-    )
-    .await;
+    let mut call = OwnedCall {
+        call_id,
+        owner_token,
+        media: None,
+    };
+    let outcome = owned_call(remote, control, &mut call, &mut audio, input, cancellation).await;
     audio.request_stop();
     // Any local failure requests termination; a lost connection or response is
     // reported as uncertain. An accepted command alone never proves remote end.
     // Teardown is issued once even when the user signal remains latched. Its
     // existing eight-second limit still bounds an unresponsive remote operation.
-    let ended = if matches!(&outcome, Ok(true)) {
-        Ok(())
-    } else {
-        terminate_owned(control, &call_id).await
-    };
+    let ended = call.finish(control, matches!(&outcome, Ok(true))).await;
     let stopped = audio.stop().await;
     ended?;
     stopped?;
     outcome.map(|_| ())
+}
+
+pub(super) struct OwnedCall {
+    pub(super) call_id: String,
+    pub(super) owner_token: String,
+    pub(super) media: Option<Media>,
+}
+impl OwnedCall {
+    pub(super) async fn finish(&mut self, control: &mut Control, terminal: bool) -> Result<()> {
+        // Dropping a live media attachment revokes its control owner. Retain it
+        // until explicit end reaches terminal evidence or the bounded attempt
+        // reports uncertainty. Capture and playback are stopped by the caller.
+        let result = if terminal {
+            Ok(())
+        } else {
+            terminate_owned(control, &self.call_id).await
+        };
+        self.media.take();
+        result
+    }
 }
 
 pub(super) struct Media {
@@ -438,18 +450,19 @@ async fn next_media(media: &mut Option<Media>) -> Result<Message> {
 async fn owned_call(
     remote: &Remote,
     control: &mut Control,
-    call_id: &str,
-    owner_token: &str,
+    call: &mut OwnedCall,
     audio: &mut LocalAudio,
     input: &mut Input,
     cancellation: &Cancellation,
 ) -> Result<bool> {
+    let call_id = call.call_id.as_str();
+    let owner_token = call.owner_token.as_str();
     let format = AudioFormat::new(
         control.format.sample_rate,
         control.format.channels,
         control.format.frame_ms,
     )?;
-    let mut media: Option<Media> = None;
+    let media = &mut call.media;
     let mut muted = false;
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(control.format.frame_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -458,7 +471,7 @@ async fn owned_call(
         if cancellation.is_cancelled() {
             return Ok(false);
         }
-        if let Some(media) = &mut media {
+        if let Some(media) = media {
             let (send_changed, receive_changed) = media.synchronize_tracks(control, call_id)?;
             if send_changed {
                 audio.discard_capture();
@@ -487,7 +500,7 @@ async fn owned_call(
                 attached=Media::attach(remote,control,call_id,owner_token)=>attached?,
             };
             audio.discard_capture();
-            media = Some(attached);
+            *media = Some(attached);
             eprintln!("Connected. Local microphone and speakers are active.");
         }
         tokio::select! {
@@ -518,7 +531,7 @@ async fn owned_call(
                     _=>{},
                 }
             }
-            message=next_media(&mut media)=> {
+            message=next_media(media)=> {
                 let Message::Binary(bytes)=message? else {bail!("unexpected call media message");};
                 let frame=MediaFrame::decode(&bytes,format)?;
                 media.as_mut().expect("media event has an attachment").receive.admit(&frame)?;
@@ -531,7 +544,7 @@ async fn owned_call(
             }
             _=tick.tick()=> {
                 let samples=audio.frame(format.samples_per_frame(),muted)?;
-                if let Some(media)=&mut media {media.send(&samples,format).await?;}
+                if let Some(media)=media {media.send(&samples,format).await?;}
             }
         }
     }

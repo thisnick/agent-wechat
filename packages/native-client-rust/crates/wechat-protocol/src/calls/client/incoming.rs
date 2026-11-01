@@ -11,6 +11,7 @@ pub enum IncomingPhase {
     Joining,
     Joined,
     Ending,
+    TerminalPending,
     Uncertain,
     Finished,
 }
@@ -133,6 +134,9 @@ impl NativeIncomingSession {
             peer: expected_caller.to_owned(),
             origin: ControlOrigin::Incoming,
             peer_joined: None,
+            terminal: None,
+            invitation_pending: false,
+            pending_recipients: vec![],
         });
         base.phase = PersonalPhase::Ringing;
         Ok(Self {
@@ -196,19 +200,131 @@ impl NativeIncomingSession {
         for tag in [5, 6, 7, 8, 10] {
             p::optional_data(&ack, tag)?;
         }
-        // ACK installs current im_roomid before the later callee Join.
-        // Its cursor is retained by the owner receipt, not projected or polled.
-        let group = fields(&self.base.parameters.group)?;
-        let cloud_group = std::str::from_utf8(data(&group, 4)?)?;
-        self.base.parameters.group =
-            replace_group(&self.base.parameters.group, live_id, cloud_group)?;
-
         self.invite.room.own_member = u32::from(member);
         self.base
             .control
             .as_mut()
             .expect("incoming control")
             .identity = self.invite.room;
+        let group = fields(&self.base.parameters.group)?;
+        let cloud_group = std::str::from_utf8(data(&group, 4)?)?;
+        self.base.parameters.group =
+            replace_group(&self.base.parameters.group, live_id, cloud_group)?;
+        // ACK6 is MemList(seq1/member2); it is not LiveSync item10(seq3/member4).
+        let (sequence, members) = if let Some(raw) = p::optional_data(&ack, 6)? {
+            let list = fields(raw)?;
+            only(&list, &[1, 2, 3])?;
+            p::optional_data(&list, 3)?;
+            let sequence = u32::try_from(number(&list, 1, Some(0))?)?;
+            let members = if sequence == 0 {
+                BTreeMap::new()
+            } else {
+                parse_roster_entries(
+                    repeated(&list, 2, 16)?,
+                    &self.base.own_username,
+                    &self.invite.caller,
+                )?
+            };
+            (sequence, members)
+        } else {
+            (0, BTreeMap::new())
+        };
+        for (name, entry) in &members {
+            let expected = if name == &self.base.own_username {
+                &self.invite.callee_openid
+            } else {
+                &self.invite.caller_openid
+            };
+            ensure!(
+                &entry.openid == expected,
+                "Incoming ACK app identity mismatch"
+            );
+            if name == &self.base.own_username {
+                ensure!(entry.member == member, "Incoming ACK own member mismatch");
+            } else if let Some(expected) = self.invite.caller_member {
+                ensure!(
+                    entry.member == expected,
+                    "Incoming ACK caller member mismatch"
+                );
+            }
+        }
+        if sequence != 0 {
+            if let Some(action) = termination::classify(
+                termination::Origin::Callee,
+                3,
+                members
+                    .get(&self.base.own_username)
+                    .map(|entry| entry.status),
+                members.get(&self.invite.caller).map(|entry| entry.status),
+                false,
+            )? {
+                ensure!(
+                    matches!(action, RemoteTermination::LocalStop(_)),
+                    "Unsupported incoming ACK terminal operation"
+                );
+                self.base
+                    .control
+                    .as_mut()
+                    .expect("incoming control")
+                    .terminal = Some(action);
+                self.base.phase = PersonalPhase::Finished;
+                self.phase = IncomingPhase::Finished;
+                return Ok(());
+            }
+        }
+        if self.invite.caller_member.is_none() {
+            self.invite.caller_member = members.get(&self.invite.caller).map(|entry| entry.member);
+        }
+        let caller_member = self
+            .invite
+            .caller_member
+            .ok_or_else(|| anyhow::anyhow!("Missing incoming caller member binding"))?;
+        ensure!(
+            caller_member != member && live_id != 0,
+            "Incomplete incoming ACK control context"
+        );
+        let strategy = p::optional_data(&ack, 7)?.unwrap_or_default();
+        ensure!(
+            number(&fields(strategy)?, 14, Some(0))? & (1 << 36) == 0,
+            "Alternate incoming sync unsupported"
+        );
+        // Original entries below bind identities only. They do not fabricate an
+        // accepted roster when the initial ACK sequence is absent/stale.
+        let original_members = BTreeMap::from([
+            (
+                self.base.own_username.clone(),
+                Member {
+                    member,
+                    status: 0,
+                    openid: self.invite.callee_openid.clone(),
+                },
+            ),
+            (
+                self.invite.caller.clone(),
+                Member {
+                    member: caller_member,
+                    status: 0,
+                    openid: self.invite.caller_openid.clone(),
+                },
+            ),
+        ]);
+        self.base.active = Some(ActiveRoom {
+            identity: self.invite.room,
+            peer: self.invite.caller.clone(),
+            live_id,
+            cookies: p::optional_data(&ack, 5)?.unwrap_or_default().to_vec(),
+            strategy: Zeroizing::new(strategy.to_vec()),
+            members,
+            original_members,
+            member_sequence: sequence,
+            cap_sequence: 0,
+            engine: vec![],
+            channel: vec![],
+            av_sequence: 0,
+            av: BTreeMap::new(),
+            media_taken: false,
+        });
+        self.base.phase = PersonalPhase::Ringing;
         self.phase = IncomingPhase::Acknowledged;
         Ok(())
     }
@@ -328,6 +444,26 @@ impl NativeIncomingSession {
             members[&self.invite.caller].member,
         )?;
         let member_sequence = u32::try_from(number(&fields(raw_members)?, 1, Some(0))?)?;
+        if let Some(acked) = self.base.active.as_ref() {
+            ensure!(
+                member_sequence >= acked.member_sequence,
+                "Incoming Join roster sequence regressed"
+            );
+            if member_sequence == acked.member_sequence && member_sequence != 0 {
+                ensure!(
+                    members
+                        .iter()
+                        .all(|(name, entry)| acked
+                            .members
+                            .get(name)
+                            .is_some_and(|old| old.member == entry.member
+                                && old.openid == entry.openid
+                                && old.status == entry.status)),
+                    "Incoming Join changed a stale roster"
+                );
+            }
+        }
+
         self.base.active = Some(ActiveRoom {
             identity: room,
             peer: self.invite.caller.clone(),
@@ -428,13 +564,47 @@ impl NativeIncomingSession {
         tasks: TaskIds,
     ) -> Result<SyncProgress> {
         ensure!(
-            self.phase == IncomingPhase::Joined,
+            matches!(
+                self.phase,
+                IncomingPhase::Acknowledged | IncomingPhase::Joined
+            ),
             "Incoming sync unavailable"
         );
         let result = self.base.poll(client, state, current, tasks);
         if self.base.phase == PersonalPhase::Uncertain {
             self.phase = IncomingPhase::Uncertain;
         }
+        if let Ok(SyncProgress::Terminal(action)) = result.as_ref() {
+            self.phase = if matches!(action, RemoteTermination::LocalStop(_)) {
+                IncomingPhase::Finished
+            } else {
+                IncomingPhase::TerminalPending
+            };
+        }
+        result
+    }
+    /// Source-classified remote cleanup, separate from local user hangup.
+    pub fn finish_remote(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        tasks: TaskIds,
+        talk_success: bool,
+    ) -> Result<()> {
+        ensure!(
+            self.phase == IncomingPhase::TerminalPending,
+            "No incoming remote teardown"
+        );
+        self.phase = IncomingPhase::Ending;
+        let result = self
+            .base
+            .finish_remote(client, state, current, tasks, talk_success);
+        self.phase = if result.is_ok() {
+            IncomingPhase::Finished
+        } else {
+            IncomingPhase::Uncertain
+        };
         result
     }
     pub fn media_ready(&self, state: &AccountState, current: AppAuthority) -> Result<bool> {
@@ -494,8 +664,13 @@ impl NativeIncomingSession {
         ) {
             return Ok(false);
         }
+        ensure!(
+            cancel.unknown_fields.is_empty(),
+            "Unknown incoming cancellation fields"
+        );
         if cancel.room_id != Some(self.invite.room.room)
             || cancel.room_key != Some(self.invite.room.room_key)
+            || cancel.member_id != Some(self.invite.room.own_member)
         {
             return Ok(false);
         }
@@ -564,6 +739,16 @@ mod tests {
                 p::uint(3, 0),
                 p::uint(4, 99),
                 p::bytes(5, b"ack-cursor"),
+                p::bytes(
+                    6,
+                    &p::message(&[
+                        p::uint(1, 1),
+                        p::bytes(2, &member("own", 0, 3)),
+                        p::bytes(2, &member("peer", 1, 1)),
+                    ])
+                    .unwrap(),
+                ),
+                p::bytes(7, &p::uint(14, 0)),
             ])
             .unwrap(),
         ))
@@ -628,7 +813,7 @@ mod tests {
             .unwrap();
         }
         let members = p::message(&[
-            p::uint(1, 1),
+            p::uint(1, 2),
             p::bytes(2, &member("own", 0, 1)),
             p::bytes(2, &peer),
         ])
@@ -835,9 +1020,12 @@ mod tests {
         let transport = transport(vec![(CallHostRoute::AppAuth, auth_reply())]);
         let mut state = state();
         let mut session = session(&transport, &mut state);
-        let mut cancel = CancelNotification::decode(&[8, 8, 16, 9, 24, 1, 32, 1]).unwrap();
+        let mut cancel = CancelNotification::decode(&[8, 8, 16, 9, 24, 0, 32, 1]).unwrap();
         assert!(!session.retire_cancel(&state, authority(), &cancel).unwrap());
         cancel.room_id = Some(7);
+        cancel.member_id = Some(1);
+        assert!(!session.retire_cancel(&state, authority(), &cancel).unwrap());
+        cancel.member_id = Some(0);
         assert!(session.retire_cancel(&state, authority(), &cancel).unwrap());
         assert!(!session.retire_cancel(&state, authority(), &cancel).unwrap());
     }
@@ -876,5 +1064,163 @@ mod tests {
             number(&fields(join.body.as_deref().unwrap()).unwrap(), 8, None).unwrap(),
             0
         );
+    }
+    fn ack_with_roster(sequence: u32, own: u32, peer: Option<u32>) -> Vec<u8> {
+        let mut list = vec![
+            p::uint(1, u64::from(sequence)),
+            p::bytes(2, &member("own", 0, own)),
+            p::bytes(3, b"checksum"),
+        ];
+        if let Some(status) = peer {
+            list.push(p::bytes(2, &member("peer", 1, status)));
+        }
+        host_reply(&p::bytes(
+            1,
+            &p::message(&[
+                p::uint(1, 7),
+                p::uint(2, 9),
+                p::uint(3, 0),
+                p::uint(4, 99),
+                p::bytes(5, b"ack-cursor"),
+                p::bytes(6, &p::message(&list).unwrap()),
+                p::bytes(7, &p::uint(14, 0)),
+            ])
+            .unwrap(),
+        ))
+    }
+    #[test]
+    fn ack_baseline_other_device_status_ends_locally_before_offering_or_join() {
+        let transport = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_with_roster(1, 1, Some(1))),
+        ]);
+        let mut state = state();
+        let mut session = session(&transport, &mut state);
+        session
+            .ringing_ack(&transport, &mut state, authority(), tasks(1))
+            .unwrap();
+        assert_eq!(session.phase(), IncomingPhase::Finished);
+        assert!(session
+            .accept(&transport, &mut state, authority(), tasks(2))
+            .is_err());
+        assert!(session
+            .reject(&transport, &mut state, authority(), tasks(2))
+            .is_err());
+        assert!(transport.0.borrow().is_empty());
+    }
+    #[test]
+    fn acked_callee_polls_without_join_and_only_newer_full_roster_handles_elsewhere() {
+        use super::super::tests::roster_sync;
+        let transport = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_reply()),
+            (
+                CallHostRoute::LiveSync,
+                roster_sync(1, Some(1), Some(1), false),
+            ),
+            (
+                CallHostRoute::LiveSync,
+                roster_sync(2, Some(1), Some(1), false),
+            ),
+        ]);
+        let mut state = state();
+        let mut session = session(&transport, &mut state);
+        session
+            .ringing_ack(&transport, &mut state, authority(), tasks(1))
+            .unwrap();
+        assert_eq!(
+            session
+                .poll(&transport, &mut state, authority(), tasks(2))
+                .unwrap(),
+            SyncProgress::Waiting
+        );
+        assert_eq!(session.phase(), IncomingPhase::Acknowledged);
+        assert_eq!(session.base.active.as_ref().unwrap().member_sequence, 1);
+        assert_eq!(
+            session
+                .poll(&transport, &mut state, authority(), tasks(3))
+                .unwrap(),
+            SyncProgress::Terminal(RemoteTermination::LocalStop(
+                LocalStopReason::HandledElsewhere { sdk_end: 13 }
+            ))
+        );
+        assert_eq!(session.phase(), IncomingPhase::Finished);
+        assert!(transport.0.borrow().is_empty());
+    }
+    #[test]
+    fn joined_callee_remote_hangup_requests_exit_even_after_peer_is_not_joined() {
+        use super::super::tests::{recorded_exit_reason, roster_sync, RecordingTransport};
+        let transport = RecordingTransport {
+            inner: transport(vec![
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::RingingAck, ack_reply()),
+                (CallHostRoute::Transfer, join_reply(17, false)),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(3, Some(1), Some(4), false),
+                ),
+                (CallHostRoute::Transfer, exit_reply()),
+            ]),
+            requests: Default::default(),
+        };
+        let mut state = state();
+        let mut session = NativeIncomingSession::authenticate(
+            &transport,
+            &mut state,
+            authority(),
+            1,
+            [2; 32],
+            parameters(),
+            &notification(),
+            "peer",
+        )
+        .unwrap();
+        session
+            .ringing_ack(&transport, &mut state, authority(), tasks(1))
+            .unwrap();
+        session
+            .accept(&transport, &mut state, authority(), tasks(2))
+            .unwrap();
+        assert!(matches!(
+            session
+                .poll(&transport, &mut state, authority(), tasks(3))
+                .unwrap(),
+            SyncProgress::Terminal(RemoteTermination::Exit(RemoteExitReason::LastPeerLeft))
+        ));
+        session
+            .finish_remote(&transport, &mut state, authority(), tasks(4), false)
+            .unwrap();
+        assert_eq!(session.phase(), IncomingPhase::Finished);
+        assert_eq!(
+            recorded_exit_reason(&transport.requests.borrow().last().unwrap().1),
+            5
+        );
+    }
+    #[test]
+    fn acked_callee_peer_gone_is_local_stop_without_user_reject_or_exit() {
+        use super::super::tests::roster_sync;
+        let transport = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_reply()),
+            (
+                CallHostRoute::LiveSync,
+                roster_sync(2, Some(3), None, false),
+            ),
+        ]);
+        let mut state = state();
+        let mut session = session(&transport, &mut state);
+        session
+            .ringing_ack(&transport, &mut state, authority(), tasks(1))
+            .unwrap();
+        assert_eq!(
+            session
+                .poll(&transport, &mut state, authority(), tasks(2))
+                .unwrap(),
+            SyncProgress::Terminal(RemoteTermination::LocalStop(
+                LocalStopReason::PeerLeftBeforeJoin
+            ))
+        );
+        assert_eq!(session.phase(), IncomingPhase::Finished);
+        assert!(transport.0.borrow().is_empty());
     }
 }

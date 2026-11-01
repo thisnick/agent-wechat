@@ -15,6 +15,8 @@ on:
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-simulator-smoke.mjs'
+      - 'scripts/native-calls-api-smoke.mjs'
+      - 'packages/openclaw-extension/src/calls*'
       - 'scripts/client-ui*-smoke.mjs'
       - 'packages/client-ui/**'
       - '.node-version'
@@ -146,11 +148,18 @@ jobs:
       - name: Install browser-client test dependencies
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
-        run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui...
+        run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui... --filter @agent-wechat/agent-wechat...
       - name: Exercise the connected session and UI launcher with synthetic accounts
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm client:smoke
+      - name: Build the account-free calling API fixture
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        run: cargo build --locked --profile test -p wechat-simulator --features calls-fixture --bin wx-calls-fixture
+      - name: Exercise calling through the real API, SDK, CLI and fake voice provider
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        working-directory: .
+        run: node --experimental-strip-types scripts/native-calls-api-smoke.mjs
 
   call-libraries:
     name: Call libraries (${{ matrix.runner }})

@@ -249,6 +249,9 @@ pub fn cancel(
 pub enum CancelReason {
     Local,
     Timeout,
+    /// Direct InviteTimeout sends this lower-layer wire reason, bypassing the
+    /// ordinary SDK OnCancel mapping.
+    NoResponse,
     Other,
 }
 
@@ -257,6 +260,7 @@ impl CancelReason {
         match self {
             Self::Local => 1,
             Self::Timeout => 4,
+            Self::NoResponse => 2,
             Self::Other => 0,
         }
     }
@@ -404,6 +408,23 @@ pub fn join(
     ))
 }
 
+/// Remote-last-member cleanup uses a distinct source table from local Hangup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteExitReason {
+    LastPeerLeft,
+    PeerBusy,
+    PeerRejected,
+}
+impl RemoteExitReason {
+    pub const fn wire(self) -> u64 {
+        match self {
+            Self::LastPeerLeft => 5,
+            Self::PeerBusy => 7,
+            Self::PeerRejected => 6,
+        }
+    }
+}
+
 /// Prepare joined Cloud Exit3380. Source reason numbers belong to the selected
 /// SDK, not local HTTP/CLI enums. The caller must establish native talk-success
 /// state separately; a joined roster or decoded frame is insufficient evidence.
@@ -422,6 +443,29 @@ pub fn exit(
         .get(source_reason.wrapping_sub(1) as usize)
         .copied()
         .unwrap_or(0);
+    exit_with_wire(inputs, room, mapped, talk_success, sdk_task)
+}
+/// Clean up an admitted remote-terminal roster once. The owner must stop media
+/// first and retain uncertainty if the correlated reply is lost.
+pub fn exit_remote(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    reason: RemoteExitReason,
+    talk_success: bool,
+    sdk_task: u32,
+) -> Result<CloudRequest> {
+    inputs.checked()?;
+    room.validate()?;
+    ensure!(sdk_task != 0, "Missing call task");
+    exit_with_wire(inputs, room, reason.wire(), talk_success, sdk_task)
+}
+fn exit_with_wire(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    mapped: u64,
+    talk_success: bool,
+    sdk_task: u32,
+) -> Result<CloudRequest> {
     let body = message(&[
         p::bytes(1, inputs.sdk),
         p::bytes(2, inputs.group),
@@ -503,7 +547,10 @@ impl InviteResponse {
             let nested = fields(field_bytes(value)?)?;
             let name = required_bytes(&nested, 1)?;
             text(name, 128, true)?;
-            results.push((String::from_utf8(name.to_vec())?, required_u32(&nested, 2)?));
+            results.push((
+                String::from_utf8(name.to_vec())?,
+                signaling::optional_u32(&nested, 2)?.unwrap_or(0),
+            ));
         }
         let users = values
             .iter()
@@ -821,5 +868,37 @@ mod tests {
         assert_eq!(result.original, response);
         response.extend(p::uint(3, u64::MAX));
         assert!(InviteResponse::decode(&response).is_err());
+    }
+    #[test]
+    fn invite_result_optional_zero_is_distinct_from_nonzero_and_invalid_wire() {
+        let base = message(&[
+            p::uint(1, 7),
+            p::uint(2, 9),
+            p::uint(3, 0),
+            p::bytes(4, b"group"),
+            p::bytes(5, &[8, 1]),
+        ])
+        .unwrap();
+        let response = |nested: &[u8]| {
+            let mut bytes = base.clone();
+            bytes.extend(p::bytes(8, nested));
+            bytes
+        };
+        let absent = response(&p::bytes(1, b"peer"));
+        assert_eq!(
+            InviteResponse::decode(&absent).unwrap().invite_results,
+            vec![("peer".to_owned(), 0)]
+        );
+        let nonzero = response(&message(&[p::bytes(1, b"peer"), p::uint(2, 7)]).unwrap());
+        assert_eq!(
+            InviteResponse::decode(&nonzero).unwrap().invite_results[0].1,
+            7
+        );
+        for nested in [
+            message(&[p::bytes(1, b"peer"), p::bytes(2, &[])]).unwrap(),
+            message(&[p::bytes(1, b"peer"), p::uint(2, 0), p::uint(2, 0)]).unwrap(),
+        ] {
+            assert!(InviteResponse::decode(&response(&nested)).is_err());
+        }
     }
 }

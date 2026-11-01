@@ -9,7 +9,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:openclaw",
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:openclaw --external:ws",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types src/*.test.ts"
   },

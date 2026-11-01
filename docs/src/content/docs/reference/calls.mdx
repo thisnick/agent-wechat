@@ -46,6 +46,8 @@ ownership to its initiating client. Other clients see busy state and cannot star
 another call. The owner attaches its separate media socket using the returned
 owner token; observers receive no audio. Stale offer revisions and owner tokens
 are rejected. An uncertain result must be inspected rather than dialed again.
+An accepted end command starts termination. Keep both sockets open until the
+terminal state arrives; losing confirmation leaves the outcome unknown.
 
 Audio uses interleaved PCM16 little-endian samples in versioned binary frames.
 Follow the announced format, track and generation. `call.clear_audio` interrupts

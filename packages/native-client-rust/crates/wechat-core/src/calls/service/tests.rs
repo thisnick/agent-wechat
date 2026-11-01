@@ -899,11 +899,12 @@ async fn hangup_fences_queued_audio_before_the_remote_stop_result() {
     let (backend, mut attempts) = FakeBackend::new(false);
     let service = Arc::new(CallService::new(backend.clone()));
     let mut owner = ready(&service, "a", "owner").await;
-    let (_sink, call, token) = connected_call(&service, &mut attempts, &mut owner).await;
-    let media = service
+    let (sink, call, token) = connected_call(&service, &mut attempts, &mut owner).await;
+    let mut media = service
         .attach_media("a", "owner", &call, &owner.client_id, &token)
         .await
         .unwrap();
+    sink.audio(&[123; 320]).await.unwrap();
     let (release, held) = oneshot::channel();
     *backend.held_audio.lock().unwrap() = Some(held);
     let bytes = frame::encode_pcm(
@@ -928,7 +929,7 @@ async fn hangup_fences_queued_audio_before_the_remote_stop_result() {
             &owner.client_id,
             CallCommand::Hangup {
                 request_id: "hangup".into(),
-                call_id: call,
+                call_id: call.clone(),
                 expected_revision: 2,
             },
         )
@@ -936,15 +937,99 @@ async fn hangup_fences_queued_audio_before_the_remote_stop_result() {
         .unwrap();
     let stopping = next_attempt(&mut attempts).await;
     assert_eq!(stopping.request.ticket.operation(), Operation::Hangup);
-    release.send(()).unwrap();
-    assert!(sending.await.unwrap().is_err());
+    // A queued receive frame remains owned but is no longer deliverable. The
+    // existing attachment stays live until the backend confirms terminal state.
+    assert!(media.frames.try_recv().is_ok());
+    assert!(!service.media_delivery_allowed(&media.id).await.unwrap());
+    service.validate_media(&media.id).await.unwrap();
+    service.validate_control(&owner.client_id).await.unwrap();
+    assert!(service
+        .attach_media("a", "owner", &call, &owner.client_id, &token)
+        .await
+        .is_err());
+    let late = frame::encode_pcm(
+        MediaHeader {
+            track_id: 1,
+            generation: 1,
+            sequence: 1,
+            timestamp_micros: 20_000,
+        },
+        AudioFormat::new(16000, 1, 20).unwrap(),
+        &[2000; 320],
+    )
+    .unwrap();
+    service.media_frame(&media.id, &late).await.unwrap();
     assert!(backend.submitted_pcm.lock().unwrap().is_empty());
-    assert!(service.validate_media(&media.id).await.is_err());
+    assert!(sink.audio(&[456; 320]).await.is_err());
+    release.send(()).unwrap();
+    sending.await.unwrap().unwrap();
+    assert!(backend.submitted_pcm.lock().unwrap().is_empty());
+    service.validate_media(&media.id).await.unwrap();
+    assert!(
+        service
+            .current("a", "observer")
+            .await
+            .unwrap()
+            .availability
+            .busy
+    );
+    assert!(backend.stopped.lock().unwrap().is_empty());
     stopping
         .reply
         .send(Ok(BackendOutcome::Ended))
         .unwrap_or_else(|_| panic!("active stop"));
     state(&mut owner, CallState::Ended).await;
+    assert!(service.validate_media(&media.id).await.is_err());
+}
+
+#[tokio::test]
+async fn ending_transport_still_rejects_foreign_frames_and_revoked_authority() {
+    let (backend, mut attempts) = FakeBackend::new(false);
+    let service = Arc::new(CallService::new(backend.clone()));
+    let mut owner = ready(&service, "a", "owner").await;
+    let (_, call, token) = connected_call(&service, &mut attempts, &mut owner).await;
+    let media = service
+        .attach_media("a", "owner", &call, &owner.client_id, &token)
+        .await
+        .unwrap();
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Hangup {
+                request_id: "held-hangup".into(),
+                call_id: call,
+                expected_revision: 2,
+            },
+        )
+        .await
+        .unwrap();
+    let stop = next_attempt(&mut attempts).await;
+    let format = AudioFormat::new(16000, 1, 20).unwrap();
+    for (track_id, generation) in [(2, 1), (1, 2)] {
+        let bytes = frame::encode_pcm(
+            MediaHeader {
+                track_id,
+                generation,
+                sequence: 0,
+                timestamp_micros: 0,
+            },
+            format,
+            &[1; 320],
+        )
+        .unwrap();
+        assert!(service.media_frame(&media.id, &bytes).await.is_err());
+    }
+    service.validate_media(&media.id).await.unwrap();
+    backend
+        .authorities
+        .lock()
+        .unwrap()
+        .insert("a".into(), auth("a", "replacement"));
+    assert!(service.validate_media(&media.id).await.is_err());
+    assert!(service.media_delivery_allowed(&media.id).await.is_err());
+    assert!(service.validate_control(&owner.client_id).await.is_err());
+    assert!(backend.submitted_pcm.lock().unwrap().is_empty());
+    drop(stop);
 }
 
 #[tokio::test]

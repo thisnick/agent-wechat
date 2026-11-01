@@ -822,3 +822,121 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
     control.close().await;
     server.await.unwrap();
 }
+
+#[cfg(feature = "call-audio")]
+#[tokio::test]
+async fn owned_media_stays_attached_until_one_hangup_reaches_terminal() {
+    use wechat_core::call_types::{
+        CallAudioTrack, CallDirection, CallKind, CallState, CallTrackDirection, CallView,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut control = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let view = CallView {
+            call_id: "owned-call".into(),
+            revision: 4,
+            kind: CallKind::Direct,
+            direction: CallDirection::Outgoing,
+            state: CallState::Connected,
+            owned_by_this_client: true,
+        };
+        let mut initial = hello();
+        if let CallEvent::Hello { current_call, .. } = &mut initial {
+            *current_call = Some(view.clone());
+        }
+        control
+            .send(Message::Text(
+                serde_json::to_string(&initial).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut media = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert!(matches!(
+            media.next().await.unwrap().unwrap(),
+            Message::Text(_)
+        ));
+        let ready = CallEvent::MediaReady {
+            send_track: CallAudioTrack {
+                id: 1,
+                generation: 1,
+                direction: CallTrackDirection::Send,
+                format: CallAudioFormat::default(),
+            },
+            receive_track: CallAudioTrack {
+                id: 2,
+                generation: 1,
+                direction: CallTrackDirection::Receive,
+                format: CallAudioFormat::default(),
+            },
+        };
+        media
+            .send(Message::Text(serde_json::to_string(&ready).unwrap().into()))
+            .await
+            .unwrap();
+        let message = tokio::select! {
+            message = control.next() => message.unwrap().unwrap(),
+            _ = media.next() => panic!("media detached before explicit end"),
+        };
+        let Message::Text(message) = message else {
+            panic!("expected hangup");
+        };
+        let command: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(command["type"], "call.hangup");
+        let result = CallEvent::CommandResult {
+            request_id: command["requestId"].as_str().unwrap().into(),
+            status: CallCommandStatus::Accepted,
+            call_id: Some("owned-call".into()),
+            owner_token: None,
+            code: None,
+        };
+        control
+            .send(Message::Text(
+                serde_json::to_string(&result).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        // Local acceptance alone must not drop the attachment or retry hangup.
+        assert!(timeout(Duration::from_millis(30), media.next())
+            .await
+            .is_err());
+        let ended = CallEvent::State {
+            call: CallView {
+                state: CallState::Ended,
+                ..view
+            },
+        };
+        control
+            .send(Message::Text(serde_json::to_string(&ended).unwrap().into()))
+            .await
+            .unwrap();
+        let detached = timeout(Duration::from_secs(1), media.next()).await.unwrap();
+        assert!(!matches!(
+            detached,
+            Some(Ok(Message::Text(_) | Message::Binary(_)))
+        ));
+        assert!(matches!(
+            control.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
+    });
+    let remote = remote(address);
+    let (mut control, _) = Control::connect(&remote).await.unwrap();
+    let media = super::audio::Media::attach(&remote, &control, "owned-call", "synthetic-owner")
+        .await
+        .unwrap();
+    let mut call = super::audio::OwnedCall {
+        call_id: "owned-call".into(),
+        owner_token: "synthetic-owner".into(),
+        media: Some(media),
+    };
+    let (_cancel, signal) = tokio::sync::watch::channel(true);
+    control.cancellation = Some(Cancellation(signal));
+    call.finish(&mut control, false).await.unwrap();
+    assert!(call.media.is_none());
+    call.finish(&mut control, false).await.unwrap();
+    control.close().await;
+    server.await.unwrap();
+}

@@ -792,7 +792,6 @@ impl CallService {
         }
         // Keep the original pending ticket and its possible remote result.
         // The actor must prove no mutation or perform accepted-context cleanup.
-        s.media.clear();
         Ok(true)
     }
     fn interrupt_audio(
@@ -1186,12 +1185,6 @@ impl CallService {
                 }
             };
             result_identity = Some(ticket.identity());
-            if matches!(
-                ticket.operation(),
-                Operation::Cancel | Operation::Reject | Operation::Hangup
-            ) {
-                s.media.clear();
-            }
             if s.call
                 .as_ref()
                 .is_some_and(|c| c.identity == ticket.identity())
@@ -1360,30 +1353,46 @@ impl CallService {
         let s = self.lock()?;
         self.valid_peer(&s, client)
     }
-    /// Recheck before forwarding each queued media frame; a dropped sender does
-    /// not remove frames already queued in the receiver owned by the API task.
-    pub async fn validate_media(&self, id: &str) -> Result<()> {
-        self.maintenance().await;
-        let s = self.lock()?;
-        let media = s
+    fn media_transport<'a>(&self, state: &'a State, id: &str) -> Result<&'a LiveCall> {
+        let media = state
             .media
             .get(id)
             .ok_or_else(|| error(CallErrorCode::Closed))?;
-        self.valid_peer(&s, &media.client)?;
-        let call = s
+        self.valid_peer(state, &media.client)?;
+        let peer = &state.clients[&media.client];
+        let call = state
             .call
             .as_ref()
-            .filter(|c| {
-                c.identity == media.identity
-                    && c.state == CallState::Connected
-                    && !c.revoked
-                    && c.owner.as_deref() == Some(&media.client)
+            .filter(|call| {
+                call.identity == media.identity
+                    && call.authority == peer.authority
+                    && matches!(call.state, CallState::Connected | CallState::Ending)
+                    && !call.revoked
+                    && call.owner.as_deref() == Some(&media.client)
             })
             .ok_or_else(|| error(CallErrorCode::Stale))?;
-        if call.audio_lease.load(Ordering::Acquire) != call.send_generation {
+        let lease = call.audio_lease.load(Ordering::Acquire);
+        if (call.state == CallState::Connected && lease != call.send_generation)
+            || (call.state == CallState::Ending && lease != 0)
+        {
             return Err(error(CallErrorCode::Stale));
         }
+        Ok(call)
+    }
+    /// Keep an authenticated attachment until terminal state, even after audio
+    /// has stopped. Transport liveness does not authorize frame delivery.
+    pub async fn validate_media(&self, id: &str) -> Result<()> {
+        self.maintenance().await;
+        let s = self.lock()?;
+        self.media_transport(&s, id)?;
         Ok(())
+    }
+    /// Recheck before forwarding queued RX. Frames left in the API receiver
+    /// after Ending are discarded while the control owner awaits confirmation.
+    pub async fn media_delivery_allowed(&self, id: &str) -> Result<bool> {
+        self.maintenance().await;
+        let s = self.lock()?;
+        Ok(self.media_transport(&s, id)?.state == CallState::Connected)
     }
     pub async fn attach_media(
         &self,
@@ -1454,20 +1463,11 @@ impl CallService {
         self.maintenance().await;
         let request = {
             let mut s = self.lock()?;
-            let client = s
-                .media
-                .get(id)
-                .ok_or_else(|| error(CallErrorCode::Closed))?
-                .client
-                .clone();
-            self.valid_peer(&s, &client)?;
-            let c = s.call.as_ref().ok_or_else(|| error(CallErrorCode::Stale))?;
-            if c.state != CallState::Connected || c.owner.as_deref() != Some(&client) {
-                return Err(error(CallErrorCode::NotOwner));
-            }
+            let c = self.media_transport(&s, id)?;
             let identity = c.identity.clone();
             let lease = c.audio_lease.clone();
             let muted = c.muted;
+            let ending = c.state == CallState::Ending;
             let current_generation = c.send_generation;
             let m = s.media.get_mut(id).expect("media");
             if m.identity != identity {
@@ -1484,6 +1484,11 @@ impl CallService {
             m.stream
                 .admit(&frame)
                 .map_err(|_| error(CallErrorCode::Stale))?;
+            if ending {
+                // This valid PCM may have been written on the other socket
+                // before the owner received Ending. It has no audio effect.
+                return Ok(());
+            }
             BackendAudioRequest {
                 identity,
                 format: Self::format(),
@@ -1501,16 +1506,13 @@ impl CallService {
         let generation = request.generation;
         let identity = request.identity.clone();
         let result = self.backend.send_audio(request).await;
-        if matches!(result, Err(CallServiceError(CallErrorCode::Stale))) {
+        if result.is_err() {
             let s = self.lock()?;
-            if let Some(media) = s.media.get(id) {
-                if self.valid_peer(&s, &media.client).is_ok()
-                    && s.call.as_ref().is_some_and(|call| {
-                        call.identity == identity
-                            && call.state == CallState::Connected
-                            && call.owner.as_deref() == Some(media.client.as_str())
-                            && call.send_generation > generation
-                    })
+            if let Ok(call) = self.media_transport(&s, id) {
+                if call.identity == identity
+                    && (call.state == CallState::Ending
+                        || (matches!(result, Err(CallServiceError(CallErrorCode::Stale)))
+                            && call.send_generation > generation))
                 {
                     return Ok(());
                 }

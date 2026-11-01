@@ -2310,10 +2310,29 @@ mod tests {
         cookie.cookie = vec![99];
         core.save_state("one", &cookie).unwrap();
         assert!(old.current());
+        let mut policy = cookie.clone();
+        policy.auth_snapshot.ax_auth = vec![8, 1];
+        assert_eq!(
+            authorization(&cookie).unwrap(),
+            authorization(&policy).unwrap()
+        );
+        core.save_state("one", &policy).unwrap();
+        assert!(
+            !old.current(),
+            "route-only updates must fence old call work"
+        );
+        let routed = core.call_authority("one").unwrap();
+        assert!(core.lease_for_call_state("one", &cookie).is_err());
+        assert!(
+            routed.current(),
+            "stale policy reads must not restore the old route"
+        );
+        cookie = policy;
         let mut changed = cookie.clone();
         changed.session_key = vec![7; 16];
         core.save_state("one", &changed).unwrap();
         assert!(!old.current());
+        assert!(!routed.current());
         let replacement = core.call_authority("one").unwrap();
         assert!(core.lease_for_call_state("one", &first).is_err());
         assert!(

@@ -582,7 +582,7 @@ impl PersonalTransport for FencedTransport {
                     if route == CallHostRoute::Invite {
                         self.worker.invite_attempted.store(false, Ordering::Release);
                     }
-                    core.store.put_runtime(&self.account,&format!("call-host-diagnostic:{}:{action}",self.call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"scope_expired","mayHaveSubmitted":false}))?)?;
+                    core.store.put_runtime(&self.account,&format!("call-host-diagnostic:{}:{action}",self.call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"admission_revoked","mayHaveSubmitted":false}))?)?;
                 }
                 if let Some(error) =
                     error.downcast_ref::<wechat_protocol::calls::host_transport::CallHostRpcError>()
@@ -742,6 +742,10 @@ fn run_control(
             break;
         }
         match session.poll(&transport, &mut state, auth, tasks.next()?) {
+            Ok(SyncProgress::Terminal(_)) => {
+                worker.stop.store(true, Ordering::Release);
+                break;
+            }
             Ok(_) => {}
             Err(error)
                 if error.is::<CallRpcNotSubmitted>() || error.is::<UnsupportedCallMedia>() =>
@@ -753,7 +757,11 @@ fn run_control(
         }
     }
     if worker.stop.load(Ordering::Acquire) {
-        let result = if session.phase() == PersonalPhase::Ringing {
+        let result = if session.phase() == PersonalPhase::Finished {
+            Ok(())
+        } else if session.phase() == PersonalPhase::TerminalPending {
+            session.finish_remote(&transport, &mut state, auth, tasks.next()?, false)
+        } else if session.phase() == PersonalPhase::Ringing {
             session.cancel(&transport, &mut state, auth, tasks.next()?)
         } else if session.phase() == PersonalPhase::Joined {
             session.exit(&transport, &mut state, auth, tasks.next()?, false)
@@ -799,6 +807,10 @@ fn run_control(
             }
             match session.poll(&transport, &mut state, auth, tasks.next()?) {
                 Ok(SyncProgress::MediaReady) => {}
+                Ok(SyncProgress::Terminal(_)) => {
+                    worker.media_stop.store(true, Ordering::Release);
+                    break;
+                }
                 Ok(SyncProgress::Waiting) => bail!("Peer left current voice state"),
                 Err(error)
                     if error.is::<CallRpcNotSubmitted>() || error.is::<UnsupportedCallMedia>() =>
@@ -827,7 +839,14 @@ fn run_control(
         )?;
     }
     ensure!(worker.lease.current(), "Call authority revoked before Exit");
-    let ended = session.exit(&transport, &mut state, auth, tasks.next()?, false);
+    let ended = match session.phase() {
+        PersonalPhase::Finished => Ok(()),
+        PersonalPhase::TerminalPending => {
+            session.finish_remote(&transport, &mut state, auth, tasks.next()?, false)
+        }
+        PersonalPhase::Joined => session.exit(&transport, &mut state, auth, tasks.next()?, false),
+        _ => bail!("Call termination state unknown"),
+    };
     core.store.finish_call(account, call_id, ended.is_ok())?;
     ended
 }

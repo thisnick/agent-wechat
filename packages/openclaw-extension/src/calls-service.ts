@@ -7,7 +7,7 @@ import type { ResolvedWeChatCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
 
-export type CallMediaPort = Pick<NativeCallMediaClient, "frames" | "tracks" | "sendPcm" | "close">;
+export type CallMediaPort = Pick<NativeCallMediaClient, "frames" | "tracks" | "sendPcm" | "stopAudio" | "close">;
 export type CallControlPort = Pick<NativeCallsClient, "connect" | "events" | "ready" | "dial" | "answer" | "end" | "clearAudio" | "close"> & { attachMedia(callId: string): Promise<CallMediaPort> };
 export type CallServiceDependencies = {
   client?: CallControlPort;
@@ -16,7 +16,8 @@ export type CallServiceDependencies = {
   socketFactory?: NativeCallWebSocketFactory;
 };
 type Owned = { key: string; peer: string; callId?: string; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
-  ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; timer?: ReturnType<typeof setTimeout> };
+  ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
+const TERMINAL_WAIT_MS = 30_000;
 const bounded = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error("Calling operation timed out")), ms); })]); }
@@ -98,8 +99,9 @@ export class NativeCallService {
           }
           active.callId = event.call.callId; active.call = event.call;
           if (["ending", "ended", "uncertain"].includes(event.call.state)) {
-            active.output?.close(); active.media?.close(); active.abort.abort();
-            if (event.call.state !== "ending") {
+            active.output?.close(); active.media?.stopAudio(); this.stopVoice(active);
+            if (event.call.state === "ending") { active.endStarted = true; this.armTerminalWait(active); }
+            else {
               this.state = event.call.state === "uncertain" ? "needs_review" : "available";
               await this.retire(active);
             }
@@ -225,8 +227,10 @@ export class NativeCallService {
     active.attaching = true;
     try {
       const media = await this.client!.attachMedia(active.callId);
-      if (!this.current(active) || active.endStarted) { media.close(); return; }
+      if (this.stopped || this.active !== active || active.retired) { media.close(); return; }
       active.media = media;
+      if (active.endStarted) { media.stopAudio(); this.armTerminalWait(active); return; }
+      if (!this.current(active)) { media.close(); return; }
       const tracks = media.tracks();
       if (JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTrack.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
       active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); });
@@ -249,23 +253,46 @@ export class NativeCallService {
     const active = this.active;
     if (!active?.claimed || !active.callId || !active.call || !this.client || active.endStarted) throw Error("No owned call can be ended");
     if (!["dialing", "ringing", "connecting", "connected"].includes(active.call.state)) throw Error("Call cannot be ended in this state");
-    active.endStarted = true; active.output?.close(); active.media?.close(); active.abort.abort();
+    active.endStarted = true; active.output?.close(); active.media?.stopAudio(); this.stopVoice(active); this.armTerminalWait(active);
+    // Closing media revokes the daemon owner. Acceptance and Ending can precede
+    // the upstream terminal reply, so retain its connection until terminal state.
     try {
       await this.client.end(["dialing", "ringing"].includes(active.call.state) ? "call.cancel" : "call.hangup", randomUUID(), active.callId, active.call.revision);
       // Acceptance is not a terminal result. Keep the owner until server state arrives.
     } catch { this.state = "needs_review"; this.client.close(); await this.retire(active); throw Error("Call end outcome needs review"); }
   }
   private async fail(active: Owned): Promise<void> {
+    if (active.endStarted && !this.stopped && this.active === active && !active.retired) {
+      active.output?.close(); active.media?.stopAudio(); this.stopVoice(active); this.armTerminalWait(active); return;
+    }
     if (!this.current(active)) return;
     active.output?.close();
-    if (active.claimed && active.call && !active.endStarted) { try { await bounded(this.end(), 2000); } catch {} }
+    if (active.claimed && active.call && !active.endStarted) {
+      try { await bounded(this.end(), 2000); return; } catch {}
+    }
     this.state = active.submitted || active.incomingReadinessAttempted ? "needs_review" : "unavailable"; await this.retire(active); this.client?.close();
+  }
+  private stopVoice(active: Owned): void {
+    active.abort.abort();
+    const voice = active.voice;
+    if (!voice) return;
+    active.voice = undefined;
+    active.voiceClosing = bounded(Promise.resolve().then(() => voice.close()), 1000).then(() => {}, () => {});
+  }
+  private armTerminalWait(active: Owned): void {
+    clearTimeout(active.timer);
+    if (active.endTimer) return;
+    active.endTimer = setTimeout(() => {
+      if (this.stopped || this.active !== active || active.retired) return;
+      this.state = "needs_review"; this.client?.close(); void this.retire(active);
+    }, TERMINAL_WAIT_MS);
+    active.endTimer.unref?.();
   }
   private async retire(active: Owned): Promise<void> {
     if (active.retired) return;
-    active.retired = true; clearTimeout(active.timer); active.output?.close(); active.media?.close(); active.abort.abort();
+    active.retired = true; clearTimeout(active.timer); clearTimeout(active.endTimer); active.output?.close(); active.media?.close(); this.stopVoice(active);
     if (this.active === active) this.active = undefined;
-    if (active.voice) { try { await bounded(Promise.resolve(active.voice.close()), 1000); } catch {} }
+    await active.voiceClosing;
   }
   async stop(): Promise<void> {
     if (this.stopped) return;

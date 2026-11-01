@@ -263,7 +263,10 @@ export class NativeCallsClient {
       }
     }
     if (event.type === "track.updated" || event.type === "track.added") this.media.get(event.callId)?.updateTrack(event.track);
-    if (event.type === "call.state" && (!event.call.ownedByThisClient || ["ending", "ended", "uncertain"].includes(event.call.state))) this.dropMedia(event.call.callId);
+    if (event.type === "call.state") {
+      if (!event.call.ownedByThisClient || ["ended", "uncertain"].includes(event.call.state)) this.dropMedia(event.call.callId);
+      else if (event.call.state === "ending") this.media.get(event.call.callId)?.stopAudio();
+    }
     if (event.type === "calls.availability" && (!event.availability.busy || !event.availability.ownedByThisClient)) { for (const callId of this.media.keys()) this.dropMedia(callId); this.owner = undefined; }
     if (event.type === "call.error" && ["forbidden", "closed"].includes(event.code)) this.fail(new NativeCallError(event.code));
   }
@@ -289,6 +292,8 @@ export class NativeCallsClient {
   }
   dial(requestId: string, contactId: string): Promise<CallResult> { return this.command({ type: "call.dial", requestId, target: { kind: "direct", contactId }, media: { audio: true, video: false } }); }
   answer(requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type: "call.answer", requestId, callId, expectedRevision, media: { audio: true, video: false } }); }
+  /** Acceptance starts termination. Retain control and media transports until
+   * the terminal call.state event; a lost confirmation leaves an unknown outcome. */
   end(type: "call.reject" | "call.cancel" | "call.hangup", requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type, requestId, callId, expectedRevision }); }
   clearAudio(requestId: string, callId: string): Promise<CallResult> { return this.command({ type: "call.clear_audio", requestId, callId }); }
   async attachMedia(callId: string): Promise<NativeCallMediaClient> {
@@ -326,6 +331,7 @@ export class NativeCallMediaClient {
   private readyEvent?: MediaReady;
   private sendGuard?: NativeCallMediaStream;
   private receiveGuard?: NativeCallMediaStream;
+  private ending = false;
   private closed = false;
   constructor(options: NativeCallsClientOptions, callId: string, attachment: CallMediaCommand) {
     const url = validateNativeBaseUrl(options.baseUrl); resourceId(callId);
@@ -366,6 +372,7 @@ export class NativeCallMediaClient {
     }
     const bytes = binaryBytes(data);
     if (!bytes || !this.readyEvent || !this.receiveGuard) throw new Error("Unattached media");
+    if (this.ending) return;
     const frame = decodeNativeCallPcm(bytes, this.readyEvent.receiveTrack.format);
     this.receiveGuard.admit(frame);
     if (!this.queue.push(frame)) this.fail(new NativeCallError("media_backpressure"));
@@ -382,8 +389,11 @@ export class NativeCallMediaClient {
     if (track.direction === "receive") this.queue.clear();
     this.readyEvent[key] = structuredClone(track);
   }
+  /** Stop audio immediately without detaching the owner before termination. */
+  stopAudio(): void { this.ending = true; this.queue.clear(); }
   sendPcm(header: NativeCallMediaHeader, samples: Int16Array): void {
     if (this.closed || !this.readyEvent || !this.sendGuard || this.socket?.readyState !== 1) throw new NativeCallError("media_not_ready");
+    if (this.ending) throw new NativeCallError("call_ending");
     const bytes = encodeNativeCallPcm(header, this.readyEvent.sendTrack.format, samples);
     if (this.socket.bufferedAmount + bytes.byteLength > (this.options.maxBufferedBytes ?? 65536)) throw new NativeCallError("media_backpressure");
     const frame = decodeNativeCallPcm(bytes, this.readyEvent.sendTrack.format);

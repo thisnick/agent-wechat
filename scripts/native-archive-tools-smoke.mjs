@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Real pinned Gateway, per-agent policies and provider tool calls; all data is synthetic.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -123,7 +124,8 @@ const upstream = createServer(async (req, res) => {
 try {
   await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
   for (const name of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', name), join(temporary, 'plugin', name));
-  await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-archive-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
+  await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+  await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-archive-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const apiPort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const native = { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${apiPort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy: 'never' };

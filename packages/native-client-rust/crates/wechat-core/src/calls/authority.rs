@@ -1,13 +1,35 @@
-//! Cheap media fences derived from accepted account credentials. Cookies do not
-//! change the generation; credential/routing replacement and logout do.
+//! Cheap media fences derived from accepted account credentials and routing
+//! policy. Cookies do not change the generation; policy replacement/logout do.
 use super::ownership::AccountAuthority;
 use crate::{runtime::authorization, Core};
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use wechat_protocol::AccountState;
+
+fn call_authorization(state: &AccountState) -> Result<[u8; 32]> {
+    // Calls cannot keep using an old ordinary/Ax selection after a policy-only
+    // update. Keep this stricter fence separate from general network admission.
+    let mut digest = Sha256::new();
+    digest.update(b"agent-wechat-call-authority-v1");
+    digest.update(authorization(state)?);
+    let policy = &state.auth_snapshot;
+    digest.update(policy.update_mask.to_le_bytes());
+    for section in [
+        &policy.response,
+        &policy.auth,
+        &policy.account,
+        &policy.network,
+        &policy.ax_auth,
+    ] {
+        digest.update(u64::try_from(section.len())?.to_le_bytes());
+        digest.update(section);
+    }
+    Ok(digest.finalize().into())
+}
 struct Generation {
     epoch: AtomicU64,
     active: AtomicBool,
@@ -90,7 +112,7 @@ impl Core {
         let lease = self
             .cached_call_authority(account)
             .context("auth_required")?;
-        if lease.digest != authorization(state)? || !lease.current() {
+        if lease.digest != call_authorization(state)? || !lease.current() {
             bail!("auth_required");
         }
         Ok(lease)
@@ -143,7 +165,7 @@ impl Core {
         account: &str,
         state: &AccountState,
     ) -> Result<()> {
-        let digest = authorization(state)?;
+        let digest = call_authorization(state)?;
         let mut map = self
             .call_epochs
             .lock()
@@ -185,7 +207,7 @@ impl Core {
         {
             return Ok(());
         }
-        let digest = authorization(state)?;
+        let digest = call_authorization(state)?;
         let mut map = self
             .call_epochs
             .lock()

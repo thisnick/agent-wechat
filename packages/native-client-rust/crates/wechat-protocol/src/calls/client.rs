@@ -65,7 +65,10 @@ impl std::fmt::Display for UnsupportedCallMedia {
 impl std::error::Error for UnsupportedCallMedia {}
 
 mod incoming;
+mod termination;
+pub use super::personal::RemoteExitReason;
 pub use incoming::{IncomingPhase, NativeIncomingSession};
+pub use termination::{LocalStopReason, RemoteTermination};
 
 type AvSnapshot = BTreeMap<u16, (u32, bool)>;
 
@@ -119,6 +122,7 @@ pub enum PersonalPhase {
     Ringing,
     Joined,
     Ending,
+    TerminalPending,
     Uncertain,
     Finished,
 }
@@ -126,6 +130,7 @@ pub enum PersonalPhase {
 pub enum SyncProgress {
     Waiting,
     MediaReady,
+    Terminal(RemoteTermination),
 }
 
 #[derive(Clone)]
@@ -143,6 +148,9 @@ struct PersonalControl {
     peer: String,
     origin: ControlOrigin,
     peer_joined: Option<bool>,
+    terminal: Option<RemoteTermination>,
+    invitation_pending: bool,
+    pending_recipients: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -227,6 +235,9 @@ impl NativePersonalSession {
     }
     pub fn media_ready(&self, state: &AccountState, current: AppAuthority) -> Result<bool> {
         self.check(state, current)?;
+        if self.phase != PersonalPhase::Joined {
+            return Ok(false);
+        }
         match self.active.as_ref() {
             Some(active) => ready(active, &self.own_username),
             None => Ok(false),
@@ -345,6 +356,9 @@ impl NativePersonalSession {
             peer: peer.to_owned(),
             origin: ControlOrigin::Outgoing { invite_id },
             peer_joined: None,
+            terminal: None,
+            invitation_pending: false,
+            pending_recipients: vec![],
         });
         let client_response = personal::JoinClientResponse::decode(&wrapper.client_response)?;
         let members = roster(
@@ -358,6 +372,11 @@ impl NativePersonalSession {
             .as_mut()
             .expect("allocated control")
             .peer_joined = Some(peer_joined);
+        let control = self.control.as_mut().expect("allocated control");
+        control.invitation_pending = !peer_joined;
+        if control.invitation_pending {
+            control.pending_recipients = vec![peer.to_owned()];
+        }
         self.phase = if peer_joined {
             PersonalPhase::Joined
         } else {
@@ -474,6 +493,26 @@ impl NativePersonalSession {
             response.unknown_fields.is_empty(),
             "Unknown caller sync response field"
         );
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing personal control"))?;
+        let origin = match control.origin {
+            ControlOrigin::Outgoing { .. } => termination::Origin::Caller,
+            ControlOrigin::Incoming => termination::Origin::Callee,
+        };
+        let local_status = if matches!(control.origin, ControlOrigin::Incoming)
+            && self.phase != PersonalPhase::Joined
+        {
+            3
+        } else {
+            1
+        };
+        let original_invite =
+            matches!(control.origin,ControlOrigin::Outgoing{invite_id}if invite_id!=0);
+        let mut invitation_pending = control.invitation_pending;
+        let mut pending_recipients = control.pending_recipients.clone();
+        let mut terminal = None;
         let mut next = self.active.as_ref().expect("active room").clone();
         for item in response.items {
             ensure!(
@@ -511,11 +550,10 @@ impl NativePersonalSession {
                         if sequence <= next.member_sequence {
                             continue;
                         }
-                        let members = roster_entries(
+                        let members = parse_roster_entries(
                             repeated(&update, 4, 16)?,
                             &self.own_username,
                             &next.peer,
-                            next.identity.own_member as u16,
                         )?;
                         ensure!(
                             members.iter().all(|(name, m)| next
@@ -526,6 +564,28 @@ impl NativePersonalSession {
                                 )),
                             "Caller member identity changed"
                         );
+                        if members
+                            .get(&next.peer)
+                            .is_some_and(|member| member.status == 1)
+                        {
+                            invitation_pending = false;
+                            pending_recipients.clear();
+                        }
+                        let action = termination::classify(
+                            origin,
+                            local_status,
+                            members.get(&self.own_username).map(|m| m.status),
+                            members.get(&next.peer).map(|m| m.status),
+                            original_invite && invitation_pending && !pending_recipients.is_empty(),
+                        )?;
+                        // A later authoritative own-removal proof suppresses
+                        // an unsubmitted teardown; no later row revives us.
+                        if !matches!(terminal, Some(RemoteTermination::LocalStop(_)))
+                            && (terminal.is_none()
+                                || matches!(action, Some(RemoteTermination::LocalStop(_))))
+                        {
+                            terminal = action;
+                        }
                         next.members = members;
                         next.member_sequence = sequence;
                     }
@@ -535,7 +595,7 @@ impl NativePersonalSession {
                             continue;
                         }
                         ensure!(
-                            !next.media_taken,
+                            !next.media_taken || terminal.is_some(),
                             "Post-start call capability reconfiguration unsupported"
                         );
                         next.cap_sequence = sequence;
@@ -546,13 +606,13 @@ impl NativePersonalSession {
                         let (sequence, av) = av(
                             bytes,
                             next.identity.own_member as u16,
-                            next.members[&next.peer].member,
+                            next.original_members[&next.peer].member,
                         )?;
                         if sequence <= next.av_sequence {
                             continue;
                         }
                         ensure!(
-                            !next.media_taken,
+                            !next.media_taken || terminal.is_some(),
                             "Post-start call AV reconfiguration unsupported"
                         );
                         next.av_sequence = sequence;
@@ -562,7 +622,30 @@ impl NativePersonalSession {
                 }
             }
         }
-        let media_result = match ready(&next, &self.own_username) {
+        if let Some(action) = terminal {
+            next.cookies = response.cookies.unwrap_or_default();
+            let control = self.control.as_mut().expect("personal control");
+            control.peer_joined = Some(
+                next.members
+                    .get(&next.peer)
+                    .is_some_and(|member| member.status == 1),
+            );
+            control.invitation_pending = invitation_pending;
+            control.pending_recipients = pending_recipients;
+            control.terminal = Some(action);
+            self.phase = if matches!(action, RemoteTermination::LocalStop(_)) {
+                PersonalPhase::Finished
+            } else {
+                PersonalPhase::TerminalPending
+            };
+            self.active = Some(next);
+            return Ok(SyncProgress::Terminal(action));
+        }
+        let media_result = match if local_status == 3 {
+            Ok(false)
+        } else {
+            ready(&next, &self.own_username)
+        } {
             Err(error) if !error.is::<UnsupportedCallMedia>() => return Err(error),
             result => result,
         };
@@ -571,12 +654,21 @@ impl NativePersonalSession {
         if media_result.is_ok() {
             next.cookies = response.cookies.unwrap_or_default();
         }
-        let joined = next.members[&next.peer].status == 1;
+        let joined = next
+            .members
+            .get(&next.peer)
+            .is_some_and(|member| member.status == 1);
         self.control
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Missing allocated control"))?
             .peer_joined = Some(joined);
-        self.phase = if joined {
+        let control = self.control.as_mut().expect("personal control");
+        control.invitation_pending = invitation_pending;
+        control.pending_recipients = pending_recipients;
+        self.phase = if (joined
+            || matches!(origin, termination::Origin::Caller) && !invitation_pending)
+            && local_status == 1
+        {
             PersonalPhase::Joined
         } else {
             PersonalPhase::Ringing
@@ -648,15 +740,17 @@ impl NativePersonalSession {
                 bail!("Incoming calls cannot use caller Cancel")
             };
             ensure!(
-                control.peer_joined == Some(false),
-                "Pending peer state unknown or already joined"
+                control.peer_joined == Some(false)
+                    && control.invitation_pending
+                    && !control.pending_recipients.is_empty(),
+                "Pending invitation provenance missing or already joined"
             );
             let request = personal::cancel(
                 &self.parameters.inputs(),
                 room.room,
                 room.room_key,
                 invite_id,
-                std::slice::from_ref(&control.peer),
+                &control.pending_recipients,
                 personal::CancelReason::Local,
                 tasks.sdk,
             )?;
@@ -683,6 +777,124 @@ impl NativePersonalSession {
         };
         result
     }
+    /// Complete one source-classified remote termination. This is separate from
+    /// local Hangup: the peer may already be absent or nonjoined. The embedding
+    /// owner must stop media before calling. Failed replies remain uncertain.
+    pub fn finish_remote(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        tasks: TaskIds,
+        talk_success: bool,
+    ) -> Result<()> {
+        self.check(state, current)?;
+        ensure!(
+            self.phase == PersonalPhase::TerminalPending,
+            "No pending remote teardown"
+        );
+        self.reserve(tasks)?;
+        self.phase = PersonalPhase::Ending;
+        let result = (|| {
+            let control = self
+                .control
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("Missing remote termination control"))?;
+            let action = control
+                .terminal
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Remote termination already spent"))?;
+            let identity = control.identity;
+            match action {
+                RemoteTermination::Exit(reason) => {
+                    let request = personal::exit_remote(
+                        &self.parameters.inputs(),
+                        identity,
+                        reason,
+                        talk_success,
+                        tasks.sdk,
+                    )?;
+                    let parameters = AppFrameParameters {
+                        sdk_version: self.parameters.sdk_version()?,
+                        cloud_device_id: &self.parameters.cloud_device_id,
+                        host_client_version: state.device.client_version as u32,
+                        app_config_version: self.parameters.app_config_version,
+                    };
+                    let body = app_frame::prepare_transfer(
+                        &self.app,
+                        current,
+                        CallOperation::Exit,
+                        request.body.as_deref().expect("prepared remote Exit"),
+                        &parameters,
+                    )?;
+                    let reply =
+                        self.host(client, state, CallHostRoute::Transfer, &body, tasks.host)?;
+                    let exit = fields(&app_frame::decode_transfer_reply(
+                        &self.app,
+                        current,
+                        CallOperation::Exit,
+                        &reply,
+                    )?)?;
+                    ensure!(
+                        number(&exit, 1, None)? == identity.room
+                            && number(&exit, 2, None)? == identity.room_key
+                            && number(&exit, 3, None)? == u64::from(identity.own_member),
+                        "Remote Exit identity mismatch"
+                    );
+                }
+                RemoteTermination::NoResponseCancel => {
+                    let ControlOrigin::Outgoing { invite_id } = control.origin else {
+                        bail!("Callee cannot cancel an original invitation")
+                    };
+                    ensure!(
+                        control.invitation_pending
+                            && !control.pending_recipients.is_empty()
+                            && control
+                                .pending_recipients
+                                .iter()
+                                .all(|recipient| recipient == &control.peer),
+                        "Missing current pending-recipient provenance"
+                    );
+                    control.invitation_pending = false;
+                    let recipients = std::mem::take(&mut control.pending_recipients);
+                    let request = personal::cancel(
+                        &self.parameters.inputs(),
+                        identity.room,
+                        identity.room_key,
+                        invite_id,
+                        &recipients,
+                        personal::CancelReason::NoResponse,
+                        tasks.sdk,
+                    )?;
+                    let body = self.host(
+                        client,
+                        state,
+                        CallHostRoute::Cancel,
+                        request.body(),
+                        tasks.host,
+                    )?;
+                    let outer = fields(&body)?;
+                    let cancelled = fields(data(&outer, 1)?)?;
+                    ensure!(
+                        number(&cancelled, 1, None)? == identity.room
+                            && number(&cancelled, 2, None)? == identity.room_key,
+                        "Remote cancellation room mismatch"
+                    );
+                }
+                RemoteTermination::LocalStop(_) => {
+                    bail!("Local-only stop must not submit a teardown")
+                }
+            }
+            Ok(())
+        })();
+        self.phase = if result.is_ok() {
+            PersonalPhase::Finished
+        } else {
+            PersonalPhase::Uncertain
+        };
+        result
+    }
+
     /// Submit joined Exit once. `talk_success` is the independently established
     /// source predicate, not inferred here from a phone timer. Reliable peer
     /// notice and canonical history remain distinct from accepted server Exit.
@@ -707,8 +919,8 @@ impl NativePersonalSession {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Missing allocated control"))?;
             ensure!(
-                control.peer_joined == Some(true),
-                "Joined peer control state unknown"
+                matches!(control.origin, ControlOrigin::Incoming) || !control.invitation_pending,
+                "Joined control state unknown"
             );
             let identity = control.identity;
             let request = personal::exit(
@@ -810,11 +1022,45 @@ fn roster_entries(
     peer: &str,
     own_member: u16,
 ) -> Result<BTreeMap<String, Member>> {
+    let members = parse_roster_entries(entries, own, peer)?;
+    ensure!(
+        members.len() == 2
+            && members
+                .get(own)
+                .is_some_and(|m| m.member == own_member && m.status == 1)
+            && members
+                .get(peer)
+                .is_some_and(|m| (1..=3).contains(&m.status)),
+        "Incomplete or unsupported personal roster"
+    );
+    Ok(members)
+}
+fn parse_roster_entries(
+    entries: Vec<&[u8]>,
+    own: &str,
+    peer: &str,
+) -> Result<BTreeMap<String, Member>> {
+    ensure!(entries.len() <= 2, "Unsupported direct roster size");
     let mut members = BTreeMap::new();
     let mut ids = BTreeSet::new();
     for raw in entries {
         let values = fields(raw)?;
         only(&values, &[1, 2, 3, 4, 5, 6, 7, 8, 9])?;
+        for tag in [4, 5, 9] {
+            if let Some(Value::Varint(value)) = p::optional(&values, tag)? {
+                u32::try_from(*value)?;
+            } else {
+                ensure!(
+                    p::optional(&values, tag)?.is_none(),
+                    "Invalid member scalar wire type"
+                );
+            }
+        }
+        for tag in [6, 8] {
+            if let Some(value) = p::optional_data(&values, tag)? {
+                std::str::from_utf8(value)?;
+            }
+        }
         let name = std::str::from_utf8(data(&values, 7)?)?;
         ensure!(
             (name == own || name == peer) && !members.contains_key(name),
@@ -836,16 +1082,6 @@ fn roster_entries(
             },
         );
     }
-    ensure!(
-        members.len() == 2
-            && members
-                .get(own)
-                .is_some_and(|m| m.member == own_member && m.status == 1)
-            && members
-                .get(peer)
-                .is_some_and(|m| (1..=3).contains(&m.status)),
-        "Incomplete or unsupported personal roster"
-    );
     Ok(members)
 }
 fn cap(raw: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>)> {
@@ -1643,5 +1879,357 @@ mod tests {
                 TaskIds { sdk: 3, host: 4 }
             )
             .is_err());
+    }
+    pub(super) fn roster_sync(
+        sequence: u32,
+        own: Option<u32>,
+        peer: Option<u32>,
+        unknown_after: bool,
+    ) -> Vec<u8> {
+        let mut roster = vec![
+            p::uint(1, 7),
+            p::uint(2, 9),
+            p::uint(3, u64::from(sequence)),
+        ];
+        if let Some(status) = own {
+            roster.push(p::bytes(4, &member("own", 0, status)));
+        }
+        if let Some(status) = peer {
+            roster.push(p::bytes(4, &member("peer", 1, status)));
+        }
+        let mut notify = vec![
+            p::uint(3, 7),
+            p::uint(4, 9),
+            p::bytes(
+                5,
+                &p::message(&[p::uint(1, 10), p::bytes(2, &p::message(&roster).unwrap())]).unwrap(),
+            ),
+        ];
+        if unknown_after {
+            notify.push(p::bytes(
+                5,
+                &p::message(&[p::uint(1, 999), p::bytes(2, &[])]).unwrap(),
+            ));
+        }
+        let message = p::message(&[
+            p::uint(1, 10002),
+            p::bytes(2, &p::message(&notify).unwrap()),
+        ])
+        .unwrap();
+        host_reply(
+            &p::message(&[
+                p::bytes(
+                    1,
+                    &p::message(&[p::uint(1, 1), p::bytes(2, &message)]).unwrap(),
+                ),
+                p::bytes(2, b"terminal-cursor"),
+            ])
+            .unwrap(),
+        )
+    }
+    pub(super) struct RecordingTransport {
+        pub(super) inner: FakeTransport,
+        pub(super) requests: std::cell::RefCell<Vec<(CallHostRoute, Vec<u8>)>>,
+    }
+    impl PersonalTransport for RecordingTransport {
+        fn call_rpc(
+            &self,
+            state: &mut AccountState,
+            route: CallHostRoute,
+            request: &[u8],
+        ) -> Result<Vec<u8>> {
+            self.requests.borrow_mut().push((route, request.to_vec()));
+            self.inner.call_rpc(state, route, request)
+        }
+    }
+    fn caller_with(
+        transport: &impl PersonalTransport,
+        state: &mut AccountState,
+    ) -> NativePersonalSession {
+        let mut session = NativePersonalSession::authenticate(
+            transport,
+            state,
+            authority(),
+            1,
+            [9; 32],
+            parameters(),
+        )
+        .unwrap();
+        session
+            .invite(
+                transport,
+                state,
+                authority(),
+                "peer",
+                123,
+                TaskIds { sdk: 1, host: 2 },
+            )
+            .unwrap();
+        session
+    }
+    pub(super) fn recorded_exit_reason(request: &[u8]) -> u64 {
+        let common = CommonRequest::decode(request).unwrap();
+        let delegate = fields(common.body.as_deref().unwrap()).unwrap();
+        assert_eq!(number(&delegate, 2, None).unwrap(), 3380);
+        let frame = app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();
+        let cloud = fields(&app_frame::lz4_decode(&frame.payload, 64 * 1024).unwrap()).unwrap();
+        number(&fields(data(&cloud, 2).unwrap()).unwrap(), 6, None).unwrap()
+    }
+    #[test]
+    fn caller_remote_last_peer_uses_one_exit_with_distinct_reason_and_no_local_cancel() {
+        for (peer, wire) in [(4, 5), (6, 7), (7, 6)] {
+            let transport = RecordingTransport {
+                inner: FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+                    (CallHostRoute::AppAuth, auth_reply()),
+                    (CallHostRoute::Invite, invite_reply()),
+                    (
+                        CallHostRoute::LiveSync,
+                        roster_sync(2, Some(1), Some(peer), false),
+                    ),
+                    (CallHostRoute::Transfer, exit_reply()),
+                ]))),
+                requests: Default::default(),
+            };
+            let mut state = state();
+            let mut session = caller_with(&transport, &mut state);
+            assert!(matches!(
+                session
+                    .poll(
+                        &transport,
+                        &mut state,
+                        authority(),
+                        TaskIds { sdk: 2, host: 3 }
+                    )
+                    .unwrap(),
+                SyncProgress::Terminal(RemoteTermination::Exit(_))
+            ));
+            assert_eq!(session.phase(), PersonalPhase::TerminalPending);
+            assert!(session.take_media(&state, authority(), 0, 0).is_err());
+            session
+                .finish_remote(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 3, host: 4 },
+                    false,
+                )
+                .unwrap();
+            let requests = transport.requests.borrow();
+            let last = requests.last().unwrap();
+            assert_eq!(last.0, CallHostRoute::Transfer);
+            assert_eq!(recorded_exit_reason(&last.1), wire);
+            assert_eq!(session.phase(), PersonalPhase::Finished);
+            assert!(session
+                .finish_remote(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 4, host: 5 },
+                    false
+                )
+                .is_err());
+            assert!(transport.inner.0.borrow().is_empty());
+        }
+    }
+    #[test]
+    fn caller_self_removal_is_local_stop_with_no_exit_or_cancel() {
+        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::Invite, invite_reply()),
+            (
+                CallHostRoute::LiveSync,
+                roster_sync(2, None, Some(1), false),
+            ),
+        ])));
+        let mut state = state();
+        let mut session = caller_with(&transport, &mut state);
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .unwrap(),
+            SyncProgress::Terminal(RemoteTermination::LocalStop(LocalStopReason::SelfRemoved))
+        );
+        assert_eq!(session.phase(), PersonalPhase::Finished);
+        assert!(session
+            .finish_remote(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 3, host: 4 },
+                false
+            )
+            .is_err());
+        assert!(transport.0.borrow().is_empty());
+    }
+    #[test]
+    fn terminal_row_in_incomplete_batch_does_not_advance_cursor_or_commit_action() {
+        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::Invite, invite_reply()),
+            (CallHostRoute::LiveSync, roster_sync(2, None, Some(1), true)),
+        ])));
+        let mut state = state();
+        let mut session = caller_with(&transport, &mut state);
+        assert!(session
+            .poll(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 2, host: 3 }
+            )
+            .is_err());
+        assert_eq!(session.phase(), PersonalPhase::Uncertain);
+        assert_eq!(session.active.as_ref().unwrap().cookies, b"old");
+        assert_eq!(session.active.as_ref().unwrap().member_sequence, 1);
+        assert!(session.control.as_ref().unwrap().terminal.is_none());
+    }
+    #[test]
+    fn no_response_cancel_uses_original_id_and_direct_invite_timeout_wire_reason() {
+        let cancel = host_reply(&p::bytes(
+            1,
+            &p::message(&[p::uint(1, 7), p::uint(2, 9)]).unwrap(),
+        ));
+        let transport = RecordingTransport {
+            inner: FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::Invite, invite_reply()),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(2, Some(1), Some(8), false),
+                ),
+                (CallHostRoute::Cancel, cancel),
+            ]))),
+            requests: Default::default(),
+        };
+        let mut state = state();
+        let mut session = caller_with(&transport, &mut state);
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .unwrap(),
+            SyncProgress::Terminal(RemoteTermination::NoResponseCancel)
+        );
+        session
+            .finish_remote(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 3, host: 4 },
+                false,
+            )
+            .unwrap();
+        let requests = transport.requests.borrow();
+        let last = requests.last().unwrap();
+        assert_eq!(last.0, CallHostRoute::Cancel);
+        let common = CommonRequest::decode(&last.1).unwrap();
+        let outer = fields(common.body.as_deref().unwrap()).unwrap();
+        assert_eq!(number(&outer, 2, None).unwrap(), 123);
+        assert_eq!(repeated(&outer, 4, 16).unwrap(), vec![b"peer".as_slice()]);
+
+        let inner = fields(data(&outer, 1).unwrap()).unwrap();
+        assert_eq!(number(&inner, 5, None).unwrap(), 123);
+        assert_eq!(number(&inner, 6, None).unwrap(), 2);
+    }
+    #[test]
+    fn failed_remote_exit_is_uncertain_and_not_replayed() {
+        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::Invite, invite_reply()),
+            (
+                CallHostRoute::LiveSync,
+                roster_sync(2, Some(1), Some(4), false),
+            ),
+        ])));
+        let mut state = state();
+        let mut session = caller_with(&transport, &mut state);
+        session
+            .poll(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 2, host: 3 },
+            )
+            .unwrap();
+        assert!(session
+            .finish_remote(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 3, host: 4 },
+                false
+            )
+            .is_err());
+        assert_eq!(session.phase(), PersonalPhase::Uncertain);
+        assert!(session
+            .finish_remote(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 4, host: 5 },
+                false
+            )
+            .is_err());
+    }
+    #[test]
+    fn previously_joined_peer_permanently_disarms_original_pending_cancel() {
+        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::Invite, invite_reply()),
+            (CallHostRoute::LiveSync, joined_sync(false)),
+            (
+                CallHostRoute::LiveSync,
+                roster_sync(3, Some(1), Some(8), false),
+            ),
+        ])));
+        let mut state = state();
+        let mut session = caller_with(&transport, &mut state);
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert!(!session.control.as_ref().unwrap().invitation_pending);
+        assert!(session
+            .control
+            .as_ref()
+            .unwrap()
+            .pending_recipients
+            .is_empty());
+        assert!(session
+            .poll(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 3, host: 4 }
+            )
+            .is_err());
+        assert_eq!(session.phase(), PersonalPhase::Uncertain);
+        assert_eq!(session.active.as_ref().unwrap().cookies, b"new");
+        assert!(session
+            .finish_remote(
+                &transport,
+                &mut state,
+                authority(),
+                TaskIds { sdk: 4, host: 5 },
+                false
+            )
+            .is_err());
+        assert!(transport.0.borrow().is_empty());
     }
 }

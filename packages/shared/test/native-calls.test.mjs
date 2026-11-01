@@ -171,6 +171,29 @@ test('pending request ID deduplicates locally, detects changed payload and never
   } finally { owner.close(); }
 });
 
+test('ending stops audio but retains owner transports until terminal confirmation', async () => {
+  for (const terminal of ['ended', 'uncertain']) {
+    const server = new MockCallServer(); const owner = client(server);
+    try {
+      await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
+      const media = await owner.attachMedia('call-1');
+      const snapshot = { callId: 'call-1', revision: 2, kind: 'direct', direction: 'outgoing', state: 'ending', ownedByThisClient: true };
+      server.controls[0].receive({ type: 'call.state', call: snapshot });
+      assert.equal(server.controls[0].readyState, 1);
+      assert.equal(server.media[0].readyState, 1);
+      assert.throws(() => media.sendPcm({ trackId: 1, generation: 1, sequence: 0n, timestampMicros: 0n }, new Int16Array(320)), error => error.code === 'call_ending');
+      // Cross-socket data already queued before Ending must neither play nor
+      // overflow a stopped consumer and detach its still-terminating owner.
+      for (let i = 0; i < 20; i++) server.media[0].receive(encodeNativeCallPcm({ trackId: 2, generation: 1, sequence: BigInt(i), timestampMicros: BigInt(i) * 20000n }, audio, new Int16Array(320)));
+      assert.equal(server.media[0].readyState, 1);
+      server.controls[0].receive({ type: 'call.state', call: { ...snapshot, revision: 3, state: terminal } });
+      assert.equal(server.media[0].readyState, 3);
+      assert.equal(server.controls[0].readyState, 1);
+      await assert.rejects(owner.attachMedia('call-1'), error => error.code === 'not_owner');
+    } finally { owner.close(); }
+  }
+});
+
 test('revocation closes media and rejects pending control operations without exposing server text', async () => {
   const server = new MockCallServer(); const owner = client(server);
   await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
