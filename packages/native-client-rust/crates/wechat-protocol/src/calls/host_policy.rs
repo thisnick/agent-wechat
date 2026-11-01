@@ -58,9 +58,23 @@ pub fn is_teardown_request(route: CallHostRoute, common: &[u8]) -> Result<bool> 
     if route == CallHostRoute::Cancel {
         return Ok(true);
     }
+    is_terminal_transfer(route, common, super::signaling::CallOperation::Exit)
+}
+/// An explicit broker-winning callee rejection has a separate admission ticket.
+/// This recognizer does not grant that permission or turn an expiry into Reject.
+pub fn is_reject_request(route: CallHostRoute, common: &[u8]) -> Result<bool> {
+    is_terminal_transfer(route, common, super::signaling::CallOperation::Reject)
+}
+fn is_terminal_transfer(
+    route: CallHostRoute,
+    common: &[u8],
+    operation: super::signaling::CallOperation,
+) -> Result<bool> {
     if route != CallHostRoute::Transfer {
         return Ok(false);
     }
+    let command = operation.command_id();
+    let rejecting = operation == super::signaling::CallOperation::Reject;
     let common = super::signaling::CommonRequest::decode(common)?;
     if !common.unknown_fields.is_empty() {
         return Ok(false);
@@ -71,17 +85,17 @@ pub fn is_teardown_request(route: CallHostRoute, common: &[u8]) -> Result<bool> 
     let delegate = Fields::decode(&body)?;
     if delegate.0.iter().any(|f| !(1..=5).contains(&f.number))
         || delegate.required_u64(1)? != 1901
-        || delegate.required_u64(2)? != 3380
+        || delegate.required_u64(2)? != u64::from(command)
         || delegate.required_bytes(3)? != b"wechat"
-        || delegate.required_bytes(4)? != super::signaling::CallOperation::Exit.path().as_bytes()
+        || delegate.required_bytes(4)? != operation.path().as_bytes()
     {
         return Ok(false);
     }
-    let frame = super::app_frame::TaskFrame::decode(delegate.required_bytes(5)?, 3380)?;
+    let frame = super::app_frame::TaskFrame::decode(delegate.required_bytes(5)?, command)?;
     const INTEGER_KEYS: &[u32] = &[
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 20, 21, 22, 23, 25, 26, 28, 29, 30, 31,
     ];
-    if frame.command != 3380
+    if frame.command != command
         || frame.integers.keys().any(|n| !INTEGER_KEYS.contains(n))
         || frame.strings.keys().any(|n| ![14, 24, 27].contains(n))
         || frame.integers.get(&1) != Some(&1)
@@ -111,16 +125,21 @@ pub fn is_teardown_request(route: CallHostRoute, common: &[u8]) -> Result<bool> 
         return Ok(false);
     }
     let exit = Fields::decode(cloud.required_bytes(2)?)?;
-    if exit.0.iter().any(|f| !(1..=8).contains(&f.number))
+    let last_field = if rejecting { 6 } else { 8 };
+    if exit.0.iter().any(|f| !(1..=last_field).contains(&f.number))
         || exit.required_bytes(1)?.is_empty()
         || exit.required_bytes(2)?.is_empty()
         || exit.required_u64(3)? == 0
         || exit.required_u64(4)? == 0
-        || [5, 6, 7].iter().any(|n| {
+        || [5, 6].iter().any(|n| {
             exit.required_u64(*n)
                 .map_or(true, |v| u32::try_from(v).is_err())
         })
-        || exit.required_u64(8)? > 1
+        || if rejecting {
+            exit.required_u64(6)? != 1
+        } else {
+            u32::try_from(exit.required_u64(7)?).is_err() || exit.required_u64(8)? > 1
+        }
     {
         return Ok(false);
     }
@@ -340,17 +359,18 @@ mod tests {
                 crate::protobuf::uint(7, 0),
             ])
             .unwrap();
-            let exit = crate::protobuf::message(&[
+            let mut terminal = vec![
                 crate::protobuf::bytes(1, &sdk),
                 crate::protobuf::bytes(2, &group),
                 crate::protobuf::uint(3, 7),
                 crate::protobuf::uint(4, 9),
                 crate::protobuf::uint(5, 0),
                 crate::protobuf::uint(6, 1),
-                crate::protobuf::uint(7, 0),
-                crate::protobuf::uint(8, 1),
-            ])
-            .unwrap();
+            ];
+            if delegate != 3095 {
+                terminal.extend([crate::protobuf::uint(7, 0), crate::protobuf::uint(8, 1)]);
+            }
+            let exit = crate::protobuf::message(&terminal).unwrap();
             let base = crate::protobuf::message(&[
                 crate::protobuf::uint(1, 17),
                 crate::protobuf::bytes(2, b"Ldevice"),
@@ -421,6 +441,27 @@ mod tests {
             assert!(!is_teardown_request(
                 CallHostRoute::Transfer,
                 &request_override(3380, exit, 3380, Some(extra))
+            )
+            .unwrap_or(false));
+        }
+        let reject = super::super::signaling::CallOperation::Reject
+            .path()
+            .as_bytes();
+        assert!(is_reject_request(CallHostRoute::Transfer, &request(3095, reject, 3095)).unwrap());
+        assert!(
+            !is_teardown_request(CallHostRoute::Transfer, &request(3095, reject, 3095)).unwrap()
+        );
+        for raw in [
+            request(3380, exit, 3380),
+            request(3095, join, 3095),
+            request(3095, reject, 3361),
+        ] {
+            assert!(!is_reject_request(CallHostRoute::Transfer, &raw).unwrap_or(false));
+        }
+        for extra in [(99, 0), (7, 11), (26, 0)] {
+            assert!(!is_reject_request(
+                CallHostRoute::Transfer,
+                &request_override(3095, reject, 3095, Some(extra))
             )
             .unwrap_or(false));
         }

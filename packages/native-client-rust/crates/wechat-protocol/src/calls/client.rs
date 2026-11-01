@@ -14,7 +14,7 @@ use crate::{
     protobuf::{self as p, Field, Value},
     wire, AccountState, NativeClient,
 };
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 
@@ -340,11 +340,12 @@ impl NativePersonalSession {
         );
         ensure!(
             wrapper.invite_results.len() <= 1
-                && wrapper
-                    .invite_results
-                    .iter()
-                    .all(|(name, code)| name == peer && *code == 0),
-            "Personal invitation result mismatch or rejection"
+                && wrapper.invite_results.iter().all(|(name, _)| name == peer),
+            "Personal invitation result identity mismatch"
+        );
+        ensure!(
+            wrapper.unknown_fields.is_empty(),
+            "Unknown personal allocation fields"
         );
         let own_member = u16::try_from(wrapper.own_member)?;
         self.control = Some(PersonalControl {
@@ -360,33 +361,70 @@ impl NativePersonalSession {
             invitation_pending: false,
             pending_recipients: vec![],
         });
-        let client_response = personal::JoinClientResponse::decode(&wrapper.client_response)?;
-        let members = roster(
-            &client_response.members,
-            &self.own_username,
-            peer,
-            own_member,
-        )?;
-        let peer_joined = members[peer].status == 1;
-        self.control
-            .as_mut()
-            .expect("allocated control")
-            .peer_joined = Some(peer_joined);
+        // The personal host wrapper's per-target status is not the overall
+        // allocation outcome. The source reduces the initial full roster before
+        // AV/codec setup, including busy/rejected peers and our own removal.
+        let initial = fields(&wrapper.client_response)?;
+        only(&initial, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])?;
+        let raw_members = data(&initial, 2)?;
+        let list = fields(raw_members)?;
+        only(&list, &[1, 2, 3])?;
+        p::optional_data(&list, 3)?;
+        let member_sequence = u32::try_from(number(&list, 1, Some(0))?)?;
+        ensure!(
+            member_sequence != 0,
+            "Missing initial current member sequence"
+        );
+        let members = parse_roster_entries(repeated(&list, 2, 16)?, &self.own_username, peer)?;
+        ensure!(
+            members
+                .get(&self.own_username)
+                .is_none_or(|own| own.member == own_member)
+                && members
+                    .get(peer)
+                    .is_none_or(|peer| peer.member != own_member),
+            "Initial personal member identity mismatch"
+        );
+        let peer_joined = members.get(peer).is_some_and(|peer| peer.status == 1);
+        let pending = members
+            .get(peer)
+            .is_some_and(|peer| matches!(peer.status, 2 | 3));
         let control = self.control.as_mut().expect("allocated control");
-        control.invitation_pending = !peer_joined;
-        if control.invitation_pending {
+        control.peer_joined = Some(peer_joined);
+        control.invitation_pending = pending;
+        if pending {
             control.pending_recipients = vec![peer.to_owned()];
         }
+        let terminal = termination::classify(
+            termination::Origin::Caller,
+            1,
+            members.get(&self.own_username).map(|own| own.status),
+            members.get(peer).map(|peer| peer.status),
+            pending,
+        )?;
+        if let Some(action @ RemoteTermination::LocalStop(_)) = terminal {
+            control.terminal = Some(action);
+            self.phase = PersonalPhase::Finished;
+            return Ok(());
+        }
+        let live_id = number(&initial, 5, None)?;
+        ensure!(live_id != 0, "Missing initial live identity");
+        self.parameters.group = replace_group(&self.parameters.group, live_id, &wrapper.group_id)?;
+        if let Some(action) = terminal {
+            self.control.as_mut().expect("allocated control").terminal = Some(action);
+            self.phase = PersonalPhase::TerminalPending;
+            return Ok(());
+        }
+        ensure!(
+            members.len() == 2 && members[&self.own_username].status == 1,
+            "Incomplete initial personal roster"
+        );
         self.phase = if peer_joined {
             PersonalPhase::Joined
         } else {
             PersonalPhase::Ringing
         };
-        self.parameters.group = replace_group(
-            &self.parameters.group,
-            client_response.live_id,
-            &wrapper.group_id,
-        )?;
+        let client_response = personal::JoinClientResponse::decode(&wrapper.client_response)?;
         let strategy = fields(&client_response.strategy)?;
         ensure!(
             number(&strategy, 14, None)? & (1 << 36) == 0,
@@ -401,8 +439,6 @@ impl NativePersonalSession {
             own_member,
             members[peer].member,
         )?;
-        let member_sequence =
-            u32::try_from(number(&fields(&client_response.members)?, 1, Some(0))?)?;
         let active = ActiveRoom {
             identity: VoiceRoom {
                 room: wrapper.room,
@@ -665,10 +701,7 @@ impl NativePersonalSession {
         let control = self.control.as_mut().expect("personal control");
         control.invitation_pending = invitation_pending;
         control.pending_recipients = pending_recipients;
-        self.phase = if (joined
-            || matches!(origin, termination::Origin::Caller) && !invitation_pending)
-            && local_status == 1
-        {
+        self.phase = if (joined || !invitation_pending) && local_status == 1 {
             PersonalPhase::Joined
         } else {
             PersonalPhase::Ringing
@@ -1097,6 +1130,7 @@ fn cap(raw: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>)> {
         !engine.is_empty() && !channel.is_empty(),
         "Partial call capabilities unsupported"
     );
+    profile_shape(&engine, &channel)?;
     Ok((sequence, engine, channel))
 }
 fn av(raw: &[u8], own: u16, peer: u16) -> Result<(u32, AvSnapshot)> {
@@ -1122,7 +1156,7 @@ fn av(raw: &[u8], own: u16, peer: u16) -> Result<(u32, AvSnapshot)> {
     }
     Ok((sequence, members))
 }
-fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
+fn profile_shape(engine: &[u8], channel: &[u8]) -> Result<[u64; 6]> {
     let ef = fields(engine)?;
     let cf = fields(channel)?;
     let mut seen = BTreeSet::new();
@@ -1141,28 +1175,44 @@ fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
         }
     }
     only(&cf, &[1, 2])?;
-    let selected = [
-        number(&ef, 5, None)?,
-        number(&ef, 6, None)?,
+    Ok([
+        number(&ef, 5, Some(0))?,
+        number(&ef, 6, Some(0))?,
         number(&ef, 7, Some(0))?,
         number(&ef, 39, Some(0))?,
-        number(&cf, 1, Some(0))?,
-        number(&cf, 2, Some(0))?,
-    ];
-    if selected != [17, 0x206, 0x800000, 0, 2, 3] {
+        u64::from(u32::try_from(number(&cf, 1, Some(0))?)?),
+        u64::from(u32::try_from(number(&cf, 2, Some(0))?)?),
+    ])
+}
+fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
+    if profile_shape(engine, channel)? != [17, 0x206, 0x800000, 0, 2, 3] {
         return Err(UnsupportedCallMedia.into());
     }
     Ok(())
 }
 fn ready(room: &ActiveRoom, own: &str) -> Result<bool> {
-    profile(&room.engine, &room.channel)?;
-    let own_id = room.members[own].member;
-    let peer = &room.members[&room.peer];
-    Ok(peer.status == 1
-        && room.av.len() == 2
-        && [own_id, peer.member]
+    // Current capability bytes are validated even while a peer/AV stream is
+    // pending. Codec0 is then unselected data, never decoder permission.
+    profile_shape(&room.engine, &room.channel)?;
+    let own_id = room
+        .members
+        .get(own)
+        .context("Missing current own member")?
+        .member;
+    let peer = room
+        .members
+        .get(&room.peer)
+        .context("Missing current peer member")?;
+    if peer.status != 1
+        || room.av.len() != 2
+        || ![own_id, peer.member]
             .iter()
-            .all(|id| room.av.get(id) == Some(&(1, false))))
+            .all(|id| room.av.get(id) == Some(&(1, false)))
+    {
+        return Ok(false);
+    }
+    profile(&room.engine, &room.channel)?;
+    Ok(true)
 }
 fn replace_group(raw: &[u8], live_id: u64, group: &str) -> Result<Vec<u8>> {
     let values = fields(raw)?;
@@ -1336,7 +1386,16 @@ mod tests {
         invite_reply_profile(17, 2)
     }
     fn invite_reply_profile(codec: u64, peer_status: u32) -> Vec<u8> {
+        invite_reply_full(codec, peer_status, 0)
+    }
+    fn invite_reply_full(codec: u64, peer_status: u32, peer_av: u32) -> Vec<u8> {
         let (engine, channel) = capabilities_for_codec(codec);
+        // Scalar0 may be absent in a current, unselected capability message.
+        let engine = if codec == 0 {
+            p::message(&[p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap()
+        } else {
+            engine
+        };
         let cap = p::message(&[
             p::uint(1, 1),
             p::bytes(
@@ -1363,7 +1422,7 @@ mod tests {
         let client = p::message(&[
             p::bytes(1, &strategy),
             p::bytes(2, &roster),
-            p::bytes(3, &av_status(1, 0)),
+            p::bytes(3, &av_status(1, peer_av)),
             p::uint(5, 99),
             p::bytes(6, b"old"),
         ])
@@ -1375,6 +1434,69 @@ mod tests {
                 p::uint(3, 0),
                 p::bytes(4, b"group"),
                 p::bytes(5, &client),
+            ])
+            .unwrap(),
+        )
+    }
+    fn with_result(reply: &[u8], recipient: &str, code: u64) -> Vec<u8> {
+        let common = fields(reply).unwrap();
+        let mut body = data(&common, 2).unwrap().to_vec();
+        body.extend(p::bytes(
+            8,
+            &p::message(&[p::bytes(1, recipient.as_bytes()), p::uint(2, code)]).unwrap(),
+        ));
+        host_reply(&body)
+    }
+    fn initial_roster_reply(sequence: u32, own: Option<u32>, peer: Option<u32>) -> Vec<u8> {
+        let mut list = vec![p::uint(1, u64::from(sequence))];
+        if let Some(status) = own {
+            list.push(p::bytes(2, &member("own", 0, status)));
+        }
+        if let Some(status) = peer {
+            list.push(p::bytes(2, &member("peer", 1, status)));
+        }
+        // No AV/codec data is needed for the source's earlier terminal reducer.
+        let client = p::message(&[
+            p::bytes(2, &p::message(&list).unwrap()),
+            p::uint(5, 99),
+            p::bytes(6, b"initial"),
+        ])
+        .unwrap();
+        with_result(
+            &host_reply(
+                &p::message(&[
+                    p::uint(1, 7),
+                    p::uint(2, 9),
+                    p::uint(3, 0),
+                    p::bytes(4, b"group"),
+                    p::bytes(5, &client),
+                ])
+                .unwrap(),
+            ),
+            "peer",
+            23,
+        )
+    }
+    fn capability_sync(engine: &[u8], channel: &[u8]) -> Vec<u8> {
+        let content = p::message(&[p::bytes(1, engine), p::bytes(2, channel)]).unwrap();
+        let cap = p::message(&[p::uint(1, 2), p::bytes(2, &content)]).unwrap();
+        let notify = p::message(&[
+            p::uint(3, 7),
+            p::uint(4, 9),
+            p::bytes(
+                5,
+                &p::message(&[p::uint(1, 11), p::bytes(2, &cap)]).unwrap(),
+            ),
+        ])
+        .unwrap();
+        let message = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+        host_reply(
+            &p::message(&[
+                p::bytes(
+                    1,
+                    &p::message(&[p::uint(1, 1), p::bytes(2, &message)]).unwrap(),
+                ),
+                p::bytes(2, b"bad-cursor"),
             ])
             .unwrap(),
         )
@@ -1663,7 +1785,281 @@ mod tests {
     }
 
     #[test]
-    fn accepted_pending_control_survives_unsupported_media_and_cancels_once() {
+    fn pending_codec_zero_continues_sync_until_both_av_and_selected_codec_are_ready() {
+        let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+            (CallHostRoute::AppAuth, auth_reply()),
+            (
+                CallHostRoute::Invite,
+                with_result(&invite_reply_profile(0, 2), "peer", 23),
+            ),
+            (
+                CallHostRoute::LiveSync,
+                host_reply(&p::bytes(2, b"waiting")),
+            ),
+            (
+                CallHostRoute::LiveSync,
+                joined_sync_profile(false, Some(17)),
+            ),
+        ])));
+        let mut state = state();
+        let mut session = NativePersonalSession::authenticate(
+            &transport,
+            &mut state,
+            authority(),
+            1,
+            [9; 32],
+            parameters(),
+        )
+        .unwrap();
+        session
+            .invite(
+                &transport,
+                &mut state,
+                authority(),
+                "peer",
+                123,
+                TaskIds { sdk: 1, host: 2 },
+            )
+            .unwrap();
+        assert_eq!(session.phase(), PersonalPhase::Ringing);
+        assert!(!session.media_ready(&state, authority()).unwrap());
+        assert!(session.take_media(&state, authority(), 0, 0).is_err());
+        assert!(p::optional(
+            &fields(&session.active.as_ref().unwrap().engine).unwrap(),
+            5
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .unwrap(),
+            SyncProgress::Waiting
+        );
+        assert_eq!(session.active.as_ref().unwrap().cookies, b"waiting");
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 3, host: 4 }
+                )
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert!(session.media_ready(&state, authority()).unwrap());
+        assert_eq!(
+            session
+                .take_media(&state, authority(), 0, 0)
+                .unwrap()
+                .peer_member,
+            1
+        );
+    }
+    #[test]
+    fn pending_capability_shapes_are_checked_before_cursor_installation() {
+        let (engine, channel) = capabilities_for_codec(0);
+        for (bad_engine, bad_channel) in [
+            ([engine.clone(), p::uint(99, 0)].concat(), channel.clone()),
+            ([engine.clone(), p::uint(6, 0)].concat(), channel.clone()),
+            (p::bytes(6, b"wrong-wire"), channel.clone()),
+            (
+                engine.clone(),
+                p::message(&[p::uint(1, u64::MAX), p::uint(2, 3)]).unwrap(),
+            ),
+        ] {
+            let transport =
+                FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+                    (CallHostRoute::AppAuth, auth_reply()),
+                    (CallHostRoute::Invite, invite_reply_profile(0, 2)),
+                    (
+                        CallHostRoute::LiveSync,
+                        capability_sync(&bad_engine, &bad_channel),
+                    ),
+                ])));
+            let mut state = state();
+            let mut session = NativePersonalSession::authenticate(
+                &transport,
+                &mut state,
+                authority(),
+                1,
+                [9; 32],
+                parameters(),
+            )
+            .unwrap();
+            session
+                .invite(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    "peer",
+                    123,
+                    TaskIds { sdk: 1, host: 2 },
+                )
+                .unwrap();
+            assert!(session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .is_err());
+            assert_eq!(session.phase(), PersonalPhase::Uncertain);
+            let active = session.active.as_ref().unwrap();
+            assert_eq!(active.cookies, b"old");
+            assert_eq!(active.cap_sequence, 1);
+            assert_eq!(active.members["peer"].status, 2);
+            assert!(session.take_media(&state, authority(), 0, 0).is_err());
+        }
+    }
+    #[test]
+    fn initial_full_roster_terminates_before_profile_and_recipient_result_is_not_overall_error() {
+        for (own, peer, action) in [
+            (
+                Some(1),
+                Some(6),
+                RemoteTermination::Exit(personal::RemoteExitReason::PeerBusy),
+            ),
+            (
+                Some(1),
+                Some(7),
+                RemoteTermination::Exit(personal::RemoteExitReason::PeerRejected),
+            ),
+            (
+                Some(1),
+                None,
+                RemoteTermination::Exit(personal::RemoteExitReason::LastPeerLeft),
+            ),
+            (
+                None,
+                Some(1),
+                RemoteTermination::LocalStop(LocalStopReason::SelfRemoved),
+            ),
+            (
+                Some(2),
+                Some(1),
+                RemoteTermination::LocalStop(LocalStopReason::SelfRemoved),
+            ),
+        ] {
+            let local = matches!(action, RemoteTermination::LocalStop(_));
+            let mut replies = std::collections::VecDeque::from([
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::Invite, initial_roster_reply(1, own, peer)),
+            ]);
+            if !local {
+                replies.push_back((CallHostRoute::Transfer, exit_reply()));
+            }
+            let transport = RecordingTransport {
+                inner: FakeTransport(std::cell::RefCell::new(replies)),
+                requests: Default::default(),
+            };
+            let mut state = state();
+            let mut session = NativePersonalSession::authenticate(
+                &transport,
+                &mut state,
+                authority(),
+                1,
+                [9; 32],
+                parameters(),
+            )
+            .unwrap();
+            session
+                .invite(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    "peer",
+                    123,
+                    TaskIds { sdk: 1, host: 2 },
+                )
+                .unwrap();
+            assert_eq!(session.control.as_ref().unwrap().terminal, Some(action));
+            assert!(session.active.is_none());
+            assert!(!session.media_ready(&state, authority()).unwrap());
+            if local {
+                assert_eq!(session.phase(), PersonalPhase::Finished);
+            } else {
+                assert_eq!(session.phase(), PersonalPhase::TerminalPending);
+                session
+                    .finish_remote(
+                        &transport,
+                        &mut state,
+                        authority(),
+                        TaskIds { sdk: 2, host: 3 },
+                        false,
+                    )
+                    .unwrap();
+                let expected = match action {
+                    RemoteTermination::Exit(reason) => reason.wire(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    recorded_exit_reason(&transport.requests.borrow().last().unwrap().1),
+                    expected
+                );
+            }
+            assert_eq!(session.phase(), PersonalPhase::Finished);
+            assert!(transport.inner.0.borrow().is_empty());
+        }
+    }
+    #[test]
+    fn initial_zero_sequence_or_unknown_membership_is_not_terminal_proof() {
+        for (sequence, own, peer) in [
+            (0, None, Some(1)),
+            (1, Some(1), Some(99)),
+            (1, Some(1), Some(8)),
+        ] {
+            let transport =
+                FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+                    (CallHostRoute::AppAuth, auth_reply()),
+                    (
+                        CallHostRoute::Invite,
+                        initial_roster_reply(sequence, own, peer),
+                    ),
+                ])));
+            let mut state = state();
+            let mut session = NativePersonalSession::authenticate(
+                &transport,
+                &mut state,
+                authority(),
+                1,
+                [9; 32],
+                parameters(),
+            )
+            .unwrap();
+            assert!(session
+                .invite(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    "peer",
+                    123,
+                    TaskIds { sdk: 1, host: 2 }
+                )
+                .is_err());
+            assert_eq!(session.phase(), PersonalPhase::Uncertain);
+            assert!(session.control.as_ref().unwrap().terminal.is_none());
+            assert!(session
+                .finish_remote(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 },
+                    false
+                )
+                .is_err());
+            assert!(transport.0.borrow().is_empty());
+        }
+    }
+    #[test]
+    fn pending_unselected_control_is_not_media_admission_and_cancels_once() {
         let cancel = host_reply(
             &p::message(&[p::bytes(
                 1,
@@ -1686,7 +2082,7 @@ mod tests {
             parameters(),
         )
         .unwrap();
-        let error = session
+        session
             .invite(
                 &transport,
                 &mut state,
@@ -1695,8 +2091,8 @@ mod tests {
                 123,
                 TaskIds { sdk: 1, host: 2 },
             )
-            .unwrap_err();
-        assert!(error.is::<UnsupportedCallMedia>());
+            .unwrap();
+        assert!(!session.media_ready(&state, authority()).unwrap());
         assert!(session.has_allocated_control());
         assert_eq!(session.phase(), PersonalPhase::Ringing);
         assert!(session.take_media(&state, authority(), 0, 0).is_err());
@@ -1754,17 +2150,16 @@ mod tests {
             parameters(),
         )
         .unwrap();
-        assert!(session
+        session
             .invite(
                 &transport,
                 &mut state,
                 authority(),
                 "peer",
                 123,
-                TaskIds { sdk: 1, host: 2 }
+                TaskIds { sdk: 1, host: 2 },
             )
-            .unwrap_err()
-            .is::<UnsupportedCallMedia>());
+            .unwrap();
         assert!(session
             .cancel(
                 &transport,
@@ -1788,7 +2183,7 @@ mod tests {
     fn joined_membership_selects_exit_even_when_media_is_unsupported() {
         let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
             (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::Invite, invite_reply_profile(0, 1)),
+            (CallHostRoute::Invite, invite_reply_full(0, 1, 1)),
             (CallHostRoute::Transfer, exit_reply()),
         ])));
         let mut state = state();

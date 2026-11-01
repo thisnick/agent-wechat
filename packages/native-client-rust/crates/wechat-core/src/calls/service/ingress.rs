@@ -1,17 +1,27 @@
 use super::super::notifications::{
-    IncomingGuard, IncomingNotification, IncomingPreparation, IncomingRequest, PendingStage,
-    Registry,
+    IncomingCancellation, IncomingGuard, IncomingNotification, IncomingPreparation,
+    IncomingRegistration, IncomingRequest, PendingStage,
 };
 use super::*;
 use std::time::Duration;
 use wechat_protocol::calls::incoming::NotificationPayload;
 
-pub(super) enum IncomingJob {
-    Prepare(IncomingRequest),
-    Cancel {
-        identity: CallIdentity,
-        note: Arc<IncomingNotification>,
-    },
+pub(super) struct IncomingCancel {
+    identity: CallIdentity,
+    note: Arc<IncomingNotification>,
+    registration: IncomingRegistration,
+    expires: Instant,
+}
+pub(super) struct IncomingReceivers {
+    pub preparations: mpsc::Receiver<IncomingRequest>,
+    pub cancellations: mpsc::Receiver<IncomingCancel>,
+}
+type IncomingFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+async fn poll_incoming(future: &mut Option<IncomingFuture>) {
+    match future {
+        Some(future) => future.await,
+        None => std::future::pending().await,
+    }
 }
 impl CallService {
     pub(super) fn pending_incoming(&self, s: &State, account: &str) -> Option<CallPendingOffer> {
@@ -112,6 +122,7 @@ impl CallService {
                     call.state = CallState::Uncertain;
                     call.revision = call.revision.saturating_add(1);
                     call.audio_lease.store(0, Ordering::Release);
+                    call.stop_requested = true;
                     changed = true;
                 }
             } else {
@@ -150,23 +161,58 @@ impl CallService {
         self.wake_incoming();
     }
     fn ingest_cancel(self: &Arc<Self>, note: IncomingNotification) {
-        let Some(room) = Registry::room(&note) else {
+        let NotificationPayload::Cancel(cancel) = &note.control.payload else {
             return;
         };
+        let Some(member) = cancel.member_id else {
+            return;
+        };
+        if !note.lease.current()
+            || self
+                .backend
+                .authority(&note.lease.authority().account_id)
+                .as_ref()
+                != Some(note.lease.authority())
+        {
+            return;
+        }
         let Ok(mut s) = self.lock() else {
             return;
         };
+        s.incoming.prune_dedup();
         let found = s
             .incoming
             .entries
             .iter()
             .find(|(_, entry)| {
-                Registry::room(&entry.note).as_deref() == Some(room.as_str())
-                    && entry.note.header_from == note.header_from
-                    && entry.note.own_username == note.own_username
+                if entry.matches_cancel(&note) {
+                    return true;
+                }
+                // ACK/Join can already have returned while its admitted member
+                // is still being interpreted. This delivers owned bytes only;
+                // the serialized native actor must verify its current member.
+                entry.matches_cancel_source(&note)
+                    && entry.identity.as_ref().is_some_and(|identity| {
+                        s.call.as_ref().is_some_and(|call| {
+                            call.identity == *identity
+                                && call.direction == CallDirection::Incoming
+                                && matches!(
+                                    call.state,
+                                    CallState::Ringing | CallState::Offered | CallState::Connecting
+                                )
+                        })
+                    })
             })
-            .map(|(id, entry)| (id.clone(), entry.identity.clone()));
-        let Some((id, identity)) = found else {
+            .map(|(id, entry)| {
+                (
+                    id.clone(),
+                    entry.identity.clone(),
+                    entry.registration.clone(),
+                    entry.expires,
+                    entry.member_revision,
+                )
+            });
+        let Some((id, identity, registration, expires, member_revision)) = found else {
             return;
         };
         let Some(identity) = identity else {
@@ -174,25 +220,38 @@ impl CallService {
             self.broadcast(&mut s);
             return;
         };
-        if let Some(entry) = s.incoming.entries.get_mut(&id) {
-            entry.cancelled = true;
+        let Some(registration) = registration else {
+            return;
+        };
+        let key = (id, member_revision, member, cancel.reason);
+        if s.incoming.cancellations.contains_key(&key) {
+            return;
         }
-        let _ = s.ownership.uncertain(note.lease.authority(), &identity);
-        if let Some(call) = s.call.as_mut().filter(|call| call.identity == identity) {
-            call.state = CallState::Uncertain;
-            call.revision = call.revision.saturating_add(1);
-            call.audio_lease.store(0, Ordering::Release);
-            // The notification's role/reason belongs to the native consumer;
-            // generic maintenance must not invent an additional refusal here.
-            call.stop_requested = true;
+        if s.incoming.cancellations.len() >= 256 {
+            drop(s);
+            let _ = self.incoming_uncertain(note.lease.authority(), &identity);
+            return;
         }
-        s.media.clear();
-        self.broadcast(&mut s);
+        s.incoming
+            .cancellations
+            .insert(key, Instant::now() + Duration::from_secs(300));
         drop(s);
-        let _ = self.incoming_jobs.try_send(IncomingJob::Cancel {
-            identity,
-            note: Arc::new(note),
-        });
+        let authority = note.lease.authority().clone();
+        if self
+            .incoming_cancellations
+            .try_send(IncomingCancel {
+                identity: identity.clone(),
+                note: Arc::new(note),
+                registration,
+                expires,
+            })
+            .is_err()
+        {
+            let _ = self.incoming_uncertain(&authority, &identity);
+            return;
+        }
+        // Only the source actor can determine whether this is a pending callee,
+        // an already-joined member, or an unresolved phase. No early revocation.
         self.start_incoming_worker();
     }
     pub(super) fn wake_incoming(self: &Arc<Self>) {
@@ -242,10 +301,12 @@ impl CallService {
             return;
         };
         let entry = s.incoming.entries.get_mut(&id).expect("selected candidate");
+        let registration = IncomingRegistration::new();
         entry.stage = PendingStage::Preparing;
         entry.metadata.phase = CallPendingPhase::Preparing;
         entry.metadata.revision = 2;
         entry.identity = Some(identity.clone());
+        entry.registration = Some(registration.clone());
         s.call = Some(LiveCall {
             identity: identity.clone(),
             authority: note.lease.authority().clone(),
@@ -315,12 +376,9 @@ impl CallService {
             expires,
             notification: note,
             guard,
+            registration,
         };
-        if self
-            .incoming_jobs
-            .try_send(IncomingJob::Prepare(request))
-            .is_err()
-        {
+        if self.incoming_preparations.try_send(request).is_err() {
             self.finish_preparation(&identity, IncomingPreparation::Ignored);
             return;
         }
@@ -336,63 +394,134 @@ impl CallService {
         };
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
-            while let Some(job) = receiver.recv().await {
-                let Some(service) = weak.upgrade() else {
-                    break;
-                };
-                match job {
-                    IncomingJob::Prepare(request) => {
-                        let identity = request.identity.clone();
-                        if let Some(core) = request.notification.core.upgrade() {
-                            let Ok(guard) = core.lock_account(&request.authority.account_id).await
-                            else {
-                                service.finish_preparation(&identity, IncomingPreparation::Ignored);
-                                continue;
-                            };
-                            drop(guard);
-                        }
-                        let outcome = if !request.guard.is_current() {
-                            IncomingPreparation::Ignored
-                        } else {
-                            let remaining =
-                                request.expires.saturating_duration_since(Instant::now());
-                            match tokio::time::timeout(
-                                remaining,
-                                service.backend.prepare_incoming(request),
-                            )
-                            .await
-                            {
-                                Ok(Ok(outcome)) => outcome,
-                                _ => IncomingPreparation::Uncertain,
-                            }
-                        };
-                        service.finish_preparation(&identity, outcome);
+            let mut preparing: Option<IncomingFuture> = None;
+            let mut cancelling: Option<IncomingFuture> = None;
+            loop {
+                tokio::select! {
+                    // Registration is an explicit signal, never inferred from
+                    // constructing or polling a preparation future.
+                    biased;
+                    _ = poll_incoming(&mut preparing), if preparing.is_some() => { preparing = None; }
+                    _ = poll_incoming(&mut cancelling), if cancelling.is_some() => { cancelling = None; }
+                    request = receiver.preparations.recv(), if preparing.is_none() => {
+                        let Some(request) = request else { break; };
+                        let Some(service) = weak.upgrade() else { break; };
+                        preparing = Some(Box::pin(service.prepare_incoming_one(request)));
                     }
-                    IncomingJob::Cancel { identity, note } => {
-                        let authority = note.lease.authority().clone();
-                        if let Some(core) = note.core.upgrade() {
-                            let Ok(guard) = core.lock_account(&authority.account_id).await else {
-                                continue;
-                            };
-                            drop(guard);
-                        }
-                        if !note.lease.current() {
-                            continue;
-                        }
-                        if matches!(
-                            tokio::time::timeout(
-                                Duration::from_secs(5),
-                                service.backend.cancel_incoming(identity.clone(), note)
-                            )
-                            .await,
-                            Ok(Ok(BackendOutcome::Ended))
-                        ) {
-                            let _ = service.terminal(&authority, &identity);
-                        }
+                    request = receiver.cancellations.recv(), if cancelling.is_none() => {
+                        let Some(request) = request else { break; };
+                        let Some(service) = weak.upgrade() else { break; };
+                        cancelling = Some(Box::pin(service.cancel_incoming_one(request)));
                     }
                 }
             }
         });
+    }
+    async fn prepare_incoming_one(self: Arc<Self>, request: IncomingRequest) {
+        let identity = request.identity.clone();
+        let registration = request.registration.clone();
+        if let Some(core) = request.notification.core.upgrade() {
+            let Ok(guard) = core.lock_account(&request.authority.account_id).await else {
+                self.finish_preparation(&identity, IncomingPreparation::Ignored);
+                registration.close_unregistered();
+                return;
+            };
+            drop(guard);
+        }
+        let mut outcome = if !request.guard.is_current() {
+            IncomingPreparation::Ignored
+        } else {
+            let remaining = request.expires.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, self.backend.prepare_incoming(request)).await {
+                Ok(Ok(outcome)) => outcome,
+                _ => IncomingPreparation::Uncertain,
+            }
+        };
+        if outcome == IncomingPreparation::Acked && !registration.is_registered() {
+            outcome = IncomingPreparation::Uncertain;
+        }
+        self.finish_preparation(&identity, outcome);
+        registration.close_unregistered();
+    }
+    async fn cancel_incoming_one(self: Arc<Self>, request: IncomingCancel) {
+        let authority = request.note.lease.authority().clone();
+        if !request.registration.is_registered() {
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(request.expires),
+                request.registration.wait_registered(),
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    let _ = self.incoming_uncertain(&authority, &request.identity);
+                    return;
+                }
+            }
+        }
+        if !request.note.lease.current() {
+            return;
+        }
+        {
+            let Ok(s) = self.lock() else {
+                return;
+            };
+            if !s
+                .incoming
+                .entries
+                .get(request.identity.call_id())
+                .is_some_and(|entry| {
+                    entry.identity.as_ref() == Some(&request.identity)
+                        && entry.note.lease.authority() == &authority
+                })
+            {
+                return;
+            }
+        }
+        // This local actor classification must not wait on the account lock
+        // held by an Auth RPC. The staged notification already owns its bytes
+        // and accepted-generation binding; the actor owns mutation admission.
+        let outcome = match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.backend
+                .cancel_incoming(request.identity.clone(), request.note.clone()),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            _ => IncomingCancellation::Uncertain,
+        };
+        let Ok(mut s) = self.lock() else {
+            return;
+        };
+        if self.backend.authority(&authority.account_id).as_ref() != Some(&authority)
+            || !s
+                .incoming
+                .entries
+                .get(request.identity.call_id())
+                .is_some_and(|entry| {
+                    entry.identity.as_ref() == Some(&request.identity)
+                        && entry.matches_cancel_source(&request.note)
+                })
+        {
+            return;
+        }
+        match outcome {
+            IncomingCancellation::Ignored => {}
+            IncomingCancellation::Ended => {
+                if s.incoming
+                    .entries
+                    .get(request.identity.call_id())
+                    .is_some_and(|entry| entry.matches_cancel(&request.note))
+                {
+                    let _ = self.terminal_locked(&mut s, &authority, &request.identity);
+                }
+            }
+            IncomingCancellation::Uncertain => {
+                let _ = self.incoming_uncertain_locked(&mut s, &authority, &request.identity);
+            }
+        }
     }
     fn finish_preparation(&self, identity: &CallIdentity, outcome: IncomingPreparation) {
         let Ok(mut s) = self.lock() else {
@@ -412,8 +541,10 @@ impl CallService {
             && Self::ready_for(&s, id, &entry.note)
             && self.backend.authority(&authority.account_id).as_ref() == Some(&authority);
         if outcome == IncomingPreparation::Ended {
-            drop(s);
-            let _ = self.verified_incoming_terminal(&authority, identity);
+            let _ = self.terminal_locked(&mut s, &authority, identity);
+            return;
+        }
+        if entry.cancelled || entry.stage != PendingStage::Preparing {
             return;
         }
         if outcome == IncomingPreparation::Ignored {
@@ -441,12 +572,132 @@ impl CallService {
                 call.state = CallState::Uncertain;
                 call.revision = call.revision.saturating_add(1);
                 call.audio_lease.store(0, Ordering::Release);
+                call.stop_requested = true;
             }
         }
         self.broadcast(&mut s);
     }
+    /// Record only the source-verified current own member after authenticated
+    /// ACK/Join admission. Original invitation and receipt bytes remain intact.
+    #[cfg(any(feature = "native-calls", test))]
+    pub(crate) fn set_incoming_member(
+        &self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+        room_id: u64,
+        room_key: u64,
+        member: u32,
+    ) -> Result<()> {
+        let mut s = self.lock()?;
+        let entry = s
+            .incoming
+            .entries
+            .get(identity.call_id())
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        let NotificationPayload::Invite(invite) = &entry.note.control.payload else {
+            return Err(error(CallErrorCode::Stale));
+        };
+        if entry.identity.as_ref() != Some(identity)
+            || entry.note.lease.authority() != authority
+            || !entry.note.lease.current()
+            || entry.cancelled
+            || invite.room_id != Some(room_id)
+            || invite.room_key != Some(room_key)
+            || self.backend.authority(&authority.account_id).as_ref() != Some(authority)
+        {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let call = s
+            .call
+            .as_ref()
+            .filter(|call| {
+                call.direction == CallDirection::Incoming
+                    && &call.identity == identity
+                    && &call.authority == authority
+                    && !call.revoked
+                    && !call.cancellation_requested
+                    && matches!(
+                        call.state,
+                        CallState::Ringing
+                            | CallState::Offered
+                            | CallState::Connecting
+                            | CallState::Connected
+                    )
+            })
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        let admitted = if let Some(owner) = &call.owner {
+            s.clients.get(owner).is_some_and(|peer| {
+                peer.control && !peer.events.is_closed() && peer.authority == *authority
+            })
+        } else {
+            Instant::now() < entry.expires && Self::ready_for(&s, identity.call_id(), &entry.note)
+        };
+        if !admitted {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let entry = s
+            .incoming
+            .entries
+            .get_mut(identity.call_id())
+            .expect("verified incoming binding");
+        if entry.admitted_member != Some(member) {
+            entry.member_revision = entry
+                .member_revision
+                .checked_add(1)
+                .ok_or_else(|| error(CallErrorCode::Capacity))?;
+            entry.admitted_member = Some(member);
+        }
+        Ok(())
+    }
+    /// Trusted incoming actor only. An unresolved source phase fences audio and
+    /// future admission, without inventing another remote control operation.
+    pub(crate) fn incoming_uncertain(
+        &self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> Result<()> {
+        let mut s = self.lock()?;
+        self.incoming_uncertain_locked(&mut s, authority, identity)
+    }
+    fn incoming_uncertain_locked(
+        &self,
+        s: &mut State,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> Result<()> {
+        if !s.call.as_ref().is_some_and(|call| {
+            call.direction == CallDirection::Incoming
+                && &call.identity == identity
+                && &call.authority == authority
+        }) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let changed = s
+            .call
+            .as_ref()
+            .is_some_and(|call| call.state != CallState::Uncertain);
+        if changed {
+            s.ownership.uncertain(authority, identity)?;
+        }
+        if let Some(entry) = s.incoming.entries.get_mut(identity.call_id()) {
+            entry.cancelled = true;
+        }
+        let call = s.call.as_mut().expect("verified incoming attempt");
+        call.state = CallState::Uncertain;
+        if changed {
+            call.revision = call.revision.saturating_add(1);
+        }
+        call.audio_lease.store(0, Ordering::Release);
+        call.stop_requested = true;
+        s.media.clear();
+        if changed {
+            self.broadcast(s);
+        }
+        Ok(())
+    }
     /// Trusted native actors only: room, member, origin and terminal meaning
     /// must already be verified. A timeout is not terminal evidence.
+    #[cfg(any(feature = "native-calls", test))]
     pub(crate) fn verified_incoming_terminal(
         &self,
         authority: &AccountAuthority,

@@ -118,19 +118,24 @@ pub trait CallBackend: Send + Sync {
         false
     }
     /// Called outside the sync staging/account-lock path, once per reservation.
-    /// A backend must install its callee actor before returning Acked.
+    /// Install the exact actor/mailbox and mark request.registration before the first preparation await so a
+    /// concurrent Cancel can be admitted before Auth completes and ACK begins.
+    /// Returning Acked also requires that actor to handle Answer/Reject.
     fn prepare_incoming(
         &self,
         _request: super::notifications::IncomingRequest,
     ) -> BackendFuture<Result<super::notifications::IncomingPreparation>> {
         Box::pin(async { Ok(super::notifications::IncomingPreparation::Ignored) })
     }
+    /// Classify an owned cancellation against the actor's serialized source
+    /// phase. Delivery may run while preparation awaits Auth; it must not wait
+    /// on a broker-held account lock or invent a remote refusal/Exit.
     fn cancel_incoming(
         &self,
         _identity: CallIdentity,
         _notification: Arc<super::notifications::IncomingNotification>,
-    ) -> BackendFuture<Result<BackendOutcome>> {
-        Box::pin(async { Ok(BackendOutcome::Uncertain) })
+    ) -> BackendFuture<Result<super::notifications::IncomingCancellation>> {
+        Box::pin(async { Ok(super::notifications::IncomingCancellation::Uncertain) })
     }
     fn submit(
         &self,
@@ -180,6 +185,43 @@ impl BackendSink {
             return false;
         };
         service.ticket_current(&s, &self.ticket)
+    }
+    /// Admission for the current owner's exact accepted terminal action.
+    /// Owner-loss cleanup uses its separately verified native context instead.
+    pub fn is_terminal_current(&self) -> bool {
+        let Some(service) = self.service.upgrade() else {
+            return false;
+        };
+        let Ok(s) = service.lock() else {
+            return false;
+        };
+        if !matches!(
+            self.ticket.operation(),
+            Operation::Reject | Operation::Cancel | Operation::Hangup
+        ) || !s.ownership.pending_ticket_matches(&self.ticket)
+        {
+            return false;
+        }
+        let Some(call) = s.call.as_ref().filter(|call| {
+            call.identity == self.ticket.identity()
+                && &call.authority == self.ticket.authority()
+                && call.state == CallState::Ending
+                && !call.revoked
+                && !call.cancellation_requested
+        }) else {
+            return false;
+        };
+        let Some(owner) = call.owner.as_ref().and_then(|owner| s.clients.get(owner)) else {
+            return false;
+        };
+        owner.control
+            && !owner.events.is_closed()
+            && owner.authority == call.authority
+            && service
+                .backend
+                .authority(&call.authority.account_id)
+                .as_ref()
+                == Some(&call.authority)
     }
     pub async fn connected(&self) -> Result<()> {
         self.service
@@ -269,8 +311,9 @@ pub struct CallService {
     backend: Arc<dyn CallBackend>,
     started: Instant,
     maintenance_started: AtomicBool,
-    incoming_jobs: mpsc::Sender<ingress::IncomingJob>,
-    incoming_receiver: Mutex<Option<mpsc::Receiver<ingress::IncomingJob>>>,
+    incoming_preparations: mpsc::Sender<super::notifications::IncomingRequest>,
+    incoming_cancellations: mpsc::Sender<ingress::IncomingCancel>,
+    incoming_receiver: Mutex<Option<ingress::IncomingReceivers>>,
 }
 impl Default for CallService {
     fn default() -> Self {
@@ -279,14 +322,19 @@ impl Default for CallService {
 }
 impl CallService {
     pub fn new(backend: Arc<dyn CallBackend>) -> Self {
-        let (incoming_jobs, incoming_receiver) = mpsc::channel(8);
+        let (incoming_preparations, preparations) = mpsc::channel(1);
+        let (incoming_cancellations, cancellations) = mpsc::channel(8);
         Self {
             state: Mutex::new(State::default()),
             backend,
             started: Instant::now(),
             maintenance_started: AtomicBool::new(false),
-            incoming_jobs,
-            incoming_receiver: Mutex::new(Some(incoming_receiver)),
+            incoming_preparations,
+            incoming_cancellations,
+            incoming_receiver: Mutex::new(Some(ingress::IncomingReceivers {
+                preparations,
+                cancellations,
+            })),
         }
     }
     /// Install an unresolved operational journal record before serving clients.
@@ -1325,6 +1373,14 @@ impl CallService {
     }
     fn terminal(&self, authority: &AccountAuthority, identity: &CallIdentity) -> Result<()> {
         let mut s = self.lock()?;
+        self.terminal_locked(&mut s, authority, identity)
+    }
+    fn terminal_locked(
+        &self,
+        s: &mut State,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> Result<()> {
         s.ownership.terminal(authority, identity)?;
         if let Some(c) = s.call.as_ref().filter(|c| &c.identity == identity) {
             c.audio_lease.store(0, Ordering::Release);
@@ -1333,11 +1389,11 @@ impl CallService {
             c.state = CallState::Ended;
             c.revision = c.revision.saturating_add(1);
         }
-        self.broadcast(&mut s);
+        self.broadcast(s);
         s.call = None;
         s.incoming.entries.remove(identity.call_id());
         s.media.clear();
-        self.broadcast(&mut s);
+        self.broadcast(s);
         Ok(())
     }
     pub async fn disconnect(self: &Arc<Self>, client: &str) {

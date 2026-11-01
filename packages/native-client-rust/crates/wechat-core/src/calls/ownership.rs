@@ -425,7 +425,9 @@ impl Ownership {
                     Phase::Ending
                 }
                 Operation::Cancel if s.phase == Phase::Dialing => Phase::Ending,
-                Operation::Hangup if s.phase == Phase::Connected => Phase::Ending,
+                Operation::Hangup if matches!(s.phase, Phase::Answering | Phase::Connected) => {
+                    Phase::Ending
+                }
                 _ => return Err(Error::InvalidTransition),
             };
             let revision = s.revision.checked_add(1).ok_or(Error::Capacity)?;
@@ -521,6 +523,16 @@ impl Ownership {
         s.pending = None;
         s.resume_until = None;
         Ok(())
+    }
+    /// Match the one pending business action without changing its ownership.
+    pub fn pending_ticket_matches(&self, ticket: &Ticket) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            !session.invalidated
+                && session.attempt == ticket.attempt
+                && session.authority == ticket.authority
+                && session.id == ticket.call_id
+                && session.pending.as_ref() == Some(ticket)
+        })
     }
     /// Verified terminal signaling from the accepted generation, including a
     /// pickup by another official device. The source adapter establishes meaning.

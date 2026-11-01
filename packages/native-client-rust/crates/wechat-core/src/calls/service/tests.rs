@@ -1102,3 +1102,194 @@ async fn recovered_unknown_calls_block_all_accounts_without_fabricating_an_owner
     assert!(attempts.try_recv().is_err());
     assert!(backend.stopped.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn explicit_reject_guard_is_pending_ticket_bound_and_stops_on_owner_loss_or_replacement() {
+    for revoke in [false, true] {
+        let (backend, mut attempts) = FakeBackend::new(false);
+        let service = Arc::new(CallService::new(backend.clone()));
+        let owner = ready(&service, "a", "owner").await;
+        service
+            .offer(
+                auth("a", "generation1"),
+                "reused-id".into(),
+                "peer".into(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        service
+            .command(
+                &owner.client_id,
+                CallCommand::Reject {
+                    request_id: "reject".into(),
+                    call_id: "reused-id".into(),
+                    expected_revision: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let rejecting = next_attempt(&mut attempts).await;
+        assert!(!rejecting.sink.is_current());
+        assert!(rejecting.sink.is_terminal_current());
+        if revoke {
+            backend
+                .authorities
+                .lock()
+                .unwrap()
+                .insert("a".into(), auth("a", "replacement"));
+            assert!(!rejecting.sink.is_terminal_current());
+            continue;
+        }
+        service.disconnect(&owner.client_id).await;
+        assert!(!rejecting.sink.is_terminal_current());
+        rejecting
+            .reply
+            .send(Ok(BackendOutcome::Ended))
+            .unwrap_or_else(|_| panic!("reject receiver"));
+        for _ in 0..100 {
+            if !service
+                .current("a", "fixture")
+                .await
+                .unwrap()
+                .availability
+                .busy
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let mut next = ready(&service, "a", "new-owner").await;
+        service
+            .offer(
+                auth("a", "generation1"),
+                "reused-id".into(),
+                "peer".into(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        service
+            .command(
+                &next.client_id,
+                CallCommand::Reject {
+                    request_id: "new-reject".into(),
+                    call_id: "reused-id".into(),
+                    expected_revision: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let newer = next_attempt(&mut attempts).await;
+        assert!(newer.sink.is_terminal_current());
+        assert!(!rejecting.sink.is_terminal_current());
+        newer
+            .reply
+            .send(Ok(BackendOutcome::Ended))
+            .unwrap_or_else(|_| panic!("new reject receiver"));
+        state(&mut next, CallState::Ended).await;
+    }
+}
+
+#[tokio::test]
+async fn admitted_answer_waiting_for_media_accepts_one_owner_hangup() {
+    let (backend, mut attempts) = FakeBackend::new(false);
+    let service = Arc::new(CallService::new(backend));
+    let mut owner = ready(&service, "a", "owner").await;
+    let mut other = ready(&service, "a", "other").await;
+    service
+        .offer(
+            auth("a", "generation1"),
+            "answering".into(),
+            "peer".into(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Answer {
+                request_id: "answer".into(),
+                call_id: "answering".into(),
+                expected_revision: 1,
+                media: CallMedia::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let answering = next_attempt(&mut attempts).await;
+    answering
+        .reply
+        .send(Ok(BackendOutcome::Admitted))
+        .unwrap_or_else(|_| panic!("answer admission receiver"));
+    let revision = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            {
+                let state = service.lock().unwrap();
+                let call = state.call.as_ref().unwrap();
+                if state
+                    .ownership
+                    .pending_start(&call.authority, &call.identity)
+                    .is_none()
+                {
+                    break call.revision;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    service
+        .command(
+            &other.client_id,
+            CallCommand::Hangup {
+                request_id: "not-owner".into(),
+                call_id: "answering".into(),
+                expected_revision: revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut other, "not-owner").await.0,
+        CallCommandStatus::Error
+    );
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Hangup {
+                request_id: "owner-hangup".into(),
+                call_id: "answering".into(),
+                expected_revision: revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut owner, "owner-hangup").await.0,
+        CallCommandStatus::Accepted
+    );
+    let ending = next_attempt(&mut attempts).await;
+    assert_eq!(ending.request.ticket.operation(), Operation::Hangup);
+    assert!(ending.sink.is_terminal_current());
+    assert!(!answering.sink.is_current());
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Hangup {
+                request_id: "owner-hangup".into(),
+                call_id: "answering".into(),
+                expected_revision: revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(attempts.try_recv().is_err());
+    ending
+        .reply
+        .send(Ok(BackendOutcome::Ended))
+        .unwrap_or_else(|_| panic!("hangup receiver"));
+    state(&mut owner, CallState::Ended).await;
+}

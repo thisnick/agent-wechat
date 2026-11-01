@@ -30,6 +30,9 @@ pub struct NativeIncomingSession {
     base: NativePersonalSession,
     invite: Invite,
     phase: IncomingPhase,
+    ack_spent: bool,
+    join_spent: bool,
+    reject_spent: bool,
 }
 impl NativeIncomingSession {
     /// Call only after a current account-owned live notification has been
@@ -149,10 +152,18 @@ impl NativeIncomingSession {
                 caller_member,
             },
             phase: IncomingPhase::Invited,
+            ack_spent: false,
+            join_spent: false,
+            reject_spent: false,
         })
     }
     pub fn phase(&self) -> IncomingPhase {
         self.phase
+    }
+    /// Latest authenticated local room/member binding. This is private call
+    /// routing data and must not be exposed as a public event or diagnostic.
+    pub fn room(&self) -> VoiceRoom {
+        self.invite.room
     }
     /// Perform singleton ringing ACK8069. A successful ACK may be offered to
     /// controllers, but it grants neither a media stream nor permission to Join.
@@ -165,11 +176,29 @@ impl NativeIncomingSession {
     ) -> Result<()> {
         self.base.check(state, current)?;
         ensure!(
-            self.phase == IncomingPhase::Invited,
+            self.phase == IncomingPhase::Invited && !self.ack_spent,
             "Incoming ACK already spent"
         );
         self.base.reserve(tasks)?;
+        self.ack_spent = true;
         self.phase = IncomingPhase::Uncertain;
+        let result = self.ringing_ack_once(client, state, tasks);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<CallRpcNotSubmitted>())
+        {
+            // Preserve the source phase for a separately authenticated Cancel;
+            // the spent action is not retried with a new task.
+            self.phase = IncomingPhase::Invited;
+        }
+        result
+    }
+    fn ringing_ack_once(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        tasks: TaskIds,
+    ) -> Result<()> {
         let request = personal::acknowledge_voice(
             &self.base.parameters.inputs(),
             self.invite.room,
@@ -339,18 +368,21 @@ impl NativeIncomingSession {
     ) -> Result<()> {
         self.base.check(state, current)?;
         ensure!(
-            self.phase == IncomingPhase::Acknowledged,
+            self.phase == IncomingPhase::Acknowledged && !self.join_spent,
             "Incoming call not acknowledged or Join spent"
         );
         self.base.reserve(tasks)?;
+        self.join_spent = true;
         self.phase = IncomingPhase::Joining;
         let result = self.accept_once(client, state, current, tasks);
-        if result
-            .as_ref()
-            .is_err_and(|error| !error.is::<UnsupportedCallMedia>())
-        {
-            self.phase = IncomingPhase::Uncertain;
-            self.base.phase = PersonalPhase::Uncertain;
+        if let Err(error) = &result {
+            if error.is::<CallRpcNotSubmitted>() {
+                self.phase = IncomingPhase::Acknowledged;
+                self.base.phase = PersonalPhase::Ringing;
+            } else if !error.is::<UnsupportedCallMedia>() {
+                self.phase = IncomingPhase::Uncertain;
+                self.base.phase = PersonalPhase::Uncertain;
+            }
         }
         result
     }
@@ -423,6 +455,7 @@ impl NativeIncomingSession {
         let control = self.base.control.as_mut().expect("incoming control");
         control.identity = room;
         control.peer_joined = Some(true);
+        self.invite.room = room;
         self.base.phase = PersonalPhase::Joined;
         self.phase = IncomingPhase::Joined;
         let strategy = data(&joined, 4)?;
@@ -516,12 +549,13 @@ impl NativeIncomingSession {
     ) -> Result<()> {
         self.base.check(state, current)?;
         ensure!(
-            self.phase == IncomingPhase::Acknowledged,
+            self.phase == IncomingPhase::Acknowledged && !self.reject_spent,
             "Incoming rejection unavailable"
         );
         self.base.reserve(tasks)?;
+        self.reject_spent = true;
         self.phase = IncomingPhase::Ending;
-        let result = (|| {
+        let result: Result<()> = (|| {
             let request =
                 personal::reject(&self.base.parameters.inputs(), self.invite.room, tasks.sdk)?;
             let raw = self.transfer(
@@ -544,13 +578,20 @@ impl NativeIncomingSession {
             );
             Ok(())
         })();
+        let unsent = result
+            .as_ref()
+            .is_err_and(|error| error.is::<CallRpcNotSubmitted>());
         self.phase = if result.is_ok() {
             IncomingPhase::Finished
+        } else if unsent {
+            IncomingPhase::Acknowledged
         } else {
             IncomingPhase::Uncertain
         };
         self.base.phase = if result.is_ok() {
             PersonalPhase::Finished
+        } else if unsent {
+            PersonalPhase::Ringing
         } else {
             PersonalPhase::Uncertain
         };
@@ -860,6 +901,81 @@ mod tests {
             host: number + 1,
         }
     }
+    struct Unsent<'a> {
+        inner: &'a FakeTransport,
+        route: CallHostRoute,
+        attempts: std::cell::Cell<usize>,
+    }
+    impl PersonalTransport for Unsent<'_> {
+        fn call_rpc(
+            &self,
+            state: &mut AccountState,
+            route: CallHostRoute,
+            request: &[u8],
+        ) -> Result<Vec<u8>> {
+            if route == self.route {
+                self.attempts.set(self.attempts.get() + 1);
+                return Err(CallRpcNotSubmitted.into());
+            }
+            self.inner.call_rpc(state, route, request)
+        }
+    }
+    #[test]
+    fn known_unsent_callee_actions_keep_cancel_phase_but_are_never_retried() {
+        for operation in 0..3 {
+            let transport = transport(if operation == 0 {
+                vec![(CallHostRoute::AppAuth, auth_reply())]
+            } else {
+                vec![
+                    (CallHostRoute::AppAuth, auth_reply()),
+                    (CallHostRoute::RingingAck, ack_reply()),
+                ]
+            });
+            let mut state = state();
+            let mut session = session(&transport, &mut state);
+            if operation != 0 {
+                session
+                    .ringing_ack(&transport, &mut state, authority(), tasks(1))
+                    .unwrap();
+            }
+            let unsent = Unsent {
+                inner: &transport,
+                route: if operation == 0 {
+                    CallHostRoute::RingingAck
+                } else {
+                    CallHostRoute::Transfer
+                },
+                attempts: std::cell::Cell::new(0),
+            };
+            for task in [2, 3] {
+                let result = match operation {
+                    0 => session.ringing_ack(&unsent, &mut state, authority(), tasks(task)),
+                    1 => session.accept(&unsent, &mut state, authority(), tasks(task)),
+                    _ => session.reject(&unsent, &mut state, authority(), tasks(task)),
+                };
+                assert!(result.is_err());
+                if task == 2 {
+                    assert!(result.unwrap_err().is::<CallRpcNotSubmitted>());
+                }
+            }
+            assert_eq!(unsent.attempts.get(), 1);
+            assert_eq!(
+                session.phase(),
+                if operation == 0 {
+                    IncomingPhase::Invited
+                } else {
+                    IncomingPhase::Acknowledged
+                }
+            );
+            let cancel = CancelNotification::decode(
+                &p::message(&[p::uint(1, 7), p::uint(2, 9), p::uint(3, 0)]).unwrap(),
+            )
+            .unwrap();
+            assert!(session.retire_cancel(&state, authority(), &cancel).unwrap());
+            assert_eq!(session.phase(), IncomingPhase::Finished);
+            assert!(transport.0.borrow().is_empty());
+        }
+    }
     #[test]
     fn incoming_ack_is_not_join_and_callee_context_can_take_media_then_exit() {
         let transport = transport(vec![
@@ -1157,7 +1273,19 @@ mod tests {
                 (CallHostRoute::Transfer, join_reply(17, false)),
                 (
                     CallHostRoute::LiveSync,
-                    roster_sync(3, Some(1), Some(4), false),
+                    roster_sync(3, Some(1), Some(2), false),
+                ),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(4, Some(1), Some(3), false),
+                ),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(5, Some(1), Some(1), false),
+                ),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(6, Some(1), Some(4), false),
                 ),
                 (CallHostRoute::Transfer, exit_reply()),
             ]),
@@ -1181,14 +1309,32 @@ mod tests {
         session
             .accept(&transport, &mut state, authority(), tasks(2))
             .unwrap();
+        for task in [3, 4] {
+            assert_eq!(
+                session
+                    .poll(&transport, &mut state, authority(), tasks(task))
+                    .unwrap(),
+                SyncProgress::Waiting
+            );
+            assert_eq!(session.phase(), IncomingPhase::Joined);
+            assert_eq!(session.base.phase(), PersonalPhase::Joined);
+            assert!(!session.media_ready(&state, authority()).unwrap());
+        }
+        assert_eq!(
+            session
+                .poll(&transport, &mut state, authority(), tasks(5))
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert_eq!(session.phase(), IncomingPhase::Joined);
         assert!(matches!(
             session
-                .poll(&transport, &mut state, authority(), tasks(3))
+                .poll(&transport, &mut state, authority(), tasks(6))
                 .unwrap(),
             SyncProgress::Terminal(RemoteTermination::Exit(RemoteExitReason::LastPeerLeft))
         ));
         session
-            .finish_remote(&transport, &mut state, authority(), tasks(4), false)
+            .finish_remote(&transport, &mut state, authority(), tasks(7), false)
             .unwrap();
         assert_eq!(session.phase(), IncomingPhase::Finished);
         assert_eq!(

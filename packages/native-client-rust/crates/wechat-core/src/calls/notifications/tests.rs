@@ -22,10 +22,28 @@ struct Attempt {
     request: IncomingRequest,
     reply: oneshot::Sender<IncomingPreparation>,
 }
+struct Cancellation {
+    identity: CallIdentity,
+    note: Arc<IncomingNotification>,
+    reply: oneshot::Sender<Result<IncomingCancellation, CallServiceError>>,
+}
 struct Backend {
     core: Weak<Core>,
     attempts: mpsc::UnboundedSender<Attempt>,
     prepared: AtomicUsize,
+    cancellations: mpsc::UnboundedSender<Cancellation>,
+    cancelled: AtomicUsize,
+    stopped: AtomicUsize,
+    audio: AtomicUsize,
+    registration_mode: AtomicUsize,
+    actors: std::sync::Mutex<Vec<CallIdentity>>,
+    last_registration: std::sync::Mutex<Option<IncomingRegistration>>,
+}
+impl Backend {
+    fn install(&self, request: &IncomingRequest) -> bool {
+        self.actors.lock().unwrap().push(request.identity.clone());
+        request.registration.mark_registered()
+    }
 }
 impl CallBackend for Backend {
     fn authority(&self, account: &str) -> Option<AccountAuthority> {
@@ -48,19 +66,59 @@ impl CallBackend for Backend {
     }
     fn prepare_incoming(&self, request: IncomingRequest) -> FutureResult<IncomingPreparation> {
         self.prepared.fetch_add(1, Ordering::SeqCst);
+        *self.last_registration.lock().unwrap() = Some(request.registration.clone());
+        match self.registration_mode.load(Ordering::SeqCst) {
+            1 => return Box::pin(async { Ok(IncomingPreparation::Ignored) }),
+            2 => return Box::pin(async { Ok(IncomingPreparation::Ended) }),
+            3 => {} // A constructed future is deliberately not installation.
+            _ => {
+                if !self.install(&request) {
+                    return Box::pin(async { Ok(IncomingPreparation::Ignored) });
+                }
+            }
+        }
         let (reply, result) = oneshot::channel();
         self.attempts
             .send(Attempt { request, reply })
             .unwrap_or_else(|_| panic!("fixture receiver"));
         Box::pin(async move { Ok(result.await.unwrap_or(IncomingPreparation::Uncertain)) })
     }
+    fn cancel_incoming(
+        &self,
+        identity: CallIdentity,
+        note: Arc<IncomingNotification>,
+    ) -> FutureResult<IncomingCancellation> {
+        assert!(
+            self.actors.lock().unwrap().contains(&identity),
+            "cancellation preceded mailbox installation"
+        );
+        self.cancelled.fetch_add(1, Ordering::SeqCst);
+        let (reply, received) = oneshot::channel();
+        self.cancellations
+            .send(Cancellation {
+                identity,
+                note,
+                reply,
+            })
+            .unwrap_or_else(|_| panic!("fixture cancellation receiver"));
+        Box::pin(async move {
+            received
+                .await
+                .unwrap_or(Ok(IncomingCancellation::Uncertain))
+        })
+    }
     fn submit(&self, _: BackendRequest, _: BackendSink) -> FutureResult<BackendOutcome> {
         Box::pin(async { Ok(BackendOutcome::Connected) })
     }
-    fn send_audio(&self, _: BackendAudioRequest) -> FutureResult<()> {
+    fn send_audio(&self, request: BackendAudioRequest) -> FutureResult<()> {
+        if !request.is_current() {
+            return Box::pin(async { Err(CallServiceError(CallErrorCode::Stale)) });
+        }
+        self.audio.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(()) })
     }
     fn stop(&self, _: CallIdentity) -> FutureResult<BackendOutcome> {
+        self.stopped.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(BackendOutcome::Uncertain) })
     }
 }
@@ -69,6 +127,7 @@ struct Fixture {
     core: Arc<Core>,
     backend: Arc<Backend>,
     attempts: mpsc::UnboundedReceiver<Attempt>,
+    cancellations: mpsc::UnboundedReceiver<Cancellation>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -103,10 +162,18 @@ impl Fixture {
         core.save_state("one", &state).unwrap();
         assert!(core.call_authority("one").is_ok());
         let (attempts, receiver) = mpsc::unbounded_channel();
+        let (cancellations, cancelled) = mpsc::unbounded_channel();
         let backend = Arc::new(Backend {
             core: Arc::downgrade(&core),
             attempts,
             prepared: AtomicUsize::new(0),
+            cancellations,
+            cancelled: AtomicUsize::new(0),
+            stopped: AtomicUsize::new(0),
+            audio: AtomicUsize::new(0),
+            registration_mode: AtomicUsize::new(0),
+            actors: std::sync::Mutex::new(Vec::new()),
+            last_registration: std::sync::Mutex::new(None),
         });
         Core::configure_calls(&core, backend.clone()).unwrap();
         Self {
@@ -114,6 +181,7 @@ impl Fixture {
             core,
             backend,
             attempts: receiver,
+            cancellations: cancelled,
         }
     }
     fn live(&self) {
@@ -147,12 +215,15 @@ impl Fixture {
     }
 }
 fn batch(room: u64, cancel: bool, room_type: u64, callee: &str) -> SyncBatch {
+    batch_member(room, cancel, room_type, callee, 0)
+}
+fn batch_member(room: u64, cancel: bool, room_type: u64, callee: &str, member: u32) -> SyncBatch {
     let now = chrono::Utc::now().timestamp() as u64;
     let inner = if cancel {
         p::message(&[
             p::uint(1, room),
             p::uint(2, room + 1000),
-            p::uint(3, 0),
+            p::uint(3, u64::from(member)),
             p::uint(4, 2),
         ])
         .unwrap()
@@ -160,7 +231,7 @@ fn batch(room: u64, cancel: bool, room_type: u64, callee: &str) -> SyncBatch {
         p::message(&[
             p::uint(1, room),
             p::uint(2, room + 1000),
-            p::uint(3, 0),
+            p::uint(3, u64::from(member)),
             p::uint(4, room_type),
             p::bytes(5, b"caller-open"),
             p::bytes(6, b"callee-open"),
@@ -452,6 +523,7 @@ async fn verified_terminal_after_ack_frees_the_slot_but_uncertainty_does_not() {
         assert_eq!(f.core.store.pending_sync_count("one").unwrap(), 1);
         f.stage(raw);
         assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -515,4 +587,587 @@ async fn another_ready_client_cannot_keep_an_ending_or_disconnected_owner_curren
         }
         assert!(!guard.is_current());
     }
+}
+
+async fn next_cancellation(f: &mut Fixture) -> Cancellation {
+    tokio::time::timeout(Duration::from_secs(1), f.cancellations.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(20)).await;
+}
+fn cancellation_note(
+    f: &Fixture,
+    raw: SyncBatch,
+    lease: CallAuthorityLease,
+) -> IncomingNotification {
+    let message =
+        wechat_protocol::wire::decode_add_message(&raw.commands[0].payload, "synthetic_self")
+            .unwrap();
+    IncomingNotification {
+        lease,
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        source_created_at: u64::from(message.created_at),
+        received_at_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+        own_username: "synthetic_self".into(),
+        caller_username: String::new(),
+        original_message: Arc::from(raw.commands[0].payload.clone()),
+        control: crate::calls::incoming::decode_system_control(&message)
+            .unwrap()
+            .unwrap(),
+        core: Arc::downgrade(&f.core),
+        header_from: message.from,
+    }
+}
+
+#[tokio::test]
+async fn cancellation_reaches_held_auth_without_account_prelock_and_late_ack_cannot_revive() {
+    let mut f = Fixture::new();
+    f.live();
+    let mut client = f.client(true).await;
+    ready(&f, &mut client, CallReadyScope::All).await;
+    let invite = batch(42, false, 2, "synthetic_self");
+    f.stage(invite.clone());
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let first_id = preparation.request.identity.clone();
+    let guard = preparation.request.guard.clone();
+    // Auth may own this lock, but already-owned cancellation bytes must still
+    // reach local actor classification. Live Sync's RPC lock limit is separate.
+    let account = f.core.lock_account("one").await.unwrap();
+    f.stage(batch(42, true, 2, "synthetic_self"));
+    let cancellation = next_cancellation(&mut f).await;
+    assert_eq!(cancellation.identity, first_id);
+    assert!(cancellation.note.core.upgrade().is_some());
+    assert!(guard.is_current());
+    assert!(
+        f.core
+            .call_service()
+            .current("one", "fixture")
+            .await
+            .unwrap()
+            .availability
+            .busy
+    );
+    cancellation
+        .reply
+        .send(Ok(IncomingCancellation::Ended))
+        .unwrap();
+    settle().await;
+    assert!(!guard.is_current());
+    assert!(
+        !f.core
+            .call_service()
+            .current("one", "fixture")
+            .await
+            .unwrap()
+            .availability
+            .busy
+    );
+    f.stage(invite);
+    f.stage(batch(43, false, 2, "synthetic_self"));
+    assert!(f.attempts.try_recv().is_err());
+    preparation.reply.send(IncomingPreparation::Acked).unwrap();
+    drop(account);
+    let next = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(next.request.identity, first_id);
+    next.reply.send(IncomingPreparation::Acked).unwrap();
+    let second = offered(&f).await;
+    assert_ne!(second.call_id, first_id.call_id());
+    assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 2);
+    assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn ignored_joined_cancellation_preserves_guard_owner_and_audio() {
+    use wechat_calls::{
+        audio::AudioFormat,
+        frame::{self, MediaHeader},
+    };
+    let mut f = Fixture::new();
+    f.live();
+    let mut owner = f.client(true).await;
+    ready(&f, &mut owner, CallReadyScope::All).await;
+    f.stage(batch(42, false, 2, "synthetic_self"));
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = preparation.request.guard.clone();
+    preparation.reply.send(IncomingPreparation::Acked).unwrap();
+    let offer = offered(&f).await;
+    f.core
+        .call_service()
+        .command(
+            &owner.client_id,
+            CallCommand::Answer {
+                request_id: "join".into(),
+                call_id: offer.call_id.clone(),
+                expected_revision: offer.revision,
+                media: CallMedia::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut token = None;
+    let mut connected = false;
+    while token.is_none() || !connected {
+        match owner.events.recv().await.unwrap() {
+            CallEvent::CommandResult {
+                request_id,
+                owner_token,
+                ..
+            } if request_id == "join" => token = owner_token,
+            CallEvent::State { call } if call.state == CallState::Connected => connected = true,
+            _ => {}
+        }
+    }
+    let media = f
+        .core
+        .call_service()
+        .attach_media(
+            "one",
+            "fixture",
+            &offer.call_id,
+            &owner.client_id,
+            &token.unwrap(),
+        )
+        .await
+        .unwrap();
+    let cancel = batch(42, true, 2, "synthetic_self");
+    f.stage(cancel.clone());
+    let classification = next_cancellation(&mut f).await;
+    assert!(guard.is_current());
+    f.core
+        .call_service()
+        .validate_media(&media.id)
+        .await
+        .unwrap();
+    classification
+        .reply
+        .send(Ok(IncomingCancellation::Ignored))
+        .unwrap();
+    settle().await;
+    assert!(guard.is_current());
+    f.core
+        .call_service()
+        .validate_control(&owner.client_id)
+        .await
+        .unwrap();
+    assert!(f
+        .core
+        .call_service()
+        .media_delivery_allowed(&media.id)
+        .await
+        .unwrap());
+    assert!(owner.events.try_recv().is_err());
+    let bytes = frame::encode_pcm(
+        MediaHeader {
+            track_id: 1,
+            generation: 1,
+            sequence: 0,
+            timestamp_micros: 0,
+        },
+        AudioFormat::new(16000, 1, 20).unwrap(),
+        &[321; 320],
+    )
+    .unwrap();
+    f.core
+        .call_service()
+        .media_frame(&media.id, &bytes)
+        .await
+        .unwrap();
+    assert_eq!(f.backend.audio.load(Ordering::SeqCst), 1);
+    f.stage(cancel);
+    settle().await;
+    assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn foreign_cancel_member_header_account_and_generation_do_not_change_candidate() {
+    let mut f = Fixture::new();
+    f.live();
+    let old = f.core.call_authority("one").unwrap();
+    let mut state = f.core.account_state("one").unwrap();
+    state.session_key = vec![8; 16];
+    f.core.save_state("one", &state).unwrap();
+    assert!(!old.current());
+    let mut owner = f.client(true).await;
+    f.stage(batch(42, false, 2, "synthetic_self"));
+    let pending = f
+        .core
+        .call_service()
+        .current("one", "fixture")
+        .await
+        .unwrap()
+        .current_pending_offer
+        .unwrap();
+    f.stage(batch_member(42, true, 2, "synthetic_self", 99));
+    let lease = f.core.call_authority("one").unwrap();
+    let mut wrong_header =
+        cancellation_note(&f, batch(42, true, 2, "synthetic_self"), lease.clone());
+    wrong_header.header_from = "different-system".into();
+    f.core
+        .call_service()
+        .ingest_incoming(wrong_header, Duration::from_secs(30));
+    let mut wrong_recipient = cancellation_note(&f, batch(42, true, 2, "synthetic_self"), lease);
+    wrong_recipient.own_username = "different-self".into();
+    f.core
+        .call_service()
+        .ingest_incoming(wrong_recipient, Duration::from_secs(30));
+    let stale = cancellation_note(&f, batch(42, true, 2, "synthetic_self"), old);
+    f.core
+        .call_service()
+        .ingest_incoming(stale, Duration::from_secs(30));
+    settle().await;
+    assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 0);
+    assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        f.core
+            .call_service()
+            .current("one", "fixture")
+            .await
+            .unwrap()
+            .current_pending_offer
+            .unwrap()
+            .call_id,
+        pending.call_id
+    );
+    ready(&f, &mut owner, CallReadyScope::All).await;
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(preparation.request.guard.is_current());
+    preparation.reply.send(IncomingPreparation::Acked).unwrap();
+    offered(&f).await;
+}
+
+#[tokio::test]
+async fn cancellation_error_or_timeout_holds_slot_and_late_ignored_prepare_cannot_clear_it() {
+    for timeout in [false, true] {
+        let mut f = Fixture::new();
+        f.live();
+        let mut owner = f.client(true).await;
+        ready(&f, &mut owner, CallReadyScope::All).await;
+        f.stage(batch(42, false, 2, "synthetic_self"));
+        let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let guard = preparation.request.guard.clone();
+        let identity = preparation.request.identity.clone();
+        let authority = preparation.request.authority.clone();
+        f.stage(batch(42, true, 2, "synthetic_self"));
+        let classification = next_cancellation(&mut f).await;
+        if timeout {
+            tokio::time::sleep(Duration::from_millis(5100)).await;
+            assert!(classification
+                .reply
+                .send(Ok(IncomingCancellation::Ended))
+                .is_err());
+        } else {
+            classification
+                .reply
+                .send(Err(CallServiceError(CallErrorCode::InvalidRequest)))
+                .unwrap();
+        }
+        settle().await;
+        assert!(!guard.is_current());
+        preparation
+            .reply
+            .send(IncomingPreparation::Ignored)
+            .unwrap();
+        settle().await;
+        let snapshot = f
+            .core
+            .call_service()
+            .current("one", "fixture")
+            .await
+            .unwrap();
+        assert!(snapshot.availability.busy);
+        assert!(snapshot.current_offer.is_none());
+        assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
+        f.core
+            .call_service()
+            .verified_incoming_terminal(&authority, &identity)
+            .unwrap();
+        assert!(
+            !f.core
+                .call_service()
+                .current("one", "fixture")
+                .await
+                .unwrap()
+                .availability
+                .busy
+        );
+    }
+}
+
+#[tokio::test]
+async fn admitted_member_replaces_invite_binding_and_stale_callbacks_cannot_retire_newer_member() {
+    let mut f = Fixture::new();
+    f.live();
+    let mut owner = f.client(true).await;
+    ready(&f, &mut owner, CallReadyScope::All).await;
+    f.stage(batch(42, false, 2, "synthetic_self"));
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let identity = preparation.request.identity.clone();
+    let authority = preparation.request.authority.clone();
+    let original = preparation.request.notification.clone();
+    let guard = preparation.request.guard.clone();
+    let service = f.core.call_service();
+    assert!(service
+        .set_incoming_member(&authority, &identity, 43, 1042, 9)
+        .is_err());
+    service
+        .set_incoming_member(&authority, &identity, 42, 1042, 9)
+        .unwrap();
+    let NotificationPayload::Invite(invite) = &original.control.payload else {
+        panic!("invite fixture");
+    };
+    assert_eq!(invite.member_id, Some(0));
+    preparation.reply.send(IncomingPreparation::Acked).unwrap();
+    let offer = offered(&f).await;
+    f.stage(batch_member(42, true, 2, "synthetic_self", 0));
+    f.stage(batch_member(42, true, 2, "synthetic_self", 11));
+    for _ in 0..2 {
+        let foreign = next_cancellation(&mut f).await;
+        foreign
+            .reply
+            .send(Ok(IncomingCancellation::Ignored))
+            .unwrap();
+    }
+    settle().await;
+    assert!(guard.is_current());
+    assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 2);
+    f.stage(batch_member(42, true, 2, "synthetic_self", 9));
+    let old = next_cancellation(&mut f).await;
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Answer {
+                request_id: "join-member".into(),
+                call_id: offer.call_id,
+                expected_revision: offer.revision,
+                media: CallMedia::default(),
+            },
+        )
+        .await
+        .unwrap();
+    loop {
+        if let Some(CallEvent::State { call }) = owner.events.recv().await {
+            if call.state == CallState::Connected {
+                break;
+            }
+        }
+    }
+    // A verified Join may admit member zero. A verdict for the former member
+    // must not clear that newer binding when its callback completes late.
+    service
+        .set_incoming_member(&authority, &identity, 42, 1042, 0)
+        .unwrap();
+    old.reply.send(Ok(IncomingCancellation::Ended)).unwrap();
+    settle().await;
+    assert!(guard.is_current());
+    service.validate_control(&owner.client_id).await.unwrap();
+    assert!(
+        service
+            .current("one", "fixture")
+            .await
+            .unwrap()
+            .availability
+            .busy
+    );
+    let mut zero = cancellation_note(
+        &f,
+        batch_member(42, true, 2, "synthetic_self", 0),
+        f.core.call_authority("one").unwrap(),
+    );
+    zero.receipt_id = "new-member-zero".into();
+    service.ingest_incoming(zero, Duration::from_secs(30));
+    let zero = next_cancellation(&mut f).await;
+    zero.reply.send(Ok(IncomingCancellation::Ignored)).unwrap();
+    settle().await;
+    service
+        .verified_incoming_terminal(&authority, &identity)
+        .unwrap();
+    assert!(service
+        .set_incoming_member(&authority, &identity, 42, 1042, 99)
+        .is_err());
+    assert!(
+        !service
+            .current("one", "fixture")
+            .await
+            .unwrap()
+            .availability
+            .busy
+    );
+}
+
+#[tokio::test]
+async fn same_staging_turn_cancellation_waits_for_explicit_actor_registration() {
+    let mut f = Fixture::new();
+    f.live();
+    let mut owner = f.client(true).await;
+    ready(&f, &mut owner, CallReadyScope::All).await;
+    let staging = f.core.lock_account("one").await.unwrap();
+    f.stage(batch(42, false, 2, "synthetic_self"));
+    f.stage(batch(42, true, 2, "synthetic_self"));
+    settle().await;
+    assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 0);
+    assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 0);
+    drop(staging);
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(preparation.request.registration.is_registered());
+    let cancellation = next_cancellation(&mut f).await;
+    assert_eq!(cancellation.identity, preparation.request.identity);
+    cancellation
+        .reply
+        .send(Ok(IncomingCancellation::Ended))
+        .unwrap();
+    settle().await;
+    preparation.reply.send(IncomingPreparation::Acked).unwrap();
+    settle().await;
+    let snapshot = f
+        .core
+        .call_service()
+        .current("one", "fixture")
+        .await
+        .unwrap();
+    assert!(!snapshot.availability.busy);
+    assert!(snapshot.current_offer.is_none());
+    assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn constructing_a_preparation_future_does_not_register_an_actor() {
+    let mut f = Fixture::new();
+    f.live();
+    f.backend.registration_mode.store(3, Ordering::SeqCst);
+    let mut owner = f.client(true).await;
+    ready(&f, &mut owner, CallReadyScope::All).await;
+    f.stage(batch(42, false, 2, "synthetic_self"));
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    f.stage(batch(42, true, 2, "synthetic_self"));
+    settle().await;
+    assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 0);
+    assert!(!preparation.request.registration.is_registered());
+    assert!(f.backend.install(&preparation.request));
+    let cancellation = next_cancellation(&mut f).await;
+    cancellation
+        .reply
+        .send(Ok(IncomingCancellation::Ended))
+        .unwrap();
+    settle().await;
+    assert!(!preparation.request.registration.mark_registered());
+    preparation
+        .reply
+        .send(IncomingPreparation::Ignored)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unregistered_synchronous_preparation_ignores_or_ends_without_false_cancel_uncertainty() {
+    for mode in [1, 2] {
+        let f = Fixture::new();
+        f.live();
+        f.backend.registration_mode.store(mode, Ordering::SeqCst);
+        let mut owner = f.client(true).await;
+        ready(&f, &mut owner, CallReadyScope::All).await;
+        let staging = f.core.lock_account("one").await.unwrap();
+        f.stage(batch(42, false, 2, "synthetic_self"));
+        f.stage(batch(42, true, 2, "synthetic_self"));
+        settle().await;
+        assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 0);
+        drop(staging);
+        settle().await;
+        let snapshot = f
+            .core
+            .call_service()
+            .current("one", "fixture")
+            .await
+            .unwrap();
+        assert!(!snapshot.availability.busy);
+        assert!(snapshot.current_offer.is_none());
+        assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 0);
+        assert!(!f
+            .backend
+            .last_registration
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .mark_registered());
+        assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn changed_member_cancel_is_handed_off_during_ack_cutover_and_applied_only_after_proof() {
+    let mut f = Fixture::new();
+    f.live();
+    let mut owner = f.client(true).await;
+    ready(&f, &mut owner, CallReadyScope::All).await;
+    f.stage(batch(42, false, 2, "synthetic_self"));
+    let preparation = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let guard = preparation.request.guard.clone();
+    let identity = preparation.request.identity.clone();
+    let authority = preparation.request.authority.clone();
+    // The ACK's bytes may already have returned before the actor registers its
+    // new own member. The broker delivers this raw control, never a verdict.
+    f.stage(batch_member(42, true, 2, "synthetic_self", 9));
+    let cancellation = next_cancellation(&mut f).await;
+    assert!(guard.is_current());
+    assert!(f
+        .core
+        .call_service()
+        .current("one", "fixture")
+        .await
+        .unwrap()
+        .current_offer
+        .is_none());
+    f.core
+        .call_service()
+        .set_incoming_member(&authority, &identity, 42, 1042, 9)
+        .unwrap();
+    cancellation
+        .reply
+        .send(Ok(IncomingCancellation::Ended))
+        .unwrap();
+    settle().await;
+    preparation.reply.send(IncomingPreparation::Acked).unwrap();
+    settle().await;
+    assert!(!guard.is_current());
+    assert!(
+        !f.core
+            .call_service()
+            .current("one", "fixture")
+            .await
+            .unwrap()
+            .availability
+            .busy
+    );
 }

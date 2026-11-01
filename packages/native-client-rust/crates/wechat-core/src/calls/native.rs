@@ -1,6 +1,7 @@
 //! Native personal-call backend. Constructing it performs no login, profile read,
-//! network operation or device access. A reserved owner command starts a worker;
-//! current account authority and journaled intents fence every host mutation.
+//! network operation or device access. An admitted invitation or reserved owner
+//! command starts a worker; current account authority and journaled intents
+//! fence every host mutation.
 
 use super::{
     authority::CallAuthorityLease,
@@ -43,13 +44,19 @@ use wechat_protocol::{
             CallRpcNotSubmitted, NativePersonalSession, PersonalPhase, PersonalTransport,
             SyncProgress, TaskIds, UnsupportedCallMedia, VoiceParameters,
         },
-        host_policy::{is_teardown_request, selected_policy, CallHostPolicy, CallHostRoute},
+        host_policy::{
+            is_reject_request, is_teardown_request, selected_policy, CallHostPolicy, CallHostRoute,
+        },
         relay::{RelayEpoch, RelayProgress, RoomInputs, TwoRttRelay},
         voice_offer::VoiceOffer,
     },
-    crypto, protobuf as p, AccountState, NativeOptions,
+    crypto, protobuf as p, AccountState,
 };
 
+#[cfg(not(test))]
+use wechat_protocol::NativeOptions;
+
+mod incoming;
 mod rtp_order;
 use rtp_order::RtpOrder;
 
@@ -186,6 +193,8 @@ struct Inner {
     config: NativeCallConfig,
     active: Mutex<Option<Arc<Worker>>>,
     test_spent: AtomicBool,
+    #[cfg(test)]
+    test_io: Option<Arc<dyn TestCallIo>>,
 }
 struct Worker {
     identity: CallIdentity,
@@ -197,7 +206,8 @@ struct Worker {
     metrics: MediaMetrics,
     scope_deadline: Instant,
     scope_expires_unix_ms: u64,
-    invite_attempted: AtomicBool,
+    mutations_submitted: AtomicBool,
+    incoming: Option<Arc<incoming::Mailbox>>,
     audio: SyncSender<QueuedAudio>,
     done: Mutex<Option<BackendOutcome>>,
     notify: Notify,
@@ -242,6 +252,8 @@ impl NativeCallBackend {
                 config,
                 active: Mutex::new(None),
                 test_spent: AtomicBool::new(false),
+                #[cfg(test)]
+                test_io: None,
             }),
         })
     }
@@ -259,10 +271,35 @@ impl CallBackend for NativeCallBackend {
         CallCapabilities {
             direct_audio: account == self.inner.config.account_id
                 && self.inner.config.tx_ready()
-                && !self.inner.test_spent.load(Ordering::Acquire)
+                && (!self.inner.test_spent.load(Ordering::Acquire)
+                    || self.inner.active.lock().ok().is_some_and(|active| {
+                        active.as_ref().is_some_and(|worker| {
+                            worker.lease.current()
+                                && worker.scope_current()
+                                && worker.done.lock().ok().is_some_and(|done| done.is_none())
+                        })
+                    }))
                 && self.authority(account).is_some(),
             ..CallCapabilities::default()
         }
+    }
+    fn incoming_supported(&self, authority: &AccountAuthority, caller: &str) -> bool {
+        incoming::supported(&self.inner, authority, caller)
+    }
+    fn prepare_incoming(
+        &self,
+        request: crate::calls::notifications::IncomingRequest,
+    ) -> BackendFuture<crate::calls::notifications::IncomingPreparation> {
+        let inner = self.inner.clone();
+        Box::pin(async move { incoming::prepare(inner, request).await })
+    }
+    fn cancel_incoming(
+        &self,
+        identity: CallIdentity,
+        note: Arc<crate::calls::notifications::IncomingNotification>,
+    ) -> BackendFuture<crate::calls::notifications::IncomingCancellation> {
+        let inner = self.inner.clone();
+        Box::pin(async move { incoming::cancel(inner, identity, note).await })
     }
     fn submit(&self, request: BackendRequest, sink: BackendSink) -> BackendFuture<BackendOutcome> {
         let inner = self.inner.clone();
@@ -273,7 +310,7 @@ impl CallBackend for NativeCallBackend {
                     return stop_inner(&inner, request.ticket.identity()).await
                 }
                 Operation::Answer | Operation::Reject => {
-                    return Err(service_error(CallErrorCode::Unsupported))
+                    return incoming::action(inner, request, sink).await
                 }
             }
             if request.media.video
@@ -322,7 +359,8 @@ impl CallBackend for NativeCallBackend {
                 metrics: MediaMetrics::default(),
                 scope_deadline,
                 scope_expires_unix_ms,
-                invite_attempted: AtomicBool::new(false),
+                mutations_submitted: AtomicBool::new(false),
+                incoming: None,
                 audio,
                 done: Mutex::new(None),
                 notify: Notify::new(),
@@ -365,7 +403,7 @@ impl CallBackend for NativeCallBackend {
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("Call worker panicked")));
                     let terminal =
-                        result.is_ok() || !actor_worker.invite_attempted.load(Ordering::Acquire);
+                        result.is_ok() || !actor_worker.mutations_submitted.load(Ordering::Acquire);
                     if result.is_err() {
                         if let Some(core) = actor_inner.core.upgrade() {
                             let _ = core.store.finish_call(
@@ -470,6 +508,33 @@ async fn stop_inner(
     worker.wait().await
 }
 
+enum ControlAdmission {
+    Owner(BackendSink),
+    Incoming(crate::calls::notifications::IncomingGuard),
+    Terminal(BackendSink),
+}
+impl ControlAdmission {
+    fn nonterminal_current(&self) -> bool {
+        match self {
+            Self::Owner(sink) => sink.is_current(),
+            Self::Incoming(guard) => guard.is_current(),
+            Self::Terminal(_) => false,
+        }
+    }
+    fn terminal_current(&self) -> bool {
+        matches!(self, Self::Terminal(sink) if sink.is_terminal_current())
+    }
+}
+#[cfg(test)]
+trait TestCallIo: Send + Sync {
+    fn call(
+        &self,
+        state: &mut AccountState,
+        route: CallHostRoute,
+        request: &[u8],
+        handoff: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<u8>>;
+}
 struct FencedTransport {
     core: Weak<Core>,
     account: String,
@@ -479,8 +544,30 @@ struct FencedTransport {
     scope_deadline: Instant,
     scope_expires_unix_ms: u64,
     worker: Arc<Worker>,
-    owner: BackendSink,
+    admission: ControlAdmission,
     runtime: tokio::runtime::Handle,
+    #[cfg(test)]
+    test_io: Option<Arc<dyn TestCallIo>>,
+}
+impl FencedTransport {
+    fn admits(&self, teardown: bool, rejecting: bool) -> bool {
+        if teardown {
+            return true;
+        }
+        if self
+            .worker
+            .incoming
+            .as_ref()
+            .is_some_and(|mailbox| mailbox.cancellation_pending())
+        {
+            return false;
+        }
+        if rejecting {
+            return self.admission.terminal_current();
+        }
+        self.admission.nonterminal_current()
+            && scope_current(self.scope_deadline, self.scope_expires_unix_ms)
+    }
 }
 impl PersonalTransport for FencedTransport {
     fn call_rpc(
@@ -496,10 +583,8 @@ impl PersonalTransport for FencedTransport {
             "Call account authority revoked"
         );
         let teardown = is_teardown_request(route, request)?;
-        if !teardown
-            && (!self.owner.is_current()
-                || !scope_current(self.scope_deadline, self.scope_expires_unix_ms))
-        {
+        let rejecting = is_reject_request(route, request)?;
+        if !self.admits(teardown, rejecting) {
             return Err(CallRpcNotSubmitted.into());
         }
         let latest = core.account_state(&self.account)?;
@@ -512,14 +597,12 @@ impl PersonalTransport for FencedTransport {
             selected_policy(&state.auth_snapshot, route.command())? == CallHostPolicy::Ordinary,
             "Selected call host route unsupported"
         );
+        #[cfg(not(test))]
         let native = core.upstream.native(NativeOptions {
             timeout: Duration::from_secs(12),
             ..NativeOptions::default()
         })?;
-        if !teardown
-            && (!self.owner.is_current()
-                || !scope_current(self.scope_deadline, self.scope_expires_unix_ms))
-        {
+        if !self.admits(teardown, rejecting) {
             return Err(CallRpcNotSubmitted.into());
         }
         let ordinal = self.ordinal.fetch_add(1, Ordering::AcqRel);
@@ -542,22 +625,32 @@ impl PersonalTransport for FencedTransport {
             )?,
             "Call action already spent"
         );
-        if route == CallHostRoute::Invite {
-            self.worker.invite_attempted.store(true, Ordering::Release);
-        }
-        let result = native.experimental_call_rpc_guarded(state, route, request, || {
+        let handoff = || {
             ensure!(
                 self.lease.current() && !core.stopping.load(Ordering::Acquire),
                 "Call account authority revoked before submission"
             );
-            if !teardown
-                && (!self.owner.is_current()
-                    || !scope_current(self.scope_deadline, self.scope_expires_unix_ms))
-            {
+            if !self.admits(teardown, rejecting) {
                 return Err(CallRpcNotSubmitted.into());
             }
+            if !matches!(route, CallHostRoute::AppAuth | CallHostRoute::LiveSync) {
+                self.worker
+                    .mutations_submitted
+                    .store(true, Ordering::Release);
+            }
             Ok(())
-        });
+        };
+        // A unit-test build can never fall through into network transport.
+        #[cfg(test)]
+        let result = {
+            let mut handoff = handoff;
+            self.test_io
+                .as_ref()
+                .context("Missing synthetic call host")?
+                .call(state, route, request, &mut handoff)
+        };
+        #[cfg(not(test))]
+        let result = native.experimental_call_rpc_guarded(state, route, request, handoff);
         match result {
             Ok(reply) => {
                 let label = format!("call-reply:{}:{action}", self.call_id);
@@ -579,17 +672,11 @@ impl PersonalTransport for FencedTransport {
             Err(error) => {
                 let local_stop = error.is::<CallRpcNotSubmitted>();
                 if local_stop {
-                    if route == CallHostRoute::Invite {
-                        self.worker.invite_attempted.store(false, Ordering::Release);
-                    }
                     core.store.put_runtime(&self.account,&format!("call-host-diagnostic:{}:{action}",self.call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"admission_revoked","mayHaveSubmitted":false}))?)?;
                 }
                 if let Some(error) =
                     error.downcast_ref::<wechat_protocol::calls::host_transport::CallHostRpcError>()
                 {
-                    if route == CallHostRoute::Invite && !error.may_have_submitted() {
-                        self.worker.invite_attempted.store(false, Ordering::Release);
-                    }
                     let diagnostic = serde_json::to_vec(
                         &serde_json::json!({"cgi":route.command(),"stage":error.stage.as_str(),"code":error.code,"value":error.value,"mayHaveSubmitted":error.may_have_submitted()}),
                     )?;
@@ -599,6 +686,14 @@ impl PersonalTransport for FencedTransport {
                         &diagnostic,
                     )?;
                 }
+                if local_stop {
+                    core.store.finish_call_action_not_submitted(
+                        &self.account,
+                        &self.call_id,
+                        &action,
+                    )?;
+                    return Err(error);
+                }
                 core.store.finish_call_action(
                     &self.account,
                     &self.call_id,
@@ -606,9 +701,6 @@ impl PersonalTransport for FencedTransport {
                     "needs_review",
                     None,
                 )?;
-                if local_stop {
-                    return Err(error);
-                }
                 bail!("Call host outcome unknown")
             }
         }
@@ -637,6 +729,33 @@ impl Tasks {
     }
 }
 
+fn begin_operational_call(
+    inner: &Inner,
+    worker: &Worker,
+    core: &Core,
+    runtime: &tokio::runtime::Handle,
+) -> Result<()> {
+    let account = &inner.config.account_id;
+    let call_id = worker.identity.call_id();
+    let _guard = runtime.block_on(core.lock_account(account))?;
+    ensure!(worker.lease.current(), "Call authority revoked");
+    ensure!(
+        core.store
+            .begin_call(account, call_id, &worker.lease.authority().generation)?,
+        "Previous call requires reconciliation"
+    );
+    if let NativeTransmitScope::IsolatedTest { intent_id, .. } = &inner.config.transmit_scope {
+        let marker = format!("call-test-intent:{:x}", Sha256::digest(intent_id));
+        ensure!(
+            core.store.runtime(account, &marker)?.is_none(),
+            "Isolated call test intent already spent"
+        );
+        core.store
+            .put_runtime(account, &marker, call_id.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn run_control(
     inner: &Arc<Inner>,
     worker: &Arc<Worker>,
@@ -649,24 +768,7 @@ fn run_control(
     let core = inner.core.upgrade().context("Call core closed")?;
     let account = &inner.config.account_id;
     let call_id = worker.identity.call_id();
-    {
-        let _guard = runtime.block_on(core.lock_account(account))?;
-        ensure!(worker.lease.current(), "Call authority revoked");
-        ensure!(
-            core.store
-                .begin_call(account, call_id, &worker.lease.authority().generation)?,
-            "Previous call requires reconciliation"
-        );
-        if let NativeTransmitScope::IsolatedTest { intent_id, .. } = &inner.config.transmit_scope {
-            let marker = format!("call-test-intent:{:x}", Sha256::digest(intent_id));
-            ensure!(
-                core.store.runtime(account, &marker)?.is_none(),
-                "Isolated call test intent already spent"
-            );
-            core.store
-                .put_runtime(account, &marker, call_id.as_bytes())?;
-        }
-    }
+    begin_operational_call(inner, worker, &core, runtime)?;
     let transport = FencedTransport {
         core: inner.core.clone(),
         account: account.clone(),
@@ -676,8 +778,10 @@ fn run_control(
         scope_deadline: worker.scope_deadline,
         scope_expires_unix_ms: worker.scope_expires_unix_ms,
         worker: worker.clone(),
-        owner: sink.clone(),
+        admission: ControlAdmission::Owner(sink.clone()),
         runtime: runtime.clone(),
+        #[cfg(test)]
+        test_io: inner.test_io.clone(),
     };
     let mut state = core.account_state(account)?;
     let auth = AppAuthority {
@@ -723,6 +827,12 @@ fn run_control(
         } else {
             return Err(error);
         }
+    }
+    if matches!(
+        session.phase(),
+        PersonalPhase::Finished | PersonalPhase::TerminalPending
+    ) {
+        worker.stop.store(true, Ordering::Release);
     }
     let _ = admitted.send(Ok(BackendOutcome::Admitted));
     let ringing_end = Instant::now() + inner.config.ring_timeout;

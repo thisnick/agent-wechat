@@ -10,6 +10,7 @@ use crate::{
 };
 use std::{collections::BTreeMap, sync::Weak, time::Duration};
 use std::{sync::Arc, time::Instant};
+use tokio::sync::watch;
 use wechat_protocol::{
     calls::incoming::NotificationPayload,
     wire::{decode_add_message, SyncBatch},
@@ -51,6 +52,74 @@ pub struct IncomingRequest {
     pub expires: Instant,
     pub notification: Arc<IncomingNotification>,
     pub guard: IncomingGuard,
+    pub registration: IncomingRegistration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegistrationState {
+    Pending,
+    Registered,
+    Closed,
+}
+
+/// One request's actor-mailbox installation signal. Registration alone grants
+/// no mutation permission: the actor must still check its authority/guard.
+#[derive(Clone)]
+pub struct IncomingRegistration {
+    state: watch::Sender<RegistrationState>,
+}
+impl IncomingRegistration {
+    pub(crate) fn new() -> Self {
+        let (state, _) = watch::channel(RegistrationState::Pending);
+        Self { state }
+    }
+    /// Call only after the exact actor/mailbox is installed, before any await,
+    /// profile proof or Auth. A retired request cannot be registered again.
+    pub fn mark_registered(&self) -> bool {
+        let mut registered = false;
+        self.state.send_if_modified(|state| match state {
+            RegistrationState::Pending => {
+                *state = RegistrationState::Registered;
+                registered = true;
+                true
+            }
+            RegistrationState::Registered => {
+                registered = true;
+                false
+            }
+            RegistrationState::Closed => false,
+        });
+        registered
+    }
+    pub(crate) fn is_registered(&self) -> bool {
+        *self.state.borrow() == RegistrationState::Registered
+    }
+    pub(crate) fn close(&self) {
+        self.state.send_replace(RegistrationState::Closed);
+    }
+    pub(crate) fn close_unregistered(&self) {
+        self.state.send_if_modified(|state| {
+            if *state == RegistrationState::Pending {
+                *state = RegistrationState::Closed;
+                true
+            } else {
+                false
+            }
+        });
+    }
+    pub(crate) async fn wait_registered(&self) -> bool {
+        let mut state = self.state.subscribe();
+        loop {
+            match *state.borrow_and_update() {
+                RegistrationState::Registered => return true,
+                RegistrationState::Closed => return false,
+                RegistrationState::Pending => {}
+            }
+            if state.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +132,16 @@ pub enum IncomingPreparation {
     /// a terminal member update contained in the successful ringing ACK.
     Ended,
     /// Submission or cleanup is unresolved; the slot must remain occupied.
+    Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncomingCancellation {
+    /// This notification does not apply to the actor's current source phase.
+    Ignored,
+    /// The actor verified local terminal state for this exact incoming attempt.
+    Ended,
+    /// Classification or submission remains unresolved; retain the reservation.
     Uncertain,
 }
 
@@ -85,8 +164,49 @@ pub(super) struct PendingEntry {
     pub stage: PendingStage,
     pub cancelled: bool,
     pub identity: Option<CallIdentity>,
+    pub admitted_member: Option<u32>,
+    pub member_revision: u64,
+    pub registration: Option<IncomingRegistration>,
+}
+impl Drop for PendingEntry {
+    fn drop(&mut self) {
+        if let Some(registration) = &self.registration {
+            registration.close();
+        }
+    }
 }
 impl PendingEntry {
+    pub fn matches_cancel(&self, note: &IncomingNotification) -> bool {
+        if !self.matches_cancel_source(note) {
+            return false;
+        }
+        let (NotificationPayload::Invite(invite), NotificationPayload::Cancel(cancel)) =
+            (&self.note.control.payload, &note.control.payload)
+        else {
+            return false;
+        };
+        self.admitted_member.or(invite.member_id) == cancel.member_id
+    }
+    pub fn matches_cancel_source(&self, note: &IncomingNotification) -> bool {
+        let (NotificationPayload::Invite(invite), NotificationPayload::Cancel(cancel)) =
+            (&self.note.control.payload, &note.control.payload)
+        else {
+            return false;
+        };
+        if cancel.member_id.is_none() {
+            return false;
+        }
+        self.note.lease.current()
+            && note.lease.current()
+            && self.note.lease.authority() == note.lease.authority()
+            && invite.room_id.is_some()
+            && invite.room_id == cancel.room_id
+            && invite.room_key.is_some()
+            && invite.room_key == cancel.room_key
+            && self.note.header_from == note.header_from
+            && self.note.own_username == note.own_username
+            && invite.callee_username.as_deref() == Some(note.own_username.as_str())
+    }
     pub fn view(&self, account: &str) -> Option<CallPendingOffer> {
         (self.note.lease.authority().account_id == account
             && !self.cancelled
@@ -100,12 +220,14 @@ pub(super) struct Registry {
     pub entries: BTreeMap<String, PendingEntry>,
     pub rooms: BTreeMap<String, Instant>,
     pub receipts: BTreeMap<String, Instant>,
+    pub cancellations: BTreeMap<(String, u64, u32, Option<u32>), Instant>,
 }
 impl Registry {
     pub fn prune_dedup(&mut self) {
         let now = Instant::now();
         self.rooms.retain(|_, expiry| *expiry > now);
         self.receipts.retain(|_, expiry| *expiry > now);
+        self.cancellations.retain(|_, expiry| *expiry > now);
     }
     pub fn room(note: &IncomingNotification) -> Option<String> {
         let (room, key) = match &note.control.payload {
@@ -161,6 +283,9 @@ impl Registry {
                 stage: PendingStage::Waiting,
                 cancelled: false,
                 identity: None,
+                admitted_member: None,
+                member_revision: 0,
+                registration: None,
             },
         );
         Some(id)
