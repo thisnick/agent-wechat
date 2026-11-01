@@ -350,7 +350,6 @@ pub(crate) fn after_sync_staged(
                     || invite.room_id.is_none_or(|id| id == 0)
                     || invite.room_key.is_none_or(|key| key == 0)
                     || invite.member_id.is_none()
-                    || invite.caller_member_id.is_none()
                     || !invite.caller_openid.as_deref().is_some_and(valid_identity)
                     || !invite.callee_openid.as_deref().is_some_and(valid_identity)
                 {

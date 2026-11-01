@@ -112,7 +112,19 @@ try {
   assert.equal(url.username, ""); assert.equal(url.password, ""); assert.equal(ready.accountId, "calls-fixture");
   const token = (await readFile(ready.callsTokenFile, "utf8")).trim();
   const nonCallsToken = (await readFile(ready.nonCallsTokenFile, "utf8")).trim();
-  const webSocketFactory = await nativeCallSocketFactory();
+  const rawWebSocketFactory = await nativeCallSocketFactory();
+  let holdNativePcm = false, heldNativePcm;
+  const webSocketFactory = (url, options) => {
+    const socket = rawWebSocketFactory(url, options), send = socket.send.bind(socket);
+    socket.send = value => {
+      if (holdNativePcm && typeof value !== "string") {
+        holdNativePcm = false; const bytes = Buffer.from(value);
+        heldNativePcm = () => send(bytes); return;
+      }
+      send(value);
+    };
+    return socket;
+  };
   const options = { baseUrl: ready.baseUrl, token, accountId: ready.accountId, webSocketFactory, commandTimeoutMs: 5000 };
   const observer = new NativeCallsClient(options); const observing = watch(observer);
   const observedHello = await observer.connect(); assert.equal(observedHello.currentCall, null);
@@ -191,6 +203,16 @@ try {
   assert.equal(received[2].sequence, 2n); assert.equal(received[2].timestampMicros, 40000n);
   assert.equal((await control("stats")).stats.audioFrames, 2);
   if (monitor) await until("CLI observes offer without claiming", () => monitorEvents.some(event => event.type === "call.offered" && event.offer.callId === offer.callId));
+  holdNativePcm = true;
+  media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 2n, timestampMicros: 40000n }, samples(first));
+  assert.equal(typeof heldNativePcm, "function");
+  await control("begin_end");
+  await until("autonomous ending event", () => winnerEvents.events.some(event => event.type === "call.state" && event.call.state === "ending"));
+  const beforeLatePcm = (await control("stats")).stats.audioFrames;
+  assert.throws(() => media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 3n, timestampMicros: 60000n }, samples(first)), error => error.code === "call_ending");
+  heldNativePcm();
+  await delay(100);
+  assert.equal((await control("stats")).stats.audioFrames, beforeLatePcm, "Late PCM during autonomous teardown is ignored");
   mediaClosing = true; await control("end");
   await until("synthetic remote terminal", () => availability(leftEvents)?.busy === false && availability(rightEvents)?.busy === false
     && winnerEvents.events.some(event => event.type === "call.state" && event.call.callId === offer.callId && event.call.state === "ended"));

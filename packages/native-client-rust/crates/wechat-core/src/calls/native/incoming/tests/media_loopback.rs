@@ -37,7 +37,7 @@ struct LocalPeer {
     diagnostic: Arc<PeerDiagnostic>,
 }
 impl LocalPeer {
-    fn new() -> Result<Self> {
+    fn new(frames_per_packet: u8) -> Result<Self> {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         socket.set_nonblocking(true)?;
         let SocketAddr::V4(endpoint) = socket.local_addr()? else {
@@ -55,8 +55,11 @@ impl LocalPeer {
             .spawn(move || {
                 let result = peer(
                     socket,
-                    endpoint,
-                    key,
+                    ReadyMedia {
+                        endpoint,
+                        key,
+                        frames_per_packet,
+                    },
                     intent,
                     receive_start,
                     &stopping,
@@ -98,13 +101,14 @@ struct Harness {
     owner_state: Mutex<Option<CallState>>,
 }
 impl Harness {
-    fn new() -> Result<Self> {
-        let peer = LocalPeer::new()?;
+    fn new(frames_per_packet: u8) -> Result<Self> {
+        let peer = LocalPeer::new(frames_per_packet)?;
         let fixture = Fixture::with_media(
             Case::Normal,
             Some(ReadyMedia {
                 endpoint: peer.endpoint,
                 key: peer.key,
+                frames_per_packet,
             }),
         );
         Ok(Self {
@@ -278,13 +282,17 @@ fn checkin(
 }
 fn peer(
     socket: UdpSocket,
-    endpoint: SocketAddrV4,
-    key: [u8; 32],
+    media: ReadyMedia,
     intent: [u8; 32],
     start: Receiver<(AudioFormat, MediaEpoch)>,
     stop: &AtomicBool,
     diagnostic: &PeerDiagnostic,
 ) -> Result<PeerStats> {
+    let ReadyMedia {
+        endpoint,
+        key,
+        frames_per_packet,
+    } = media;
     let began = Instant::now();
     diagnostic.stage.store(1, Ordering::Release);
     let (initial, source) = receive(&socket, stop, began + Duration::from_secs(3))?;
@@ -403,8 +411,8 @@ fn peer(
                 if opened.packed_kind == 0x10 {
                     let audio = audio_packet::parse_ordinary95(opened.payload())?;
                     ensure!(
-                        audio.primaries.len() == 2,
-                        "Synthetic native sender is not N2"
+                        audio.primaries.len() == usize::from(frames_per_packet),
+                        "Synthetic native sender packet grouping mismatch"
                     );
                     for packet in audio.primaries {
                         result.samples.extend(decoder.decode(packet)?);
@@ -427,6 +435,13 @@ fn peer(
             Err(error) => return Err(error.into()),
         }
         if result.sent_primaries == FRAMES && result.received_primaries >= FRAMES {
+            if frames_per_packet == 2 {
+                // Ongoing malformed traffic must not keep a silent peer alive.
+                for _ in 0..40 {
+                    socket.send_to(&[0x96, 0x10], source)?;
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
             result.overlaps = channel.known_audio_overlaps();
             channel.close();
             diagnostic.stage.store(10, Ordering::Release);
@@ -487,226 +502,235 @@ fn check_tone(samples: &[i16], format: AudioFormat, expected: f64, other: f64) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -> Result<()> {
-    let mut h = Harness::new()?;
-    let test = async {
-        let f = &h.fixture;
-        let service = f.core.call_service();
-        let mut client = service.connect("one", "fixture", true).await?;
-        let Some(CallEvent::Hello { audio_format, .. }) = client.events.recv().await else {
-            bail!("Synthetic missing Hello")
-        };
-        ensure!(
-            audio_format == CallAudioFormat::default(),
-            "Synthetic selected codec format differs from announced format"
-        );
-        let format = AudioFormat::new(
-            audio_format.sample_rate,
-            audio_format.channels,
-            audio_format.frame_ms,
-        )?;
-        service
-            .command(
-                &client.client_id,
-                CallCommand::Ready {
-                    request_id: "ready".into(),
-                    ready: true,
-                    format: audio_format,
-                    scope: Some(CallReadyScope::All),
-                },
-            )
-            .await?;
-        assert_eq!(
-            result(&mut client, "ready").await,
-            CallCommandStatus::Accepted
-        );
-        f.stage(false, 0);
-        let offer = f.offer().await;
-        service
-            .command(
-                &client.client_id,
-                CallCommand::Answer {
-                    request_id: "answer".into(),
-                    call_id: offer.call_id.clone(),
-                    expected_revision: offer.revision,
-                    media: CallMedia::default(),
-                },
-            )
-            .await?;
-        // GET/current is observer-safe and intentionally omits this private
-        // owner view. Preserve owner events even if Connected precedes the
-        // Answer result instead of querying the observer snapshot for it.
-        let (token, call) = tokio::time::timeout(Duration::from_secs(3), async {
-            let (mut token, mut connected) = (None, None);
-            loop {
-                match client
-                    .events
-                    .recv()
-                    .await
-                    .context("Synthetic owner control closed")?
-                {
-                    CallEvent::CommandResult {
-                        request_id,
-                        status,
-                        owner_token,
-                        ..
-                    } if request_id == "answer" => {
-                        ensure!(
-                            status == CallCommandStatus::Accepted,
-                            "Synthetic Answer rejected"
-                        );
-                        token = Some(owner_token.context("Synthetic missing owner token")?);
-                    }
-                    CallEvent::State { call } if call.call_id == offer.call_id => {
-                        *h.owner_state.lock().unwrap() = Some(call.state);
-                        if call.state == CallState::Connected {
-                            connected = Some(call);
-                        }
-                    }
-                    _ => {}
-                }
-                if let (Some(token), Some(call)) = (&token, &connected) {
-                    return Ok::<_, anyhow::Error>((token.clone(), call.clone()));
-                }
-            }
-        })
-        .await
-        .context("Synthetic transport did not connect")??;
-        let mut media = service
-            .attach_media("one", "fixture", &offer.call_id, &client.client_id, &token)
-            .await?;
-        let CallEvent::MediaReady {
-            send_track,
-            receive_track,
-        } = &media.ready
-        else {
-            bail!("Synthetic missing tracks")
-        };
-        ensure!(
-            send_track.format == audio_format
-                && receive_track.format == audio_format
-                && send_track.direction == CallTrackDirection::Send
-                && receive_track.direction == CallTrackDirection::Receive,
-            "Synthetic announced track format/direction"
-        );
-        let send_track = send_track.clone();
-        let receive_track = receive_track.clone();
-        let worker = f
-            .backend
-            .inner
-            .active
-            .lock()
-            .unwrap()
-            .clone()
-            .context("Synthetic missing worker")?;
-        let epoch = MediaEpoch {
-            account_generation: nonzero64(worker.lease.authority().generation.as_bytes()),
-            logout_epoch: 0,
-            call_generation: nonzero64(worker.identity.call_id().as_bytes()),
-            key_generation: 1,
-        };
-        h.peer.start.send((format, epoch))?;
-        let media_id = media.id.clone();
-        let feed = async {
-            let mut tone = tone(format, OWNER_HZ)?;
-            for n in 0..FRAMES {
-                let raw = frame::encode_pcm(
-                    MediaHeader {
-                        track_id: send_track.id,
-                        generation: send_track.generation,
-                        sequence: n as u64,
-                        timestamp_micros: n as u64 * u64::from(audio_format.frame_ms) * 1000,
+    for frames_per_packet in [1, 2] {
+        let mut h = Harness::new(frames_per_packet)?;
+        let test = async {
+            let f = &h.fixture;
+            let service = f.core.call_service();
+            let mut client = service.connect("one", "fixture", true).await?;
+            let Some(CallEvent::Hello { audio_format, .. }) = client.events.recv().await else {
+                bail!("Synthetic missing Hello")
+            };
+            ensure!(
+                audio_format == CallAudioFormat::default(),
+                "Synthetic selected codec format differs from announced format"
+            );
+            let format = AudioFormat::new(
+                audio_format.sample_rate,
+                audio_format.channels,
+                audio_format.frame_ms,
+            )?;
+            service
+                .command(
+                    &client.client_id,
+                    CallCommand::Ready {
+                        request_id: "ready".into(),
+                        ready: true,
+                        format: audio_format,
+                        scope: Some(CallReadyScope::All),
                     },
-                    format,
-                    &tone.next_frame()?,
-                )?;
-                service.media_frame(&media_id, &raw).await?;
-                tokio::time::sleep(Duration::from_millis(u64::from(audio_format.frame_ms))).await;
+                )
+                .await?;
+            assert_eq!(
+                result(&mut client, "ready").await,
+                CallCommandStatus::Accepted
+            );
+            f.stage(false, 0);
+            let offer = f.offer().await;
+            service
+                .command(
+                    &client.client_id,
+                    CallCommand::Answer {
+                        request_id: "answer".into(),
+                        call_id: offer.call_id.clone(),
+                        expected_revision: offer.revision,
+                        media: CallMedia::default(),
+                    },
+                )
+                .await?;
+            // GET/current is observer-safe and intentionally omits this private
+            // owner view. Preserve owner events even if Connected precedes the
+            // Answer result instead of querying the observer snapshot for it.
+            let (token, call) = tokio::time::timeout(Duration::from_secs(3), async {
+                let (mut token, mut connected) = (None, None);
+                loop {
+                    match client
+                        .events
+                        .recv()
+                        .await
+                        .context("Synthetic owner control closed")?
+                    {
+                        CallEvent::CommandResult {
+                            request_id,
+                            status,
+                            owner_token,
+                            ..
+                        } if request_id == "answer" => {
+                            ensure!(
+                                status == CallCommandStatus::Accepted,
+                                "Synthetic Answer rejected"
+                            );
+                            token = Some(owner_token.context("Synthetic missing owner token")?);
+                        }
+                        CallEvent::State { call } if call.call_id == offer.call_id => {
+                            *h.owner_state.lock().unwrap() = Some(call.state);
+                            if call.state == CallState::Connected {
+                                connected = Some(call);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let (Some(token), Some(call)) = (&token, &connected) {
+                        return Ok::<_, anyhow::Error>((token.clone(), call.clone()));
+                    }
+                }
+            })
+            .await
+            .context("Synthetic transport did not connect")??;
+            let mut media = service
+                .attach_media("one", "fixture", &offer.call_id, &client.client_id, &token)
+                .await?;
+            let CallEvent::MediaReady {
+                send_track,
+                receive_track,
+            } = &media.ready
+            else {
+                bail!("Synthetic missing tracks")
+            };
+            ensure!(
+                send_track.format == audio_format
+                    && receive_track.format == audio_format
+                    && send_track.direction == CallTrackDirection::Send
+                    && receive_track.direction == CallTrackDirection::Receive,
+                "Synthetic announced track format/direction"
+            );
+            let send_track = send_track.clone();
+            let receive_track = receive_track.clone();
+            let worker = f
+                .backend
+                .inner
+                .active
+                .lock()
+                .unwrap()
+                .clone()
+                .context("Synthetic missing worker")?;
+            let epoch = MediaEpoch {
+                account_generation: nonzero64(worker.lease.authority().generation.as_bytes()),
+                logout_epoch: 0,
+                call_generation: nonzero64(worker.identity.call_id().as_bytes()),
+                key_generation: 1,
+            };
+            h.peer.start.send((format, epoch))?;
+            let media_id = media.id.clone();
+            let feed = async {
+                let mut tone = tone(format, OWNER_HZ)?;
+                for n in 0..FRAMES {
+                    let raw = frame::encode_pcm(
+                        MediaHeader {
+                            track_id: send_track.id,
+                            generation: send_track.generation,
+                            sequence: n as u64,
+                            timestamp_micros: n as u64 * u64::from(audio_format.frame_ms) * 1000,
+                        },
+                        format,
+                        &tone.next_frame()?,
+                    )?;
+                    service.media_frame(&media_id, &raw).await?;
+                    tokio::time::sleep(Duration::from_millis(u64::from(audio_format.frame_ms)))
+                        .await;
+                }
+                Ok::<_, anyhow::Error>(())
+            };
+            let receive = async {
+                let mut samples = vec![];
+                for n in 0..FRAMES {
+                    let raw = media
+                        .frames
+                        .recv()
+                        .await
+                        .context("Synthetic owner media closed")?;
+                    let frame = MediaFrame::decode(&raw, format)?;
+                    ensure!(
+                        frame.header.track_id == receive_track.id
+                            && frame.header.generation == receive_track.generation
+                            && frame.header.sequence == n as u64,
+                        "Synthetic owner receive ordering"
+                    );
+                    samples.extend(frame.samples());
+                }
+                Ok::<_, anyhow::Error>(samples)
+            };
+            let (sent, received) = tokio::join!(feed, receive);
+            sent?;
+            let received = received?;
+            let peer = h.peer.finish()?;
+            check_tone(&received, format, PEER_HZ, OWNER_HZ);
+            check_tone(&peer.samples, format, OWNER_HZ, PEER_HZ);
+            assert_eq!(peer.checkins, 2);
+            assert_eq!(peer.sent_primaries, FRAMES);
+            assert!((FRAMES..=FRAMES + 8).contains(&peer.received_primaries));
+            assert!(peer.overlaps > 0);
+            // Delivery publishes PCM before the media worker updates its counter.
+            tokio::time::timeout(Duration::from_millis(500), async {
+                while worker.metrics.rx_delivered_frames.load(Ordering::Relaxed) < FRAMES as u64 {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .context("Synthetic RX counter publication deadline")?;
+            assert_eq!(
+                worker.metrics.rx_delivered_frames.load(Ordering::Relaxed),
+                FRAMES as u64
+            );
+            assert!(
+                worker
+                    .metrics
+                    .tx_submitted_datagrams
+                    .load(Ordering::Relaxed)
+                    >= (FRAMES / 2) as u64
+            );
+            eprintln!("generated local media: owner_samples={}, peer_samples={}, peer_sent_primaries={}, peer_received_native_primaries={}, extra_native_primaries={}, other_datagrams={}, diagnostic_audio_overlaps={}", received.len(), peer.samples.len(), peer.sent_primaries, peer.received_primaries, peer.received_primaries - FRAMES, peer.other_datagrams, peer.overlaps);
+            if frames_per_packet == 1 {
+                service
+                    .command(
+                        &client.client_id,
+                        CallCommand::Hangup {
+                            request_id: "end".into(),
+                            call_id: call.call_id,
+                            expected_revision: call.revision,
+                        },
+                    )
+                    .await?;
+                assert_eq!(
+                    result(&mut client, "end").await,
+                    CallCommandStatus::Accepted
+                );
             }
+            f.finished().await;
+            ensure!(
+                !f.core.store.has_unresolved_call("one")?,
+                "Synthetic call journal unresolved"
+            );
+            let seen = f.host.seen();
+            assert_eq!(seen.iter().filter(|(_, cmd)| *cmd == Some(3380)).count(), 1);
+            assert!(!seen
+                .iter()
+                .any(|(route, _)| matches!(route, CallHostRoute::Invite | CallHostRoute::Cancel)));
+            let records = f.core.store.call_action_records("one", &offer.call_id)?;
+            assert!(records.iter().all(|record| {
+                record.encrypted_request.is_some()
+                    && ((record.outcome == "received" && record.encrypted_reply.is_some())
+                        || (record.route == 9262
+                            && record.outcome == "not_submitted"
+                            && record.encrypted_reply.is_none()))
+            }));
             Ok::<_, anyhow::Error>(())
         };
-        let receive = async {
-            let mut samples = vec![];
-            for n in 0..FRAMES {
-                let raw = media
-                    .frames
-                    .recv()
-                    .await
-                    .context("Synthetic owner media closed")?;
-                let frame = MediaFrame::decode(&raw, format)?;
-                ensure!(
-                    frame.header.track_id == receive_track.id
-                        && frame.header.generation == receive_track.generation
-                        && frame.header.sequence == n as u64,
-                    "Synthetic owner receive ordering"
-                );
-                samples.extend(frame.samples());
-            }
-            Ok::<_, anyhow::Error>(samples)
-        };
-        let (sent, received) = tokio::join!(feed, receive);
-        sent?;
-        let received = received?;
-        let peer = h.peer.finish()?;
-        check_tone(&received, format, PEER_HZ, OWNER_HZ);
-        check_tone(&peer.samples, format, OWNER_HZ, PEER_HZ);
-        assert_eq!(peer.checkins, 2);
-        assert_eq!(peer.sent_primaries, FRAMES);
-        assert!((FRAMES..=FRAMES + 8).contains(&peer.received_primaries));
-        assert!(peer.overlaps > 0);
-        // Delivery publishes PCM before the media worker updates its counter.
-        tokio::time::timeout(Duration::from_millis(500), async {
-            while worker.metrics.rx_delivered_frames.load(Ordering::Relaxed) < FRAMES as u64 {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .context("Synthetic RX counter publication deadline")?;
-        assert_eq!(
-            worker.metrics.rx_delivered_frames.load(Ordering::Relaxed),
-            FRAMES as u64
-        );
-        assert!(
-            worker
-                .metrics
-                .tx_submitted_datagrams
-                .load(Ordering::Relaxed)
-                >= (FRAMES / 2) as u64
-        );
-        eprintln!("generated local media: owner_samples={}, peer_samples={}, peer_sent_primaries={}, peer_received_native_primaries={}, extra_native_primaries={}, other_datagrams={}, diagnostic_audio_overlaps={}", received.len(), peer.samples.len(), peer.sent_primaries, peer.received_primaries, peer.received_primaries - FRAMES, peer.other_datagrams, peer.overlaps);
-        service
-            .command(
-                &client.client_id,
-                CallCommand::Hangup {
-                    request_id: "end".into(),
-                    call_id: call.call_id,
-                    expected_revision: call.revision,
-                },
-            )
-            .await?;
-        assert_eq!(
-            result(&mut client, "end").await,
-            CallCommandStatus::Accepted
-        );
-        f.finished().await;
-        ensure!(
-            !f.core.store.has_unresolved_call("one")?,
-            "Synthetic call journal unresolved"
-        );
-        let seen = f.host.seen();
-        assert_eq!(seen.iter().filter(|(_, cmd)| *cmd == Some(3380)).count(), 1);
-        assert!(!seen
-            .iter()
-            .any(|(route, _)| matches!(route, CallHostRoute::Invite | CallHostRoute::Cancel)));
-        let records = f.core.store.call_action_records("one", &offer.call_id)?;
-        assert!(records.iter().all(|record| record.outcome == "received"
-            && record.encrypted_request.is_some()
-            && record.encrypted_reply.is_some()));
-        Ok::<_, anyhow::Error>(())
-    };
-    let outcome = tokio::time::timeout(Duration::from_secs(8), test).await;
-    if !matches!(&outcome, Ok(Ok(()))) {
-        h.diagnose();
+        let outcome = tokio::time::timeout(Duration::from_secs(8), test).await;
+        if !matches!(&outcome, Ok(Ok(()))) {
+            h.diagnose();
+        }
+        outcome.context("Generated native-media test deadline")??;
     }
-    outcome.context("Generated native-media test deadline")??;
     Ok(())
 }

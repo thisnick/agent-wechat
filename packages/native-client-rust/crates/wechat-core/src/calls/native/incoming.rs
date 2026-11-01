@@ -24,14 +24,11 @@ pub(super) fn supported(inner: &Inner, authority: &AccountAuthority, caller: &st
 }
 
 fn known_invitation(note: &IncomingNotification) -> bool {
+    // Only the selected conference bytes describe the admitted operation.
+    // Opaque outer-carrier fields remain in the original notification; the
+    // ACK still has to bind the caller's member before an offer is published.
     matches!(&note.control.payload, NotificationPayload::Invite(invite) if invite.unknown_fields.is_empty())
         && note.control.conference.unknown_fields.is_empty()
-        && note
-            .control
-            .carrier
-            .fields()
-            .iter()
-            .all(|field| (1..=7).contains(&field.number))
 }
 
 pub(super) async fn prepare(
@@ -704,6 +701,9 @@ impl Actor {
         Ok(())
     }
     fn stop_media(&mut self) {
+        if let Some(sink) = &self.sink {
+            let _ = self.transport.runtime.block_on(sink.ending());
+        }
         self.worker.media_stop.store(true, Ordering::Release);
         if let Some(media) = self.media.take() {
             let failed = media.join().map_or(true, |result| result.is_err());

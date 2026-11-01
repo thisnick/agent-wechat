@@ -32,28 +32,33 @@ never appear in socket URLs. Use HTTPS/WSS or a trusted tunnel for remote access
 | WebSocket `/calls/socket` | Observe call events and send control commands | `calls` |
 | WebSocket `/calls/{callId}/media` | Exchange the owner's PCM audio | `calls`, plus the current owner token |
 
-The control socket starts with `hello`, including its client ID and current
-snapshot. Observing does not register readiness or answer a call. A client sends
-`call.ready` when it can handle calls, and prepares audio before claiming one.
-Readiness can apply to outgoing calls,
-one exact pending offer, or all calls. A pending offer cannot be answered until
-the server emits `call.offered`.
+The control socket starts with `hello` and its current snapshot. Connecting
+alone does not answer calls. Send `call.ready` after preparing audio; readiness
+can cover outgoing calls, one pending offer, or all calls. Wait for
+`call.offered` before answering.
 
-The first successful `call.answer` owns an incoming call. `call.dial` gives
-ownership to its initiating client. Other clients see busy state and cannot start
-another call. The owner attaches its separate media socket using the returned
-owner token; observers receive no audio. Keep the owning control socket connected;
-reconnecting does not reclaim ownership. Stale offer revisions and owner tokens
-are rejected. An uncertain result must be inspected rather than dialed again.
+The first successful `call.answer` owns an incoming call; `call.dial` assigns
+ownership to its initiator. Other clients see busy state and cannot start another
+call. The owner attaches audio using the returned owner token. Observers receive
+no audio. Keep the control socket connected; reconnecting alone does not reclaim
+ownership. Stale offers and tokens are rejected.
+
 An accepted end command starts termination. Keep both sockets open until the
-terminal state arrives; losing confirmation leaves the outcome unknown.
+terminal state arrives. Missing confirmation remains an unknown outcome; inspect
+it before dialing again. An unanswered offer also receives an `ended` event when
+WeChat confirms it ended or was handled elsewhere.
 
-Audio uses interleaved PCM16 little-endian samples in versioned binary frames.
-Follow the announced format, track and generation. `call.clear_audio` interrupts
-queued output and advances its generation; it does not place or answer a call.
-The TypeScript SDK accepts a header-capable WebSocket factory and needs no local
-audio devices or codec bindings. A browser WebSocket alone cannot supply these
-authentication headers.
+The server pings control sockets every 15 seconds; clients must reply with Pong.
+A silent connection closes after 45 seconds, followed by a five-second ownership
+cleanup window. Outgoing calls wait up to one minute for pickup. Connected calls
+start termination after one minute without a fresh authenticated peer packet;
+malformed or replayed traffic does not reset that timer.
+
+Audio uses PCM16 little-endian samples in versioned binary frames. Follow the
+announced format, track and generation. `call.clear_audio` interrupts queued
+output. The TypeScript SDK needs no device or codec bindings; its WebSocket
+factory must support authentication headers, which browser WebSocket alone cannot
+supply.
 
 ## CLI and OpenClaw
 
@@ -67,17 +72,16 @@ authentication headers.
 Interactive participation requires a `call-audio` build. A late answer stays tied
 to the selected offer; it must not answer a replacement caller.
 
-OpenClaw calling is also disabled by default. Its `calls` settings have separate
-`inboundAllowFrom`, `outboundAllowTo` and `outboundToolAllowFrom` lists; messaging
-permission grants none of them. The adapter supports OpenClaw's OpenAI response
-audio bridge. Call audio is streamed to that provider; the adapter uses no local
-microphone. Provider readiness is checked before claiming a call. Agent
-consultation is off by default; enabling safe read-only consultation also requires
-opting in to the host's separate per-call session storage.
+OpenClaw calling defaults to off. Configure its separate `inboundAllowFrom`,
+`outboundAllowTo` and `outboundToolAllowFrom` lists; messaging permission grants
+none of them. The OpenAI response audio bridge streams audio to its provider and
+checks readiness before answering. It uses no local microphone. Read-only agent
+consultation requires opting into both consultation and the host's per-call
+session storage.
 
 :::note[Good to know]
 Calling is disabled in the default daemon. The native worker is restricted to an
-expiring isolated test. Integrated phone playback, media security across a call's
-lifetime, and ordinary microphone/speaker calling still need validation. Video
+expiring isolated test. Media security across a call's lifetime and ordinary
+microphone/speaker calling still need validation. Video
 and conference capabilities remain off.
 :::

@@ -88,6 +88,7 @@ pub struct NativeCallConfig {
     pub parameters: VoiceParameters,
     pub transmit_scope: NativeTransmitScope,
     pub ring_timeout: Duration,
+    pub peer_idle_timeout: Duration,
     pub max_duration: Duration,
 }
 impl NativeCallConfig {
@@ -96,7 +97,8 @@ impl NativeCallConfig {
             account_id,
             parameters,
             transmit_scope: NativeTransmitScope::ReceiveOnly,
-            ring_timeout: Duration::from_secs(30),
+            ring_timeout: Duration::from_secs(60),
+            peer_idle_timeout: Duration::from_secs(60),
             max_duration: Duration::from_secs(20),
         }
     }
@@ -107,7 +109,9 @@ impl NativeCallConfig {
         );
         self.parameters.inputs().validate()?;
         ensure!(
-            (Duration::from_secs(5)..=Duration::from_secs(120)).contains(&self.ring_timeout)
+            (Duration::from_secs(5)..=Duration::from_secs(60)).contains(&self.ring_timeout)
+                && !self.peer_idle_timeout.is_zero()
+                && self.peer_idle_timeout <= Duration::from_secs(60)
                 && (Duration::from_secs(1)..=Duration::from_secs(1200))
                     .contains(&self.max_duration),
             "Invalid native call time budget"
@@ -901,6 +905,7 @@ fn run_control(
         }
     }
     if worker.stop.load(Ordering::Acquire) {
+        let _ = runtime.block_on(sink.ending());
         let result = if session.phase() == PersonalPhase::Finished {
             Ok(())
         } else if session.phase() == PersonalPhase::TerminalPending {
@@ -967,6 +972,9 @@ fn run_control(
         }
         Ok(())
     })();
+    if control_result.is_ok() {
+        let _ = runtime.block_on(sink.ending());
+    }
     worker.media_stop.store(true, Ordering::Release);
     let media_result = media_thread
         .join()
@@ -975,12 +983,40 @@ fn run_control(
     // A local media failure still permits one separately journaled Exit from a
     // known joined room. Confirmed server termination and successful audio are
     // distinct; keep the local failure as an operational diagnostic.
-    if media_result.is_err() {
+    if let Err(error) = &media_result {
         core.store.put_runtime(
             account,
             &format!("call-media-error:{call_id}"),
             b"media_failed",
         )?;
+        // Persist only fixed categories and counters, never packet material or
+        // dynamic transport errors, so a live failure can be diagnosed safely.
+        let message = error.to_string().to_ascii_lowercase();
+        let code = if message.contains("peer activity timed out") {
+            "peer_inactive"
+        } else if message.contains("nonce") {
+            "nonce_lifetime"
+        } else if message.contains("generation") {
+            "generation_changed"
+        } else if message.contains("authenticated call control") {
+            "unsupported_control"
+        } else if message.contains("opus") {
+            "opus_codec"
+        } else if message.contains("receiver unavailable") {
+            "audio_receiver_closed"
+        } else {
+            "other_media_error"
+        };
+        let _ = core.store.put_runtime(
+            account,
+            &format!("call-media-diagnostic:{call_id}"),
+            &serde_json::to_vec(&serde_json::json!({
+                "code": code,
+                "txDatagrams": worker.metrics.tx_submitted_datagrams.load(Ordering::Relaxed),
+                "rxFrames": worker.metrics.rx_delivered_frames.load(Ordering::Relaxed),
+                "txUnderruns": worker.metrics.tx_input_underruns.load(Ordering::Relaxed)
+            }))?,
+        );
     }
     ensure!(worker.lease.current(), "Call authority revoked before Exit");
     let ended = match session.phase() {
@@ -1004,6 +1040,10 @@ fn run_media(
     runtime: &tokio::runtime::Handle,
 ) -> Result<()> {
     let started = Instant::now();
+    ensure!(
+        matches!(media.frames_per_packet, 1 | 2),
+        "Unsupported call packet grouping"
+    );
     let clock = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let epoch = MediaEpoch {
         account_generation: nonzero64(worker.lease.authority().generation.as_bytes()),
@@ -1129,8 +1169,13 @@ fn run_media(
     let mut rtp_sequence = 0u32;
     let mut rtp_timestamp = 0u64;
     let mut rx_order = RtpOrder::new();
+    let mut last_peer_activity = Instant::now();
     let media_result = (|| -> Result<()> {
         while worker.current() && !worker.stop.load(Ordering::Acquire) {
+            ensure!(
+                last_peer_activity.elapsed() < config.peer_idle_timeout,
+                "Call peer activity timed out"
+            );
             match socket.recv_from(&mut buffer) {
                 Ok((n, SocketAddr::V4(source))) if source == endpoint && n <= 8197 => {
                     if buffer[..n].first() == Some(&0x96) {
@@ -1146,6 +1191,10 @@ fn run_media(
                             }
                         };
                         if let Some(opened) = opened {
+                            // Only a fresh, authenticated packet from the selected
+                            // peer renews liveness. Relay traffic and bad/replayed
+                            // packets do not establish that the peer is still here.
+                            last_peer_activity = Instant::now();
                             if opened.packed_kind == 0x70 {
                                 if let Some(reply) =
                                     channel.reply_to_probe(epoch, clock(), &opened)?
@@ -1272,7 +1321,13 @@ fn run_media(
                     encoder.reset()?;
                     continue;
                 }
-                if let Some((first, first_item)) = pending.take() {
+                if media.frames_per_packet == 1 {
+                    let conf = audio_packet::ordinary95_single(0, sequence, timestamp, &encoded)?;
+                    let datagram = channel.seal_audio(epoch, clock(), &conf)?;
+                    if !send_datagram(&socket, endpoint, &datagram, worker, &[&item])? {
+                        encoder.reset()?;
+                    }
+                } else if let Some((first, first_item)) = pending.take() {
                     if audio_current(worker, &first_item) && audio_current(worker, &item) {
                         let conf = audio_packet::ordinary95_pair(
                             0, sequence, timestamp, &first, &encoded,

@@ -290,6 +290,7 @@ enum Command {
         value: i16,
         frames: u8,
     },
+    BeginEnd,
     End,
     Stats,
     HoldClear {
@@ -374,6 +375,15 @@ async fn control(
                     .map_err(|error| error.code())?;
             }
             Ok(json!({"frames":frames}))
+        }
+        Command::BeginEnd => {
+            backend
+                .active_sink()
+                .map_err(|error| error.code())?
+                .ending()
+                .await
+                .map_err(|error| error.code())?;
+            Ok(json!({}))
         }
         Command::End => {
             backend.end().await.map_err(|error| error.code())?;

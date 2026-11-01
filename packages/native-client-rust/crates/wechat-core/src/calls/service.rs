@@ -275,6 +275,13 @@ impl BackendSink {
             .ok_or_else(|| error(CallErrorCode::Closed))?
             .uncertain(&self.ticket)
     }
+    /// Publish autonomous teardown before late owner PCM reaches a stopped worker.
+    pub async fn ending(&self) -> Result<()> {
+        self.service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?
+            .ending(&self.ticket)
+    }
     pub async fn ended(&self) -> Result<()> {
         self.service
             .upgrade()
@@ -635,8 +642,12 @@ impl CallService {
             {
                 snap.current_offer = Some(Self::offer_view(call));
             }
-            if owner {
-                snap.current_call = Some(Self::call_view(call, true));
+            if owner
+                || (call.direction == CallDirection::Incoming
+                    && call.owner.is_none()
+                    && call.state == CallState::Ended)
+            {
+                snap.current_call = Some(Self::call_view(call, owner));
             }
         }
         snap
@@ -1409,6 +1420,36 @@ impl CallService {
             .checked_add(1)
             .ok_or_else(|| error(CallErrorCode::Capacity))?;
         self.broadcast(&mut s);
+        Ok(())
+    }
+    fn ending(&self, ticket: &Ticket) -> Result<()> {
+        let mut s = self.lock()?;
+        if self
+            .backend
+            .authority(&ticket.authority().account_id)
+            .as_ref()
+            != Some(ticket.authority())
+        {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let c = s
+            .call
+            .as_mut()
+            .filter(|c| {
+                c.identity == ticket.identity()
+                    && &c.authority == ticket.authority()
+                    && !c.revoked
+                    && !matches!(c.state, CallState::Uncertain | CallState::Ended)
+            })
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        if c.state != CallState::Ending {
+            c.state = CallState::Ending;
+            c.revision = c.revision.saturating_add(1);
+            c.audio_lease.store(0, Ordering::Release);
+            // Keep transports until confirmed termination. Late PCM is consumed
+            // without dispatch, just as for an owner-requested Hangup.
+            self.broadcast(&mut s);
+        }
         Ok(())
     }
     fn terminal(&self, authority: &AccountAuthority, identity: &CallIdentity) -> Result<()> {

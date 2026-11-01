@@ -581,6 +581,16 @@ async fn cancellation_error_or_timeout_holds_slot_and_late_ignored_prepare_canno
             .call_service()
             .verified_incoming_terminal(&authority, &identity)
             .unwrap();
+        let mut terminal_event = false;
+        while let Ok(event) = owner.events.try_recv() {
+            if let CallEvent::State { call } = event {
+                if call.call_id == identity.call_id() && call.state == CallState::Ended {
+                    assert!(!call.owned_by_this_client);
+                    terminal_event = true;
+                }
+            }
+        }
+        assert!(terminal_event, "Unanswered offers need a terminal event");
         assert!(
             !f.core
                 .call_service()

@@ -344,14 +344,28 @@ impl Live96 {
             return Ok(None);
         }
         match opened.payload() {
-            [8, 1, 18, 2, 8, 1] => Ok(Some(self.seal(
-                current,
-                now_ms,
-                0x70,
-                &[8, 1, 18, 2, 8, 2],
-            )?)),
+            [8, 1, 18, 2, 8, 1] => {
+                // Leave the probe unanswered if a reply would consume an
+                // inbound nonce. The sender's reuse fence stays unchanged.
+                if self.next_control <= u32::from(u16::MAX)
+                    && self.rx_seen.get(&0x70).is_some_and(|seen| {
+                        let sequence = self.next_control as usize;
+                        seen[sequence / 64] & (1u64 << (sequence % 64)) != 0
+                    })
+                {
+                    return Ok(None);
+                }
+                Ok(Some(self.seal(
+                    current,
+                    now_ms,
+                    0x70,
+                    &[8, 1, 18, 2, 8, 2],
+                )?))
+            }
             [8, 1, 18, 2, 8, 0 | 2] => Ok(None),
-            _ => bail!("Unsupported authenticated call control"),
+            // Other authenticated control messages have no implemented reply.
+            // Ignore them without inventing a response or stopping audio.
+            _ => Ok(None),
         }
     }
     pub fn close(&mut self) {
@@ -363,6 +377,27 @@ impl Live96 {
         self.rx_highest.clear();
         self.rx_seen.clear();
     }
+}
+
+/// Configured ordinary95/74 N1 sender for format106.
+pub fn ordinary95_single(
+    metadata: u8,
+    sequence: u16,
+    timestamp: u32,
+    frame: &[u8],
+) -> Result<Vec<u8>> {
+    ensure!(
+        !frame.is_empty() && frame.len() <= 1023 && 15 + frame.len() <= MAX_CONF,
+        "Invalid ordinary95 primary extent"
+    );
+    let mut out = Vec::with_capacity(15 + frame.len());
+    out.extend([1, metadata, 0, 0, 0x95, 0x74]);
+    out.extend(sequence.to_be_bytes());
+    out.extend(timestamp.to_be_bytes());
+    out.push(1);
+    out.extend((frame.len() as i16).to_le_bytes());
+    out.extend(frame);
+    Ok(out)
 }
 
 /// Configured ordinary95/74 N2 sender. RTP sequence/time identify the LAST
@@ -555,6 +590,15 @@ mod tests {
     }
     #[test]
     fn literal_primary_layout_and_extent() {
+        let single = ordinary95_single(3, 1, 320, &[1, 2]).unwrap();
+        assert_eq!(
+            single,
+            [1, 3, 0, 0, 0x95, 0x74, 0, 1, 0, 0, 1, 64, 1, 2, 0, 1, 2]
+        );
+        assert_eq!(
+            parse_ordinary95(&single).unwrap().primaries,
+            vec![&[1, 2][..]]
+        );
         let raw = ordinary95_pair(3, 1, 320, &[1, 2], &[3]).unwrap();
         assert_eq!(
             &raw[..17],
@@ -620,7 +664,17 @@ mod tests {
         assert!(diagnostic.seal_audio(epoch(), 100, &raw).is_err());
     }
     #[test]
-    fn authenticated_probe_response_is_distinct_and_not_echoed() {
+    fn authenticated_controls_preserve_nonce_fence_and_ignore_unhandled_messages() {
+        let mut other_peer = peer();
+        let other = other_peer.seal(epoch(), 0, 0x70, &[8, 7]).unwrap();
+        let mut other_receiver = receiver();
+        let opened = other_receiver.open(epoch(), &other).unwrap().unwrap();
+        assert!(other_receiver
+            .reply_to_probe(epoch(), 0, &opened)
+            .unwrap()
+            .is_none());
+        assert!(other_receiver.check(epoch()).is_ok());
+
         let mut peer = peer();
         let request = peer.seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 1]).unwrap();
         let mut receiver = receiver();
@@ -631,6 +685,14 @@ mod tests {
                 TransmitScope::VerifiedGeneration { key_generation: 1 },
             )
             .unwrap();
-        assert!(receiver.reply_to_probe(epoch(), 0, &opened).is_err()); /* same control nonce is not silently reused */
+        assert!(receiver
+            .reply_to_probe(epoch(), 0, &opened)
+            .unwrap()
+            .is_none());
+        assert!(receiver.check(epoch()).is_ok());
+        // Omitting a reply does not disable the underlying reuse fence.
+        assert!(receiver
+            .seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 2])
+            .is_err());
     }
 }

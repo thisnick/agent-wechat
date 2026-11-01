@@ -162,6 +162,7 @@ struct ActiveRoom {
     strategy: Zeroizing<Vec<u8>>,
     members: BTreeMap<String, Member>,
     original_members: BTreeMap<String, Member>,
+    unbound_peer_openid: Option<Vec<u8>>,
     member_sequence: u32,
     cap_sequence: u32,
     engine: Vec<u8>,
@@ -174,6 +175,7 @@ struct ActiveRoom {
 pub struct NegotiatedMedia {
     pub relay: SelectedRelay,
     pub peer_member: u16,
+    pub frames_per_packet: u8,
 }
 
 /// One generic app session with at most one personal call. It is not Clone and
@@ -450,6 +452,7 @@ impl NativePersonalSession {
             cookies: client_response.cookies,
             strategy: Zeroizing::new(client_response.strategy),
             original_members: members.clone(),
+            unbound_peer_openid: None,
             members,
             member_sequence,
             cap_sequence,
@@ -550,7 +553,7 @@ impl NativePersonalSession {
         let mut pending_recipients = control.pending_recipients.clone();
         let mut terminal = None;
         let mut next = self.active.as_ref().expect("active room").clone();
-        for item in response.items {
+        'notifications: for item in response.items {
             ensure!(
                 item.kind == 1 && item.unknown_fields.is_empty(),
                 "Unsupported caller sync item"
@@ -591,15 +594,25 @@ impl NativePersonalSession {
                             &self.own_username,
                             &next.peer,
                         )?;
-                        ensure!(
-                            members.iter().all(|(name, m)| next
-                                .original_members
-                                .get(name)
-                                .is_some_and(
-                                    |old| old.member == m.member && old.openid == m.openid
-                                )),
-                            "Caller member identity changed"
-                        );
+                        for (name, member) in &members {
+                            if let Some(old) = next.original_members.get(name) {
+                                ensure!(
+                                    old.member == member.member && old.openid == member.openid,
+                                    "Caller member identity changed"
+                                );
+                            } else {
+                                ensure!(
+                                    matches!(origin, termination::Origin::Callee)
+                                        && name == &next.peer
+                                        && next.unbound_peer_openid.as_deref()
+                                            == Some(member.openid.as_slice())
+                                        && u32::from(member.member) != next.identity.own_member,
+                                    "Unbound caller member identity mismatch"
+                                );
+                                next.original_members.insert(name.clone(), member.clone());
+                                next.unbound_peer_openid = None;
+                            }
+                        }
                         if members
                             .get(&next.peer)
                             .is_some_and(|member| member.status == 1)
@@ -624,6 +637,13 @@ impl NativePersonalSession {
                         }
                         next.members = members;
                         next.member_sequence = sequence;
+                        if matches!(terminal, Some(RemoteTermination::LocalStop(_))) {
+                            // Verified loss/handling of this local participant
+                            // ends its reducer. Do not revive it or turn later
+                            // ancillary items into a reason to stay on the call.
+                            // The transport retains the complete received reply.
+                            break 'notifications;
+                        }
                     }
                     11 => {
                         let (sequence, engine, channel) = cap(bytes)?;
@@ -642,7 +662,10 @@ impl NativePersonalSession {
                         let (sequence, av) = av(
                             bytes,
                             next.identity.own_member as u16,
-                            next.original_members[&next.peer].member,
+                            next.original_members
+                                .get(&next.peer)
+                                .context("Call AV arrived before caller member binding")?
+                                .member,
                         )?;
                         if sequence <= next.av_sequence {
                             continue;
@@ -745,6 +768,7 @@ impl NativePersonalSession {
         Ok(NegotiatedMedia {
             relay,
             peer_member: active.members[&active.peer].member,
+            frames_per_packet: (profile_shape(&active.engine, &active.channel)?[1] >> 8) as u8,
         })
     }
     /// Cancel the original unanswered personal invitation once. This selected
@@ -1185,7 +1209,10 @@ fn profile_shape(engine: &[u8], channel: &[u8]) -> Result<[u64; 6]> {
     ])
 }
 fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
-    if profile_shape(engine, channel)? != [17, 0x206, 0x800000, 0, 2, 3] {
+    if !matches!(
+        profile_shape(engine, channel)?,
+        [17, 0x106 | 0x206, 0x800000, 0, 2, 3]
+    ) {
         return Err(UnsupportedCallMedia.into());
     }
     Ok(())

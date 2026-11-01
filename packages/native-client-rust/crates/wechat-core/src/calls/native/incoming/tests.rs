@@ -17,6 +17,7 @@ mod media_loopback;
 struct ReadyMedia {
     endpoint: SocketAddrV4,
     key: [u8; 32],
+    frames_per_packet: u8,
 }
 
 const OWN: &str = "synthetic_self";
@@ -235,7 +236,14 @@ fn ack_reply(own_member: u16, own_status: u32) -> Vec<u8> {
             p::uint(3, u64::from(own_member)),
             p::uint(4, 99),
             p::bytes(5, b"ack-cursor"),
-            p::bytes(6, &members(1, own_member, own_status)),
+            p::bytes(
+                6,
+                &if own_status == 3 {
+                    p::message(&[p::uint(1, 0), p::bytes(3, b"")]).unwrap()
+                } else {
+                    members(1, own_member, own_status)
+                },
+            ),
             p::bytes(7, &p::uint(14, 0)),
         ])
         .unwrap(),
@@ -262,7 +270,8 @@ fn wrapped_reply(command: u32, body: &[u8]) -> Vec<u8> {
     host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
 }
 fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> {
-    let engine = p::message(&[p::uint(5, 17), p::uint(6, 0x206), p::uint(7, 0x800000)]).unwrap();
+    let format = (u64::from(media.map_or(2, |media| media.frames_per_packet)) << 8) | 6;
+    let engine = p::message(&[p::uint(5, 17), p::uint(6, format), p::uint(7, 0x800000)]).unwrap();
     let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
     let capabilities = p::message(&[
         p::uint(1, 1),
@@ -375,6 +384,9 @@ impl Fixture {
             allow_known_audio_overlap: ready_media.is_some(),
         };
         config.max_duration = Duration::from_secs(if ready_media.is_some() { 6 } else { 2 });
+        if ready_media.is_some() {
+            config.peer_idle_timeout = Duration::from_millis(500);
+        }
         let mut backend = NativeCallBackend::new(Arc::downgrade(&core), config).unwrap();
         let host = Host::new(case, ready_media);
         Arc::get_mut(&mut backend.inner).unwrap().test_io = Some(host.clone());
@@ -410,13 +422,18 @@ impl Fixture {
                 p::bytes(8, OWN.as_bytes()),
                 p::bytes(10, b"wechat"),
                 p::bytes(11, b"voip-2p"),
-                p::uint(12, u64::from(PEER_MEMBER)),
             ])
             .unwrap()
         };
         let conference =
             p::message(&[p::uint(1, if cancel { 3 } else { 2 }), p::bytes(2, &inner)]).unwrap();
-        let carrier = p::message(&[p::bytes(if cancel { 2 } else { 6 }, &conference)]).unwrap();
+        let mut carrier = vec![p::bytes(if cancel { 2 } else { 6 }, &conference)];
+        if !cancel {
+            // An invitation can leave caller membership for the ACK and
+            // retain additional carrier data outside the conference envelope.
+            carrier.extend([p::bytes(8, b"opaque"), p::uint(9, 1), p::uint(10, 0)]);
+        }
+        let carrier = p::message(&carrier).unwrap();
         let child = if cancel { "cancel" } else { "invite" };
         let xml = format!(
             "<sysmsg type='ilinkvoip'><voipmt><{child}>{}</{child}></voipmt></sysmsg>",

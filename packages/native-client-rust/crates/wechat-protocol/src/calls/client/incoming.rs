@@ -304,12 +304,11 @@ impl NativeIncomingSession {
         if self.invite.caller_member.is_none() {
             self.invite.caller_member = members.get(&self.invite.caller).map(|entry| entry.member);
         }
-        let caller_member = self
-            .invite
-            .caller_member
-            .ok_or_else(|| anyhow::anyhow!("Missing incoming caller member binding"))?;
         ensure!(
-            caller_member != member && live_id != 0,
+            self.invite
+                .caller_member
+                .is_none_or(|caller| caller != member)
+                && live_id != 0,
             "Incomplete incoming ACK control context"
         );
         let strategy = p::optional_data(&ack, 7)?.unwrap_or_default();
@@ -319,24 +318,24 @@ impl NativeIncomingSession {
         );
         // Original entries below bind identities only. They do not fabricate an
         // accepted roster when the initial ACK sequence is absent/stale.
-        let original_members = BTreeMap::from([
-            (
-                self.base.own_username.clone(),
-                Member {
-                    member,
-                    status: 0,
-                    openid: self.invite.callee_openid.clone(),
-                },
-            ),
-            (
+        let mut original_members = BTreeMap::from([(
+            self.base.own_username.clone(),
+            Member {
+                member,
+                status: 0,
+                openid: self.invite.callee_openid.clone(),
+            },
+        )]);
+        if let Some(caller_member) = self.invite.caller_member {
+            original_members.insert(
                 self.invite.caller.clone(),
                 Member {
                     member: caller_member,
                     status: 0,
                     openid: self.invite.caller_openid.clone(),
                 },
-            ),
-        ]);
+            );
+        }
         self.base.active = Some(ActiveRoom {
             identity: self.invite.room,
             peer: self.invite.caller.clone(),
@@ -345,6 +344,11 @@ impl NativeIncomingSession {
             strategy: Zeroizing::new(strategy.to_vec()),
             members,
             original_members,
+            unbound_peer_openid: self
+                .invite
+                .caller_member
+                .is_none()
+                .then(|| self.invite.caller_openid.clone()),
             member_sequence: sequence,
             cap_sequence: 0,
             engine: vec![],
@@ -428,7 +432,7 @@ impl NativeIncomingSession {
                 "Invalid incoming opaque field"
             );
         }
-        p::optional_data(&joined, 6)?;
+        repeated(&joined, 6, 16)?;
         let own_member = u16::try_from(number(&joined, 3, None)?)?;
         let room = VoiceRoom {
             room: self.invite.room.room,
@@ -504,6 +508,7 @@ impl NativeIncomingSession {
             cookies: data(&joined, 12)?.to_vec(),
             strategy: Zeroizing::new(strategy.to_vec()),
             original_members: members.clone(),
+            unbound_peer_openid: None,
             members,
             member_sequence,
             cap_sequence,
@@ -612,6 +617,14 @@ impl NativeIncomingSession {
             "Incoming sync unavailable"
         );
         let result = self.base.poll(client, state, current, tasks);
+        if result.is_ok() && self.invite.caller_member.is_none() {
+            self.invite.caller_member = self
+                .base
+                .active
+                .as_ref()
+                .and_then(|active| active.original_members.get(&self.invite.caller))
+                .map(|member| member.member);
+        }
         if self.base.phase == PersonalPhase::Uncertain {
             self.phase = IncomingPhase::Uncertain;
         }
@@ -868,6 +881,8 @@ mod tests {
                 p::uint(2, 9),
                 p::uint(3, 0),
                 p::bytes(4, &strategy),
+                p::bytes(6, b"opaque-one"),
+                p::bytes(6, b"opaque-two"),
                 p::uint(5, 0),
                 p::bytes(6, &[]),
                 p::uint(8, 2),
@@ -1098,7 +1113,7 @@ mod tests {
             ),
             (
                 CallHostRoute::LiveSync,
-                roster_sync(2, Some(1), Some(1), false),
+                roster_sync(2, Some(1), Some(1), true),
             ),
         ]);
         let mut state = state();
@@ -1124,6 +1139,61 @@ mod tests {
         );
         assert_eq!(session.phase(), IncomingPhase::Finished);
         assert!(transport.0.borrow().is_empty());
+        // A zero-sequence ACK may omit both the roster and caller member.
+        // Bind once from the next authenticated roster, using the invitation's
+        // expected app identity; a different identity must not establish it.
+        for wrong_identity in [false, true] {
+            let empty_ack = host_reply(&p::bytes(
+                1,
+                &p::message(&[
+                    p::uint(1, 7),
+                    p::uint(2, 9),
+                    p::uint(3, 0),
+                    p::uint(4, 99),
+                    p::bytes(5, b"ack-cursor"),
+                    p::bytes(6, &p::message(&[p::uint(1, 0), p::bytes(3, b"")]).unwrap()),
+                ])
+                .unwrap(),
+            ));
+            let wire = self::transport(vec![
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::RingingAck, empty_ack),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(1, Some(3), Some(1), false),
+                ),
+            ]);
+            let mut next_state = super::super::tests::state();
+            let mut next = self::session(&wire, &mut next_state);
+            next.invite.caller_member = None;
+            if wrong_identity {
+                next.invite.caller_openid = b"different-peer".to_vec();
+            }
+            next.ringing_ack(&wire, &mut next_state, authority(), tasks(1))
+                .unwrap();
+            assert!(!next
+                .base
+                .active
+                .as_ref()
+                .unwrap()
+                .original_members
+                .contains_key("peer"));
+            let update = next.poll(&wire, &mut next_state, authority(), tasks(2));
+            if wrong_identity {
+                assert!(update.is_err());
+                assert!(next.invite.caller_member.is_none());
+            } else {
+                assert_eq!(update.unwrap(), SyncProgress::Waiting);
+                assert_eq!(next.invite.caller_member, Some(1));
+                assert!(next
+                    .base
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .unbound_peer_openid
+                    .is_none());
+            }
+        }
     }
     #[test]
     fn joined_callee_remote_hangup_requests_exit_even_after_peer_is_not_joined() {
