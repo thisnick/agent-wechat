@@ -1,6 +1,6 @@
 # Optional native codec notices
 
-The `native-opus` feature builds libopus through opusic-c 1.6.1 and opusic-sys.
+Native builds include libopus through opusic-c 1.6.1 and opusic-sys.
 The workspace lockfile pins the exact transitive release. These are independently
 maintained codec dependencies; no library from the official client is loaded.
 

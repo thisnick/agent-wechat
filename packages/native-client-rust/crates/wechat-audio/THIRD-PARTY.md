@@ -8,7 +8,7 @@ The upstream copyright and license are retained in `LICENSE.sys-voice`.
 Local changes:
 
 - A single owned device worker disconnects and releases capture/playback resources
-  on `stop()` or drop. Device opening is behind the `native-audio` feature.
+  on `stop()` or drop. Device opening requires an `AudioSession::open` request.
 - Playback has a sample-count limit and generation tokens. Clearing rejects old
   producers and discards old resampler history. New chunks reuse resampler state.
 - Linux uses polled libpulse streams instead of blocking PulseAudio Simple reads,

@@ -65,7 +65,7 @@ path. Negotiation belongs in the worker/transport layers, not the device adapter
 
 | Dependency | Where and why |
 | --- | --- |
-| `opusic-c = 1.6.1` | Optional `wechat-calls/native-opus`; uses libopus for audio encoding/decoding |
+| `opusic-c = 1.6.1` | Included in native `wechat-calls` builds; uses libopus for audio encoding/decoding |
 | `rubato` | `wechat-audio` resampling between device and call formats |
 | `libpulse-binding` | Linux capture/playback |
 | `coreaudio-rs` / `coreaudio-sys` | macOS capture/playback, including VoiceProcessingIO |
@@ -84,6 +84,6 @@ has native dependencies. A standalone JavaScript WeChat transport is not provide
 
 ## Building
 
-[Build from source](../../reference/build/) covers workspace builds and optional
-features. [Calling](../../reference/calls/) describes daemon, CLI and OpenClaw use;
+[Build from source](../../reference/build/) covers workspace builds and platform
+prerequisites. [Calling](../../reference/calls/) describes daemon, CLI and OpenClaw use;
 [Calls API](../../reference/calls-api/) owns call payloads and events.

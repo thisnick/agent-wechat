@@ -3,9 +3,9 @@
 Portable call-media interfaces, PCM frame queues, pacing and generated test audio.
 The crate is initially unpublished. Its primitives do not establish a live call.
 
-The default feature set has no native dependencies. Hosts supply authenticated
+Native builds include the Opus codec. Hosts supply authenticated
 packets, clocks and PCM; device access, account credentials and networking belong
-in adapters. `native-opus` provides raw-packet VOIP encoding/decoding through
+in adapters. Raw-packet VOIP encoding/decoding uses
 `opusic-c` and its bundled libopus. Device callbacks must hand samples to a worker
 rather than invoking codec or network operations directly.
 
@@ -18,7 +18,7 @@ controller. The host chooses loss-concealment policy and negotiates codec settin
 `PulseTone` produces synthetic PCM without accessing devices or the network.
 Playing it to a real participant requires a separately authorized call.
 
-The optional codec contains third-party C code under libopus's BSD license and
+The native codec contains third-party C code under libopus's BSD license and
 patent grant. Preserve its license notices when distributing native artifacts.
 See [NOTICE.md](NOTICE.md), the retained license files, and
 <https://opus-codec.org/license/>. The
@@ -36,5 +36,5 @@ is also separate from the remote WeChat wire format.
 Run the generated-audio check without devices or network access:
 
 ```sh
-cargo run -p wechat-calls --features native-opus --example tone_roundtrip
+cargo run -p wechat-calls --example tone_roundtrip
 ```

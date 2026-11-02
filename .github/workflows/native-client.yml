@@ -86,7 +86,7 @@ jobs:
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
-          cargo clippy --workspace "${packages[@]}" --all-targets --all-features --locked -- -D warnings
+          cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache
@@ -125,13 +125,13 @@ jobs:
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
-          cargo test --workspace "${packages[@]}" --all-features --locked
-      # Workspace all-feature tests above already cover the native codec and
+          cargo test --workspace "${packages[@]}" --locked
+      # Workspace default-feature tests above already cover the native codec and
       # audio libraries. Keep the virtual-device and portable-target checks here
       # instead of scheduling another Linux runner for the same unit tests.
       - name: Build isolated audio probe
         if: matrix.suite == 'test' && runner.arch == 'X64'
-        run: cargo build --locked -p wechat-audio --features native-audio --example isolated_loopback
+        run: cargo build --locked -p wechat-audio --example isolated_loopback
       - name: Exercise generated audio through an isolated sound server
         if: matrix.suite == 'test' && runner.arch == 'X64'
         run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
@@ -168,7 +168,7 @@ jobs:
         run: pnpm client:smoke
       - name: Build the account-free calling API fixture
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
-        run: cargo build --locked --profile test -p wechat-simulator --features calls-fixture --bin wx-calls-fixture
+        run: cargo build --locked --profile test -p wechat-simulator --bin wx-calls-fixture
       - name: Exercise calling through the real API, SDK, CLI and fake voice provider
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .

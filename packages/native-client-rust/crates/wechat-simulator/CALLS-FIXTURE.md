@@ -8,7 +8,7 @@ files, listens on an allocated loopback port, and removes the state on exit.
 Build with the repository's pinned Rust toolchain:
 
 ```sh
-cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --features calls-fixture --bin wx-calls-fixture
+cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-calls-fixture
 ```
 
 Run the cross-language smoke from the repository root after building the shared

@@ -100,11 +100,11 @@ jobs:
         run: node scripts/native-ci-artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
       - name: Build native CLI
         if: inputs.native_artifact_prefix == '' && runner.os != 'Windows'
-        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native --features call-audio
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
       - name: Build Windows native CLI
         if: inputs.native_artifact_prefix == '' && runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native --features call-audio
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
       - run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
       - name: Build desktop executable
         if: runner.os != 'Windows'

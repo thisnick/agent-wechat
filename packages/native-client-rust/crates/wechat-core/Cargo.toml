@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = []
+default = ["native-calls"]
 experimental-calls = ["wechat-protocol/experimental-calls", "dep:wechat-calls"]
 native-calls = ["experimental-calls", "wechat-calls/native-opus"]
 

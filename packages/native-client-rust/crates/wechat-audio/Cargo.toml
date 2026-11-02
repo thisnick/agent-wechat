@@ -7,7 +7,7 @@ publish = false
 description = "Optional native microphone and speaker adapter for WeChat calls"
 
 [features]
-default = []
+default = ["native-audio"]
 native-audio = ["dep:libpulse-binding", "dep:coreaudio-rs", "dep:coreaudio-sys", "dep:wasapi"]
 
 [dependencies]

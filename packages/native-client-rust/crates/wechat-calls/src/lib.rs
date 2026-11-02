@@ -1,14 +1,15 @@
 //! Portable call-media building blocks.
 //!
 //! Hosts supply authenticated packets, clocks and PCM. This crate has no sockets,
-//! credentials, microphone, speaker or account storage. The optional `native-opus`
-//! feature adds a bundled libopus adapter; the default build has no native codec
-//! dependency. These primitives alone do not establish a WeChat call.
+//! credentials, microphone, speaker or account storage. Native builds include a
+//! bundled libopus adapter. The portable media interfaces also compile for
+//! WebAssembly without the native codec. These primitives alone do not establish
+//! a WeChat call.
 
 pub mod audio;
 pub mod frame;
 pub mod playout;
 pub mod tone;
 
-#[cfg(feature = "native-opus")]
+#[cfg(all(feature = "native-opus", not(target_arch = "wasm32")))]
 pub mod opus;
