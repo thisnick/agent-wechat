@@ -10,6 +10,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if arguments[1].is_empty() || arguments[2].is_empty() {
         return Err("both fixture device names are required; defaults are prohibited".into());
     }
+    let devices = AudioSession::devices()?;
+    for (input, id) in [(true, &arguments[1]), (false, &arguments[2])] {
+        if !devices
+            .iter()
+            .any(|device| device.input == input && device.id.as_ref() == Some(id))
+        {
+            return Err("isolated fixture endpoint was missing from device discovery".into());
+        }
+    }
     let mut session = AudioSession::open(AudioConfig {
         input_device: Some(arguments[1].clone()),
         output_device: Some(arguments[2].clone()),

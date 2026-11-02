@@ -24,6 +24,9 @@ use wechat_core::call_types::{
 #[cfg(feature = "call-audio")]
 #[path = "calls_cli_audio.rs"]
 mod audio;
+#[cfg(feature = "call-audio")]
+#[path = "calls_cli_levels.rs"]
+mod levels;
 
 type Socket = WebSocketStream<reqwest::Upgraded>;
 const SOCKET_LIMIT: usize = 64 * 1024;
@@ -32,6 +35,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Subcommand)]
 pub(crate) enum CallsCommand {
+    /// List local microphone/speaker devices without connecting to a daemon.
+    Devices,
     /// Read the daemon's current call state and exit.
     Status,
     /// Wait for incoming calls. With --json, observe only without audio devices.
@@ -67,6 +72,7 @@ pub(crate) struct AudioOptions {
 
 pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
     match command {
+        CallsCommand::Devices => devices(json).await,
         CallsCommand::Status => {
             let value = remote.get(&remote.path("calls/current")?).await?;
             super::output(&value)
@@ -83,6 +89,55 @@ pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
                 bail!("call_audio_unavailable: this build supports calls status and calls monitor --json; interactive calls require a build with call-audio")
             }
         }
+    }
+}
+
+pub(crate) async fn devices(json: bool) -> Result<()> {
+    #[cfg(feature = "call-audio")]
+    {
+        let devices = tokio::task::spawn_blocking(wechat_audio::AudioSession::devices).await??;
+        let values: Vec<_> = devices
+            .iter()
+            .map(|device| {
+                serde_json::json!({
+                    "kind": if device.input { "input" } else { "output" }, "id": device.id,
+                    "name": device.name, "default": device.is_default,
+                })
+            })
+            .collect();
+        if json {
+            return super::output(&serde_json::json!({"devices": values}));
+        }
+        println!("Local audio devices (no microphone capture or playback started):");
+        for device in devices {
+            let clean = |text: &str| {
+                text.chars()
+                    .filter(|c| !c.is_control())
+                    .take(256)
+                    .collect::<String>()
+            };
+            println!(
+                "{}{}: {}\n  {}",
+                if device.input {
+                    "Microphone"
+                } else {
+                    "Speaker"
+                },
+                if device.is_default { " (default)" } else { "" },
+                clean(&device.name),
+                device
+                    .id
+                    .as_deref()
+                    .map(clean)
+                    .unwrap_or_else(|| "Use the operating system's default device".into())
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "call-audio"))]
+    {
+        let _ = json;
+        bail!("call_audio_unavailable: this build does not include local audio devices")
     }
 }
 

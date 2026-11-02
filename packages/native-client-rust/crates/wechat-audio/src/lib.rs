@@ -29,6 +29,15 @@ pub enum AecStatus {
     Unknown,
 }
 
+/// Local endpoint metadata. A missing ID means only OS-default routing is supported.
+#[derive(Clone, Debug)]
+pub struct AudioDevice {
+    pub input: bool,
+    pub id: Option<String>,
+    pub name: String,
+    pub is_default: bool,
+}
+
 /// User-selected devices; None asks the operating system for its defaults.
 #[derive(Clone, Debug)]
 pub struct AudioConfig {
@@ -97,6 +106,17 @@ pub struct AudioSession {
 }
 
 impl AudioSession {
+    /// Query endpoint metadata without starting microphone capture or playback.
+    pub fn devices() -> Result<Vec<AudioDevice>, AudioError> {
+        #[cfg(feature = "native-audio")]
+        {
+            backends::devices()
+        }
+        #[cfg(not(feature = "native-audio"))]
+        {
+            Err(AudioError::Unsupported)
+        }
+    }
     pub fn open(config: AudioConfig) -> Result<Self, AudioError> {
         config.validate()?;
         #[cfg(feature = "native-audio")]

@@ -71,7 +71,9 @@ pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
             )
             .await
         }
-        CallsCommand::Status => unreachable!("status is handled without devices"),
+        CallsCommand::Status | CallsCommand::Devices => {
+            unreachable!("status is handled without devices")
+        }
     };
     control.close().await;
     result
@@ -453,6 +455,9 @@ async fn owned_call(
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(control.format.frame_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     eprintln!("Call {call_id}. [m] Mute/unmute  [h] Hang up  Ctrl-C ends this call.");
+    let mut levels = super::levels::CallLevels::new();
+    let mut meter_tick = tokio::time::interval(Duration::from_millis(100));
+    meter_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if cancellation.is_cancelled() {
             return Ok(false);
@@ -461,9 +466,11 @@ async fn owned_call(
             let (send_changed, receive_changed) = media.synchronize_tracks(control, call_id)?;
             if send_changed {
                 audio.discard_capture();
+                levels.clear_microphone();
             }
             if receive_changed {
                 audio.playback_token = audio.playback.clear()?;
+                levels.clear_speaker();
             }
         }
         if let Some(call) = control.call.as_ref().filter(|call| call.call_id == call_id) {
@@ -486,21 +493,24 @@ async fn owned_call(
                 attached=Media::attach(remote,control,call_id,owner_token)=>attached?,
             };
             audio.discard_capture();
+            levels.clear_microphone();
             *media = Some(attached);
-            eprintln!("Connected. Local microphone and speakers are active.");
+            levels.notice("Connected. Local microphone and speakers are active.");
         }
         tokio::select! {
             _=cancellation.wait()=>return Ok(false),
             line=input.next_line()=> {
                 let Some(line)=line? else {return Ok(false);};
+                levels.input_received();
                 match line.trim().to_ascii_lowercase().as_str() {
                     "h"|"hangup"|"q"=>return Ok(false),
                     "m"|"mute"=> {
                         muted = !muted;
                         control.command(CallCommand::Mute {request_id:request_id(),call_id:call_id.into(),muted}).await?;
-                        eprintln!("Microphone {}.",if muted {"muted"} else {"unmuted"});
+                        levels.microphone(&[], muted);
+                        levels.notice(if muted {"Microphone muted."} else {"Microphone unmuted."});
                     }
-                    _=>eprintln!("Choose m to mute/unmute or h to hang up."),
+                    _=>levels.notice("Choose m to mute/unmute or h to hang up, then Enter."),
                 }
             }
             event=receive_event(&mut control.socket)=> {
@@ -508,7 +518,7 @@ async fn owned_call(
                 control.update(&event);
                 match event {
                     CallEvent::State {call} if call.call_id==call_id=> match call.state {
-                        CallState::Ended=>{eprintln!("Call ended.");return Ok(true);},
+                        CallState::Ended=>{levels.notice("Call ended.");return Ok(true);},
                         CallState::Uncertain=>bail!("call outcome unknown; check calls status before retrying"),
                         _=>{},
                     },
@@ -522,14 +532,15 @@ async fn owned_call(
                 if bytes.is_empty() || bytes.len() > 64 * 1024 || !bytes.len().is_multiple_of(usize::from(format.channels()) * 2) {bail!("invalid call PCM samples");}
                 let samples:Vec<f32>=bytes.chunks_exact(2).map(|sample|f32::from(i16::from_le_bytes([sample[0], sample[1]]))/32768.0).collect();
                 match audio.playback.enqueue(audio.playback_token,&samples,format.sample_rate()) {
-                    Ok(())=>{},
-                    Err(AudioError::QueueFull)=>{audio.playback_token=audio.playback.clear()?;},
+                    Ok(())=>levels.speaker(&samples),
+                    Err(AudioError::QueueFull)=>{audio.playback_token=audio.playback.clear()?;levels.clear_speaker();},
                     Err(error)=>return Err(error.into()),
                 }
             }
+            _=meter_tick.tick()=>levels.refresh(),
             _=tick.tick()=> {
                 let samples=audio.frame(format.samples_per_frame(),muted)?;
-                if let Some(media)=media {media.send(&samples,format).await?;}
+                if let Some(media)=media {levels.microphone(&samples,muted);media.send(&samples,format).await?;}
             }
         }
     }
@@ -641,6 +652,11 @@ impl LocalAudio {
         )
         .await
         .context("audio device startup timed out; no call was placed or answered")???;
+        eprintln!(
+            "Microphone: {}\nSpeaker: {}",
+            options.input_device.as_deref().unwrap_or("OS default"),
+            options.output_device.as_deref().unwrap_or("OS default")
+        );
         eprintln!(
             "Audio AEC status: {:?}; cancellation quality is unmeasured. A headset is recommended.",
             session.aec_status()

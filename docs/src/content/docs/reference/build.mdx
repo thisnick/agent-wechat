@@ -36,7 +36,9 @@ cargo build --manifest-path packages/native-client-rust/Cargo.toml \
 
 The executable is `packages/native-client-rust/target/debug/wx`.
 Choose `native-calls` alone for a headless daemon, or `call-audio` alone for a CLI
-using a remote daemon. Native audio requires the selected OS's development libraries.
+using a remote daemon. Release executables include `call-audio`; library defaults
+remain device-free. Linux source builds need `libpulse-dev`, and Linux executables
+need `libpulse0`. Native audio requires the selected OS's development libraries.
 Account authorization and transmission admission still apply.
 
 

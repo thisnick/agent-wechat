@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 native-calls = ["wechat-core/native-calls", "wechat-api/experimental-calls"]
-call-audio = ["dep:wechat-audio", "wechat-audio/native-audio", "dep:wechat-calls"]
+call-audio = ["dep:wechat-audio", "wechat-audio/native-audio", "dep:wechat-calls", "dep:windows-sys"]
 
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }
@@ -41,3 +41,6 @@ tempfile.workspace = true
 sha2.workspace = true
 toml = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Console"] }

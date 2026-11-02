@@ -105,7 +105,7 @@ if __name__ == "__main__":
         root = Path(__file__).resolve().parent.parent
         start_build(state, ["cargo", "build", "--release", "--locked", "--manifest-path",
                            "packages/native-client-rust/Cargo.toml", "--target", args.target,
-                           "--package", "wx-native"], root)
+                           "--package", "wx-native", "--features", "call-audio"], root)
         print("Native release compiler started; dependency setup can run concurrently.")
     elif args.operation == "_compile":
         compile_build(state)

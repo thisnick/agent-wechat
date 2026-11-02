@@ -3263,6 +3263,7 @@ dependencies = [
  "wechat-platform",
  "wechat-profile",
  "wechat-store",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,8 +1,9 @@
 // PulseAudio backend derived from sys-voice; see THIRD-PARTY.md.
 // The nonblocking mainloop replaces pa_simple's uninterruptible reads.
 use super::{wait_ready, DeviceBackend, NATIVE_RATE};
-use crate::{AecStatus, AudioConfig, AudioError, PlaybackHandle};
+use crate::{AecStatus, AudioConfig, AudioDevice, AudioError, PlaybackHandle};
 use libpulse_binding::{
+    callbacks::ListResult,
     context::{Context, FlagSet as ContextFlags, State as ContextState},
     def::BufferAttr,
     mainloop::standard::{IterateResult, Mainloop},
@@ -10,6 +11,106 @@ use libpulse_binding::{
     stream::{FlagSet, PeekResult, SeekMode, State, Stream},
 };
 use std::sync::mpsc::SyncSender;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
+
+pub(super) fn devices() -> Result<Vec<AudioDevice>, AudioError> {
+    let mut mainloop = Mainloop::new().ok_or_else(|| error("cannot create PulseAudio mainloop"))?;
+    let mut context = Context::new(&mainloop, "wx audio devices")
+        .ok_or_else(|| error("cannot create PulseAudio context"))?;
+    context
+        .connect(None, ContextFlags::NOAUTOSPAWN, None)
+        .map_err(error)?;
+    wait_ready(|| {
+        iterate(&mut mainloop)?;
+        match context.get_state() {
+            ContextState::Ready => Ok(true),
+            ContextState::Failed | ContextState::Terminated => Err(error(
+                "PulseAudio connection failed; start PulseAudio or PipeWire's PulseAudio service",
+            )),
+            _ => Ok(false),
+        }
+    })?;
+    let defaults = Rc::new(RefCell::new(None));
+    let result = defaults.clone();
+    let server = context.introspect().get_server_info(move |info| {
+        *result.borrow_mut() = Some((
+            info.default_source_name.as_ref().map(ToString::to_string),
+            info.default_sink_name.as_ref().map(ToString::to_string),
+        ));
+    });
+    wait_ready(|| {
+        iterate(&mut mainloop)?;
+        Ok(defaults.borrow().is_some())
+    })?;
+    drop(server);
+    let (default_input, default_output) = defaults.borrow_mut().take().unwrap();
+    let devices = Rc::new(RefCell::new(Vec::new()));
+    let done = Rc::new(Cell::new(false));
+    let failed = Rc::new(Cell::new(false));
+    let (result, completed, failure) = (devices.clone(), done.clone(), failed.clone());
+    let operation = context
+        .introspect()
+        .get_source_info_list(move |info| match info {
+            ListResult::Item(info) => {
+                if let Some(id) = info.name.as_ref().filter(|_| result.borrow().len() < 1024) {
+                    result.borrow_mut().push(AudioDevice {
+                        input: true,
+                        id: Some(id.to_string()),
+                        name: info.description.as_ref().unwrap_or(id).to_string(),
+                        is_default: default_input.as_deref() == Some(id.as_ref()),
+                    });
+                }
+            }
+            ListResult::End => completed.set(true),
+            ListResult::Error => {
+                failure.set(true);
+                completed.set(true);
+            }
+        });
+    wait_ready(|| {
+        iterate(&mut mainloop)?;
+        Ok(done.get())
+    })?;
+    drop(operation);
+    if failed.get() {
+        return Err(error("cannot list PulseAudio microphones"));
+    }
+    done.set(false);
+    let (result, completed, failure) = (devices.clone(), done.clone(), failed.clone());
+    let operation = context
+        .introspect()
+        .get_sink_info_list(move |info| match info {
+            ListResult::Item(info) => {
+                if let Some(id) = info.name.as_ref().filter(|_| result.borrow().len() < 2048) {
+                    result.borrow_mut().push(AudioDevice {
+                        input: false,
+                        id: Some(id.to_string()),
+                        name: info.description.as_ref().unwrap_or(id).to_string(),
+                        is_default: default_output.as_deref() == Some(id.as_ref()),
+                    });
+                }
+            }
+            ListResult::End => completed.set(true),
+            ListResult::Error => {
+                failure.set(true);
+                completed.set(true);
+            }
+        });
+    wait_ready(|| {
+        iterate(&mut mainloop)?;
+        Ok(done.get())
+    })?;
+    drop(operation);
+    context.disconnect();
+    if failed.get() {
+        return Err(error("cannot list PulseAudio speakers"));
+    }
+    let result = devices.borrow_mut().drain(..).collect();
+    Ok(result)
+}
 
 pub(super) struct Backend {
     record: Stream,
