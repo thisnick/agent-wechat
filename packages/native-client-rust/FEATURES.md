@@ -95,6 +95,12 @@ Unknown packed resource subtypes, arbitrary avatar replacement, general FTS/sear
 index maintenance and external-content message indexes remain compatibility gaps. Copying a profile does not repair
 those gaps.
 
+## Calling
+
+| Feature | Current evidence / limits |
+| --- | --- |
+| Direct voice calling | Authenticated control/media WebSockets, a device-free TypeScript PCM adapter, CLI monitor/dial/answer and an optional OpenClaw OpenAI response bridge are implemented. One `calls` permission covers them; first-answer ownership and initiator-owned outgoing calls prevent a second concurrent call. The [calling fixture](crates/wechat-simulator/CALLS-FIXTURE.md) exercises the real API, SDK, plugin and passive CLI. Native generated-audio tests cover both selected packet groupings, Opus, authenticated UDP, owner PCM queues and inactivity cleanup despite malformed traffic. Isolated maintained-daemon tests established incoming answer with audible return audio, incoming reject and caller cancellation, outgoing recipient decline/hangup, repeated generated speech, immediate duplex echo, and automatic server-confirmed cleanup. Android and iPad calls passed in both directions. Other-device pickup withdrew the daemon offer, emitted `ended` and rejected a late answer as stale without Join/Reject/Exit. Outgoing no-answer cleanup emitted `ended` after 60.5 seconds of ringing with no media; this timer was checked on the daemon. Native host operations retain account-writer release, accepted-cookie/generation fences, encrypted request/reply journals and uncertain outcomes. Unanswered incoming offers emit terminal state before being cleared. Control sockets use Ping/Pong and stale-owner cleanup; the native peer watchdog starts termination after 60 seconds without fresh authenticated peer packets. Internal `wechat-calls` uses optional bundled libopus; internal `wechat-audio` adapts sys-voice for CLI device I/O. The native backend is disabled by default and transmission remains restricted to expiring isolated tests while media key/counter lifetime is unresolved. Physical microphone/speaker/AEC, canonical history, other-device races and sustained impaired-network behavior still require acceptance. Video and conferences remain unavailable. |
+
 ## Experimental extras outside the initial scope
 
 | Extra | Current evidence / limits |

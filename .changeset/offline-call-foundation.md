@@ -1,0 +1,8 @@
+---
+"@agent-wechat/cli": minor
+"@agent-wechat/agent-wechat": minor
+---
+
+Add disabled-by-default direct voice calling: authenticated control/media WebSockets, single-call ownership, PCM SDK connections, CLI monitor/dial/answer controls, and an optional OpenClaw OpenAI audio bridge with separate calling allowlists. Add the opt-in native worker and internal call-media/audio libraries. Expose direct/conference kind and voice/video call type in call metadata, including same-account observer snapshots without ownership or audio access. Select call type when dialing and accept offers by identity/revision; remove redundant media flags and the unimplemented resume command. Advertise available calling capabilities only; missing flags mean unavailable. Use one `calls` API token scope for call state, control and owner-bound audio; messaging grants do not permit calls. Isolated live tests cover personal voice negotiation, duplex PCM and terminal handling. An accepted owner hangup completes known cleanup when it fences an unsent poll before the queued backend stop runs. Media security lifetime and physical device validation remain incomplete; the native worker is restricted to expiring isolated tests. Video and conference calling remain unavailable.
+
+Exchange raw PCM samples on media sockets with JSON stream setup; buffer, frame and pace client audio in the daemon instead of requiring CLI or OpenClaw clients to construct custom binary headers.

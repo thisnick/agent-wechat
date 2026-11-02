@@ -52,6 +52,20 @@ Managed startup sends the resolved token through a private stdin pipe; it create
 
 Keep `dataDir` and `consumerStateDir` on separate explicit persistent mounts. The daemon owns official-format profile/sidecar data; the consumer directory holds private intake/deduplication/model-handoff/read receipts bound to server and account identities. Executable upgrades do not remove either. One configured OpenClaw account maps to one selected native daemon account in this increment, while the daemon itself supports independent account slots.
 
+## Calling
+
+Calling is disabled by default. Messaging
+allowlists do not permit calls: `calls.inboundAllowFrom`, `calls.outboundAllowTo`
+and `calls.outboundToolAllowFrom` grant separate permissions. The daemon API token
+also needs the account's `calls` scope in addition to its messaging scopes. The
+adapter supports the pinned host's OpenAI response audio bridge and requires provider readiness
+before claiming a call. Agent consultation is off by default; safe read-only
+consultation additionally requires `allowConsultSessionPersistence: true` because
+OpenClaw can store its separate per-call agent session. The native backend remains
+restricted to expiring isolated tests; integrated phone validation is incomplete.
+See the [calling guide](https://thisnick.github.io/agent-wechat/reference/calls/)
+for connections and limits.
+
 ## Native messaging lifecycle and validation limits
 
 The adapter consumes account-scoped SSE using bearer headers and decimal-string journal cursors. It persists custody before acknowledging a cursor; acknowledgement is independent of unread state. Only explicitly live, incoming, committed resources can enter the model. Supported images, short voice, video, files and eligible stickers pass through bounded media retrieval and hash verification into OpenClaw-managed storage. Pending media retains custody without model dispatch or a read receipt. Expired/unsupported attachments retain an explicit status; raw XML never becomes an attachment. Catch-up/import/raw pending sync batches, unknown origin and outgoing messages do not become automatic model inputs. Group admission uses structured exact self-mention facts; unknown metadata or displayed `@names` never satisfy a mention gate. Contacts and groups use their separate catalogs.

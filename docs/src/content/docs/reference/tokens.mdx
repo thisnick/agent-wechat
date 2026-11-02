@@ -23,8 +23,20 @@ The new token is printed once, in the `token` field.
 | `read-state` | Marking chats read |
 | `login` | Logging in, connecting and disconnecting |
 | `admin` | Managing tokens and accounts, and editing groups. Group reads use `read`. |
+| `calls` | Reading [call state and events](/reference/calls/), registering readiness, controlling calls and exchanging the owner's call audio |
 
-OpenClaw needs `read`, `media`, `send` and `login`, plus `read-state` unless `readPolicy` is `never`.
+OpenClaw needs `read`, `media`, `send` and `login`, plus `read-state` unless `readPolicy` is `never`. Calling also needs the `calls` scope.
+
+For a calling-only token, grant `calls` for the selected account:
+
+```bash
+wx tokens create my-calls --accounts ACCOUNT_ID --scopes calls
+```
+
+Pass `--account ACCOUNT_ID` to the call commands. `wx calls status` and
+`wx calls monitor --json` stay passive even though the
+token also permits call control. They need no permission to read chat history or
+the account catalog. Call audio still requires ownership of that call.
 
 <Aside title="Good to know">
 - **API tokens and WeChat logins are separate.** Revoking a token doesn't log out of WeChat, and logging out doesn't revoke tokens.

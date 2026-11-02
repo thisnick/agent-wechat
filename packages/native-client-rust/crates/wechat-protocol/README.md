@@ -106,6 +106,18 @@ recipient opening and complete local writeback. Cold CLI/SDK byte and range
 checks passed; recipient-exported SHA-256 remains unavailable.
 See [FEATURES.md](../../FEATURES.md) for the current validation record.
 
+## Call codecs
+
+The opt-in Rust feature `experimental-calls` exposes offline signaling and
+incoming notification envelopes, personal Invite/Cancel/LiveSync codecs, selected
+app-session negotiation and relay packet codecs under `calls`. These prepare and
+validate owned bytes with account-generation bindings. The feature does
+not enable voice or video calls.
+There is no call transport, codec negotiation, microphone/camera access or
+`NativeClient` call method. Keys, media framing and session lifetimes must be
+verified before connecting these building blocks to a live transport. Existing
+voice-note and video-file methods remain attachment operations.
+
 Results preserve unsigned 64-bit message IDs as decimal strings.
 Unknown command payloads and contact fields remain available as original bytes.
 All write/send methods submit once. A response failure after submission is an

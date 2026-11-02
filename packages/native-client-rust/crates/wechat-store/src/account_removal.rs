@@ -23,7 +23,7 @@ impl Store {
         if signed_in {
             bail!("account_sign_out_required");
         }
-        let pending: bool = control.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE state NOT IN ('succeeded','failed','cancelled','rejected','expired','needs_login','needs_review')) OR EXISTS(SELECT 1 FROM runtime WHERE key='logout-pending') OR EXISTS(SELECT 1 FROM media_jobs WHERE state IN ('queued','running')) OR EXISTS(SELECT 1 FROM outbox WHERE state IN ('queued','submitting'))", [], |r| r.get(0))?;
+        let pending: bool = control.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE state NOT IN ('succeeded','failed','cancelled','rejected','expired','needs_login','needs_review')) OR EXISTS(SELECT 1 FROM runtime WHERE key='logout-pending') OR EXISTS(SELECT 1 FROM media_jobs WHERE state IN ('queued','running')) OR EXISTS(SELECT 1 FROM outbox WHERE state IN ('queued','submitting')) OR EXISTS(SELECT 1 FROM call_sessions WHERE state!='ended')", [], |r| r.get(0))?;
         if pending {
             bail!("operation_in_progress");
         }
@@ -48,6 +48,22 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unresolved_call_prevents_unregistering_its_recovery_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("data")).unwrap();
+        store.create_account("a").unwrap();
+        store.begin_call("a", "call", "generation").unwrap();
+        store.put_runtime("a", "logged-out", b"1").unwrap();
+        assert_eq!(
+            store.remove_account("a").unwrap_err().to_string(),
+            "operation_in_progress"
+        );
+        store.finish_call("a", "call", false).unwrap();
+        assert!(store.remove_account("a").is_err());
+        store.finish_call("a", "call", true).unwrap();
+        store.remove_account("a").unwrap();
+    }
     #[test]
     fn removal_preserves_files_reserves_identity_and_survives_restart() {
         let temp = tempfile::tempdir().unwrap();

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Real pinned Gateway/model runtime; both native API and model are local fixtures.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -72,7 +73,8 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
   try {
     await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
     for (const file of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', file), join(temporary, 'plugin', file));
-    await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-media-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
+    await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+    await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-media-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
     upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const nativePort = upstream.address().port;
     const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
     // The real SDK invokes this explicitly configured local transcription CLI.

@@ -21,6 +21,25 @@ pnpm build:image         # tags agent-wechat-native:local
 
 Release builds, CI and the publishing process are described in [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md). Contributor rules are in [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md).
 
+## Calling features
+
+Cargo `--all-features` enables every optional feature of the selected packages.
+It is useful for broad CI checks, not required to build a calling component.
+It does not build every operating system or enable runtime permissions.
+
+From the repository root, build both the native daemon worker and CLI audio with:
+
+```bash
+cargo build --manifest-path packages/native-client-rust/Cargo.toml \
+  -p wx-native --features native-calls,call-audio
+```
+
+The executable is `packages/native-client-rust/target/debug/wx`.
+Choose `native-calls` alone for a headless daemon, or `call-audio` alone for a CLI
+using a remote daemon. Native audio requires the selected OS's development libraries.
+Account authorization and transmission admission still apply.
+
+
 ## Try the browser client
 
 1. Start the local simulator and connected browser client:

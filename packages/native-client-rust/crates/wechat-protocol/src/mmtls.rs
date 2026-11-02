@@ -666,6 +666,27 @@ pub fn unpack_longlink(input: &[u8]) -> Result<Longlink> {
     })
 }
 
+/// A route rejected locally before any short-link request bytes are submitted.
+#[derive(Debug)]
+pub(crate) struct UnsupportedNativeRoute;
+impl std::fmt::Display for UnsupportedNativeRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Unsupported native route")
+    }
+}
+impl std::error::Error for UnsupportedNativeRoute {}
+pub(crate) fn validate_short_route(path: &str) -> Result<()> {
+    let ordinary = path.starts_with("/cgi-bin/micromsg-bin/")
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'-');
+    if ordinary || path == "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth" {
+        Ok(())
+    } else {
+        Err(UnsupportedNativeRoute.into())
+    }
+}
+
 pub fn short_exchange(
     session: &ShortSession,
     host: &str,
@@ -674,13 +695,7 @@ pub fn short_exchange(
     timeout: Duration,
 ) -> Result<Vec<u8>> {
     validate_host(host)?;
-    ensure!(
-        path.starts_with("/cgi-bin/micromsg-bin/")
-            && path
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'-'),
-        "Unsupported native route"
-    );
+    validate_short_route(path)?;
     ensure!(
         payload.len() <= crate::MAX_MESSAGE_BYTES,
         "Payload too large"
@@ -863,6 +878,29 @@ fn decode_short_reply(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exact_call_app_auth_route_does_not_admit_arbitrary_route_bytes() {
+        assert!(validate_short_route("/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth").is_ok());
+        assert!(validate_short_route("/cgi-bin/micromsg-bin/heartbeat").is_ok());
+        assert!(validate_short_route("/cgi-bin/micromsg-bin/voipilinkack").is_ok());
+        for bad in [
+            "/cgi-bin/micromsg-bin/another_route",
+            "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth/extra",
+            "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth?x=1",
+            "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth#x",
+            "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth\r\nX: y",
+            "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth\0",
+            "/cgi-bin/micromsg-bin/%2e%2e",
+            "/cgi-bin/micromsg-bin/../x",
+            "/cgi-bin/micromsg-bin/\\x",
+            "/cgi-bin/micromsg-bin/音",
+            "http://example.test/cgi-bin/micromsg-bin/heartbeat",
+        ] {
+            assert!(validate_short_route(bad)
+                .unwrap_err()
+                .is::<UnsupportedNativeRoute>());
+        }
+    }
     use super::*;
     #[test]
     fn longlink_frames_can_split_or_share_records_and_reject_bad_lengths_early() {

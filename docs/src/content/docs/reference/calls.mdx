@@ -1,0 +1,71 @@
+---
+title: Calling
+description: Call availability, client ownership and CLI/OpenClaw participation.
+---
+
+Check calling availability with `wx calls status`, then use the CLI, OpenClaw or
+the [control](../calls-api/) and [media](../calls-media/) APIs.
+The current backend handles direct voice calls; video and conference capabilities
+remain off. Call metadata separates `kind` (`direct`/`conference`) from
+`callType` (`voice`/`video`).
+
+## Check availability
+
+1. In a source build, run `wx calls --help`. The parent command only prints help;
+   it does not connect, log in or open audio devices.
+2. Run `wx calls status` against your selected daemon. A disabled backend reports
+   empty `capabilities: {}`. A default build without the call routes
+   returns an unavailable route instead.
+3. Require the corresponding capability before participating. An API route or a
+   configured plugin does not make a call available.
+
+Source builds use `native-calls` for the daemon's native worker and `call-audio`
+for the CLI's local audio adapter. These are separate features: a headless daemon
+does not need access to a microphone or speaker. Use the targeted features in
+[Build from source](../build/#calling-features); Cargo
+`--all-features` is for enabling every optional build feature and is not required.
+
+## API connections
+
+Use the [Calls API reference](../calls-api/) for routes, complete command/event
+payloads, incoming-call examples and ownership rules. The separate
+[media reference](../calls-media/) specifies attachment, JSON stream setup and raw PCM chunks.
+
+A control connection observes calls without answering them. The first successful
+answer owns an incoming call; an outgoing call belongs to its initiator.
+Other authorized clients see same-account call metadata, including
+`callType: "voice"`, but receive no audio and cannot start another call while busy.
+All call routes require the `calls` token scope and authorization headers.
+
+Keep control connected through termination. Reconnecting does not reclaim ownership. An accepted end command starts cleanup,
+so wait for `ended`. An `uncertain` outcome needs inspection before another call.
+
+The server checks connection heartbeat and call activity. Outgoing pickup and
+fresh authenticated peer-packet timeouts are both one minute. See the API
+reference for connection timeouts and media rules.
+
+## CLI and OpenClaw
+
+| Command | Behavior |
+| --- | --- |
+| `wx calls monitor --json` | Observe events without opening audio devices |
+| `wx calls monitor` | Register readiness and show incoming prompts; open audio on acceptance |
+| `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
+| `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
+
+Interactive participation requires a `call-audio` build. A late answer stays tied
+to the selected offer; it must not answer a replacement caller.
+
+OpenClaw calling defaults to off. Configure its separate `inboundAllowFrom`,
+`outboundAllowTo` and `outboundToolAllowFrom` lists; messaging permission grants
+none of them. The OpenAI response audio bridge streams audio to its provider and
+checks readiness before answering. It uses no local microphone. Read-only agent
+consultation requires opting into both consultation and the host's per-call
+session storage.
+
+:::note[Good to know]
+Calling is disabled in the default daemon. The native worker is restricted to an
+expiring isolated test. Media security across a call's lifetime and ordinary
+microphone/speaker calling still need validation. Video
+and conference capabilities remain off.
+:::

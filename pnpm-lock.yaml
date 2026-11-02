@@ -92,6 +92,10 @@ importers:
         version: 2.12.4
 
   packages/openclaw-extension:
+    dependencies:
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
     devDependencies:
       '@agent-wechat/shared':
         specifier: workspace:*
@@ -114,6 +118,9 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
 
 packages:
 
@@ -1709,6 +1716,7 @@ packages:
   '@smithy/core@3.24.3':
     resolution: {integrity: sha512-Ep/7tPamGY8mgESE3LyLKtxJyy6U52WWAqr/3wial47Sj4u3PiIF73AOGI27UyLy9duTkhZbgzodOfLV4TduZg==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.3.3':
     resolution: {integrity: sha512-I2Bti0DKFo2IJyN28ijCsx51BAumEYR4/1yZ1FXyBygy9MqbnMqCev4JPth/MbpRfBSRAX35hITSnAdJRo1u5w==}

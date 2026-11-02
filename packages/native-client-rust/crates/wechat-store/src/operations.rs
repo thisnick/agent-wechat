@@ -83,7 +83,7 @@ impl Store {
             || scopes.iter().any(|s| {
                 !matches!(
                     s.as_str(),
-                    "read" | "media" | "send" | "read-state" | "login" | "admin"
+                    "read" | "media" | "send" | "read-state" | "login" | "admin" | "calls"
                 )
             })
         {
@@ -249,7 +249,7 @@ impl Store {
     pub(crate) fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=8).contains(&version) {
+        if !(1..=11).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -295,11 +295,30 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/account/V008__contact_sync.sql"))?;
             tx.commit()?;
         }
+        if version < 9 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V009__call_actions.sql"))?;
+            tx.commit()?;
+        }
+        if version < 10 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V010__call_request_context.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 11 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V011__call_non_submission.sql"
+            ))?;
+            tx.commit()?;
+        }
         Ok(())
     }
     pub fn protected_state_exists(&self) -> Result<bool> {
         for account in self.accounts()? {
-            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)+(SELECT count(*) FROM message_recalls)+(SELECT count(*) FROM outgoing_recalls)+(SELECT count(*) FROM group_mutations)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
+            if self.control(&account.id,|db|Ok(db.query_row("SELECT (SELECT count(*) FROM runtime)+(SELECT count(*) FROM outbox)+(SELECT count(*) FROM apply_intents)+(SELECT count(*) FROM media_sources)+(SELECT count(*) FROM media_jobs)+(SELECT count(*) FROM media_assets)+(SELECT count(*) FROM pagination_views)+(SELECT count(*) FROM message_recalls)+(SELECT count(*) FROM outgoing_recalls)+(SELECT count(*) FROM group_mutations)+(SELECT count(*) FROM call_sessions)+(SELECT count(*) FROM call_actions)",[],|r|r.get::<_,i64>(0))?>0))? {return Ok(true);}
         }
         Ok(false)
     }
@@ -561,6 +580,19 @@ impl Store {
         payload: &[u8],
         received_cursor: &[u8],
     ) -> Result<()> {
+        self.stage_sync_if_new(account, id, payload, received_cursor)
+            .map(|_| ())
+    }
+    /// Whether this exact owned message batch was inserted for the first time.
+    /// A duplicate is not fresh notification evidence, regardless of a caller's
+    /// later origin label. This never marks any projection as complete.
+    pub fn stage_sync_if_new(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+        received_cursor: &[u8],
+    ) -> Result<bool> {
         self.stage_sync_stream(account, id, payload, received_cursor, "message")
     }
     pub fn stage_contact_sync(
@@ -571,6 +603,7 @@ impl Store {
         received_cursor: &[u8],
     ) -> Result<()> {
         self.stage_sync_stream(account, id, payload, received_cursor, "contact")
+            .map(|_| ())
     }
     fn stage_sync_stream(
         &self,
@@ -579,17 +612,17 @@ impl Store {
         payload: &[u8],
         received_cursor: &[u8],
         stream: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let cursor_key = if stream == "contact" {
             "contact-received-cursor"
         } else {
             "received-cursor"
         };
         self.control(account,|db|{
-        let tx=db.transaction()?;tx.execute("INSERT OR IGNORE INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,?4)",params![id,payload,chrono::Utc::now().to_rfc3339(),stream])?;
+        let tx=db.transaction()?;let fresh=tx.execute("INSERT OR IGNORE INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,?4)",params![id,payload,chrono::Utc::now().to_rfc3339(),stream])? == 1;
         tx.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![cursor_key,received_cursor])?;
         if stream == "message" { tx.execute("INSERT INTO runtime VALUES('cursor-projection-needed',?1) ON CONFLICT(key)DO UPDATE SET value=excluded.value",[b"1".as_slice()])?; }
-        tx.commit()?;Ok(())
+        tx.commit()?;Ok(fresh)
     })
     }
     pub fn pending_reads(&self, account: &str) -> Result<usize> {
@@ -934,23 +967,47 @@ mod tests {
     #[test]
     fn staging_and_received_cursor_commit_without_claiming_projection() {
         let (_t, store) = setup();
-        store
-            .stage_sync("test", "batch", b"encrypted original", b"encrypted cursor")
-            .unwrap();
+        assert!(store
+            .stage_sync_if_new("test", "batch", b"encrypted original", b"encrypted cursor")
+            .unwrap());
         assert_eq!(
             store.runtime("test", "received-cursor").unwrap().unwrap(),
             b"encrypted cursor"
         );
         assert_eq!(store.pending_sync("test").unwrap().len(), 1);
-        store
-            .stage_sync("test", "batch", b"new nonce", b"encrypted cursor")
-            .unwrap();
+        assert!(!store
+            .stage_sync_if_new("test", "batch", b"new nonce", b"encrypted cursor")
+            .unwrap());
         assert_eq!(
             store.pending_sync("test").unwrap()[0].1,
             b"encrypted original"
         );
         store.finish_sync("test", "batch").unwrap();
+        assert!(!store
+            .stage_sync_if_new("test", "batch", b"new nonce", b"encrypted cursor")
+            .unwrap());
         assert!(store.pending_sync("test").unwrap().is_empty());
+    }
+    #[test]
+    fn fresh_sync_admission_rolls_back_with_the_received_cursor() {
+        let (_temp, store) = setup();
+        store.control("test", |db| {
+            db.execute_batch("CREATE TRIGGER reject_cursor BEFORE INSERT ON runtime WHEN NEW.key='received-cursor' BEGIN SELECT RAISE(ABORT,'cursor unavailable'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(store
+            .stage_sync_if_new("test", "batch", b"encrypted", b"cursor")
+            .is_err());
+        assert!(store.pending_sync("test").unwrap().is_empty());
+        store
+            .control("test", |db| {
+                db.execute_batch("DROP TRIGGER reject_cursor;")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store
+            .stage_sync_if_new("test", "batch", b"encrypted", b"cursor")
+            .unwrap());
     }
     #[test]
     fn events_are_once_only_and_acknowledgements_are_separate() {
@@ -1023,13 +1080,18 @@ mod tests {
                 "synthetic",
                 "sha256",
                 &["test".into()],
-                &["read".into()],
+                &["calls".into()],
                 None,
             )
             .unwrap();
         let json = serde_json::to_string(&grant).unwrap();
         assert!(!json.contains("sha256"));
         assert!(!json.contains("digest"));
+        for scope in ["calls.observe", "calls.control", "calls.media"] {
+            assert!(store
+                .issue_token("retired", "hash", &["test".into()], &[scope.into()], None)
+                .is_err());
+        }
         assert!(store
             .issue_token("bad", "hash", &["test".into()], &["unknown".into()], None)
             .is_err());
@@ -1122,7 +1184,7 @@ mod runtime_prefix_tests {
             .stage_sync("test", "old", b"old sealed commands", b"message cursor")
             .unwrap();
         store.control("test", |db| {
-            db.execute_batch("DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;PRAGMA user_version=7;")?;
+            db.execute_batch("DROP TABLE call_actions;DROP TABLE call_sessions;DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;PRAGMA user_version=7;")?;
             Ok(())
         }).unwrap();
         drop(store);
