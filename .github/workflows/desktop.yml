@@ -61,7 +61,7 @@ jobs:
             sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/ubuntu.sources
           fi
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb x11-utils webkit2gtk-driver python3-dbus python3-gi
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev libpulse-dev patchelf dbus-x11 gnome-keyring xvfb x11-utils webkit2gtk-driver python3-dbus python3-gi
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh
@@ -100,11 +100,11 @@ jobs:
         run: node scripts/native-ci-artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
       - name: Build native CLI
         if: inputs.native_artifact_prefix == '' && runner.os != 'Windows'
-        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native --features call-audio
       - name: Build Windows native CLI
         if: inputs.native_artifact_prefix == '' && runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
+        run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native --features call-audio
       - run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
       - name: Build desktop executable
         if: runner.os != 'Windows'
