@@ -1,5 +1,17 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.1
+
+### Patch Changes
+
+- [#363](https://github.com/thisnick/agent-wechat/pull/363) [`476a041`](https://github.com/thisnick/agent-wechat/commit/476a041e7616bcb1485393facc715f69270baaab) Thanks [@thisnick](https://github.com/thisnick)! - Include local microphone/speaker support in released executables, add local audio-device discovery, and show live signal-level meters during interactive calls. Keep passive/JSON output free of terminal meters and retain separate daemon calling permissions and native transmission guards. Linux executables now require libpulse0; daemon operation does not require audio devices or a sound server.
+
+  Include the call API, native worker, codec and device adapters in normal Cargo builds. Use the same complete default features for development, CI and release artifacts, without feature-selection flags. Verify calling routes and a passive control connection in the packaged executable and image; runtime calling authorization remains separate.
+
+- [#364](https://github.com/thisnick/agent-wechat/pull/364) [`821eeb6`](https://github.com/thisnick/agent-wechat/commit/821eeb6cef8ed4fd049ded06bc11d0b9b1ab9f53) Thanks [@thisnick](https://github.com/thisnick)! - Fix group creation, member additions, and pin/mute preferences for contacts whose saved deletion flag is NULL. New contacts created by sparse updates default to a zero deletion flag while existing deletion state is preserved.
+
+- [#362](https://github.com/thisnick/agent-wechat/pull/362) [`b82cf37`](https://github.com/thisnick/agent-wechat/commit/b82cf37245ba3c4a944d852295ca91908b7e6528) Thanks [@thisnick](https://github.com/thisnick)! - Keep an incoming call's actor available when an accepted reject fences an unsent poll before the reject command reaches the backend. Send the reject once, without resending the poll, and retain uncertain rejection receipts.
+
 ## 1.4.0-beta.0
 
 ### Minor Changes
