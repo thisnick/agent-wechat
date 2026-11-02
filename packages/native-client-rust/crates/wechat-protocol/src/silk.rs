@@ -19,17 +19,20 @@ unsafe extern "C" {
 }
 pub const SAMPLE_RATE: u32 = 16000;
 /// Target bit rate of the single bundled encoder profile (`silk_bridge.c`).
-pub const BIT_RATE: u32 = 16000;
+/// SILK's wideband range tops out here; the previous 16 kbit/s profile was
+/// audibly destructive for anything richer than speech, and the rate control is
+/// soft, so the actual stream lands well under this ceiling.
+pub const BIT_RATE: u32 = 40000;
 /// Duration of one encoded SILK packet in the bundled profile.
 pub const FRAME_MS: u32 = 20;
 /// Longest single voice note: the official 60-second voice-message limit.
 pub const MAX_NOTE_MS: u32 = 60_000;
 pub const MAX_SAMPLES: usize = (MAX_NOTE_MS / 1000 * SAMPLE_RATE) as usize;
 /// Largest stream accepted by framing validation and decoding.
-pub const MAX_STREAM_BYTES: usize = 200 * 1024;
+pub const MAX_STREAM_BYTES: usize = 512 * 1024;
 /// Encoded-size bound for one maximum-length note from the bundled profile:
 /// the 10-byte header plus, per 20 ms packet, a 2-byte length prefix and the
-/// 16 kbit/s payload budget (40 bytes) with 1.5x headroom. SILK rate control
+/// 40 kbit/s payload budget (100 bytes) with 1.5x headroom. SILK rate control
 /// is soft, so single packets may exceed the budget; the observed 60-second
 /// worst case (full-scale white noise) averages about 2.2 KB/s, or 131 KB.
 pub const MAX_NOTE_BYTES: usize = 10
@@ -147,7 +150,7 @@ mod tests {
     #[test]
     fn maximum_note_stays_within_derived_byte_bound() {
         assert_eq!(MAX_SAMPLES, 960_000);
-        assert_eq!(MAX_NOTE_BYTES, 186_010);
+        assert_eq!(MAX_NOTE_BYTES, 456_010);
         // Full-scale white noise is the least compressible input; a harmonic
         // signal with a moving pitch exercises the voiced path.
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
