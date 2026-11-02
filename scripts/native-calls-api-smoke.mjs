@@ -165,6 +165,7 @@ try {
   await left.ready(randomUUID(), true); leftEvents.start();
   const currentHello = await right.connect();
   assert.equal(currentHello.currentOffer?.callId, offer.callId);
+  assert.equal(currentHello.currentOffer.callType, "voice");
   await right.ready(randomUUID(), true);
   await until("late SDK reader keeps hello and queued offer", () => leftEvents.events.some(event => event.type === "call.offered" && event.offer.callId === offer.callId));
   assert.equal(leftEvents.events[0].type, "hello");
@@ -181,6 +182,14 @@ try {
   await until("passive SDK observes busy state", () => availability(observing)?.busy === true);
   assert.equal(availability(observing).ownedByThisClient, false);
   await until("Rust connected state", () => winnerEvents.events.some(event => event.type === "call.state" && event.call.callId === offer.callId && event.call.state === "connected"));
+  await until("observer receives typed call metadata", () => observing.events.some(event => event.type === "call.state" && event.call.callId === offer.callId && event.call.state === "connected" && event.call.callType === "voice" && !event.call.ownedByThisClient));
+  const currentResponse = await fetch(new URL(`v1/accounts/${ready.accountId}/calls/current`, ready.baseUrl), {
+    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(currentResponse.status, 200);
+  const currentSnapshot = await currentResponse.json();
+  assert.deepEqual(currentSnapshot.currentCall, { callId: offer.callId, revision: winnerEvents.events.findLast(event => event.type === "call.state" && event.call.state === "connected").call.revision, kind: "direct", callType: "voice", direction: "incoming", state: "connected", ownedByThisClient: false });
+  assert.equal("ownerToken" in currentSnapshot, false);
   assert.equal((await control("stats")).stats.answer, 1, "The losing claim must not reach the backend");
   await assert.rejects(loser.dial(randomUUID(), "synthetic-peer"), error => error instanceof NativeCallError && error.code === "busy");
   const loserHello = loserEvents.events.find(event => event.type === "hello");

@@ -5,7 +5,7 @@ use super::{
     ownership::{AccountAuthority, CallIdentity},
 };
 use crate::{
-    call_types::{CallKind, CallMedia, CallPendingOffer, CallPendingPhase},
+    call_types::{CallKind, CallMedia, CallPendingOffer, CallPendingPhase, CallType},
     Core,
 };
 use std::{collections::BTreeMap, sync::Weak, time::Duration};
@@ -274,6 +274,7 @@ impl Registry {
                     call_id: id.clone(),
                     revision: 1,
                     kind: CallKind::Direct,
+                    call_type: CallType::Voice,
                     caller_id: note.caller_username.clone(),
                     offered_media: CallMedia::default(),
                     phase: CallPendingPhase::WaitingForReady,

@@ -1,10 +1,13 @@
 ---
 title: Calling
-description: Call controls, ownership and audio connections.
+description: Call availability, client ownership and CLI/OpenClaw participation.
 ---
 
 Check calling availability with `wx calls status`, then use the CLI, OpenClaw or
-the control and audio connections described below.
+the [control](../calls-api/) and [media](../calls-media/) APIs.
+The current backend handles direct voice calls; video and conference capabilities
+remain off. Call metadata separates `kind` (`direct`/`conference`) from
+`callType` (`voice`/`video`).
 
 ## Check availability
 
@@ -18,47 +21,29 @@ the control and audio connections described below.
 
 Source builds use `native-calls` for the daemon's native worker and `call-audio`
 for the CLI's local audio adapter. These are separate features: a headless daemon
-does not need access to a microphone or speaker.
+does not need access to a microphone or speaker. Use the targeted features in
+[calling architecture](../calls-architecture/#build-features); Cargo
+`--all-features` is for enabling every optional build feature and is not required.
 
 ## API connections
 
-All paths below begin with `/v1/accounts/{account}`. Authenticate with an
-`Authorization: Bearer …` header, including on WebSocket upgrades. Tokens must
-never appear in socket URLs. Use HTTPS/WSS or a trusted tunnel for remote access.
+Use the [Calls API reference](../calls-api/) for routes, complete command/event
+payloads, incoming-call examples and ownership rules. The separate
+[media reference](../calls-media/) specifies attachment and binary frames.
 
-| Connection | Purpose | Token scope |
-| --- | --- | --- |
-| `GET /calls/current` | Read capabilities, current offer and busy state | `calls` |
-| WebSocket `/calls/socket` | Observe call events and send control commands | `calls` |
-| WebSocket `/calls/{callId}/media` | Exchange the owner's PCM audio | `calls`, plus the current owner token |
+A control connection observes calls without answering them. The first successful
+answer owns an incoming call; an outgoing call belongs to its initiator.
+Other authorized clients see same-account call metadata, including
+`callType: "voice"`, but receive no audio and cannot start another call while busy.
+All call routes require the `calls` token scope and authorization headers.
 
-The control socket starts with `hello` and its current snapshot. Connecting
-alone does not answer calls. Send `call.ready` after preparing audio; readiness
-can cover outgoing calls, one pending offer, or all calls. Wait for
-`call.offered` before answering.
+Keep control connected through termination. There is no pause/resume command;
+reconnecting does not reclaim ownership. An accepted end command starts cleanup,
+so wait for `ended`. An `uncertain` outcome needs inspection before another call.
 
-The first successful `call.answer` owns an incoming call; `call.dial` assigns
-ownership to its initiator. Other clients see busy state and cannot start another
-call. The owner attaches audio using the returned owner token. Observers receive
-no audio. Keep the control socket connected; reconnecting alone does not reclaim
-ownership. Stale offers and tokens are rejected.
-
-An accepted end command starts termination. Keep both sockets open until the
-terminal state arrives. Missing confirmation remains an unknown outcome; inspect
-it before dialing again. An unanswered offer also receives an `ended` event when
-WeChat confirms it ended or was handled elsewhere.
-
-The server pings control sockets every 15 seconds; clients must reply with Pong.
-A silent connection closes after 45 seconds, followed by a five-second ownership
-cleanup window. Outgoing calls wait up to one minute for pickup. Connected calls
-start termination after one minute without a fresh authenticated peer packet;
-malformed or replayed traffic does not reset that timer.
-
-Audio uses PCM16 little-endian samples in versioned binary frames. Follow the
-announced format, track and generation. `call.clear_audio` interrupts queued
-output. The TypeScript SDK needs no device or codec bindings; its WebSocket
-factory must support authentication headers, which browser WebSocket alone cannot
-supply.
+The server checks connection heartbeat and call activity. Outgoing pickup and
+fresh authenticated peer-packet timeouts are both one minute. See the API
+reference for connection timeouts and media rules.
 
 ## CLI and OpenClaw
 

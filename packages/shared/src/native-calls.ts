@@ -154,12 +154,12 @@ function trackValue(value: unknown): value is CallAudioTrack {
 function availabilityValue(value: unknown): boolean { return object(value) && typeof value.busy === "boolean" && typeof value.ownedByThisClient === "boolean"; }
 function callValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision)
-    && ["direct", "conference"].includes(String(value.kind)) && ["incoming", "outgoing"].includes(String(value.direction))
+    && ["direct", "conference"].includes(String(value.kind)) && ["voice", "video"].includes(String(value.callType)) && ["incoming", "outgoing"].includes(String(value.direction))
     && ["offered", "dialing", "ringing", "connecting", "connected", "ending", "ended", "uncertain"].includes(String(value.state)) && typeof value.ownedByThisClient === "boolean";
 }
 function offerValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision) && idValue(value.callerId)
-    && ["direct", "conference"].includes(String(value.kind)) && object(value.offeredMedia)
+    && ["direct", "conference"].includes(String(value.kind)) && ["voice", "video"].includes(String(value.callType)) && object(value.offeredMedia)
     && typeof value.offeredMedia.audio === "boolean" && typeof value.offeredMedia.video === "boolean";
 }
 function pendingOfferValue(value: unknown): boolean {

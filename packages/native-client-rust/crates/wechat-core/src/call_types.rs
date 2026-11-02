@@ -64,6 +64,14 @@ pub enum CallKind {
     Direct,
     Conference,
 }
+/// Call identity, independent from membership and the currently negotiated media.
+/// A video call can continue with audio only.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallType {
+    Voice,
+    Video,
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallDirection {
@@ -89,6 +97,7 @@ pub struct CallOffer {
     pub call_id: String,
     pub revision: u32,
     pub kind: CallKind,
+    pub call_type: CallType,
     pub caller_id: String,
     pub offered_media: CallMedia,
 }
@@ -106,6 +115,7 @@ pub struct CallPendingOffer {
     pub call_id: String,
     pub revision: u32,
     pub kind: CallKind,
+    pub call_type: CallType,
     pub caller_id: String,
     pub offered_media: CallMedia,
     pub phase: CallPendingPhase,
@@ -129,6 +139,7 @@ pub struct CallView {
     pub call_id: String,
     pub revision: u32,
     pub kind: CallKind,
+    pub call_type: CallType,
     pub direction: CallDirection,
     pub state: CallState,
     pub owned_by_this_client: bool,
@@ -225,17 +236,6 @@ pub enum CallCommand {
         #[serde(rename = "callId")]
         call_id: String,
     },
-    #[serde(rename = "call.resume")]
-    Resume {
-        #[serde(rename = "requestId")]
-        request_id: String,
-        #[serde(rename = "callId")]
-        call_id: String,
-        #[serde(rename = "clientId")]
-        client_id: String,
-        #[serde(rename = "ownerToken")]
-        owner_token: String,
-    },
 }
 impl CallCommand {
     pub fn request_id(&self) -> &str {
@@ -247,8 +247,7 @@ impl CallCommand {
             | Self::Cancel { request_id, .. }
             | Self::Hangup { request_id, .. }
             | Self::Mute { request_id, .. }
-            | Self::ClearAudio { request_id, .. }
-            | Self::Resume { request_id, .. } => request_id,
+            | Self::ClearAudio { request_id, .. } => request_id,
         }
     }
 }

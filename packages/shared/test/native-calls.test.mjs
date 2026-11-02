@@ -50,7 +50,7 @@ test('media stream fences stale output after clear and rejects replayed or forei
 
 import { NativeCallsClient, NativeCallError } from '../src/native-calls.ts';
 const audio = { sampleRate: 16000, channels: 1, frameMs: 20 };
-const offer = { callId: 'call-1', revision: 1, kind: 'direct', callerId: 'synthetic-contact', offeredMedia: { audio: true, video: false } };
+const offer = { callId: 'call-1', revision: 1, kind: 'direct', callType: 'voice', callerId: 'synthetic-contact', offeredMedia: { audio: true, video: false } };
 class MockSocket {
   readyState = 0; bufferedAmount = 0; binaryType = '';
   onopen = null; onmessage = null; onerror = null; onclose = null;
@@ -131,7 +131,7 @@ test('ending stops audio but retains owner transports until terminal confirmatio
     try {
       await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
       const media = await owner.attachMedia('call-1');
-      const snapshot = { callId: 'call-1', revision: 2, kind: 'direct', direction: 'outgoing', state: 'ending', ownedByThisClient: true };
+      const snapshot = { callId: 'call-1', revision: 2, kind: 'direct', callType: 'voice', direction: 'outgoing', state: 'ending', ownedByThisClient: true };
       server.controls[0].receive({ type: 'call.state', call: snapshot });
       assert.equal(server.controls[0].readyState, 1);
       assert.equal(server.media[0].readyState, 1);
@@ -177,4 +177,17 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
   server.media[0].receive(new Uint8Array(3));
   await assert.rejects(media.frames()[Symbol.asyncIterator]().next(), error => error.code === 'invalid_media');
   owner.close();
+  for (const malformed of [
+    { ...offer, callType: 'conference' },
+    { ...offer, callType: undefined },
+    { ...offer, offeredMedia: { audio: 'yes', video: false } },
+  ]) {
+    const invalidServer = new MockCallServer(); const invalidClient = client(invalidServer);
+    await invalidClient.connect();
+    invalidServer.controls[0].receive({ type: 'call.offered', offer: { ...offer, callType: 'video' } });
+    assert.equal(invalidServer.controls[0].readyState, 1);
+    invalidServer.controls[0].receive({ type: 'call.offered', offer: malformed });
+    assert.equal(invalidServer.controls[0].readyState, 3);
+    invalidClient.close();
+  }
 });

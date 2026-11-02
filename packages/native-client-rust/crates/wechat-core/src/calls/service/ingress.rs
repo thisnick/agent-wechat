@@ -308,6 +308,7 @@ impl CallService {
         entry.identity = Some(identity.clone());
         entry.registration = Some(registration.clone());
         s.call = Some(LiveCall {
+            call_type: CallType::Voice,
             identity: identity.clone(),
             authority: note.lease.authority().clone(),
             peer: note.caller_username.clone(),

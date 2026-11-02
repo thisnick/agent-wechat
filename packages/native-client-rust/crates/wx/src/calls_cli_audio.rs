@@ -784,6 +784,7 @@ mod tests {
                     call_id: "original-offer".into(),
                     revision: 7,
                     kind: CallKind::Direct,
+                    call_type: wechat_core::call_types::CallType::Voice,
                     caller_id: "alice".into(),
                     offered_media: CallMedia::default(),
                 });
@@ -819,6 +820,7 @@ mod tests {
                     call_id: "different-offer".into(),
                     revision: 1,
                     kind: CallKind::Direct,
+                    call_type: wechat_core::call_types::CallType::Voice,
                     caller_id: "bob".into(),
                     offered_media: CallMedia::default(),
                 },

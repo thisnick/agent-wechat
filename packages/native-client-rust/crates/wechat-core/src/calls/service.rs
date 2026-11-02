@@ -307,6 +307,7 @@ struct LiveCall {
     identity: CallIdentity,
     authority: AccountAuthority,
     peer: String,
+    call_type: CallType,
     direction: CallDirection,
     owner: Option<String>,
     token: Option<String>,
@@ -642,7 +643,7 @@ impl CallService {
             {
                 snap.current_offer = Some(Self::offer_view(call));
             }
-            if owner
+            if call.owner.is_some()
                 || (call.direction == CallDirection::Incoming
                     && call.owner.is_none()
                     && call.state == CallState::Ended)
@@ -657,6 +658,7 @@ impl CallService {
             call_id: c.identity.call_id().into(),
             revision: c.revision,
             kind: CallKind::Direct,
+            call_type: c.call_type,
             caller_id: c.peer.clone(),
             offered_media: CallMedia::default(),
         }
@@ -666,6 +668,7 @@ impl CallService {
             call_id: c.identity.call_id().into(),
             revision: c.revision,
             kind: CallKind::Direct,
+            call_type: c.call_type,
             direction: c.direction,
             state: c.state,
             owned_by_this_client: owned,
@@ -786,6 +789,7 @@ impl CallService {
             identity: identity.clone(),
             authority,
             peer: caller,
+            call_type: CallType::Voice,
             direction: CallDirection::Incoming,
             owner: None,
             token: None,
@@ -1044,7 +1048,7 @@ impl CallService {
         }
         let claims_owner = matches!(
             command,
-            CallCommand::Dial { .. } | CallCommand::Answer { .. } | CallCommand::Resume { .. }
+            CallCommand::Dial { .. } | CallCommand::Answer { .. }
         );
         if !s.recovered_unknown.is_empty()
             && matches!(
@@ -1108,6 +1112,7 @@ impl CallService {
                         identity: ticket.identity(),
                         authority: ticket.authority().clone(),
                         peer: contact_id,
+                        call_type: CallType::Voice,
                         direction: CallDirection::Outgoing,
                         owner: Some(client.into()),
                         token: Some(format!(
@@ -1244,7 +1249,6 @@ impl CallService {
                 result_identity = Some(identity);
                 None
             }
-            CallCommand::Resume { .. } => return Err(error(CallErrorCode::Unsupported)),
         };
         let mut status = CallCommandStatus::Accepted;
         if let Some(d) = decision {

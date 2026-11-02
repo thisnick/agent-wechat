@@ -428,6 +428,7 @@ pub fn typescript() -> String {
         wechat_core::call_types::CallMedia::decl(),
         wechat_core::call_types::CallTarget::decl(),
         wechat_core::call_types::CallKind::decl(),
+        wechat_core::call_types::CallType::decl(),
         wechat_core::call_types::CallDirection::decl(),
         wechat_core::call_types::CallState::decl(),
         wechat_core::call_types::CallOffer::decl(),
