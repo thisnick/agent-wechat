@@ -21,7 +21,7 @@ session.stop()?;
 # }
 ```
 
-`native-audio` enables platform libraries. Opening a session accesses the microphone
+Normal builds include the platform libraries. Opening a session accesses the microphone
 and speaker; no device opens during default unit tests. Input/output are mono f32;
 `sample_rate` selects captured PCM rate. `native_sample_rate()` reports the 48 kHz
 backend contract. Receive may return an empty chunk while the streaming resampler

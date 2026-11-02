@@ -3,7 +3,7 @@
 # Build on a native x64 or ARM64 worker (CI runs each architecture separately).
 FROM rust:1.93.1-bookworm AS chef
 RUN cargo install cargo-chef --version 0.1.77 --locked
-RUN apt-get update && apt-get install -y --no-install-recommends libpulse-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends libpulse-dev cmake \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 ENV CARGO_BUILD_JOBS=4
@@ -18,9 +18,9 @@ COPY --from=planner /build/recipe.json recipe.json
 # builds the shipping CLI; distribution CI exercises the actual binary/container.
 ENV CARGO_INCREMENTAL=0
 # Exportable dependency layers survive source changes and fresh CI workers.
-RUN cargo chef cook --package wx-native --features call-audio --release --locked --recipe-path recipe.json
+RUN cargo chef cook --package wx-native --release --locked --recipe-path recipe.json
 COPY packages/native-client-rust/ ./
-RUN cargo build --release --locked --package wx-native --features call-audio \
+RUN cargo build --release --locked --package wx-native \
     && rustc --version > /build/rustc-version
 
 # CI extracts one tested binary. Exporting this stage avoids loading the Rust

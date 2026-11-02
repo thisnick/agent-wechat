@@ -80,6 +80,11 @@ The extension consumes committed inbound events in `packages/openclaw-extension/
 
 ## Development and verification
 
+All implemented product features belong in the default Cargo build. Local, CI
+and release build/test commands must use that same feature set without feature-
+selection flags. Platform-specific adapters may use target checks; compiling
+support does not grant runtime account, device or calling permissions.
+
 Rust work uses the toolchain in `rust-toolchain.toml`, currently **1.93.1**, with
 **rustfmt and clippy**. Check those components before editing Rust: a successful
 `cargo build` or `cargo test` does not establish that they are installed. A

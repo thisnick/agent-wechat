@@ -5,14 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Portable call audio interfaces, pacing and optional native Opus codec"
+description = "Portable call audio interfaces, pacing and native Opus codec"
 publish = false
 
 [features]
-default = []
+default = ["native-opus"]
 native-opus = ["dep:opusic-c"]
 
-[dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 opusic-c = { version = "=1.6.1", optional = true }
 
 [[example]]

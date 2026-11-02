@@ -10,6 +10,7 @@ name = "wx"
 path = "src/main.rs"
 
 [features]
+default = ["native-calls", "call-audio"]
 native-calls = ["wechat-core/native-calls", "wechat-api/experimental-calls"]
 call-audio = ["dep:wechat-audio", "wechat-audio/native-audio", "dep:wechat-calls", "dep:windows-sys"]
 

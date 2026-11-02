@@ -1,6 +1,6 @@
 //! Native audio devices, kept separate from protocol and headless call transport.
 //!
-//! Device access requires `native-audio` and an explicit [`AudioSession::open`].
+//! Device access requires an explicit [`AudioSession::open`].
 //! Tests exercise queue/resampling behavior without opening a device. This adapter
 //! derives from the MIT-licensed sys-voice library; see THIRD-PARTY.md.
 

@@ -73,9 +73,9 @@ jobs:
       # These checks use the same native toolchain and cache as the platform
       # primitives, including Windows ARM64 during release validation.
       - name: Lint native call libraries
-        run: cargo clippy --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls -p wechat-audio --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls -p wechat-audio --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: Test native Opus and audio adapters without opening devices
-        run: cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls -p wechat-audio --all-features --target ${{ matrix.target }}
+        run: cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls -p wechat-audio --target ${{ matrix.target }}
 
   build:
     strategy:
@@ -186,14 +186,14 @@ jobs:
       - name: Build the local upstream development runtime
         if: inputs.simulator_checks && runner.os != 'Windows'
         run: |
-          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile --all-features --lib --target ${{ matrix.target }}
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile --lib --target ${{ matrix.target }}
           cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-profile --test initialize --test projection --target ${{ matrix.target }}
           cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-dev --target ${{ matrix.target }}
       - name: Build the Windows local upstream development runtime
         if: inputs.simulator_checks && inputs.windows_simulator && runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile --all-features --lib --target ${{ matrix.target }}
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile --lib --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-profile --test initialize --test projection --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

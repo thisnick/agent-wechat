@@ -11,28 +11,35 @@ These assets prepare the standalone native daemon. They do not include the offic
 | Native runtime image | `linux/amd64` | `linux/arm64` | One versioned multi-architecture `ghcr.io/thisnick/agent-wechat-native:vVERSION` tag; includes FFmpeg/FFprobe, no official client |
 | `@agent-wechat/agent-wechat` | Managed or external daemon | Managed or external daemon | Existing public OpenClaw npm plugin; external mode can also run on other host platforms |
 | `@agent-wechat/shared` | Source SDK | Source SDK | Existing private TypeScript package; bundled into OpenClaw, no npm publication |
-| Rust library crates | Workspace/git/path | Workspace/git/path | `publish = false`; no crates.io distribution in this release |
+| Rust library crates | Workspace/git/path and crates.io | Workspace/git/path and crates.io | Four public protocol/profile/support crates; internal calls/audio crates remain unpublished |
 
 The container packages the same daemon as the executable. It replaces the previous official-client-plus-UI-server runtime; it is optional when `wx serve` runs on the host. macOS ARM64 and Windows x64/ARM64 have native candidate jobs; machine acceptance and official-app profile compatibility are tracked in [the platform checklist](../../PLATFORM-ACCEPTANCE.md). musl is not provided. Protocol device identity belongs to the saved account/profile and is preserved independently of the host CPU architecture. Arbitrary official-build schemas still require separate evidence. Controlled live account validation was on x64; ARM64 CI exercises synthetic protocol/profile data and the real compiled runtime.
 
 ## CI build and validation
 
-PR checks own routine validation; main runs the checks deliberately deferred from PRs. Distribution jobs use separate path filters, so an OpenClaw-only change does not rebuild the Rust CLI or desktop. Tests use local synthetic data and do not publish, log into WeChat or deploy.
+Local, CI and release commands use the complete default Cargo feature set,
+including the call API, native worker, codec and device adapters. Feature-selection
+flags are not needed. Platform adapters compile for their target OS; no audio
+device opens until requested. Packaged executable and image smoke checks verify
+the call snapshot and control socket with a synthetic signed-out account, without
+granting transmission or making a call.
+
+PR checks own routine validation; release preparation adds the architectures deferred from PRs. Distribution jobs use separate path filters, so an OpenClaw-only change does not rebuild the Rust CLI or desktop. Tests use local synthetic data and do not publish, log into WeChat or deploy.
 
 | Check | Pull requests | Main after merging | Release preparation |
 | --- | --- | --- | --- |
 | TypeScript, UI and desktop JavaScript tests | Once on Linux x64 | No repeat | Reviewed version commit |
 | Rust format and Clippy | Linux x64; desktop format once | No repeat | Required native checks on the release commit |
-| Rust workspace tests and native daemon/simulator smoke | Linux x64 and ARM64 | No repeat | Both Linux architectures gate publication |
+| Rust workspace tests and native daemon/simulator smoke | Linux x64 | No repeat | Both Linux architectures gate publication |
 | Generated TypeScript contracts | Linux x64 | No repeat | Linux x64 |
-| Connected UI/launcher smoke | Linux x64 | No repeat | Linux x64 and ARM64 |
+| Connected UI/launcher smoke | Linux x64 | No repeat | Omitted with the development simulator |
 | Pinned OpenClaw Gateway/model fixtures | Linux x64 only | No repeat | Reviewed version commit |
-| CLI package, lifecycle, platform and container checks | All five CLI targets; containers on both Linux architectures | No full repeat; build only the CLI inputs needed below | All five CLI targets; runtime images tested before publication |
-| Upstream simulator on macOS/Windows | macOS | Windows x64 and ARM64 | All three targets |
-| Desktop native tests and credential stores | Linux x64, Windows x64, macOS ARM64 | Linux ARM64 and Windows ARM64 | All five targets |
-| Desktop installers | Omitted | Unsigned deferred ARM installers | Signed packages; all five targets required |
+| CLI package, lifecycle, platform and container checks | Linux x64, macOS ARM64 and Windows x64; Linux x64 container | No full repeat | All five CLI targets; runtime images tested before publication |
+| Upstream simulator on macOS/Windows | macOS ARM64 and Windows x64 | No repeat | Omitted; production tests still gate publication |
+| Desktop native tests and credential stores | Linux x64, Windows x64, macOS ARM64 | No repeat | All five targets |
+| Desktop installers | Omitted | No repeat | Signed packages; all five targets required |
 
-Linux release binaries are built in Bookworm (glibc 2.36). The Dockerfile builds only `wx-native`; it does not repeat the Rust unit suite or compile the development simulator. Distribution CI still tests the actual packaged executable and container. A complete PR CLI matrix is merged only when native inputs changed; release preparation always requires the complete matrix.
+Linux release binaries are built in Bookworm (glibc 2.36). The Dockerfile builds only `wx-native`; it does not repeat the Rust unit suite or compile the development simulator. Distribution CI still tests the actual packaged executable and container. The PR CLI matrix runs when native inputs change; release preparation always requires all five targets.
 
 Distribution and release preparation pass their CLI artifacts to desktop within the same workflow run. Desktop verifies the clean source commit, pinned compiler, target, Rust flags, checksum and executable identity before reuse. Standalone desktop runs build their own CLI. Windows dependency caches are restored even when the exact CLI executable is cached, and simulator/test builds omit debug symbols.
 
