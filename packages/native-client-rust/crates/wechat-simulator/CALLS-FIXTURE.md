@@ -21,7 +21,10 @@ node --experimental-strip-types scripts/native-calls-api-smoke.mjs
 
 `WX_CALLS_FIXTURE_BINARY` selects the fixture executable. An adjacent `wx` binary
 adds the CLI checks; `WX_BINARY` selects it explicitly. The script starts and
-stops its own fixture and uses a synthetic in-process voice provider.
+stops its own fixture and uses a synthetic in-process voice provider. Add
+`--check-heartbeat` for a real 60-second Ping/Pong timeout test with an
+unresponsive owner and a healthy observer. Startup also verifies that an
+abandoned call closes locally without replaying its retained uncertain request.
 
 Run the resulting `wx-calls-fixture` executable with no arguments. Its first
 stdout line is JSON with `event: "ready"`, `baseUrl`, `accountId`, `tokenFile`,
@@ -47,6 +50,7 @@ fixed error `code`. Lines are limited to 16 KiB. For example:
 | --- | --- |
 | `offer` | Supplies a trusted, already-ACKed synthetic direct voice offer; returns `callId` and `revision`. |
 | `inject_audio` | Sends 1–4 generated 320-sample receive frames after a call connects. `value` is a signed 16-bit constant. |
+| `peer_microphone` | Supplies a verified synthetic microphone state with `muted: true` or `false`; exercises control events and current snapshots. |
 | `end` | Supplies a trusted terminal result for the active synthetic call. |
 | `stats` | Returns additive operation/audio counters, the last send generation/peak, and whether the backend has an active call. |
 | `hold_clear` | Sets `enabled: true` to hold the fake backend's clear operation. |

@@ -2,13 +2,13 @@
 //!
 //! This policy layer performs no network I/O. A reservation authorizes one
 //! account actor operation only after that actor persists the intent and checks
-//! its current credential/logout generation. Uncertain operations retain the slot.
+//! its current credential/logout generation. Uncertain active operations retain
+//! the slot until the backend stops and the local session closes.
 use std::collections::BTreeMap;
 
 const MAX_CLIENTS: usize = 64;
 const MAX_REQUESTS: usize = 256;
 const REQUEST_TTL_MS: u64 = 300_000;
-const OWNER_GRACE_MS: u64 = 5_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountAuthority {
@@ -119,7 +119,7 @@ struct Session {
     owner: Option<String>,
     owner_principal: Option<String>,
     owner_logical_id: Option<u64>,
-    resume_until: Option<u64>,
+    owner_closed_at: Option<u64>,
     offer_until: Option<u64>,
     pending: Option<Ticket>,
     invalidated: bool,
@@ -239,7 +239,7 @@ impl Ownership {
             owner: None,
             owner_principal: None,
             owner_logical_id: None,
-            resume_until: None,
+            owner_closed_at: None,
             offer_until: Some(expires),
             pending: None,
             invalidated: false,
@@ -402,7 +402,7 @@ impl Ownership {
                 owner: Some(client_id.into()),
                 owner_principal: Some(client.principal.clone()),
                 owner_logical_id: Some(client.logical_id),
-                resume_until: None,
+                owner_closed_at: None,
                 offer_until: None,
                 pending: None,
                 invalidated: false,
@@ -486,6 +486,19 @@ impl Ownership {
         {
             return Err(Error::Stale);
         }
+        if phase.is_some_and(|phase| !matches!(phase, Phase::Uncertain))
+            && !s
+                .owner
+                .as_ref()
+                .and_then(|owner| self.clients.get(owner))
+                .is_some_and(|client| {
+                    s.owner_logical_id == Some(client.logical_id)
+                        && client.authority == s.authority
+                        && s.owner_principal.as_deref() == Some(client.principal.as_str())
+                })
+        {
+            return Err(Error::Stale);
+        }
         let next = match (ticket.operation, phase) {
             (_, None) => None,
             (_, Some(Phase::Uncertain)) => Some(Phase::Uncertain),
@@ -538,7 +551,7 @@ impl Ownership {
         s.revision = revision;
         s.phase = Phase::Uncertain;
         s.pending = None;
-        s.resume_until = None;
+        s.owner_closed_at = None;
         Ok(())
     }
     /// Match the one pending business action without changing its ownership.
@@ -568,7 +581,7 @@ impl Ownership {
     }
     pub fn disconnect(&mut self, client_id: &str, now: u64) {
         // Several transport error paths can close one connection. Only the
-        // first close starts the grace period; old callbacks cannot extend it.
+        // first close requests cleanup; old callbacks cannot postpone it.
         let Some(client) = self.clients.remove(client_id) else {
             return;
         };
@@ -578,54 +591,28 @@ impl Ownership {
                 && s.owner_logical_id == Some(client.logical_id)
                 && s.owner_principal.as_deref() == Some(client.principal.as_str())
         }) {
-            s.resume_until = Some(now.saturating_add(OWNER_GRACE_MS));
+            s.owner_closed_at = Some(now);
         }
     }
-    /// Resume needs both the authenticated principal and a secret lease checked
-    /// by the transport. The caller supplies the old server-issued connection ID
-    /// only after checking that lease; knowledge of a public call ID is insufficient.
-    pub fn resume(&mut self, old_client: &str, new_client: &str, now: u64) -> Result<(), Error> {
-        let client = self
-            .clients
-            .get(new_client)
-            .ok_or(Error::NotConnected)?
-            .clone();
-        if !client.ready {
-            return Err(Error::NotReady);
-        }
-        let s = self.session.as_mut().ok_or(Error::Stale)?;
-        if s.invalidated
-            || s.owner.as_deref() != Some(old_client)
-            || s.authority != client.authority
-            || s.owner_principal.as_deref() != Some(client.principal.as_str())
-            || s.resume_until.is_none_or(|until| now >= until)
-        {
-            return Err(Error::NotOwner);
-        }
-        let revision = s.revision.checked_add(1).ok_or(Error::Capacity)?;
-        let logical_id = s.owner_logical_id.ok_or(Error::Stale)?;
-        s.owner = Some(new_client.into());
-        s.resume_until = None;
-        s.revision = revision;
-        self.clients
-            .get_mut(new_client)
-            .expect("checked client")
-            .logical_id = logical_id;
-        Ok(())
-    }
-    /// Stop local media immediately on disconnect. At grace expiry, the actor
-    /// receives the call identity once to terminate/reconcile, never transfer it.
+    /// A closed owner connection requests cleanup immediately. The actor receives
+    /// its call identity once; reconnecting never transfers that ownership.
     pub fn expire(&mut self, now: u64) -> Option<(AccountAuthority, CallIdentity)> {
         let s = self.session.as_mut()?;
         if s.phase == Phase::Ringing && s.offer_until.is_some_and(|until| now >= until) {
             self.session = None;
             return None;
         }
-        if s.resume_until.is_some_and(|until| now >= until) {
-            s.resume_until = None;
+        if s.owner_closed_at.is_some_and(|until| now >= until) {
+            s.owner_closed_at = None;
             // Any late accepted Invite/Join result must not revive a call whose
             // owner has gone. The actor reconciles/terminates it by identity.
-            s.pending = None;
+            // Keep only an in-flight start's correlation for its received
+            // allocation/Join cleanup. It does not restore controller authority.
+            if !s.pending.as_ref().is_some_and(|ticket| {
+                matches!(ticket.operation, Operation::Dial | Operation::Answer)
+            }) {
+                s.pending = None;
+            }
             s.phase = Phase::Uncertain;
             s.revision = s.revision.saturating_add(1);
             return Some((
@@ -654,7 +641,7 @@ impl Ownership {
             s.invalidated = true;
             s.phase = Phase::Uncertain;
             s.revision = s.revision.saturating_add(1);
-            s.resume_until = None;
+            s.owner_closed_at = None;
             return Some(s.id.clone());
         }
         None

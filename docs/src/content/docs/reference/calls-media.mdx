@@ -187,6 +187,10 @@ An attachment failure can return:
 
 ## Mute and interrupt
 
+Remote microphone state arrives as [`call.control`](../calls-api/#participant-control-events)
+on the control socket. Continue handling PCM normally: a muted peer is still in
+the call, and their microphone state does not mute your outgoing audio.
+
 Send these JSON commands on the **control** socket:
 
 ```json

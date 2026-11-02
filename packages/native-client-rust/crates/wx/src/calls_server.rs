@@ -44,8 +44,8 @@ fn intent(value: &str) -> Result<[u8; 32]> {
 }
 fn check_window(expires: u64, now: u64, duration: u64) -> Result<()> {
     ensure!(
-        expires > now && expires - now <= 300_000 && (1..=30).contains(&duration),
-        "Call test must expire within five minutes and last at most 30 seconds"
+        expires > now && expires - now <= 300_000 && (1..=60).contains(&duration),
+        "Call test must expire within five minutes and last at most 60 seconds"
     );
     Ok(())
 }
@@ -99,11 +99,11 @@ mod tests {
         for invalid in ["00".repeat(32), "é".repeat(32), "01".repeat(33)] {
             assert!(intent(&invalid).is_err());
         }
-        assert!(check_window(301_000, 1_000, 20).is_ok());
+        assert!(check_window(301_000, 1_000, 60).is_ok());
         for (expires, now, duration) in [
             (1_000, 1_000, 20),
             (301_001, 1_000, 20),
-            (2_000, 1_000, 31),
+            (2_000, 1_000, 61),
             (2_000, 1_000, 0),
         ] {
             assert!(check_window(expires, now, duration).is_err());

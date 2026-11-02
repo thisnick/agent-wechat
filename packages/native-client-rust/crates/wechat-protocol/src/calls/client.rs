@@ -70,7 +70,7 @@ pub use super::personal::RemoteExitReason;
 pub use incoming::{IncomingPhase, NativeIncomingSession};
 pub use termination::{LocalStopReason, RemoteTermination};
 
-type AvSnapshot = BTreeMap<u16, (u32, bool)>;
+type AvSnapshot = BTreeMap<u16, (u32, Option<Vec<u8>>)>;
 
 /// Metadata and advertised voice support supplied by the embedding client.
 /// Request buffers are not returned codec/format/channel selections. This is
@@ -228,6 +228,23 @@ impl NativePersonalSession {
     }
     pub fn phase(&self) -> PersonalPhase {
         self.phase
+    }
+    /// Current authenticated remote microphone state while joined. This is
+    /// independent of membership, codec selection and whether media is audible.
+    pub fn peer_microphone_muted(&self) -> Option<bool> {
+        if self.phase != PersonalPhase::Joined {
+            return None;
+        }
+        let room = self.active.as_ref()?;
+        let member = room.members.get(&room.peer)?;
+        if member.status != 1 {
+            return None;
+        }
+        match room.av.get(&member.member)?.0 {
+            0 => Some(true),
+            1 => Some(false),
+            _ => None,
+        }
     }
     /// Allocated control identity survives a later media-admission failure. It
     /// does not by itself authorize Cancel or Exit; the current phase still must
@@ -671,7 +688,9 @@ impl NativePersonalSession {
                             continue;
                         }
                         ensure!(
-                            !next.media_taken || terminal.is_some(),
+                            !next.media_taken
+                                || terminal.is_some()
+                                || microphone_update(&next, &av, &self.own_username),
                             "Post-start call AV reconfiguration unsupported"
                         );
                         next.av_sequence = sequence;
@@ -1174,7 +1193,12 @@ fn av(raw: &[u8], own: u16, peer: u16) -> Result<(u32, AvSnapshot)> {
             member,
             (
                 u32::try_from(number(&values, 2, None)?)?,
-                p::optional_data(&values, 3)?.is_some(),
+                p::optional_data(&values, 3)?
+                    .map(|info| {
+                        ensure!(info.len() <= 1024, "Microphone metadata too large");
+                        Ok(info.to_vec())
+                    })
+                    .transpose()?,
             ),
         );
     }
@@ -1217,6 +1241,21 @@ fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+/// A microphone change does not replace the already admitted media context.
+/// Keep microphone metadata opaque: it cannot reset codec, crypto or counters.
+fn microphone_update(room: &ActiveRoom, av: &AvSnapshot, own: &str) -> bool {
+    let Some(local) = room.members.get(own) else {
+        return false;
+    };
+    let Some(peer) = room.members.get(&room.peer) else {
+        return false;
+    };
+    av.len() == 2
+        && av
+            .get(&local.member)
+            .is_some_and(|(status, info)| *status == 1 && info.is_none())
+        && av.get(&peer.member).is_some_and(|(status, _)| *status <= 1)
+}
 fn ready(room: &ActiveRoom, own: &str) -> Result<bool> {
     // Current capability bytes are validated even while a peer/AV stream is
     // pending. Codec0 is then unselected data, never decoder permission.
@@ -1232,9 +1271,12 @@ fn ready(room: &ActiveRoom, own: &str) -> Result<bool> {
         .context("Missing current peer member")?;
     if peer.status != 1
         || room.av.len() != 2
-        || ![own_id, peer.member]
-            .iter()
-            .all(|id| room.av.get(id) == Some(&(1, false)))
+        || !(room.media_taken && microphone_update(room, &room.av, own)
+            || [own_id, peer.member].iter().all(|id| {
+                room.av
+                    .get(id)
+                    .is_some_and(|(status, info)| *status == 1 && info.is_none())
+            }))
     {
         return Ok(false);
     }
@@ -1608,6 +1650,36 @@ mod tests {
             .unwrap(),
         )
     }
+    fn microphone_sync(sequence: u32, status: u32, info: Option<&[u8]>) -> Vec<u8> {
+        let own = p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap();
+        let mut peer = vec![p::uint(1, 1), p::uint(2, u64::from(status))];
+        if let Some(info) = info {
+            peer.push(p::bytes(3, info));
+        }
+        let av = p::message(&[
+            p::uint(3, u64::from(sequence)),
+            p::bytes(4, &own),
+            p::bytes(4, &p::message(&peer).unwrap()),
+        ])
+        .unwrap();
+        let notify = p::message(&[
+            p::uint(3, 7),
+            p::uint(4, 9),
+            p::bytes(5, &p::message(&[p::uint(1, 12), p::bytes(2, &av)]).unwrap()),
+        ])
+        .unwrap();
+        let message = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+        host_reply(
+            &p::message(&[
+                p::bytes(
+                    1,
+                    &p::message(&[p::uint(1, 1), p::bytes(2, &message)]).unwrap(),
+                ),
+                p::bytes(2, b"mic-update"),
+            ])
+            .unwrap(),
+        )
+    }
     fn joined_sync(extra_unknown: bool) -> Vec<u8> {
         joined_sync_profile(extra_unknown, None)
     }
@@ -1696,6 +1768,14 @@ mod tests {
                 (CallHostRoute::AppAuth, auth_reply_uin(u64::MAX)),
                 (CallHostRoute::Invite, invite_reply()),
                 (CallHostRoute::LiveSync, joined_sync(false)),
+                (
+                    CallHostRoute::LiveSync,
+                    microphone_sync(3, 0, Some(&[8, 2])),
+                ),
+                (
+                    CallHostRoute::LiveSync,
+                    microphone_sync(4, 1, Some(&[8, 3])),
+                ),
                 (CallHostRoute::Transfer, exit_reply_uin(u64::MAX)),
             ]))),
             requests: Default::default(),
@@ -1733,19 +1813,43 @@ mod tests {
             SyncProgress::MediaReady
         );
         let media = session.take_media(&state, authority(), 0, 0).unwrap();
+        assert_eq!(session.peer_microphone_muted(), Some(false));
         assert_eq!(media.peer_member, 1);
         assert_eq!(media.relay.room_id, 7);
         assert!(session.take_media(&state, authority(), 0, 0).is_err());
+        for (sdk, host, status) in [(3, 4, 0), (4, 5, 1)] {
+            assert_eq!(
+                session
+                    .poll(&transport, &mut state, authority(), TaskIds { sdk, host })
+                    .unwrap(),
+                SyncProgress::MediaReady
+            );
+            assert_eq!(session.phase(), PersonalPhase::Joined);
+            assert_eq!(session.peer_microphone_muted(), Some(status == 0));
+            let active = session.active.as_ref().unwrap();
+            assert_eq!(active.av.get(&1).unwrap().0, status);
+            assert!(active.media_taken);
+            assert!(session.take_media(&state, authority(), 0, 0).is_err());
+        }
+        let active = session.active.as_ref().unwrap();
+        let mut unsupported = active.av.clone();
+        unsupported.get_mut(&1).unwrap().0 = 4;
+        assert!(!microphone_update(
+            active,
+            &unsupported,
+            &state.own_username
+        ));
         session
             .exit(
                 &transport,
                 &mut state,
                 authority(),
-                TaskIds { sdk: 3, host: 4 },
+                TaskIds { sdk: 5, host: 6 },
                 false,
             )
             .unwrap();
         assert_eq!(session.phase(), PersonalPhase::Finished);
+        assert_eq!(session.peer_microphone_muted(), None);
         assert!(transport.inner.0.borrow().is_empty());
         let requests = transport.requests.borrow();
         let host_tasks = requests
@@ -1760,7 +1864,7 @@ mod tests {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        assert_eq!(host_tasks, [1, 2, 3, 4]);
+        assert_eq!(host_tasks, [1, 2, 3, 4, 5, 6]);
         let common = CommonRequest::decode(&requests.last().unwrap().1).unwrap();
         let delegate = fields(common.body.as_deref().unwrap()).unwrap();
         let frame = app_frame::TaskFrame::decode(data(&delegate, 5).unwrap(), 3380).unwrap();

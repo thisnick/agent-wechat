@@ -137,6 +137,25 @@ pub struct CallView {
     pub direction: CallDirection,
     pub state: CallState,
     pub owned_by_this_client: bool,
+    // Latest reported remote controls, also available to a newly connected observer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub controls: Vec<CallParticipantControl>,
+}
+
+/// Application-level controls. Native protocol flags and opaque metadata stay
+/// inside the daemon; a microphone update does not renegotiate the audio format.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(tag = "kind", rename_all = "snake_case")]
+pub enum CallControl {
+    Microphone { muted: bool },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallParticipantControl {
+    pub participant_id: String,
+    pub control: CallControl,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -324,6 +343,14 @@ pub enum CallEvent {
     Pending { offer: Option<CallPendingOffer> },
     #[serde(rename = "call.state")]
     State { call: CallView },
+    #[serde(rename = "call.control")]
+    Control {
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "participantId")]
+        participant_id: String,
+        control: CallControl,
+    },
     #[serde(rename = "calls.availability")]
     Availability { availability: CallsAvailability },
     #[serde(rename = "track.added")]

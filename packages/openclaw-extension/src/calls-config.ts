@@ -1,4 +1,4 @@
-/** Calling permissions are independent of direct-message permission. */
+/** Direct voice calling permissions are independent of messaging permission. */
 export type WeChatCallsConfig = {
   enabled?: boolean;
   inboundPolicy?: "disabled" | "allowlist";
@@ -41,7 +41,7 @@ export const callsConfigSchema = {
   type: "object", additionalProperties: false,
   description: "Direct voice calling using OpenAI's PCM response bridge. Disabled by default. Video, conferences and continuous GPT-Live output are unsupported.",
   properties: {
-    enabled: { type: "boolean", default: false },
+    enabled: { type: "boolean", default: false, description: "Enable direct voice calling. When disabled, incoming calls are ignored by this plugin." },
     inboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, inboundAllowFrom: { type: "array", maxItems: 128, items: { type: "string", minLength: 1, maxLength: 200 } },
     outboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, outboundAllowTo: { type: "array", maxItems: 128, items: { type: "string", minLength: 1, maxLength: 200 } },
     outboundToolAllowFrom: { type: "array", maxItems: 128, items: { type: "string", minLength: 1, maxLength: 200 } },

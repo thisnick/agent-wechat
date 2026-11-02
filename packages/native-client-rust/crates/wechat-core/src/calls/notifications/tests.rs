@@ -576,7 +576,15 @@ async fn cancellation_error_or_timeout_holds_slot_and_late_ignored_prepare_canno
             .unwrap();
         assert!(snapshot.availability.busy);
         assert!(snapshot.current_offer.is_none());
-        assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
+        // A stop request alone is not acknowledgement that the backend has
+        // stopped. This fixture deliberately cannot confirm local closure.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while f.backend.stopped.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         f.core
             .call_service()
             .verified_incoming_terminal(&authority, &identity)

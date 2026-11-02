@@ -249,7 +249,7 @@ impl Store {
     pub(crate) fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=11).contains(&version) {
+        if !(1..=12).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -311,6 +311,13 @@ impl Store {
             let tx = db.transaction()?;
             tx.execute_batch(include_str!(
                 "../migrations/account/V011__call_non_submission.sql"
+            ))?;
+            tx.commit()?;
+        }
+        if version < 12 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/account/V012__call_local_closure.sql"
             ))?;
             tx.commit()?;
         }

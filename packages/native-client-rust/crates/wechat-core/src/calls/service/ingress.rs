@@ -122,7 +122,7 @@ impl CallService {
                     call.state = CallState::Uncertain;
                     call.revision = call.revision.saturating_add(1);
                     call.audio_lease.store(0, Ordering::Release);
-                    call.stop_requested = true;
+                    call.stop_requested = false;
                     changed = true;
                 }
             } else {
@@ -255,6 +255,9 @@ impl CallService {
         self.start_incoming_worker();
     }
     pub(super) fn wake_incoming(self: &Arc<Self>) {
+        if self.shutdown_state.load(Ordering::Acquire) != 0 {
+            return;
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
@@ -326,6 +329,7 @@ impl CallService {
             sequence: 0,
             sample_clock: 0,
             muted: false,
+            controls: vec![],
             cancellation_requested: false,
         });
         self.broadcast(&mut s);
@@ -573,7 +577,7 @@ impl CallService {
                 call.state = CallState::Uncertain;
                 call.revision = call.revision.saturating_add(1);
                 call.audio_lease.store(0, Ordering::Release);
-                call.stop_requested = true;
+                call.stop_requested = false;
             }
         }
         self.broadcast(&mut s);
@@ -689,7 +693,11 @@ impl CallService {
             call.revision = call.revision.saturating_add(1);
         }
         call.audio_lease.store(0, Ordering::Release);
-        call.stop_requested = true;
+        if changed {
+            // The actor preserves its uncertain receipt; maintenance still has
+            // to wait for it to stop and close the separate local session.
+            call.stop_requested = false;
+        }
         s.media.clear();
         if changed {
             self.broadcast(s);

@@ -2114,6 +2114,22 @@ impl Core {
         }
         Ok(())
     }
+    pub async fn shutdown_gracefully(self: &Arc<Self>) {
+        // The task keeps running if the requesting HTTP connection disappears.
+        let core = self.clone();
+        if tokio::spawn(async move {
+            #[cfg(feature = "experimental-calls")]
+            if let Some(service) = core.call_service.get() {
+                service.shutdown().await;
+            }
+            core.shutdown();
+        })
+        .await
+        .is_err()
+        {
+            self.shutdown();
+        }
+    }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::SeqCst);
         #[cfg(feature = "experimental-calls")]

@@ -553,7 +553,17 @@ impl Fixture {
                 let snapshot = self.snapshot().await;
                 let terminal = match done {
                     Some(BackendOutcome::Ended) => !snapshot.availability.busy,
-                    Some(BackendOutcome::Uncertain) => snapshot.availability.busy,
+                    Some(BackendOutcome::Uncertain) => {
+                        !snapshot.availability.busy
+                            && self
+                                .backend
+                                .inner
+                                .active
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .is_some_and(|worker| worker.locally_closed.load(Ordering::Acquire))
+                    }
                     _ => false,
                 };
                 if terminal {
@@ -798,7 +808,7 @@ async fn cancellation_uses_current_ack_member_and_preserves_original_notificatio
 }
 
 #[tokio::test]
-async fn explicit_reject_requires_receipt_and_lost_reply_holds_slot() {
+async fn explicit_reject_preserves_lost_reply_without_retry_or_a_live_session() {
     for (case, expected) in [
         (Case::Normal, CallCommandStatus::Accepted),
         (Case::LostReject, CallCommandStatus::Accepted),
@@ -822,7 +832,7 @@ async fn explicit_reject_requires_receipt_and_lost_reply_holds_slot() {
         assert_eq!(result(&mut client, "reject").await, expected);
         f.finished().await;
         let snapshot = f.snapshot().await;
-        assert_eq!(snapshot.availability.busy, matches!(case, Case::LostReject));
+        assert!(!snapshot.availability.busy);
         if matches!(case, Case::LostReject) {
             owned_state(&mut client, CallState::Uncertain, 0).await;
         }
@@ -1149,7 +1159,7 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
     } else {
         matches!(outcome, Some(BackendOutcome::Uncertain))
     });
-    assert_eq!(f.snapshot().await.availability.busy, !confirmed);
+    assert!(!f.snapshot().await.availability.busy);
     let seen = f.host.seen();
     assert_eq!(
         seen.iter()
@@ -1191,13 +1201,21 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
     assert!(records
         .iter()
         .any(|record| record.route == 11421 && record.encrypted_reply.is_some()));
-    assert_eq!(f.core.store.has_unresolved_call("one").unwrap(), !confirmed);
+    assert!(!f.core.store.has_unresolved_call("one").unwrap());
+    let status = f
+        .core
+        .store
+        .call_session_status("one", &offer.call_id)
+        .unwrap()
+        .unwrap();
+    assert!(status.local_closed);
+    assert_eq!(status.remote_terminal_confirmed, confirmed);
 }
 
 #[tokio::test]
 async fn owner_disconnect_after_join_handoff_exits_once_with_returned_member() {
-    // This pre-media in-flight Answer exception does not change established
-    // calls' normal disconnect grace or create a controller that can resume it.
+    // A lost owner cannot resume the in-flight Answer. Cleanup still uses only
+    // the received Join's known identity and never starts media.
     held_join_reply_change(Case::HoldJoinReply, JoinReplyChange::Disconnect).await;
 }
 

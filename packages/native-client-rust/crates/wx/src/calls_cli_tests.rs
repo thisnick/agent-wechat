@@ -323,6 +323,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
             direction: CallDirection::Outgoing,
             state: CallState::Connected,
             owned_by_this_client: true,
+            controls: vec![],
         };
         control
             .send(Message::Text(
@@ -624,6 +625,7 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
             direction: CallDirection::Outgoing,
             state: CallState::Dialing,
             owned_by_this_client: true,
+            controls: vec![],
         };
         socket
             .send(Message::Text(

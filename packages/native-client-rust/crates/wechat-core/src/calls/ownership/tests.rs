@@ -25,13 +25,14 @@ fn reused_label_cannot_own_or_control_the_disconnected_owners_call() {
         .unwrap();
     h.ready("socket", true).unwrap();
     assert!(h.snapshot("socket").unwrap().current.is_none());
+    assert_eq!(h.result(&ticket, Some(Phase::Connected)), Err(Error::Stale));
     assert_eq!(
         h.act("socket", "hangup", "call", 2, Operation::Hangup, 2),
         Err(Error::NotOwner)
     );
-    assert_eq!(h.resume("socket", "socket", 2), Err(Error::NotOwner));
+    assert!(h.expire(2).is_some());
     h.disconnect("socket", 4999);
-    assert!(h.expire(5001).is_some());
+    assert!(h.expire(5001).is_none());
 
     let old = CallIdentity {
         attempt: ticket.attempt,

@@ -26,7 +26,7 @@ const CONTROL_LIMIT: usize = 16 * 1024;
 const MEDIA_LIMIT: usize = 64 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Socket-local PCM queue. Only the daemon constructs the internal ordered
 /// envelopes consumed by the core; none of those headers cross the API.
@@ -262,7 +262,7 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
     loop {
         tokio::select! {
             _ = valid_tick.tick() => {
-                if last_seen.elapsed() > IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err() { break; }
+                if last_seen.elapsed() >= IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err() { break; }
             }
             _ = ping_tick.tick() => {
                 if !send(&mut sink, Message::Ping(Default::default())).await { break; }
@@ -380,7 +380,7 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
                 }
             }
             _ = valid_tick.tick() => {
-                if last_seen.elapsed() > IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err()
+                if last_seen.elapsed() >= IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err()
                     || service.validate_media(&connection.id).await.is_err() { break; }
             }
             _ = ping_tick.tick() => { if !send(&mut sink, Message::Ping(Default::default())).await { break; } }

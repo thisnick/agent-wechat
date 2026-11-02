@@ -88,6 +88,7 @@ pub(super) async fn prepare(
         lease: request.notification.lease.clone(),
         stop: AtomicBool::new(false),
         media_stop: AtomicBool::new(false),
+        locally_closed: AtomicBool::new(false),
         generation: AtomicU32::new(1),
         submission: SendAdmission::default(),
         metrics: MediaMetrics::default(),
@@ -104,12 +105,7 @@ pub(super) async fn prepare(
             .active
             .lock()
             .map_err(|_| service_error(CallErrorCode::Closed))?;
-        if active.as_ref().is_some_and(|old| {
-            !matches!(
-                old.done.lock().ok().and_then(|done| *done),
-                Some(BackendOutcome::Ended)
-            )
-        }) {
+        if active.as_ref().is_some_and(|old| !old.reusable()) {
             return Ok(IncomingPreparation::Ignored);
         }
         if !consume_test_intent(&inner.test_spent) {
@@ -150,15 +146,20 @@ pub(super) async fn prepare(
             let core = actor_inner.core.upgrade();
             let mut confirmed = result.is_ok();
             if let Some(core) = &core {
-                if core
-                    .store
-                    .finish_call(
+                let retained = if no_mutation {
+                    core.store.close_call_locally(
                         &actor_inner.config.account_id,
                         actor_worker.identity.call_id(),
-                        confirmed || no_mutation,
+                        wechat_store::CallLocalEndReason::NoRemoteMutation,
                     )
-                    .is_err()
-                {
+                } else {
+                    core.store.finish_call(
+                        &actor_inner.config.account_id,
+                        actor_worker.identity.call_id(),
+                        confirmed,
+                    )
+                };
+                if retained.is_err() {
                     confirmed = false;
                 }
             }
@@ -478,7 +479,18 @@ impl Actor {
                 return Ok(false);
             }
         }
-        Ok(matches!(result?, SyncProgress::Terminal(_)))
+        let progress = result?;
+        if matches!(progress, SyncProgress::MediaReady) {
+            if let (Some(sink), Some(muted)) = (
+                self.sink.as_ref(),
+                self.session
+                    .as_ref()
+                    .and_then(|session| session.peer_microphone_muted()),
+            ) {
+                let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
+            }
+        }
+        Ok(matches!(progress, SyncProgress::Terminal(_)))
     }
     fn drain_commands(&mut self) -> Result<bool> {
         for _ in 0..8 {
@@ -687,6 +699,9 @@ impl Actor {
             "Incoming media admission revoked"
         );
         let media = session.take_media(&self.state, self.authority, 0, 0)?;
+        if let Some(muted) = session.peer_microphone_muted() {
+            let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
+        }
         let audio = self
             .audio
             .take()

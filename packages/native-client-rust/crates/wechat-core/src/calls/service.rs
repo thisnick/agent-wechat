@@ -10,8 +10,8 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        Arc, Mutex, OnceLock, Weak,
     },
     time::Instant,
 };
@@ -150,6 +150,15 @@ pub trait CallBackend: Send + Sync {
         Box::pin(async { Ok(()) })
     }
     fn stop(&self, identity: CallIdentity) -> BackendFuture<Result<BackendOutcome>>;
+    /// Close only the local session ledger after its worker stops. Unknown
+    /// remote action outcomes must remain unchanged and must never be retried.
+    fn close_local(
+        &self,
+        _identity: CallIdentity,
+        _reason: wechat_store::CallLocalEndReason,
+    ) -> BackendFuture<Result<()>> {
+        Box::pin(async { Err(error(CallErrorCode::Unsupported)) })
+    }
 }
 pub struct DisabledBackend;
 impl CallBackend for DisabledBackend {
@@ -231,7 +240,10 @@ impl BackendSink {
             call.identity == self.ticket.identity()
                 && &call.authority == self.ticket.authority()
                 && call.direction == CallDirection::Incoming
-                && call.state == CallState::Connecting
+                && matches!(
+                    call.state,
+                    CallState::Connecting | CallState::Uncertain | CallState::Ending
+                )
                 && !call.revoked
                 && !call.cancellation_requested
         }) else {
@@ -294,6 +306,14 @@ impl BackendSink {
             .ok_or_else(|| error(CallErrorCode::Closed))?
             .connected(&self.ticket)
     }
+    /// Publish a verified peer control for this exact call/authority. Delivery
+    /// has no effect on audio ownership or the caller's negotiated media context.
+    pub async fn peer_microphone(&self, muted: bool) -> Result<()> {
+        self.service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?
+            .peer_control(&self.ticket, CallControl::Microphone { muted })
+    }
     pub async fn uncertain(&self) -> Result<()> {
         self.service
             .upgrade()
@@ -347,6 +367,7 @@ struct LiveCall {
     sequence: u64,
     sample_clock: u64,
     muted: bool,
+    controls: Vec<CallParticipantControl>,
     cancellation_requested: bool,
 }
 struct MediaPeer {
@@ -384,6 +405,9 @@ pub struct CallService {
     backend: Arc<dyn CallBackend>,
     started: Instant,
     maintenance_started: AtomicBool,
+    self_weak: OnceLock<Weak<CallService>>,
+    shutdown_state: AtomicU8,
+    shutdown_done: tokio::sync::Notify,
     incoming_preparations: mpsc::Sender<super::notifications::IncomingRequest>,
     incoming_cancellations: mpsc::Sender<ingress::IncomingCancel>,
     incoming_receiver: Mutex<Option<ingress::IncomingReceivers>>,
@@ -394,6 +418,70 @@ impl Default for CallService {
     }
 }
 impl CallService {
+    /// Stop admission, then give the existing native actor one opportunity to
+    /// finish its known call. This never reconstructs or resends an operation.
+    pub async fn shutdown(&self) {
+        if self
+            .shutdown_state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            loop {
+                let notified = self.shutdown_done.notified();
+                if self.shutdown_state.load(Ordering::Acquire) == 2 {
+                    return;
+                }
+                notified.await;
+            }
+        }
+        let active = if let Ok(mut s) = self.lock() {
+            let active = s.call.as_mut().map(|call| {
+                call.audio_lease.store(0, Ordering::Release);
+                call.state = CallState::Ending;
+                call.revision = call.revision.saturating_add(1);
+                call.stop_requested = true;
+                (call.authority.clone(), call.identity.clone())
+            });
+            s.media.clear();
+            self.broadcast(&mut s);
+            if let Some(owner) = s.call.as_ref().and_then(|call| call.owner.clone()) {
+                self.drop_client(&mut s, &owner);
+            }
+            active
+        } else {
+            None
+        };
+        if let Some((authority, identity)) = active {
+            let confirmed = matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    self.backend.stop(identity.clone())
+                )
+                .await,
+                Ok(Ok(BackendOutcome::Ended))
+            );
+            if confirmed
+                || self
+                    .backend
+                    .close_local(
+                        identity.clone(),
+                        wechat_store::CallLocalEndReason::ServerShutdown,
+                    )
+                    .await
+                    .is_ok()
+            {
+                let _ = self.terminal(&authority, &identity);
+            }
+        }
+        if let Ok(mut s) = self.lock() {
+            let clients: Vec<_> = s.clients.keys().cloned().collect();
+            for id in clients {
+                self.drop_client(&mut s, &id);
+            }
+        }
+        self.shutdown_state.store(2, Ordering::Release);
+        self.shutdown_done.notify_waiters();
+    }
     pub fn new(backend: Arc<dyn CallBackend>) -> Self {
         let (incoming_preparations, preparations) = mpsc::channel(1);
         let (incoming_cancellations, cancellations) = mpsc::channel(8);
@@ -402,6 +490,9 @@ impl CallService {
             backend,
             started: Instant::now(),
             maintenance_started: AtomicBool::new(false),
+            self_weak: OnceLock::new(),
+            shutdown_state: AtomicU8::new(0),
+            shutdown_done: tokio::sync::Notify::new(),
             incoming_preparations,
             incoming_cancellations,
             incoming_receiver: Mutex::new(Some(ingress::IncomingReceivers {
@@ -441,6 +532,7 @@ impl CallService {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
     fn start_maintenance(self: &Arc<Self>) {
+        let _ = self.self_weak.set(Arc::downgrade(self));
         if self.maintenance_started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -564,7 +656,12 @@ impl CallService {
                     }
                     if c.state == CallState::Uncertain && !c.stop_requested {
                         c.stop_requested = true;
-                        jobs.push((c.authority.clone(), c.identity.clone()));
+                        let reason = if expired_owner.as_ref() == Some(&c.identity) {
+                            wechat_store::CallLocalEndReason::ControllerDisconnected
+                        } else {
+                            wechat_store::CallLocalEndReason::BackendStopped
+                        };
+                        jobs.push((c.authority.clone(), c.identity.clone(), reason));
                     }
                 }
                 if stop_media {
@@ -590,16 +687,56 @@ impl CallService {
                 self.mark_uncertain(&identity);
             }
         }
-        for (authority, identity) in jobs {
-            if matches!(
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    self.backend.stop(identity.clone())
-                )
-                .await,
-                Ok(Ok(BackendOutcome::Ended))
-            ) {
+        for (authority, identity, reason) in jobs {
+            if let Some(service) = self.self_weak.get().and_then(Weak::upgrade) {
+                tokio::spawn(async move {
+                    service.finish_stop(authority, identity, reason).await;
+                });
+            } else {
+                self.retry_stop(&identity);
+            }
+        }
+    }
+    fn retry_stop(&self, identity: &CallIdentity) {
+        if let Ok(mut s) = self.lock() {
+            if let Some(c) = s.call.as_mut().filter(|c| &c.identity == identity) {
+                c.stop_requested = false;
+            }
+        }
+    }
+    async fn finish_stop(
+        &self,
+        authority: AccountAuthority,
+        identity: CallIdentity,
+        reason: wechat_store::CallLocalEndReason,
+    ) {
+        // Waiting for an in-flight host reply must not block WebSocket close,
+        // observer reads or the actor that will deliver that same reply.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.backend.stop(identity.clone()),
+        )
+        .await
+        {
+            Ok(Ok(BackendOutcome::Ended)) => {
                 let _ = self.terminal(&authority, &identity);
+            }
+            Ok(_) => {
+                if self
+                    .backend
+                    .close_local(identity.clone(), reason)
+                    .await
+                    .is_ok()
+                {
+                    let _ = self.terminal(&authority, &identity);
+                } else {
+                    self.retry_stop(&identity);
+                }
+            }
+            Err(_) => {
+                // This waits again for the same stopping worker. It never
+                // prepares or retries a remote operation.
+                self.retry_stop(&identity);
             }
         }
     }
@@ -696,6 +833,7 @@ impl CallService {
             direction: c.direction,
             state: c.state,
             owned_by_this_client: owned,
+            controls: c.controls.clone(),
         }
     }
     pub async fn current(&self, account: &str, _principal: &str) -> Result<CallSnapshot> {
@@ -709,6 +847,9 @@ impl CallService {
         principal: &str,
         can_control: bool,
     ) -> Result<ControlConnection> {
+        if self.shutdown_state.load(Ordering::Acquire) != 0 {
+            return Err(error(CallErrorCode::Closed));
+        }
         self.maintenance().await;
         let authority = self.authority(account);
         let client_id = uuid::Uuid::new_v4().to_string();
@@ -788,6 +929,9 @@ impl CallService {
         caller: String,
         ttl: std::time::Duration,
     ) -> Result<CallIdentity> {
+        if self.shutdown_state.load(Ordering::Acquire) != 0 {
+            return Err(error(CallErrorCode::Closed));
+        }
         self.maintenance().await;
         if self.backend.authority(&authority.account_id).as_ref() != Some(&authority) {
             return Err(error(CallErrorCode::Stale));
@@ -818,6 +962,7 @@ impl CallService {
             owner: None,
             token: None,
             state: CallState::Offered,
+            controls: vec![],
             revision: 1,
             send_generation: 1,
             receive_generation: 1,
@@ -960,6 +1105,9 @@ impl CallService {
         Ok((identity, generation))
     }
     pub async fn command(self: &Arc<Self>, client: &str, command: CallCommand) -> Result<()> {
+        if self.shutdown_state.load(Ordering::Acquire) != 0 {
+            return Err(error(CallErrorCode::Closed));
+        }
         let request_id = command.request_id().to_owned();
         if request_id.is_empty()
             || request_id.len() > 200
@@ -1147,6 +1295,7 @@ impl CallService {
                             uuid::Uuid::new_v4().simple()
                         )),
                         state: CallState::Dialing,
+                        controls: vec![],
                         revision: 1,
                         send_generation: 1,
                         receive_generation: 1,
@@ -1418,6 +1567,44 @@ impl CallService {
             s.call = None;
             s.media.clear();
             self.broadcast(&mut s);
+        }
+        Ok(())
+    }
+    fn peer_control(&self, ticket: &Ticket, control: CallControl) -> Result<()> {
+        let mut s = self.lock()?;
+        if !self.ticket_current(&s, ticket) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let call = s.call.as_mut().expect("current call");
+        let update = CallParticipantControl {
+            participant_id: call.peer.clone(),
+            control: control.clone(),
+        };
+        if call.controls.contains(&update) {
+            return Ok(());
+        }
+        // The current backend supports one peer microphone. Additional control
+        // kinds must define their own independent replacement key.
+        call.controls = vec![update];
+        let event = CallEvent::Control {
+            call_id: call.identity.call_id().into(),
+            participant_id: call.peer.clone(),
+            control,
+        };
+        let authority = call.authority.clone();
+        let failed: Vec<_> = s
+            .clients
+            .iter()
+            .filter(|(_, peer)| peer.authority == authority)
+            .filter_map(|(id, peer)| {
+                peer.events
+                    .try_send(event.clone())
+                    .err()
+                    .map(|_| id.clone())
+            })
+            .collect();
+        for id in failed {
+            self.drop_client(&mut s, &id);
         }
         Ok(())
     }

@@ -290,6 +290,9 @@ enum Command {
         value: i16,
         frames: u8,
     },
+    PeerMicrophone {
+        muted: bool,
+    },
     BeginEnd,
     End,
     Stats,
@@ -376,6 +379,15 @@ async fn control(
             }
             Ok(json!({"frames":frames}))
         }
+        Command::PeerMicrophone { muted } => {
+            backend
+                .active_sink()
+                .map_err(|error| error.code())?
+                .peer_microphone(muted)
+                .await
+                .map_err(|error| error.code())?;
+            Ok(json!({"muted":muted}))
+        }
         Command::BeginEnd => {
             backend
                 .active_sink()
@@ -414,6 +426,28 @@ async fn run(root: &Path) -> Result<()> {
     let root = workspace::prepare(root)?;
     let store = Arc::new(Store::open(&workspace::hub_directory(&root)?)?);
     store.create_account(ACCOUNT)?;
+    // Model a previous process disappearing after journaling an invitation.
+    // The NoNetworkUpstream below makes any attempted replay fail closed.
+    let prior_call = "synthetic-restart-orphan";
+    store.begin_call(ACCOUNT, prior_call, "previous-process")?;
+    let vault = wechat_store::vault::Vault::open(&store.root.join("storage-key"), true)?;
+    let request = b"synthetic retained invitation; never submit";
+    let sealed = vault.seal(
+        ACCOUNT,
+        &format!("call-request:{prior_call}:invite"),
+        request,
+    )?;
+    {
+        use sha2::{Digest, Sha256};
+        store.begin_call_action(
+            ACCOUNT,
+            prior_call,
+            "invite",
+            10342,
+            &format!("{:x}", Sha256::digest(request)),
+            &sealed,
+        )?;
+    }
     let token_file = root.join("api-token");
     let token = wechat_api::provision_token(&token_file, true)?;
     let calls_token_file = root.join("calls-token");
@@ -436,6 +470,23 @@ async fn run(root: &Path) -> Result<()> {
         }
     }
     let core = Core::with_upstream(store, None, Arc::new(NoNetworkUpstream))?;
+    let recovered = core
+        .store
+        .call_session_status(ACCOUNT, prior_call)?
+        .context("restart session")?;
+    ensure!(
+        recovered.local_closed
+            && !recovered.remote_terminal_confirmed
+            && recovered.local_end_reason.as_deref() == Some("server_restart"),
+        "restart recovery mismatch"
+    );
+    let retained = core.store.call_action_records(ACCOUNT, prior_call)?;
+    ensure!(
+        retained.len() == 1
+            && retained[0].outcome == "needs_review"
+            && retained[0].encrypted_request.as_deref() == Some(sealed.as_slice()),
+        "restart receipt changed"
+    );
     let backend = Arc::new(Backend::new());
     Core::configure_calls(&core, backend.clone())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -451,7 +502,8 @@ async fn run(root: &Path) -> Result<()> {
     });
     emit(
         &json!({"event":"ready","baseUrl":format!("http://{address}"),"accountId":ACCOUNT,
-        "tokenFile":token_file,"callsTokenFile":calls_token_file,"nonCallsTokenFile":non_calls_token_file}),
+        "tokenFile":token_file,"callsTokenFile":calls_token_file,"nonCallsTokenFile":non_calls_token_file,
+        "restartRecovery":{"localClosed":true,"remoteConfirmed":false,"requestOutcome":"needs_review"}}),
     )?;
     let mut input = BufReader::new(tokio::io::stdin());
     while let Some(line) = input_line(&mut input).await? {
@@ -484,9 +536,7 @@ async fn run(root: &Path) -> Result<()> {
     }
     backend.hold_clear.send_replace(false);
     backend.hold_end.send_replace(false);
-    if backend.active_sink().is_ok() {
-        let _ = backend.end().await;
-    }
+    core.shutdown_gracefully().await;
     let _ = shutdown.send(());
     if tokio::time::timeout(Duration::from_secs(2), &mut server)
         .await

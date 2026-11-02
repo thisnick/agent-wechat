@@ -250,6 +250,7 @@ impl Fixture {
             lease: lease.clone(),
             stop: AtomicBool::new(false),
             media_stop: AtomicBool::new(false),
+            locally_closed: AtomicBool::new(false),
             generation: AtomicU32::new(1),
             submission: SendAdmission::default(),
             metrics: MediaMetrics::default(),

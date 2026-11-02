@@ -37,10 +37,10 @@ class Media implements CallMediaPort {
   close() { this.closed = true; this.input.close(); }
 }
 class Control implements CallControlPort {
-  eventsQueue = new Queue<CallEvent>(); media = new Media(); directAudio = true; closed = false; readied = 0; answers = 0; dials = 0; ends = 0; attaches = 0; clears = 0;
+  eventsQueue = new Queue<CallEvent>(); media = new Media(); directAudio = true; closed = false; connects = 0; readied = 0; answers = 0; dials = 0; ends = 0; attaches = 0; clears = 0;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
-  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
+  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
   events() { return this.eventsQueue; }
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);
@@ -64,13 +64,28 @@ function voiceFactory() {
 async function until(predicate: () => boolean) { for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(5); } assert.fail("Condition did not become true"); }
 async function fixture() { const client = new Control(); const voice = voiceFactory(); const cfg = configuration(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared }); await service.start(); return { service, client, voice }; }
 
-test("calling stays disabled independently of open messaging and requires its own complete configuration", () => {
+test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
   assert.throws(() => resolveWeChatCallsConfig({ enabled: true }), /configuration/);
   assert.throws(() => resolveWeChatCallsConfig({ enabled: true, provider: "p", agentId: "a", inboundAllowFrom: ["*"] }), /allowlist/);
   assert.throws(() => resolveWeChatCallsConfig({ enabled: true, provider: "p", agentId: "a", toolPolicy: "safe-read-only" }), /persistence/);
   const cfg = configuration(); delete (cfg.channels["agent-wechat"] as any).calls;
   const account = resolveWeChatAccount(cfg as any)!; assert.equal(account.dmPolicy, "open"); assert.equal(account.calls, undefined);
+  for (const calls of [undefined, { enabled: false }]) {
+    const disabledCfg = configuration(); (disabledCfg.channels["agent-wechat"] as any).calls = calls;
+    const disabledAccount = resolveWeChatAccount(disabledCfg as any)!;
+    const control = new Control(); let prepared = 0;
+    const disabled = new NativeCallService(disabledAccount, disabledCfg, {} as PluginRuntime, {
+      client: control, prepareVoice: async () => { prepared++; throw Error("Disabled voice must not prepare a provider"); },
+    });
+    await disabled.start();
+    control.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
+    control.eventsQueue.push({ type: "call.offered", offer });
+    await delay(1);
+    assert.equal(disabled.status().state, "disabled");
+    assert.deepEqual([prepared, control.connects, control.readied, control.answers, control.ends, control.dials], [0, 0, 0, 0, 0, 0]);
+    await disabled.stop();
+  }
 });
 test("provider and daemon capability failures never advertise readiness or claim", async () => {
   const cfg = configuration(); const client = new Control();
@@ -211,7 +226,14 @@ test("overlapping clears keep interrupted late chunks revoked and stale acknowle
 test("terminal ownership revocation stops old audio callbacks and does not manufacture a hangup", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
   client.eventsQueue.push({ type: "call.state", call: view("dial", "uncertain") }); await until(() => voice.state.closes === 1);
-  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "late" }); await delay(10); assert.equal(client.media.sent.length, 0); assert.equal(client.ends, 0); await service.stop();
+  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "late" }); await delay(10); assert.equal(client.media.sent.length, 0); assert.equal(client.ends, 0);
+  client.eventsQueue.push({ type: "call.state", call: view("other-call", "ended") });
+  await delay(1); assert.equal(service.status().state, "needs_review");
+  client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+  await until(() => service.status().state === "available");
+  assert.equal(client.dials, 1); assert.equal(client.ends, 0);
+  await service.stop();
 });
 test("minimal availability revocation also tears down the former owner's provider", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);

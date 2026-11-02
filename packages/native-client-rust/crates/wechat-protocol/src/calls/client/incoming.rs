@@ -35,6 +35,12 @@ pub struct NativeIncomingSession {
     reject_spent: bool,
 }
 impl NativeIncomingSession {
+    /// Current remote microphone state from the authenticated AV snapshot.
+    pub fn peer_microphone_muted(&self) -> Option<bool> {
+        (self.phase == IncomingPhase::Joined)
+            .then(|| self.base.peer_microphone_muted())
+            .flatten()
+    }
     /// Call only after a current account-owned live notification has been
     /// retained and a listening controller has reserved the global call slot.
     #[allow(clippy::too_many_arguments)]

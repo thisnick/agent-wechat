@@ -5,7 +5,7 @@
  * protocol actions. There are no device or codec dependencies. */
 import { validateNativeBaseUrl } from "./native-client.ts";
 import type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallMediaCommand, CallSnapshot, CallReadyScope } from "./native.generated.js";
-export type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope } from "./native.generated.js";
+export type { CallAudioFormat, CallAudioTrack, CallCommand, CallControl, CallParticipantControl, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope } from "./native.generated.js";
 
 export const NATIVE_CALL_MAX_FRAME_BYTES = 64 * 1024;
 export type NativeCallPcmFormat = CallAudioFormat;
@@ -104,10 +104,15 @@ function trackValue(value: unknown): value is CallAudioTrack {
     && ["send", "receive"].includes(String(value.direction)) && formatValue(value.format);
 }
 function availabilityValue(value: unknown): boolean { return object(value) && typeof value.busy === "boolean" && typeof value.ownedByThisClient === "boolean"; }
+function participantControlValue(value: unknown): boolean {
+  return object(value) && idValue(value.participantId) && object(value.control)
+    && value.control.kind === "microphone" && typeof value.control.muted === "boolean";
+}
 function callValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision)
     && ["direct", "conference"].includes(String(value.kind)) && ["voice", "video"].includes(String(value.callType)) && ["incoming", "outgoing"].includes(String(value.direction))
-    && ["offered", "dialing", "ringing", "connecting", "connected", "ending", "ended", "uncertain"].includes(String(value.state)) && typeof value.ownedByThisClient === "boolean";
+    && ["offered", "dialing", "ringing", "connecting", "connected", "ending", "ended", "uncertain"].includes(String(value.state)) && typeof value.ownedByThisClient === "boolean"
+    && (value.controls === undefined || (Array.isArray(value.controls) && value.controls.length <= 16 && value.controls.every(participantControlValue)));
 }
 function offerValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision) && idValue(value.callerId)
@@ -139,6 +144,7 @@ function parseCallEvent(data: unknown): CallEvent {
     case "call.offered": valid = offerValue(value.offer); break;
     case "call.pending": valid = value.offer === null || pendingOfferValue(value.offer); break;
     case "call.state": valid = callValue(value.call); break;
+    case "call.control": valid = idValue(value.callId) && participantControlValue(value); break;
     case "calls.availability": valid = availabilityValue(value.availability); break;
     case "track.added": case "track.updated": valid = idValue(value.callId) && trackValue(value.track); break;
     case "media.ready": valid = trackValue(value.sendTrack) && trackValue(value.receiveTrack)

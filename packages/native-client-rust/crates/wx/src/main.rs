@@ -867,7 +867,7 @@ async fn shutdown(core: Arc<Core>) {
     }
     #[cfg(windows)]
     tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{} }
-    core.shutdown();
+    core.shutdown_gracefully().await;
 }
 
 struct Remote {

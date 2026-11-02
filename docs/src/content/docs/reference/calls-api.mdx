@@ -49,7 +49,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 | `capabilities` | Available flags only; missing flags mean unavailable; `{}` means no calling |
 | `currentPendingOffer` | Incoming candidate waiting for readiness or preparation; cannot be answered |
 | `currentOffer` | Actionable incoming offer; clears when claimed or ended |
-| `currentCall` | Active call metadata, including `kind`, `callType`, direction and state |
+| `currentCall` | Active call metadata, including `kind`, `callType`, direction, state and reported participant `controls` |
 | `audioFormat` | Client/daemon PCM format, independent of the WeChat codec |
 
 Same-account observers see call metadata without owner tokens or audio access.
@@ -197,6 +197,8 @@ after answering/connecting:
 
 Mute outgoing audio; send `muted: false` to unmute. Clear queued outgoing audio
 when interrupting a response; see [stream generations](../calls-media/#mute-and-interrupt).
+`call.mute` silences this client's outgoing stream in the daemon. It does not
+send a remote microphone-control request or change the peer's microphone.
 
 ```json
 {
@@ -352,7 +354,16 @@ An actionable offer can be answered or rejected using its revision:
     "callType": "voice",
     "direction": "incoming",
     "state": "connected",
-    "ownedByThisClient": true
+    "ownedByThisClient": true,
+    "controls": [
+      {
+        "participantId": "example-contact",
+        "control": {
+          "kind": "microphone",
+          "muted": false
+        }
+      }
+    ]
   }
 }
 ```
@@ -398,8 +409,46 @@ An actionable offer can be answered or rejected using its revision:
 ```
 
 States are `offered`, `dialing`, `ringing`, `connecting`, `connected`, `ending`,
-`ended` and `uncertain`. Stop audio at `ending`; retain control until terminal
-confirmation. `uncertain` blocks another call until resolved.
+`ended` and `uncertain`. Stop audio at `ending`; keep control connected while the
+daemon finishes cleanup. `uncertain` reports an unconfirmed backend outcome;
+its network receipts are retained even when the local session closes.
+
+### Participant control events
+
+`call.control` reports a participant's control state. The current control kind is
+`microphone`; `muted: true` means muted, and `false` means unmuted. `participantId`
+is the contact ID used by the direct-call target or incoming offer.
+
+```json
+{
+  "type": "call.control",
+  "callId": "example-call",
+  "participantId": "example-contact",
+  "control": {
+    "kind": "microphone",
+    "muted": true
+  }
+}
+```
+
+```json
+{
+  "type": "call.control",
+  "callId": "example-call",
+  "participantId": "example-contact",
+  "control": {
+    "kind": "microphone",
+    "muted": false
+  }
+}
+```
+
+These events go to the owner and same-account observers. They need no reply;
+clients can ignore them. Repeated unchanged microphone state produces no event.
+The latest known values also appear in `currentCall.controls` in HTTP snapshots,
+`hello` and `call.state`. An omitted `controls` means no state has been reported.
+Control updates do not change the call-state revision or PCM format, end the call,
+or interrupt audio in the other direction.
 
 ### Audio generation and errors
 
@@ -437,8 +486,14 @@ Error codes are `invalid_request`, `busy`, `already_claimed`, `offer_expired`,
 
 :::note[Good to know]
 Reconnecting does not reclaim ownership. Control messages are limited to 16 KiB.
-Reply to server WebSocket Pings; a connection silent for 45 seconds closes,
-followed by five seconds for owner cleanup. `kind` is `direct` or `conference`;
+The server sends WebSocket Pings every 15 seconds. A connection without incoming
+traffic for 60 seconds closes. Closing the owner's socket stops media and starts
+call cleanup; another observer cannot keep that ownership alive. Muting or quiet
+audio does not count as a lost control connection.
+
+On daemon restart, previous calls are locally ended and `currentCall` is empty.
+Old requests are never replayed. A normal shutdown first attempts call cleanup;
+unconfirmed network outcomes remain recorded separately from local call state. `kind` is `direct` or `conference`;
 `callType` is `voice` or `video`. Only direct voice is currently implemented.
 Conference targets and video calls return `unsupported` with this backend.
 :::

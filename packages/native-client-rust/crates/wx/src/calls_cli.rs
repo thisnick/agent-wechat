@@ -267,6 +267,21 @@ impl Control {
                 }
             }
             CallEvent::State { call } => self.call = Some(call.clone()),
+            CallEvent::Control {
+                call_id,
+                participant_id,
+                control,
+            } => {
+                if let Some(call) = self.call.as_mut().filter(|call| call.call_id == *call_id) {
+                    call.controls
+                        .retain(|item| item.participant_id != *participant_id);
+                    call.controls
+                        .push(wechat_core::call_types::CallParticipantControl {
+                            participant_id: participant_id.clone(),
+                            control: control.clone(),
+                        });
+                }
+            }
             CallEvent::Availability { availability } => {
                 self.availability = *availability;
                 // Availability begins each new snapshot batch; a still-current

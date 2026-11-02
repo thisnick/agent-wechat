@@ -209,6 +209,7 @@ struct Worker {
     lease: CallAuthorityLease,
     stop: AtomicBool,
     media_stop: AtomicBool,
+    locally_closed: AtomicBool,
     generation: AtomicU32,
     submission: SendAdmission,
     metrics: MediaMetrics,
@@ -225,6 +226,15 @@ struct QueuedAudio {
     queued: Instant,
 }
 impl Worker {
+    fn reusable(&self) -> bool {
+        self.done.lock().is_ok_and(|done| {
+            done.is_some_and(|outcome| {
+                matches!(outcome, BackendOutcome::Ended)
+                    || self.locally_closed.load(Ordering::Acquire)
+            })
+        })
+    }
+
     fn scope_current(&self) -> bool {
         scope_current(self.scope_deadline, self.scope_expires_unix_ms)
     }
@@ -361,6 +371,7 @@ impl CallBackend for NativeCallBackend {
                 lease,
                 stop: AtomicBool::new(false),
                 media_stop: AtomicBool::new(false),
+                locally_closed: AtomicBool::new(false),
                 generation: AtomicU32::new(1),
                 submission: SendAdmission::default(),
                 metrics: MediaMetrics::default(),
@@ -377,12 +388,7 @@ impl CallBackend for NativeCallBackend {
                     .active
                     .lock()
                     .map_err(|_| service_error(CallErrorCode::Closed))?;
-                if active.as_ref().is_some_and(|old| {
-                    !matches!(
-                        old.done.lock().ok().and_then(|o| *o),
-                        Some(BackendOutcome::Ended)
-                    )
-                }) {
+                if active.as_ref().is_some_and(|old| !old.reusable()) {
                     return Err(service_error(CallErrorCode::Busy));
                 }
                 if !consume_test_intent(&inner.test_spent) {
@@ -409,15 +415,23 @@ impl CallBackend for NativeCallBackend {
                         )
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("Call worker panicked")));
-                    let terminal =
-                        result.is_ok() || !actor_worker.mutations_submitted.load(Ordering::Acquire);
+                    let no_mutation = !actor_worker.mutations_submitted.load(Ordering::Acquire);
+                    let terminal = result.is_ok() || no_mutation;
                     if result.is_err() {
                         if let Some(core) = actor_inner.core.upgrade() {
-                            let _ = core.store.finish_call(
-                                &actor_inner.config.account_id,
-                                actor_worker.identity.call_id(),
-                                terminal,
-                            );
+                            let _ = if no_mutation {
+                                core.store.close_call_locally(
+                                    &actor_inner.config.account_id,
+                                    actor_worker.identity.call_id(),
+                                    wechat_store::CallLocalEndReason::NoRemoteMutation,
+                                )
+                            } else {
+                                core.store.finish_call(
+                                    &actor_inner.config.account_id,
+                                    actor_worker.identity.call_id(),
+                                    false,
+                                )
+                            };
                         }
                     }
                     let outcome = if terminal {
@@ -487,6 +501,47 @@ impl CallBackend for NativeCallBackend {
     fn stop(&self, identity: CallIdentity) -> BackendFuture<BackendOutcome> {
         let inner = self.inner.clone();
         Box::pin(async move { stop_inner(&inner, identity).await })
+    }
+    fn close_local(
+        &self,
+        identity: CallIdentity,
+        reason: wechat_store::CallLocalEndReason,
+    ) -> BackendFuture<()> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = inner
+                .active
+                .lock()
+                .map_err(|_| service_error(CallErrorCode::Closed))?
+                .as_ref()
+                .filter(|worker| worker.identity == identity)
+                .cloned();
+            if let Some(worker) = &worker {
+                let done = worker
+                    .done
+                    .lock()
+                    .map_err(|_| service_error(CallErrorCode::Closed))?
+                    .is_some();
+                if !done && reason != wechat_store::CallLocalEndReason::ServerShutdown {
+                    return Err(service_error(CallErrorCode::OutcomeUnknown));
+                }
+            }
+            let core = inner
+                .core
+                .upgrade()
+                .ok_or_else(|| service_error(CallErrorCode::Closed))?;
+            let _guard = core
+                .lock_account(&inner.config.account_id)
+                .await
+                .map_err(|_| service_error(CallErrorCode::Closed))?;
+            core.store
+                .close_call_locally(&inner.config.account_id, identity.call_id(), reason)
+                .map_err(|_| service_error(CallErrorCode::Closed))?;
+            if let Some(worker) = worker {
+                worker.locally_closed.store(true, Ordering::Release);
+            }
+            Ok(())
+        })
     }
 }
 fn service_error(code: CallErrorCode) -> CallServiceError {
@@ -924,6 +979,9 @@ fn run_control(
         "Peer call admission incomplete"
     );
     let negotiated = session.take_media(&state, auth, 0, 0)?;
+    if let Some(muted) = session.peer_microphone_muted() {
+        let _ = runtime.block_on(sink.peer_microphone(muted));
+    }
     let cfg = inner.config.clone();
     let media_worker = worker.clone();
     let media_sink = sink.clone();
@@ -954,7 +1012,11 @@ fn run_control(
                 break;
             }
             match session.poll(&transport, &mut state, auth, tasks.next()?) {
-                Ok(SyncProgress::MediaReady) => {}
+                Ok(SyncProgress::MediaReady) => {
+                    if let Some(muted) = session.peer_microphone_muted() {
+                        let _ = runtime.block_on(sink.peer_microphone(muted));
+                    }
+                }
                 Ok(SyncProgress::Terminal(_)) => {
                     worker.media_stop.store(true, Ordering::Release);
                     break;

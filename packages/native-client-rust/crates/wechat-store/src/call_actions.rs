@@ -13,9 +13,33 @@ pub struct CallActionRecord {
     pub encrypted_request: Option<Vec<u8>>,
     pub encrypted_reply: Option<Vec<u8>>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CallLocalEndReason {
+    ControllerDisconnected,
+    BackendStopped,
+    ServerShutdown,
+    NoRemoteMutation,
+}
+impl CallLocalEndReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ControllerDisconnected => "controller_disconnected",
+            Self::BackendStopped => "backend_stopped",
+            Self::ServerShutdown => "server_shutdown",
+            Self::NoRemoteMutation => "not_submitted",
+        }
+    }
+}
+/// Operational session status, separate from retained wire action outcomes and
+/// canonical chat history. Local closure does not assert remote success.
+pub struct CallSessionStatus {
+    pub local_closed: bool,
+    pub local_end_reason: Option<String>,
+    pub remote_terminal_confirmed: bool,
+}
 impl Store {
-    /// Reserve a session once. Existing unresolved sessions stop new calls after
-    /// a crash; this journal never retries an invitation automatically.
+    /// Reserve a session once. An unfinished local session blocks reservation
+    /// until cleanup or startup recovery closes it; requests are never retried.
     pub fn begin_call(
         &self,
         account: &str,
@@ -84,7 +108,7 @@ impl Store {
             let tx=db.transaction()?;
             let changed=tx.execute("UPDATE call_actions SET outcome=?3,encrypted_reply=?4,updated_at=?5 WHERE call_id=?1 AND action_id=?2 AND outcome='prepared'",params![call_id,action_id,outcome,encrypted_reply,unix_seconds()])?;
             if changed!=1{bail!("call_action_already_recorded");}
-            if outcome=="needs_review"{tx.execute("UPDATE call_sessions SET state='needs_review',updated_at=?2 WHERE call_id=?1",params![call_id,unix_seconds()])?;}
+            if outcome=="needs_review"{tx.execute("UPDATE call_sessions SET state='needs_review',updated_at=?2 WHERE call_id=?1 AND state!='ended'",params![call_id,unix_seconds()])?;}
             tx.commit()?;Ok(())
         })
     }
@@ -123,7 +147,7 @@ impl Store {
         }
         self.control(account, |db| {
             let changed = db.execute(
-                "UPDATE call_sessions SET state=?2,updated_at=?3 WHERE call_id=?1",
+                "UPDATE call_sessions SET state=CASE WHEN state='ended' THEN state ELSE ?2 END,updated_at=?3,remote_terminal_confirmed=MAX(remote_terminal_confirmed,?4) WHERE call_id=?1",
                 params![
                     call_id,
                     if confirmed_terminal {
@@ -131,7 +155,8 @@ impl Store {
                     } else {
                         "needs_review"
                     },
-                    unix_seconds()
+                    unix_seconds(),
+                    confirmed_terminal
                 ],
             )?;
             if changed != 1 {
@@ -142,9 +167,36 @@ impl Store {
     }
     pub fn recover_call_sessions(&self, account: &str) -> Result<()> {
         self.control(account,|db|{let tx=db.transaction()?;
-            tx.execute("UPDATE call_sessions SET state='needs_review',updated_at=?1 WHERE state='active'",[unix_seconds()])?;
+            // No owning socket or relay session survives this process restart.
+            // Never infer a remote result or replay an old request here.
+            tx.execute("UPDATE call_sessions SET state='ended',local_end_reason='server_restart',updated_at=?1 WHERE state!='ended'",[unix_seconds()])?;
             tx.execute("UPDATE call_actions SET outcome='needs_review',updated_at=?1 WHERE outcome='prepared'",[unix_seconds()])?;
             tx.commit()?;Ok(())})
+    }
+    pub fn close_call_locally(
+        &self,
+        account: &str,
+        call_id: &str,
+        reason: CallLocalEndReason,
+    ) -> Result<()> {
+        if !id(call_id) {
+            bail!("invalid_call_intent");
+        }
+        self.control(account, |db| {
+            db.execute("UPDATE call_sessions SET state='ended',local_end_reason=COALESCE(local_end_reason,?2),updated_at=?3 WHERE call_id=?1 AND remote_terminal_confirmed=0",
+                params![call_id,reason.as_str(),unix_seconds()])?;
+            Ok(())
+        })
+    }
+    pub fn call_session_status(
+        &self,
+        account: &str,
+        call_id: &str,
+    ) -> Result<Option<CallSessionStatus>> {
+        self.control(account, |db| Ok(db.query_row(
+            "SELECT state='ended',local_end_reason,remote_terminal_confirmed FROM call_sessions WHERE call_id=?1",[call_id],
+            |row| Ok(CallSessionStatus { local_closed:row.get(0)?,local_end_reason:row.get(1)?,remote_terminal_confirmed:row.get(2)? })
+        ).optional()?))
     }
     pub fn call_action_records(
         &self,
@@ -219,14 +271,49 @@ mod tests {
         let record = store.call_action_records("a", "c").unwrap().remove(0);
         assert_eq!(record.outcome, "received");
         assert_eq!(record.encrypted_reply.as_deref(), Some(reply.as_slice()));
-        assert!(!store.begin_call("a", "next", "generation2").unwrap());
-        assert!(store.has_unresolved_call("a").unwrap());
+        assert!(!store.has_unresolved_call("a").unwrap());
+        let status = store.call_session_status("a", "c").unwrap().unwrap();
+        assert!(status.local_closed);
+        assert_eq!(status.local_end_reason.as_deref(), Some("server_restart"));
+        assert!(!status.remote_terminal_confirmed);
+        assert!(store.begin_call("a", "next", "generation2").unwrap());
+        store
+            .begin_call_action("a", "next", "late", 11421, &"c".repeat(64), &sealed)
+            .unwrap();
+        store
+            .close_call_locally("a", "next", CallLocalEndReason::ServerShutdown)
+            .unwrap();
+        store
+            .finish_call_action("a", "next", "late", "needs_review", None)
+            .unwrap();
+        let closed = store.call_session_status("a", "next").unwrap().unwrap();
+        assert!(closed.local_closed);
+        assert_eq!(closed.local_end_reason.as_deref(), Some("server_shutdown"));
+        assert!(!closed.remote_terminal_confirmed);
+        assert!(!store.has_unresolved_call("a").unwrap());
+        let late = store.call_action_records("a", "next").unwrap().remove(0);
+        assert_eq!(late.outcome, "needs_review");
+        assert_eq!(late.encrypted_request.as_deref(), Some(sealed.as_slice()));
+
         assert!(store
             .begin_call_action("a", "c", "1", 10342, &"a".repeat(64), &sealed)
             .is_err());
-
+        store.finish_call("a", "c", false).unwrap();
+        assert!(
+            store
+                .call_session_status("a", "c")
+                .unwrap()
+                .unwrap()
+                .local_closed
+        );
         store.finish_call("a", "c", true).unwrap();
-        assert!(store.begin_call("a", "next", "generation2").unwrap());
+        assert!(
+            store
+                .call_session_status("a", "c")
+                .unwrap()
+                .unwrap()
+                .remote_terminal_confirmed
+        );
     }
     #[test]
     fn proven_non_submission_preserves_intent_and_never_reuses_the_action() {
@@ -307,7 +394,7 @@ mod tests {
                     if version == 10 {
                         db.execute_batch(include_str!("../migrations/account/V010__call_request_context.sql"))?;
                     }
-                    db.execute("INSERT INTO call_sessions VALUES('old','generation','active',1)", [])?;
+                    db.execute("INSERT INTO call_sessions(call_id,authority_generation,state,updated_at) VALUES('old','generation','active',1)", [])?;
                     db.execute("INSERT INTO call_actions(rowid,call_id,action_id,route,request_digest,outcome,encrypted_reply,updated_at) VALUES(4,'old','first',9262,?1,'prepared',NULL,1)", ["a".repeat(64)])?;
                     db.execute("INSERT INTO call_actions(rowid,call_id,action_id,route,request_digest,outcome,encrypted_reply,updated_at) VALUES(42,'old','last',11421,?1,'received',?2,2)", params!["b".repeat(64), &[2_u8; 30][..]])?;
                     if version == 10 {
@@ -336,7 +423,7 @@ mod tests {
                 .control("a", |db| {
                     assert_eq!(
                         db.pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))?,
-                        11
+                        12
                     );
                     let rows = db
                         .prepare("SELECT rowid FROM call_actions ORDER BY rowid")?
@@ -356,7 +443,7 @@ mod tests {
             assert_eq!(records[0].outcome, "needs_review");
             assert!(records[0].encrypted_request.is_none());
             assert_eq!(records[1].outcome, "received");
-            assert!(!store.begin_call("a", "new", "new-generation").unwrap());
+            assert!(store.begin_call("a", "new", "new-generation").unwrap());
             assert!(store
                 .finish_call_action_not_submitted("a", "old", "first")
                 .is_err());

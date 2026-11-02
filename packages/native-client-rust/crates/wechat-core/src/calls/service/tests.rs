@@ -112,6 +112,14 @@ impl CallBackend for FakeBackend {
         let outcome = *self.stop_outcome.lock().unwrap();
         Box::pin(async move { Ok(outcome) })
     }
+    fn close_local(
+        &self,
+        _: CallIdentity,
+        _: wechat_store::CallLocalEndReason,
+    ) -> BackendFuture<Result<()>> {
+        // This policy fixture has no actor or remote request to keep running.
+        Box::pin(async { Ok(()) })
+    }
 }
 fn auth(account: &str, generation: &str) -> AccountAuthority {
     AccountAuthority {
@@ -226,6 +234,52 @@ async fn mute_interrupts_queued_audio_once_and_sends_silence_in_the_new_generati
     let service = Arc::new(CallService::new(backend.clone()));
     let mut owner = ready(&service, "a", "owner").await;
     let (sink, call, token) = connected_call(&service, &mut attempts, &mut owner).await;
+    let mut observer = service.connect("a", "observer", false).await.unwrap();
+    let mut other = service.connect("b", "other", false).await.unwrap();
+    assert!(matches!(
+        observer.events.recv().await.unwrap(),
+        CallEvent::Hello { .. }
+    ));
+    assert!(matches!(
+        other.events.recv().await.unwrap(),
+        CallEvent::Hello {
+            current_call: None,
+            ..
+        }
+    ));
+    for muted in [false, true, false] {
+        sink.peer_microphone(muted).await.unwrap();
+        for connection in [&mut owner, &mut observer] {
+            let event = tokio::time::timeout(Duration::from_secs(1), connection.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(event, CallEvent::Control {
+                call_id, participant_id, control: CallControl::Microphone { muted: value }
+            } if call_id == call && participant_id == "synthetic-contact" && value == muted));
+        }
+        assert!(other.events.try_recv().is_err());
+        let snapshot = service.current("a", "observer").await.unwrap();
+        let control = &snapshot.current_call.unwrap().controls[0];
+        assert_eq!(control.participant_id, "synthetic-contact");
+        assert_eq!(control.control, CallControl::Microphone { muted });
+        sink.peer_microphone(muted).await.unwrap();
+        assert!(owner.events.try_recv().is_err());
+        assert!(observer.events.try_recv().is_err());
+    }
+    let mut late = service.connect("a", "late observer", false).await.unwrap();
+    let CallEvent::Hello {
+        current_call: Some(view),
+        ..
+    } = late.events.recv().await.unwrap()
+    else {
+        panic!("Current controls must be included for a late observer")
+    };
+    assert_eq!(
+        view.controls[0].control,
+        CallControl::Microphone { muted: false }
+    );
+    assert!(!view.owned_by_this_client);
     let mut media = service
         .attach_media("a", "owner", &call, &owner.client_id, &token)
         .await
@@ -314,6 +368,8 @@ async fn mute_interrupts_queued_audio_once_and_sends_silence_in_the_new_generati
     service.media_frame(&media.id, &bytes).await.unwrap();
     assert_eq!(backend.submitted_pcm.lock().unwrap().len(), 1);
     service.validate_media(&media.id).await.unwrap();
+    sink.ended().await.unwrap();
+    assert!(sink.peer_microphone(true).await.is_err());
 }
 
 #[tokio::test]
@@ -362,25 +418,25 @@ async fn held_initial_start_is_revoked_by_cancel_or_disconnect_and_cannot_revive
             .unwrap_or_else(|_| panic!("held start outcome"));
         for _ in 0..100 {
             tokio::task::yield_now().await;
-            let snapshot = service.current("a", "observer").await.unwrap();
-            let call_state = service.lock().unwrap().call.as_ref().map(|call| call.state);
-            if terminal && !snapshot.availability.busy {
-                break;
-            }
-            if !terminal && call_state == Some(CallState::Uncertain) {
+            if !service
+                .current("a", "observer")
+                .await
+                .unwrap()
+                .availability
+                .busy
+            {
                 break;
             }
         }
-        let snapshot = service.current("a", "observer").await.unwrap();
-        if terminal {
-            assert!(!snapshot.availability.busy);
-        } else {
-            assert!(snapshot.availability.busy);
-            assert_eq!(
-                service.lock().unwrap().call.as_ref().unwrap().state,
-                CallState::Uncertain
-            );
-        }
+        assert!(
+            !service
+                .current("a", "observer")
+                .await
+                .unwrap()
+                .availability
+                .busy
+        );
+        assert!(!attempt.sink.is_current());
     }
 }
 
@@ -421,17 +477,20 @@ async fn slow_owner_control_reader_is_disconnected_and_queued_media_is_not_autho
     assert!(sink.audio(&[0; 320]).await.is_err());
 
     service.disconnect(&owner.client_id).await;
-    assert!(
-        service
+    for _ in 0..100 {
+        if !service
             .current("b", "observer")
             .await
             .unwrap()
             .availability
             .busy
-    );
-    tokio::time::sleep(Duration::from_millis(5100)).await;
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert!(
-        service
+        !service
             .current("b", "observer")
             .await
             .unwrap()
@@ -442,15 +501,25 @@ async fn slow_owner_control_reader_is_disconnected_and_queued_media_is_not_autho
     service.disconnect(&owner.client_id).await;
     service.current("a", "owner").await.unwrap();
     assert_eq!(backend.stopped.lock().unwrap().len(), 1);
-    sink.ended().await.unwrap();
+    assert!(sink.ended().await.is_err());
+
+    // A fresh controller can own a new call. Graceful shutdown stops it once
+    // and a late callback cannot recreate a session in this daemon.
+    let mut next_owner = ready(&service, "a", "next owner").await;
+    let (next_sink, _, _) = connected_call(&service, &mut attempts, &mut next_owner).await;
+    service.shutdown().await;
+    service.shutdown().await;
+    assert_eq!(backend.stopped.lock().unwrap().len(), 2);
     assert!(
         !service
-            .current("b", "observer")
+            .current("a", "observer")
             .await
             .unwrap()
             .availability
             .busy
     );
+    assert!(service.connect("a", "new", false).await.is_err());
+    assert!(next_sink.connected().await.is_err());
 }
 
 #[tokio::test]

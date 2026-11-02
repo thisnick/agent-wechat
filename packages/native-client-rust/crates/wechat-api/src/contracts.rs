@@ -435,6 +435,8 @@ pub fn typescript() -> String {
         wechat_core::call_types::CallPendingOffer::decl(),
         wechat_core::call_types::CallReadyScope::decl(),
         wechat_core::call_types::CallView::decl(),
+        wechat_core::call_types::CallControl::decl(),
+        wechat_core::call_types::CallParticipantControl::decl(),
         wechat_core::call_types::CallsAvailability::decl(),
         wechat_core::call_types::CallSnapshot::decl(),
         wechat_core::call_types::CallCommand::decl(),

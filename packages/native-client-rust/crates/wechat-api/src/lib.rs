@@ -499,7 +499,7 @@ async fn shutdown_daemon(
     {
         return Err(ApiError(StatusCode::CONFLICT, "daemon_ownership_mismatch"));
     }
-    app.core.shutdown();
+    app.core.shutdown_gracefully().await;
     Ok(Json(json!({"state":"stopping","logout":false})))
 }
 async fn status(State(app): State<App>, Extension(c): Extension<Claims>) -> ApiResult<Json<Value>> {

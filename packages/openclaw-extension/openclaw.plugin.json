@@ -160,7 +160,8 @@
         "properties": {
           "enabled": {
             "type": "boolean",
-            "default": false
+            "default": false,
+            "description": "Enable direct voice calling. When disabled, incoming calls are ignored by this plugin."
           },
           "inboundPolicy": {
             "type": "string",
@@ -430,7 +431,8 @@
             "properties": {
               "enabled": {
                 "type": "boolean",
-                "default": false
+                "default": false,
+                "description": "Enable direct voice calling. When disabled, incoming calls are ignored by this plugin."
               },
               "inboundPolicy": {
                 "type": "string",

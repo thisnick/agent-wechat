@@ -87,6 +87,15 @@ test('ending stops audio but retains owner transports until terminal confirmatio
     try {
       await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
       const media = await owner.attachMedia('call-1');
+      const events = owner.events()[Symbol.asyncIterator]();
+      for (const muted of [false, true, false]) {
+        const control = { type: 'call.control', callId: 'call-1', participantId: 'synthetic-contact', control: { kind: 'microphone', muted } };
+        server.controls[0].receive(control);
+        let event;
+        do { event = (await events.next()).value; } while (event.type !== 'call.control');
+        assert.deepEqual(event, control);
+        assert.equal(server.media[0].readyState, 1);
+      }
       const snapshot = { callId: 'call-1', revision: 2, kind: 'direct', callType: 'voice', direction: 'outgoing', state: 'ending', ownedByThisClient: true };
       server.controls[0].receive({ type: 'call.state', call: snapshot });
       assert.equal(server.controls[0].readyState, 1);
@@ -160,6 +169,13 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
     invalidServer.controls[0].receive({ type: 'call.offered', offer: { ...offer, callType: 'video' } });
     assert.equal(invalidServer.controls[0].readyState, 1);
     invalidServer.controls[0].receive({ type: 'call.offered', offer: malformed });
+    assert.equal(invalidServer.controls[0].readyState, 3);
+    invalidClient.close();
+  }
+  for (const control of [{ kind: 'microphone', muted: 'yes' }, { kind: 'microphone' }]) {
+    const invalidServer = new MockCallServer(); const invalidClient = client(invalidServer);
+    await invalidClient.connect();
+    invalidServer.controls[0].receive({ type: 'call.control', callId: 'call-1', participantId: 'synthetic-contact', control });
     assert.equal(invalidServer.controls[0].readyState, 3);
     invalidClient.close();
   }

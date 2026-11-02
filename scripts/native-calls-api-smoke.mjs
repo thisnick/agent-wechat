@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -19,7 +20,7 @@ const suffix = process.platform === "win32" ? ".exe" : "";
 const fixtureBinary = process.env.WX_CALLS_FIXTURE_BINARY ?? join(repository, "packages/native-client-rust/target/debug", `wx-calls-fixture${suffix}`);
 const cliBinary = process.env.WX_BINARY ?? join(dirname(fixtureBinary), `wx${suffix}`);
 if (process.argv.includes("--help")) {
-  console.log("Account-free Rust call API / SDK / OpenClaw smoke. Set WX_CALLS_FIXTURE_BINARY; optional WX_BINARY enables CLI status and passive monitor checks. --skip-cli isolates SDK/plugin diagnostics. No WeChat or voice-provider connection is made.");
+  console.log("Account-free Rust call API / SDK / OpenClaw smoke. Set WX_CALLS_FIXTURE_BINARY; optional WX_BINARY enables CLI status and passive monitor checks. --skip-cli isolates SDK/plugin diagnostics. --check-heartbeat adds a real 60-second no-Pong owner cleanup check. No WeChat or voice-provider connection is made.");
   process.exit(0);
 }
 
@@ -109,6 +110,7 @@ try {
   const ready = await bounded(readyPromise, "fixture startup");
   const url = new URL(ready.baseUrl);
   assert.equal(url.protocol, "http:"); assert.equal(url.hostname, "127.0.0.1"); assert.ok(url.port);
+  assert.deepEqual(ready.restartRecovery, { localClosed: true, remoteConfirmed: false, requestOutcome: "needs_review" });
   assert.equal(url.username, ""); assert.equal(url.password, ""); assert.equal(ready.accountId, "calls-fixture");
   const token = (await readFile(ready.callsTokenFile, "utf8")).trim();
   const nonCallsToken = (await readFile(ready.nonCallsTokenFile, "utf8")).trim();
@@ -194,6 +196,19 @@ try {
   assert.deepEqual(currentSnapshot.currentCall, { callId: offer.callId, revision: winnerEvents.events.findLast(event => event.type === "call.state" && event.call.state === "connected").call.revision, kind: "direct", callType: "voice", direction: "incoming", state: "connected", ownedByThisClient: false });
   assert.equal("ownerToken" in currentSnapshot, false);
   assert.equal((await control("stats")).stats.answer, 1, "The losing claim must not reach the backend");
+  for (const muted of [true, false]) {
+    await control("peer_microphone", { muted });
+    await until("peer control delivered to owner and observer", () => [winnerEvents, observing].every(reader => {
+      const update = reader.events.findLast(event => event.type === "call.control");
+      return update?.callId === offer.callId && update.participantId === "synthetic-peer"
+        && update.control.kind === "microphone" && update.control.muted === muted;
+    }));
+  }
+  const lateObserver = new NativeCallsClient(options); watch(lateObserver);
+  const lateHello = await lateObserver.connect();
+  assert.deepEqual(lateHello.currentCall.controls, [{ participantId: "synthetic-peer", control: { kind: "microphone", muted: false } }]);
+  assert.equal(lateHello.currentCall.ownedByThisClient, false);
+  if (cli === "status-and-passive-monitor") await until("CLI peer control event", () => monitorEvents.some(event => event.type === "call.control"));
   await assert.rejects(loser.dial(randomUUID(), "synthetic-peer"), error => error instanceof NativeCallError && error.code === "busy");
   const loserHello = loserEvents.events.find(event => event.type === "hello");
   const mismatched = new NativeCallMediaClient(options, offer.callId, { type: "media.attach", clientId: loserHello.clientId, ownerToken: winnerResult.ownerToken });
@@ -312,9 +327,35 @@ try {
   callbacks.audio(pcm(3200), { itemId: "after-end" }); await delay(30);
   assert.equal((await control("stats")).stats.audioFrames, final.audioFrames);
   await service.stop();
+  let heartbeatOwnerLoss = "not-run";
+  if (process.argv.includes("--check-heartbeat")) {
+    const WebSocket = createRequire(new URL("../packages/shared/package.json", import.meta.url))("ws");
+    const heartbeatObserver = new NativeCallsClient(options);
+    const heartbeatEvents = watch(heartbeatObserver);
+    await heartbeatObserver.connect();
+    let pings = 0;
+    const silent = new NativeCallsClient({ ...options, webSocketFactory: (url, settings) => {
+      const socket = new WebSocket(url, { headers: settings.headers, maxPayload: settings.maxPayload, autoPong: false });
+      socket.on("ping", () => { pings++; });
+      return socket;
+    } });
+    const silentEvents = watch(silent); silentEvents.closing = true;
+    await silent.connect(); await silent.ready(randomUUID(), true);
+    const oldControls = heartbeatEvents.events.filter(event => event.type === "calls.availability").length;
+    const began = Date.now();
+    await silent.dial(randomUUID(), "synthetic-peer");
+    await until("unresponsive owner is connected", () => availability(heartbeatEvents)?.busy === true);
+    await bounded((async () => {
+      while (heartbeatEvents.events.filter(event => event.type === "calls.availability").length <= oldControls || availability(heartbeatEvents)?.busy !== false) await delay(25);
+    })(), "60-second WebSocket liveness cleanup", 75000);
+    assert.ok(Date.now() - began >= 59000, "A healthy observer must not change the owner's idle deadline");
+    assert.ok(pings >= 3, "The server must probe the owning connection");
+    assert.equal((await control("stats")).stats.active, false);
+    heartbeatOwnerLoss = "passed";
+  }
   summary = { state: "passed", fixture: "trusted-acked-and-outgoing-synthetic-calls", pendingIngressIntegrated: false,
     sdkAnswerWinner: winnerIndex, sdkDuplexFrames: received.length, pluginNewGeneration: afterClear.lastTxGeneration, pluginExplicitHangups: final.hangup - before.hangup,
-    heldEndingRetained: true, inFlightEndingPcmDropped: true, cli };
+    heldEndingRetained: true, inFlightEndingPcmDropped: true, peerControlsAndLateSnapshot: true, restartRecovery: true, heartbeatOwnerLoss, cli };
 } finally {
   let cleanupError, fixtureExit;
   await service?.stop().catch(() => {});

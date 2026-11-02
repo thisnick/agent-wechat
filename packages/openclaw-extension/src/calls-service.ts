@@ -40,6 +40,7 @@ export class NativeCallService {
   private active?: Owned;
   private stopped = false;
   private busy = false;
+  private unconfirmedCallId?: string;
   private seen = new Set<string>();
   private loop?: Promise<void>;
   private state = "disabled";
@@ -89,6 +90,10 @@ export class NativeCallService {
         } else if (event.type === "call.pending" && event.offer) this.pending(event.offer);
         else if (event.type === "call.offered") this.offer(event.offer);
         else if (event.type === "call.state") {
+          if (event.call.state === "ended" && this.unconfirmedCallId === event.call.callId && !this.active) {
+            this.unconfirmedCallId = undefined;
+            this.state = this.busy ? "busy" : "available";
+          }
           const active = this.active;
           if (!active || (active.callId && active.callId !== event.call.callId)) continue;
           if (event.call.kind !== "direct") { this.state = "needs_review"; await this.retire(active); this.client?.close(); continue; }
@@ -103,6 +108,7 @@ export class NativeCallService {
             if (event.call.state === "ending") { active.endStarted = true; this.armTerminalWait(active); }
             else {
               this.state = event.call.state === "uncertain" ? "needs_review" : "available";
+              this.unconfirmedCallId = event.call.state === "uncertain" ? event.call.callId : undefined;
               await this.retire(active);
             }
           } else if (event.call.state === "connected" && active.claimed) void this.attach(active);
