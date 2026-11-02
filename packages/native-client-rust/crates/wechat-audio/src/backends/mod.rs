@@ -16,6 +16,40 @@ mod windows;
 
 const NATIVE_RATE: u32 = 48_000;
 
+pub(crate) fn devices() -> Result<Vec<crate::AudioDevice>, AudioError> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::devices()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::devices()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // VoiceProcessingIO follows OS defaults; custom endpoint routing is not
+        // supported by this adapter. Do not advertise unusable endpoint IDs.
+        Ok(vec![
+            crate::AudioDevice {
+                input: true,
+                id: None,
+                name: "System default microphone".into(),
+                is_default: true,
+            },
+            crate::AudioDevice {
+                input: false,
+                id: None,
+                name: "System default speaker".into(),
+                is_default: true,
+            },
+        ])
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        Err(AudioError::Unsupported)
+    }
+}
+
 trait DeviceBackend {
     fn aec_status(&self) -> AecStatus;
     fn poll(&mut self) -> Result<(), AudioError>;

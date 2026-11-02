@@ -1064,6 +1064,14 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Devices)
+        }
+    ) {
+        return calls_cli::devices(cli.json).await;
+    }
     if matches!(&cli.command, Command::Calls { command: None }) {
         let mut command = <Cli as clap::CommandFactory>::command();
         command

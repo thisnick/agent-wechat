@@ -1,6 +1,6 @@
 // WASAPI setup adapted from sys-voice; see THIRD-PARTY.md.
 use super::{DeviceBackend, NATIVE_RATE};
-use crate::{AecStatus, AudioConfig, AudioError, PlaybackHandle};
+use crate::{AecStatus, AudioConfig, AudioDevice, AudioError, PlaybackHandle};
 use std::sync::mpsc::SyncSender;
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
@@ -27,6 +27,36 @@ pub(super) struct Backend {
 }
 fn error(e: impl std::fmt::Debug) -> AudioError {
     AudioError::Backend(format!("WASAPI: {e:?}"))
+}
+
+pub(super) fn devices() -> Result<Vec<AudioDevice>, AudioError> {
+    let hr = wasapi::initialize_mta();
+    if hr.0 < 0 {
+        return Err(error(hr));
+    }
+    let _com = ComApartment;
+    let enumerator = DeviceEnumerator::new().map_err(error)?;
+    let mut result = Vec::new();
+    for (input, direction) in [(true, Direction::Capture), (false, Direction::Render)] {
+        let default = enumerator
+            .get_default_device(&direction)
+            .ok()
+            .and_then(|d| d.get_id().ok());
+        let collection = enumerator
+            .get_device_collection(&direction)
+            .map_err(error)?;
+        for index in 0..collection.get_nbr_devices().map_err(error)?.min(1024) {
+            let device = collection.get_device_at_index(index).map_err(error)?;
+            let id = device.get_id().map_err(error)?;
+            result.push(AudioDevice {
+                input,
+                is_default: default.as_ref() == Some(&id),
+                id: Some(id),
+                name: device.get_friendlyname().map_err(error)?,
+            });
+        }
+    }
+    Ok(result)
 }
 
 impl Backend {

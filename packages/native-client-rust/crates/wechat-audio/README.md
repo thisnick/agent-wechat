@@ -34,7 +34,9 @@ Applications should cancel the old producer too. Playback queues reject overflow
 rather than accumulating seconds of stale audio.
 
 Linux accepts PulseAudio source/sink names; Windows accepts device endpoint IDs.
-macOS currently accepts the system defaults only. Inspect `aec_status()`; a value
+`AudioSession::devices()` lists usable endpoint metadata without starting capture
+or playback. macOS currently accepts the system defaults only and reports those
+defaults without advertising custom endpoint IDs. Inspect `aec_status()`; a value
 of `Requested` records backend selection, not measured cancellation quality. Linux
 requires a separately configured echo-cancel source/sink for speakerphone use.
 
