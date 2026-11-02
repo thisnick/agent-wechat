@@ -14,7 +14,7 @@ remain off. Call metadata separates `kind` (`direct`/`conference`) from
 1. In a source build, run `wx calls --help`. The parent command only prints help;
    it does not connect, log in or open audio devices.
 2. Run `wx calls status` against your selected daemon. A disabled backend reports
-   `capabilities.directAudio: false`. A default build without the call routes
+   empty `capabilities: {}`. A default build without the call routes
    returns an unavailable route instead.
 3. Require the corresponding capability before participating. An API route or a
    configured plugin does not make a call available.

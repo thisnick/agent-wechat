@@ -177,7 +177,7 @@ function parseCallEvent(data: unknown): CallEvent {
     case "hello":
       if (value.currentPendingOffer === undefined) value.currentPendingOffer = null;
       valid = value.protocolVersion === 1 && idValue(value.clientId) && object(value.capabilities)
-      && ["directAudio", "directVideo", "conferenceAudio", "conferenceVideo"].every(key => typeof (value.capabilities as Record<string, unknown>)[key] === "boolean")
+      && Object.entries(value.capabilities).every(([key, enabled]) => idValue(key) && typeof enabled === "boolean")
       && availabilityValue(value.availability) && (value.currentOffer === null || offerValue(value.currentOffer))
       && (value.currentPendingOffer === null || pendingOfferValue(value.currentPendingOffer))
       && (value.currentCall === null || callValue(value.currentCall)) && formatValue(value.audioFormat); break;

@@ -19,7 +19,7 @@ class Queue<T> implements AsyncIterableIterator<T> {
   [Symbol.asyncIterator]() { return this; }
 }
 const format = { sampleRate: 16000, channels: 1, frameMs: 20 };
-const capabilities = { directAudio: true, directVideo: false, conferenceAudio: false, conferenceVideo: false };
+const capabilities = { directAudio: true };
 const offer: CallOffer = { callId: "offer", revision: 1, callerId: "allowed-peer", kind: "direct", callType: "voice" };
 const accepted = (callId: string | null = null, ownerToken: string | null = null): Extract<CallEvent, { type: "command.result" }> => ({ type: "command.result", requestId: "synthetic", status: "accepted", callId, ownerToken, code: null });
 const view = (callId: string, state: CallView["state"] = "connected", ownedByThisClient = true): CallView => ({ callId, revision: 2, kind: "direct", callType: "voice", direction: "incoming", state, ownedByThisClient });
@@ -40,7 +40,7 @@ class Control implements CallControlPort {
   eventsQueue = new Queue<CallEvent>(); media = new Media(); directAudio = true; closed = false; readied = 0; answers = 0; dials = 0; ends = 0; attaches = 0; clears = 0;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
-  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: { ...capabilities, directAudio: this.directAudio }, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
+  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
   events() { return this.eventsQueue; }
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);

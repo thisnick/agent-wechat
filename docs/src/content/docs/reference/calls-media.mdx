@@ -4,8 +4,19 @@ description: Attach call media, exchange PCM frames and interrupt audio output.
 ---
 
 Use the media WebSocket after claiming a call through the [control API](../calls-api/).
-It carries the daemon's media format, not encrypted WeChat packets. The daemon
-handles WeChat packet encryption and audio encoding.
+Your application sends and receives PCM samples. The daemon handles WeChat's
+codec, packet framing, authentication and encryption; those packets and keys
+are never part of this API.
+
+```mermaid
+flowchart LR
+  A["Application PCM"] --> B["Daemon media API"]
+  B --> C["WeChat codec and transport"]
+  C --> D["WeChat network"]
+```
+
+The repository's TypeScript SDK handles API framing through `attachMedia`,
+`sendPcm` and `frames`. Direct WebSocket clients use the message layout below.
 
 ## Attach
 
@@ -33,9 +44,11 @@ handles WeChat packet encryption and audio encoding.
    received messages on `receiveTrack`. Track direction is relative to your client.
    Use the announced IDs and format rather than assuming the example IDs.
 
-## Binary frame format
+## API binary message layout
 
-Each message starts with a 36-byte header. Header integers use unsigned big-endian
+This is the client-to-daemon API format. Its track IDs, generations and
+sequences are independent of WeChat packet counters. Each message starts with
+a 36-byte header. Header integers use unsigned big-endian
 encoding; the audio payload uses signed PCM16 little-endian samples.
 
 | Offset | Bytes | Meaning |

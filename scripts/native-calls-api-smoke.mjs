@@ -128,6 +128,7 @@ try {
   const options = { baseUrl: ready.baseUrl, token, accountId: ready.accountId, webSocketFactory, commandTimeoutMs: 5000 };
   const observer = new NativeCallsClient(options); const observing = watch(observer);
   const observedHello = await observer.connect(); assert.equal(observedHello.currentCall, null);
+  assert.deepEqual(observedHello.capabilities, { directAudio: true });
   // The same calls grant permits participation, but connecting alone stays passive.
   const blocked = new NativeCallsClient({ ...options, token: nonCallsToken }); const blockedEvents = watch(blocked); blockedEvents.closing = true;
   await assert.rejects(blocked.connect()); blocked.close();

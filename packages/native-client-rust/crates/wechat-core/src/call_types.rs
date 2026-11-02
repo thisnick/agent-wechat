@@ -5,10 +5,21 @@ use ts_rs::TS;
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallCapabilities {
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
     pub direct_audio: bool,
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
     pub direct_video: bool,
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
     pub conference_audio: bool,
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
     pub conference_video: bool,
+}
+fn capability_unavailable(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]

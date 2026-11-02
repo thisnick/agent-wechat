@@ -252,7 +252,7 @@ async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
         .insert(header::ORIGIN, origin.parse().unwrap());
     let (mut socket, _) = connect_async(request.clone()).await.unwrap();
     let hello = json_event(&mut socket).await;
-    assert_eq!(hello["capabilities"]["directAudio"], false);
+    assert_eq!(hello["capabilities"], json!({}));
     assert_eq!(hello["currentOffer"], Value::Null);
     socket.close(None).await.unwrap();
     request

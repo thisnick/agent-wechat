@@ -62,6 +62,7 @@ class MockSocket {
   close() { if (this.readyState === 3) return; this.readyState = 3; this.onclose?.({}); }
 }
 class MockCallServer {
+  capabilities = { directAudio: true };
   sockets = []; controls = []; media = []; owner = null; counter = 0; hold = false;
   tracks = { sendTrack: { id: 1, generation: 1, direction: 'send', format: audio }, receiveTrack: { id: 2, generation: 1, direction: 'receive', format: audio } };
   result(socket, requestId, extra = {}) { queueMicrotask(() => socket.receive({ type: 'command.result', requestId, status: 'accepted', callId: null, ownerToken: null, code: null, ...extra })); }
@@ -100,7 +101,7 @@ class MockCallServer {
     socket.id = id; this.sockets.push(socket); this.controls.push(socket);
     queueMicrotask(() => {
       socket.open(); socket.receive({ type: 'hello', protocolVersion: 1, clientId: id,
-        capabilities: { directAudio: true, directVideo: false, conferenceAudio: false, conferenceVideo: false },
+        capabilities: this.capabilities,
         availability: { busy: false, ownedByThisClient: false }, currentOffer: offer, currentCall: null, audioFormat: audio });
     });
     return socket;
@@ -177,6 +178,17 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
   server.media[0].receive(new Uint8Array(3));
   await assert.rejects(media.frames()[Symbol.asyncIterator]().next(), error => error.code === 'invalid_media');
   owner.close();
+  for (const capabilities of [{}, { directAudio: true }, { directAudio: false }, { futureCallingMode: true }]) {
+    const capabilityServer = new MockCallServer(); capabilityServer.capabilities = capabilities;
+    const capabilityClient = client(capabilityServer);
+    const hello = await capabilityClient.connect();
+    assert.equal(hello.capabilities.directAudio ?? false, capabilities.directAudio ?? false);
+    capabilityClient.close();
+  }
+  const invalidCapabilityServer = new MockCallServer(); invalidCapabilityServer.capabilities = { directAudio: 'yes' };
+  const invalidCapabilityClient = client(invalidCapabilityServer);
+  await assert.rejects(invalidCapabilityClient.connect(), error => error.code === 'invalid_event');
+  invalidCapabilityClient.close();
   for (const malformed of [
     { ...offer, callType: 'conference' },
     { ...offer, callType: undefined },

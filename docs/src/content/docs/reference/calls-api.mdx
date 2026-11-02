@@ -30,7 +30,7 @@ Replace `{account}` and `{callId}` with URL-encoded identifiers.
 
    ```json
    {
-     "capabilities": {"directAudio":true,"directVideo":false,"conferenceAudio":false,"conferenceVideo":false},
+     "capabilities": {"directAudio":true},
      "availability": {"busy":false,"ownedByThisClient":false},
      "currentOffer": null,
      "currentPendingOffer": null,
@@ -38,6 +38,9 @@ Replace `{account}` and `{callId}` with URL-encoded identifiers.
      "audioFormat": {"sampleRate":16000,"channels":1,"frameMs":20}
    }
    ```
+
+`capabilities` lists available flags only. Treat missing flags as unavailable;
+`{}` means this backend currently offers no calling.
 
 2. Open the control socket. Its first `hello` event contains that snapshot plus
    `protocolVersion: 1` and the connection's `clientId`. Prepare audio, then send:
@@ -63,12 +66,16 @@ Replace `{account}` and `{callId}` with URL-encoded identifiers.
 
 ## Incoming calls and snapshots
 
-A `call.pending` event contains `offer` with phase `waiting_for_ready` or
-`preparing`; `offer: null` clears it. Pending calls cannot be answered yet. Scope
-readiness to that offer using `{"kind":"offer","callId":"example-call","expectedRevision":1}`.
+`currentOffer` is the incoming call ready to answer or reject. It is also sent
+as `call.offered`, and clears when claimed or ended. `currentPendingOffer` is
+still waiting for readiness or preparation and cannot be answered.
+
+`call.pending` reports that candidate with phase `waiting_for_ready` or `preparing`;
+`offer: null` clears it. Scope readiness using `{"kind":"offer","callId":"example-call","expectedRevision":1}`.
 An omitted readiness scope means `{"kind":"all"}`. Setting `ready: false` clears readiness.
 
-Audio format is announced in `audioFormat` and each track's `format`.
+`audioFormat` and each track's `format` describe PCM between your client and
+the daemon: sample rate, channels and frame duration, independently of WeChat's codec.
 
 An actionable incoming event looks like:
 
