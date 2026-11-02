@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.2
+
+### Patch Changes
+
+- [#368](https://github.com/thisnick/agent-wechat/pull/368) [`8c93201`](https://github.com/thisnick/agent-wechat/commit/8c9320117996e7bd91b71b5803a16fb506142d77) Thanks [@thisnick](https://github.com/thisnick)! - Install the CLI audio runtime dependency before verifying executables during Linux image publication.
+
 ## 1.4.0-beta.1
 
 ### Patch Changes
