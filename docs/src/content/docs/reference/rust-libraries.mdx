@@ -16,10 +16,9 @@ connecting to an existing daemon can use the [HTTP API](/use/api/).
 | [wechat-media](https://docs.rs/wechat-media) | Shared image inspection and decoding |
 | [wechat-platform](https://docs.rs/wechat-platform) | Private files and OS support |
 
-Calling uses these transport/profile libraries plus internal call-media, audio,
-Core and API crates. See [calling architecture](../calls-architecture/) for their
-dependencies and responsibilities; use the [Calls API](../calls-api/) to connect
-a client to the daemon.
+The [Rust crate architecture](../../how-it-works/rust-crates/) maps published
+libraries and internal runtime dependencies. Use the [Calls API](../calls-api/)
+to connect a calling client to the daemon.
 
 ## Add dependencies
 

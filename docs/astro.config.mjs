@@ -34,6 +34,7 @@ const moved = {
   'reference/environment-vars': 'reference/configuration',
   'reference/rust-protocol': 'reference/rust-libraries#send-one-text-message',
   'reference/rust-profile': 'reference/rust-libraries#profile-writes',
+  'reference/calls-architecture': 'how-it-works/rust-crates',
 };
 
 export default defineConfig({
@@ -86,6 +87,7 @@ export default defineConfig({
         ] },
         { label: 'How it works', items: [
           { label: 'Architecture', slug: 'how-it-works/architecture' },
+          { label: 'Rust crate architecture', slug: 'how-it-works/rust-crates' },
           { label: 'How wx talks to WeChat', slug: 'how-it-works/wechat' },
           { label: 'Sends and recovery', slug: 'how-it-works/sends' },
           { label: 'Message types', slug: 'how-it-works/message-types' },
@@ -98,7 +100,6 @@ export default defineConfig({
           { label: 'Calling', slug: 'reference/calls' },
           { label: 'Calls API', slug: 'reference/calls-api' },
           { label: 'Call media API', slug: 'reference/calls-media' },
-          { label: 'Calling architecture', slug: 'reference/calls-architecture' },
           { label: 'Rust libraries', slug: 'reference/rust-libraries' },
           { label: 'Troubleshooting', slug: 'reference/troubleshooting' },
           { label: 'Build from source', slug: 'reference/build' },

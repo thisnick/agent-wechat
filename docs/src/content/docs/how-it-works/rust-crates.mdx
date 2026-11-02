@@ -1,11 +1,11 @@
 ---
-title: Calling architecture
+title: Rust crate architecture
 description: Rust crate responsibilities, dependencies and client adapters.
 ---
 
-The daemon coordinates calls. Clients own interaction and provide media over
-WebSockets. Audio devices and WeChat's codecs stay outside the HTTP API contract.
-[Control](../calls-api/) and [media](../calls-media/) references define payloads.
+The Rust workspace separates WeChat transport, official-profile access, account
+orchestration and client adapters. Four libraries are published; the daemon,
+CLI and supporting runtime crates remain internal.
 
 ## Package dependencies
 
@@ -16,7 +16,8 @@ Arrows below mean “depends on.” `wechat-protocol` does **not** depend on
 flowchart TD
   WX["wx-native: daemon and CLI"] --> API["wechat-api: HTTP and WebSockets"]
   WX --> AUDIO["wechat-audio: local devices"]
-  WX --> CORE["wechat-core: accounts and call lifecycle"]
+  WX --> CFG["wechat-config: configuration"]
+  WX --> CORE["wechat-core: account runtime"]
   API --> CORE
   CORE --> CALLS["wechat-calls: media and Opus"]
   CORE --> PROTOCOL["wechat-protocol: WeChat transport"]
@@ -25,6 +26,10 @@ flowchart TD
   PROFILE --> MEDIA["wechat-media: message media"]
   PROTOCOL --> MEDIA
   MEDIA --> PLATFORM["wechat-platform: OS primitives"]
+  CFG --> PLATFORM
+  STORE --> PLATFORM
+  DEV["wechat-simulator: development fixtures"] --> API
+  DEV --> CORE
   PROFILE --> PLATFORM
   PROTOCOL --> PLATFORM
 ```
@@ -43,13 +48,15 @@ for PCM framing.
 | `wechat-core` | Account authorization, ownership, call state and workers | No |
 | `wechat-api` | HTTP routes, authenticated control/media sockets and contracts | No |
 | `wechat-store` | Pending operations and recovery receipts | No |
+| `wechat-config` | CLI/daemon configuration files | No |
+| `wechat-simulator` | Synthetic backend and development fixtures | No |
 | `wx-native` | `wx` executable, daemon startup and CLI participation | No |
 
 Canonical chat state stays in the official profile. Operational call records
 do not create another history database. The four public crates remain unchanged.
-[Reusable Rust libraries](../rust-libraries/) describes their standalone APIs.
+[Reusable Rust libraries](../../reference/rust-libraries/) describes their standalone APIs.
 
-## Media and library choices
+## Media adapters
 
 Outgoing client PCM passes through the API, Core's call worker, `wechat-calls`
 encoding and `wechat-protocol` transport. Incoming media follows the reverse
@@ -72,26 +79,10 @@ The private TypeScript HTTP/WebSocket SDK and OpenClaw extension talk to the
 daemon; neither needs libopus or OS audio bindings in Node. The Rust daemon still
 has native dependencies. A standalone JavaScript WeChat transport is not provided.
 
-## Build features
+<span id="build-features"></span>
 
-Cargo `--all-features` enables every optional feature of the selected packages.
-It is useful for broad CI checks, not required to build a calling component.
-It does not build every operating system or enable runtime permissions.
+## Building
 
-From the repository root, build both the native daemon worker and CLI audio with:
-
-```bash
-cargo build --manifest-path packages/native-client-rust/Cargo.toml \
-  -p wx-native --features native-calls,call-audio
-```
-
-The executable is `packages/native-client-rust/target/debug/wx`.
-Choose `native-calls` alone for a headless daemon, or `call-audio` alone for a CLI
-using a remote daemon. Native audio requires the selected OS's development libraries.
-Account authorization and transmission admission still apply.
-
-## Call metadata
-
-`kind` describes direct/conference membership. `callType` describes voice/video
-call type. The current backend supports direct voice and advertises the other
-capabilities as false. A call's audio format is announced separately from its type.
+[Build from source](../../reference/build/) covers workspace builds and optional
+features. [Calling](../../reference/calls/) describes daemon, CLI and OpenClaw use;
+[Calls API](../../reference/calls-api/) owns call payloads and events.
