@@ -131,25 +131,47 @@ fn live(event: &Value) -> bool {
                     <= 120
             })
 }
+#[cfg(test)]
 fn preview(message: &Value) -> Option<String> {
+    preview_for_locale(message, false)
+}
+fn preview_for_locale(message: &Value, zh: bool) -> Option<String> {
     if !message["recall"].is_null() || message["direction"] != "incoming" {
         return None;
     }
     let text = match message["type"].as_u64()? {
         1 => message["body"].as_str()?.to_owned(),
-        3 => "Photo".into(),
-        34 => "Voice message".into(),
-        43 => "Video".into(),
-        47 => "Sticker".into(),
+        3 => if zh { "图片" } else { "Photo" }.into(),
+        34 => if zh { "语音消息" } else { "Voice message" }.into(),
+        43 => if zh { "视频" } else { "Video" }.into(),
+        47 => if zh { "表情" } else { "Sticker" }.into(),
         49 if message["appMessageType"] == 57 || message["quote"].is_object() => message["body"]
             .as_str()
             .filter(|body| !body.trim().is_empty())
-            .unwrap_or("Reply")
+            .unwrap_or(if zh { "回复" } else { "Reply" })
             .into(),
         49 => match message["appMessageType"].as_u64() {
-            Some(5) => "Shared link",
-            Some(6) => "File",
-            _ => "Attachment",
+            Some(5) => {
+                if zh {
+                    "链接"
+                } else {
+                    "Shared link"
+                }
+            }
+            Some(6) => {
+                if zh {
+                    "文件"
+                } else {
+                    "File"
+                }
+            }
+            _ => {
+                if zh {
+                    "附件"
+                } else {
+                    "Attachment"
+                }
+            }
         }
         .into(),
         _ => return None,
@@ -236,15 +258,24 @@ async fn group_sender(
     sender_label(&lookup["member"]["displayName"], sender)
         .or_else(|| sender_label(&lookup["member"]["roomDisplayName"], sender))
 }
+#[cfg(test)]
 fn notification_heading(
     thread: &Value,
     message: &Value,
     sender: Option<&str>,
 ) -> (String, Option<String>) {
+    notification_heading_for_locale(thread, message, sender, false)
+}
+fn notification_heading_for_locale(
+    thread: &Value,
+    message: &Value,
+    sender: Option<&str>,
+    zh: bool,
+) -> (String, Option<String>) {
     let name: String = thread["displayName"]
         .as_str()
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or("New message")
+        .unwrap_or(if zh { "新消息" } else { "New message" })
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -253,7 +284,12 @@ fn notification_heading(
         .take(100)
         .collect();
     if group_message(thread, message) {
-        (sender.unwrap_or("Member").into(), Some(name))
+        (
+            sender
+                .unwrap_or(if zh { "群成员" } else { "Member" })
+                .into(),
+            Some(name),
+        )
     } else {
         (name, None)
     }
@@ -503,7 +539,8 @@ async fn alert(
     if message["id"] != id || message["accountId"] != account || message["threadId"] != thread_id {
         bail!("Notification message identity mismatch");
     }
-    let Some(body) = preview(&message) else {
+    let zh = app.state::<Desktop>().inner.lock().await.config.is_zh();
+    let Some(body) = preview_for_locale(&message, zh) else {
         return Ok(());
     };
     let thread = get(
@@ -515,7 +552,8 @@ async fn alert(
         return Ok(());
     }
     let sender = group_sender(active, account, thread_id, &thread, &message).await;
-    let (title, subtitle) = notification_heading(&thread, &message, sender.as_deref());
+    let (title, subtitle) =
+        notification_heading_for_locale(&thread, &message, sender.as_deref(), zh);
     let target = Target {
         connection_id: active.connection.id.clone(),
         server_id: active
@@ -903,6 +941,29 @@ mod tests {
                 .chars()
                 .count(),
             60
+        );
+    }
+    #[test]
+    fn simplified_chinese_previews_translate_labels_but_not_message_text() {
+        assert_eq!(
+            preview_for_locale(&json!({"type":3,"direction":"incoming"}), true),
+            Some("图片".into())
+        );
+        assert_eq!(
+            preview_for_locale(
+                &json!({"type":1,"body":"Hello","direction":"incoming"}),
+                true
+            ),
+            Some("Hello".into())
+        );
+        assert_eq!(
+            notification_heading_for_locale(
+                &json!({"displayName":"Team"}),
+                &json!({"threadId":"room@chatroom","senderId":"alice"}),
+                None,
+                true
+            ),
+            ("群成员".into(), Some("Team".into()))
         );
     }
     #[test]

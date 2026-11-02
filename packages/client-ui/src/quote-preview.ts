@@ -1,4 +1,5 @@
 import type { NativeMessage } from "@agent-wechat/shared";
+import { t } from "./i18n.ts";
 import { messagePresentation } from "./message-presentation.ts";
 
 export function localQuote(
@@ -57,26 +58,26 @@ export function embeddedQuotePreview(
       ? quote.embeddedLink
       : undefined;
   const text = recalled
-    ? "Message recalled"
+    ? t("Message recalled", "消息已撤回")
     : valid && state !== "missing" && quote?.embeddedText
     ? quote.embeddedText
     : quote?.type === 3
-    ? "Image unavailable"
+    ? t("Image unavailable", "图片不可用")
     : quote?.type === 34
-    ? "Voice message unavailable"
+    ? t("Voice message unavailable", "语音消息不可用")
     : [43, 62].includes(quote?.type ?? 0)
-    ? "Video unavailable"
+    ? t("Video unavailable", "视频不可用")
     : quote?.type === 47 || (quote?.type === 49 && quote.appMessageType === 8)
-    ? "Sticker unavailable"
+    ? t("Sticker unavailable", "表情不可用")
     : quote?.type === 49 && quote.appMessageType === 6
-    ? "File unavailable"
+    ? t("File unavailable", "文件不可用")
     : quote?.type === 48
-    ? "Location unavailable"
+    ? t("Location unavailable", "位置不可用")
     : quote?.type === 42
-    ? "Shared contact unavailable"
+    ? t("Shared contact unavailable", "分享名片不可用")
     : quote?.type === 49 && quote.appMessageType === 19
-    ? "Forwarded messages unavailable"
-    : "Quoted message unavailable";
+    ? t("Forwarded messages unavailable", "聊天记录不可用")
+    : t("Quoted message unavailable", "引用消息不可用");
   return {
     text,
     senderId: recalled ? undefined : quote?.senderId,
@@ -98,27 +99,37 @@ export function embeddedQuotePreview(
 }
 export function quotedText(message: NativeMessage): string {
   const kind = messagePresentation(message);
-  if (kind === "recalled") return "Message recalled";
+  if (kind === "recalled") return t("Message recalled", "消息已撤回");
   if (kind === "forwarded")
-    return message.body?.split(/\r\n|\r|\n/).map(line => line.trim()).find(Boolean) || "Forwarded messages";
+    return (
+      message.body
+        ?.split(/\r\n|\r|\n/)
+        .map((line) => line.trim())
+        .find(Boolean) || t("Forwarded messages", "聊天记录")
+    );
   if (["text", "reply"].includes(kind))
-    return message.body || "Message text unavailable";
-  if (kind === "link") return message.link?.title || "Link";
+    return message.body || t("Message text unavailable", "消息内容不可用");
+  if (kind === "link") return message.link?.title || t("Link", "链接");
   if (message.type === 48 && message.location)
-    return message.location.name || message.location.address || "Location";
-  if (message.type === 42) return "Shared contact";
-  if (message.type === 49 && message.appMessageType === 8) return "Sticker";
+    return (
+      message.location.name ||
+      message.location.address ||
+      t("Location", "位置")
+    );
+  if (message.type === 42) return t("Shared contact", "个人名片");
+  if (message.type === 49 && message.appMessageType === 8)
+    return t("Sticker", "表情");
   return (
     (
       {
-        3: "Image",
-        34: "Voice message",
-        43: "Video",
-        47: "Sticker",
-        48: "Location",
-        49: "Attachment",
-        62: "Video",
+        3: t("Image", "图片"),
+        34: t("Voice message", "语音消息"),
+        43: t("Video", "视频"),
+        47: t("Sticker", "表情"),
+        48: t("Location", "位置"),
+        49: t("Attachment", "附件"),
+        62: t("Video", "视频"),
       } as Record<number, string>
-    )[message.type] || "Message preview unavailable"
+    )[message.type] || t("Message preview unavailable", "消息预览不可用")
   );
 }

@@ -41,6 +41,8 @@ pub struct Config {
     pub automatic_updates: bool,
     #[serde(default)]
     pub update_prereleases: Option<bool>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 fn enabled() -> bool {
     true
@@ -60,10 +62,14 @@ impl Default for Config {
             notification_sound_enabled: true,
             automatic_updates: true,
             update_prereleases: None,
+            language: None,
         }
     }
 }
 impl Config {
+    pub fn is_zh(&self) -> bool {
+        self.language.as_deref() == Some("zh-CN")
+    }
     pub fn account_notifications_enabled(&self, server: &str, account: &str) -> bool {
         !self
             .notification_disabled_accounts
@@ -157,6 +163,11 @@ impl Config {
                 .is_some_and(|value| value.len() > 64 * 1024)
             {
                 bail!("Certificate is too large");
+            }
+        }
+        if let Some(language) = &self.language {
+            if language != "en" && language != "zh-CN" {
+                bail!("Unsupported display language");
             }
         }
         Ok(())
@@ -301,5 +312,21 @@ mod tests {
         config.notifications_enabled = true;
         assert!(config.notifications_for("hub-a", "account-a"));
         assert!(config.notification_disabled_accounts.is_empty());
+    }
+    #[test]
+    fn display_language_defaults_to_english_and_rejects_unknown_values() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("language");
+        let mut config: Config = serde_json::from_value(value).unwrap();
+        assert!(!config.is_zh());
+        let directory = wechat_platform::private_tempdir("desktop-language-").unwrap();
+        let path = directory.path().join("desktop.json");
+        config.language = Some("zh-CN".into());
+        config.save(&path).unwrap();
+        assert!(Config::load(&path).unwrap().is_zh());
+        let before = std::fs::read(&path).unwrap();
+        config.language = Some("fr".into());
+        assert!(config.save(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

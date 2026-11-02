@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { NativeThread } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import type { ThreadPreference } from "./thread-pinning.ts";
 import { Icon } from "./ui.tsx";
 
@@ -47,6 +48,7 @@ export function PinFeedback<K extends "pinned" | "muted">({
   model: ThreadPreference<K>;
   kind?: "pin" | "notification";
 }) {
+  useLocale();
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   return (
     <>
@@ -56,14 +58,23 @@ export function PinFeedback<K extends "pinned" | "muted">({
       {(state.uncertain || state.error) && (
         <div className="pin-feedback" role={state.error ? "alert" : undefined}>
           <span>
-            {state.uncertain ? `Couldn’t confirm ${kind} change.` : state.error}
+            {state.uncertain
+              ? t(
+                  `Couldn’t confirm ${kind} change.`,
+                  kind === "pin"
+                    ? "无法确认置顶更改。"
+                    : "无法确认通知更改。",
+                )
+              : state.error}
           </span>
           <button
             className="text-button"
             disabled={state.busy}
             onClick={() => void model.check()}
           >
-            {state.uncertain ? "Check status" : "Refresh"}
+            {state.uncertain
+              ? t("Check status", "检查状态")
+              : t("Refresh", "刷新")}
           </button>
         </div>
       )}
@@ -80,6 +91,7 @@ export function ThreadPinSwitch({
   account: string;
   threadId: string;
 }) {
+  useLocale();
   const model = connection.threadPinning(account, threadId);
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   if (!state.supported) return null;
@@ -92,13 +104,21 @@ export function ThreadPinSwitch({
           className="group-toggle"
           role={known ? "switch" : undefined}
           aria-checked={known ? displayed! : undefined}
-          aria-label={known ? "Pin chat" : "Pin chat: state unavailable"}
+          aria-label={
+            known
+              ? t("Pin chat", "置顶聊天")
+              : t("Pin chat: state unavailable", "置顶聊天：状态不可用")
+          }
           aria-busy={state.busy}
           disabled={state.disabled}
-          title={known ? "Keep this chat at the top" : "Pin state unavailable"}
+          title={
+            known
+              ? t("Keep this chat at the top", "将此聊天保持在顶部")
+              : t("Pin state unavailable", "置顶状态不可用")
+          }
           onClick={() => void model.toggle()}
         >
-          <span>Pin chat</span>
+          <span>{t("Pin chat", "置顶聊天")}</span>
           {state.saving && <span className="pin-spinner" aria-hidden="true" />}
           <span
             className={`toggle-track ${displayed ? "on" : ""} ${
@@ -112,8 +132,8 @@ export function ThreadPinSwitch({
         {!known && (
           <button
             className="icon-btn"
-            aria-label="Refresh pin state"
-            title="Refresh pin state"
+            aria-label={t("Refresh pin state", "刷新置顶状态")}
+            title={t("Refresh pin state", "刷新置顶状态")}
             disabled={state.busy}
             onClick={() => void model.check()}
           >

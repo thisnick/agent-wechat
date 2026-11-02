@@ -18,20 +18,32 @@ import {
   type GroupAction,
 } from "./group-creation.ts";
 import { HubAvatar } from "./avatars.tsx";
+import { t, useLocale } from "./i18n.ts";
 import { Button } from "./ui.tsx";
 import { inventory, pause, readableError } from "./session.ts";
 
-const labels: Record<GroupAction["action"], string> = {
-  create: "Create group",
-  rename: "Rename group",
-  leave: "Leave group",
-  add_members: "Add members",
-  remove_members: "Remove members",
-  my_name: "My name in this group",
-  clear_announcement: "Clear announcement",
-  mute: "Notifications",
-  pin: "Pin chat",
-};
+function groupLabel(action: GroupAction["action"]): string {
+  switch (action) {
+    case "create":
+      return t("Create group", "创建群聊");
+    case "rename":
+      return t("Rename group", "修改群名称");
+    case "leave":
+      return t("Leave group", "退出群聊");
+    case "add_members":
+      return t("Add members", "添加成员");
+    case "remove_members":
+      return t("Remove members", "移除成员");
+    case "my_name":
+      return t("My name in this group", "我在本群的昵称");
+    case "clear_announcement":
+      return t("Clear announcement", "清空群公告");
+    case "mute":
+      return t("Notifications", "通知");
+    case "pin":
+      return t("Pin chat", "置顶聊天");
+  }
+}
 type Result = {
   groupId?: string;
   remoteOutcome?: string;
@@ -42,6 +54,7 @@ type Result = {
   steps?: { accepted: boolean }[];
 };
 export function GroupResult({ model }: { model: GroupMutations }) {
+  useLocale();
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const receipt = state.receipt;
   if (!receipt || ["pin", "mute"].includes(receipt.input.action)) return null;
@@ -52,26 +65,44 @@ export function GroupResult({ model }: { model: GroupMutations }) {
     <div className="group-operation-result">
       <p role="status">
         {receipt.notAdmitted
-          ? "The change wasn’t submitted."
+          ? t("The change wasn’t submitted.", "更改未提交。")
           : operation?.state === "succeeded"
           ? partial
             ? receipt.input.action === "create"
-              ? "Group created. Some selected contacts weren’t confirmed as added."
-              : "Group updated. Some member changes weren’t confirmed."
+              ? t(
+                  "Group created. Some selected contacts weren’t confirmed as added.",
+                  "群聊已创建。部分所选联系人未确认已加入。",
+                )
+              : t(
+                  "Group updated. Some member changes weren’t confirmed.",
+                  "群聊已更新。部分成员变更未确认。",
+                )
             : receipt.input.action === "leave"
-            ? "You left the group. Cached history is still available."
+            ? t(
+                "You left the group. Cached history is still available.",
+                "你已退出群聊，已缓存的聊天记录仍可查看。",
+              )
             : receipt.input.action === "create"
-            ? "Group created."
-            : "Group updated."
+            ? t("Group created.", "群聊已创建。")
+            : t("Group updated.", "群聊已更新。")
           : operation?.state === "needs_review"
-          ? "The outcome couldn’t be confirmed. Check the group before attempting this change again."
+          ? t(
+              "The outcome couldn’t be confirmed. Check the group before attempting this change again.",
+              "无法确认操作结果。请先检查群聊状态，再尝试重新操作。",
+            )
           : operation?.state === "failed"
-          ? "The change failed. Review the result before trying again."
+          ? t(
+              "The change failed. Review the result before trying again.",
+              "更改失败，请检查结果后再重试。",
+            )
           : operation?.state === "cancelled"
-          ? "Cancelled before submission."
+          ? t("Cancelled before submission.", "提交前已取消。")
           : operation
-          ? "Updating group…"
-          : "Checking whether the change was submitted…"}
+          ? t("Updating group…", "正在更新群聊…")
+          : t(
+              "Checking whether the change was submitted…",
+              "正在检查更改是否已提交…",
+            )}
       </p>
       {result?.members && result.members.length > 0 && (
         <ul className="group-member-results">
@@ -81,10 +112,13 @@ export function GroupResult({ model }: { model: GroupMutations }) {
               <small>
                 {receipt.input.action === "remove_members" &&
                 member.status === null
-                  ? "Removal acknowledged"
+                  ? t("Removal acknowledged", "移除已确认")
                   : member.status === 0
-                  ? "Accepted"
-                  : `Not confirmed (status ${member.status ?? "unknown"})`}
+                  ? t("Accepted", "已接受")
+                  : t(
+                      `Not confirmed (status ${member.status ?? "unknown"})`,
+                      `未确认（状态 ${member.status ?? "未知"}）`,
+                    )}
               </small>
             </li>
           ))}
@@ -92,27 +126,42 @@ export function GroupResult({ model }: { model: GroupMutations }) {
       )}
       {!!result?.unconfirmedMembers?.length && (
         <p className="field-help">
-          Unconfirmed: {result.unconfirmedMembers.join(", ")}. These members
-          were not assumed to have changed.
+          {t(
+            `Unconfirmed: ${result.unconfirmedMembers.join(", ")}. These members were not assumed to have changed.`,
+            `未确认：${result.unconfirmedMembers.join(", ")}。这些成员状态未视为已变更。`,
+          )}
         </p>
       )}
       {result?.steps?.some((step) => !step.accepted) && (
         <p className="field-help">
-          One or more steps were rejected.{" "}
+          {t("One or more steps were rejected. ", "一个或多个步骤被拒绝。")}
           {receipt.input.action === "leave"
-            ? "The final quit result is shown above; cleanup results are retained separately."
-            : "Refresh the group to inspect its current state."}
+            ? t(
+                "The final quit result is shown above; cleanup results are retained separately.",
+                "最终退群结果已显示在上方；清理结果单独保留。",
+              )
+            : t(
+                "Refresh the group to inspect its current state.",
+                "请刷新群聊以查看当前状态。",
+              )}
         </p>
       )}
       {result?.remoteOutcome === "accepted" &&
         result.profileProjection === "pending" && (
           <p className="field-help">
-            WeChat accepted this change. The saved view on this agent-wechat hub
-            is still updating.
+            {t(
+              "WeChat accepted this change. The saved view on this agent-wechat hub is still updating.",
+              "微信已接受此更改，此 agent-wechat Hub 上的保存视图仍在更新中。",
+            )}
           </p>
         )}
       {partial && (
-        <p className="field-help">No members will be retried automatically.</p>
+        <p className="field-help">
+          {t(
+            "No members will be retried automatically.",
+            "不会自动重试任何成员。",
+          )}
+        </p>
       )}
       {state.error && (
         <p className="attachment-error" role="alert">
@@ -132,6 +181,7 @@ export function GroupSettings({
   account: string;
   groupId: string;
 }) {
+  useLocale();
   const session = connection.session;
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
   const model = connection.groupCreation(account, groupId);
@@ -230,12 +280,18 @@ export function GroupSettings({
         ["failed", "cancelled", "needs_review", "expired"].includes(item.state)
       )
         throw new Error(
-          "The group refresh did not finish. The saved view may be incomplete.",
+          t(
+            "The group refresh did not finish. The saved view may be incomplete.",
+            "群聊刷新未完成，保存的视图可能不完整。",
+          ),
         );
       await pause(700, signal);
     }
     throw new Error(
-      "Group refresh is still pending. Try Refresh group again to inspect the latest view.",
+      t(
+        "Group refresh is still pending. Try Refresh group again to inspect the latest view.",
+        "群聊刷新仍在进行中，请稍后再次点击“刷新群聊”查看最新视图。",
+      ),
     );
   }
   async function refresh() {
@@ -327,58 +383,69 @@ export function GroupSettings({
     <>
       <div className="detail-section group-settings">
         <div className="group-section-head">
-          <div className="section-head">Group settings</div>
+          <div className="section-head">{t("Group settings", "群聊设置")}</div>
           <button
             className="text-button"
             disabled={refreshing || !state.connected}
             onClick={() => void refresh()}
           >
-            {refreshing ? "Refreshing…" : "Refresh group"}
+            {refreshing
+              ? t("Refreshing…", "正在刷新…")
+              : t("Refresh group", "刷新群聊")}
           </button>
         </div>
         {group?.isInGroup === false ? (
-          <p className="group-membership">You are no longer in this group.</p>
+          <p className="group-membership">
+            {t("You are no longer in this group.", "你已不在该群聊中。")}
+          </p>
         ) : (
           group?.isInGroup !== true && (
             <p className="field-help">
-              Membership is unconfirmed. Refresh before making changes.
+              {t(
+                "Membership is unconfirmed. Refresh before making changes.",
+                "群成员身份尚未确认，修改前请先刷新。",
+              )}
             </p>
           )
         )}
         <div className="group-setting-row">
           <span>
-            Group name
+            {t("Group name", "群名称")}
             <strong>
-              {group?.name || group?.displayName || "Unnamed group"}
+              {group?.name ||
+                group?.displayName ||
+                t("Unnamed group", "未命名群聊")}
             </strong>
           </span>
           <button
             disabled={!enabled("rename") || refreshing}
-            aria-label="Edit group name"
+            aria-label={t("Edit group name", "编辑群名称")}
             onClick={() => edit("rename")}
           >
-            Edit
+            {t("Edit", "编辑")}
           </button>
         </div>
         <div className="group-setting-row">
           <span>
-            My name in this group
-            <strong>{group?.myDisplayName || "Using profile name"}</strong>
+            {t("My name in this group", "我在本群的昵称")}
+            <strong>
+              {group?.myDisplayName || t("Using profile name", "使用个人昵称")}
+            </strong>
           </span>
           <button
             disabled={!enabled("my_name") || refreshing}
-            aria-label="Edit my name in this group"
+            aria-label={t("Edit my name in this group", "编辑我在本群的昵称")}
             onClick={() => edit("my_name")}
           >
-            Edit
+            {t("Edit", "编辑")}
           </button>
         </div>
         <div className="group-announcement">
-          <div className="section-head">Announcement</div>
+          <div className="section-head">{t("Announcement", "群公告")}</div>
           <p>
             {group?.announcement === null || group?.announcement === undefined
-              ? "Not available in the saved view."
-              : group.announcement || "No announcement."}
+              ? t("Not available in the saved view.", "保存的视图中暂不可用。")
+              : group.announcement || t("No announcement.", "暂无群公告。")}
           </p>
           <button
             disabled={
@@ -388,7 +455,7 @@ export function GroupSettings({
             }
             onClick={() => edit("clear_announcement")}
           >
-            Clear announcement
+            {t("Clear announcement", "清空群公告")}
           </button>
         </div>
         {operation.receipt && (
@@ -396,7 +463,7 @@ export function GroupSettings({
             className="secondary group-pending"
             onClick={() => setMode("result")}
           >
-            View last group change
+            {t("View last group change", "查看上次群聊变更")}
           </button>
         )}
         <button
@@ -404,7 +471,7 @@ export function GroupSettings({
           disabled={!enabled("leave") || refreshing}
           onClick={() => edit("leave")}
         >
-          Leave group
+          {t("Leave group", "退出群聊")}
         </button>
         {error && (
           <p className="attachment-error" role="alert">
@@ -415,14 +482,14 @@ export function GroupSettings({
       <div className="detail-section group-settings">
         <div className="group-section-head">
           <div className="section-head">
-            Members <small>{members.length}</small>
+            {t("Members", "群成员")} <small>{members.length}</small>
           </div>
           <div className="group-member-actions">
             <button
               disabled={!enabled("add_members") || refreshing}
               onClick={() => edit("add_members")}
             >
-              Add
+              {t("Add", "添加")}
             </button>
             <button
               disabled={
@@ -432,7 +499,7 @@ export function GroupSettings({
               }
               onClick={() => edit("remove_members")}
             >
-              Remove
+              {t("Remove", "移除")}
             </button>
           </div>
         </div>
@@ -446,7 +513,7 @@ export function GroupSettings({
             />
             <span>
               {member.roomDisplayName || member.displayName || member.username}
-              {member.id === own && <small> (you)</small>}
+              {member.id === own && <small> {t("(you)", "（你）")}</small>}
             </span>
           </div>
         ))}
@@ -458,7 +525,9 @@ export function GroupSettings({
             role="dialog"
             aria-modal="true"
             aria-label={
-              mode === "result" ? "Group change result" : labels[mode]
+              mode === "result"
+                ? t("Group change result", "群聊变更结果")
+                : groupLabel(mode)
             }
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
@@ -467,11 +536,13 @@ export function GroupSettings({
           >
             <div className="modal-head">
               <h2>
-                {mode === "result" ? "Group change result" : labels[mode]}
+                {mode === "result"
+                  ? t("Group change result", "群聊变更结果")
+                  : groupLabel(mode)}
               </h2>
               <Button
                 icon="close"
-                label="Close group settings"
+                label={t("Close group settings", "关闭群聊设置")}
                 onClick={() => setMode(null)}
               />
             </div>
@@ -485,7 +556,7 @@ export function GroupSettings({
                       disabled={operation.busy}
                       onClick={() => void model.check()}
                     >
-                      Check status
+                      {t("Check status", "检查状态")}
                     </button>
                   )}
                   {operation.receipt.operation &&
@@ -495,7 +566,7 @@ export function GroupSettings({
                         disabled={operation.busy}
                         onClick={() => void model.cancel()}
                       >
-                        Cancel if not started
+                        {t("Cancel if not started", "若未开始则取消")}
                       </button>
                     )}
                   {canDismiss && (
@@ -506,7 +577,7 @@ export function GroupSettings({
                         setMode(null);
                       }}
                     >
-                      Done
+                      {t("Done", "完成")}
                     </button>
                   )}
                 </div>
@@ -520,11 +591,15 @@ export function GroupSettings({
               >
                 {textMode && (
                   <label className="group-name">
-                    {mode === "rename" ? "Group name" : "My display name"}
+                    {mode === "rename"
+                      ? t("Group name", "群名称")
+                      : t("My display name", "我的本群昵称")}
                     <input
                       autoFocus
                       aria-label={
-                        mode === "rename" ? "Group name" : "My display name"
+                        mode === "rename"
+                          ? t("Group name", "群名称")
+                          : t("My display name", "我的本群昵称")
                       }
                       maxLength={512}
                       value={draft}
@@ -532,8 +607,14 @@ export function GroupSettings({
                     />
                     <small className="field-help">
                       {mode === "rename"
-                        ? "Everyone in the group can see this name."
-                        : "Leave blank to use your profile name."}
+                        ? t(
+                            "Everyone in the group can see this name.",
+                            "群内所有成员均可看到此名称。",
+                          )
+                        : t(
+                            "Leave blank to use your profile name.",
+                            "留空则使用你的个人昵称。",
+                          )}
                     </small>
                   </label>
                 )}
@@ -542,8 +623,8 @@ export function GroupSettings({
                     <label className="search">
                       <input
                         autoFocus
-                        aria-label="Find group contacts"
-                        placeholder="Find contacts"
+                        aria-label={t("Find group contacts", "查找群联系人")}
+                        placeholder={t("Find contacts", "查找联系人")}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
                       />
@@ -560,7 +641,10 @@ export function GroupSettings({
                           <span>{item.displayName || item.id}</span>
                           <input
                             type="checkbox"
-                            aria-label={`Select ${item.displayName || item.id}`}
+                            aria-label={t(
+                              `Select ${item.displayName || item.id}`,
+                              `选择 ${item.displayName || item.id}`,
+                            )}
                             checked={selected.includes(item.id)}
                             disabled={
                               !selected.includes(item.id) &&
@@ -578,36 +662,46 @@ export function GroupSettings({
                       ))}
                       {!visible.length && (
                         <p className="no-results">
-                          No contacts available. Refresh the group or contact
-                          list.
+                          {t(
+                            "No contacts available. Refresh the group or contact list.",
+                            "暂无可选联系人，请刷新群聊或联系人列表。",
+                          )}
                         </p>
                       )}
                     </div>
                     <p className="field-help member-picker-help">
-                      {selected.length} selected · WeChat checks who can be
-                      added or removed. Each member’s result will be shown.
+                      {t(
+                        `${selected.length} selected · WeChat checks who can be added or removed. Each member’s result will be shown.`,
+                        `已选 ${selected.length} 人 · 微信将校验可添加或移除的成员，并显示每位成员的结果。`,
+                      )}
                     </p>
                   </div>
                 )}
                 {mode === "leave" && (
                   <p>
-                    Leave <strong>{group?.displayName || groupId}</strong>?
-                    You’ll stop receiving new messages. Cached history will
-                    remain on this agent-wechat hub.
+                    {t("Leave ", "确定退出 ")}
+                    <strong>{group?.displayName || groupId}</strong>
+                    {t(
+                      "? You’ll stop receiving new messages. Cached history will remain on this agent-wechat hub.",
+                      "？你将不再接收新消息，已缓存的聊天记录仍保留在此 agent-wechat Hub 上。",
+                    )}
                   </p>
                 )}
                 {mode === "clear_announcement" && (
                   <p>
-                    Clear the announcement for everyone in this group? WeChat
-                    checks your permission to make this change.
+                    {t(
+                      "Clear the announcement for everyone in this group? WeChat checks your permission to make this change.",
+                      "确定为群内所有人清空群公告？微信将校验你的修改权限。",
+                    )}
                   </p>
                 )}
                 {mode === "mute" && (
                   <p>
                     {group?.muted === true
-                      ? "Turn notifications on"
-                      : "Mute notifications"}{" "}
-                    for <strong>{group?.displayName || groupId}</strong>?
+                      ? t("Turn notifications on for ", "开启通知：")
+                      : t("Mute notifications for ", "静音通知：")}
+                    <strong>{group?.displayName || groupId}</strong>
+                    {t("?", "？")}
                   </p>
                 )}
                 <div className="group-edit-footer">
@@ -616,7 +710,7 @@ export function GroupSettings({
                     className="secondary"
                     onClick={() => setMode(null)}
                   >
-                    Cancel
+                    {t("Cancel", "取消")}
                   </button>
                   <button
                     className={`primary ${
@@ -633,21 +727,24 @@ export function GroupSettings({
                     }
                   >
                     {mode === "leave"
-                      ? "Leave group"
+                      ? t("Leave group", "退出群聊")
                       : mode === "clear_announcement"
-                      ? "Clear announcement"
+                      ? t("Clear announcement", "清空群公告")
                       : memberMode
                       ? mode === "add_members"
-                        ? "Add members"
-                        : "Remove members"
-                      : "Save changes"}
+                        ? t("Add members", "添加成员")
+                        : t("Remove members", "移除成员")
+                      : t("Save changes", "保存更改")}
                   </button>
                 </div>
               </form>
             )}
             {connection.simulator && (
               <p className="field-help">
-                Simulator account · No real WeChat group is changed.
+                {t(
+                  "Simulator account · No real WeChat group is changed.",
+                  "模拟器账号 · 不会修改真实的微信群聊。",
+                )}
               </p>
             )}
           </section>

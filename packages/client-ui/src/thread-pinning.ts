@@ -1,5 +1,6 @@
 import type { NativeOperation } from "@agent-wechat/shared";
 import { GroupMutations, groupEnded } from "./group-creation.ts";
+import { subscribeLocale, t } from "./i18n.ts";
 import { readableError, type HubSession } from "./session.ts";
 
 type Field = "pinned" | "muted";
@@ -69,6 +70,7 @@ export class ThreadPreference<K extends Field> {
     this.stop = [
       session.subscribe(this.update),
       mutations.subscribe(this.update),
+      subscribeLocale(this.update),
     ];
     this.update();
   }
@@ -128,38 +130,70 @@ export class ThreadPreference<K extends Field> {
       error =
         change.admissionStatus === 403
           ? isPin
-            ? "This access key can’t change pins. Use a key with account management permission."
-            : "This access key can’t change notifications. Use a key with account management permission."
+            ? t(
+                "This access key can’t change pins. Use a key with account management permission.",
+                "此访问密钥无法更改置顶状态。请使用具有账号管理权限的密钥。",
+              )
+            : t(
+                "This access key can’t change notifications. Use a key with account management permission.",
+                "此访问密钥无法更改通知设置。请使用具有账号管理权限的密钥。",
+              )
           : change.admissionStatus === 409
           ? isPin
-            ? "Pinning is unavailable. Refresh this chat and check again."
-            : "Notifications are unavailable. Refresh this chat and check again."
+            ? t(
+                "Pinning is unavailable. Refresh this chat and check again.",
+                "置顶功能不可用。请刷新此会话并重试。",
+              )
+            : t(
+                "Notifications are unavailable. Refresh this chat and check again.",
+                "通知设置不可用。请刷新此会话并重试。",
+              )
           : isPin
-          ? "Couldn’t pin this chat. Refresh and try again."
-          : "Couldn’t change notifications. Refresh and try again.";
+          ? t(
+              "Couldn’t pin this chat. Refresh and try again.",
+              "无法置顶此会话。请刷新并重试。",
+            )
+          : t(
+              "Couldn’t change notifications. Refresh and try again.",
+              "无法更改通知设置。请刷新并重试。",
+            );
     } else if (
       change?.operation &&
       ["rejected", "failed", "cancelled"].includes(change.operation.state)
     )
-      error = `${
-        isPin ? "Pin" : "Notification"
-      } change wasn’t applied. Refresh and try again.`;
+      error = t(
+        `${
+          isPin ? "Pin" : "Notification"
+        } change wasn’t applied. Refresh and try again.`,
+        isPin
+          ? "置顶更改未生效。请刷新并重试。"
+          : "通知更改未生效。请刷新并重试。",
+      );
     else if (operation.error && change && !uncertain && !confirmed)
       error = operation.error;
     const announcement = saving
-      ? `Saving ${noun}`
+      ? t(
+          `Saving ${noun}`,
+          isPin ? "正在保存置顶" : "正在保存通知设置",
+        )
       : uncertain
-      ? `${isPin ? "Pin" : "Notification"} change needs a status check`
+      ? t(
+          `${isPin ? "Pin" : "Notification"} change needs a status check`,
+          isPin ? "置顶更改需要检查状态" : "通知更改需要检查状态",
+        )
       : error ||
         (enabled === null
-          ? `${isPin ? "Pin" : "Notification"} state unavailable`
+          ? t(
+              `${isPin ? "Pin" : "Notification"} state unavailable`,
+              isPin ? "置顶状态不可用" : "通知状态不可用",
+            )
           : enabled
           ? isPin
-            ? "Chat pinned"
-            : "Notifications muted"
+            ? t("Chat pinned", "已置顶聊天")
+            : t("Notifications muted", "已静音通知")
           : isPin
-          ? "Chat unpinned"
-          : "Notifications unmuted");
+          ? t("Chat unpinned", "已取消置顶")
+          : t("Notifications unmuted", "已取消静音"));
     return {
       [this.field]: enabled,
       preview:
@@ -228,9 +262,14 @@ export class ThreadPreference<K extends Field> {
         );
         if (key) this.synced = key;
       } catch (error) {
-        this.syncError = `Couldn’t refresh ${
-          this.field === "pinned" ? "pins" : "notifications"
-        }. ${readableError(error)}`;
+        this.syncError = t(
+          `Couldn’t refresh ${
+            this.field === "pinned" ? "pins" : "notifications"
+          }. ${readableError(error)}`,
+          `无法刷新${
+            this.field === "pinned" ? "置顶状态" : "通知设置"
+          }。${readableError(error)}`,
+        );
       } finally {
         this.syncing = false;
         this.reconciling = undefined;

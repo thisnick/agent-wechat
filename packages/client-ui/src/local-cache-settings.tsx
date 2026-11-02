@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 
 export function LocalCacheSettings({
   connection,
@@ -8,6 +9,7 @@ export function LocalCacheSettings({
   connection: Connection;
   account: string;
 }) {
+  useLocale();
   const [usage, setUsage] = useState<{
     bytes: number;
     messages: number;
@@ -28,17 +30,18 @@ export function LocalCacheSettings({
   return (
     <div className="setting local-cache-setting">
       <span>
-        On this device
+        {t("On this device", "在此设备上")}
         <small>
           {usage?.available === false
-            ? "Browser storage unavailable"
+            ? t("Browser storage unavailable", "浏览器存储不可用")
             : usage
-              ? `${(usage.bytes / 1024 / 1024).toFixed(1)} MB · ${
-                  usage.chats
-                } chats · ${usage.messages} messages`
-              : "Checking storage…"}
+              ? t(
+                  `${(usage.bytes / 1024 / 1024).toFixed(1)} MB · ${usage.chats} chats · ${usage.messages} messages`,
+                  `${(usage.bytes / 1024 / 1024).toFixed(1)} MB · ${usage.chats} 个会话 · ${usage.messages} 条消息`,
+                )
+              : t("Checking storage…", "正在检查存储…")}
         </small>
-        <small>Media limit: 256 MB</small>
+        <small>{t("Media limit: 256 MB", "媒体缓存上限：256 MB")}</small>
       </span>
       <button
         className="secondary"
@@ -48,13 +51,20 @@ export function LocalCacheSettings({
           try {
             await connection.clearCache(account);
             setUsage(await connection.cache.stats(account));
-            setNotice("Temporary data cleared. Drafts and pending sends kept.");
+            setNotice(
+              t(
+                "Temporary data cleared. Drafts and pending sends kept.",
+                "临时数据已清除，草稿与待发送项已保留。",
+              ),
+            );
           } finally {
             setBusy(false);
           }
         }}
       >
-        {busy ? "Clearing…" : "Clear temporary data"}
+        {busy
+          ? t("Clearing…", "正在清除…")
+          : t("Clear temporary data", "清除临时数据")}
       </button>
       {notice && (
         <small className="local-cache-notice" role="status">

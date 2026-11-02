@@ -18,6 +18,7 @@ import {
 } from "react-zoom-pan-pinch";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { dateLocale, t, useLocale } from "./i18n.ts";
 import { conversationMedia, videoAsset } from "./media-variants.ts";
 import { mergeMessage } from "./session.ts";
 import { MediaCard, MediaDownload } from "./media.tsx";
@@ -35,6 +36,7 @@ export function PhotoViewer({
   connection: Connection;
   children: ReactNode;
 }) {
+  useLocale();
   const state = useSyncExternalStore(
     connection.session.subscribe,
     connection.session.snapshot,
@@ -129,7 +131,10 @@ export function PhotoViewer({
           return;
         }
         if (after.nextMessages === before.nextMessages) {
-          setError(after.error || "Couldn’t load earlier media.");
+          setError(
+            after.error ||
+              t("Couldn’t load earlier media.", "无法加载更早的媒体。"),
+          );
           break;
         }
       }
@@ -153,7 +158,7 @@ export function PhotoViewer({
           <dialog
             ref={dialog}
             className="photo-viewer"
-            aria-label="Media viewer"
+            aria-label={t("Media viewer", "媒体查看器")}
             onCancel={(event) => {
               event.preventDefault();
               close();
@@ -204,23 +209,25 @@ export function PhotoViewer({
                 <div className="photo-viewer-info">
                   <strong>
                     {current.direction === "outgoing"
-                      ? "You"
+                      ? t("You", "我")
                       : state.contacts.find(
                           (contact) => contact.id === current.senderId,
                         )?.displayName ||
                         current.senderId ||
-                        (current.type === 43 ? "Video" : "Photo")}
+                        (current.type === 43
+                          ? t("Video", "视频")
+                          : t("Photo", "图片"))}
                   </strong>
                   <span aria-live="polite">
                     {loading
-                      ? "Finding earlier media…"
+                      ? t("Finding earlier media…", "正在查找更早的媒体…")
                       : `${index + 1} / ${photos.length}`}
                     {current.createdAt &&
                       ` · ${new Date(
                         /^\d+$/.test(current.createdAt)
                           ? Number(current.createdAt) * 1000
                           : current.createdAt,
-                      ).toLocaleString([], {
+                      ).toLocaleString(dateLocale(), {
                         month: "short",
                         day: "numeric",
                         hour: "numeric",
@@ -233,7 +240,7 @@ export function PhotoViewer({
                           void navigation.jump(current);
                         }}
                       >
-                        Show message
+                        {t("Show message", "定位到消息")}
                       </button>
                     )}
                   </span>
@@ -243,7 +250,11 @@ export function PhotoViewer({
                     <PhotoZoomControls animationTime={animationTime} />
                   )}
                   <PhotoDownload message={current} connection={connection} />
-                  <Button icon="close" label="Close viewer" onClick={close} />
+                  <Button
+                    icon="close"
+                    label={t("Close viewer", "关闭查看器")}
+                    onClick={close}
+                  />
                 </div>
               </div>
               <div className="photo-viewer-body">
@@ -261,14 +272,14 @@ export function PhotoViewer({
                 </PhotoCanvas>
                 <Button
                   icon="back"
-                  label="Previous item"
+                  label={t("Previous item", "上一项")}
                   disabled={!previous || loading}
                   onClick={() => void move(-1)}
                   className="photo-previous"
                 />
                 <Button
                   icon="chevron"
-                  label="Next item"
+                  label={t("Next item", "下一项")}
                   disabled={!next || loading}
                   onClick={() => void move(1)}
                   className="photo-next"
@@ -277,7 +288,7 @@ export function PhotoViewer({
               <div
                 ref={thumbnails}
                 className="photo-thumbnails"
-                aria-label="Media thumbnails"
+                aria-label={t("Media thumbnails", "媒体缩略图")}
               >
                 {state.nextMessages && (
                   <button
@@ -287,16 +298,18 @@ export function PhotoViewer({
                       void earlier(photos[0]);
                     }}
                   >
-                    Earlier media
+                    {t("Earlier media", "更早的媒体")}
                   </button>
                 )}
                 {photos.map((photo, position) => (
                   <button
                     key={photo.id}
                     className="photo-thumbnail"
-                    aria-label={`${photo.type === 43 ? "Video" : "Photo"} ${
-                      position + 1
-                    }`}
+                    aria-label={`${
+                      photo.type === 43
+                        ? t("Video", "视频")
+                        : t("Photo", "图片")
+                    } ${position + 1}`}
                     aria-current={photo.id === current.id ? "true" : undefined}
                     onClick={() => setSelected(photo)}
                   >
@@ -326,27 +339,31 @@ const isZoomed = ({ state }: ReactZoomPanPinchContextState) =>
   state.scale > 1.001;
 
 function PhotoZoomControls({ animationTime }: { animationTime: number }) {
+  useLocale();
   const scale = useTransformComponent(zoomScale);
   const { zoomIn, zoomOut, resetTransform } = useControls();
   return (
     <>
       <Button
         icon="reset-zoom"
-        label="Reset zoom"
+        label={t("Reset zoom", "重置缩放")}
         onClick={() => void resetTransform(animationTime)}
       />
       <Button
         icon="zoom-out"
-        label="Zoom out"
+        label={t("Zoom out", "缩小")}
         disabled={scale <= 1.001}
         onClick={() => void zoomOut(0.5, animationTime)}
       />
-      <span className="photo-zoom-level" aria-label="Zoom level">
+      <span
+        className="photo-zoom-level"
+        aria-label={t("Zoom level", "缩放比例")}
+      >
         {Math.round(scale * 100)}%
       </span>
       <Button
         icon="zoom-in"
-        label="Zoom in"
+        label={t("Zoom in", "放大")}
         disabled={scale >= 3.999}
         onClick={() => void zoomIn(0.5, animationTime)}
       />
@@ -408,7 +425,7 @@ function PhotoCanvas({
       contentClass="photo-transform"
       wrapperProps={{
         tabIndex: image ? 0 : undefined,
-        "aria-label": image ? "Image canvas" : undefined,
+        "aria-label": image ? t("Image canvas", "图片画布") : undefined,
         onPointerDown: (event) => {
           // Leave native video controls, buttons and links to their own gestures.
           if (

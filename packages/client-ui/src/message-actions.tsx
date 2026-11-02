@@ -8,6 +8,7 @@ import {
 import { createPortal } from "react-dom";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import { canRecall } from "./message-recall.ts";
 import { messagePresentation } from "./message-presentation.ts";
 import { useMediaViewer } from "./media-viewer-context.ts";
@@ -24,6 +25,7 @@ export function MessageActions({
   message: NativeMessage;
   connection: Connection;
 }) {
+  useLocale();
   const gallery = useMediaViewer();
   const composer = useReply();
   const presentation = messagePresentation(message);
@@ -53,12 +55,12 @@ export function MessageActions({
       <div
         className="message-actions"
         role="toolbar"
-        aria-label="Message actions"
+        aria-label={t("Message actions", "消息操作")}
       >
         {composer?.enabled && canReply(message) && (
           <Button
             icon="reply"
-            label="Reply"
+            label={t("Reply", "回复")}
             onClick={() => composer.reply(message)}
           />
         )}
@@ -78,7 +80,10 @@ export function MessageActions({
               }
             }}
           >
-            <summary aria-label="More message actions" title="More">
+            <summary
+              aria-label={t("More message actions", "更多消息操作")}
+              title={t("More", "更多")}
+            >
               <Icon name="more" />
             </summary>
             <div className="message-menu-items">
@@ -87,12 +92,14 @@ export function MessageActions({
                   onClick={() => {
                     void navigator.clipboard
                       .writeText(message.body!)
-                      .then(() => setStatus("Copied"))
-                      .catch(() => setStatus("Couldn’t copy text."));
+                      .then(() => setStatus(t("Copied", "已复制")))
+                      .catch(() =>
+                        setStatus(t("Couldn’t copy text.", "无法复制文本。")),
+                      );
                     if (menu.current) menu.current.open = false;
                   }}
                 >
-                  Copy text
+                  {t("Copy text", "复制文本")}
                 </button>
               )}
               {photo && (
@@ -102,7 +109,9 @@ export function MessageActions({
                     if (menu.current) menu.current.open = false;
                   }}
                 >
-                  {message.type === 43 ? "Open video" : "Open photo"}
+                  {message.type === 43
+                    ? t("Open video", "打开视频")
+                    : t("Open photo", "打开图片")}
                 </button>
               )}
             </div>
@@ -125,6 +134,7 @@ function RecallButton({
   message: NativeMessage;
   connection: Connection;
 }) {
+  useLocale();
   const model = connection.messageRecall(message);
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const [confirming, setConfirming] = useState(false);
@@ -140,10 +150,10 @@ function RecallButton({
     state.operation?.state,
   ]);
   const label = state.busy
-    ? "Recalling…"
+    ? t("Recalling…", "正在撤回…")
     : state.uncertain
-      ? "Check recall"
-      : "Recall";
+      ? t("Check recall", "检查撤回状态")
+      : t("Recall", "撤回");
   return (
     <>
       <span className="recall-action">
@@ -196,6 +206,7 @@ function RecallConfirmation({
   close: () => void;
   confirm: () => void;
 }) {
+  useLocale();
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useId();
   const description = useId();
@@ -220,17 +231,17 @@ function RecallConfirmation({
         close();
       }}
     >
-      <h2 id={heading}>Recall this message?</h2>
-      <p id={description}>This can’t be undone.</p>
+      <h2 id={heading}>{t("Recall this message?", "撤回这条消息？")}</h2>
+      <p id={description}>{t("This can’t be undone.", "此操作无法撤销。")}</p>
       <blockquote className="recall-preview">
-        {emojiText(messageSummary(message, "You").text).slice(0, 240)}
+        {emojiText(messageSummary(message, t("You", "我")).text).slice(0, 240)}
       </blockquote>
       <div className="recall-confirm-actions">
         <button className="secondary" autoFocus onClick={close}>
-          Cancel
+          {t("Cancel", "取消")}
         </button>
         <button className="primary" onClick={confirm}>
-          Recall
+          {t("Recall", "撤回")}
         </button>
       </div>
     </dialog>,
