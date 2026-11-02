@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { assetName, manifestName, releaseRepository, supportedTargets } from '../packages/cli/scripts/native-runtime.mjs';
-import { nativeReleaseReadiness, resumeNpmRelease, nativePublicationSucceeded, runtimeImagePublished, npmReleaseReadiness } from './native-release-orchestration.mjs';
+import { nativeReleaseReadiness, runtimeImagePublished, npmReleaseReadiness } from './native-release-orchestration.mjs';
 
 const version = '1.0.0-beta.10';
 const sourceCommit = 'a'.repeat(40);
@@ -57,7 +57,13 @@ test('the waiting CLI exits successfully and writes an explicit non-publication 
   assert.match(text, /Waiting for native release assets/);
   assert.ok(text.includes(version) && text.includes(sourceCommit));
   assert.match(text, /confirm_publish=true/);
-  assert.match(text, /automatically retries this original push run/);
+  assert.match(text, /rerun this original push run/);
+  await assert.rejects(promisify(execFile)(process.execPath,
+    [fileURLToPath(new URL('./native-release-orchestration.mjs', import.meta.url)), 'resume'],
+    { cwd: root }), error => {
+    assert.match(error.stderr, /Usage: native-release-orchestration\.mjs ready/);
+    return true;
+  });
 });
 
 test('every target, manifest and notice must finish uploading before npm can proceed', async t => {
@@ -95,81 +101,10 @@ test('registry failures, GitHub failures and invalid metadata fail instead of re
   }
 });
 
-function originalRun(overrides = {}) {
-  return { id: 123, head_sha: sourceCommit, event: 'push', head_branch: 'main', path: '.github/workflows/release.yml',
+function imageRun(workflow = 'native-release.yml', overrides = {}) {
+  return { id: 123, head_sha: sourceCommit, event: 'push', head_branch: 'main', path: `.github/workflows/${workflow}`,
     repository: { full_name: releaseRepository }, head_repository: { full_name: releaseRepository },
     status: 'completed', conclusion: 'success', ...overrides };
-}
-
-test('native completion reruns the original push for the exact commit, including a successful waiting run', async () => {
-  for (const conclusion of ['success', 'failure']) {
-    const requests = [];
-    const result = await resumeNpmRelease({ sourceCommit, token, fetchImpl: async (url, init) => {
-      requests.push({ url, method: init.method });
-      assert.equal(init.headers.Authorization, `Bearer ${token}`);
-      assert.equal(init.redirect, 'error');
-      if (init.method === 'GET') {
-        const parsed = new URL(url);
-        assert.equal(parsed.pathname, `/repos/${releaseRepository}/actions/workflows/release.yml/runs`);
-        assert.equal(parsed.searchParams.get('head_sha'), sourceCommit);
-        assert.equal(parsed.searchParams.get('event'), 'push');
-        assert.equal(parsed.searchParams.get('branch'), 'main');
-        return Response.json({ total_count: 1, workflow_runs: [originalRun({ conclusion })] });
-      }
-      assert.equal(url, `https://api.github.com/repos/${releaseRepository}/actions/runs/123/rerun`);
-      return new Response(null, { status: 201 });
-    } });
-    assert.deepEqual(result, { runId: 123, sourceCommit });
-    assert.equal(requests.length, 2);
-    assert.equal(requests[1].method, 'POST');
-  }
-});
-
-test('resume refuses another commit, branch, workflow, event or repository even if the API returns it', async () => {
-  const invalid = [{ head_sha: 'b'.repeat(40) }, { head_branch: 'feature' }, { event: 'pull_request' },
-    { path: '.github/workflows/native-release.yml' }, { repository: { full_name: 'other/repo' } },
-    { head_repository: { full_name: 'other/repo' } }, { id: -1 }];
-  for (const overrides of invalid) {
-    await assert.rejects(resumeNpmRelease({ sourceCommit, fetchImpl: async (_url, init) => {
-      assert.equal(init.method, 'GET');
-      return Response.json({ total_count: 1, workflow_runs: [originalRun(overrides)] });
-    } }), /exactly one original/);
-  }
-});
-
-test('resume refuses missing, ambiguous, unfinished or unbounded run results', async () => {
-  for (const value of [{ total_count: 0, workflow_runs: [] }, { total_count: 2, workflow_runs: [originalRun(), originalRun({ id: 124 })] },
-    { total_count: 101, workflow_runs: [originalRun()] }, { total_count: 1 },
-    { total_count: 1, workflow_runs: [originalRun({ status: 'in_progress' })] }]) {
-    await assert.rejects(resumeNpmRelease({ sourceCommit, fetchImpl: async (_url, init) => {
-      assert.equal(init.method, 'GET');
-      return Response.json(value);
-    } }), /original|unique/i);
-  }
-});
-
-test('resume fails visibly on invalid source, API access errors and rejected reruns', async () => {
-  await assert.rejects(resumeNpmRelease({ sourceCommit: 'main', fetchImpl: () => assert.fail('must not fetch') }), /full native release source commit/);
-  await assert.rejects(resumeNpmRelease({ sourceCommit, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
-  await assert.rejects(resumeNpmRelease({ sourceCommit, fetchImpl: async (_url, init) => init.method === 'GET'
-    ? Response.json({ total_count: 1, workflow_runs: [originalRun()] }) : new Response(null, { status: 403 }) }), /HTTP 403/);
-});
-
-
-test('completion retries npm only after the native publication job actually succeeds', async () => {
-  for (const conclusion of ['success', 'skipped', 'failure', 'cancelled']) {
-    const result = await nativePublicationSucceeded({ runId: 123, fetchImpl: async url => {
-      assert.ok(url.endsWith('/actions/runs/123/jobs?per_page=100'));
-      return Response.json({ total_count: 2, jobs: [{ name: 'prepare', status: 'completed', conclusion: 'success' }, { name: 'image / manifest', status: 'completed', conclusion }] });
-    } });
-    assert.equal(result, conclusion === 'success');
-  }
-  assert.equal(await nativePublicationSucceeded({ runId: 123, fetchImpl: async () => Response.json({ total_count: 0, jobs: [] }) }), false);
-  await assert.rejects(nativePublicationSucceeded({ runId: 123, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
-});
-
-function imageRun(workflow = 'native-release.yml', overrides = {}) {
-  return { ...originalRun(), path: `.github/workflows/${workflow}`, ...overrides };
 }
 
 test('an image must finish its manifest publication for the exact source before npm is ready', async t => {
@@ -199,7 +134,7 @@ test('unrelated or unfinished image workflows never unlock npm', async () => {
   }
 });
 
-test('manual image recovery also satisfies the exact-source npm gate', async () => {
+test('manual image publication also satisfies the exact-source npm gate', async () => {
   assert.equal(await runtimeImagePublished({ sourceCommit, fetchImpl: async url => {
     if (url.includes('/native-release.yml/')) return Response.json({ total_count: 0, workflow_runs: [] });
     if (url.includes('/native-image.yml/')) return Response.json({ total_count: 1, workflow_runs: [imageRun('native-image.yml', { event: 'workflow_dispatch' })] });

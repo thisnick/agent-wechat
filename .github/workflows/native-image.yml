@@ -8,20 +8,11 @@ on:
       confirm_publish:
         required: true
         type: boolean
-      source_commit:
-        required: false
-        default: ''
-        type: string
   workflow_dispatch:
     inputs:
       version:
-        description: Exact native CLI version with published source-verified assets
+        description: Exact native CLI version already prepared from this main commit
         required: true
-        type: string
-      source_commit:
-        description: Optional full prepared release commit for image-only recovery
-        required: false
-        default: ''
         type: string
       confirm_publish:
         description: Publish image only; no host deploy, service restart or profile change
@@ -52,9 +43,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.source_commit || github.sha }}
-          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
@@ -63,25 +51,9 @@ jobs:
       - name: Require prepared exact-version source assets
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-          IMAGE_SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}
-          PUBLISHER_SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import { execFileSync } from 'node:child_process';
-          import { prepareNativePackage } from './scripts/native-prepare-package.mjs';
-          const source = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-          if (!/^[a-f0-9]{40}$/.test(process.env.IMAGE_SOURCE_COMMIT ?? '') || source !== process.env.IMAGE_SOURCE_COMMIT) {
-            throw Error('Image checkout must match the full prepared source commit');
-          }
-          if (JSON.parse(fs.readFileSync('packages/cli/package.json')).version !== process.env.RELEASE_VERSION) {
-            throw Error('Version mismatch');
-          }
-          const taggedSource = execFileSync('git', ['rev-parse', `refs/tags/v${process.env.RELEASE_VERSION}^{commit}`], { encoding: 'utf8' }).trim();
-          if (taggedSource !== source) throw Error('Image source must match the published version tag');
-          execFileSync('git', ['merge-base', '--is-ancestor', source, process.env.PUBLISHER_SOURCE_COMMIT]);
-          await prepareNativePackage({ sourceCommit: source });
-          NODE
+          node --input-type=module -e 'import fs from "node:fs"; if(JSON.parse(fs.readFileSync("packages/cli/package.json")).version!==process.env.RELEASE_VERSION)throw Error("Version mismatch");'
+          node scripts/native-prepare-package.mjs
       - uses: docker/setup-buildx-action@v4.4.1
         id: buildx
       - name: Build the native image candidate
@@ -94,7 +66,7 @@ jobs:
           load: true
           tags: native-candidate
           labels: |
-            org.opencontainers.image.revision=${{ inputs.source_commit || github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ inputs.version }}
           cache-from: type=gha,scope=native-linux-${{ runner.arch }}
       - name: Build and test on the native architecture before publishing
@@ -116,7 +88,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=ghcr.io/${{ github.repository }}-native,push-by-digest=true,name-canonical=true,push=true
           labels: |
-            org.opencontainers.image.revision=${{ inputs.source_commit || github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ inputs.version }}
           provenance: mode=max
           sbom: true
