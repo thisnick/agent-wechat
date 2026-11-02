@@ -1005,6 +1005,37 @@ impl CallService {
         }
         Ok(())
     }
+    /// Keep an acknowledged actor available for its already accepted Reject.
+    /// This permits waiting for delivery, never another poll or mutation.
+    #[cfg(feature = "native-calls")]
+    pub(crate) fn pending_incoming_reject(
+        &self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> bool {
+        let Ok(s) = self.lock() else {
+            return false;
+        };
+        let Some(call) = s.call.as_ref().filter(|call| {
+            &call.identity == identity
+                && &call.authority == authority
+                && call.direction == CallDirection::Incoming
+                && call.state == CallState::Ending
+                && !call.revoked
+                && !call.cancellation_requested
+        }) else {
+            return false;
+        };
+        s.ownership.pending_terminal_operation(authority, identity) == Some(Operation::Reject)
+            && call
+                .owner
+                .as_ref()
+                .and_then(|owner| s.clients.get(owner))
+                .is_some_and(|owner| {
+                    owner.control && !owner.events.is_closed() && &owner.authority == authority
+                })
+            && self.backend.authority(&authority.account_id).as_ref() == Some(authority)
+    }
     fn ticket_current(&self, s: &State, ticket: &Ticket) -> bool {
         let Some(call) = s.call.as_ref().filter(|call| {
             call.identity == ticket.identity()
