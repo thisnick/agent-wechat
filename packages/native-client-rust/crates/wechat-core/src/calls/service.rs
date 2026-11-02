@@ -1550,6 +1550,12 @@ impl CallService {
         self.media_transport(&s, id)?;
         Ok(())
     }
+    /// The API adapter uses this to discard queued PCM when clear_audio fences
+    /// its stream. It never grants a new owner or advances the generation.
+    pub async fn media_generation(&self, id: &str) -> Result<u32> {
+        let s = self.lock()?;
+        Ok(self.media_transport(&s, id)?.send_generation)
+    }
     /// Recheck before forwarding queued RX. Frames left in the API receiver
     /// after Ending are discarded while the control owner awaits confirmation.
     pub async fn media_delivery_allowed(&self, id: &str) -> Result<bool> {

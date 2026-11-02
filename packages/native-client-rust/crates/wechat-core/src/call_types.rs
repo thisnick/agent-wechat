@@ -349,7 +349,8 @@ pub enum CallEvent {
     Error { code: CallErrorCode },
 }
 
-/// First message on the separately authenticated media socket, before binary PCM.
+/// JSON setup on the separately authenticated media socket. Binary messages
+/// contain only PCM samples; stream identity is established by these messages.
 #[derive(Serialize, Deserialize, TS)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
@@ -361,4 +362,6 @@ pub enum CallMediaCommand {
         #[serde(rename = "ownerToken")]
         owner_token: String,
     },
+    #[serde(rename = "audio.start")]
+    AudioStart { generation: u32 },
 }

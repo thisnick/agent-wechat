@@ -7,62 +7,14 @@ import { validateNativeBaseUrl } from "./native-client.ts";
 import type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallMediaCommand, CallSnapshot, CallReadyScope } from "./native.generated.js";
 export type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope } from "./native.generated.js";
 
-export const NATIVE_CALL_MEDIA_HEADER_BYTES = 36;
 export const NATIVE_CALL_MAX_FRAME_BYTES = 64 * 1024;
 export type NativeCallPcmFormat = CallAudioFormat;
-export type NativeCallMediaHeader = { trackId: number; generation: number; sequence: bigint; timestampMicros: bigint };
-export type NativeCallMediaFrame = NativeCallMediaHeader & { payload: Uint8Array };
+export type NativeCallMediaFrame = { payload: Uint8Array };
 
 function pcmBytes(format: NativeCallPcmFormat): number {
   if (![8000, 12000, 16000, 24000, 48000].includes(format.sampleRate)
     || ![1, 2].includes(format.channels) || ![10, 20, 40, 60].includes(format.frameMs)) throw new Error("Invalid call PCM format");
   return format.sampleRate * format.frameMs / 1000 * format.channels * 2;
-}
-function validMediaHeader(header: NativeCallMediaHeader): void {
-  for (const value of [header.trackId, header.generation]) if (!Number.isInteger(value) || value < 1 || value > 0xffffffff) throw new Error("Invalid call media identity");
-  for (const value of [header.sequence, header.timestampMicros]) if (typeof value !== "bigint" || value < 0n || value > 0xffffffffffffffffn) throw new Error("Invalid call media counter");
-}
-/** Encode one interleaved PCM16 frame. Header numbers are BE; samples are LE. */
-export function encodeNativeCallPcm(header: NativeCallMediaHeader, format: NativeCallPcmFormat, samples: Int16Array): Uint8Array {
-  validMediaHeader(header);
-  const length = pcmBytes(format);
-  if (!(samples instanceof Int16Array) || samples.length * 2 !== length || length + 36 > NATIVE_CALL_MAX_FRAME_BYTES) throw new Error("Invalid call PCM frame");
-  const bytes = new Uint8Array(36 + length); const view = new DataView(bytes.buffer);
-  bytes.set([0x57, 0x58, 0x43, 0x4d, 1, 1, 0, 0]);
-  view.setUint32(8, header.trackId); view.setUint32(12, header.generation);
-  view.setBigUint64(16, header.sequence); view.setBigUint64(24, header.timestampMicros); view.setUint32(32, length);
-  for (let i = 0; i < samples.length; i++) view.setInt16(36 + i * 2, samples[i], true);
-  return bytes;
-}
-/** Decode without allocating or copying the payload. Retain/copy it only as long
- * as needed; the caller owns the backing input buffer. */
-export function decodeNativeCallPcm(bytes: Uint8Array, format: NativeCallPcmFormat): NativeCallMediaFrame {
-  if (!(bytes instanceof Uint8Array) || bytes.length < 36 || bytes.length > NATIVE_CALL_MAX_FRAME_BYTES) throw new Error("Invalid call media frame");
-  if (bytes[0] !== 0x57 || bytes[1] !== 0x58 || bytes[2] !== 0x43 || bytes[3] !== 0x4d || bytes[4] !== 1 || bytes[5] !== 1 || bytes[6] !== 0 || bytes[7] !== 0) throw new Error("Invalid call media header");
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const length = view.getUint32(32);
-  if (length !== bytes.length - 36 || length !== pcmBytes(format)) throw new Error("Invalid call PCM frame extent");
-  const header = { trackId: view.getUint32(8), generation: view.getUint32(12), sequence: view.getBigUint64(16), timestampMicros: view.getBigUint64(24) };
-  validMediaHeader(header);
-  return { ...header, payload: bytes.subarray(36) };
-}
-export class NativeCallMediaStream {
-  private last?: NativeCallMediaHeader;
-  readonly trackId: number;
-  private generation: number;
-  constructor(trackId: number, generation: number) { this.trackId = trackId; this.generation = generation; validMediaHeader({ trackId, generation, sequence: 0n, timestampMicros: 0n }); }
-  admit(frame: NativeCallMediaFrame): void {
-    validMediaHeader(frame);
-    if (frame.trackId !== this.trackId) throw new Error("Wrong call media track");
-    if (frame.generation !== this.generation) throw new Error("Stale call media generation");
-    if (this.last && (frame.sequence <= this.last.sequence || frame.timestampMicros <= this.last.timestampMicros)) throw new Error("Out-of-order call media frame");
-    this.last = { trackId: frame.trackId, generation: frame.generation, sequence: frame.sequence, timestampMicros: frame.timestampMicros };
-  }
-  advanceGeneration(generation: number): void {
-    validMediaHeader({ trackId: this.trackId, generation, sequence: 0n, timestampMicros: 0n });
-    if (generation <= this.generation) throw new Error("Stale call media generation");
-    this.generation = generation; this.last = undefined;
-  }
 }
 
 export interface NativeCallSocket {
@@ -330,8 +282,7 @@ export class NativeCallMediaClient {
   private openReject?: (error: Error) => void;
   private timer?: ReturnType<typeof setTimeout>;
   private readyEvent?: MediaReady;
-  private sendGuard?: NativeCallMediaStream;
-  private receiveGuard?: NativeCallMediaStream;
+  private sendGeneration?: number;
   private ending = false;
   private closed = false;
   constructor(options: NativeCallsClientOptions, callId: string, attachment: CallMediaCommand) {
@@ -368,15 +319,14 @@ export class NativeCallMediaClient {
       if (event.type === "call.error") { this.fail(new NativeCallError(event.code)); return; }
       if (event.type === "track.updated" || event.type === "track.added") { if (event.callId !== this.callId) throw new Error("Wrong media call"); this.updateTrack(event.track); return; }
       if (event.type !== "media.ready" || this.readyEvent) throw new Error("Unexpected media event");
-      this.readyEvent = structuredClone(event); this.sendGuard = new NativeCallMediaStream(event.sendTrack.id, event.sendTrack.generation); this.receiveGuard = new NativeCallMediaStream(event.receiveTrack.id, event.receiveTrack.generation);
+      this.readyEvent = structuredClone(event);
       clearTimeout(this.timer); this.openResolve?.(structuredClone(event)); this.openResolve = undefined; this.openReject = undefined; return;
     }
     const bytes = binaryBytes(data);
-    if (!bytes || !this.readyEvent || !this.receiveGuard) throw new Error("Unattached media");
+    if (!bytes || !this.readyEvent) throw new Error("Unattached media");
     if (this.ending) return;
-    const frame = decodeNativeCallPcm(bytes, this.readyEvent.receiveTrack.format);
-    this.receiveGuard.admit(frame);
-    if (!this.queue.push(frame)) this.fail(new NativeCallError("media_backpressure"));
+    if (bytes.byteLength === 0 || bytes.byteLength > NATIVE_CALL_MAX_FRAME_BYTES || bytes.byteLength % (this.readyEvent.receiveTrack.format.channels * 2) !== 0) throw new Error("Invalid PCM samples");
+    if (!this.queue.push({ payload: bytes })) this.fail(new NativeCallError("media_backpressure"));
   }
   /** Called from authenticated control track updates as well as this socket. */
   updateTrack(track: CallAudioTrack): void {
@@ -385,21 +335,27 @@ export class NativeCallMediaClient {
     const prior = this.readyEvent[key];
     if (track.id !== prior.id || track.generation < prior.generation || JSON.stringify(track.format) !== JSON.stringify(prior.format)) { this.fail(new NativeCallError("invalid_track_update")); return; }
     if (track.generation === prior.generation) return;
-    const guard = track.direction === "send" ? this.sendGuard : this.receiveGuard;
-    guard?.advanceGeneration(track.generation);
     if (track.direction === "receive") this.queue.clear();
     this.readyEvent[key] = structuredClone(track);
   }
   /** Stop audio immediately without detaching the owner before termination. */
   stopAudio(): void { this.ending = true; this.queue.clear(); }
-  sendPcm(header: NativeCallMediaHeader, samples: Int16Array): void {
-    if (this.closed || !this.readyEvent || !this.sendGuard || this.socket?.readyState !== 1) throw new NativeCallError("media_not_ready");
+  /** Send PCM chunks, with the generation captured for this producer. The daemon
+   * buffers, frames and clocks the samples. An old producer cannot silently
+   * adopt the new generation after clearAudio. */
+  sendPcm(samples: Int16Array, generation: number): void {
+    if (this.closed || !this.readyEvent || this.socket?.readyState !== 1) throw new NativeCallError("media_not_ready");
     if (this.ending) throw new NativeCallError("call_ending");
-    const bytes = encodeNativeCallPcm(header, this.readyEvent.sendTrack.format, samples);
-    if (this.socket.bufferedAmount + bytes.byteLength > (this.options.maxBufferedBytes ?? 65536)) throw new NativeCallError("media_backpressure");
-    const frame = decodeNativeCallPcm(bytes, this.readyEvent.sendTrack.format);
-    this.sendGuard.admit(frame);
-    try { this.socket.send(bytes); } catch { this.fail(new NativeCallError("media_send_failed", true)); throw new NativeCallError("media_send_failed", true); }
+    if (generation !== this.readyEvent.sendTrack.generation) throw new NativeCallError("stale");
+    if (!(samples instanceof Int16Array) || samples.length === 0 || samples.length % this.readyEvent.sendTrack.format.channels !== 0 || samples.byteLength > NATIVE_CALL_MAX_FRAME_BYTES) throw new NativeCallError("invalid_pcm");
+    const start = this.sendGeneration === generation ? undefined : JSON.stringify({ type: "audio.start", generation } satisfies CallMediaCommand);
+    if (this.socket.bufferedAmount + samples.byteLength + (start?.length ?? 0) > (this.options.maxBufferedBytes ?? 65536)) throw new NativeCallError("media_backpressure");
+    const bytes = new Uint8Array(samples.byteLength); const view = new DataView(bytes.buffer);
+    for (let i = 0; i < samples.length; i++) view.setInt16(i * 2, samples[i], true);
+    try {
+      if (start) { this.socket.send(start); this.sendGeneration = generation; }
+      this.socket.send(bytes);
+    } catch { this.fail(new NativeCallError("media_send_failed", true)); throw new NativeCallError("media_send_failed", true); }
   }
   private fail(error: NativeCallError): void {
     if (this.closed) return;

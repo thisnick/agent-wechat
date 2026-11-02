@@ -32,7 +32,7 @@ class Media implements CallMediaPort {
   input = new Queue<NativeCallMediaFrame>(); sent: Array<{ generation: number; samples: Int16Array }> = []; generation = 1; closed = false; stopped = false;
   tracks() { return { sendTrack: { id: 1, generation: this.generation, direction: "send" as const, format }, receiveTrack: { id: 2, generation: 1, direction: "receive" as const, format } }; }
   frames() { return this.input; }
-  sendPcm(header: { generation: number }, samples: Int16Array) { if (this.closed || this.stopped) throw Error("Closed"); this.sent.push({ generation: header.generation, samples: samples.slice() }); }
+  sendPcm(samples: Int16Array, generation: number) { if (this.closed || this.stopped) throw Error("Closed"); this.sent.push({ generation, samples: samples.slice() }); }
   stopAudio() { this.stopped = true; this.input.values = []; }
   close() { this.closed = true; this.input.close(); }
 }
@@ -176,12 +176,12 @@ test("new response PCM waits for clear acknowledgement and uses a fresh resample
   output.enqueue(old, { itemId: "interrupted" });
   const clearing = output.clear();
   output.enqueue(fresh, { itemId: "fresh-response" });
-  await delay(30); assert.equal(media.sent.length, 0); assert.equal(resamplers, 2);
+  await delay(30); assert.equal(media.sent.length, 1); assert.equal(resamplers, 2);
   release(); await clearing; await until(() => media.sent.length === 2);
   assert.equal(failures, 0);
-  for (const frame of media.sent) {
+  for (const frame of media.sent.slice(1)) {
     assert.equal(frame.generation, 2);
-    assert.deepEqual(frame.samples, new Int16Array(320).fill(200));
+    assert.deepEqual(frame.samples, new Int16Array(640).fill(200));
   }
 });
 test("overlapping clears keep interrupted late chunks revoked and stale acknowledgements paused", async t => {
@@ -199,14 +199,14 @@ test("overlapping clears keep interrupted late chunks revoked and stale acknowle
   output.enqueue(pcm(101), { itemId: "first-response" });
   output.enqueue(pcm(201), { itemId: "second-response" });
   media.generation = 2; releases[0](); await first;
-  await delay(30); assert.equal(media.sent.length, 0);
+  await delay(30); assert.equal(media.sent.length, 1);
   media.generation = 3; releases[1](); await second;
-  await until(() => media.sent.length === 1);
-  assert.equal(media.sent[0].generation, 3);
-  assert.deepEqual(media.sent[0].samples, new Int16Array(320).fill(300));
+  await until(() => media.sent.length === 2);
+  assert.equal(media.sent[1].generation, 3);
+  assert.deepEqual(media.sent[1].samples, new Int16Array(320).fill(300));
   output.enqueue(pcm(102), { itemId: "first-response" });
   output.enqueue(pcm(202), { itemId: "second-response" });
-  await delay(30); assert.equal(media.sent.length, 1); assert.equal(failures, 0);
+  await delay(30); assert.equal(media.sent.length, 2); assert.equal(failures, 0);
 });
 test("terminal ownership revocation stops old audio callbacks and does not manufacture a hangup", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
@@ -258,7 +258,8 @@ test("PCM queue rejects oversized or unidentified output rather than growing ind
   const media = new Media(); const voice = voiceFactory(); let failures = 0;
   const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
   output.enqueue(Buffer.alloc(640), undefined); output.enqueue(Buffer.alloc(640), { itemId: "late" }); assert.equal(failures, 1); assert.equal(media.sent.length, 0);
-  const bounded = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
+  const bounded = new CallPcmOutput(media, format, voice.prepared, () => new Promise(() => {}), () => { failures++; });
+  void bounded.clear();
   for (let i = 0; i < 4; i++) bounded.enqueue(Buffer.alloc(64000), { itemId: "first" });
   bounded.enqueue(Buffer.alloc(640), { itemId: "overflow" }); assert.equal(failures, 2); bounded.close();
 });

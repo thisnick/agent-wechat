@@ -34,8 +34,9 @@ flowchart TD
   PROTOCOL --> PLATFORM
 ```
 
-Utility dependencies are omitted. The CLI and API also use `wechat-calls`
-for PCM framing.
+Utility dependencies are omitted. The API uses `wechat-calls` for internal
+PCM envelopes; the CLI reuses its audio format types. Client sockets carry raw
+PCM samples and JSON metadata, while the daemon assembles and paces audio frames.
 
 | Package | Responsibility | Published crate? |
 | --- | --- | --- |

@@ -459,39 +459,30 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     .await;
     let ack = json_event(&mut media).await;
     assert_eq!(ack["type"], "media.ready");
-    use wechat_calls::{
-        audio::AudioFormat,
-        frame::{encode_pcm, MediaFrame, MediaHeader},
-    };
-    let format = AudioFormat::new(16000, 1, 20).unwrap();
     let samples: Vec<i16> = (0..320)
         .map(|n| if n % 2 == 0 { 1000 } else { -1000 })
         .collect();
-    let bytes = encode_pcm(
-        MediaHeader {
-            track_id: 1,
-            generation: 1,
-            sequence: 1,
-            timestamp_micros: 20_000,
-        },
-        format,
-        &samples,
-    )
-    .unwrap();
-    media
-        .send(ClientMessage::Binary(bytes.into()))
-        .await
-        .unwrap();
+    let bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    command(&mut media, json!({"type":"audio.start","generation":1})).await;
+    // Application chunks need not match codec frame boundaries. The daemon
+    // joins partial chunks and clocks complete frames, with raw PCM on RX too.
+    for chunk in [&bytes[..6], &bytes[6..]] {
+        media
+            .send(ClientMessage::Binary(chunk.to_vec().into()))
+            .await
+            .unwrap();
+    }
     loop {
         let response = timeout(Duration::from_secs(3), media.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        if let ClientMessage::Binary(bytes) = response {
-            let frame = MediaFrame::decode(&bytes, format).unwrap();
-            assert_eq!(frame.header.track_id, 2);
-            assert_eq!(frame.samples().collect::<Vec<_>>(), samples);
+        if let ClientMessage::Binary(response) = response {
+            assert_eq!(response.as_ref(), bytes.as_slice());
             break;
         }
     }
@@ -539,10 +530,38 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
 
 #[tokio::test]
 async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owner() {
-    use wechat_calls::{
-        audio::AudioFormat,
-        frame::{encode_pcm, MediaFrame, MediaHeader},
+    // The same stream contract covers partial samples, queue admission and a
+    // clear which overtakes queued PCM. No per-chunk client header is accepted.
+    let mut queue = PcmInput {
+        format: AudioFormat::new(16_000, 1, 20).unwrap(),
+        track: 1,
+        generation: None,
+        pending: VecDeque::new(),
+        sequence: 0,
+        timestamp: 0,
     };
+    assert!(queue.push(&[0, 0], 1).is_err());
+    assert!(queue.start(2, 1).is_err());
+    queue.start(1, 1).unwrap();
+    assert!(queue.push(&[0], 1).is_err());
+    assert!(queue.push(&[], 1).is_err());
+    assert!(queue.push(&vec![0; MEDIA_LIMIT + 2], 1).is_err());
+    for _ in 0..4 {
+        queue.push(&vec![0; 64_000], 1).unwrap();
+    }
+    assert!(queue.push(&[0, 0], 1).is_err());
+    assert!(queue.next_frame(2).unwrap().is_none());
+    assert!(queue.pending.is_empty());
+    queue.start(2, 2).unwrap();
+    queue.push(&[1, 0], 2).unwrap();
+    assert!(queue.next_frame(2).unwrap().is_none());
+    queue.push(&vec![0; 638], 2).unwrap();
+    let bytes = queue.next_frame(2).unwrap().unwrap();
+    let frame = MediaFrame::decode(&bytes, queue.format).unwrap();
+    assert_eq!(frame.header.generation, 2);
+    assert_eq!(frame.header.sequence, 0);
+    assert_eq!(frame.samples().next(), Some(1));
+    assert!(queue.start(1, 2).is_err());
     let f = Fixture::new(true).await;
     let mut control = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
     let hello = json_event(&mut control).await;
@@ -562,24 +581,17 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
         .await;
     command(&mut media,json!({"type":"media.attach","clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
     assert_eq!(json_event(&mut media).await["type"], "media.ready");
-    let format = AudioFormat::new(16000, 1, 20).unwrap();
-    let frame = |generation, sequence, timestamp| {
-        encode_pcm(
-            MediaHeader {
-                track_id: 1,
-                generation,
-                sequence,
-                timestamp_micros: timestamp,
-            },
-            format,
-            &[432; 320],
-        )
-        .unwrap()
+    let frame = || {
+        [432i16; 320]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>()
     };
+    command(&mut media, json!({"type":"audio.start","generation":1})).await;
     let (release_audio, audio_gate) = tokio::sync::oneshot::channel();
     *f.backend.held_audio.lock().unwrap() = Some(audio_gate);
     media
-        .send(ClientMessage::Binary(frame(1, 1, 20_000).into()))
+        .send(ClientMessage::Binary(frame().into()))
         .await
         .unwrap();
     timeout(Duration::from_secs(2), f.backend.audio_started.notified())
@@ -602,7 +614,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
         .is_err());
     release_audio.send(()).unwrap();
     media
-        .send(ClientMessage::Binary(frame(1, 2, 40_000).into()))
+        .send(ClientMessage::Binary(frame().into()))
         .await
         .unwrap();
     release_clear.send(()).unwrap();
@@ -618,8 +630,9 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     }
     assert_eq!(result.unwrap()["status"], "accepted");
     assert_eq!(track.unwrap()["track"]["generation"], 2);
+    command(&mut media, json!({"type":"audio.start","generation":2})).await;
     media
-        .send(ClientMessage::Binary(frame(2, 0, 0).into()))
+        .send(ClientMessage::Binary(frame().into()))
         .await
         .unwrap();
     loop {
@@ -629,8 +642,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
             .unwrap()
             .unwrap();
         if let ClientMessage::Binary(bytes) = response {
-            let decoded = MediaFrame::decode(&bytes, format).unwrap();
-            assert_eq!(decoded.samples().collect::<Vec<_>>(), vec![432; 320]);
+            assert_eq!(bytes.as_ref(), frame().as_slice());
             break;
         }
     }

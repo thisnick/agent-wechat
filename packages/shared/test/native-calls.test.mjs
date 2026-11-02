@@ -1,53 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { encodeNativeCallPcm, decodeNativeCallPcm, NativeCallMediaStream } from '../src/native-calls.ts';
-
-const format = { sampleRate: 8000, channels: 1, frameMs: 10 };
-const header = { trackId: 0x01020304, generation: 2, sequence: 3n, timestampMicros: 10_000n };
-test('WXCM literal bytes match the Rust media format and retain the input slice', () => {
-  const samples = new Int16Array(80); samples.set([-32768, 32767, -1]);
-  const bytes = encodeNativeCallPcm(header, format, samples);
-  assert.deepEqual([...bytes.subarray(0, 36)], [
-    0x57, 0x58, 0x43, 0x4d, 1, 1, 0, 0,
-    1, 2, 3, 4, 0, 0, 0, 2,
-    0, 0, 0, 0, 0, 0, 0, 3,
-    0, 0, 0, 0, 0, 0, 0x27, 0x10,
-    0, 0, 0, 0xa0,
-  ]);
-  assert.deepEqual([...bytes.subarray(36, 42)], [0, 0x80, 0xff, 0x7f, 0xff, 0xff]);
-  const decoded = decodeNativeCallPcm(bytes, format);
-  assert.equal(decoded.payload.buffer, bytes.buffer);
-  assert.equal(decoded.sequence, 3n);
-  assert.equal(decoded.timestampMicros, 10_000n);
-  const padded = new Uint8Array(bytes.length + 14); padded.set(bytes, 7);
-  assert.deepEqual(decodeNativeCallPcm(padded.subarray(7, 7 + bytes.length), format), decoded);
-});
-test('WXCM rejects malformed extents, kind/version/reserved fields and unsafe IDs', () => {
-  const bytes = encodeNativeCallPcm(header, format, new Int16Array(80));
-  for (let i = 0; i < bytes.length; i++) assert.throws(() => decodeNativeCallPcm(bytes.subarray(0, i), format));
-  for (const index of [0, 4, 5, 6, 7, 35]) {
-    const corrupt = bytes.slice(); corrupt[index] ^= 0xff;
-    assert.throws(() => decodeNativeCallPcm(corrupt, format));
-  }
-  assert.throws(() => decodeNativeCallPcm(new Uint8Array(65537), format));
-  assert.throws(() => encodeNativeCallPcm({ ...header, sequence: -1n }, format, new Int16Array(80)));
-  assert.throws(() => encodeNativeCallPcm({ ...header, trackId: 0 }, format, new Int16Array(80)));
-  assert.throws(() => encodeNativeCallPcm(header, format, new Int16Array(79)));
-  assert.throws(() => decodeNativeCallPcm(bytes, { ...format, channels: 2 }));
-});
-test('media stream fences stale output after clear and rejects replayed or foreign tracks', () => {
-  const frame = decodeNativeCallPcm(encodeNativeCallPcm(header, format, new Int16Array(80)), format);
-  const stream = new NativeCallMediaStream(header.trackId, header.generation);
-  assert.throws(() => stream.admit({ ...frame, trackId: header.trackId + 1 }), /track/);
-  assert.throws(() => stream.admit({ ...frame, generation: 1 }), /generation/);
-  stream.admit(frame);
-  assert.throws(() => stream.admit(frame), /Out-of-order/);
-  assert.throws(() => stream.admit({ ...frame, sequence: 4n }), /Out-of-order/);
-  stream.advanceGeneration(3);
-  assert.throws(() => stream.admit(frame), /generation/);
-  stream.admit({ ...frame, generation: 3, sequence: 0n, timestampMicros: 0n });
-});
-
 import { NativeCallsClient, NativeCallError } from '../src/native-calls.ts';
 const audio = { sampleRate: 16000, channels: 1, frameMs: 20 };
 const offer = { callId: 'call-1', revision: 1, kind: 'direct', callType: 'voice', callerId: 'synthetic-contact' };
@@ -79,6 +31,9 @@ class MockCallServer {
           assert.equal(command.clientId, this.owner);
           assert.equal(command.ownerToken, `owner-${this.owner}`);
           attached = true; queueMicrotask(() => socket.receive({ type: 'media.ready', ...structuredClone(this.tracks) }));
+        } else if (typeof value === 'string') {
+          const start = JSON.parse(value); assert.equal(start.type, 'audio.start');
+          assert.equal(start.generation, this.tracks.sendTrack.generation);
         } else assert.ok(value instanceof Uint8Array);
       });
       this.sockets.push(socket); this.media.push(socket); queueMicrotask(() => socket.open()); return socket;
@@ -136,10 +91,10 @@ test('ending stops audio but retains owner transports until terminal confirmatio
       server.controls[0].receive({ type: 'call.state', call: snapshot });
       assert.equal(server.controls[0].readyState, 1);
       assert.equal(server.media[0].readyState, 1);
-      assert.throws(() => media.sendPcm({ trackId: 1, generation: 1, sequence: 0n, timestampMicros: 0n }, new Int16Array(320)), error => error.code === 'call_ending');
+      assert.throws(() => media.sendPcm(new Int16Array(320), 1), error => error.code === 'call_ending');
       // Cross-socket data already queued before Ending must neither play nor
       // overflow a stopped consumer and detach its still-terminating owner.
-      for (let i = 0; i < 20; i++) server.media[0].receive(encodeNativeCallPcm({ trackId: 2, generation: 1, sequence: BigInt(i), timestampMicros: BigInt(i) * 20000n }, audio, new Int16Array(320)));
+      for (let i = 0; i < 20; i++) server.media[0].receive(new Uint8Array(640));
       assert.equal(server.media[0].readyState, 1);
       server.controls[0].receive({ type: 'call.state', call: { ...snapshot, revision: 3, state: terminal } });
       assert.equal(server.media[0].readyState, 3);
@@ -158,7 +113,7 @@ test('revocation closes media and rejects pending control operations without exp
   server.controls[0].receive({ type: 'call.error', code: 'forbidden' });
   await assert.rejects(pending, error => error.code === 'forbidden' && error.outcomeUnknown);
   assert.equal(server.media[0].readyState, 3);
-  assert.throws(() => media.sendPcm({ trackId: 1, generation: 1, sequence: 0n, timestampMicros: 0n }, new Int16Array(320)), error => error.code === 'media_not_ready');
+  assert.throws(() => media.sendPcm(new Int16Array(320), 1), error => error.code === 'media_not_ready');
 });
 
 test('slow control consumer and malformed media fail closed with fixed queue limits', async () => {
@@ -169,12 +124,18 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
   await assert.rejects(observer.command({ type: 'call.ready', requestId: 'ready', ready: true, format: audio }), error => error.code === 'not_connected');
   const owner = client(server); await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
   const media = await owner.attachMedia('call-1');
-  const first = { trackId: 1, generation: 1, sequence: 0n, timestampMicros: 0n };
   server.media[0].bufferedAmount = 65536;
-  assert.throws(() => media.sendPcm(first, new Int16Array(320)), error => error.code === 'media_backpressure');
+  assert.throws(() => media.sendPcm(new Int16Array(320), 1), error => error.code === 'media_backpressure');
   server.media[0].bufferedAmount = 0;
-  media.sendPcm(first, new Int16Array(320));
-  assert.equal(decodeNativeCallPcm(server.media[0].sent[1], audio).sequence, 0n);
+  media.sendPcm(new Int16Array(320), 1);
+  assert.deepEqual(JSON.parse(server.media[0].sent[1]), { type: 'audio.start', generation: 1 });
+  assert.deepEqual(server.media[0].sent[2], new Uint8Array(640));
+  media.sendPcm(new Int16Array([-32768, 32767, -1]), 1);
+  assert.deepEqual([...server.media[0].sent[3]], [0, 128, 255, 127, 255, 255]);
+  await owner.clearAudio('clear-pcm', 'call-1');
+  assert.throws(() => media.sendPcm(new Int16Array(1), 1), error => error.code === 'stale');
+  media.sendPcm(new Int16Array(1), 2);
+  assert.deepEqual(JSON.parse(server.media[0].sent[4]), { type: 'audio.start', generation: 2 });
   server.media[0].receive(new Uint8Array(3));
   await assert.rejects(media.frames()[Symbol.asyncIterator]().next(), error => error.code === 'invalid_media');
   owner.close();

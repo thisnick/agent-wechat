@@ -1,146 +1,237 @@
 ---
 title: Calls API
-description: Call snapshots, WebSocket commands and call events.
+description: Call snapshots and complete client/server JSON payload examples.
 ---
 
-Use one control WebSocket to observe and control calls. Only its winning owner
-can attach media. See [media framing](../calls-media/) for audio transport and
-[Rust crate architecture](../../how-it-works/rust-crates/) for package responsibilities.
+Use the control WebSocket for call commands and events. Its winning owner can
+attach the separate [raw PCM media socket](../calls-media/).
+[Rust crate architecture](../../how-it-works/rust-crates/) explains package responsibilities.
 
-## Connect
+## Routes and snapshot
 
-All routes require an account-authorized bearer token with the `calls` scope.
-Use the header on HTTP requests and WebSocket upgrades; never put tokens in URLs.
-Replace `{account}` and `{callId}` with URL-encoded identifiers.
+All routes require an account-authorized `calls` bearer token in the
+`Authorization` header, including WebSocket upgrades. URL-encode identifiers;
+never put credentials in URLs.
 
-| Method | Path | Result |
+| Method | Path | Response |
 | --- | --- | --- |
 | GET | `/v1/accounts/{account}/calls/current` | JSON snapshot |
-| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON commands and events |
-| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | Owner-only media |
+| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages |
+| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON setup and binary PCM |
 
-1. Inspect the snapshot:
-
-   ```bash
-   curl -sS -H "Authorization: Bearer $TOKEN" \
-     "$BASE/v1/accounts/$ACCOUNT/calls/current"
-   ```
-
-   Example with an enabled direct-voice backend and no active call:
-
-   ```json
-   {
-     "capabilities": {"directAudio":true},
-     "availability": {"busy":false,"ownedByThisClient":false},
-     "currentOffer": null,
-     "currentPendingOffer": null,
-     "currentCall": null,
-     "audioFormat": {"sampleRate":16000,"channels":1,"frameMs":20}
-   }
-   ```
-
-`capabilities` lists available flags only. Treat missing flags as unavailable;
-`{}` means this backend currently offers no calling.
-
-2. Open the control socket. Its first `hello` event contains that snapshot plus
-   `protocolVersion: 1` and the connection's `clientId`. Prepare audio, then send:
-
-   ```json
-   {"type":"call.ready","requestId":"ready-1","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20},"scope":{"kind":"outgoing"}}
-   ```
-
-3. Initiate a voice call:
-
-   ```json
-   {"type":"call.dial","requestId":"dial-1","target":{"kind":"direct","contactId":"example-contact"},"callType":"voice"}
-   ```
-
-   A successful claim returns:
-
-   ```json
-   {"type":"command.result","requestId":"dial-1","status":"accepted","callId":"example-call","ownerToken":"<secret owner token>","code":null}
-   ```
-
-   Preserve the token privately for media attachment. Acceptance starts the
-   operation; wait for `call.state` with `state: "connected"` before sending audio.
-
-## Incoming calls and snapshots
-
-`currentOffer` is the incoming call ready to answer or reject. It is also sent
-as `call.offered`, and clears when claimed or ended. `currentPendingOffer` is
-still waiting for readiness or preparation and cannot be answered.
-
-`call.pending` reports that candidate with phase `waiting_for_ready` or `preparing`;
-`offer: null` clears it. Scope readiness using `{"kind":"offer","callId":"example-call","expectedRevision":1}`.
-An omitted readiness scope means `{"kind":"all"}`. Setting `ready: false` clears readiness.
-
-`audioFormat` and each track's `format` describe PCM between your client and
-the daemon: sample rate, channels and frame duration, independently of WeChat's codec.
-
-An actionable incoming event looks like:
-
-```json
-{"type":"call.offered","offer":{"callId":"example-call","revision":1,"kind":"direct","callType":"voice","callerId":"example-contact"}}
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v1/accounts/$ACCOUNT/calls/current"
 ```
 
-Answer using its current revision:
-
 ```json
-{"type":"call.answer","requestId":"answer-1","callId":"example-call","expectedRevision":1}
+{
+  "capabilities":{"directAudio":true},
+  "availability":{"busy":false,"ownedByThisClient":false},
+  "currentOffer":null,
+  "currentPendingOffer":null,
+  "currentCall":null,
+  "audioFormat":{"sampleRate":16000,"channels":1,"frameMs":20}
+}
 ```
 
-The first successful answer owns the call. Other clients receive `already_claimed`.
-Active `currentCall` and `call.state.call` share this shape:
-
-```json
-{"callId":"example-call","revision":2,"kind":"direct","callType":"voice","direction":"incoming","state":"connected","ownedByThisClient":false}
-```
-
-Same-account observers see this metadata without owner tokens or media access.
-HTTP snapshots always report ownership as false: ownership belongs to a socket.
-`availability.busy` also covers calls on other accounts, whose details stay hidden.
-
-## Commands and events
-
-Every command requires `type` and `requestId`. Reuse an ID only for an identical
-command. End/answer/reject commands require the latest `expectedRevision`.
-
-| Command | Additional fields |
+| Field | Meaning |
 | --- | --- |
-| `call.ready` | `ready`, `format`, optional `scope` |
-| `call.dial` | `target`, `callType` |
-| `call.answer` | `callId`, `expectedRevision` |
-| `call.reject`, `call.cancel`, `call.hangup` | `callId`, `expectedRevision` |
-| `call.mute` | `callId`, `muted` |
-| `call.clear_audio` | `callId` |
+| `capabilities` | Available flags only; missing flags mean unavailable; `{}` means no calling |
+| `currentPendingOffer` | Incoming candidate waiting for readiness or preparation; cannot be answered |
+| `currentOffer` | Actionable incoming offer; clears when claimed or ended |
+| `currentCall` | Active call metadata, including `kind`, `callType`, direction and state |
+| `audioFormat` | Client/daemon PCM format, independent of the WeChat codec |
 
-Use `reject` for an offer, `cancel` before pickup and `hangup` once connected.
-Results use status `accepted`, `replayed` or `error`. Error `code` is one of
-`invalid_request`, `busy`, `already_claimed`, `offer_expired`, `not_owner`,
-`unsupported`, `media_not_ready`, `outcome_unknown`, `capacity`, `stale`, `forbidden`,
-`closed`; successful results have `code: null`.
+Same-account observers see call metadata without owner tokens or audio access.
+HTTP ownership is always false: ownership belongs to a control socket. Global
+`busy` also covers other accounts, whose call details stay hidden.
 
-| Event | Payload |
-| --- | --- |
-| `hello` | Connection ID, version and snapshot fields |
-| `command.result` | `requestId`, `status`, nullable `callId`, `ownerToken`, `code` |
-| `call.offered`, `call.pending` | `offer` |
-| `call.state` | `call` |
-| `calls.availability` | `availability` |
-| `track.added`, `track.updated` | `callId`, audio `track` |
-| `media.ready` | `sendTrack`, `receiveTrack` |
-| `call.error` | `code` |
+## Client messages
+
+Send these JSON text messages on the **control** socket. Every command has a
+`requestId`; reuse it only for an identical command. Use the latest received
+revision for answer/reject/cancel/hangup. Example revisions below are illustrative.
+
+### Readiness
+
+Prepare your audio path, then advertise readiness. Connecting alone stays passive.
+
+```json
+{"type":"call.ready","requestId":"ready-outgoing","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20},"scope":{"kind":"outgoing"}}
+```
+
+Ready for one pending incoming call:
+
+```json
+{"type":"call.ready","requestId":"ready-offer","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20},"scope":{"kind":"offer","callId":"example-call","expectedRevision":1}}
+```
+
+Ready for incoming and outgoing calls, or withdraw readiness:
+
+```json
+{"type":"call.ready","requestId":"ready-all","ready":true,"format":{"sampleRate":16000,"channels":1,"frameMs":20},"scope":{"kind":"all"}}
+```
+
+```json
+{"type":"call.ready","requestId":"not-ready","ready":false,"format":{"sampleRate":16000,"channels":1,"frameMs":20}}
+```
+
+Omitting `scope` means `all`.
+
+### Start or answer
+
+```json
+{"type":"call.dial","requestId":"dial-1","target":{"kind":"direct","contactId":"example-contact"},"callType":"voice"}
+```
+
+```json
+{"type":"call.answer","requestId":"answer-1","callId":"example-call","expectedRevision":3}
+```
+
+The initiating socket owns an outgoing call. For incoming calls, the first
+successful answer wins; competing clients receive `already_claimed`.
+
+### Reject, cancel or hang up
+
+Reject an incoming offer, cancel your outgoing call before pickup, or hang up
+after answering/connecting:
+
+```json
+{"type":"call.reject","requestId":"reject-1","callId":"example-call","expectedRevision":3}
+```
+
+```json
+{"type":"call.cancel","requestId":"cancel-1","callId":"example-call","expectedRevision":4}
+```
+
+```json
+{"type":"call.hangup","requestId":"hangup-1","callId":"example-call","expectedRevision":5}
+```
+
+### Audio controls
+
+Mute outgoing audio; send `muted: false` to unmute. Clear queued outgoing audio
+when interrupting a response; see [stream generations](../calls-media/#mute-and-interrupt).
+
+```json
+{"type":"call.mute","requestId":"mute-1","callId":"example-call","muted":true}
+```
+
+```json
+{"type":"call.clear_audio","requestId":"clear-1","callId":"example-call"}
+```
+
+## Server messages
+
+These JSON text messages arrive on the **control** socket. Media attachment has
+its own [`media.ready` response](../calls-media/#attach-and-exchange-audio).
+
+### Hello
+
+The first event includes the connection's `clientId` and a current snapshot:
+
+```json
+{
+  "type":"hello",
+  "protocolVersion":1,
+  "clientId":"example-client",
+  "capabilities":{"directAudio":true},
+  "availability":{"busy":false,"ownedByThisClient":false},
+  "currentOffer":null,
+  "currentPendingOffer":null,
+  "currentCall":null,
+  "audioFormat":{"sampleRate":16000,"channels":1,"frameMs":20}
+}
+```
+
+### Command results
+
+Match `requestId` to your command. Readiness succeeds without claiming a call:
+
+```json
+{"type":"command.result","requestId":"ready-outgoing","status":"accepted","callId":null,"ownerToken":null,"code":null}
+```
+
+A successful claim includes a secret token for media attachment:
+
+```json
+{"type":"command.result","requestId":"dial-1","status":"accepted","callId":"example-call","ownerToken":"<secret owner token>","code":null}
+```
+
+Acceptance starts the operation; it does not mean connected. An identical request
+can return `replayed`. A rejected command returns `error` and a fixed code:
+
+```json
+{"type":"command.result","requestId":"ready-outgoing","status":"replayed","callId":null,"ownerToken":null,"code":null}
+```
+
+```json
+{"type":"command.result","requestId":"answer-1","status":"error","callId":null,"ownerToken":null,"code":"already_claimed"}
+```
+
+### Pending and actionable offers
+
+A pending candidate has phase `waiting_for_ready` or `preparing`:
+
+```json
+{"type":"call.pending","offer":{"callId":"example-call","revision":1,"kind":"direct","callType":"voice","callerId":"example-contact","phase":"waiting_for_ready"}}
+```
+
+```json
+{"type":"call.pending","offer":null}
+```
+
+An actionable offer can be answered or rejected using its revision:
+
+```json
+{"type":"call.offered","offer":{"callId":"example-call","revision":3,"kind":"direct","callType":"voice","callerId":"example-contact"}}
+```
+
+### State and availability
+
+```json
+{"type":"call.state","call":{"callId":"example-call","revision":5,"kind":"direct","callType":"voice","direction":"incoming","state":"connected","ownedByThisClient":true}}
+```
+
+```json
+{"type":"call.state","call":{"callId":"example-call","revision":6,"kind":"direct","callType":"voice","direction":"incoming","state":"ending","ownedByThisClient":true}}
+```
+
+```json
+{"type":"call.state","call":{"callId":"example-call","revision":7,"kind":"direct","callType":"voice","direction":"incoming","state":"ended","ownedByThisClient":true}}
+```
+
+```json
+{"type":"calls.availability","availability":{"busy":false,"ownedByThisClient":false}}
+```
 
 States are `offered`, `dialing`, `ringing`, `connecting`, `connected`, `ending`,
-`ended`, `uncertain`. Stop sending at `ending`; retain control until confirmation.
-An uncertain outcome blocks another call until resolved.
+`ended` and `uncertain`. Stop audio at `ending`; retain control until terminal
+confirmation. `uncertain` blocks another call until resolved.
+
+### Audio generation and errors
+
+After successful `call.clear_audio`, the send track advances:
+
+```json
+{"type":"track.updated","callId":"example-call","track":{"id":1,"generation":2,"direction":"send","format":{"sampleRate":16000,"channels":1,"frameMs":20}}}
+```
+
+A socket-level failure uses `call.error`:
+
+```json
+{"type":"call.error","code":"forbidden"}
+```
+
+Error codes are `invalid_request`, `busy`, `already_claimed`, `offer_expired`,
+`not_owner`, `unsupported`, `media_not_ready`, `outcome_unknown`, `capacity`,
+`stale`, `forbidden` and `closed`. Lost replies do not authorize automatic retry.
 
 :::note[Good to know]
-Reconnecting does not reclaim ownership.
-Control messages are limited to 16 KiB. Reply to server WebSocket Pings;
-a connection silent for 45 seconds closes, followed by five seconds for owner cleanup.
-`kind` is `direct` or `conference`; `callType` is `voice` or `video`.
-Only direct voice is currently implemented. Conference targets
-`{"kind":"conference","groupId":"example-group","invitees":["example-contact"]}`
-and video requests are not supported by the current backend.
+Reconnecting does not reclaim ownership. Control messages are limited to 16 KiB.
+Reply to server WebSocket Pings; a connection silent for 45 seconds closes,
+followed by five seconds for owner cleanup. `kind` is `direct` or `conference`;
+`callType` is `voice` or `video`. Only direct voice is currently implemented.
+Conference targets and video calls return `unsupported` with this backend.
 :::

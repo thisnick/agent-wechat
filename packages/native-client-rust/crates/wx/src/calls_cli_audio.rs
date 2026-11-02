@@ -14,10 +14,7 @@ use tokio::{
     sync::mpsc,
 };
 use wechat_audio::{AudioConfig, AudioError, AudioSession, PlaybackHandle, PlaybackToken};
-use wechat_calls::{
-    audio::AudioFormat,
-    frame::{encode_pcm, MediaFrame, MediaHeader, MediaStream},
-};
+use wechat_calls::audio::AudioFormat;
 use wechat_core::call_types::{
     CallMediaCommand, CallReadyScope, CallState, CallTarget, CallTrackDirection,
 };
@@ -317,11 +314,9 @@ impl OwnedCall {
 pub(super) struct Media {
     socket: Socket,
     send_track: wechat_core::call_types::CallAudioTrack,
-    receive: MediaStream,
     receive_track: u32,
     receive_generation: u32,
-    sequence: u64,
-    timestamp: u64,
+    started_generation: Option<u32>,
 }
 impl Media {
     pub(super) async fn attach(
@@ -365,12 +360,10 @@ impl Media {
         }
         Ok(Self {
             socket,
-            receive: MediaStream::new(receive_track.id, receive_track.generation)?,
             receive_track: receive_track.id,
             receive_generation: receive_track.generation,
             send_track,
-            sequence: 0,
-            timestamp: 0,
+            started_generation: None,
         })
     }
     pub(super) fn synchronize_tracks(
@@ -393,15 +386,12 @@ impl Media {
                         && track.generation > self.send_track.generation =>
                 {
                     self.send_track = track.clone();
-                    self.sequence = 0;
-                    self.timestamp = 0;
                     send_changed = true;
                 }
                 CallTrackDirection::Receive
                     if track.id == self.receive_track
                         && track.generation > self.receive_generation =>
                 {
-                    self.receive.advance_generation(track.generation)?;
                     self.receive_generation = track.generation;
                     receive_changed = true;
                 }
@@ -411,30 +401,27 @@ impl Media {
         Ok((send_changed, receive_changed))
     }
     pub(super) async fn send(&mut self, samples: &[i16], format: AudioFormat) -> Result<()> {
-        let frame = encode_pcm(
-            MediaHeader {
-                track_id: self.send_track.id,
-                generation: self.send_track.generation,
-                sequence: self.sequence,
-                timestamp_micros: self.timestamp,
-            },
-            format,
-            samples,
-        )?;
+        format.validate_frame(samples)?;
+        if self.started_generation != Some(self.send_track.generation) {
+            send_json(
+                &mut self.socket,
+                &CallMediaCommand::AudioStart {
+                    generation: self.send_track.generation,
+                },
+            )
+            .await?;
+            self.started_generation = Some(self.send_track.generation);
+        }
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
         timeout(
             WRITE_TIMEOUT,
-            self.socket.send(Message::Binary(frame.into())),
+            self.socket.send(Message::Binary(bytes.into())),
         )
         .await
         .context("call media write timed out")??;
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .context("audio sequence exhausted")?;
-        self.timestamp = self
-            .timestamp
-            .checked_add(u64::from(format.frame_ms()) * 1000)
-            .context("audio timestamp exhausted")?;
         Ok(())
     }
 }
@@ -532,9 +519,8 @@ async fn owned_call(
             }
             message=next_media(media)=> {
                 let Message::Binary(bytes)=message? else {bail!("unexpected call media message");};
-                let frame=MediaFrame::decode(&bytes,format)?;
-                media.as_mut().expect("media event has an attachment").receive.admit(&frame)?;
-                let samples:Vec<f32>=frame.samples().map(|sample|f32::from(sample)/32768.0).collect();
+                if bytes.is_empty() || bytes.len() > 64 * 1024 || !bytes.len().is_multiple_of(usize::from(format.channels()) * 2) {bail!("invalid call PCM samples");}
+                let samples:Vec<f32>=bytes.chunks_exact(2).map(|sample|f32::from(i16::from_le_bytes([sample[0], sample[1]]))/32768.0).collect();
                 match audio.playback.enqueue(audio.playback_token,&samples,format.sample_rate()) {
                     Ok(())=>{},
                     Err(AudioError::QueueFull)=>{audio.playback_token=audio.playback.clear()?;},

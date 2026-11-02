@@ -1,9 +1,10 @@
-//! Version 1 daemon/client PCM frames. This is our API format, not WeChat wire.
+//! Internal daemon PCM envelopes. These headers are never sent on API sockets
+//! and are separate from WeChat wire packets.
 //!
 //! All header integers are big endian; PCM samples are signed 16-bit little
 //! endian. One message carries exactly one negotiated audio frame. Decode borrows
 //! the payload and allocates nothing. Authentication and socket ownership remain
-//! the host's responsibility before accepting a media message.
+//! the daemon's responsibility before constructing a media message.
 
 use crate::audio::{AudioFormat, MediaError};
 

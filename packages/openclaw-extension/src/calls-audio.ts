@@ -7,14 +7,9 @@ export class CallPcmOutput {
   private resampler: StreamingPcmResampler;
   private readonly items = new Set<string>();
   private readonly revokedItems = new Set<string>();
-  private timer?: ReturnType<typeof setTimeout>;
-  private due?: number;
   private closed = false;
   private paused = false;
   private clearEpoch = 0;
-  private sequence = 0n;
-  private sampleTime = 0n;
-  private readonly frameBytes: number;
   private readonly maxBytes: number;
   private media: Pick<NativeCallMediaClient, "sendPcm" | "tracks">;
   private format: CallAudioFormat;
@@ -25,9 +20,8 @@ export class CallPcmOutput {
     clearRemote: () => Promise<unknown>, failed: () => void) {
     this.media = media; this.format = format; this.voice = voice; this.clearRemote = clearRemote; this.failed = failed;
     if (format.channels !== 1 || format.frameMs !== 20 || ![8000, 12000, 16000, 24000, 48000].includes(format.sampleRate)) throw Error("Calling PCM format unsupported");
-    this.frameBytes = format.sampleRate * format.frameMs / 1000 * 2;
-    // Provider output can arrive faster than playout. Keep at most eight seconds
-    // while the WebSocket itself receives one negotiated frame per clock tick.
+    // While a clear is awaiting acknowledgement, retain at most eight seconds.
+    // The daemon buffers and paces ordinary output; this adapter only resamples.
     this.maxBytes = format.sampleRate * 2 * 8;
     this.resampler = voice.resampler(voice.sampleRate, format.sampleRate);
   }
@@ -49,12 +43,12 @@ export class CallPcmOutput {
     this.pending = Buffer.concat([this.pending, converted]);
     // New response items remain bounded in pending while the daemon clear is
     // outstanding. Only its current acknowledgement can resume playout.
-    if (!this.paused && !this.timer && this.pending.length >= this.frameBytes) this.schedule();
+    if (!this.paused) this.flush();
   }
   async clear(): Promise<void> {
     if (this.closed) return;
     const epoch = ++this.clearEpoch;
-    this.paused = true; this.pending = Buffer.alloc(0); clearTimeout(this.timer); this.timer = undefined; this.due = undefined;
+    this.paused = true; this.pending = Buffer.alloc(0);
     for (const item of this.items) this.revokedItems.add(item);
     try {
       const resampler = this.voice.resampler(this.voice.sampleRate, this.format.sampleRate);
@@ -63,30 +57,25 @@ export class CallPcmOutput {
       await this.clearRemote();
       if (!this.closed && epoch === this.clearEpoch) {
         this.paused = false;
-        if (!this.timer && this.pending.length >= this.frameBytes) this.schedule();
+        this.flush();
       }
     } catch { if (epoch === this.clearEpoch) this.fail(); }
   }
-  private schedule(): void {
-    if (this.closed || this.paused || this.timer || this.pending.length < this.frameBytes) return;
-    this.due ??= performance.now();
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      if (this.closed || this.paused) return;
-      if (performance.now() - this.due! > 200) return this.fail();
-      try {
-        const track = this.media.tracks().sendTrack;
-        const samples = new Int16Array(this.frameBytes / 2);
-        for (let i = 0; i < samples.length; i++) samples[i] = this.pending.readInt16LE(i * 2);
-        this.pending = this.pending.subarray(this.frameBytes);
-        this.media.sendPcm({ trackId: track.id, generation: track.generation, sequence: this.sequence++, timestampMicros: this.sampleTime }, samples);
-        this.sampleTime += BigInt(this.format.frameMs * 1000);
-      } catch { return this.fail(); }
-      if (this.pending.length >= this.frameBytes) { this.due = Math.max(this.due! + this.format.frameMs, performance.now()); this.schedule(); }
-      else this.due = undefined;
-    }, Math.max(0, this.due - performance.now()));
-    this.timer.unref?.();
+  private flush(): void {
+    if (this.closed || this.paused || this.pending.length === 0) return;
+    try {
+      const generation = this.media.tracks().sendTrack.generation;
+      // Arbitrary sample chunks, independent of the daemon's codec frame size.
+      // Keep individual socket writes small enough for transport backpressure.
+      while (this.pending.length > 0) {
+        const chunk = this.pending.subarray(0, 16 * 1024);
+        const samples = new Int16Array(chunk.length / 2);
+        for (let i = 0; i < samples.length; i++) samples[i] = chunk.readInt16LE(i * 2);
+        this.media.sendPcm(samples, generation);
+        this.pending = this.pending.subarray(chunk.length);
+      }
+    } catch { this.fail(); }
   }
   private fail(): void { if (!this.closed) { this.close(); this.failed(); } }
-  close(): void { this.closed = true; clearTimeout(this.timer); this.timer = undefined; this.pending = Buffer.alloc(0); this.items.clear(); this.revokedItems.clear(); }
+  close(): void { this.closed = true; this.pending = Buffer.alloc(0); this.items.clear(); this.revokedItems.clear(); }
 }

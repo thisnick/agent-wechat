@@ -174,7 +174,7 @@ async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
 #[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
-    use wechat_calls::{audio::AudioFormat, frame::MediaFrame};
+    use wechat_calls::audio::AudioFormat;
     use wechat_core::call_types::{CallAudioTrack, CallTrackDirection};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -253,13 +253,23 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
             .send(Message::Text(serde_json::to_string(&ready).unwrap().into()))
             .await
             .unwrap();
-        let Message::Binary(bytes) = media.next().await.unwrap().unwrap() else {
-            panic!("expected generated PCM");
+        let Message::Text(start) = media.next().await.unwrap().unwrap() else {
+            panic!("expected stream metadata");
         };
-        let frame = MediaFrame::decode(&bytes, AudioFormat::new(16000, 1, 20).unwrap()).unwrap();
-        assert_eq!(frame.header.track_id, 1);
-        assert_eq!(frame.header.generation, 3);
-        assert_eq!(frame.samples().collect::<Vec<_>>(), vec![123; 320]);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&start).unwrap(),
+            serde_json::json!({"type":"audio.start","generation":3})
+        );
+        let Message::Binary(bytes) = media.next().await.unwrap().unwrap() else {
+            panic!("expected raw PCM");
+        };
+        assert_eq!(
+            bytes.to_vec(),
+            [123i16; 320]
+                .into_iter()
+                .flat_map(i16::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
         let Message::Text(text) = control.next().await.unwrap().unwrap() else {
             panic!("expected mute");
         };
@@ -293,12 +303,17 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
             ))
             .await
             .unwrap();
-        let Message::Binary(bytes) = media.next().await.unwrap().unwrap() else {
-            panic!("expected generation-four PCM");
+        let Message::Text(start) = media.next().await.unwrap().unwrap() else {
+            panic!("expected new stream metadata");
         };
-        let frame = MediaFrame::decode(&bytes, AudioFormat::new(16000, 1, 20).unwrap()).unwrap();
-        assert_eq!(frame.header.generation, 4);
-        assert_eq!(frame.header.sequence, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&start).unwrap(),
+            serde_json::json!({"type":"audio.start","generation":4})
+        );
+        let Message::Binary(bytes) = media.next().await.unwrap().unwrap() else {
+            panic!("expected raw PCM");
+        };
+        assert_eq!(bytes.as_ref(), &[0; 640]);
         use wechat_core::call_types::{CallDirection, CallKind, CallState, CallView};
         let view = CallView {
             call_id: "owned-call".into(),

@@ -1,36 +1,32 @@
 ---
 title: Call media API
-description: Attach call media, exchange PCM frames and interrupt audio output.
+description: Send and receive raw PCM over an authenticated call WebSocket.
 ---
 
-Use the media WebSocket after claiming a call through the [control API](../calls-api/).
-Your application sends and receives PCM samples. The daemon handles WeChat's
-codec, packet framing, authentication and encryption; those packets and keys
-are never part of this API.
+Send and receive **raw PCM16 little-endian samples** on the media WebSocket.
+Binary messages contain audio only. JSON text messages carry attachment,
+format and stream information. There is no custom binary header or WAV container.
+The daemon handles audio framing, pacing, codecs and WeChat transport.
 
 ```mermaid
 flowchart LR
-  A["Application PCM"] --> B["Daemon media API"]
-  B --> C["WeChat codec and transport"]
-  C --> D["WeChat network"]
+  A["Application: JSON + raw PCM"] <--> B["Daemon: buffering and audio frames"]
+  B <--> C["WeChat codec and encrypted transport"]
 ```
 
-The repository's TypeScript SDK handles API framing through `attachMedia`,
-`sendPcm` and `frames`. Direct WebSocket clients use the message layout below.
+## Attach and exchange audio
 
-## Attach
-
-1. Keep the owning control socket connected. Open
-   `/v1/accounts/{account}/calls/{callId}/media` with the same account's `calls`
-   bearer authorization header.
-2. Within five seconds, send this first text message using the control socket's
-   `clientId` and the secret `ownerToken` returned by its successful claim:
+1. Claim a call through the [control API](../calls-api/) and wait for
+   `call.state` with `state: "connected"`. Keep the owning control socket open.
+2. Open `/v1/accounts/{account}/calls/{callId}/media` with the same account's
+   `calls` bearer authorization header. Within five seconds, send this JSON:
 
    ```json
    {"type":"media.attach","clientId":"example-client","ownerToken":"<secret owner token>"}
    ```
 
-3. Wait for `media.ready` on that media socket:
+3. Wait for this JSON response on the **media** socket. Direction is relative
+   to your application; use the announced format and generation.
 
    ```json
    {
@@ -40,40 +36,48 @@ The repository's TypeScript SDK handles API framing through `attachMedia`,
    }
    ```
 
-4. Send one binary WebSocket message per audio frame on `sendTrack`; consume
-   received messages on `receiveTrack`. Track direction is relative to your client.
-   Use the announced IDs and format rather than assuming the example IDs.
+4. Start the outgoing stream with a JSON text message, then send binary PCM:
 
-## API binary message layout
+   ```json
+   {"type":"audio.start","generation":1}
+   ```
 
-This is the client-to-daemon API format. Its track IDs, generations and
-sequences are independent of WeChat packet counters. Each message starts with
-a 36-byte header. Header integers use unsigned big-endian
-encoding; the audio payload uses signed PCM16 little-endian samples.
+   Binary bytes `00 80 ff 7f ff ff` represent three samples: `-32768`, `32767`,
+   and `-1`. They contain no track ID, counter or length prefix. The same byte
+   layout applies in both directions.
 
-| Offset | Bytes | Meaning |
-| --- | --- | --- |
-| 0 | 4 | ASCII `WXCM` |
-| 4 | 1 | Frame version, `1` |
-| 5 | 1 | Payload kind, `1` for PCM16 |
-| 6 | 2 | Reserved, both zero |
-| 8 | 4 | Track ID, positive u32 |
-| 12 | 4 | Track generation, positive u32 |
-| 16 | 8 | Sequence, u64 |
-| 24 | 8 | Monotonic stream timestamp in microseconds, u64 |
-| 32 | 4 | Payload byte length, u32 |
-| 36 | remaining | Exactly one announced PCM frame |
+| Property | Current value |
+| --- | --- |
+| Sample encoding | Signed 16-bit, little-endian |
+| Sample rate / channels | 16,000 Hz / mono |
+| Daemon audio frame duration | 20 ms: 320 samples / 640 bytes |
+| Application chunk size | Any nonempty whole-sample chunk, up to 64 KiB |
+| Daemon outgoing queue | At most eight seconds |
 
-For 16 kHz mono with 20 ms frames, each payload has 320 samples / 640 bytes;
-the complete message is 676 bytes. Increase the sequence for every frame.
-Timestamps describe stream time, not wall-clock time. JavaScript clients should
-use `bigint` for both 64-bit fields. The SDK encodes these without JSON conversion.
-Malformed, replayed, foreign-track or old-generation frames are rejected.
-The complete binary message cannot exceed 64 KiB.
+Your chunks do not need to be 20 ms long. The daemon combines smaller chunks,
+splits larger ones, and clocks complete frames. Consume incoming binary messages
+as PCM chunks; do not depend on their boundaries. This API does not offer
+sample-rate or codec-bitrate controls.
 
-## Stop, mute and interrupt
+## TypeScript example
 
-Send these commands on the **control** socket:
+The repository's SDK sends `audio.start` automatically when a producer first
+writes a generation. Capture the generation for that producer; old producers
+must not adopt a new one after an interruption.
+
+```ts
+const media = await calls.attachMedia(callId);
+const generation = media.tracks().sendTrack.generation;
+media.sendPcm(new Int16Array([1000, -1000, 0]), generation);
+
+for await (const chunk of media.frames()) {
+  consumePcm16LittleEndian(chunk.payload);
+}
+```
+
+## Mute and interrupt
+
+Send these JSON commands on the **control** socket:
 
 ```json
 {"type":"call.mute","requestId":"mute-1","callId":"example-call","muted":true}
@@ -83,20 +87,20 @@ Send these commands on the **control** socket:
 {"type":"call.clear_audio","requestId":"interrupt-1","callId":"example-call"}
 ```
 
-Muting controls outgoing audio. Clearing discards queued outgoing audio and
-advances the send track's generation; `track.updated` announces it. Discard old
-producer output, use the new generation and restart its sequence. Clearing does
-not reset the receive track. Do not continue sending the old generation.
+Muting silences outgoing audio. Clearing discards queued outgoing audio and
+advances its generation. Wait for `track.updated` and the successful command
+result, discard interrupted producer output, then send `audio.start` with the
+new generation on the media socket. Subsequent binary chunks belong to that
+stream. Already-transmitted old-generation chunks are discarded. The receive
+track is unchanged.
 
-Stop transmitting on `ending`, `ended` or `uncertain`, lost ownership, revoked
-authorization or socket closure. During `ending`, keep control connected until
-the terminal event arrives. A successful hangup command alone does not prove
-that remote cleanup finished.
+Stop audio at `ending`, `ended`, `uncertain`, lost ownership or authorization.
+Keep control connected during `ending` until terminal confirmation.
 
 :::note[Good to know]
-The TypeScript SDK handles control, framing and PCM queues without microphone,
-speaker or native codec bindings. Your application supplies/consumes PCM and its
-WebSocket factory must support authorization headers. A browser's bare WebSocket
-constructor cannot supply those headers. Use HTTPS/WSS or a trusted tunnel for
-remote connections, and never log owner tokens or complete claim results.
+No microphone, speaker or native codec dependency is required in Node. Your
+WebSocket factory must support authorization headers; a browser's bare
+WebSocket constructor cannot supply them. Use HTTPS/WSS or a trusted tunnel for
+remote access. Never log owner tokens. Odd-byte chunks, invalid stream setup,
+queue overflow and lost authorization close the media connection.
 :::

@@ -202,26 +202,26 @@ try {
   let mediaClosing = false;
   const mediaReading = (async () => { try { for await (const frame of media.frames()) received.push(frame); } catch (error) { if (!mediaClosing) fixtureError = error; } })();
   const first = pcm(1200); let track = media.tracks().sendTrack;
-  media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 0n, timestampMicros: 0n }, samples(first));
+  media.sendPcm(samples(first).subarray(0, 3), track.generation);
+  media.sendPcm(samples(first).subarray(3), track.generation);
   await until("Rust-to-SDK echo PCM", () => received.length === 1); assert.deepEqual(Buffer.from(received[0].payload), first);
   await control("inject_audio", { value: -1700, frames: 1 });
   await until("independent Rust RX PCM", () => received.length === 2); assert.deepEqual(Buffer.from(received[1].payload), pcm(-1700));
   await winner.clearAudio(randomUUID(), offer.callId); const nextTrack = media.tracks().sendTrack;
   assert.equal(nextTrack.generation, track.generation + 1); assert.equal(media.tracks().receiveTrack.generation, 1);
-  assert.throws(() => media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 1n, timestampMicros: 20000n }, samples(first)));
+  assert.throws(() => media.sendPcm(samples(first), track.generation));
   track = nextTrack;
-  media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 1n, timestampMicros: 20000n }, samples(pcm(1800)));
-  await until("new-generation PCM", () => received.length === 3); assert.equal(received[2].generation, 1);
-  assert.equal(received[2].sequence, 2n); assert.equal(received[2].timestampMicros, 40000n);
+  media.sendPcm(samples(pcm(1800)), track.generation);
+  await until("new-generation PCM", () => received.length === 3); assert.deepEqual(Buffer.from(received[2].payload), pcm(1800));
   assert.equal((await control("stats")).stats.audioFrames, 2);
   if (monitor) await until("CLI observes offer without claiming", () => monitorEvents.some(event => event.type === "call.offered" && event.offer.callId === offer.callId));
   holdNativePcm = true;
-  media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 2n, timestampMicros: 40000n }, samples(first));
+  media.sendPcm(samples(first), track.generation);
   assert.equal(typeof heldNativePcm, "function");
   await control("begin_end");
   await until("autonomous ending event", () => winnerEvents.events.some(event => event.type === "call.state" && event.call.state === "ending"));
   const beforeLatePcm = (await control("stats")).stats.audioFrames;
-  assert.throws(() => media.sendPcm({ trackId: track.id, generation: track.generation, sequence: 3n, timestampMicros: 60000n }, samples(first)), error => error.code === "call_ending");
+  assert.throws(() => media.sendPcm(samples(first), track.generation), error => error.code === "call_ending");
   heldNativePcm();
   await delay(100);
   assert.equal((await control("stats")).stats.audioFrames, beforeLatePcm, "Late PCM during autonomous teardown is ignored");
@@ -294,7 +294,7 @@ try {
   await ending;
   await until("plugin observes Ending before backend terminal", () => pluginEvents.some(event => event.type === "call.state" && event.call.state === "ending"));
   assert.equal(service.status().owned, true); assert.equal(service.status().state, "busy"); assert.equal(providerCloses, 1);
-  assert.throws(() => pluginMedia.sendPcm({ trackId: 1, generation: 2, sequence: 9n, timestampMicros: 180000n }, samples(pcm(3500))),
+  assert.throws(() => pluginMedia.sendPcm(samples(pcm(3500)), 2),
     error => error instanceof NativeCallError && error.code === "call_ending");
   heldPcm(); heldPcm = undefined;
   callbacks.failed(); // A provider may close after local end but before upstream terminal.

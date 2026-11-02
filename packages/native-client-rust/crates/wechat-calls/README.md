@@ -24,12 +24,14 @@ See [NOTICE.md](NOTICE.md), the retained license files, and
 <https://opus-codec.org/license/>. The
 portable crate code is MIT-licensed under the repository license.
 
-The API PCM frame codec uses a 36-byte `WXCM` version 1 header with big-endian
+The internal daemon PCM envelope codec uses a 36-byte `WXCM` version 1 header with big-endian
 track/generation/sequence/timestamp/length fields and little-endian signed PCM.
 `MediaFrame::decode` borrows its payload, validates complete frame extent and the
 negotiated PCM frame length, and allocates nothing. `MediaStream` separately
 rejects wrong tracks, stale generations and replayed/out-of-order frames. This is
-a daemon/client API format; it is not the remote WeChat wire format.
+an internal representation only. API sockets exchange raw PCM samples and JSON
+stream metadata; the daemon constructs these envelopes and handles pacing. This
+is also separate from the remote WeChat wire format.
 
 Run the generated-audio check without devices or network access:
 

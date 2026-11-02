@@ -236,12 +236,14 @@ export class NativeCallService {
       active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); });
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
       void (async () => {
+        let receivedMs = 0;
         try {
           for await (const frame of media.frames()) {
             if (!this.current(active) || active.endStarted) break;
             const audio = resampler.process(Buffer.from(frame.payload));
-            if (audio.length > this.prepared!.sampleRate * 2 || frame.timestampMicros > BigInt(Number.MAX_SAFE_INTEGER)) throw Error("Calling input budget exceeded");
-            active.voice!.setMediaTimestamp(Number(frame.timestampMicros) / 1000);
+            if (audio.length > this.prepared!.sampleRate * 2 || !Number.isFinite(receivedMs) || receivedMs > Number.MAX_SAFE_INTEGER) throw Error("Calling input budget exceeded");
+            active.voice!.setMediaTimestamp(receivedMs);
+            receivedMs += frame.payload.byteLength * 1000 / (this.format!.sampleRate * this.format!.channels * 2);
             active.voice!.sendAudio(audio);
           }
         } catch { if (this.current(active) && !active.endStarted) await this.fail(active); }
