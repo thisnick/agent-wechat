@@ -186,6 +186,31 @@ impl BackendSink {
         };
         service.ticket_current(&s, &self.ticket)
     }
+    /// A successful owner end command fences nonterminal work before its
+    /// backend task is polled. Match that accepted intent, not generic owner
+    /// loss or uncertainty, so the joined actor can complete known cleanup.
+    #[cfg(feature = "native-calls")]
+    pub(crate) fn has_accepted_end(&self) -> bool {
+        let Some(service) = self.service.upgrade() else {
+            return false;
+        };
+        let Ok(s) = service.lock() else {
+            return false;
+        };
+        s.call.as_ref().is_some_and(|call| {
+            call.identity == self.ticket.identity()
+                && &call.authority == self.ticket.authority()
+                && call.state == CallState::Ending
+                && !call.revoked
+                && !call.cancellation_requested
+                && s.ownership.pending_end(&call.authority, &call.identity)
+                && service
+                    .backend
+                    .authority(&call.authority.account_id)
+                    .as_ref()
+                    == Some(&call.authority)
+        })
+    }
     /// A pre-media Answer can lose its original controller while Join is in
     /// flight. This identifies that narrow cleanup case; generic uncertainty
     /// or a stale ticket does not grant another remote operation.

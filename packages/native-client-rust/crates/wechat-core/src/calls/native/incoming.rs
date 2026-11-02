@@ -365,7 +365,7 @@ impl Actor {
                 "Incoming account authority revoked"
             );
             if self.phase() == IncomingPhase::Joined {
-                if self.worker.stop.load(Ordering::Acquire)
+                if self.local_stop_requested()
                     || !self.worker.scope_current()
                     || self
                         .joined_deadline
@@ -400,8 +400,7 @@ impl Actor {
                         return Ok(());
                     }
                     if self.phase() == IncomingPhase::Joined
-                        && (self.worker.stop.load(Ordering::Acquire)
-                            || !self.worker.scope_current())
+                        && (self.local_stop_requested() || !self.worker.scope_current())
                     {
                         return self.exit();
                     }
@@ -424,6 +423,13 @@ impl Actor {
         self.session
             .as_ref()
             .map_or(IncomingPhase::Invited, NativeIncomingSession::phase)
+    }
+    fn local_stop_requested(&self) -> bool {
+        self.worker.stop.load(Ordering::Acquire)
+            || self
+                .sink
+                .as_ref()
+                .is_some_and(BackendSink::has_accepted_end)
     }
     fn register_member(&self) -> Result<()> {
         let room = self

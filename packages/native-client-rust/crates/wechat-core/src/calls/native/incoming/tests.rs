@@ -35,12 +35,14 @@ enum Case {
     ChangedMember,
     LostReject,
     HoldJoin,
+    HoldJoinAndPoll,
     HoldReject,
     HoldChangedAck,
     HoldPreAuth,
     HoldJoinReply,
     LostOwnerExit,
 }
+#[derive(Default)]
 struct Gate {
     released: Mutex<bool>,
     changed: Condvar,
@@ -70,6 +72,7 @@ struct Host {
     ready_media: Option<ReadyMedia>,
     routes: Mutex<Vec<(CallHostRoute, Option<u32>)>>,
     gate: Gate,
+    post_join_gate: Gate,
     sync_held: AtomicBool,
     exit_members: Mutex<Vec<u32>>,
 }
@@ -81,11 +84,8 @@ impl Host {
             routes: Mutex::new(vec![]),
             sync_held: AtomicBool::new(false),
             exit_members: Mutex::new(vec![]),
-            gate: Gate {
-                released: Mutex::new(false),
-                changed: Condvar::new(),
-                entered: Notify::new(),
-            },
+            gate: Gate::default(),
+            post_join_gate: Gate::default(),
         })
     }
     fn own_member(&self) -> u16 {
@@ -127,13 +127,18 @@ impl TestCallIo for Host {
             .any(|(_, command)| *command == Some(3361));
         if route == CallHostRoute::LiveSync
             && joined
-            && matches!(self.case, Case::HoldJoinedSync)
+            && matches!(self.case, Case::HoldJoinedSync | Case::HoldJoinAndPoll)
             && !self.sync_held.swap(true, Ordering::AcqRel)
         {
-            self.gate.wait()?;
+            if matches!(self.case, Case::HoldJoinAndPoll) {
+                self.post_join_gate.wait()?;
+            } else {
+                self.gate.wait()?;
+            }
         }
         if route == CallHostRoute::Transfer
-            && ((command == Some(3361) && matches!(self.case, Case::HoldJoin))
+            && ((command == Some(3361)
+                && matches!(self.case, Case::HoldJoin | Case::HoldJoinAndPoll))
                 || (command == Some(3095) && matches!(self.case, Case::HoldReject)))
         {
             self.gate.wait()?;
@@ -564,6 +569,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.host.gate.release();
+        self.host.post_join_gate.release();
         if let Some(worker) = self.backend.inner.active.lock().unwrap().clone() {
             worker.stop.store(true, Ordering::Release);
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -865,6 +871,12 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
     let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
     // Exercise a raw control already admitted during member cutover. The
     // broker separately rejects newly unmatched notes once it enters Ending.
+    let polls_before_stop = f
+        .host
+        .seen()
+        .iter()
+        .filter(|(route, _)| *route == CallHostRoute::LiveSync)
+        .count();
     let mut cancelling = f
         .backend
         .cancel_incoming(worker.identity.clone(), f.cancellation(member));
@@ -890,6 +902,14 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
         let call = owned_state(&mut client, CallState::Connecting, offer.revision + 2).await;
         assert!(f.snapshot().await.availability.busy);
         assert!(worker.done.lock().unwrap().is_none());
+        if matches!(case, Case::HoldJoinAndPoll) {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                f.host.post_join_gate.entered.notified(),
+            )
+            .await
+            .unwrap();
+        }
         f.core
             .call_service()
             .command(
@@ -906,6 +926,21 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
             result(&mut client, "end").await,
             CallCommandStatus::Accepted
         );
+        if matches!(case, Case::HoldJoinAndPoll) {
+            assert!(!worker.stop.load(Ordering::Acquire));
+            f.host.post_join_gate.release();
+            // Keep the single-thread Tokio runtime from polling the queued
+            // backend stop. The actor must observe the accepted owner Hangup
+            // when its unsent poll loses admission, before that task runs.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while worker.done.lock().unwrap().is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(matches!(
+                *worker.done.lock().unwrap(),
+                Some(BackendOutcome::Ended)
+            ));
+        }
     }
     f.finished().await;
     assert!(!f.snapshot().await.availability.busy);
@@ -918,12 +953,38 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
             .count(),
         usize::from(member != 0)
     );
+    assert_eq!(
+        f.host
+            .seen()
+            .iter()
+            .filter(|(_, command)| *command == Some(3380))
+            .count(),
+        usize::from(member != 0 && !rejecting)
+    );
+    if matches!(case, Case::HoldJoinAndPoll) {
+        assert!(f
+            .core
+            .store
+            .call_action_records("one", &offer.call_id)
+            .unwrap()
+            .iter()
+            .any(|record| record.route == CallHostRoute::LiveSync.command()
+                && record.outcome == "not_submitted"));
+        assert_eq!(
+            f.host
+                .seen()
+                .iter()
+                .filter(|(route, _)| *route == CallHostRoute::LiveSync)
+                .count(),
+            polls_before_stop
+        );
+    }
     assert!(!f.core.store.has_unresolved_call("one").unwrap());
 }
 
 #[tokio::test]
 async fn foreign_member_cancel_does_not_interrupt_unsent_join() {
-    held_owner_action_with_cancel(Case::HoldJoin, 9).await;
+    held_owner_action_with_cancel(Case::HoldJoinAndPoll, 9).await;
 }
 
 #[tokio::test]
