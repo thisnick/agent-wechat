@@ -79,6 +79,18 @@ struct Settings {
     notifications_enabled: bool,
     notification_sound_enabled: bool,
     notification_status: String,
+    language: Option<String>,
+}
+struct TrayMenu {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+fn tray_labels(zh: bool) -> (&'static str, &'static str) {
+    if zh {
+        ("打开 AgentWechat", "退出 AgentWechat")
+    } else {
+        ("Open AgentWechat", "Quit AgentWechat")
+    }
 }
 impl Desktop {
     async fn start_local(&self, inner: &mut Inner, key: Zeroizing<String>) -> Result<()> {
@@ -291,7 +303,34 @@ async fn desktop_settings(state: State<'_, Desktop>) -> Result<Settings, String>
         notifications_enabled: config.notifications_enabled,
         notification_sound_enabled: config.notification_sound_enabled,
         notification_status: notifications::status(&state).await,
+        language: config.language.clone(),
     })
+}
+#[tauri::command]
+async fn desktop_language(
+    app: tauri::AppHandle,
+    state: State<'_, Desktop>,
+    language: String,
+) -> Result<String, String> {
+    let normalized = match language.trim() {
+        "zh-CN" | "zh" => "zh-CN",
+        "en" => "en",
+        _ => return Err("Unsupported display language".into()),
+    };
+    let mut inner = state.inner.lock().await;
+    let mut next = inner.config.clone();
+    next.language = Some(normalized.into());
+    next.save(&state.config_file)
+        .map_err(|error| error.to_string())?;
+    inner.config = next;
+    let zh = inner.config.is_zh();
+    drop(inner);
+    if let Some(tray) = app.try_state::<TrayMenu>() {
+        let (show_text, quit_text) = tray_labels(zh);
+        let _ = tray.show.set_text(show_text);
+        let _ = tray.quit.set_text(quit_text);
+    }
+    Ok(normalized.into())
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -489,9 +528,14 @@ fn request_quit(app: tauri::AppHandle) {
                 app.exit(0);
             }
             Err(_) => {
+                let zh = state.inner.lock().await.config.is_zh();
                 state.quit.store(0, Ordering::Release);
                 app.dialog()
-                    .message("The hub is still stopping. Wait and try Quit again.")
+                    .message(if zh {
+                        "Hub 仍在停止中，请稍候再试退出。"
+                    } else {
+                        "The hub is still stopping. Wait and try Quit again."
+                    })
                     .title("AgentWechat")
                     .show(|_| {});
                 if let Some(window) = app.get_webview_window("main") {
@@ -523,6 +567,7 @@ fn main() {
             let config_file = app.path().app_config_dir()?.join("settings/desktop.json");
             let config = Config::load(&config_file)?;
             config.save(&config_file)?;
+            let zh = config.is_zh();
             let data = app.path().app_local_data_dir()?.join("hub");
             #[cfg(target_os = "linux")]
             let binaries = app.path().resource_dir()?.join("bin");
@@ -548,21 +593,14 @@ fn main() {
             });
             notifications::start(app.handle().clone())?;
             updates::start(app.handle().clone());
-            let show = tauri::menu::MenuItem::with_id(
-                app,
-                "show",
-                "Open AgentWechat",
-                true,
-                None::<&str>,
-            )?;
-            let quit = tauri::menu::MenuItem::with_id(
-                app,
-                "quit",
-                "Quit AgentWechat",
-                true,
-                None::<&str>,
-            )?;
+            let (show_text, quit_text) = tray_labels(zh);
+            let show = tauri::menu::MenuItem::with_id(app, "show", show_text, true, None::<&str>)?;
+            let quit = tauri::menu::MenuItem::with_id(app, "quit", quit_text, true, None::<&str>)?;
             let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            app.manage(TrayMenu {
+                show: show.clone(),
+                quit: quit.clone(),
+            });
             tauri::tray::TrayIconBuilder::new()
                 .icon(
                     app.default_window_icon()
@@ -590,6 +628,7 @@ fn main() {
             desktop_remote,
             desktop_select,
             desktop_settings,
+            desktop_language,
             desktop_save_local,
             desktop_reveal,
             desktop_copy_key,

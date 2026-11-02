@@ -2,8 +2,16 @@ import { ConversationRow } from "./conversation-row.tsx";
 import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
 import { emojiText } from "./emoji-text.ts";
+import {
+  dateLocale,
+  setLocale,
+  syncDesktopLocale,
+  t,
+  useLocale,
+  type Locale,
+} from "./i18n.ts";
 import { DesktopUpdates } from "./desktop-updates.tsx";
-import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
+import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession, type DesktopSettings } from "./desktop.ts";
 import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
 import { LocalCacheSettings } from "./local-cache-settings.tsx";
 import { GroupSettings } from "./group-settings.tsx";
@@ -84,7 +92,10 @@ function date(value: string | null): Date {
 }
 function time(value: string | null): string {
   return value
-    ? date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    ? date(value).toLocaleTimeString(dateLocale(), {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
     : "";
 }
 function useTheme() {
@@ -123,6 +134,7 @@ function ErrorNotice({ children }: { children: ReactNode }) {
   );
 }
 function App() {
+  useLocale();
   useEffect(() => desktop ? installDesktopLinks() : undefined, []);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [changingHub, setChangingHub] = useState(false);
@@ -131,6 +143,13 @@ function App() {
   const [theme, setTheme] = useTheme();
   useEffect(() => {
     let cancelled = false;
+    if (desktop) {
+      void desktopInvoke<DesktopSettings>("desktop_settings")
+        .then((settings) => {
+          if (!cancelled) syncDesktopLocale(settings.language);
+        })
+        .catch(() => {});
+    }
     void (desktop ? desktopInvoke<DesktopSession | null>("desktop_bootstrap").then((session) => session ? desktopConnect(session) : null) : bootstrap())
       .then((value) => {
         if (cancelled) value?.close();
@@ -165,7 +184,7 @@ function App() {
   if (starting)
     return (
       <Welcome simulator={false}>
-        <h1>Opening AgentWechat…</h1>
+        <h1>{t("Opening AgentWechat…", "正在打开 AgentWechat…")}</h1>
       </Welcome>
     );
   if (!connection || changingHub)
@@ -204,6 +223,7 @@ function ConnectionForm({
   onBack?: () => void;
   initialEndpoint?: string;
 }) {
+  useLocale();
   const [endpoint, setEndpoint] = useState(initialEndpoint ?? location.origin),
     [token, setToken] = useState("");
   const [error, setError] = useState(initialError),
@@ -243,26 +263,35 @@ function ConnectionForm({
           disabled={busy}
           onClick={onBack}
         >
-          <Icon name="back" /> Back
+          <Icon name="back" /> {t("Back", "返回")}
         </button>
       )}
       <div className="welcome-heading">
-        <h1>Connect to an agent-wechat hub</h1>
-        <p>Enter the address and access key for your agent-wechat hub.</p>
+        <h1>
+          {t("Connect to an agent-wechat hub", "连接到 agent-wechat 服务")}
+        </h1>
+        <p>
+          {t(
+            "Enter the address and access key for your agent-wechat hub.",
+            "请输入你的 agent-wechat 服务地址和访问密钥。",
+          )}
+        </p>
       </div>
-      {hubs.length > 1 && <div className="preview-hubs" aria-label="Preview hubs">
+      {hubs.length > 1 && <div className="preview-hubs" aria-label={t("Preview hubs", "预览服务")}>
         {hubs.map(hub => <button key={hub.id} type="button" className="secondary" disabled={busy}
           onClick={() => {
             setBusy(true); setError("");
             void bootstrap(undefined, hub.id).then(value => {
-              if (!value) throw Error("Reopen the private preview link to choose a hub.");
+              if (!value) throw Error(t("Reopen the private preview link to choose a hub.", "请重新打开预览链接以选择服务。"));
               onConnect(value);
             }).catch(e => setError(readableError(e))).finally(() => setBusy(false));
           }}>{hub.name}</button>)}
       </div>}
       <form onSubmit={submit}>
         <div className="remote-fields">
-          <label htmlFor="hub-address">agent-wechat hub address</label>
+          <label htmlFor="hub-address">
+            {t("agent-wechat hub address", "agent-wechat 服务地址")}
+          </label>
           <div className="connection-input">
             <Icon name="server" />
             <input
@@ -274,7 +303,9 @@ function ConnectionForm({
               autoComplete="off"
             />
           </div>
-          <label htmlFor="hub-key">agent-wechat hub access key</label>
+          <label htmlFor="hub-key">
+            {t("agent-wechat hub access key", "agent-wechat 服务访问密钥")}
+          </label>
           <div className="connection-input">
             <input
               id="hub-key"
@@ -285,21 +316,33 @@ function ConnectionForm({
               autoComplete="off"
             />
             <button type="button" onClick={() => setShow(!show)}>
-              {show ? "Hide" : "Show"}
+              {show ? t("Hide", "隐藏") : t("Show", "显示")}
             </button>
           </div>
         </div>
         {error && <ErrorNotice>{error}</ErrorNotice>}
         <button className="continue-button" disabled={busy}>
-          {busy ? "Connecting…" : "Connect"} <Icon name="chevron" />
+          {busy ? t("Connecting…", "正在连接…") : t("Connect", "连接")}{" "}
+          <Icon name="chevron" />
         </button>
       </form>
       <details className="hub-help">
-        <summary>Use this device as an agent-wechat hub</summary>
+        <summary>
+          {t(
+            "Use this device as an agent-wechat hub",
+            "将此设备作为 agent-wechat 服务使用",
+          )}
+        </summary>
         <p>
-          The browser connects to a running agent-wechat hub. For local
-          development, start <code>pnpm client:dev</code> on this device and
-          open its printed URL.
+          {t(
+            "The browser connects to a running agent-wechat hub. For local development, start ",
+            "浏览器需要连接正在运行的 agent-wechat 服务。本地开发时，请在此设备上运行 ",
+          )}
+          <code>pnpm client:dev</code>
+          {t(
+            " on this device and open its printed URL.",
+            " 并打开终端输出的链接。",
+          )}
         </p>
       </details>
     </Welcome>
@@ -423,7 +466,7 @@ function Client({
   if (visibleScreen === "restoring" && !state.account)
     return (
       <Welcome simulator={simulator}>
-        <h1>Opening AgentWechat…</h1>
+        <h1>{t("Opening AgentWechat…", "正在打开 AgentWechat…")}</h1>
       </Welcome>
     );
   if (visibleScreen === "login" && loginAccount)
@@ -449,18 +492,28 @@ function Client({
       <Welcome simulator={simulator}>
         <div className="welcome-heading">
           <h1>
-            {state.accounts.length ? "Choose an account" : "Sign in to WeChat"}
+            {state.accounts.length
+              ? t("Choose an account", "选择账号")
+              : t("Sign in to WeChat", "登录微信")}
           </h1>
           {!state.accounts.length && (
             <p>
               {simulator
-                ? "Create a synthetic account to try the connected client."
-                : "Add your WeChat account to get started."}
+                ? t(
+                    "Create a synthetic account to try the connected client.",
+                    "创建模拟账号以体验已连接的客户端。",
+                  )
+                : t(
+                    "Add your WeChat account to get started.",
+                    "添加你的微信账号以开始使用。",
+                  )}
             </p>
           )}
         </div>
         {state.signInRequired && (
-          <ErrorNotice>WeChat signed out. Sign in again.</ErrorNotice>
+          <ErrorNotice>
+            {t("WeChat signed out. Sign in again.", "微信已退出登录，请重新登录。")}
+          </ErrorNotice>
         )}
         <div className="login-accounts">
           {state.accounts.map((a) => (
@@ -479,15 +532,20 @@ function Client({
                 <span>
                   <strong>{a.alias || a.id}</strong>
                   <small>
-                    {a.authenticated ? "Open chats" : "Sign in to WeChat"}
+                    {a.authenticated
+                      ? t("Open chats", "打开聊天")
+                      : t("Sign in to WeChat", "登录微信")}
                   </small>
                 </span>
                 <Icon name="chevron" />
               </button>
               <button
                 className="profile-manage"
-                aria-label={`Manage ${a.alias || a.id}`}
-                title="Manage profile"
+                aria-label={t(
+                  `Manage ${a.alias || a.id}`,
+                  `管理 ${a.alias || a.id}`,
+                )}
+                title={t("Manage profile", "管理资料")}
                 disabled={busy}
                 onClick={() => setManaged(a.id)}
               >
@@ -523,10 +581,16 @@ function Client({
           disabled={busy}
           onClick={() => void add()}
         >
-          {busy ? "Opening…" : "Add WeChat account"} <Icon name="plus" />
+          {busy
+            ? t("Opening…", "正在打开…")
+            : t("Add WeChat account", "添加微信账号")}{" "}
+          <Icon name="plus" />
         </button>
         <button className="quiet-button" onClick={disconnect}>
-          Connect to a different agent-wechat hub
+          {t(
+            "Connect to a different agent-wechat hub",
+            "连接到其他 agent-wechat 服务",
+          )}
         </button>
       </Welcome>
     );
@@ -670,7 +734,7 @@ function Login({
       await control({ op: "login", account, status });
       if (status === "expired") setQr("");
     } catch {
-      setError("Simulator control failed.");
+      setError(t("Simulator control failed.", "模拟器控制失败。"));
     } finally {
       setBusy(false);
     }
@@ -678,30 +742,39 @@ function Login({
   return (
     <>
       <button className="step-back" onClick={cancel}>
-        <Icon name="back" /> Back
+        <Icon name="back" /> {t("Back", "返回")}
       </button>
       <div className="welcome-heading">
         <h1>
           {state === "awaiting_approval"
-            ? "Confirm sign-in in WeChat"
+            ? t("Confirm sign-in in WeChat", "在微信中确认登录")
             : state === "expired"
-            ? "QR code expired"
+            ? t("QR code expired", "二维码已过期")
             : terminal
-            ? "Sign-in could not finish"
+            ? t("Sign-in could not finish", "无法完成登录")
             : !qr
-            ? "Signing in…"
-            : "Sign in to WeChat"}
+            ? t("Signing in…", "正在登录…")
+            : t("Sign in to WeChat", "登录微信")}
         </h1>
         <p>
           {connection.simulator
-            ? "Simulator QR only. It cannot sign in to WeChat. Use the phone controls below."
+            ? t(
+                "Simulator QR only. It cannot sign in to WeChat. Use the phone controls below.",
+                "仅模拟器二维码，无法用于登录真实微信。请使用下方的模拟手机控件。",
+              )
             : state === "awaiting_approval"
-            ? "Open WeChat on your phone and confirm sign-in."
+            ? t(
+                "Open WeChat on your phone and confirm sign-in.",
+                "请在手机上打开微信并确认登录。",
+              )
             : qr
-            ? "In WeChat on your phone, tap +, then Scan."
+            ? t(
+                "In WeChat on your phone, tap +, then Scan.",
+                "在手机微信中点击“+”，然后选择“扫一扫”。",
+              )
             : terminal
-            ? "Try signing in again."
-            : "Trying your saved WeChat sign-in."}
+            ? t("Try signing in again.", "请重新尝试登录。")
+            : t("Trying your saved WeChat sign-in.", "正在尝试使用已保存的微信登录状态。")}
         </p>
       </div>
       <div className="account-link-card">
@@ -715,8 +788,8 @@ function Login({
             src={qr}
             alt={
               connection.simulator
-                ? "Simulator sign-in QR code"
-                : "WeChat sign-in QR code"
+                ? t("Simulator sign-in QR code", "模拟器登录二维码")
+                : t("WeChat sign-in QR code", "微信登录二维码")
             }
             data-qr-generation={
               (operation?.result as { qrGeneration?: number } | null)
@@ -725,19 +798,25 @@ function Login({
             data-expires-at={expiresAt}
           />
         ) : (
-          <p>{terminal ? "Try again to continue." : "Connecting…"}</p>
+          <p>
+            {terminal
+              ? t("Try again to continue.", "请重试以继续。")
+              : t("Connecting…", "正在连接…")}
+          </p>
         )}
       </div>
       {qr && !terminal && state !== "awaiting_approval" && (
         <p className="qr-expiry" role="status">
-          {remaining === 0 ? "Refreshing code…" : "Code refresh in"}
+          {remaining === 0
+            ? t("Refreshing code…", "正在刷新二维码…")
+            : t("Code refresh in", "二维码刷新倒计时")}
           {remaining !== null && (!connection.simulator || clock !== null)
             ? remaining > 0
               ? ` ${Math.floor(remaining / 60)}:${String(
                   remaining % 60,
                 ).padStart(2, "0")}`
               : ""
-            : " a moment"}
+            : t(" a moment", " 即将刷新")}
         </p>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}
@@ -746,11 +825,11 @@ function Login({
           className="continue-button"
           onClick={() => setAttempt((a) => a + 1)}
         >
-          Try again
+          {t("Try again", "重试")}
         </button>
       ) : connection.simulator ? (
         <div className="sim-phone">
-          <span>Simulated phone</span>
+          <span>{t("Simulated phone", "模拟手机")}</span>
           <button
             className="continue-button"
             disabled={busy || !qr}
@@ -761,25 +840,29 @@ function Login({
             }
           >
             {state === "awaiting_approval"
-              ? "Simulate phone approval"
-              : "Simulate scan"}{" "}
+              ? t("Simulate phone approval", "模拟手机确认")
+              : t("Simulate scan", "模拟扫码")}{" "}
             <Icon name="chevron" />
           </button>
           {state !== "awaiting_approval" && (
             <details className="sim-login-tools">
-              <summary>Simulator test controls</summary>
+              <summary>
+                {t("Simulator test controls", "模拟器测试控件")}
+              </summary>
               <button
                 className="quiet-button"
                 disabled={busy || !qr}
                 onClick={() => void simulate("expired")}
               >
-                Simulate code expiry
+                {t("Simulate code expiry", "模拟二维码过期")}
               </button>
             </details>
           )}
         </div>
       ) : (
-        <p className="field-help">Chats open automatically after sign-in.</p>
+        <p className="field-help">
+          {t("Chats open automatically after sign-in.", "登录后将自动打开会话列表。")}
+        </p>
       )}
     </>
   );
@@ -805,6 +888,7 @@ function Chats({
 }) {
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
+  const [locale] = useLocale();
   const savedView = state.account ? connection.cache.view(state.account) : {};
   const [section, setSection] = useState<"chats" | "contacts">(
       savedView.section === "contacts" ? "contacts" : "chats",
@@ -867,7 +951,7 @@ function Chats({
   const name = (id: string) =>
     state.contacts.find((c) => c.id === id)?.displayName ||
     state.threads.find((t) => t.id === id)?.displayName ||
-    (id === "filehelper" ? "File Transfer" : id);
+    (id === "filehelper" ? t("File Transfer", "文件传输助手") : id);
   const selectedName = state.selected ? name(state.selected) : "";
   const draftKey = `${state.account}:${state.selected}`,
     draft = drafts[draftKey] ?? "";
@@ -986,9 +1070,9 @@ function Chats({
   async function simulate(op: Record<string, unknown>) {
     try {
       await control({ account: state.account, ...op });
-      setSimStatus("Scenario applied.");
+      setSimStatus(t("Scenario applied.", "已应用模拟场景。"));
     } catch {
-      setSimStatus("Scenario control failed.");
+      setSimStatus(t("Scenario control failed.", "模拟场景控制失败。"));
     }
   }
   function send() {
@@ -1079,13 +1163,13 @@ function Chats({
   const firstPinned = threads.find((thread) => thread.pinned === true)?.id;
   return (
     <div className={`shell ${mobile ? "mobile-chat" : ""}`}>
-      <nav className="rail" aria-label="Main navigation">
+      <nav className="rail" aria-label={t("Main navigation", "主导航")}>
         <div className="brand" title="AgentWechat">
           <Logo />
         </div>
         <button
           className={`nav-btn ${section === "chats" ? "active" : ""}`}
-          aria-label="Chats"
+          aria-label={t("Chats", "聊天")}
           onClick={() => {
             setSection("chats");
             setMobile(false);
@@ -1095,7 +1179,7 @@ function Chats({
         </button>
         <button
           className={`nav-btn ${section === "contacts" ? "active" : ""}`}
-          aria-label="Contacts"
+          aria-label={t("Contacts", "通讯录")}
           onClick={() => {
             setSection("contacts");
             setMobile(false);
@@ -1106,7 +1190,7 @@ function Chats({
         <div className="rail-spacer" />
         <button
           className="nav-btn"
-          aria-label="Settings"
+          aria-label={t("Settings", "设置")}
           onClick={() => setSettings(true)}
         >
           <Icon name="settings" />
@@ -1114,7 +1198,7 @@ function Chats({
         <div className="rail-rule" />
         <button
           className="nav-btn account-btn"
-          aria-label="Switch account"
+          aria-label={t("Switch account", "切换账号")}
           onClick={() => setAccountMenu(!accountMenu)}
         >
           <HubAvatar
@@ -1129,10 +1213,14 @@ function Chats({
         <div className="side-head">
           <div className="eyebrow">{account?.alias || "AgentWechat"}</div>
           <div className="title-row">
-            <h1>{section === "chats" ? "Messages" : "Contacts"}</h1>
+            <h1>
+              {section === "chats"
+                ? t("Messages", "消息")
+                : t("Contacts", "通讯录")}
+            </h1>
             <Button
               icon="plus"
-              label="New conversation"
+              label={t("New conversation", "新建聊天")}
               onClick={() => {
                 setNewChat(true);
               }}
@@ -1142,10 +1230,14 @@ function Chats({
             <Icon name="search" />
             <input
               aria-label={
-                section === "chats" ? "Search conversations" : "Search contacts"
+                section === "chats"
+                  ? t("Search conversations", "搜索会话")
+                  : t("Search contacts", "搜索联系人")
               }
               placeholder={
-                section === "chats" ? "Search conversations" : "Find a person"
+                section === "chats"
+                  ? t("Search conversations", "搜索会话")
+                  : t("Find a person", "查找联系人")
               }
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -1159,7 +1251,11 @@ function Chats({
                   className={`pill ${filter === f ? "active" : ""}`}
                   onClick={() => setFilter(f)}
                 >
-                  {f[0].toUpperCase() + f.slice(1)}
+                  {f === "all"
+                    ? t("All", "全部")
+                    : f === "unread"
+                    ? t("Unread", "未读")
+                    : t("Groups", "群聊")}
                 </button>
               ))}
             </div>
@@ -1211,7 +1307,9 @@ function Chats({
             (section === "chats" ? threads.length : state.contacts.length) ===
               0 && (
               <p className="no-results">
-                {query ? "No matches." : "No conversations yet."}
+                {query
+                  ? t("No matches.", "无匹配结果。")
+                  : t("No conversations yet.", "暂无会话。")}
               </p>
             )}
         </div>
@@ -1219,19 +1317,24 @@ function Chats({
           <span>
             <i className={`status-dot ${!state.connected ? "off" : ""}`} />
             {state.connected
-              ? "agent-wechat hub connected"
+              ? t("agent-wechat hub connected", "已连接 agent-wechat 服务")
               : state.reconnecting
-              ? "Reconnecting live updates…"
-              : "Connecting to agent-wechat hub…"}
+              ? t("Reconnecting live updates…", "正在重新连接实时更新…")
+              : t(
+                  "Connecting to agent-wechat hub…",
+                  "正在连接 agent-wechat 服务…",
+                )}
           </span>
-          {simulator && <span className="sim-label">SIMULATOR</span>}
+          {simulator && (
+            <span className="sim-label">{t("SIMULATOR", "模拟器")}</span>
+          )}
         </div>
       </aside>
       <main className="workspace">
         <header className="chat-header">
           <Button
             icon="back"
-            label="Back to conversations"
+            label={t("Back to conversations", "返回会话列表")}
             className="back-btn"
             onClick={() => setMobile(false)}
           />
@@ -1251,18 +1354,18 @@ function Chats({
             <h2>{selectedName || "AgentWechat"}</h2>
             <p>
               {state.selected === "filehelper"
-                ? "Notes to yourself"
+                ? t("Notes to yourself", "发送给自己")
                 : state.selected
                 ? state.selected.endsWith("@chatroom")
-                  ? "Group conversation"
-                  : "WeChat conversation"
-                : "Choose a conversation"}
+                  ? t("Group conversation", "群聊")
+                  : t("WeChat conversation", "微信会话")
+                : t("Choose a conversation", "选择一个会话")}
             </p>
           </div>
           <div className="header-actions">
             <Button
               icon="search"
-              label="Find in conversation"
+              label={t("Find in conversation", "在聊天中查找")}
               onClick={() => {
                 setFind(!find);
                 setInChat("");
@@ -1270,15 +1373,15 @@ function Chats({
             />
             <Button
               icon="panel"
-              label="Conversation details"
+              label={t("Conversation details", "聊天详情")}
               onClick={() => setDetails(!details)}
             />
           </div>
           {find && (
             <label className="search conversation-search">
               <input
-                aria-label="Find in this chat"
-                placeholder="Find in this chat…"
+                aria-label={t("Find in this chat", "在此聊天中查找")}
+                placeholder={t("Find in this chat…", "在此聊天中查找…")}
                 autoFocus
                 maxLength={64}
                 value={inChat}
@@ -1302,27 +1405,33 @@ function Chats({
                 void session.refresh().catch(() => {});
               }}
             >
-              Refresh
+              {t("Refresh", "刷新")}
             </button>
           </div>
         )}
         {leftGroup && (
           <div className="banner">
-            You are no longer in this group. Cached history is still available.
+            {t(
+              "You are no longer in this group. Cached history is still available.",
+              "你已不在该群聊中，仍可查看本地缓存的历史记录。",
+            )}
           </div>
         )}
         {account?.authenticated === false && (
           <div className="banner">
-            Sign in to WeChat again to send messages.
-            <button onClick={switchAccount}>Sign in</button>
+            {t(
+              "Sign in to WeChat again to send messages.",
+              "请重新登录微信以发送消息。",
+            )}
+            <button onClick={switchAccount}>{t("Sign in", "登录")}</button>
           </div>
         )}
         {simulator && (
           <details className="simulator-tools">
-            <summary>Simulator controls</summary>
+            <summary>{t("Simulator controls", "模拟器控件")}</summary>
             <div className="sim-controls">
               <input
-                aria-label="Synthetic incoming text"
+                aria-label={t("Synthetic incoming text", "模拟收到的消息文本")}
                 value={simBody}
                 onChange={(e) => setSimBody(e.target.value)}
               />
@@ -1335,7 +1444,7 @@ function Chats({
                   })
                 }
               >
-                Receive message
+                {t("Receive message", "接收消息")}
               </button>
               <button
                 onClick={() =>
@@ -1347,7 +1456,7 @@ function Chats({
                   })
                 }
               >
-                Send from phone
+                {t("Send from phone", "从手机发送")}
               </button>
               <button
                 onClick={() =>
@@ -1357,7 +1466,7 @@ function Chats({
                   })
                 }
               >
-                Unavailable image
+                {t("Unavailable image", "不可用图片")}
               </button>
               {["image", "file", "video", "voice", "sticker"].map((kind) => (
                 <button
@@ -1375,7 +1484,7 @@ function Chats({
                     })
                   }
                 >
-                  Receive {kind}
+                  {t(`Receive ${kind}`, `接收 ${kind}`)}
                 </button>
               ))}
               <button
@@ -1383,7 +1492,7 @@ function Chats({
                   void simulate({ op: "send_fault", fault: "reject" })
                 }
               >
-                Reject next send
+                {t("Reject next send", "拒绝下一次发送")}
               </button>
               <button
                 onClick={() =>
@@ -1393,12 +1502,15 @@ function Chats({
                   })
                 }
               >
-                Lose next acknowledgment
+                {t("Lose next acknowledgment", "丢失下一次确认")}
               </button>
             </div>
             <p role="status">
               {simStatus ||
-                "Synthetic upstream only. No official WeChat connection."}
+                t(
+                  "Synthetic upstream only. No official WeChat connection.",
+                  "仅模拟上游，未连接官方微信。",
+                )}
             </p>
           </details>
         )}
@@ -1429,7 +1541,10 @@ function Chats({
           >
             <PhotoViewer connection={connection}>
               <div className="body-row">
-                <section className="conversation" aria-label="Conversation">
+                <section
+                  className="conversation"
+                  aria-label={t("Conversation", "会话")}
+                >
                   <ConversationScroll
                     key={`${state.account}:${state.selected}:${!!(
                       find && inChat.trim()
@@ -1520,7 +1635,7 @@ function Chats({
                             state.selected &&
                             state.messages.length === 0 && (
                               <p className="empty-chat">
-                                Start the conversation.
+                                {t("Start the conversation.", "开始聊天吧。")}
                               </p>
                             )}
                         </ConversationItem>
@@ -1533,12 +1648,15 @@ function Chats({
                         <div className="composer-reply">
                           <span className="reply-source">
                             {quoteRestoring
-                              ? "Loading reply…"
-                              : "Quoted message unavailable"}
+                              ? t("Loading reply…", "正在加载回复…")
+                              : t(
+                                  "Quoted message unavailable",
+                                  "引用的消息不可用",
+                                )}
                           </span>
                           <Button
                             icon="close"
-                            label="Remove reply"
+                            label={t("Remove reply", "移除回复")}
                             onClick={clearReply}
                           />
                         </div>
@@ -1555,15 +1673,15 @@ function Chats({
                         remove={id => { connection.attachmentDrafts.remove(state.account!, state.selected!, id); focusMessage(); }}
                         quality={original => connection.attachmentDrafts.quality(state.account!, state.selected!, original ? "original" : "normal")} />
                       {attachmentSendError?.target === draftKey && <p className="attachment-error" role="alert">{attachmentSendError.message}</p>}
-                      {attachments.files.length > 0 && reply && !draft.trim() && <p className="field-help">Write text for the quoted reply. Files send as separate messages.</p>}
+                      {attachments.files.length > 0 && reply && !draft.trim() && <p className="field-help">{t("Write text for the quoted reply. Files send as separate messages.", "请为引用回复输入文字。文件将作为独立消息发送。")}</p>}
                       {inlineEditor && state.account && state.selected ? <MentionEditor
                         key={draftKey} connection={connection} account={state.account} thread={state.selected} inputRef={mentionInput}
                         value={draft} tokens={draftMentions} disabled={!active} allowMentions={inlineCapable && active}
                         canMentionAll={allowAllMention}
-                        openRequest={mentionOpen} placeholder={`Message ${selectedName}…`} onChange={changeDraft} onSend={send} onFocus={acknowledgeComposer} onEscape={clearReply}
+                        openRequest={mentionOpen} placeholder={t(`Message ${selectedName}…`, `发送给 ${selectedName}…`)} onChange={changeDraft} onSend={send} onFocus={acknowledgeComposer} onEscape={clearReply}
                       /> : <textarea
                         ref={messageInput}
-                        aria-label="Message"
+                        aria-label={t("Message", "消息")}
                         onFocus={acknowledgeComposer}
                         onClick={acknowledgeComposer}
                         onCompositionStart={() => {
@@ -1578,8 +1696,11 @@ function Chats({
                         rows={2}
                         placeholder={
                           state.selected
-                            ? `Message ${selectedName}…`
-                            : "Choose a conversation"
+                            ? t(
+                                `Message ${selectedName}…`,
+                                `发送给 ${selectedName}…`,
+                              )
+                            : t("Choose a conversation", "选择一个会话")
                         }
                         value={draft}
                         disabled={!state.selected || !active}
@@ -1606,21 +1727,21 @@ function Chats({
                           }
                         }}
                       />}
-                      {mentionProblems[draftKey] && <p className="mention-error" role="alert">Saved mention recipients could not be restored. Choose recipients again, or <button onClick={() => { setMentionProblems(values => ({ ...values, [draftKey]: false })); changeDraft(draft); }}>keep only the text</button>.</p>}
-                      {allMentionBlocked && <p className="mention-error" role="alert">{allMentionProblem(state.selectedGroup, state.selected)} <button type="button" onClick={() => { const next = removeAllMentions(draft, draftMentions); changeDraft(next.text, next.tokens); }}>Remove Everyone</button> <button type="button" disabled={!active || state.opening} onClick={() => { void session.refreshConversations(state.account, false, state.selected ?? undefined).catch(() => {}); }}>Refresh</button></p>}
+                      {mentionProblems[draftKey] && <p className="mention-error" role="alert">{t("Saved mention recipients could not be restored. Choose recipients again, or ", "无法恢复已保存的 @ 提醒对象。请重新选择提醒对象，或")}<button onClick={() => { setMentionProblems(values => ({ ...values, [draftKey]: false })); changeDraft(draft); }}>{t("keep only the text", "仅保留纯文本")}</button>{t(".", "。")}</p>}
+                      {allMentionBlocked && <p className="mention-error" role="alert">{allMentionProblem(state.selectedGroup, state.selected)} <button type="button" onClick={() => { const next = removeAllMentions(draft, draftMentions); changeDraft(next.text, next.tokens); }}>{t("Remove Everyone", "移除所有人")}</button> <button type="button" disabled={!active || state.opening} onClick={() => { void session.refreshConversations(state.account, false, state.selected ?? undefined).catch(() => {}); }}>{t("Refresh", "刷新")}</button></p>}
                       <div className="composer-bottom">
-                        <div className="composer-tools" role="group" aria-label="Message actions">
+                        <div className="composer-tools" role="group" aria-label={t("Message actions", "消息操作")}>
                           {state.account && <AttachmentPicker key={JSON.stringify([state.account, state.selected])} connection={connection} account={state.account} threadId={state.selected}
                             composerRef={composerInput} mediaKinds={Array.isArray(state.capabilities.mediaKinds) ? state.capabilities.mediaKinds : []}
                             capabilities={state.capabilities}
                             focusMessage={focusMessage}
                             enabled={active && !attachments.submission && Array.isArray(state.capabilities.mediaKinds) && state.capabilities.mediaKinds.length > 0} />}
-                          <Button icon="mention" label="Mention someone"
-                            title={!state.selected?.endsWith("@chatroom") ? "Mentions are available in group chats" : !inlineCapable ? "Update the hub to use inline mentions" : "Mention someone"}
+                          <Button icon="mention" label={t("Mention someone", "提醒某人")}
+                            title={!state.selected?.endsWith("@chatroom") ? t("Mentions are available in group chats", "仅群聊支持 @ 提醒") : !inlineCapable ? t("Update the hub to use inline mentions", "请更新服务以使用群内 @ 提醒") : t("Mention someone", "提醒某人")}
                             disabled={!inlineCapable || !active} onClick={() => setMentionOpen(value => value + 1)} />
                         </div>
-                        {simulator && <span className="composer-hint">Messages stay in the simulator.</span>}
-                        <ComposerHelp label="Keyboard shortcuts"><span><kbd>Enter</kbd> to send</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line</span></ComposerHelp>
+                        {simulator && <span className="composer-hint">{t("Messages stay in the simulator.", "消息仅保留在模拟器中。")}</span>}
+                        <ComposerHelp label={t("Keyboard shortcuts", "键盘快捷键")}><span><kbd>Enter</kbd> {t("to send", "发送")}</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> {t("for a new line", "换行")}</span></ComposerHelp>
                         <button
                           className="send-btn"
                           disabled={
@@ -1634,7 +1755,7 @@ function Chats({
                           }
                           onClick={send}
                         >
-                          Send <Icon name="send" />
+                          {t("Send", "发送")} <Icon name="send" />
                         </button>
                       </div>
                     </div>
@@ -1654,8 +1775,12 @@ function Chats({
         </ConversationNavigation>
       </main>
       {accountMenu && (
-        <div className="account-menu" role="dialog" aria-label="Switch account">
-          <div className="eyebrow">WeChat accounts</div>
+        <div
+          className="account-menu"
+          role="dialog"
+          aria-label={t("Switch account", "切换账号")}
+        >
+          <div className="eyebrow">{t("WeChat accounts", "微信账号")}</div>
           {state.accounts.map((a) => (
             <button
               key={a.id}
@@ -1679,7 +1804,9 @@ function Chats({
               <span>
                 <strong>{a.alias || a.id}</strong>
                 <small>
-                  {a.authenticated ? "Signed in" : "Sign-in needed"}
+                  {a.authenticated
+                    ? t("Signed in", "已登录")
+                    : t("Sign-in needed", "需要登录")}
                 </small>
               </span>
             </button>
@@ -1693,13 +1820,18 @@ function Chats({
             }}
           >
             <Icon name="plus" />{" "}
-            <span>{addingAccount ? "Opening…" : "Add WeChat account"}</span>
+            <span>
+              {addingAccount
+                ? t("Opening…", "正在打开…")
+                : t("Add WeChat account", "添加微信账号")}
+            </span>
           </button>
           <button
             className="account-option account-action"
             onClick={switchAccount}
           >
-            <Icon name="people" /> <span>Choose an account</span>
+            <Icon name="people" />{" "}
+            <span>{t("Choose an account", "选择账号")}</span>
           </button>
         </div>
       )}
@@ -1722,39 +1854,52 @@ function Chats({
             className="modal settings-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="Settings"
+            aria-label={t("Settings", "设置")}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="modal-head">
-              <h2>Settings</h2>
+              <h2>{t("Settings", "设置")}</h2>
               <Button
                 icon="close"
-                label="Close settings"
+                label={t("Close settings", "关闭设置")}
                 onClick={() => setSettings(false)}
               />
             </div>
             <div className="modal-body">
               <label className="setting">
-                Appearance
+                {t("Appearance", "外观")}
                 <select
                   value={theme}
                   onChange={(e) => setTheme(e.target.value)}
                 >
-                  <option value="system">System</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
+                  <option value="system">{t("System", "跟随系统")}</option>
+                  <option value="light">{t("Light", "浅色")}</option>
+                  <option value="dark">{t("Dark", "深色")}</option>
+                </select>
+              </label>
+              <label className="setting">
+                {t("Language", "语言")}
+                <select
+                  aria-label={t("Language", "语言")}
+                  value={locale}
+                  onChange={(e) => setLocale(e.target.value as Locale)}
+                >
+                  <option value="en">English</option>
+                  <option value="zh-CN">简体中文</option>
                 </select>
               </label>
               <div className="setting">
                 <span>
                   agent-wechat hub<small>{connection.endpoint}</small>
                 </span>
-                {simulator ? "Simulator" : "Connected"}
+                {simulator
+                  ? t("Simulator", "模拟器")
+                  : t("Connected", "已连接")}
               </div>
               {desktop && (
                 <>
                   <DesktopPreferences onConnection={onConnect} onDisconnect={disconnect} />
-                  <button className="secondary" onClick={disconnect}>Switch hub</button>
+                  <button className="secondary" onClick={disconnect}>{t("Switch hub", "切换服务")}</button>
                 </>
               )}
               {state.account && (
@@ -1764,9 +1909,9 @@ function Chats({
                 />
               )}
               <div className="setting settings-accounts">
-                <span>Accounts</span>
+                <span>{t("Accounts", "账号")}</span>
                 <button className="secondary" onClick={switchAccount}>
-                  Manage
+                  {t("Manage", "管理")}
                 </button>
               </div>
               {account && (
@@ -1809,6 +1954,7 @@ function SearchResults({
   name: (id: string) => string;
   close: () => void;
 }) {
+  useLocale();
   const [search] = useState(
     () => new HistorySearch(connection.session.client, account, thread),
   );
@@ -1821,26 +1967,34 @@ function SearchResults({
   const current = state.query === query.trim();
   return (
     <section
-      aria-label="Conversation search results"
+      aria-label={t("Conversation search results", "会话搜索结果")}
       className="history-search"
     >
       <div className="history-search-status">
         <span role="status">
           {!current || state.loading
-            ? "Searching history on this agent-wechat hub…"
-            : `${state.items.length}${state.nextCursor ? "+" : ""} ${
-                state.items.length === 1 && !state.nextCursor
-                  ? "match"
-                  : "matches"
-              } in this conversation`}
+            ? t(
+                "Searching history on this agent-wechat hub…",
+                "正在此 agent-wechat 服务上搜索历史记录…",
+              )
+            : t(
+                `${state.items.length}${state.nextCursor ? "+" : ""} ${
+                  state.items.length === 1 && !state.nextCursor
+                    ? "match"
+                    : "matches"
+                } in this conversation`,
+                `此会话中找到 ${state.items.length}${
+                  state.nextCursor ? "+" : ""
+                } 条匹配结果`,
+              )}
         </span>
-        <button onClick={close}>Back to chat</button>
+        <button onClick={close}>{t("Back to chat", "返回聊天")}</button>
       </div>
       {current && state.error && (
         <ErrorNotice>
           {state.error}{" "}
           <button onClick={() => void search.search(query)}>
-            Retry search
+            {t("Retry search", "重新搜索")}
           </button>
         </ErrorNotice>
       )}
@@ -1859,12 +2013,15 @@ function SearchResults({
           disabled={state.loading}
           onClick={() => void search.more()}
         >
-          Load more matches
+          {t("Load more matches", "加载更多匹配结果")}
         </button>
       )}
       {current && !state.loading && !state.error && !state.items.length && (
         <p className="empty-chat">
-          No matches in the history available on this agent-wechat hub.
+          {t(
+            "No matches in the history available on this agent-wechat hub.",
+            "此 agent-wechat 服务上的可用历史记录中没有匹配项。",
+          )}
         </p>
       )}
     </section>
@@ -1881,6 +2038,7 @@ function Pending({
   cancel: () => Promise<void>;
   dismiss: () => void;
 }) {
+  useLocale();
   const [busy, setBusy] = useState(false);
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -1894,29 +2052,32 @@ function Pending({
   const uncertain = send.uncertain || state === "needs_review";
   const ended = ["rejected", "failed", "cancelled"].includes(state ?? "");
   const label = uncertain
-    ? "Couldn't confirm send"
+    ? t("Couldn't confirm send", "无法确认发送状态")
     : state === "rejected" || state === "failed"
-    ? "Send rejected"
+    ? t("Send rejected", "发送被拒绝")
     : state === "cancelled"
-    ? "Send cancelled"
+    ? t("Send cancelled", "已取消发送")
     : state === "accepted"
-    ? "Accepted · loading message…"
-    : "Queued…";
+    ? t("Accepted · loading message…", "已接收 · 正在加载消息…")
+    : t("Queued…", "排队中…");
   return (
     <article
       className="message own"
       data-send-state={state || (send.uncertain ? "uncertain" : "submitting")}
       aria-busy={busy}
     >
-      <Avatar name="You" />
+      <Avatar name={t("You", "我")} />
       <div className="message-body">
         <div className="bubble">
           {send.quote && (
             <div className="pending-quote">
               <strong>
-                {send.quotePreview?.senderName || "Quoted message"}
+                {send.quotePreview?.senderName ||
+                  t("Quoted message", "引用的消息")}
               </strong>
-              <span>{emojiText(send.quotePreview?.text || "Reply")}</span>
+              <span>
+                {emojiText(send.quotePreview?.text || t("Reply", "回复"))}
+              </span>
             </div>
           )}
           <p>{emojiText(send.text)}</p>
@@ -1932,23 +2093,26 @@ function Pending({
           {label}
           {!ended && (
             <button disabled={busy} onClick={() => void run(check)}>
-              Check status
+              {t("Check status", "检查状态")}
             </button>
           )}
           {state === "queued" && (
             <button disabled={busy} onClick={() => void run(cancel)}>
-              Cancel
+              {t("Cancel", "取消")}
             </button>
           )}
           {(uncertain || ended) && (
             <button disabled={busy} onClick={dismiss}>
-              Dismiss
+              {t("Dismiss", "忽略")}
             </button>
           )}
         </div>
         {uncertain && (
           <small className="send-explanation">
-            Dismiss hides this notice; it doesn’t cancel delivery.
+            {t(
+              "Dismiss hides this notice; it doesn’t cancel delivery.",
+              "忽略仅隐藏此提示，不会取消消息投递。",
+            )}
           </small>
         )}
       </div>
@@ -1966,16 +2130,17 @@ function ReplyPreview({
   invalid: boolean;
   cancel: () => void;
 }) {
+  useLocale();
   const navigation = useConversationNavigation();
   const sender =
     message.direction === "outgoing"
-      ? "You"
+      ? t("You", "我")
       : name(message.senderId || message.threadId);
   return (
     <div
       className="composer-reply"
       role="region"
-      aria-label="Replying to message"
+      aria-label={t("Replying to message", "正在回复消息")}
     >
       <Icon name="reply" />
       <button
@@ -1986,19 +2151,27 @@ function ReplyPreview({
         <span>
           {invalid
             ? message.recall
-              ? "Message recalled"
-              : "Message unavailable"
+              ? t("Message recalled", "已撤回一条消息")
+              : t("Message unavailable", "消息不可用")
             : emojiText(quotedText(message).replace(/\s+/g, " ").slice(0, 240))}
         </span>
       </button>
-      <Button icon="close" label="Cancel reply" onClick={cancel} />
+      <Button
+        icon="close"
+        label={t("Cancel reply", "取消回复")}
+        onClick={cancel}
+      />
     </div>
   );
 }
 function MessageDate({ value }: { value: string | null }) {
+  useLocale();
   return (
     <div className="date-label">
-      {date(value).toLocaleDateString([], { month: "long", day: "numeric" })}
+      {date(value).toLocaleDateString(dateLocale(), {
+        month: "long",
+        day: "numeric",
+      })}
     </div>
   );
 }
@@ -2011,12 +2184,13 @@ function Message({
   connection: Connection;
   name: (id: string) => string;
 }) {
+  useLocale();
   const navigation = useConversationNavigation();
   const own = m.direction === "outgoing";
   const presentation = messagePresentation(m);
   const textLink = textMessageLink(m);
   if (presentation === "system") {
-    return <SystemNotice messageId={m.id} text={m.body?.trim() || "System message"}
+    return <SystemNotice messageId={m.id} text={m.body?.trim() || t("System message", "系统消息")}
       timestamp={time(m.createdAt)} dateTime={date(m.createdAt).toISOString()} />;
   }
   if (
@@ -2048,7 +2222,7 @@ function Message({
         connection={connection}
         account={m.accountId}
         username={m.senderId || (!own ? m.threadId : null)}
-        name={own ? "You" : name(m.senderId || m.threadId)}
+        name={own ? t("You", "我") : name(m.senderId || m.threadId)}
       />
       <div className="message-body">
         {!own && (
@@ -2068,7 +2242,7 @@ function Message({
                     <a href={textLink.href} target="_blank" rel="noopener noreferrer">
                       {m.body}
                     </a>
-                  ) : emojiText(m.body || (m.type >= 10000 ? "System message" : ""))}
+                  ) : emojiText(m.body || (m.type >= 10000 ? t("System message", "系统消息") : ""))}
                 </p>
               </div>
             ) : presentation === "reply" || presentation === "forwarded" ? (
@@ -2082,14 +2256,14 @@ function Message({
                 ) : (
                   <div className="message-context">
                     <Icon name="chat" />
-                    Forwarded messages
+                    {t("Forwarded messages", "聊天记录")}
                   </div>
                 )}
                 <p>
                   {emojiText(m.body ||
                     (presentation === "reply"
-                      ? "Reply text is unavailable."
-                      : "Forwarded content is unavailable."))}
+                      ? t("Reply text is unavailable.", "回复内容不可用。")
+                      : t("Forwarded content is unavailable.", "转发内容不可用。")))}
                 </p>
               </div>
             ) : presentation === "link" && m.link ? (
@@ -2100,7 +2274,12 @@ function Message({
               <MediaCard message={m} connection={connection} />
             ) : (
               <div className="bubble unsupported-message">
-                <p>This WeChat message type isn’t supported yet.</p>
+                <p>
+                  {t(
+                    "This WeChat message type isn’t supported yet.",
+                    "暂不支持此类型的微信消息。",
+                  )}
+                </p>
               </div>
             )}
           </div>
@@ -2124,9 +2303,13 @@ function Details({
   threadId: string;
   name: string;
 }) {
+  useLocale();
   const state = connection.session.snapshot();
   return (
-    <aside className="detail-panel" aria-label="Conversation details">
+    <aside
+      className="detail-panel"
+      aria-label={t("Conversation details", "聊天详情")}
+    >
       <div className="detail-profile">
         <ConversationAvatar
           connection={connection}
@@ -2141,15 +2324,15 @@ function Details({
         <h3>{name}</h3>
         <p>
           {threadId === "filehelper"
-            ? "Notes to yourself"
+            ? t("Notes to yourself", "发送给自己")
             : threadId.endsWith("@chatroom")
-            ? "Group conversation"
-            : "WeChat contact"}
+            ? t("Group conversation", "群聊")
+            : t("WeChat contact", "微信联系人")}
         </p>
       </div>
       <div className="detail-section">
-        <div className="section-head">Conversation</div>
-        <p className="peer-id" title="Internal ID">
+        <div className="section-head">{t("Conversation", "会话")}</div>
+        <p className="peer-id" title={t("Internal ID", "内部 ID")}>
           {threadId}
         </p>
       </div>

@@ -6,6 +6,7 @@ import { AccountNotifications } from "./account-notifications.tsx";
 import { Icon } from "./ui.tsx";
 import { canRemoveProfile, profileRemovalName } from "./profile-removal.ts";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import type { Account } from "./session.ts";
 import { pause, readableError } from "./session.ts";
 
@@ -22,6 +23,7 @@ export function AccountSettings({
   removed: () => void;
   signedIn?: () => void;
 }) {
+  useLocale();
   const [alias, setAlias] = useState(account.alias || account.id);
   const [confirm, setConfirm] = useState(false),
     [busy, setBusy] = useState(false),
@@ -69,7 +71,8 @@ export function AccountSettings({
         alias: alias.trim(),
       });
       await connection.session.accounts();
-      if (!lifetime.current.signal.aborted) setNotice("Account name saved.");
+      if (!lifetime.current.signal.aborted)
+        setNotice(t("Account name saved.", "账号名称已保存。"));
     } catch (error) {
       if (!lifetime.current.signal.aborted) setNotice(readableError(error));
     } finally {
@@ -78,7 +81,7 @@ export function AccountSettings({
   }
   async function logout() {
     setBusy(true);
-    setNotice("Signing out…");
+    setNotice(t("Signing out…", "正在退出登录…"));
     try {
       const operation = await connection.logout(account.id);
       const deadline = Date.now() + 90000;
@@ -102,7 +105,10 @@ export function AccountSettings({
         ) {
           setUncertain(true);
           setNotice(
-            "Sign-out could not be fully confirmed. Check its status before trying again.",
+            t(
+              "Sign-out could not be fully confirmed. Check its status before trying again.",
+              "退出登录未能完全确认，请先检查状态再重试。",
+            ),
           );
           return;
         }
@@ -110,7 +116,12 @@ export function AccountSettings({
       }
       if (!lifetime.current.signal.aborted) {
         setUncertain(true);
-        setNotice("Sign-out is still pending. Check its status.");
+        setNotice(
+          t(
+            "Sign-out is still pending. Check its status.",
+            "退出登录仍在进行中，请检查状态。",
+          ),
+        );
       }
     } catch (error) {
       if (!lifetime.current.signal.aborted) {
@@ -122,14 +133,17 @@ export function AccountSettings({
     }
   }
   return (
-    <section className="account-settings" aria-label="Account settings">
+    <section
+      className="account-settings"
+      aria-label={t("Account settings", "账号设置")}
+    >
       <form
         onSubmit={(event) => {
           event.preventDefault();
           void rename();
         }}
       >
-        <label htmlFor="account-alias">Account name</label>
+        <label htmlFor="account-alias">{t("Account name", "账号名称")}</label>
         <div className="account-name">
           <input
             id="account-alias"
@@ -144,10 +158,15 @@ export function AccountSettings({
             className="secondary"
             disabled={busy || alias.trim() === (account.alias || account.id)}
           >
-            Save
+            {t("Save", "保存")}
           </button>
         </div>
-        <small>Letters, numbers, hyphens and underscores.</small>
+        <small>
+          {t(
+            "Letters, numbers, hyphens and underscores.",
+            "仅支持字母、数字、连字符和下划线。",
+          )}
+        </small>
       </form>
       <MediaDownloadSettings connection={connection} account={account.id} />
       <AccountNotifications key={JSON.stringify([connection.desktopId, connection.cache.namespace[1], account.id])} connection={connection} account={account.id} />
@@ -155,8 +174,12 @@ export function AccountSettings({
         (confirm ? (
           <div className="signout-confirm">
             <p>
-              Sign out of <strong>{account.alias || account.id}</strong>? Chat
-              history stays on this agent-wechat hub.
+              {t("Sign out of ", "确定退出 ")}
+              <strong>{account.alias || account.id}</strong>
+              {t(
+                "? Chat history stays on this agent-wechat hub.",
+                "？聊天记录将保留在此 agent-wechat Hub 上。",
+              )}
             </p>
             <div className="attachment-actions">
               <button
@@ -164,7 +187,7 @@ export function AccountSettings({
                 disabled={busy}
                 onClick={() => setConfirm(false)}
               >
-                Keep signed in
+                {t("Keep signed in", "保持登录")}
               </button>
               <button
                 className="primary"
@@ -172,10 +195,10 @@ export function AccountSettings({
                 onClick={() => void logout()}
               >
                 {busy
-                  ? "Signing out…"
+                  ? t("Signing out…", "正在退出登录…")
                   : uncertain
-                  ? "Check sign-out status"
-                  : "Sign out"}
+                  ? t("Check sign-out status", "检查退出状态")
+                  : t("Sign out", "退出登录")}
               </button>
             </div>
           </div>
@@ -185,12 +208,12 @@ export function AccountSettings({
             disabled={busy}
             onClick={() => setConfirm(true)}
           >
-            Sign out of WeChat
+            {t("Sign out of WeChat", "退出微信登录")}
           </button>
         ))}
       {!account.authenticated && signedIn && !removing && (
         <button className="primary" disabled={busy} onClick={signedIn}>
-          Sign in to WeChat
+          {t("Sign in to WeChat", "登录微信")}
         </button>
       )}
       <div className="profile-removal">
@@ -201,13 +224,22 @@ export function AccountSettings({
               void remove();
             }}
           >
-            <h3>Remove {profileRemovalName(account)}?</h3>
+            <h3>
+              {t(
+                `Remove ${profileRemovalName(account)}?`,
+                `移除 ${profileRemovalName(account)}？`,
+              )}
+            </h3>
             <p>
-              This removes the profile from this agent-wechat hub. Local files
-              are retained.
+              {t(
+                "This removes the profile from this agent-wechat hub. Local files are retained.",
+                "这将从此 agent-wechat Hub 移除该配置，本地文件将保留。",
+              )}
             </p>
             <label htmlFor="remove-profile-confirm">
-              Type <strong>{profileRemovalName(account)}</strong> to confirm
+              {t("Type ", "输入 ")}
+              <strong>{profileRemovalName(account)}</strong>
+              {t(" to confirm", " 以确认")}
             </label>
             <input
               id="remove-profile-confirm"
@@ -228,13 +260,15 @@ export function AccountSettings({
                   setConfirmation("");
                 }}
               >
-                Cancel
+                {t("Cancel", "取消")}
               </button>
               <button
                 className="danger"
                 disabled={busy || !canRemoveProfile(account, confirmation)}
               >
-                {busy ? "Removing…" : "Remove profile"}
+                {busy
+                  ? t("Removing…", "正在移除…")
+                  : t("Remove profile", "移除配置")}
               </button>
             </div>
           </form>
@@ -249,10 +283,15 @@ export function AccountSettings({
                 setNotice("");
               }}
             >
-              Remove profile
+              {t("Remove profile", "移除配置")}
             </button>
             {(account.authenticated || signOutRequired) && (
-              <small>Sign out before removing this profile.</small>
+              <small>
+                {t(
+                  "Sign out before removing this profile.",
+                  "移除此配置前请先退出登录。",
+                )}
+              </small>
             )}
           </>
         )}
@@ -281,6 +320,7 @@ export function ProfileDialog({
   removed: () => void;
   signedIn: () => void;
 }) {
+  useLocale();
   const dialog = useRef<HTMLDialogElement>(null);
   const title = useId();
   useEffect(() => {
@@ -305,12 +345,16 @@ export function ProfileDialog({
       <header>
         <div>
           <h2 id={title}>{profileRemovalName(account)}</h2>
-          <p>{account.authenticated ? "Signed in" : "Signed out"}</p>
+          <p>
+            {account.authenticated
+              ? t("Signed in", "已登录")
+              : t("Signed out", "已退出")}
+          </p>
         </div>
         <button
           autoFocus
           className="profile-close"
-          aria-label="Close profile settings"
+          aria-label={t("Close profile settings", "关闭配置设置")}
           onClick={close}
         >
           <Icon name="close" />

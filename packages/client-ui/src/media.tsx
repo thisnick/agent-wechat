@@ -12,6 +12,7 @@ import {
   type NativeMessage,
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import { mediaPreviewIdentity } from "./media-preview-cache.ts";
 import { readableError } from "./session.ts";
 import { Avatar, Button, Icon } from "./ui.tsx";
@@ -55,6 +56,7 @@ export function PendingAttachments({
   threadId: string | null;
   messages: NativeMessage[];
 }) {
+  useLocale();
   const outbox = connection.mediaOutbox(account);
   const pending = useSyncExternalStore(outbox.subscribe, outbox.snapshot);
   return (
@@ -70,32 +72,43 @@ export function PendingAttachments({
             job?.state === "needs_review" ||
             job?.state === "partial";
           const label = uncertain
-            ? "Check the conversation before sending again"
+            ? t(
+                "Check the conversation before sending again",
+                "请先检查会话，再重新发送",
+              )
             : job?.state === "accepted"
-              ? "Accepted · loading message…"
+              ? t("Accepted · loading message…", "已接收 · 正在加载消息…")
               : item.stage === "uploading"
-                ? "Uploading…"
+                ? t("Uploading…", "正在上传…")
                 : item.stage === "submitting"
-                  ? "Submitting…"
+                  ? t("Submitting…", "正在提交…")
                   : item.stage === "cancelled" || job?.state === "cancelled"
-                    ? "Cancelled"
+                    ? t("Cancelled", "已取消")
                     : item.stage === "failed" || job?.state === "failed"
-                      ? "Attachment failed"
-                      : job?.phase || "Checking submission…";
+                      ? t("Attachment failed", "附件发送失败")
+                      : job?.phase || t("Checking submission…", "正在检查提交…");
+          const kindLabel =
+            item.kind === "image"
+              ? t("image", "图片")
+              : item.kind === "video"
+                ? t("video", "视频")
+                : item.kind === "voice"
+                  ? t("voice", "语音")
+                  : t("file", "文件");
           return (
             <article
               className="message own"
               key={item.key}
               data-media-state={job?.state ?? item.stage}
             >
-              <Avatar name="You" />
+              <Avatar name={t("You", "我")} />
               <div className="message-body">
                 <div className="bubble attachment-file">
                   <Icon name="file" />
                   <span>
                     <strong>{item.name}</strong>
                     <small>
-                      {size(item.size)} · {item.kind}
+                      {size(item.size)} · {kindLabel}
                     </small>
                   </span>
                 </div>
@@ -129,14 +142,19 @@ export function PendingAttachments({
                         }[];
                       }
                     ).chunks
-                      .map((chunk) => `Note ${chunk.index + 1}: ${chunk.state}`)
+                      .map((chunk) =>
+                        t(
+                          `Note ${chunk.index + 1}: ${chunk.state}`,
+                          `第 ${chunk.index + 1} 段：${chunk.state}`,
+                        ),
+                      )
                       .join(" · ")}
                   </small>
                 )}
                 <div className="attachment-job-actions">
                   {(item.sourceId || job) && (
                     <button onClick={() => void outbox.check(item.key)}>
-                      Check status
+                      {t("Check status", "检查状态")}
                     </button>
                   )}
                   {(item.stage === "uploading" ||
@@ -145,19 +163,21 @@ export function PendingAttachments({
                       disabled={job?.cancelRequested}
                       onClick={() => void outbox.cancel(item.key)}
                     >
-                      {job?.cancelRequested ? "Cancelling…" : "Cancel"}
+                      {job?.cancelRequested
+                        ? t("Cancelling…", "正在取消…")
+                        : t("Cancel", "取消")}
                     </button>
                   )}
                   {job?.retryable && !uncertain && (
                     <button onClick={() => void outbox.retry(item.key)}>
-                      Retry
+                      {t("Retry", "重试")}
                     </button>
                   )}
                   {(item.stage === "failed" ||
                     item.stage === "cancelled" ||
                     (job && ended.has(job.state))) && (
                     <button onClick={() => outbox.dismiss(item.key)}>
-                      Dismiss
+                      {t("Dismiss", "关闭")}
                     </button>
                   )}
                 </div>
@@ -190,6 +210,7 @@ export function MediaCard({
   previewOnly?: boolean;
   viewer?: boolean;
 }) {
+  useLocale();
   const { element, visible } = useVisible<HTMLDivElement>();
   const opening = useSyncExternalStore(
     connection.session.subscribe,
@@ -266,7 +287,7 @@ export function MediaCard({
       {!visual && !voice && (
         <div className="attachment-file">
           <Icon name="file" />
-          <strong>{asset?.filename || "Attachment"}</strong>
+          <strong>{asset?.filename || t("Attachment", "附件")}</strong>
         </div>
       )}
       {video && !viewer ? (
@@ -296,15 +317,15 @@ export function MediaCard({
           aria-label={
             !state.loaded || working
               ? voice
-                ? "Loading voice message"
+                ? t("Loading voice message", "正在加载语音消息")
                 : video
-                ? "Loading video"
-                : "Loading image"
+                ? t("Loading video", "正在加载视频")
+                : t("Loading image", "正在加载图片")
               : voice
-              ? "Voice message unavailable"
+              ? t("Voice message unavailable", "语音消息不可用")
               : video
-              ? "Video unavailable"
-              : "Image unavailable"
+              ? t("Video unavailable", "视频不可用")
+              : t("Image unavailable", "图片不可用")
           }
         >
           <Icon name={voice || video ? "play" : "image-off"} />
@@ -312,7 +333,9 @@ export function MediaCard({
             <span className="media-spinner" />
           ) : !previewOnly && asset && canRetrieve(asset) ? (
             <button onClick={() => void model.retrieve(asset)}>
-              {asset.state === "pending" ? "Load" : "Retry"}
+              {asset.state === "pending"
+                ? t("Load", "加载")
+                : t("Retry", "重试")}
             </button>
           ) : null}
         </div>
@@ -331,7 +354,7 @@ export function MediaCard({
         !working &&
         canRetrieve(asset) && (
           <button onClick={() => void model.retrieve(asset)}>
-            Retry voice message
+            {t("Retry voice message", "重试语音消息")}
           </button>
         )}
       {state.error && (
@@ -366,7 +389,11 @@ function VideoPoster({
     </>
   );
   return open ? (
-    <button className="video-poster" aria-label="Open video" onClick={open}>
+    <button
+      className="video-poster"
+      aria-label={t("Open video", "打开视频")}
+      onClick={open}
+    >
       {content}
     </button>
   ) : (
@@ -385,6 +412,7 @@ export function AssetContent({
   open?: () => void;
   upgrade?: MediaAsset;
 }) {
+  useLocale();
   const cache = connection.incomingMedia.previews;
   const cached = cache.peek(asset);
   const [url, setUrl] = useState(cached?.url ?? "");
@@ -449,7 +477,9 @@ export function AssetContent({
       src={url}
       data-media-variant={shownVariant}
       alt={
-        asset.kind === "sticker" ? "Sticker" : asset.filename || "Shared image"
+        asset.kind === "sticker"
+          ? t("Sticker", "表情")
+          : asset.filename || t("Shared image", "分享的图片")
       }
     />
   );
@@ -459,7 +489,7 @@ export function AssetContent({
         <div
           className="media-placeholder"
           role="status"
-          aria-label="Preview unavailable"
+          aria-label={t("Preview unavailable", "预览不可用")}
         >
           <Icon name="image-off" />
         </div>
@@ -468,7 +498,7 @@ export function AssetContent({
         <div
           className="media-placeholder"
           role="status"
-          aria-label="Loading media"
+          aria-label={t("Loading media", "正在加载媒体")}
         >
           <span className="media-spinner" />
         </div>
@@ -479,7 +509,7 @@ export function AssetContent({
             <button
               className="photo-open"
               onClick={open}
-              aria-label="Open photo"
+              aria-label={t("Open photo", "打开图片")}
             >
               {image}
             </button>
@@ -499,14 +529,14 @@ export function AssetContent({
             src={url}
             controls
             preload="metadata"
-            aria-label="Voice message"
+            aria-label={t("Voice message", "语音消息")}
           />
         ))}
       {error && (
         <div
           className="media-placeholder"
           role="status"
-          aria-label="Media unavailable"
+          aria-label={t("Media unavailable", "媒体不可用")}
           title={error}
         >
           <Icon name="image-off" />
@@ -568,6 +598,7 @@ function MediaDownloadAction({
   model: IncomingMedia;
   connection: Connection;
 }) {
+  useLocale();
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const id = useId();
   const [saving, setSaving] = useState(false);
@@ -589,18 +620,20 @@ function MediaDownloadAction({
       ? "standard"
       : "";
   const label = saving
-    ? "Saving…"
+    ? t("Saving…", "正在保存…")
     : working
       ? original
-        ? "Getting original…"
-        : "Downloading…"
+        ? t("Getting original…", "正在获取原图/原视频…")
+        : t("Downloading…", "正在下载…")
       : ready
-        ? "Download"
+        ? t("Download", "下载")
         : original && canRetrieve(asset)
-          ? "Get original"
+          ? t("Get original", "获取原文件")
           : canRetrieve(asset)
-            ? "Download"
-            : `${original ? "Original" : "Download"} unavailable`;
+            ? t("Download", "下载")
+            : original
+              ? t("Original unavailable", "原文件不可用")
+              : t("Download unavailable", "下载不可用");
   const progress = job?.totalBytes
     ? Math.min(100, Math.round((job.completedBytes / job.totalBytes) * 100))
     : undefined;
@@ -658,25 +691,32 @@ function MediaDownloadAction({
       <span className="download-disclosure" id={id} role="tooltip">
         {quality
           ? quality === "original"
-            ? "Original"
-            : "Compressed"
-          : asset.filename || "File"}
-        {downloadBytes ? ` · ${size(downloadBytes)}` : " · Size unknown"}
+            ? t("Original", "原文件")
+            : t("Compressed", "压缩版")
+          : asset.filename || t("File", "文件")}
+        {downloadBytes
+          ? ` · ${size(downloadBytes)}`
+          : t(" · Size unknown", " · 大小未知")}
         {quality === "standard" &&
         !state.assets.some((item) => item.variant === "original")
-          ? " · Original unavailable"
+          ? t(" · Original unavailable", " · 原文件不可用")
           : ""}
         {!ready && canRetrieve(asset)
           ? original
-            ? " · Make original available for download"
-            : " · Make available for download"
+            ? t(
+                " · Make original available for download",
+                " · 获取原文件以供下载",
+              )
+            : t(" · Make available for download", " · 获取文件以供下载")
           : ""}
       </span>
       {working && (
         <>
           <progress
             aria-label={
-              original ? "Original download progress" : "Download progress"
+              original
+                ? t("Original download progress", "原文件下载进度")
+                : t("Download progress", "下载进度")
             }
             value={progress}
             max={100}
@@ -687,7 +727,9 @@ function MediaDownloadAction({
           <button
             className="media-transfer-cancel"
             aria-label={
-              original ? "Cancel original download" : "Cancel download"
+              original
+                ? t("Cancel original download", "取消原文件下载")
+                : t("Cancel download", "取消下载")
             }
             disabled={!job || job.cancelRequested}
             onClick={() => {
@@ -696,7 +738,9 @@ function MediaDownloadAction({
                 .catch((error) => setError(readableError(error)));
             }}
           >
-            {job?.cancelRequested ? "Cancelling…" : "Cancel"}
+            {job?.cancelRequested
+              ? t("Cancelling…", "正在取消…")
+              : t("Cancel", "取消")}
           </button>
         </>
       )}

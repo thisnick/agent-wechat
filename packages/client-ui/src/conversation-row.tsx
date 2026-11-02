@@ -10,6 +10,7 @@ import { createPortal } from "react-dom";
 import type { NativeThread } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { ConversationAvatar } from "./avatars.tsx";
+import { dateLocale, t, useLocale } from "./i18n.ts";
 import { PinFeedback } from "./thread-pinning.tsx";
 import { threadPreview } from "./thread-preview.ts";
 import { Icon } from "./ui.tsx";
@@ -33,6 +34,7 @@ export function ConversationRow({
   heading?: boolean;
   divider?: boolean;
 }) {
+  useLocale();
   const model = connection.threadPinning(account, thread.id);
   const pin = useSyncExternalStore(model.subscribe, model.snapshot);
   const muteModel = connection.threadMuting(account, thread.id);
@@ -154,8 +156,12 @@ export function ConversationRow({
   }, [info]);
   const anchor = trigger.current?.getBoundingClientRect();
   const displayedPin = pin.preview ?? pin.pinned;
-  const label = displayedPin ? "Unpin chat" : "Pin chat";
-  const muteLabel = mute.muted ? "Unmute notifications" : "Mute notifications";
+  const label = displayedPin
+    ? t("Unpin chat", "取消置顶")
+    : t("Pin chat", "置顶聊天");
+  const muteLabel = mute.muted
+    ? t("Unmute notifications", "取消静音")
+    : t("Mute notifications", "静音通知");
   const accountName = connection.session
     .snapshot()
     .accounts.find((item) => item.id === account)?.alias;
@@ -166,7 +172,7 @@ export function ConversationRow({
   const lastActivity = date && Number.isFinite(date.getTime()) ? date : null;
   return (
     <div className="thread-list-item" data-thread-id={thread.id}>
-      {heading && <div className="pinned-heading">Pinned</div>}
+      {heading && <div className="pinned-heading">{t("Pinned", "置顶")}</div>}
       {divider && <div className="pinned-divider" aria-hidden="true" />}
       <div
         ref={frame}
@@ -229,8 +235,10 @@ export function ConversationRow({
           className="thread-row-status"
           aria-label={
             [
-              thread.pinned === true ? "Pinned" : "",
-              thread.muted === true ? "Notifications muted" : "",
+              thread.pinned === true ? t("Pinned", "已置顶") : "",
+              thread.muted === true
+                ? t("Notifications muted", "已静音通知")
+                : "",
             ]
               .filter(Boolean)
               .join(", ") || undefined
@@ -247,13 +255,20 @@ export function ConversationRow({
           <button
             ref={trigger}
             className="thread-row-pin icon-btn"
-            aria-label={pin.pinned === null ? "Pin state unavailable" : label}
+            aria-label={
+              pin.pinned === null
+                ? t("Pin state unavailable", "置顶状态不可用")
+                : label
+            }
             aria-pressed={displayedPin ?? undefined}
             title={
               !pin.supported
-                ? "Pinning isn’t supported for this chat"
+                ? t(
+                    "Pinning isn’t supported for this chat",
+                    "此会话不支持置顶",
+                  )
                 : pin.pinned === null
-                ? "Pin state unavailable"
+                ? t("Pin state unavailable", "置顶状态不可用")
                 : label
             }
             disabled={!pin.supported || pin.pinned === null}
@@ -264,7 +279,10 @@ export function ConversationRow({
             }}
           >
             {pin.saving ? (
-              <span className="pin-spinner" aria-label="Saving pin" />
+              <span
+                className="pin-spinner"
+                aria-label={t("Saving pin", "正在保存置顶")}
+              />
             ) : (
               <Icon name={displayedPin ? "unpin" : "pin"} />
             )}
@@ -272,14 +290,19 @@ export function ConversationRow({
           <button
             className="thread-row-mute icon-btn"
             aria-label={
-              mute.muted === null ? "Notification state unavailable" : muteLabel
+              mute.muted === null
+                ? t("Notification state unavailable", "通知状态不可用")
+                : muteLabel
             }
             aria-pressed={mute.muted ?? undefined}
             title={
               !mute.supported
-                ? "Notifications aren’t supported for this chat"
+                ? t(
+                    "Notifications aren’t supported for this chat",
+                    "此会话不支持通知设置",
+                  )
                 : mute.muted === null
-                ? "Notification state unavailable"
+                ? t("Notification state unavailable", "通知状态不可用")
                 : muteLabel
             }
             disabled={!mute.supported || mute.muted === null}
@@ -290,7 +313,10 @@ export function ConversationRow({
             }}
           >
             {mute.saving ? (
-              <span className="pin-spinner" aria-label="Saving notifications" />
+              <span
+                className="pin-spinner"
+                aria-label={t("Saving notifications", "正在保存通知设置")}
+              />
             ) : (
               <Icon name={mute.muted ? "bell" : "bell-off"} />
             )}
@@ -314,7 +340,7 @@ export function ConversationRow({
               <strong>{name}</strong>
               {lastActivity && (
                 <time dateTime={lastActivity.toISOString()}>
-                  {lastActivity.toLocaleString([], {
+                  {lastActivity.toLocaleString(dateLocale(), {
                     month: "short",
                     day: "numeric",
                     hour: "numeric",
@@ -328,7 +354,9 @@ export function ConversationRow({
               <span>
                 {[
                   accountName,
-                  thread.kind === "group" ? "Group chat" : "Direct chat",
+                  thread.kind === "group"
+                    ? t("Group chat", "群聊")
+                    : t("Direct chat", "私聊"),
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -337,8 +365,15 @@ export function ConversationRow({
             {(!!thread.unreadCount || thread.muted === true) && (
               <div className="thread-info-meta">
                 {[
-                  thread.unreadCount ? `${thread.unreadCount} unread` : "",
-                  thread.muted === true ? "Notifications muted" : "",
+                  thread.unreadCount
+                    ? t(
+                        `${thread.unreadCount} unread`,
+                        `${thread.unreadCount} 条未读`,
+                      )
+                    : "",
+                  thread.muted === true
+                    ? t("Notifications muted", "已静音通知")
+                    : "",
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -355,7 +390,7 @@ export function ConversationRow({
             id={menuId}
             role="menu"
             tabIndex={-1}
-            aria-label={`Actions for ${name}`}
+            aria-label={t(`Actions for ${name}`, `${name} 的操作`)}
             className="thread-row-menu"
             style={{
               top: Math.max(
@@ -421,9 +456,12 @@ export function ConversationRow({
               disabled={pin.disabled}
               title={
                 !pin.supported
-                  ? "Pinning isn’t supported for this chat"
+                  ? t(
+                      "Pinning isn’t supported for this chat",
+                      "此会话不支持置顶",
+                    )
                   : pin.pinned === null
-                  ? "Pin state unavailable"
+                  ? t("Pin state unavailable", "置顶状态不可用")
                   : undefined
               }
               onClick={() => {
@@ -456,8 +494,8 @@ export function ConversationRow({
               >
                 <Icon name="refresh" />
                 {mute.uncertain
-                  ? "Check notification status"
-                  : "Refresh notification state"}
+                  ? t("Check notification status", "检查通知状态")
+                  : t("Refresh notification state", "刷新通知状态")}
               </button>
             )}
             {(pin.uncertain || pin.error) && (
@@ -470,7 +508,9 @@ export function ConversationRow({
                 }}
               >
                 <Icon name="refresh" />
-                {pin.uncertain ? "Check status" : "Refresh"}
+                {pin.uncertain
+                  ? t("Check status", "检查状态")
+                  : t("Refresh", "刷新")}
               </button>
             )}
             {pin.pinned === null && !pin.error && !pin.uncertain && (
@@ -483,7 +523,7 @@ export function ConversationRow({
                 }}
               >
                 <Icon name="refresh" />
-                Refresh pin state
+                {t("Refresh pin state", "刷新置顶状态")}
               </button>
             )}
           </div>,

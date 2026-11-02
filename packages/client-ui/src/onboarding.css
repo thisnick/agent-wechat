@@ -490,6 +490,18 @@ body {
   border-radius: 50%;
   background: #969b8b;
 }
+.locale-switch {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.locale-switch:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
 .palette-picker {
   display: flex;
   gap: 10px;

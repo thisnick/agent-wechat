@@ -16,6 +16,7 @@ import {
 import { allMentionProblem, canMentionAll, mentionOptions, type MentionToken } from "./mentions.ts";
 import type { BrowserCache } from "./browser-cache.ts";
 import { HISTORY_TTL_MS, HistoryCache } from "./history-cache.ts";
+import { t } from "./i18n.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
 import { quotedText, quoteTargetMatches } from "./quote-preview.ts";
@@ -94,63 +95,153 @@ export function readableError(error: unknown): string {
     return (
       (
         {
-          unauthorized: "The agent-wechat hub access key wasn't accepted.",
-          forbidden: "This access key doesn't allow that action.",
-          auth_required: "Sign in to WeChat again.",
-          operation_in_progress:
+          unauthorized: t(
+            "The agent-wechat hub access key wasn't accepted.",
+            "agent-wechat 服务访问密钥未被接受。",
+          ),
+          forbidden: t(
+            "This access key doesn't allow that action.",
+            "此访问密钥不允许执行该操作。",
+          ),
+          auth_required: t(
+            "Sign in to WeChat again.",
+            "请重新登录微信。",
+          ),
+          operation_in_progress: t(
             "This profile has an operation in progress. Wait for it to finish, then try again.",
-          account_sign_out_required: "Sign out before removing this profile.",
-          account_confirmation_mismatch:
+            "当前资料有正在进行的操作，请等待其完成后重试。",
+          ),
+          account_sign_out_required: t(
+            "Sign out before removing this profile.",
+            "移除此资料前请先退出登录。",
+          ),
+          account_confirmation_mismatch: t(
             "The profile confirmation does not match.",
-          read_state_conflict:
+            "资料确认信息不匹配。",
+          ),
+          read_state_conflict: t(
             "The conversation changed. Refresh it and try again.",
-          idempotency_conflict: "This send key is already in use.",
-          invalid_mentions: "Choose the mentioned members again.",
-          invalid_mention_text: "The message or its mention positions are invalid. Edit it and try again.",
-          mentions_require_group: "Mentions are available in groups only.",
-          mention_member_unavailable: "A mentioned member is unavailable. Remove the mention or choose them again.",
-          mention_group_membership_unavailable: "Refresh the group’s members before sending mentions.",
-          mention_all_forbidden: "You can’t mention everyone in this group.",
-          mention_all_permission_unavailable: "Group permissions are unavailable. Refresh the group before mentioning everyone.",
-          quote_mentions_unsupported: "This hub cannot combine mentions with quoted replies. Update the hub or remove one.",
-          quote_target_unavailable:
+            "会话已发生变化，请刷新后重试。",
+          ),
+          idempotency_conflict: t(
+            "This send key is already in use.",
+            "该发送标识已被使用。",
+          ),
+          invalid_mentions: t(
+            "Choose the mentioned members again.",
+            "请重新选择要提醒的成员。",
+          ),
+          invalid_mention_text: t(
+            "The message or its mention positions are invalid. Edit it and try again.",
+            "消息内容或提醒位置无效，请修改后重试。",
+          ),
+          mentions_require_group: t(
+            "Mentions are available in groups only.",
+            "仅群聊支持 @ 提醒。",
+          ),
+          mention_member_unavailable: t(
+            "A mentioned member is unavailable. Remove the mention or choose them again.",
+            "被提醒的成员不可用，请移除该提醒或重新选择。",
+          ),
+          mention_group_membership_unavailable: t(
+            "Refresh the group’s members before sending mentions.",
+            "发送提醒前请先刷新群成员列表。",
+          ),
+          mention_all_forbidden: t(
+            "You can’t mention everyone in this group.",
+            "你无法在此群聊中提醒所有人。",
+          ),
+          mention_all_permission_unavailable: t(
+            "Group permissions are unavailable. Refresh the group before mentioning everyone.",
+            "群权限信息不可用，提醒所有人前请先刷新群资料。",
+          ),
+          quote_mentions_unsupported: t(
+            "This hub cannot combine mentions with quoted replies. Update the hub or remove one.",
+            "当前服务不支持在引用回复中同时使用 @ 提醒，请更新服务或移除其中一项。",
+          ),
+          quote_target_unavailable: t(
             "That message is no longer available to quote.",
-          quote_target_mismatch: "The quoted message changed. Select it again.",
-          quote_target_ambiguous:
+            "该消息已无法引用。",
+          ),
+          quote_target_mismatch: t(
+            "The quoted message changed. Select it again.",
+            "被引用的消息已变更，请重新选择。",
+          ),
+          quote_target_ambiguous: t(
             "That message cannot be identified reliably. Choose another message.",
-          quote_content_unavailable:
+            "无法可靠识别该消息，请选择其他消息。",
+          ),
+          quote_content_unavailable: t(
             "The content of that message cannot be quoted.",
-          quote_sender_unavailable:
+            "该消息的内容无法引用。",
+          ),
+          quote_sender_unavailable: t(
             "The sender of that message is unavailable.",
-          unsupported_quote_type: "This message type cannot be quoted yet.",
-          invalid_quote_reference:
+            "该消息的发送者信息不可用。",
+          ),
+          unsupported_quote_type: t(
+            "This message type cannot be quoted yet.",
+            "暂不支持引用此类型的消息。",
+          ),
+          invalid_quote_reference: t(
             "Select the message you want to reply to again.",
-          invalid_quote_request:
+            "请重新选择要回复的消息。",
+          ),
+          invalid_quote_request: t(
             "Select the message you want to reply to again.",
-          unsupported_simulator_operation:
+            "请重新选择要回复的消息。",
+          ),
+          unsupported_simulator_operation: t(
             "This action isn't available on the simulator.",
-          unsupported_application_media:
+            "模拟器不支持此操作。",
+          ),
+          unsupported_application_media: t(
             "This message doesn't contain a supported downloadable attachment.",
-          unsupported_group_creation:
+            "此消息不包含受支持的可下载附件。",
+          ),
+          unsupported_group_creation: t(
             "Group creation isn't available on this agent-wechat hub yet.",
-          invalid_group_members:
+            "当前 agent-wechat 服务暂不支持创建群聊。",
+          ),
+          invalid_group_members: t(
             "Choose distinct contacts; group creation needs at least two.",
-          ordinary_contact_required:
+            "请选择不同的联系人；创建群聊至少需要两位联系人。",
+          ),
+          ordinary_contact_required: t(
             "One of these contacts cannot be added to an ordinary group.",
-          ordinary_group_required:
+            "所选联系人中有人无法加入普通群聊。",
+          ),
+          ordinary_group_required: t(
             "Refresh this group and check that you are still a member.",
-          group_state_incomplete:
+            "请刷新此群聊并确认你仍在群中。",
+          ),
+          group_state_incomplete: t(
             "Refresh the group before changing its settings.",
-          operation_cannot_cancel:
+            "更改群设置前请先刷新群聊信息。",
+          ),
+          operation_cannot_cancel: t(
             "This change has started and can no longer be cancelled.",
-          invalid_group_text:
+            "该更改已开始执行，无法取消。",
+          ),
+          invalid_group_text: t(
             "Use a name of at most 512 UTF-8 bytes without control characters.",
-          pagination_cursor_expired:
+            "请使用不超过 512 个 UTF-8 字节且不含控制字符的名称。",
+          ),
+          pagination_cursor_expired: t(
             "This history view expired. Reopen the conversation.",
+            "当前历史记录视图已过期，请重新打开会话。",
+          ),
         } as Record<string, string>
-      )[error.code] ?? `agent-wechat hub request failed (${error.code}).`
+      )[error.code] ??
+      t(
+        `agent-wechat hub request failed (${error.code}).`,
+        `agent-wechat 服务请求失败（${error.code}）。`,
+      )
     );
-  return "Couldn't reach the agent-wechat hub. Check the connection and try again.";
+  return t(
+    "Couldn't reach the agent-wechat hub. Check the connection and try again.",
+    "无法连接到 agent-wechat 服务。请检查连接后重试。",
+  );
 }
 function timestamp(value: string | null): number {
   return value && /^\d+$/.test(value)
@@ -847,7 +938,10 @@ export class HubSession {
           )
             continue;
           this.publish({
-            error: `Couldn’t clear unread status. ${readableError(error)}`,
+            error: t(
+              `Couldn’t clear unread status. ${readableError(error)}`,
+              `无法清除未读状态。${readableError(error)}`,
+            ),
           });
           return;
         }
@@ -1338,7 +1432,7 @@ export class HubSession {
         ...sends,
         {
           key: `observed:${intent.id}`,
-          text: "Message from another client",
+          text: t("Message from another client", "来自其他客户端的消息"),
           threadId: intent.destination,
           intent,
         },
@@ -1552,9 +1646,9 @@ export class HubSession {
     if (!account || !threadId || !text.trim()) return false;
     let mentions: TextMentions | undefined;
     try { mentions = mentionOptions(text, tokens); }
-    catch (error) { this.publish({ error: error instanceof Error ? error.message : "Choose the mentioned members again." }); return false; }
+    catch (error) { this.publish({ error: error instanceof Error ? error.message : t("Choose the mentioned members again.", "请重新选择要提醒的成员。") }); return false; }
     if (mentions && (!threadId.endsWith("@chatroom") || this.value.capabilities.inlineTextMentions !== true)) {
-      this.publish({ error: "This hub cannot send inline mentions. Remove them or update the hub." });
+      this.publish({ error: t("This hub cannot send inline mentions. Remove them or update the hub.", "当前服务不支持发送群内 @ 提醒，请移除提醒或更新服务。") });
       return false;
     }
     if (mentions?.all && !canMentionAll(this.value.selectedGroup, threadId)) {
@@ -1563,8 +1657,10 @@ export class HubSession {
     }
     if (this.value.selectedGroup?.isInGroup === false) {
       this.publish({
-        error:
+        error: t(
           "You are no longer in this group. Cached history is still available.",
+          "你已不在该群聊中，仍可查看本地缓存的历史记录。",
+        ),
       });
       return false;
     }
@@ -1583,8 +1679,10 @@ export class HubSession {
         this.value.capabilities.quotedTextSend !== true)
     ) {
       this.publish({
-        error:
+        error: t(
           "This message can’t be quoted. Choose another message or remove the reply.",
+          "无法引用此消息，请选择其他消息或移除回复。",
+        ),
       });
       return false;
     }
@@ -1595,7 +1693,7 @@ export class HubSession {
       ? messageSummary(
           target,
           target.direction === "outgoing"
-            ? "You"
+            ? t("You", "我")
             : this.value.contacts.find(
                 (contact) => contact.id === target.senderId,
               )?.displayName ?? target.senderId,
