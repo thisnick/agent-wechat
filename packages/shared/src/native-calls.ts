@@ -159,8 +159,7 @@ function callValue(value: unknown): boolean {
 }
 function offerValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision) && idValue(value.callerId)
-    && ["direct", "conference"].includes(String(value.kind)) && ["voice", "video"].includes(String(value.callType)) && object(value.offeredMedia)
-    && typeof value.offeredMedia.audio === "boolean" && typeof value.offeredMedia.video === "boolean";
+    && ["direct", "conference"].includes(String(value.kind)) && ["voice", "video"].includes(String(value.callType));
 }
 function pendingOfferValue(value: unknown): boolean {
   return offerValue(value) && object(value) && ["waiting_for_ready", "preparing"].includes(String(value.phase));
@@ -292,8 +291,8 @@ export class NativeCallsClient {
     if (!format) return Promise.reject(new NativeCallError("not_connected"));
     pcmBytes(format); return this.command({ type: "call.ready", requestId, ready, format, ...(scope ? {scope} : {}) });
   }
-  dial(requestId: string, contactId: string): Promise<CallResult> { return this.command({ type: "call.dial", requestId, target: { kind: "direct", contactId }, media: { audio: true, video: false } }); }
-  answer(requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type: "call.answer", requestId, callId, expectedRevision, media: { audio: true, video: false } }); }
+  dial(requestId: string, contactId: string): Promise<CallResult> { return this.command({ type: "call.dial", requestId, target: { kind: "direct", contactId }, callType: "voice" }); }
+  answer(requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type: "call.answer", requestId, callId, expectedRevision }); }
   /** Acceptance starts termination. Retain control and media transports until
    * the terminal call.state event; a lost confirmation leaves an unknown outcome. */
   end(type: "call.reject" | "call.cancel" | "call.hangup", requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type, requestId, callId, expectedRevision }); }

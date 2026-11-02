@@ -321,8 +321,7 @@ impl CallBackend for NativeCallBackend {
                     return incoming::action(inner, request, sink).await
                 }
             }
-            if request.media.video
-                || !request.media.audio
+            if request.call_type != crate::call_types::CallType::Voice
                 || !inner.config.tx_ready()
                 || !inner.config.allows_peer(&request.peer_id)
             {

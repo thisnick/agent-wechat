@@ -425,7 +425,6 @@ pub fn typescript() -> String {
     let declarations = [
         wechat_core::call_types::CallCapabilities::decl(),
         wechat_core::call_types::CallAudioFormat::decl(),
-        wechat_core::call_types::CallMedia::decl(),
         wechat_core::call_types::CallTarget::decl(),
         wechat_core::call_types::CallKind::decl(),
         wechat_core::call_types::CallType::decl(),

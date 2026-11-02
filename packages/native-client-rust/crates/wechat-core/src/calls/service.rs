@@ -88,7 +88,7 @@ pub enum BackendOutcome {
 pub struct BackendRequest {
     pub ticket: Ticket,
     pub peer_id: String,
-    pub media: CallMedia,
+    pub call_type: CallType,
 }
 /// Owned audio admitted for one call generation. The backend must fence delayed
 /// submissions against its latest generation and accepted account authority.
@@ -660,7 +660,6 @@ impl CallService {
             kind: CallKind::Direct,
             call_type: c.call_type,
             caller_id: c.peer.clone(),
-            offered_media: CallMedia::default(),
         }
     }
     fn call_view(c: &LiveCall, owned: bool) -> CallView {
@@ -1081,10 +1080,12 @@ impl CallService {
                 prepared.wake_incoming = ready;
                 None
             }
-            CallCommand::Dial { target, media, .. } => {
+            CallCommand::Dial {
+                target, call_type, ..
+            } => {
                 let p = &s.clients[client];
                 if !self.backend.capabilities(&p.account).direct_audio
-                    || media != CallMedia::default()
+                    || call_type != CallType::Voice
                 {
                     return Err(error(CallErrorCode::Unsupported));
                 }
@@ -1112,7 +1113,7 @@ impl CallService {
                         identity: ticket.identity(),
                         authority: ticket.authority().clone(),
                         peer: contact_id,
-                        call_type: CallType::Voice,
+                        call_type,
                         direction: CallDirection::Outgoing,
                         owner: Some(client.into()),
                         token: Some(format!(
@@ -1139,12 +1140,8 @@ impl CallService {
             CallCommand::Answer {
                 call_id,
                 expected_revision,
-                media,
                 ..
             } => {
-                if media != CallMedia::default() {
-                    return Err(error(CallErrorCode::Unsupported));
-                }
                 self.require_incoming_offer(&s, &call_id)?;
                 if s.expired_offers
                     .contains_key(&(s.clients[client].account.clone(), call_id.clone()))
@@ -1278,7 +1275,7 @@ impl CallService {
                     prepared.submit = Some(BackendRequest {
                         ticket: t.clone(),
                         peer_id: c.peer.clone(),
-                        media: CallMedia::default(),
+                        call_type: c.call_type,
                     });
                     t
                 }

@@ -159,6 +159,8 @@ try {
     await until("passive CLI hello", () => monitorEvents.some(event => event.type === "hello")); cli = "status-and-passive-monitor";
   }
 
+  await assert.rejects(left.command({ type: "call.dial", requestId: randomUUID(), target: { kind: "direct", contactId: "synthetic-peer" }, callType: "video" }), error => error instanceof NativeCallError && error.code === "unsupported");
+  assert.equal((await control("stats")).stats.dial, 0, "Unsupported call type must not reach the backend");
   const offer = await control("offer", { callerId: "synthetic-peer" });
   // A reply on the same control socket follows the already-queued offer.
   // Start consuming late: both the initial hello and new offer must survive.

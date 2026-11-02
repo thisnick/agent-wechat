@@ -37,8 +37,7 @@ Other authorized clients see same-account call metadata, including
 `callType: "voice"`, but receive no audio and cannot start another call while busy.
 All call routes require the `calls` token scope and authorization headers.
 
-Keep control connected through termination. There is no pause/resume command;
-reconnecting does not reclaim ownership. An accepted end command starts cleanup,
+Keep control connected through termination. Reconnecting does not reclaim ownership. An accepted end command starts cleanup,
 so wait for `ended`. An `uncertain` outcome needs inspection before another call.
 
 The server checks connection heartbeat and call activity. Outgoing pickup and

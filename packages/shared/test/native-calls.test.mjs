@@ -50,7 +50,7 @@ test('media stream fences stale output after clear and rejects replayed or forei
 
 import { NativeCallsClient, NativeCallError } from '../src/native-calls.ts';
 const audio = { sampleRate: 16000, channels: 1, frameMs: 20 };
-const offer = { callId: 'call-1', revision: 1, kind: 'direct', callType: 'voice', callerId: 'synthetic-contact', offeredMedia: { audio: true, video: false } };
+const offer = { callId: 'call-1', revision: 1, kind: 'direct', callType: 'voice', callerId: 'synthetic-contact' };
 class MockSocket {
   readyState = 0; bufferedAmount = 0; binaryType = '';
   onopen = null; onmessage = null; onerror = null; onclose = null;
@@ -112,11 +112,11 @@ test('pending request ID deduplicates locally, detects changed payload and never
   const server = new MockCallServer(); const owner = client(server, { commandTimeoutMs: 5, maxBufferedBytes: 1024 });
   try {
     await owner.connect(); server.hold = true;
-    const unicode = { type: 'call.dial', requestId: 'unicode', target: { kind: 'direct', contactId: '合'.repeat(20) }, media: { audio: true, video: false } };
+    const unicode = { type: 'call.dial', requestId: 'unicode', target: { kind: 'direct', contactId: '合'.repeat(20) }, callType: 'voice' };
     server.controls[0].bufferedAmount = 1024 - JSON.stringify(unicode).length;
     await assert.rejects(owner.command(unicode), error => error.code === 'control_backpressure');
     server.controls[0].bufferedAmount = 0;
-    const command = { type: 'call.dial', requestId: 'same', target: { kind: 'direct', contactId: 'synthetic-contact' }, media: { audio: true, video: false } };
+    const command = { type: 'call.dial', requestId: 'same', target: { kind: 'direct', contactId: 'synthetic-contact' }, callType: 'voice' };
     const pending = owner.command(command);
     assert.equal(owner.command(command), pending);
     await assert.rejects(owner.command({ ...command, target: { kind: 'direct', contactId: 'different-contact' } }), error => error.code === 'idempotency_conflict');
@@ -180,7 +180,7 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
   for (const malformed of [
     { ...offer, callType: 'conference' },
     { ...offer, callType: undefined },
-    { ...offer, offeredMedia: { audio: 'yes', video: false } },
+    { ...offer, callerId: 42 },
   ]) {
     const invalidServer = new MockCallServer(); const invalidClient = client(invalidServer);
     await invalidClient.connect();

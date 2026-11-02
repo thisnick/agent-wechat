@@ -544,7 +544,6 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                         request_id: "answer".into(),
                         call_id: offer.call_id.clone(),
                         expected_revision: offer.revision,
-                        media: CallMedia::default(),
                     },
                 )
                 .await?;

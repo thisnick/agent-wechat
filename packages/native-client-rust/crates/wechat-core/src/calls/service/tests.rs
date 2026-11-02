@@ -125,7 +125,7 @@ fn dial(request: &str) -> CallCommand {
         target: CallTarget::Direct {
             contact_id: "synthetic-contact".into(),
         },
-        media: CallMedia::default(),
+        call_type: CallType::Voice,
     }
 }
 async fn next_attempt(receiver: &mut mpsc::UnboundedReceiver<Attempt>) -> Attempt {

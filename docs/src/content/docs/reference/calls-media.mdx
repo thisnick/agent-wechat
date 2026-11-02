@@ -49,7 +49,7 @@ encoding; the audio payload uses signed PCM16 little-endian samples.
 | 16 | 8 | Sequence, u64 |
 | 24 | 8 | Monotonic stream timestamp in microseconds, u64 |
 | 32 | 4 | Payload byte length, u32 |
-| 36 | remaining | Exactly one negotiated PCM frame |
+| 36 | remaining | Exactly one announced PCM frame |
 
 For 16 kHz mono with 20 ms frames, each payload has 320 samples / 640 bytes;
 the complete message is 676 bytes. Increase the sequence for every frame.
@@ -79,15 +79,6 @@ Stop transmitting on `ending`, `ended` or `uncertain`, lost ownership, revoked
 authorization or socket closure. During `ending`, keep control connected until
 the terminal event arrives. A successful hangup command alone does not prove
 that remote cleanup finished.
-
-## Video extension points
-
-The endpoint is called `media` so it can eventually carry audio and video for
-either direct or conference calls. The present transport accepts PCM audio only.
-Video will require typed video tracks and negotiated formats, additional frame
-kinds, capture/encoding/decoding and orientation metadata. Conference calls will
-also need participant-to-track mapping. Unknown frame kinds are rejected today;
-they are not an available video channel.
 
 :::note[Good to know]
 The TypeScript SDK handles control, framing and PCM queues without microphone,

@@ -130,9 +130,9 @@ export class NativeCallService {
     active.offered = offer;
     void this.prepareIncoming(active);
   }
-  private allowedIncoming(offer: Pick<CallOffer, "kind" | "offeredMedia" | "callerId">): boolean {
+  private allowedIncoming(offer: Pick<CallOffer, "kind" | "callType" | "callerId">): boolean {
     return !!this.config && this.config.inboundPolicy === "allowlist" && this.config.inboundAllowFrom.includes(offer.callerId)
-      && offer.kind === "direct" && offer.offeredMedia.audio && !offer.offeredMedia.video;
+      && offer.kind === "direct" && offer.callType === "voice";
   }
   private pending(offer: CallPendingOffer): void {
     if (!this.allowedIncoming(offer)) return;

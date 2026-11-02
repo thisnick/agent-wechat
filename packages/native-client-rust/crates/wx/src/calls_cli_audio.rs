@@ -19,7 +19,7 @@ use wechat_calls::{
     frame::{encode_pcm, MediaFrame, MediaHeader, MediaStream},
 };
 use wechat_core::call_types::{
-    CallMedia, CallMediaCommand, CallReadyScope, CallState, CallTarget, CallTrackDirection,
+    CallMediaCommand, CallReadyScope, CallState, CallTarget, CallTrackDirection,
 };
 
 type Input = Lines<BufReader<Stdin>>;
@@ -258,7 +258,7 @@ async fn participate(
         Participation::Dial(contact_id) => CallCommand::Dial {
             request_id: request_id(),
             target: CallTarget::Direct { contact_id },
-            media: CallMedia::default(),
+            call_type: wechat_core::call_types::CallType::Voice,
         },
         Participation::Answer(target) => {
             let offer = await_exact_offer(control, &target, cancellation).await?;
@@ -266,7 +266,6 @@ async fn participate(
                 request_id: request_id(),
                 call_id: offer.call_id,
                 expected_revision: offer.revision,
-                media: CallMedia::default(),
             }
         }
     };
@@ -765,7 +764,7 @@ mod tests {
     #[cfg(feature = "call-audio")]
     #[tokio::test]
     async fn losing_answer_preserves_exact_offer_and_does_not_claim_a_new_caller() {
-        use wechat_core::call_types::{CallErrorCode, CallKind, CallMedia, CallOffer};
+        use wechat_core::call_types::{CallErrorCode, CallKind, CallOffer};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (checked, wait_checked) = oneshot::channel();
@@ -786,7 +785,6 @@ mod tests {
                     kind: CallKind::Direct,
                     call_type: wechat_core::call_types::CallType::Voice,
                     caller_id: "alice".into(),
-                    offered_media: CallMedia::default(),
                 });
             }
             socket
@@ -822,7 +820,6 @@ mod tests {
                     kind: CallKind::Direct,
                     call_type: wechat_core::call_types::CallType::Voice,
                     caller_id: "bob".into(),
-                    offered_media: CallMedia::default(),
                 },
             };
             socket
@@ -849,7 +846,6 @@ mod tests {
                 request_id: "claim-one".into(),
                 call_id: offer.call_id,
                 expected_revision: offer.revision,
-                media: CallMedia::default(),
             })
             .await
         {

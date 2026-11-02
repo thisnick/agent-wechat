@@ -28,21 +28,6 @@ impl Default for CallAudioFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CallMedia {
-    pub audio: bool,
-    pub video: bool,
-}
-impl Default for CallMedia {
-    fn default() -> Self {
-        Self {
-            audio: true,
-            video: false,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
@@ -99,7 +84,6 @@ pub struct CallOffer {
     pub kind: CallKind,
     pub call_type: CallType,
     pub caller_id: String,
-    pub offered_media: CallMedia,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -117,7 +101,6 @@ pub struct CallPendingOffer {
     pub kind: CallKind,
     pub call_type: CallType,
     pub caller_id: String,
-    pub offered_media: CallMedia,
     pub phase: CallPendingPhase,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -182,7 +165,8 @@ pub enum CallCommand {
         #[serde(rename = "requestId")]
         request_id: String,
         target: CallTarget,
-        media: CallMedia,
+        #[serde(rename = "callType")]
+        call_type: CallType,
     },
     #[serde(rename = "call.answer")]
     Answer {
@@ -192,7 +176,6 @@ pub enum CallCommand {
         call_id: String,
         #[serde(rename = "expectedRevision")]
         expected_revision: u32,
-        media: CallMedia,
     },
     #[serde(rename = "call.reject")]
     Reject {

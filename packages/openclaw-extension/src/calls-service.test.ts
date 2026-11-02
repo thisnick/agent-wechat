@@ -20,7 +20,7 @@ class Queue<T> implements AsyncIterableIterator<T> {
 }
 const format = { sampleRate: 16000, channels: 1, frameMs: 20 };
 const capabilities = { directAudio: true, directVideo: false, conferenceAudio: false, conferenceVideo: false };
-const offer: CallOffer = { callId: "offer", revision: 1, callerId: "allowed-peer", kind: "direct", callType: "voice", offeredMedia: { audio: true, video: false } };
+const offer: CallOffer = { callId: "offer", revision: 1, callerId: "allowed-peer", kind: "direct", callType: "voice" };
 const accepted = (callId: string | null = null, ownerToken: string | null = null): Extract<CallEvent, { type: "command.result" }> => ({ type: "command.result", requestId: "synthetic", status: "accepted", callId, ownerToken, code: null });
 const view = (callId: string, state: CallView["state"] = "connected", ownedByThisClient = true): CallView => ({ callId, revision: 2, kind: "direct", callType: "voice", direction: "incoming", state, ownedByThisClient });
 function configuration() {
@@ -83,7 +83,7 @@ test("provider and daemon capability failures never advertise readiness or claim
 test("inbound policy ignores unlisted callers and video; allowed voice preflights before its single claim", async () => {
   const { service, client, voice } = await fixture();
   client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callerId: "unlisted" } });
-  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callType: "video", offeredMedia: { audio: true, video: true } } });
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callType: "video" } });
   await delay(10); assert.equal(client.answers, 0); assert.equal(voice.state.opens, 0);
   client.answerHook = async () => { assert.equal(voice.state.opens, 1); };
   client.eventsQueue.push({ type: "call.offered", offer }); await until(() => client.attaches === 1);

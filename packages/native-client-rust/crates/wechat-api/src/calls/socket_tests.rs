@@ -337,7 +337,7 @@ async fn calls_grant_stays_passive_until_ready_and_revocation_closes_socket() {
         .socket("/v1/accounts/one/calls/socket", "calls-grant")
         .await;
     assert_eq!(json_event(&mut socket).await["type"], "hello");
-    command(&mut socket,json!({"type":"call.answer","requestId":"not-ready","callId":"passive-offer","expectedRevision":1,"media":{"audio":true,"video":false}})).await;
+    command(&mut socket,json!({"type":"call.answer","requestId":"not-ready","callId":"passive-offer","expectedRevision":1})).await;
     let result = until(&mut socket, |v| {
         v["type"] == "command.result" && v["requestId"] == "not-ready"
     })
@@ -385,7 +385,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     assert_eq!(hello_one["currentOffer"]["callId"], "incoming-fixture");
     ready(&mut one, "ready1").await;
     ready(&mut two, "ready2").await;
-    let answer = |request: &str| json!({"type":"call.answer","requestId":request,"callId":"incoming-fixture","expectedRevision":1,"media":{"audio":true,"video":false}});
+    let answer = |request: &str| json!({"type":"call.answer","requestId":request,"callId":"incoming-fixture","expectedRevision":1});
     tokio::join!(
         command(&mut one, answer("answer1")),
         command(&mut two, answer("answer2"))
@@ -503,7 +503,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     })
     .await;
     media.close(None).await.unwrap();
-    let dial = json!({"type":"call.dial","requestId":"outgoing-idempotent","target":{"kind":"direct","contactId":"synthetic-peer"},"media":{"audio":true,"video":false}});
+    let dial = json!({"type":"call.dial","requestId":"outgoing-idempotent","target":{"kind":"direct","contactId":"synthetic-peer"},"callType":"voice"});
     command(winner, dial.clone()).await;
     let result = until(winner, |v| {
         v["type"] == "command.result" && v["requestId"] == "outgoing-idempotent"
@@ -547,7 +547,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     let mut control = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
     let hello = json_event(&mut control).await;
     ready(&mut control, "ready-clear").await;
-    command(&mut control,json!({"type":"call.dial","requestId":"dial-clear","target":{"kind":"direct","contactId":"synthetic-contact"},"media":{"audio":true,"video":false}})).await;
+    command(&mut control,json!({"type":"call.dial","requestId":"dial-clear","target":{"kind":"direct","contactId":"synthetic-contact"},"callType":"voice"})).await;
     let owner = until(&mut control, |event| {
         event["type"] == "command.result" && event["requestId"] == "dial-clear"
     })

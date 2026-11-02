@@ -49,7 +49,7 @@ Replace `{account}` and `{callId}` with URL-encoded identifiers.
 3. Initiate a voice call:
 
    ```json
-   {"type":"call.dial","requestId":"dial-1","target":{"kind":"direct","contactId":"example-contact"},"media":{"audio":true,"video":false}}
+   {"type":"call.dial","requestId":"dial-1","target":{"kind":"direct","contactId":"example-contact"},"callType":"voice"}
    ```
 
    A successful claim returns:
@@ -68,16 +68,18 @@ A `call.pending` event contains `offer` with phase `waiting_for_ready` or
 readiness to that offer using `{"kind":"offer","callId":"example-call","expectedRevision":1}`.
 An omitted readiness scope means `{"kind":"all"}`. Setting `ready: false` clears readiness.
 
+Audio format is announced in `audioFormat` and each track's `format`.
+
 An actionable incoming event looks like:
 
 ```json
-{"type":"call.offered","offer":{"callId":"example-call","revision":1,"kind":"direct","callType":"voice","callerId":"example-contact","offeredMedia":{"audio":true,"video":false}}}
+{"type":"call.offered","offer":{"callId":"example-call","revision":1,"kind":"direct","callType":"voice","callerId":"example-contact"}}
 ```
 
 Answer using its current revision:
 
 ```json
-{"type":"call.answer","requestId":"answer-1","callId":"example-call","expectedRevision":1,"media":{"audio":true,"video":false}}
+{"type":"call.answer","requestId":"answer-1","callId":"example-call","expectedRevision":1}
 ```
 
 The first successful answer owns the call. Other clients receive `already_claimed`.
@@ -99,8 +101,8 @@ command. End/answer/reject commands require the latest `expectedRevision`.
 | Command | Additional fields |
 | --- | --- |
 | `call.ready` | `ready`, `format`, optional `scope` |
-| `call.dial` | `target`, `media` |
-| `call.answer` | `callId`, `expectedRevision`, `media` |
+| `call.dial` | `target`, `callType` |
+| `call.answer` | `callId`, `expectedRevision` |
 | `call.reject`, `call.cancel`, `call.hangup` | `callId`, `expectedRevision` |
 | `call.mute` | `callId`, `muted` |
 | `call.clear_audio` | `callId` |
@@ -127,12 +129,10 @@ States are `offered`, `dialing`, `ringing`, `connecting`, `connected`, `ending`,
 An uncertain outcome blocks another call until resolved.
 
 :::note[Good to know]
-There is no pause/resume command. Reconnecting does not reclaim ownership.
+Reconnecting does not reclaim ownership.
 Control messages are limited to 16 KiB. Reply to server WebSocket Pings;
 a connection silent for 45 seconds closes, followed by five seconds for owner cleanup.
-`kind` describes direct/conference membership; `callType` describes voice/video identity; it does not describe camera state.
-A video call can remain a video call in voice mode. Separate active-media mode
-metadata is deferred.
+`kind` is `direct` or `conference`; `callType` is `voice` or `video`.
 Only direct voice is currently implemented. Conference targets
 `{"kind":"conference","groupId":"example-group","invitees":["example-contact"]}`
 and video requests are not supported by the current backend.

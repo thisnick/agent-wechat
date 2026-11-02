@@ -175,7 +175,7 @@ async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
 #[tokio::test]
 async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
     use wechat_calls::{audio::AudioFormat, frame::MediaFrame};
-    use wechat_core::call_types::{CallAudioTrack, CallMedia, CallTrackDirection};
+    use wechat_core::call_types::{CallAudioTrack, CallTrackDirection};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -373,7 +373,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
             target: wechat_core::call_types::CallTarget::Direct {
                 contact_id: "synthetic-contact".into(),
             },
-            media: CallMedia::default(),
+            call_type: wechat_core::call_types::CallType::Voice,
         })
         .await
         .unwrap();
@@ -463,7 +463,6 @@ async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
             request_id: "cancelled-claim".into(),
             call_id: "pinned-offer".into(),
             expected_revision: 1,
-            media: wechat_core::call_types::CallMedia::default(),
         })
         .await;
     let error = match result {
@@ -479,7 +478,7 @@ async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
 #[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
-    use wechat_core::call_types::{CallKind, CallMedia, CallOffer, CallReadyScope};
+    use wechat_core::call_types::{CallKind, CallOffer, CallReadyScope};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -491,7 +490,6 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
             kind: CallKind::Direct,
             call_type: wechat_core::call_types::CallType::Voice,
             caller_id: "alice".into(),
-            offered_media: CallMedia::default(),
         };
         let mut initial = hello();
         if let CallEvent::Hello { current_offer, .. } = &mut initial {
@@ -531,7 +529,6 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
                 kind: CallKind::Direct,
                 call_type: wechat_core::call_types::CallType::Voice,
                 caller_id: "bob".into(),
-                offered_media: CallMedia::default(),
             },
         };
         socket
@@ -573,9 +570,7 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
 #[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
-    use wechat_core::call_types::{
-        CallDirection, CallKind, CallMedia, CallState, CallTarget, CallView,
-    };
+    use wechat_core::call_types::{CallDirection, CallKind, CallState, CallTarget, CallView};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -669,7 +664,7 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
             target: CallTarget::Direct {
                 contact_id: "synthetic-peer".into(),
             },
-            media: CallMedia::default(),
+            call_type: wechat_core::call_types::CallType::Voice,
         })
         .await
         .unwrap();

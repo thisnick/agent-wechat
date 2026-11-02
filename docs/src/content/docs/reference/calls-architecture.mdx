@@ -1,11 +1,11 @@
 ---
 title: Calling architecture
-description: Rust crate boundaries, client adapters and future video extension points.
+description: Rust crate responsibilities, dependencies and client adapters.
 ---
 
 The daemon coordinates calls. Clients own interaction and provide media over
 WebSockets. Audio devices and WeChat's codecs stay outside the HTTP API contract.
-See the [control](../calls-api/) and [media](../calls-media/) references for payloads.
+[Control](../calls-api/) and [media](../calls-media/) references define payloads.
 
 ## Package dependencies
 
@@ -90,17 +90,8 @@ Choose `native-calls` alone for a headless daemon, or `call-audio` alone for a C
 using a remote daemon. Native audio requires the selected OS's development libraries.
 Account authorization and transmission admission still apply.
 
-## Future video and conference work
+## Call metadata
 
-| Existing boundary | Extension needed |
-| --- | --- |
-| `kind: direct/conference` | Conference membership and participant lifecycle |
-| `callType: voice/video`, `offeredMedia` | Add active-media mode later; preserve video-call identity in voice mode |
-| Capability flags | Enable each mode only after implementation/validation |
-| `wechat-protocol` and Core | Video/conference signaling, transport and lifecycle |
-| `wechat-calls` | Video codecs, frame handling and loss/orientation behavior |
-| Media API | Typed video tracks, formats and participant mapping |
-| CLI/OpenClaw adapters | Camera/rendering or provider support |
-
-These extensions can retain the same call/control/media endpoints and ownership
-rules. Current support is direct voice; video and conference capabilities remain off.
+`kind` describes direct/conference membership. `callType` describes voice/video
+call type. The current backend supports direct voice and advertises the other
+capabilities as false. A call's audio format is announced separately from its type.

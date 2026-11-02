@@ -585,8 +585,7 @@ impl Actor {
             request.ticket.identity() == self.worker.identity
                 && request.ticket.authority() == self.worker.lease.authority()
                 && request.peer_id == self.request.notification.caller_username
-                && request.media.audio
-                && !request.media.video
+                && request.call_type == crate::call_types::CallType::Voice
                 && self.worker.lease.current(),
             "Incoming winner identity mismatch"
         );

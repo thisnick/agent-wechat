@@ -639,7 +639,6 @@ async fn consumed_incoming_scope_can_answer_once_then_exit_without_media() {
                 request_id: "answer".into(),
                 call_id: offer.call_id.clone(),
                 expected_revision: offer.revision,
-                media: CallMedia::default(),
             },
         )
         .await
@@ -849,7 +848,6 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
             request_id: "owner".into(),
             call_id: offer.call_id.clone(),
             expected_revision: offer.revision,
-            media: CallMedia::default(),
         }
     };
     f.core
@@ -1048,7 +1046,6 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
                 request_id: "answer".into(),
                 call_id: offer.call_id.clone(),
                 expected_revision: offer.revision,
-                media: CallMedia::default(),
             },
         )
         .await
