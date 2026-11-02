@@ -65,6 +65,7 @@
           "libwebkit2gtk-4.1-0",
           "libayatana-appindicator3-1",
           "libsecret-1-0",
+          "libpulse0",
           "libc6 (>= 2.39)"
         ]
       }
