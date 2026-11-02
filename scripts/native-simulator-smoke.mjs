@@ -333,7 +333,7 @@ try {
   controlToken = (await readFile(remote.ready.controlTokenFile, "utf8")).trim();
   assert.equal((await fetch(`http://${remote.ready.upstream}/state`)).status, 401);
   hub = await start("hub", ["--upstream", remote.ready.upstream]);
-  await runCli(["config", "server", "add", "synthetic", "--url", hub.ready.endpoint, "--token-file", hub.ready.tokenFile]);
+  await runCli(["config", "servers", "add", "synthetic", "--url", hub.ready.endpoint, "--token-file", hub.ready.tokenFile]);
   const initialStatus = await attach();
   await login("personal", true);
   const capabilities = await a.capabilities("personal");

@@ -9,12 +9,16 @@ use std::{
 
 #[derive(Subcommand)]
 pub enum DaemonCommand {
+    /// Start the local daemon in the background and wait until ready.
     Start,
+    /// Show the local managed daemon's state and identity.
     Status,
+    /// Stop the owned local daemon without logging out of WeChat.
     Stop {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
+    /// Read the local daemon log, optionally following new lines.
     Logs {
         #[arg(long)]
         follow: bool,

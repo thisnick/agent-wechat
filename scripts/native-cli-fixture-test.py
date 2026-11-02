@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         structured=result.stdout or next((line for line in reversed(result.stderr.splitlines()) if line.startswith("{")), "")
         return json.loads(structured)
     try:
-        run("config","server","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
+        run("config","servers","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
         for group in ["chats", "messages"]:
             result=run(group,"read","filehelper","--expected-version","fixture-version")
             assert result["readScope"]=="thread" and result["phoneNotification"]["state"]=="accepted"
@@ -163,10 +163,16 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             assert json.loads(pathlib.Path(result["receiptPath"]).read_text())["accountId"]=="a"
             assert state["official_posts"][-1]=={"path":path,"accountId":None}
         stopped=root/"stopped-home";storage=stopped/"xwechat_files"/"synthetic_account"/"db_storage";storage.mkdir(parents=True);(storage/"contact.db").write_bytes(b"synthetic-inventory-only")
-        run("profile","add","archive","--path",str(stopped),"--account-dir","synthetic_account","--keys-file",str(root/"not-yet-exported.keys.json"))
+        run("profiles","add","archive","--path",str(stopped),"--account-dir","synthetic_account","--keys-file",str(root/"not-yet-exported.keys.json"))
+        run("profiles","select","archive")
+        assert run("profiles","list")["serverDefault"]=="archive"
+        # Intentional compatibility checks for scripts using the old spellings.
+        assert run("profile","list")==run("profiles","list")
+        run("profile","use","archive")
         renamed=token.with_name("token-offline");token.rename(renamed)
         try:
-            inspected=run("--local-profile","archive","profile","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
+            inspected=run("--local-profile","archive","profiles","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
+            assert run("profile","inspect")==inspected
         finally:renamed.rename(token)
         print("Native CLI fixture passed: pre-request send/recall/login receipts, same-key lookup/conflict, exact recall IDs, recall uncertainty/lost-response recovery without automatic resubmission, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation, official-file login discovery/explicit server paths, and token-free offline inspection. No WeChat request.")
     finally:server.shutdown();server.server_close()

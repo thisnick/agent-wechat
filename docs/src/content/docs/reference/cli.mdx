@@ -3,7 +3,9 @@ title: CLI reference
 description: Every wx command group, global flags and exit codes.
 ---
 
-Run `wx COMMAND --help` for the full options of any command. Output is JSON.
+Run `wx --help` for command groups, `wx accounts --help` for a group's subcommands,
+or `wx accounts select --help` for a specific action. Help lists commands alphabetically
+and explains what they do. Data responses are JSON.
 
 ## Commands
 
@@ -12,8 +14,7 @@ Run `wx COMMAND --help` for the full options of any command. Output is JSON.
 | `wx serve` | Run the daemon in the foreground |
 | `wx daemon` | `start`, `status`, `logs [--follow]`, `stop` |
 | `wx auth` | `login [--official[=PATH]] [--qr] [--saved-only]`, `status`, `qr ID`, `attempts get/cancel ID`, `logout`, `forget --yes` |
-| `wx accounts` | `list`, `create [--id ID] [--alias NAME]`, `get`, `default ID`, `alias ID NAME`, `remove ID --confirm ID` |
-| `wx account` | `status`, `settings [--auto-download-max-mb MB]`, `capabilities`, `connect`, `disconnect` |
+| `wx accounts` | `alias ID NAME`, `capabilities`, `connect`, `create [ID] [--alias NAME]`, `disconnect`, `get [ID]`, `list`, `remove ID --confirm ID`, `select ID`, `settings [--auto-download-max-mb MB]`, `status` |
 | `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V`, `mute ID`, `unmute ID`, `pin ID`, `unpin ID` |
 | `wx messages` | `list CHAT`, `get CHAT ID`, `send CHAT --text/--image/--file/--video/--voice/--share`, `media CHAT ID`, `--video-quality normal/original` with `--video`, `recall ID --server-id S`, `sends lookup/get/cancel` |
 | `wx contacts` | `list`, `find TEXT`, `get ID`, `refresh ID`, `sync`, `avatar ID` |
@@ -24,17 +25,29 @@ Run `wx COMMAND --help` for the full options of any command. Output is JSON.
 | `wx operations` | `get ID` |
 | `wx sync` | Fetch new messages now |
 | `wx tokens` | `list`, `create NAME --accounts ID --scopes S`, `revoke ID` |
-| `wx config` | `show`, `server add/list/use` |
-| `wx profile` | Read a stopped profile directly, without a daemon (`add`, `inspect`, `messages`, `contacts`, `images`, …) |
+| `wx config` | `client`, `servers add/list/select`, `show` |
+| `wx profiles` | Read a stopped profile directly, without a daemon (`add`, `avatars`, `chats`, `contacts`, `groups`, `images`, `inspect`, `keys export`, `list`, `messages`, `select`) |
 | `wx store` | Experimental: copy, import and export profiles |
 | `wx version` | Version and build target |
+
+`select` saves a default in this CLI's configuration:
+
+| Command | Saved choice |
+| --- | --- |
+| `wx config servers select NAME` | Server used by subsequent commands |
+| `wx accounts select ID` | Account ID or alias for the selected named server |
+| `wx profiles select NAME` | Local profile for the selected named server, or the standalone profile when no server is selected |
+
+Selection does not sign in or start a connection. Use `--server-name`, `--account`
+or `--local-profile` to override a choice for one command. Previous spellings remain
+accepted for existing scripts, but help shows the canonical commands.
 
 ## Global flags
 
 | Flag | Environment variable | Meaning |
 | --- | --- | --- |
 | `--account ID` | `AGENT_WECHAT_ACCOUNT` | Account ID or alias |
-| `--server-name NAME` | `AGENT_WECHAT_SERVER` | Saved server from `wx config server add` |
+| `--server-name NAME` | `AGENT_WECHAT_SERVER` | Saved server from `wx config servers add` |
 | `--server URL` | `AGENT_WECHAT_URL` | Daemon URL |
 | `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | File holding the API token |
 | | `AGENT_WECHAT_TOKEN` | The token itself (prefer a file) |

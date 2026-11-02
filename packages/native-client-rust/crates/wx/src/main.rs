@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, FromArgMatches, Parser, Subcommand};
 use serde_json::{json, Value};
 #[cfg(all(unix, test))]
 use std::os::unix::fs::MetadataExt;
@@ -11,6 +11,7 @@ use std::{
 };
 use wechat_core::Core;
 mod calls_cli;
+mod cli_help;
 mod client_actions;
 mod daemon;
 mod events;
@@ -24,35 +25,45 @@ use outcome::{failure, set_exit};
 #[derive(Parser)]
 #[command(
     name = "wx",
+    bin_name = "wx",
     version,
     about = "Standalone native WeChat daemon and authenticated client"
 )]
 struct Cli {
+    /// Print machine-readable JSON, including errors and progress.
     #[arg(long, global = true)]
     json: bool,
+    /// Read local daemon settings from this TOML file.
     #[arg(long, global = true)]
     server_config: Option<PathBuf>,
+    /// Use this local daemon data directory.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
+    /// Read the API token from a local private file (AGENT_WECHAT_TOKEN_FILE).
     #[arg(long, global = true)]
     token_file: Option<PathBuf>,
     /// Read this invocation's API key from a private stdin pipe.
     #[arg(long, global = true, conflicts_with = "token_file")]
     token_stdin: bool,
+    /// Bind the local daemon's HTTP listener to this address.
     #[arg(long, global = true)]
     listen: Option<SocketAddr>,
     /// Additional HTTPS listener for other machines. Requires both TLS files.
     #[arg(long, global = true)]
     network_listen: Option<SocketAddr>,
+    /// Read the PEM certificate for the daemon's HTTPS listener.
     #[arg(long, global = true)]
     tls_cert_file: Option<PathBuf>,
+    /// Read the private PEM key for the daemon's HTTPS listener.
     #[arg(long, global = true)]
     tls_key_file: Option<PathBuf>,
     /// Additional trusted CA for this client invocation; TLS verification stays enabled.
     #[arg(long, global = true)]
     ca_cert_file: Option<PathBuf>,
+    /// Read saved CLI servers and defaults from this file (AGENT_WECHAT_CONFIG).
     #[arg(long = "config", alias = "client-config", global = true)]
     client_config: Option<PathBuf>,
+    /// Use this daemon URL for this command (AGENT_WECHAT_URL).
     #[arg(
         long = "server",
         alias = "url",
@@ -60,10 +71,13 @@ struct Cli {
         global = true
     )]
     url: Option<String>,
+    /// Use a saved server for this command (AGENT_WECHAT_SERVER).
     #[arg(long, global = true)]
     server_name: Option<String>,
+    /// Use this registered stopped local profile for offline reads.
     #[arg(long, global = true)]
     local_profile: Option<String>,
+    /// Use an account ID or alias for this command (AGENT_WECHAT_ACCOUNT).
     #[arg(long, global = true)]
     account: Option<String>,
     #[command(subcommand)]
@@ -71,73 +85,87 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Show the CLI version, build target and API capabilities.
     Version,
+    /// Show bundled third-party license notices.
     Licenses,
+    /// Inspect configuration and manage saved servers.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
     Serve {},
+    /// Start, inspect or stop the local background daemon.
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
     },
-    Profile {
+    #[command(alias = "profile")]
+    /// Register and read stopped local WeChat profiles.
+    Profiles {
         #[command(subcommand)]
         command: profile_cli::ProfileCommand,
     },
+    /// Show the selected server's health and identity.
     Status,
     /// Observe calls or use this computer's microphone and speakers.
     Calls {
         #[command(subcommand)]
         command: Option<calls_cli::CallsCommand>,
     },
+    /// Look up known contact IDs on the selected account.
     LookupContacts {
         #[arg(required = true)]
         ids: Vec<String>,
     },
+    /// Look up a known group ID on the selected account.
     LookupGroup {
         room: String,
         #[arg(long, default_value_t = 0)]
         version: u32,
     },
+    #[command(alias = "account")]
+    /// Manage accounts and inspect or connect the selected account.
     Accounts {
         #[command(subcommand)]
         command: AccountCommand,
     },
-    Account {
-        #[command(subcommand)]
-        command: AccountAction,
-    },
+    /// Fetch new messages for the selected account.
     Sync {
         #[arg(long)]
         detach: bool,
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
+    /// Find chats and change their read state and settings.
     Chats {
         #[command(subcommand)]
         command: ChatCommand,
     },
+    /// Inspect background jobs and repair local profile writes.
     Jobs {
         #[command(subcommand)]
         command: JobsAction,
     },
+    /// Inspect, cancel or retry account operations.
     Operations {
         #[command(subcommand)]
         command: ResourceAction,
     },
+    /// Sign the selected account in or out of WeChat.
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// List message threads for the selected account.
     Threads {
         #[arg(long)]
         cursor: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Find contacts and refresh their saved information.
     Contacts {
         #[command(subcommand)]
         command: Option<CatalogCommand>,
@@ -146,6 +174,7 @@ enum Command {
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Find groups and manage their names, settings and members.
     Groups {
         #[command(subcommand)]
         command: Option<GroupCommand>,
@@ -154,10 +183,12 @@ enum Command {
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Read or send messages and retrieve their attachments.
     Messages {
         #[command(subcommand)]
         command: MessageCommand,
     },
+    /// Read account events or watch for new events.
     Events {
         #[command(subcommand)]
         command: Option<EventCommand>,
@@ -167,6 +198,7 @@ enum Command {
         watch: bool,
     },
     #[command(alias = "access-tokens")]
+    /// Create and revoke API tokens for selected accounts.
     Tokens {
         #[command(subcommand)]
         command: TokenCommand,
@@ -179,15 +211,20 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Show the resolved local daemon configuration.
     Show,
+    /// Show the resolved client endpoint, token-file path and account.
     Client,
-    Server {
+    #[command(alias = "server")]
+    /// Register servers and select the default server for this CLI.
+    Servers {
         #[command(subcommand)]
         command: ServerCommand,
     },
 }
 #[derive(Subcommand)]
 enum ServerCommand {
+    /// Save a server URL and the local path to its API token file.
     Add {
         name: String,
         #[arg(long)]
@@ -195,29 +232,29 @@ enum ServerCommand {
         #[arg(long)]
         token_file: PathBuf,
     },
+    /// List saved servers and the current selection.
     List,
-    Use {
-        name: String,
-    },
+    #[command(alias = "use")]
+    /// Save the server to use for subsequent commands.
+    Select { name: String },
 }
 #[derive(Subcommand)]
 enum AccountCommand {
+    /// List accounts on the selected server.
     List,
+    /// Create an account slot with an ID or alias.
     Create {
         id: Option<String>,
         #[arg(long)]
         alias: Option<String>,
     },
-    Get {
-        id: Option<String>,
-    },
-    Default {
-        id: String,
-    },
-    Alias {
-        id: String,
-        alias: String,
-    },
+    /// Show one account by ID or alias, or the selected account.
+    Get { id: Option<String> },
+    #[command(alias = "default")]
+    /// Save the default account for the selected named server.
+    Select { id: String },
+    /// Rename an account's alias.
+    Alias { id: String, alias: String },
     /// Remove a signed-out profile from the hub, retaining its local files.
     Remove {
         id: String,
@@ -225,9 +262,7 @@ enum AccountCommand {
         #[arg(long)]
         confirm: String,
     },
-}
-#[derive(Subcommand)]
-enum AccountAction {
+    /// Show authentication and connection state for the selected account.
     Status,
     /// Read or update this account's hub-side automatic download policy.
     Settings {
@@ -235,19 +270,23 @@ enum AccountAction {
         #[arg(long, value_parser = clap::value_parser!(u64).range(0..=512))]
         auto_download_max_mb: Option<u64>,
     },
+    /// Show features available to the selected account.
     Capabilities,
+    /// Reconnect the selected account using its saved WeChat session.
     Connect {
         #[arg(long)]
         detach: bool,
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
+    /// Disconnect the selected account while keeping its saved login.
     Disconnect,
 }
 #[derive(Subcommand)]
 enum JobsAction {
     #[command(flatten)]
     Resource(ResourceAction),
+    /// Repair local profile writes using saved bytes and receipts.
     RepairWriteback {
         #[arg(long, default_value_t = 25)]
         limit: usize,
@@ -260,12 +299,11 @@ enum JobsAction {
 #[derive(Subcommand)]
 enum ResourceAction {
     #[command(alias = "status")]
-    Get {
-        id: String,
-    },
-    Cancel {
-        id: String,
-    },
+    /// Show the current result and state of an item by ID.
+    Get { id: String },
+    /// Request cancellation of an item by ID.
+    Cancel { id: String },
+    /// Retry an eligible failed item by ID.
     Retry {
         id: String,
         /// Reuse a completed file upload whose message submission never started.
@@ -275,6 +313,7 @@ enum ResourceAction {
 }
 #[derive(Subcommand)]
 enum CatalogCommand {
+    /// Retrieve a saved avatar or request an avatar refresh.
     Avatar {
         id: String,
         #[arg(long)]
@@ -286,18 +325,18 @@ enum CatalogCommand {
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
+    /// List saved entries with optional pagination.
     List {
         #[arg(long)]
         limit: Option<usize>,
         #[arg(long)]
         cursor: Option<String>,
     },
-    Get {
-        id: String,
-    },
-    Find {
-        query: String,
-    },
+    /// Show a saved entry by ID.
+    Get { id: String },
+    /// Find saved entries matching a name or ID.
+    Find { query: String },
+    /// Refresh one entry from WeChat.
     Refresh {
         id: String,
         #[arg(long)]
@@ -305,10 +344,12 @@ enum CatalogCommand {
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
+    /// List, inspect or update a group's members.
     Members {
         #[command(subcommand)]
         command: MemberCommand,
     },
+    /// Refresh the catalog from WeChat.
     Sync {
         #[arg(long)]
         detach: bool,
@@ -342,6 +383,7 @@ enum ChatCommand {
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// List chats with optional pagination and kind filtering.
     List {
         #[arg(long)]
         limit: Option<usize>,
@@ -350,22 +392,23 @@ enum ChatCommand {
         #[arg(long)]
         kind: Option<String>,
     },
-    Get {
-        id: String,
-    },
+    /// Show one chat and its current read-state version.
+    Get { id: String },
+    /// Find chats matching a name or ID.
     Find {
         query: String,
         #[arg(long)]
         kind: Option<String>,
     },
+    /// Mark the whole chat read using its current read-state version.
     Read {
         id: String,
         #[arg(long)]
         expected_version: String,
     },
-    Open {
-        id: String,
-    },
+    /// Retained for compatibility; opening a native GUI is unsupported.
+    #[command(hide = true)]
+    Open { id: String },
 }
 
 #[derive(Args)]
@@ -381,6 +424,7 @@ struct MutationOptions {
 enum GroupCommand {
     #[command(flatten)]
     Catalog(CatalogCommand),
+    /// Create a group with two to forty initial members.
     Create {
         #[arg(required = true, num_args = 2..=40)]
         members: Vec<String>,
@@ -389,23 +433,27 @@ enum GroupCommand {
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// Change a group's shared name.
     Rename {
         id: String,
         name: String,
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// Leave a group while retaining local history.
     Leave {
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// Change your display name in a group.
     MyName {
         id: String,
         display_name: String,
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// Clear a group's announcement when permitted.
     ClearAnnouncement {
         id: String,
         #[command(flatten)]
@@ -414,6 +462,7 @@ enum GroupCommand {
 }
 #[derive(Subcommand)]
 enum MemberCommand {
+    /// List saved members of a group.
     List {
         id: String,
         #[arg(long)]
@@ -421,10 +470,9 @@ enum MemberCommand {
         #[arg(long)]
         cursor: Option<String>,
     },
-    Get {
-        id: String,
-        username: String,
-    },
+    /// Show one saved group member.
+    Get { id: String, username: String },
+    /// Refresh a group's member list from WeChat.
     Refresh {
         id: String,
         #[arg(long)]
@@ -432,6 +480,7 @@ enum MemberCommand {
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
+    /// Add one or more contacts to a group.
     Add {
         id: String,
         #[arg(required = true)]
@@ -439,6 +488,7 @@ enum MemberCommand {
         #[command(flatten)]
         options: MutationOptions,
     },
+    /// Remove one or more members from a group.
     Remove {
         id: String,
         #[arg(required = true)]
@@ -449,18 +499,21 @@ enum MemberCommand {
 }
 #[derive(Subcommand)]
 enum EventCommand {
+    /// Stream new events, optionally saving a resume cursor.
     Watch {
         #[arg(long, default_value = "0")]
         after: String,
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
+    /// Read events after a cursor.
     List {
         #[arg(long, default_value = "0")]
         after: String,
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// Save a consumer's progress through an event cursor.
     Ack {
         #[arg(long)]
         consumer: String,
@@ -470,11 +523,14 @@ enum EventCommand {
 }
 #[derive(Subcommand)]
 enum AuthCommand {
+    /// Show the selected account's WeChat login state.
     Status,
+    /// Inspect or cancel a WeChat login attempt.
     Attempts {
         #[command(subcommand)]
         command: ResourceAction,
     },
+    /// Sign in using saved device trust or a phone-approved QR code.
     Login {
         /// Use supported stopped Linux files in place; optional absolute path on the daemon host, not the CLI host. macOS/Windows profiles are unverified.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "")]
@@ -498,19 +554,21 @@ enum AuthCommand {
         #[arg(long, alias = "qr-out")]
         qr_output: Option<PathBuf>,
     },
-    Operation {
-        id: String,
-    },
-    Cancel {
-        id: String,
-    },
+    /// Show a login attempt by ID.
+    Operation { id: String },
+    /// Cancel a login attempt by ID.
+    Cancel { id: String },
+    /// Show or save the QR code for a login attempt.
     Qr {
         id: String,
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Disconnect while retaining the saved WeChat login.
     Disconnect,
+    /// Sign out locally while retaining saved credentials.
     LogoutLocal,
+    /// Sign out of WeChat and disable automatic reconnection.
     Logout {
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -519,6 +577,7 @@ enum AuthCommand {
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
+    /// Forget local authentication material while retaining history.
     Forget {
         #[arg(long, required = true)]
         yes: bool,
@@ -540,12 +599,14 @@ enum MessageCommand {
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
+    /// Stream message events, optionally saving a resume cursor.
     Watch {
         #[arg(long, default_value = "0")]
         after: String,
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
+    /// Retrieve a message attachment or report its availability.
     Media {
         thread: String,
         id: String,
@@ -560,14 +621,17 @@ enum MessageCommand {
         #[arg(long, default_value_t = 20, conflicts_with = "detach")]
         wait: u64,
     },
+    /// Inspect or cancel sends, or find a send by its idempotency key.
     Sends {
         #[command(subcommand)]
         command: SendAction,
     },
+    /// Inspect or cancel outgoing voice jobs.
     Voice {
         #[command(subcommand)]
         command: ResourceAction,
     },
+    /// List messages in a chat.
     List {
         thread: String,
         #[arg(long)]
@@ -575,19 +639,22 @@ enum MessageCommand {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Show a message by local ID, optionally qualified by chat.
     Get {
         thread_or_id: String,
         id: Option<String>,
     },
+    /// Send text, a URL share, an image, a file, a video or a voice note.
     Send(Box<MessageSendArgs>),
-    SendStatus {
-        id: String,
-    },
+    /// Show an outgoing send by ID.
+    SendStatus { id: String },
+    /// Mark a whole chat read using its current read-state version.
     Read {
         thread: String,
         #[arg(long)]
         expected_version: String,
     },
+    /// Fetch new messages for the selected account.
     Sync,
 }
 #[derive(Args)]
@@ -634,12 +701,11 @@ struct MessageSendArgs {
 }
 #[derive(Subcommand)]
 enum SendAction {
-    Get {
-        id: String,
-    },
-    Cancel {
-        id: String,
-    },
+    /// Show an outgoing send by ID.
+    Get { id: String },
+    /// Request cancellation of an outgoing send.
+    Cancel { id: String },
+    /// Find an outgoing send by its original idempotency key.
     Lookup {
         #[arg(long)]
         idempotency_key: String,
@@ -647,7 +713,9 @@ enum SendAction {
 }
 #[derive(Subcommand)]
 enum TokenCommand {
+    /// List API tokens without revealing their secret values.
     List,
+    /// Create an API token with account and permission scopes.
     Create {
         name: String,
         #[arg(long, required = true)]
@@ -657,28 +725,30 @@ enum TokenCommand {
         #[arg(long)]
         expires_at: Option<i64>,
     },
-    Revoke {
-        id: String,
-    },
+    /// Revoke an API token by ID.
+    Revoke { id: String },
 }
 #[derive(Subcommand)]
 enum StoreCommand {
+    /// List accounts in the local daemon store.
     List,
-    Create {
-        id: String,
-    },
+    /// Create an offline account slot.
+    Create { id: String },
+    /// Attach a supported stopped official profile in place.
     Attach {
         #[arg(long)]
         path: PathBuf,
         #[arg(long, required = true)]
         source_stopped: bool,
     },
+    /// Copy a supported stopped profile into the local store.
     Import {
         #[arg(long)]
         source: PathBuf,
         #[arg(long, required = true)]
         source_stopped: bool,
     },
+    /// Copy an owned stopped profile to a new destination.
     Export {
         #[arg(long)]
         destination: PathBuf,
@@ -687,10 +757,12 @@ enum StoreCommand {
         #[arg(long)]
         allow_incomplete: bool,
     },
+    /// Register a verified key file for the selected account.
     BindKeys {
         #[arg(long)]
         keys_file: PathBuf,
     },
+    /// Derive profile keys from an authorized password file.
     DeriveKeys {
         #[arg(long)]
         profile: PathBuf,
@@ -699,12 +771,14 @@ enum StoreCommand {
         #[arg(long, required = true)]
         source_stopped: bool,
     },
+    /// Restore saved credentials from an authorized local file.
     RestoreCredentials {
         #[arg(long)]
         file: PathBuf,
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
+    /// Enable supported official-profile writes for a stopped client.
     EnableWrites {
         #[arg(long)]
         own_username: String,
@@ -715,6 +789,7 @@ enum StoreCommand {
         #[arg(long, required = true)]
         official_client_stopped: bool,
     },
+    /// Bind an account to supported stopped profile identity files.
     BindIdentity {
         #[arg(long)]
         mmkv_store: PathBuf,
@@ -723,7 +798,9 @@ enum StoreCommand {
         #[arg(long, required = true)]
         official_client_stopped: bool,
     },
+    /// Inspect the selected account's official database schemas.
     Schema,
+    /// Replay saved local profile writes without sending or downloading.
     RecoverProjection,
 }
 fn output(value: &impl serde::Serialize) -> Result<()> {
@@ -814,7 +891,10 @@ async fn private_media_output(
 async fn main() {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let json = arguments.iter().any(|s| s == "--json");
-    let cli = match Cli::try_parse_from(arguments) {
+    let cli = match cli_help::command()
+        .try_get_matches_from(arguments)
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+    {
         Ok(cli) => cli,
         Err(error) => {
             if error.exit_code() == 0 {
@@ -1066,7 +1146,8 @@ async fn run(cli: Cli) -> Result<()> {
         return calls_cli::devices(cli.json).await;
     }
     if matches!(&cli.command, Command::Calls { command: None }) {
-        let mut command = <Cli as clap::CommandFactory>::command();
+        let mut command = cli_help::command();
+        command.build();
         command
             .find_subcommand_mut("calls")
             .context("missing calls command")?
@@ -1088,7 +1169,7 @@ async fn run(cli: Cli) -> Result<()> {
             Command::Daemon { .. }
                 | Command::Store { .. }
                 | Command::Config { .. }
-                | Command::Profile { .. }
+                | Command::Profiles { .. }
                 | Command::Version
                 | Command::Licenses
         )
@@ -1131,10 +1212,10 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let create_settings = matches!(
         &cli.command,
-        Command::Profile {
+        Command::Profiles {
             command: profile_cli::ProfileCommand::Add { .. }
         } | Command::Config {
-            command: ConfigCommand::Server {
+            command: ConfigCommand::Servers {
                 command: ServerCommand::Add { .. }
             }
         }
@@ -1142,7 +1223,7 @@ async fn run(cli: Cli) -> Result<()> {
     let mut settings =
         settings::File::load(cli.client_config.as_deref(), &env, &cwd, create_settings)?;
     if let Command::Config {
-        command: ConfigCommand::Server { command },
+        command: ConfigCommand::Servers { command },
     } = cli.command
     {
         match command {
@@ -1181,7 +1262,7 @@ async fn run(cli: Cli) -> Result<()> {
                 settings.save()?;
                 return output(&json!({"server":name,"state":"registered"}));
             }
-            ServerCommand::Use { name } => {
+            ServerCommand::Select { name } => {
                 if !settings.settings.servers.contains_key(&name) {
                     bail!("saved server not found");
                 }
@@ -1196,7 +1277,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
     }
-    if let Command::Profile { command } = cli.command {
+    if let Command::Profiles { command } = cli.command {
         let env_url = std::env::var("AGENT_WECHAT_URL").ok();
         let env_name = std::env::var("AGENT_WECHAT_SERVER").ok();
         let url = cli.url.as_deref().or_else(|| {
@@ -1300,7 +1381,7 @@ async fn run(cli: Cli) -> Result<()> {
             | Command::Accounts {
                 command: AccountCommand::List
                     | AccountCommand::Create { .. }
-                    | AccountCommand::Default { .. }
+                    | AccountCommand::Select { .. }
                     | AccountCommand::Alias { .. }
                     | AccountCommand::Remove { .. }
                     | AccountCommand::Get { id: Some(_) }
@@ -1410,11 +1491,11 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .await?
             }
-            AccountCommand::Default { id } => {
+            AccountCommand::Select { id } => {
                 let account = r.get(&format!("v1/accounts/{}", encode(&id))).await?;
                 let id = account["id"].as_str().context("invalid account response")?;
                 let server = selected_server
-                    .context("save/select a named server before setting its account default")?;
+                    .context("save a server with wx config servers add, then run wx config servers select NAME before selecting its default account")?;
                 settings
                     .settings
                     .servers
@@ -1423,6 +1504,29 @@ async fn run(cli: Cli) -> Result<()> {
                     .default_account_id = Some(id.into());
                 settings.save()?;
                 json!({"server":server,"accountId":id})
+            }
+            AccountCommand::Settings {
+                auto_download_max_mb,
+            } => {
+                let path = r.path("settings")?;
+                if let Some(mb) = auto_download_max_mb {
+                    r.request(
+                        Method::PATCH,
+                        &path,
+                        Some(json!({"autoDownloadMaxBytes":mb * 1024 * 1024})),
+                        None,
+                    )
+                    .await?
+                } else {
+                    r.get(&path).await?
+                }
+            }
+            AccountCommand::Status => r.get(r.path("")?.trim_end_matches('/')).await?,
+            AccountCommand::Capabilities => r.get(&r.path("capabilities")?).await?,
+            AccountCommand::Disconnect => r.post(&r.path("disconnect")?, json!({})).await?,
+            AccountCommand::Connect { detach, wait } => {
+                let op = r.post(&r.path("connect")?, json!({})).await?;
+                wait_operation(&r, op, if detach { 0 } else { wait }).await?
             }
         },
         Command::Threads { cursor, limit } => {
@@ -1542,31 +1646,6 @@ async fn run(cli: Cli) -> Result<()> {
                     Some(&idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())),
                 )
                 .await?
-            }
-        },
-        Command::Account { command } => match command {
-            AccountAction::Settings {
-                auto_download_max_mb,
-            } => {
-                let path = r.path("settings")?;
-                if let Some(mb) = auto_download_max_mb {
-                    r.request(
-                        Method::PATCH,
-                        &path,
-                        Some(json!({"autoDownloadMaxBytes":mb * 1024 * 1024})),
-                        None,
-                    )
-                    .await?
-                } else {
-                    r.get(&path).await?
-                }
-            }
-            AccountAction::Status => r.get(r.path("")?.trim_end_matches('/')).await?,
-            AccountAction::Capabilities => r.get(&r.path("capabilities")?).await?,
-            AccountAction::Disconnect => r.post(&r.path("disconnect")?, json!({})).await?,
-            AccountAction::Connect { detach, wait } => {
-                let op = r.post(&r.path("connect")?, json!({})).await?;
-                wait_operation(&r, op, if detach { 0 } else { wait }).await?
             }
         },
         Command::Sync { detach, wait } => {
@@ -1849,7 +1928,7 @@ async fn run(cli: Cli) -> Result<()> {
         | Command::Config { .. }
         | Command::Serve { .. }
         | Command::Store { .. }
-        | Command::Profile { .. }
+        | Command::Profiles { .. }
         | Command::Daemon { .. } => {
             unreachable!()
         }

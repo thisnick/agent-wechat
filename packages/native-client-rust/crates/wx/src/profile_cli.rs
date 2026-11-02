@@ -25,6 +25,7 @@ pub struct ReadFlags {
 }
 #[derive(Subcommand)]
 pub enum ProfileCommand {
+    /// Register the path and optional key file of a stopped local profile.
     Add {
         name: String,
         #[arg(long)]
@@ -36,15 +37,19 @@ pub enum ProfileCommand {
         #[arg(long)]
         keys_file: Option<PathBuf>,
     },
+    /// List registered profiles and their selected defaults.
     List,
-    Use {
-        name: String,
-    },
+    #[command(alias = "use")]
+    /// Save the default local profile for this CLI or selected server.
+    Select { name: String },
+    /// Inspect the selected profile's layout and key availability.
     Inspect,
+    /// List chats from a stopped local profile.
     Chats {
         #[command(flatten)]
         read: ReadFlags,
     },
+    /// Read messages from a stopped local profile.
     Messages {
         #[arg(long)]
         chat: String,
@@ -53,10 +58,12 @@ pub enum ProfileCommand {
         #[command(flatten)]
         read: ReadFlags,
     },
+    /// Read contacts from a stopped local profile.
     Contacts {
         #[command(flatten)]
         read: ReadFlags,
     },
+    /// Read groups and saved members from a stopped local profile.
     Groups {
         #[arg(long,conflicts_with_all=["search","cursor"])]
         id: Option<String>,
@@ -65,6 +72,7 @@ pub enum ProfileCommand {
         #[command(flatten)]
         read: ReadFlags,
     },
+    /// Retrieve a saved image from a stopped local profile.
     Images {
         #[arg(long)]
         message: String,
@@ -75,6 +83,7 @@ pub enum ProfileCommand {
         #[command(flatten)]
         read: ReadFlags,
     },
+    /// Retrieve a saved avatar from a stopped local profile.
     Avatars {
         #[arg(long)]
         username: String,
@@ -83,6 +92,7 @@ pub enum ProfileCommand {
         #[command(flatten)]
         read: ReadFlags,
     },
+    /// Export profile keys from authorized local key material.
     Keys {
         #[command(subcommand)]
         command: KeyCommand,
@@ -90,6 +100,7 @@ pub enum ProfileCommand {
 }
 #[derive(Subcommand)]
 pub enum KeyCommand {
+    /// Export keys from an authorized password file or agent data directory.
     Export {
         name: Option<String>,
         #[arg(long, conflicts_with = "from_agent_data")]
@@ -265,7 +276,7 @@ pub fn run(
         ProfileCommand::List => output(
             &json!({"items":config.settings.local_profiles,"standaloneDefault":config.settings.local_profile,"serverDefault":server.and_then(|s|config.settings.servers.get(s)).and_then(|s|s.local_profile.as_ref())}),
         ),
-        ProfileCommand::Use { name } => {
+        ProfileCommand::Select { name } => {
             if !config.settings.local_profiles.contains_key(&name) {
                 bail!("local profile not found");
             }
