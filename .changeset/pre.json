@@ -10,7 +10,10 @@
     "@agent-wechat/shared": "1.1.1"
   },
   "changesets": [
+    "cli-audio-levels-devices",
     "offline-call-foundation",
-    "openclaw-2026-10-9"
+    "openclaw-2026-10-9",
+    "ordinary-null-contact-flags",
+    "reject-intent-delivery"
   ]
 }
