@@ -196,6 +196,17 @@ native release; the preflight refuses conflicting tags or published npm versions
 
 Docker image publication and deployment remain separate from these workflows.
 
+If only image publication needs a workflow repair after native assets are
+uploaded, merge the workflow fix and dispatch `native-image.yml` on main with
+the existing `version`, `confirm_publish=true`, and `source_commit` set to the
+full commit in that release's native checksum manifest. The image checks out
+that commit, requires its version tag and ancestry in the publishing main
+commit, and verifies its version and every prepared executable before
+building. Its revision label records the checked-out release source, while
+the Actions run identifies the newer publisher workflow. This recovers the
+image only; it does not replace uploaded assets or waive the original native,
+Rust-library or npm publication gates.
+
 ## Trusted Publishing (OIDC)
 
 npm trusted publishing lets GitHub Actions publish without a long-lived token. Setup:
