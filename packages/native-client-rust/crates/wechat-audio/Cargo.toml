@@ -1,0 +1,29 @@
+[package]
+name = "wechat-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Optional native microphone and speaker adapter for WeChat calls"
+
+[features]
+default = []
+native-audio = ["dep:libpulse-binding", "dep:coreaudio-rs", "dep:coreaudio-sys", "dep:wasapi"]
+
+[dependencies]
+rubato = "0.16"
+thiserror = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = { version = "2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = { version = "0.12", optional = true }
+coreaudio-sys = { version = "0.2", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wasapi = { version = "0.25", optional = true }
+
+[[example]]
+name = "isolated_loopback"
+required-features = ["native-audio"]

@@ -1,0 +1,20 @@
+[package]
+name = "wechat-calls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Portable call audio interfaces, pacing and optional native Opus codec"
+publish = false
+
+[features]
+default = []
+native-opus = ["dep:opusic-c"]
+
+[dependencies]
+opusic-c = { version = "=1.6.1", optional = true }
+
+[[example]]
+name = "tone_roundtrip"
+required-features = ["native-opus"]

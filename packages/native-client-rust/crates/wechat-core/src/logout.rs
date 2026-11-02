@@ -61,6 +61,15 @@ impl Core {
                 .cancels
                 .lock()
                 .map_err(|_| anyhow::anyhow!("operation manager unavailable"))?;
+            // A completed idempotent replay must not fence a later login/call.
+            if let Ok(prior) = self.store.operation(account, &op.id) {
+                if prior.kind != op.kind {
+                    bail!("idempotency_conflict");
+                }
+                return Ok(prior);
+            }
+            #[cfg(feature = "experimental-calls")]
+            self.fence_call_authority(account);
             let (op, created) = self
                 .store
                 .begin_logout(&op, uuid::Uuid::new_v4().as_bytes())?;

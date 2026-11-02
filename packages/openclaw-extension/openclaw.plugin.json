@@ -1,14 +1,42 @@
 {
   "id": "agent-wechat",
   "contracts": {
-    "tools": ["wechat_history", "wechat_search", "wechat_message", "wechat_media", "wechat_archive_threads", "wechat_archive_search", "wechat_archive_history", "wechat_archive_message", "wechat_archive_media", "wechat_recall", "wechat_send_share", "wechat_group_info", "wechat_login"]
+    "tools": [
+      "wechat_history",
+      "wechat_search",
+      "wechat_message",
+      "wechat_media",
+      "wechat_archive_threads",
+      "wechat_archive_search",
+      "wechat_archive_history",
+      "wechat_archive_message",
+      "wechat_archive_media",
+      "wechat_recall",
+      "wechat_send_share",
+      "wechat_group_info",
+      "wechat_login",
+      "wechat_call"
+    ]
   },
   "toolMetadata": {
-    "wechat_archive_threads": { "optional": true },
-    "wechat_archive_search": { "optional": true },
-    "wechat_archive_history": { "optional": true },
-    "wechat_archive_message": { "optional": true },
-    "wechat_archive_media": { "optional": true }
+    "wechat_archive_threads": {
+      "optional": true
+    },
+    "wechat_archive_search": {
+      "optional": true
+    },
+    "wechat_archive_history": {
+      "optional": true
+    },
+    "wechat_archive_message": {
+      "optional": true
+    },
+    "wechat_archive_media": {
+      "optional": true
+    },
+    "wechat_call": {
+      "optional": true
+    }
   },
   "legacyPluginIds": [
     "wechat"
@@ -121,6 +149,163 @@
               },
               "prefix": {
                 "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "calls": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Independent voice and video permissions. Both default off; the current backend supports direct voice only.",
+        "properties": {
+          "voice": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false,
+                "description": "Enable direct voice calling. Disabled voice calls are ignored without answering or declining."
+              },
+              "inboundPolicy": {
+                "type": "string",
+                "enum": [
+                  "disabled",
+                  "allowlist"
+                ]
+              },
+              "inboundAllowFrom": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "outboundPolicy": {
+                "type": "string",
+                "enum": [
+                  "disabled",
+                  "allowlist"
+                ]
+              },
+              "outboundAllowTo": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "outboundToolAllowFrom": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "agentId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "realtime": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Use openai. Other providers and continuous-output models fail preflight without fallback."
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Realtime speech model; omitted uses the selected provider's default."
+                  },
+                  "voice": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Spoken voice; omitted uses the selected provider's default."
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "maxLength": 4000,
+                    "description": "Additional conversation guidance; does not grant tool or account-owner authority."
+                  },
+                  "providers": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "openai": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "apiKey": {
+                            "description": "Optional OpenClaw SecretRef or API-key string. Omitted uses the selected agent's OpenAI auth profile or Gateway environment."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "toolPolicy": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "safe-read-only"
+                ],
+                "default": "none"
+              },
+              "allowConsultSessionPersistence": {
+                "type": "boolean",
+                "default": false,
+                "description": "Required for safe-read-only consultation: OpenClaw creates a separate per-call agent session which can persist. This adapter does not store transcripts or recordings."
+              },
+              "consultation": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^[^/]+/.+$",
+                    "description": "Agent-consult provider/model override; omitted uses the selected agent's model."
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 120000,
+                    "default": 30000
+                  }
+                }
+              },
+              "maxDurationSeconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 3600,
+                "default": 300
+              }
+            }
+          },
+          "video": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false,
+                "description": "Allow video independently of voice. Current video capability is unavailable; permission alone never answers a video call or routes it as voice."
               }
             }
           }
@@ -305,6 +490,163 @@
                 }
               }
             }
+          },
+          "calls": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Independent voice and video permissions. Both default off; the current backend supports direct voice only.",
+            "properties": {
+              "voice": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable direct voice calling. Disabled voice calls are ignored without answering or declining."
+                  },
+                  "inboundPolicy": {
+                    "type": "string",
+                    "enum": [
+                      "disabled",
+                      "allowlist"
+                    ]
+                  },
+                  "inboundAllowFrom": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "outboundPolicy": {
+                    "type": "string",
+                    "enum": [
+                      "disabled",
+                      "allowlist"
+                    ]
+                  },
+                  "outboundAllowTo": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "outboundToolAllowFrom": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "agentId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "realtime": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "provider": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "description": "Use openai. Other providers and continuous-output models fail preflight without fallback."
+                      },
+                      "model": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "description": "Realtime speech model; omitted uses the selected provider's default."
+                      },
+                      "voice": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "description": "Spoken voice; omitted uses the selected provider's default."
+                      },
+                      "instructions": {
+                        "type": "string",
+                        "maxLength": 4000,
+                        "description": "Additional conversation guidance; does not grant tool or account-owner authority."
+                      },
+                      "providers": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "openai": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "apiKey": {
+                                "description": "Optional OpenClaw SecretRef or API-key string. Omitted uses the selected agent's OpenAI auth profile or Gateway environment."
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "toolPolicy": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "safe-read-only"
+                    ],
+                    "default": "none"
+                  },
+                  "allowConsultSessionPersistence": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Required for safe-read-only consultation: OpenClaw creates a separate per-call agent session which can persist. This adapter does not store transcripts or recordings."
+                  },
+                  "consultation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "pattern": "^[^/]+/.+$",
+                        "description": "Agent-consult provider/model override; omitted uses the selected agent's model."
+                      },
+                      "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "maximum": 120000,
+                        "default": 30000
+                      }
+                    }
+                  },
+                  "maxDurationSeconds": {
+                    "type": "integer",
+                    "minimum": 30,
+                    "maximum": 3600,
+                    "default": 300
+                  }
+                }
+              },
+              "video": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Allow video independently of voice. Current video capability is unavailable; permission alone never answers a video call or routes it as voice."
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -317,12 +659,20 @@
           "path": "native.token",
           "expected": "string",
           "ownerKind": "capability"
+        },
+        {
+          "path": "calls.voice.realtime.providers.openai.apiKey",
+          "expected": "string",
+          "ownerKind": "capability"
         }
       ]
     }
   },
   "uiHints": {
     "native.token": {
+      "sensitive": true
+    },
+    "calls.voice.realtime.providers.openai.apiKey": {
       "sensitive": true
     }
   }

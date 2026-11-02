@@ -238,8 +238,8 @@ impl Core {
         // fallback/reconnect resumes from the already durable received cursor.
         bail!("Native push sync page limit")
     }
-    pub(super) fn commit_sync_batch(
-        &self,
+    pub(crate) fn commit_sync_batch(
+        self: &Arc<Self>,
         account: &str,
         batch: SyncBatch,
         transport: &str,
@@ -252,14 +252,18 @@ impl Core {
         };
         let raw = serde_json::to_vec(&batch)?;
         let id = format!("{:x}", Sha256::digest(&raw));
-        self.store.stage_sync(
+        let fresh = self.store.stage_sync_if_new(
             account,
             &id,
             &self.vault.seal(account, &format!("apply:{id}"), &raw)?,
             &self.vault.seal(account, "received-cursor", &batch.cursor)?,
         )?;
-        self.store
-            .put_runtime(account, &format!("apply-origin:{id}"), origin.as_bytes())?;
+        if fresh {
+            self.store
+                .put_runtime(account, &format!("apply-origin:{id}"), origin.as_bytes())?;
+            #[cfg(feature = "experimental-calls")]
+            crate::calls::notifications::after_sync_staged(self, account, &id, &batch, origin);
+        }
         let projection = self.project_pending_with_media(account, true)?;
         if !batch.continuation {
             self.store.put_runtime(account, "history-caught-up", b"1")?;

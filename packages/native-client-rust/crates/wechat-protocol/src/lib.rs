@@ -52,6 +52,8 @@
 //! pinned MMTLS signature and record authentication before business decode.
 //! Network methods block; async applications must use a blocking worker.
 pub mod business;
+#[cfg(feature = "experimental-calls")]
+pub mod calls;
 mod client;
 mod lan_login;
 pub use lan_login::login_lan_error_reason;

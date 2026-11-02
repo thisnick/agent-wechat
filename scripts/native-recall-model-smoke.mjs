@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Actual pinned plugin/tool/intake runtime; all account and provider data is synthetic.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -136,7 +137,8 @@ const item = async id => { try { return (await custody()).items[id]; } catch { r
 try {
   await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
   for (const file of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', file), join(temporary, 'plugin', file));
-  await build({ entryPoints: [join(root, 'packages/openclaw-extension/index.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
+  await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+  await build({ entryPoints: [join(root, 'packages/openclaw-extension/index.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const apiPort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false }, session: { dmScope: 'per-channel-peer' },

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Starts only an isolated, pinned OpenClaw Gateway and a synthetic loopback
 // daemon. No account credentials, provider calls, installed service or messages.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -27,6 +28,7 @@ const upstream=createServer((req,res)=>{assert.equal(req.headers.authorization,`
 try{
  await mkdir(join(temporary,'plugin'),{mode:0o700});await mkdir(join(temporary,'workspace'),{mode:0o700});
  const plugin=join(temporary,'plugin');await mkdir(join(plugin,'dist'));for(const name of ['package.json','openclaw.plugin.json','dist/index.js'])await copyFile(join(root,'packages/openclaw-extension',name),join(plugin,name));
+ await stagePluginRuntimeDependencies(root,plugin);
  upstream.listen(0,'127.0.0.1');await once(upstream,'listening');const nativePort=upstream.address().port;
  const probe=createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
  const config={gateway:{mode:'local',bind:'loopback',port,auth:{mode:'token',token:gatewayToken},controlUi:{enabled:false}},browser:{enabled:false},cron:{enabled:false},discovery:{mdns:{mode:'off'}},update:{checkOnStart:false},agents:{defaults:{workspace:join(temporary,'workspace')}},plugins:{allow:['agent-wechat'],load:{paths:[plugin]},entries:{'agent-wechat':{enabled:true,config:{backend:'native',native:{mode:'external',accountId:'a',endpoint:`http://127.0.0.1:${nativePort}`,token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' },consumerStateDir:join(temporary,'consumer'),gatewayFacade:{enabled:true}}}}}},logging:{file:join(temporary,'gateway.log')},channels:{'agent-wechat':{enabled:true}}};

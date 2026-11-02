@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wechat-platform", "crates/wechat-config", "crates/wechat-store", "crates/wechat-media", "crates/wechat-profile", "crates/wechat-protocol", "crates/wechat-core", "crates/wechat-api", "crates/wx", "crates/wechat-simulator"]
+members = ["crates/wechat-audio", "crates/wechat-calls", "crates/wechat-platform", "crates/wechat-config", "crates/wechat-store", "crates/wechat-media", "crates/wechat-profile", "crates/wechat-protocol", "crates/wechat-core", "crates/wechat-api", "crates/wx", "crates/wechat-simulator"]
 resolver = "2"
 
 [workspace.package]

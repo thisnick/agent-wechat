@@ -92,6 +92,10 @@ importers:
         version: 2.12.4
 
   packages/openclaw-extension:
+    dependencies:
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
     devDependencies:
       '@agent-wechat/shared':
         specifier: workspace:*
@@ -114,6 +118,9 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
 
 packages:
 

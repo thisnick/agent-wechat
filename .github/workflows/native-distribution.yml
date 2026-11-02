@@ -75,6 +75,7 @@ jobs:
               - 'packages/openclaw-extension/**'
               - 'packages/shared/**'
               - 'scripts/native-gateway-smoke.mjs'
+              - 'scripts/native-smoke-plugin.mjs'
               - 'scripts/native-model-smoke.mjs'
               - 'scripts/native-media-model-smoke.mjs'
               - 'scripts/native-history-model-smoke.mjs'

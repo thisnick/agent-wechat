@@ -19,6 +19,7 @@
     "test": "node --test --experimental-strip-types test/*.test.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "ws": "8.22.0"
   }
 }

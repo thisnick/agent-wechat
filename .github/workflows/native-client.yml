@@ -15,6 +15,8 @@ on:
       - 'packages/shared/src/native*'
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-simulator-smoke.mjs'
+      - 'scripts/native-calls-api-smoke.mjs'
+      - 'packages/openclaw-extension/src/calls*'
       - 'scripts/client-ui*-smoke.mjs'
       - 'packages/client-ui/**'
       - '.node-version'
@@ -73,6 +75,8 @@ jobs:
           # differ across runner images. Key the compiler we actually select.
           add-rust-environment-hash-key: false
           key: native-${{ matrix.runner }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ steps.cache-key.outputs.rust }}
+      - name: Install native audio development libraries
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev cmake
       - if: matrix.suite == 'lint'
         run: cargo fmt --all --check
       - if: matrix.suite == 'lint'
@@ -81,7 +85,7 @@ jobs:
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
-          cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
+          cargo clippy --workspace "${packages[@]}" --all-targets --all-features --locked -- -D warnings
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache
@@ -120,7 +124,7 @@ jobs:
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
-          cargo test --workspace "${packages[@]}" --locked
+          cargo test --workspace "${packages[@]}" --all-features --locked
       - if: matrix.suite == 'test'
         run: |
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then
@@ -144,8 +148,55 @@ jobs:
       - name: Install browser-client test dependencies
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
-        run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui...
+        run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui... --filter @agent-wechat/agent-wechat...
       - name: Exercise the connected session and UI launcher with synthetic accounts
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm client:smoke
+      - name: Build the account-free calling API fixture
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        run: cargo build --locked --profile test -p wechat-simulator --features calls-fixture --bin wx-calls-fixture
+      - name: Exercise calling through the real API, SDK, CLI and fake voice provider
+        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        working-directory: .
+        run: node --experimental-strip-types scripts/native-calls-api-smoke.mjs
+
+  call-libraries:
+    name: Call libraries (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15, windows-latest]
+    defaults:
+      run:
+        working-directory: packages/native-client-rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev cmake
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          key: call-libraries-${{ matrix.runner }}
+      - name: Lint native call libraries
+        run: cargo clippy --locked -p wechat-calls -p wechat-audio --all-targets --features wechat-calls/native-opus,wechat-audio/native-audio -- -D warnings
+      - name: Test native Opus with generated audio
+        run: cargo test --locked -p wechat-calls --features native-opus
+      - name: Test native audio adapters without opening devices
+        run: cargo test --locked -p wechat-audio --features native-audio
+      - name: Build isolated audio probe
+        if: runner.os == 'Linux'
+        run: cargo build --locked -p wechat-audio --features native-audio --example isolated_loopback
+      - name: Exercise generated audio through an isolated sound server
+        if: runner.os == 'Linux'
+        run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
+      - name: Check portable call media for WebAssembly
+        if: runner.os == 'Linux'
+        run: cargo check --locked -p wechat-calls --target wasm32-unknown-unknown
