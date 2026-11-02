@@ -120,6 +120,13 @@ pub(crate) fn num(r: &RawFields, k: &str) -> Option<i64> {
         _ => None,
     }
 }
+// Older sparse contact projections left the nullable deletion column unset.
+// Only SQL NULL and integer zero establish a non-deleted row; absent or
+// malformed values must not turn an incomplete identity into an eligible peer.
+pub(crate) fn contact_not_deleted(fields: &RawFields) -> bool {
+    matches!(fields.get("delete_flag"), Some(SqlValue::Null))
+        || num(fields, "delete_flag") == Some(0)
+}
 fn blob(r: &RawFields, k: &str) -> Result<Option<Vec<u8>>> {
     match r.get(k) {
         Some(SqlValue::Text(s)) => Ok(Some(s.as_bytes().to_vec())),
@@ -1632,8 +1639,8 @@ mod batch_lookup_tests {
         let chats: Vec<_> = (0..200).map(|n| format!("peer_{n}")).collect();
         for (id, chat) in chats.iter().enumerate() {
             db.execute(
-                "INSERT INTO contact(id,username,flag,local_type,delete_flag) VALUES(?1,?2,?3,1,0)",
-                params![id, chat, if id % 2 == 0 { 3 } else { 515 }],
+                "INSERT INTO contact(id,username,flag,local_type,delete_flag) VALUES(?1,?2,?3,1,?4)",
+                params![id, chat, if id % 2 == 0 { 3 } else { 515 }, if id % 3 == 0 { None } else { Some(0) }],
             )
             .unwrap();
         }
@@ -1684,8 +1691,8 @@ mod batch_lookup_tests {
             // Other flag bits must not affect the independently saved pin bit.
             let flag = kind | 0x200 | if id % 4 < 2 { 0x800 } else { 0 };
             db.execute(
-                "INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room) VALUES(?1,?2,?3,?4,0,1)",
-                params![id, chat, flag, kind],
+                "INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room) VALUES(?1,?2,?3,?4,?5,1)",
+                params![id, chat, flag, kind, if id % 3 == 0 { None } else { Some(0) }],
             )
             .unwrap();
         }
@@ -1703,7 +1710,8 @@ mod batch_lookup_tests {
             (210,'filehelper',2049,1,0,1),
             (211,'weixin',2049,1,0,1),
             (212,'gh_service',2049,1,0,1),
-            (213,'notification_messages',2049,1,0,1);",
+            (213,'notification_messages',2049,1,0,1),
+            (214,'malformed_delete',2049,1,'bad',1);",
         )
         .unwrap();
         let reader = ProfileReader::open(
@@ -1738,6 +1746,7 @@ mod batch_lookup_tests {
             "weixin",
             "gh_service",
             "notification_messages",
+            "malformed_delete",
         ]
         .map(str::to_owned);
         let states = reader.thread_pinned(&unknown).unwrap();

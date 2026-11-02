@@ -63,7 +63,7 @@ impl ProfileReader {
                     && num(&fields, "local_type") == Some(1)
                     && flag.is_some_and(|flag| flag & 1 != 0)
             };
-            let value = (ordinary && num(&fields, "delete_flag") == Some(0))
+            let value = (ordinary && contact_not_deleted(&fields))
                 .then(|| flag.map(|flag| flag & 0x800 != 0))
                 .flatten();
             pinned.insert(name, value);
@@ -102,9 +102,7 @@ impl ProfileReader {
                     Some(1) => Some(false),
                     _ => None,
                 }
-            } else if num(&fields, "local_type") == Some(1)
-                && num(&fields, "delete_flag") == Some(0)
-            {
+            } else if num(&fields, "local_type") == Some(1) && contact_not_deleted(&fields) {
                 num(&fields, "flag")
                     .and_then(|flag| u32::try_from(flag).ok())
                     .filter(|flag| flag & 1 != 0)

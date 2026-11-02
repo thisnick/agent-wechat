@@ -67,6 +67,11 @@ fn integer(fields: &RawFields, name: &str) -> Option<i64> {
     }
 }
 
+fn contact_not_deleted(fields: &RawFields) -> bool {
+    matches!(fields.get("delete_flag"), Some(SqlValue::Null))
+        || integer(fields, "delete_flag") == Some(0)
+}
+
 impl Core {
     pub(super) fn group_revision(&self, account: &str, group: &str) -> Result<Option<Vec<u8>>> {
         self.store.runtime(
@@ -249,7 +254,7 @@ impl Core {
                 ensure!(
                     !contact.is_group
                         && contact.local_type == Some(1)
-                        && integer(&contact.raw_fields, "delete_flag") == Some(0)
+                        && contact_not_deleted(&contact.raw_fields)
                         && integer(&contact.raw_fields, "flag").is_some_and(|flag| u32::try_from(
                             flag
                         )
@@ -261,7 +266,7 @@ impl Core {
                 ensure!(
                     contact.is_group
                         && contact.local_type == Some(2)
-                        && integer(&contact.raw_fields, "delete_flag") == Some(0)
+                        && contact_not_deleted(&contact.raw_fields)
                         && integer(&contact.raw_fields, "is_in_chat_room") == Some(1),
                     "ordinary_group_required"
                 );
@@ -293,7 +298,7 @@ impl Core {
                     !contact.is_group
                         && contact.local_type == Some(1)
                         && integer(&contact.raw_fields, "flag").is_some_and(|f| f & 1 != 0)
-                        && integer(&contact.raw_fields, "delete_flag") == Some(0),
+                        && contact_not_deleted(&contact.raw_fields),
                     "ordinary_contact_required"
                 );
             }
@@ -1074,6 +1079,80 @@ pub(super) mod tests {
             name: Some("Synthetic group".into()),
         }
     }
+    fn set_delete_flag(core: &Core, name: &str, value: SqlValue) {
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        wechat_profile::apply_contact_patch(
+            &location,
+            &keys,
+            &ContactProjection {
+                username: name.into(),
+                fields: [("delete_flag".into(), value)].into_iter().collect(),
+            },
+            &core.write_options("one", "delete-flag-fixture").unwrap(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn null_delete_flags_allow_group_creation_and_member_addition() {
+        let (_temp, core) = fixture();
+        for name in ["peer", "other"] {
+            set_delete_flag(&core, name, SqlValue::Null);
+            assert_eq!(
+                core.group_contact("one", name).unwrap().raw_fields["delete_flag"],
+                SqlValue::Null
+            );
+        }
+        assert!(core.admit_group("one", create(), "null-create").unwrap().1);
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        wechat_profile::apply_contact_patch(
+            &location,
+            &keys,
+            &ContactProjection {
+                username: "synthetic@chatroom".into(),
+                fields: [
+                    ("local_type".into(), SqlValue::Integer("2".into())),
+                    ("flag".into(), SqlValue::Integer("2".into())),
+                    ("delete_flag".into(), SqlValue::Null),
+                    ("is_in_chat_room".into(), SqlValue::Integer("1".into())),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            &core.write_options("one", "null-room-fixture").unwrap(),
+        )
+        .unwrap();
+        let action = GroupMutation::AddMembers {
+            group_id: "synthetic@chatroom".into(),
+            members: vec!["peer".into()],
+        };
+        assert!(core.admit_group("one", action, "null-add").unwrap().1);
+    }
+    #[test]
+    fn deleted_or_malformed_contacts_still_fail_before_mutation_admission() {
+        let (_temp, core) = fixture();
+        for (index, flag) in [
+            SqlValue::Integer("1".into()),
+            SqlValue::Integer("-1".into()),
+            SqlValue::Text("invalid".into()),
+            SqlValue::Real("0.5".into()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            set_delete_flag(&core, "peer", flag);
+            let key = format!("invalid-delete-{index}");
+            assert!(core
+                .admit_group("one", create(), &key)
+                .unwrap_err()
+                .to_string()
+                .contains("ordinary_contact_required"));
+            assert!(core
+                .store
+                .group_mutation_by_key("one", &key, None)
+                .unwrap()
+                .is_none());
+        }
+    }
     fn created(malformed: bool) -> Vec<u8> {
         let sk = |s: &str| p::bytes(1, s.as_bytes());
         let mut member = vec![
@@ -1103,6 +1182,7 @@ pub(super) mod tests {
     #[test]
     fn thread_pinning_uses_one_attempt_and_repairs_without_resending_or_overwriting_newer_state() {
         let (_temp, mut core) = fixture();
+        set_delete_flag(&core, "peer", SqlValue::Null);
         struct Snapshot(u32);
         impl crate::upstream::Upstream for Snapshot {
             fn kind(&self) -> crate::upstream::UpstreamKind {
@@ -1241,6 +1321,7 @@ pub(super) mod tests {
     #[test]
     fn direct_mute_and_unmute_preserve_other_flags_and_share_one_attempt_receipts() {
         let (_temp, mut core) = fixture();
+        set_delete_flag(&core, "peer", SqlValue::Null);
         let flag = |core: &Core| {
             let contact = core.group_contact("one", "peer").unwrap();
             integer(&contact.raw_fields, "flag").unwrap()

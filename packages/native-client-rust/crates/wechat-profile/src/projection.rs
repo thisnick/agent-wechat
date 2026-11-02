@@ -301,7 +301,7 @@ pub fn apply_contact_mute_patch(
     check_known_table(&tx, "contact")?;
     let existing = tx
         .query_row(
-            "SELECT id,flag FROM contact WHERE username=?1 AND local_type=1 AND delete_flag=0",
+            "SELECT id,flag FROM contact WHERE username=?1 AND local_type=1 AND (delete_flag IS NULL OR delete_flag=0)",
             [username],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
         )
@@ -408,7 +408,7 @@ pub fn apply_contact_pin_patch(
             && crate::reader::num(&fields, "local_type") == Some(1)
             && flag & 1 != 0
     };
-    if !ordinary || crate::reader::num(&fields, "delete_flag") != Some(0) {
+    if !ordinary || !crate::reader::contact_not_deleted(&fields) {
         return Ok(None);
     }
     let id = crate::reader::num(&fields, "id").ok_or(ProfileError::InvalidMetadata)?;
@@ -870,9 +870,9 @@ pub fn apply_session_projection(
     Ok(changed)
 }
 
-/// Sparse contact update. Existing rows preserve every omitted field. For a new
-/// row only, omitted nullable/no-default schema columns become SQL NULL as an
-/// explicit independent-client policy, not a claim about native enum defaults.
+/// Sparse contact update. Existing rows preserve every omitted field. A new row
+/// starts with a zero deletion flag; other omitted nullable/no-default columns
+/// become SQL NULL. Explicit input values take precedence over these defaults.
 pub fn apply_contact_patch(
     location: &ProfileLocation,
     keys: &KeyFile,
@@ -900,6 +900,9 @@ pub fn apply_contact_patch(
     let mut input = input.clone();
     if existing.is_none() {
         let mut fields = nullable_fields(&c, &db, "contact", &["id", "username"])?;
+        // A newly projected contact is not deleted unless the received update
+        // supplies a deletion value. Existing rows retain their saved state.
+        fields.insert("delete_flag".into(), SqlValue::Integer("0".into()));
         fields.extend(input.fields);
         input.fields = fields;
     }
@@ -1146,7 +1149,7 @@ pub fn apply_native_group_edit(
             if tx.execute("UPDATE contact SET chat_room_notify=?2,flag=CASE WHEN ?3 THEN flag & ~268435456 ELSE flag END WHERE username=?1 AND flag IS NOT NULL", rusqlite::params![room,i64::from(!muted),clear_minimized])? != 1 { return Err(ProfileError::InvalidMetadata); }
         }
         NativeGroupEdit::Unfold { .. } => {
-            let flag: Option<i64> = tx.query_row("SELECT flag FROM contact WHERE username=?1 AND local_type=2 AND delete_flag=0 AND is_in_chat_room=1", [room], |r| r.get(0)).optional()?.flatten();
+            let flag: Option<i64> = tx.query_row("SELECT flag FROM contact WHERE username=?1 AND local_type=2 AND (delete_flag IS NULL OR delete_flag=0) AND is_in_chat_room=1", [room], |r| r.get(0)).optional()?.flatten();
             let flag = flag.and_then(|flag| u32::try_from(flag).ok()).filter(|flag| flag & 2 != 0).ok_or(ProfileError::InvalidMetadata)?;
             if tx.execute("UPDATE contact SET flag=?2 WHERE username=?1", rusqlite::params![room,flag & !0x10000000])? != 1 { return Err(ProfileError::InvalidMetadata); }
         }
@@ -1698,12 +1701,92 @@ mod pin_tests {
     }
 
     #[test]
+    fn sparse_new_contacts_initialize_zero_without_resetting_existing_deletion_state() {
+        for encrypted in [false, true] {
+            let (_temp, location, keys, options) = fixture(encrypted);
+            let contact = open_write(&location, "contact/contact.db", &keys, !encrypted).unwrap();
+            let patch = |name: &str, fields: RawFields| {
+                apply_contact_patch(
+                    &location,
+                    &keys,
+                    &ContactProjection {
+                        username: name.into(),
+                        fields,
+                    },
+                    &options,
+                )
+                .unwrap();
+            };
+            patch(
+                "new_peer",
+                [("flag".into(), SqlValue::Integer("1".into()))]
+                    .into_iter()
+                    .collect(),
+            );
+            let deletion = |name: &str| {
+                contact
+                    .query_row(
+                        "SELECT delete_flag FROM contact WHERE username=?1",
+                        [name],
+                        |row| row.get::<_, Option<i64>>(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(deletion("new_peer"), Some(0));
+            for (name, value) in [
+                ("legacy_peer", SqlValue::Null),
+                ("deleted_peer", SqlValue::Integer("1".into())),
+            ] {
+                patch(name, [("delete_flag".into(), value)].into_iter().collect());
+                patch(
+                    name,
+                    [("nick_name".into(), SqlValue::Text("Updated name".into()))]
+                        .into_iter()
+                        .collect(),
+                );
+                assert_eq!(
+                    deletion(name),
+                    if name == "legacy_peer" { None } else { Some(1) }
+                );
+            }
+        }
+    }
+    #[test]
+    fn null_delete_flags_allow_mute_projection_without_normalizing_the_contact_row() {
+        for encrypted in [false, true] {
+            let (_temp, location, keys, options) = fixture(encrypted);
+            let contact = open_write(&location, "contact/contact.db", &keys, !encrypted).unwrap();
+            contact.execute_batch("INSERT INTO contact(username,local_type,flag,delete_flag) VALUES('legacy',1,2049,NULL),('deleted',1,2049,1),('malformed',1,2049,'bad');").unwrap();
+            assert!(
+                apply_contact_mute_patch(&location, &keys, "legacy", true, &options)
+                    .unwrap()
+                    .unwrap()
+                    .changed
+            );
+            let saved = contact
+                .query_row(
+                    "SELECT flag,delete_flag FROM contact WHERE username='legacy'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+                )
+                .unwrap();
+            assert_eq!(saved, (2561, None));
+            for name in ["deleted", "malformed"] {
+                assert!(
+                    apply_contact_mute_patch(&location, &keys, name, true, &options)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+    #[test]
     fn pin_projection_preserves_other_state_and_replays_without_rewinding_activity() {
         for encrypted in [false, true] {
             let (_temp, location, keys, options) = fixture(encrypted);
             let contact = open_write(&location, "contact/contact.db", &keys, !encrypted).unwrap();
             let session = open_write(&location, "session/session.db", &keys, !encrypted).unwrap();
-            contact.execute_batch("INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room,chat_room_notify)VALUES(1,'peer',268436099,1,0,0,0),(2,'room@chatroom',268435586,2,0,1,0);").unwrap();
+            contact.execute_batch("INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room,chat_room_notify)VALUES(1,'peer',268436099,1,NULL,0,0),(2,'room@chatroom',268435586,2,NULL,1,0);").unwrap();
             session.execute_batch("INSERT INTO SessionTable(username,unread_count,draft,status,is_hidden,sort_timestamp,last_timestamp,last_msg_locald_id)VALUES('peer',4,'Keep draft',7,0,100,90,12),('room@chatroom',2,'Room draft',3,0,100,99,15);").unwrap();
             let saved_flag = || {
                 contact
@@ -1877,7 +1960,7 @@ mod pin_tests {
     fn group_unfold_preserves_notification_state_other_members_and_opaque_fields() {
         let (_temp, location, keys, options) = fixture(false);
         let contact = open_write(&location, "contact/contact.db", &keys, true).unwrap();
-        contact.execute_batch("INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room,chat_room_notify)VALUES(1,'room@chatroom',268435458,2,0,1,0);INSERT INTO chat_room(id,username)VALUES(1,'room@chatroom');").unwrap();
+        contact.execute_batch("INSERT INTO contact(id,username,flag,local_type,delete_flag,is_in_chat_room,chat_room_notify)VALUES(1,'room@chatroom',268435458,2,NULL,1,0);INSERT INTO chat_room(id,username)VALUES(1,'room@chatroom');").unwrap();
         let before = [
             10, 14, 10, 4, b's', b'e', b'l', b'f', 24, 129, 64, 34, 3, 1, 2, 3, 10, 9, 10, 4, b'p',
             b'e', b'e', b'r', 24, 129, 64, 42, 3, 9, 8, 7,
