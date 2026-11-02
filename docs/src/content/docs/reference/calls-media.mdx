@@ -22,7 +22,11 @@ flowchart LR
    `calls` bearer authorization header. Within five seconds, send this JSON:
 
    ```json
-   {"type":"media.attach","clientId":"example-client","ownerToken":"<secret owner token>"}
+   {
+     "type": "media.attach",
+     "clientId": "example-client",
+     "ownerToken": "<secret owner token>"
+   }
    ```
 
 3. Wait for this JSON response on the **media** socket. Direction is relative
@@ -30,16 +34,37 @@ flowchart LR
 
    ```json
    {
-     "type":"media.ready",
-     "sendTrack":{"id":1,"generation":1,"direction":"send","format":{"sampleRate":16000,"channels":1,"frameMs":20}},
-     "receiveTrack":{"id":2,"generation":1,"direction":"receive","format":{"sampleRate":16000,"channels":1,"frameMs":20}}
+     "type": "media.ready",
+     "sendTrack": {
+       "id": 1,
+       "generation": 1,
+       "direction": "send",
+       "format": {
+         "sampleRate": 16000,
+         "channels": 1,
+         "frameMs": 20
+       }
+     },
+     "receiveTrack": {
+       "id": 2,
+       "generation": 1,
+       "direction": "receive",
+       "format": {
+         "sampleRate": 16000,
+         "channels": 1,
+         "frameMs": 20
+       }
+     }
    }
    ```
 
 4. Start the outgoing stream with a JSON text message, then send binary PCM:
 
    ```json
-   {"type":"audio.start","generation":1}
+   {
+     "type": "audio.start",
+     "generation": 1
+   }
    ```
 
    Binary bytes `00 80 ff 7f ff ff` represent three samples: `-32768`, `32767`,
@@ -80,11 +105,20 @@ for await (const chunk of media.frames()) {
 Send these JSON commands on the **control** socket:
 
 ```json
-{"type":"call.mute","requestId":"mute-1","callId":"example-call","muted":true}
+{
+  "type": "call.mute",
+  "requestId": "mute-1",
+  "callId": "example-call",
+  "muted": true
+}
 ```
 
 ```json
-{"type":"call.clear_audio","requestId":"interrupt-1","callId":"example-call"}
+{
+  "type": "call.clear_audio",
+  "requestId": "interrupt-1",
+  "callId": "example-call"
+}
 ```
 
 Muting silences outgoing audio. Clearing discards queued outgoing audio and
