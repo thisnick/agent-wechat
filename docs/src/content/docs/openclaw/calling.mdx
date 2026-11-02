@@ -1,0 +1,117 @@
+---
+title: Set up calling
+description: Configure voice and video permissions, realtime speech, OpenAI credentials and agent consultation.
+---
+
+Configure calling under `channels.agent-wechat.calls`. Voice and video each default
+to disabled. The current daemon and plugin handle direct voice calls.
+
+## Connect the daemon
+
+1. Finish [Quick setup](../setup/) and check `wx calls status`. The daemon must
+   advertise `directAudio: true`; see [Calling](/reference/calls/) for build options.
+2. Give the channel token the `calls` scope alongside its existing messaging scopes:
+
+   ```bash
+   wx tokens create openclaw-calling --accounts ACCOUNT_ID \
+     --scopes read --scopes media --scopes send --scopes login \
+     --scopes read-state --scopes calls
+   ```
+
+   Use the returned token in the channel's existing `native.token` SecretRef.
+   A token without `calls` cannot use the call endpoints.
+
+## Configure speech and access
+
+Merge this example into your OpenClaw configuration, preserving the channel's
+existing `enabled` and `native` settings. Replace the example contact and owner IDs.
+Set `OPENAI_API_KEY` in the **Gateway process's environment**.
+
+```json
+{
+  "secrets": {
+    "providers": {
+      "voiceenv": {
+        "source": "env",
+        "allowlist": ["OPENAI_API_KEY"]
+      }
+    }
+  },
+  "channels": {
+    "agent-wechat": {
+      "calls": {
+        "voice": {
+          "enabled": true,
+          "agentId": "main",
+          "inboundPolicy": "allowlist",
+          "inboundAllowFrom": ["allowed-contact-id"],
+          "outboundPolicy": "allowlist",
+          "outboundAllowTo": ["allowed-contact-id"],
+          "outboundToolAllowFrom": ["owner-id"],
+          "maxDurationSeconds": 300,
+          "realtime": {
+            "provider": "openai",
+            "model": "gpt-realtime-2.1",
+            "voice": "marin",
+            "instructions": "Keep spoken replies concise.",
+            "providers": {
+              "openai": {
+                "apiKey": {
+                  "source": "env",
+                  "provider": "voiceenv",
+                  "id": "OPENAI_API_KEY"
+                }
+              }
+            }
+          },
+          "toolPolicy": "none"
+        },
+        "video": {
+          "enabled": false
+        }
+      }
+    }
+  }
+}
+```
+
+`apiKey` also accepts an OpenClaw file/exec/store SecretRef or a key string.
+When omitted, OpenClaw uses the selected agent's OpenAI authentication or Gateway
+environment. A text-agent subscription alone does not necessarily grant realtime
+API access. The daemon token and OpenAI key are separate credentials.
+
+Restart the Gateway after saving the configuration. An enabled, prepared voice
+service reports `available` when the daemon is free; provider or capability
+failure reports `unavailable` and leaves calls unanswered.
+
+## Models and behavior
+
+All paths below are relative to `calls.voice`.
+
+| Setting | Behavior / default |
+| --- | --- |
+| `realtime.provider` | Required; `openai` is the supported adapter. |
+| `realtime.model`, `realtime.voice` | Optional speech model/voice overrides; otherwise provider defaults. |
+| `realtime.instructions` | Optional conversation guidance, up to 4,000 characters. |
+| `agentId` | Required agent for provider authentication and permitted consultations. |
+| `toolPolicy` | `none` by default; `safe-read-only` enables restricted agent consultation. |
+| `allowConsultSessionPersistence` | Must be `true` for consultation, which uses a separate host session per call. |
+| `consultation.model` | Optional `provider/model` for consultations; otherwise the selected agent's model. |
+| `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
+| `maxDurationSeconds` | 300 by default; 30–3,600 seconds. |
+
+The speech model handles conversation; the consultation model handles delegated
+questions and permitted tools. Incoming/outgoing policies default to `disabled`;
+allowlists accept exact IDs, without `*`. Tool callers must also be authorized
+owners in `outboundToolAllowFrom`. Messaging permissions do not authorize calls.
+
+:::note[Good to know]
+Disabled call types are ignored without answering or declining. Video permission
+does not supply video capability: even with `video.enabled: true`, this backend
+cannot handle video or convert it to voice.
+
+The bridge waits for the caller to speak and supports interruption while speaking.
+This adapter does not record calls or store transcripts. Consultation can persist
+in OpenClaw when opted in. Continuous-output GPT-Live and other provider adapters
+fail preflight without automatic fallback.
+:::

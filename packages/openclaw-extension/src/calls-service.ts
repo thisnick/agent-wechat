@@ -3,7 +3,7 @@ import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { NativeCallError, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type NativeCallMediaClient, type NativeCallsClient, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
-import type { ResolvedWeChatCallsConfig } from "./calls-config.ts";
+import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
 
@@ -44,13 +44,14 @@ export class NativeCallService {
   private seen = new Set<string>();
   private loop?: Promise<void>;
   private state = "disabled";
-  private readonly config?: ResolvedWeChatCallsConfig;
+  private readonly config?: ResolvedWeChatVoiceCallsConfig;
   private account: ResolvedWeChatAccount;
   private cfg: unknown;
   private runtime: PluginRuntime;
   private dependencies: CallServiceDependencies;
   constructor(account: ResolvedWeChatAccount, cfg: unknown, runtime: PluginRuntime, dependencies: CallServiceDependencies = {}) {
-    this.account = account; this.cfg = cfg; this.runtime = runtime; this.dependencies = dependencies; this.config = account.calls;
+    this.account = account; this.cfg = cfg; this.runtime = runtime; this.dependencies = dependencies; this.config = account.calls?.voice;
+    if (!this.config && account.calls?.video.enabled) this.state = "unavailable";
   }
   status(): { state: string; owned: boolean; callId?: string } {
     return { state: this.state, owned: this.active?.claimed === true, ...(this.active?.claimed && this.active.callId ? { callId: this.active.callId } : {}) };
@@ -96,7 +97,7 @@ export class NativeCallService {
           }
           const active = this.active;
           if (!active || (active.callId && active.callId !== event.call.callId)) continue;
-          if (event.call.kind !== "direct") { this.state = "needs_review"; await this.retire(active); this.client?.close(); continue; }
+          if (event.call.kind !== "direct" || event.call.callType !== "voice") { this.state = "needs_review"; await this.retire(active); this.client?.close(); continue; }
           if (!event.call.ownedByThisClient) {
             // An offered call may be won by another connection during preflight.
             if (active.callId === event.call.callId && event.call.state !== "offered") { await this.retire(active); this.state = event.call.state === "ended" ? "available" : "busy"; }

@@ -271,7 +271,7 @@ try {
   const end = pluginClient.end.bind(pluginClient);
   pluginClient.end = async (...args) => { await delay(40); return end(...args); };
   const cfg = { channels: { "agent-wechat": { dmPolicy: "open", native: { mode: "external", accountId: ready.accountId, endpoint: ready.baseUrl, token, consumerStateDir: join(temporary, "unused-consumer") },
-    calls: { enabled: true, provider: "synthetic", agentId: "synthetic-agent", inboundPolicy: "disabled", outboundPolicy: "allowlist", outboundAllowTo: ["synthetic-peer"] } } } };
+    calls: { voice: { enabled: true, realtime: { provider: "synthetic" }, agentId: "synthetic-agent", inboundPolicy: "disabled", outboundPolicy: "allowlist", outboundAllowTo: ["synthetic-peer"] }, video: { enabled: false } } } } };
   const prepared = { sampleRate: 16000, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
     async open(value) { providerOpens++; callbacks = value; await providerGate; return { sendAudio: value => providerInput.push(Buffer.from(value)), setMediaTimestamp() {}, close() { providerCloses++; } }; } };
   service = new NativeCallService(resolveWeChatAccount(cfg), cfg, {}, { client: pluginClient, prepareVoice: async () => prepared });

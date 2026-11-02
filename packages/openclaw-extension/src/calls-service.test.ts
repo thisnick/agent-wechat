@@ -7,6 +7,7 @@ import { resolveWeChatAccount } from "./types.ts";
 import { NativeCallService, type CallControlPort, type CallMediaPort } from "./calls-service.ts";
 import { type PreparedCallVoice, type VoiceCallbacks } from "./calls-voice.ts";
 import { resolveWeChatCallsConfig } from "./calls-config.ts";
+import { callsConfigurationKey, resolveCallVoiceApiKey } from "./calls-secrets.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 import { assertCallingToolAccess } from "./calls-tool.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
@@ -25,7 +26,8 @@ const accepted = (callId: string | null = null, ownerToken: string | null = null
 const view = (callId: string, state: CallView["state"] = "connected", ownedByThisClient = true): CallView => ({ callId, revision: 2, kind: "direct", callType: "voice", direction: "incoming", state, ownedByThisClient });
 function configuration() {
   return { channels: { "agent-wechat": { dmPolicy: "open", native: { mode: "external", accountId: "a", endpoint: "http://localhost:6174", token: "synthetic-token-".repeat(4), consumerStateDir: "/synthetic/consumer" }, calls: {
-    enabled: true, provider: "fake", agentId: "voice-agent", inboundPolicy: "allowlist", inboundAllowFrom: ["allowed-peer"], outboundPolicy: "allowlist", outboundAllowTo: ["allowed-peer"], outboundToolAllowFrom: ["owner"],
+    voice: { enabled: true, realtime: { provider: "fake" }, agentId: "voice-agent", inboundPolicy: "allowlist", inboundAllowFrom: ["allowed-peer"], outboundPolicy: "allowlist", outboundAllowTo: ["allowed-peer"], outboundToolAllowFrom: ["owner"],
+    }, video: { enabled: false },
   } } } };
 }
 class Media implements CallMediaPort {
@@ -66,12 +68,23 @@ async function fixture() { const client = new Control(); const voice = voiceFact
 
 test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
-  assert.throws(() => resolveWeChatCallsConfig({ enabled: true }), /configuration/);
-  assert.throws(() => resolveWeChatCallsConfig({ enabled: true, provider: "p", agentId: "a", inboundAllowFrom: ["*"] }), /allowlist/);
-  assert.throws(() => resolveWeChatCallsConfig({ enabled: true, provider: "p", agentId: "a", toolPolicy: "safe-read-only" }), /persistence/);
+  assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true } }), /configuration/);
+  assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", inboundAllowFrom: ["*"] } }), /allowlist/);
+  assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", toolPolicy: "safe-read-only" } }), /persistence/);
   const cfg = configuration(); delete (cfg.channels["agent-wechat"] as any).calls;
   const account = resolveWeChatAccount(cfg as any)!; assert.equal(account.dmPolicy, "open"); assert.equal(account.calls, undefined);
-  for (const calls of [undefined, { enabled: false }]) {
+  const apiKey = "synthetic-openai-secret";
+  const credentials = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: "a", realtime: { provider: "openai", providers: { openai: {
+    apiKey: { source: "env", provider: "voiceenv", id: "WECHAT_TEST_VOICE_KEY" },
+  } } } } })!;
+  assert.equal(await resolveCallVoiceApiKey(credentials.voice!, { secrets: { providers: { voiceenv: { source: "env", allowlist: ["WECHAT_TEST_VOICE_KEY"] } } } }, { WECHAT_TEST_VOICE_KEY: apiKey }), apiKey);
+  assert.equal(JSON.stringify(credentials).includes("WECHAT_TEST_VOICE_KEY"), false);
+  await assert.rejects(resolveCallVoiceApiKey(credentials.voice!, {}, {}), /API key could not be resolved/);
+  const changed = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: "a", realtime: { provider: "openai", providers: { openai: { apiKey } } } } })!;
+  assert.notEqual(callsConfigurationKey(credentials), callsConfigurationKey(changed));
+  assert.equal(JSON.stringify(changed).includes(apiKey), false);
+
+  for (const calls of [undefined, { voice: { enabled: false }, video: { enabled: false } }, { voice: { enabled: false }, video: { enabled: true } }]) {
     const disabledCfg = configuration(); (disabledCfg.channels["agent-wechat"] as any).calls = calls;
     const disabledAccount = resolveWeChatAccount(disabledCfg as any)!;
     const control = new Control(); let prepared = 0;
@@ -82,7 +95,7 @@ test("calling stays disabled independently of open messaging and requires its ow
     control.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
     control.eventsQueue.push({ type: "call.offered", offer });
     await delay(1);
-    assert.equal(disabled.status().state, "disabled");
+    assert.equal(disabled.status().state, calls?.video?.enabled ? "unavailable" : "disabled");
     assert.deepEqual([prepared, control.connects, control.readied, control.answers, control.ends, control.dials], [0, 0, 0, 0, 0, 0]);
     await disabled.stop();
   }
@@ -138,20 +151,28 @@ test("lost offer during provider preparation cannot issue a delayed answer", asy
 });
 test("outgoing target and tool requester permissions are separate from chat and caller permissions", async () => {
   const { service, client } = await fixture(); await assert.rejects(service.dial("unlisted", { assertCurrent() {} }), /destination/); assert.equal(client.dials, 0);
-  const cfg = configuration(); const account = resolveWeChatAccount(cfg as any)!;
+  const cfg = configuration();
+  (cfg.channels["agent-wechat"].calls.voice.realtime as any).providers = { openai: { apiKey: "synthetic-original-key" } };
+  const account = resolveWeChatAccount(cfg as any)!;
   const context = { config: cfg as any, agentId: "voice-agent", requesterSenderId: "owner", senderIsOwner: true, assertInvocationCurrent() {} };
-  const key = nativeConfigurationKey(account.native!); const calls = JSON.stringify(account.calls);
+  const key = nativeConfigurationKey(account.native!); const calls = callsConfigurationKey(account.calls!);
   assert.doesNotThrow(() => assertCallingToolAccess(context, key, calls));
   assert.throws(() => assertCallingToolAccess({ ...context, senderIsOwner: false }, key, calls), /not permitted/);
   assert.throws(() => assertCallingToolAccess({ ...context, requesterSenderId: "allowed-peer" }, key, calls), /not permitted/);
   assert.throws(() => assertCallingToolAccess({ ...context, agentId: "another" }, key, calls), /not permitted/);
+  (cfg.channels["agent-wechat"].calls.voice.realtime as any).providers.openai.apiKey = "synthetic-replaced-key";
+  assert.throws(() => assertCallingToolAccess(context, key, calls), /not permitted/);
+
   await service.stop();
 });
 test("conference targets cannot be dialed through the direct-only plugin", async () => {
-  const cfg = configuration(); cfg.channels["agent-wechat"].calls.outboundAllowTo.push("group@chatroom");
+  const cfg = configuration(); cfg.channels["agent-wechat"].calls.video.enabled = true; cfg.channels["agent-wechat"].calls.voice.outboundAllowTo.push("group@chatroom");
   const client = new Control(); const voice = voiceFactory(); const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared });
   await service.start(); await assert.rejects(service.dial("group@chatroom", { assertCurrent() {} }), /destination/);
-  assert.equal(client.dials, 0); assert.equal(voice.state.opens, 0); await service.stop();
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, callType: "video", phase: "waiting_for_ready" } });
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callType: "video" } });
+  await delay(10);
+  assert.equal(client.dials, 0); assert.equal(voice.state.opens, 0); assert.equal(client.answers, 0); assert.equal(client.readied, 0); await service.stop();
 });
 test("outgoing preflight rechecks invocation authority and releases its provider without dialing", async () => {
   const { service, client, voice } = await fixture(); let checks = 0;

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import type { ResolvedWeChatCallsConfig } from "./calls-config.ts";
+import { resolveCallVoiceApiKey } from "./calls-secrets.ts";
+import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 
 export type StreamingPcmResampler = { process(chunk: Buffer): Buffer; flush(): Buffer };
 export type VoiceCallbacks = {
@@ -21,7 +22,7 @@ const fits = (formats: ProviderCapabilities["inputAudioFormats"]) => formats?.so
 
 /** 2026.10.7 publishes these subpaths as JavaScript without declarations. Check
  * its exported entry points at runtime; never import private hashed bundles. */
-export async function prepareOpenClawCallVoice(config: ResolvedWeChatCallsConfig, cfg: unknown, runtime: PluginRuntime,
+export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsConfig, cfg: unknown, runtime: PluginRuntime,
   dependencies?: { voiceSdk: Record<string, any>; audioSdk: Record<string, any> }): Promise<PreparedCallVoice> {
   const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
   const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";
@@ -31,8 +32,13 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatCallsConfig
   }
   if (typeof audioSdk.createStreamingPcmResampler !== "function") throw Error("Calling streaming resampler unavailable");
   if (config.toolPolicy !== "none" && (typeof sdk.consultRealtimeVoiceAgent !== "function" || !runtime.agent?.runEmbeddedAgent || !config.allowConsultSessionPersistence)) throw Error("Calling consultation unavailable");
-  const selected = sdk.resolveConfiguredRealtimeVoiceProvider({ cfg, configuredProviderId: config.provider, agentId: config.agentId, surface: "bridge",
-    providerConfigOverrides: { ...(config.model ? { model: config.model } : {}), ...(config.voice ? { voice: config.voice } : {}) }, useProviderDefaultModel: true, autoRespondToAudio: true }) as { provider: unknown; providerConfig: unknown; capabilities?: ProviderCapabilities };
+  const apiKey = await resolveCallVoiceApiKey(config, cfg);
+  let selected: { provider: unknown; providerConfig: unknown; capabilities?: ProviderCapabilities };
+  try {
+    selected = sdk.resolveConfiguredRealtimeVoiceProvider({ cfg, configuredProviderId: config.realtime.provider, agentId: config.agentId, surface: "bridge",
+      providerConfigs: apiKey === undefined ? undefined : { openai: { apiKey } },
+      providerConfigOverrides: { ...(config.realtime.model ? { model: config.realtime.model } : {}), ...(config.realtime.voice ? { voice: config.realtime.voice } : {}) }, useProviderDefaultModel: true, autoRespondToAudio: true });
+  } catch { throw Error("Calling realtime provider configuration unavailable"); }
   const capabilities = selected.capabilities;
   // This pinned response bridge supplies item IDs for fencing interrupted output.
   // Continuous and other provider contracts need their own reviewed adapter.
@@ -57,6 +63,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatCallsConfig
       const fail = () => { if (!closed) { rejectReady(Error("Calling provider failed")); callbacks.failed(); } };
       const abort = () => { closed = true; rejectReady(Error("Calling provider stopped")); void Promise.resolve(session?.close()).catch(() => {}); };
       signal.throwIfAborted(); signal.addEventListener("abort", abort, { once: true });
+      const consultModel = config.consultation.model?.split(/\/(.*)/s);
       const sessionKey = `agent:${config.agentId}:wechat-call:${randomUUID()}`;
       let consulting = false;
       const consult = async (question: string, requestSignal?: AbortSignal): Promise<{ text: string }> => {
@@ -67,14 +74,15 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatCallsConfig
             contextMode: "isolated", senderId: context.senderId, senderIsOwner: false, messageProvider: "agent-wechat",
             toolsAllow: sdk.resolveRealtimeVoiceAgentConsultToolsAllow(config.toolPolicy), transcript: [], args: { question },
             surface: "a WeChat voice call", userLabel: "Caller", assistantLabel: "Assistant", runIdPrefix: "wechat-call", lane: "wechat-call",
-            timeoutMs: 30000, abortSignal: requestSignal ? AbortSignal.any([signal, requestSignal]) : signal,
+            timeoutMs: config.consultation.timeoutMs, ...(consultModel ? { provider: consultModel[0], model: consultModel[1] } : {}),
+            abortSignal: requestSignal ? AbortSignal.any([signal, requestSignal]) : signal,
             logger: { info() {}, warn() {}, error() {} } }) as { text: string };
         } finally { consulting = false; }
       };
       try {
         session = sdk.createRealtimeVoiceBridgeSession({ cfg, agentId: config.agentId, provider: selected.provider, providerConfig: selected.providerConfig,
           capabilities, audioFormat: PCM, autoRespondToAudio: true, interruptResponseOnInputAudio: true,
-          instructions: "Speak concisely with the caller. Calling permission does not grant account-owner authority. Do not claim to perform actions unless a permitted tool confirms them.",
+          instructions: ["Speak concisely with the caller. Calling permission does not grant account-owner authority. Do not claim to perform actions unless a permitted tool confirms them.", config.realtime.instructions].filter(Boolean).join("\n\n"),
           tools: sdk.resolveRealtimeVoiceAgentConsultTools(config.toolPolicy), triggerGreetingOnReady: false, markStrategy: "ignore",
           audioSink: { isOpen: () => ready && !closed && !signal.aborted, sendAudio: callbacks.audio, clearAudio: callbacks.clear },
           onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: fail, onError: fail,

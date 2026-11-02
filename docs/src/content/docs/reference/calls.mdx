@@ -56,27 +56,8 @@ reference for connection timeouts and media rules.
 Interactive participation requires a `call-audio` build. A late answer stays tied
 to the selected offer; it must not answer a replacement caller.
 
-OpenClaw voice calling defaults to off. Disable it with:
-
-```json
-{
-  "channels": {
-    "agent-wechat": {
-      "calls": {
-        "enabled": false
-      }
-    }
-  }
-}
-```
-
-The plugin then ignores incoming calls, leaving other clients free to answer.
-When enabled, configure its separate `inboundAllowFrom`,
-`outboundAllowTo` and `outboundToolAllowFrom` lists; messaging permission grants
-none of them. The OpenAI response audio bridge streams audio to its provider and
-checks readiness before answering. It uses no local microphone. Read-only agent
-consultation requires opting into both consultation and the host's per-call
-session storage.
+Configure independent voice/video permissions, realtime speech models, OpenAI
+credentials and consultation in [Set up calling](/openclaw/calling/).
 
 :::note[Good to know]
 Calling is disabled in the default daemon. The native worker is restricted to an

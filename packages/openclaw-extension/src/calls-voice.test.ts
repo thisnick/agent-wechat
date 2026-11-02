@@ -6,7 +6,7 @@ import { callsConfigSchema, resolveWeChatCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type VoiceCallbacks } from "./calls-voice.ts";
 
 const pcm = { encoding: "pcm16", sampleRateHz: 24000, channels: 1 };
-function config(consult = false) { return resolveWeChatCallsConfig({ enabled: true, provider: "openai", agentId: "agent", toolPolicy: consult ? "safe-read-only" : "none", allowConsultSessionPersistence: consult })!; }
+function config(consult = false) { return resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "openai" }, agentId: "agent", toolPolicy: consult ? "safe-read-only" : "none", allowConsultSessionPersistence: consult } })!.voice!; }
 const callbacks: VoiceCallbacks = { audio() {}, clear() {}, failed() {} };
 
 test("calling schemas agree across runtime and installed plugin manifests", async () => {
@@ -16,6 +16,10 @@ test("calling schemas agree across runtime and installed plugin manifests", asyn
   assert.deepEqual(manifest.channelConfigs["agent-wechat"].schema.properties.calls, callsConfigSchema);
   assert.deepEqual(pkg.openclaw.channelConfigs["agent-wechat"].schema.properties.calls, callsConfigSchema);
   assert.equal(manifest.toolMetadata.wechat_call.optional, true);
+  const credentialPath = "calls.voice.realtime.providers.openai.apiKey";
+  assert.ok(manifest.configContracts.secretInputs.paths.some((item: any) => item.path === credentialPath && item.expected === "string"));
+  assert.equal(manifest.uiHints[credentialPath].sensitive, true);
+
 });
 
 test("installed host bridge and streaming resampler work with an account-free fake provider", async () => {
@@ -28,12 +32,21 @@ test("installed host bridge and streaming resampler work with an account-free fa
     sendAudio: (value: Buffer) => input.push(value), setMediaTimestamp() {}, acknowledgeMark() {}, submitToolResult() {},
     close: () => { closed++; connected = false; },
   }; } };
-  let resolved = 0;
-  const prepared = await prepareOpenClawCallVoice(config(), {}, {} as PluginRuntime, {
-    voiceSdk: { ...sdk, createRealtimeVoiceBridgeSession: (params: unknown) => { bridgeParams = params; return sdk.createRealtimeVoiceBridgeSession(params); }, resolveConfiguredRealtimeVoiceProvider: () => { resolved++; return { provider: fake, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true } }; } }, audioSdk: audio,
+  let resolved = 0; let selection: any;
+  const customized = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: "agent", realtime: {
+    provider: "openai", model: "synthetic-realtime", voice: "synthetic-voice", instructions: "Use short sentences.",
+    providers: { openai: { apiKey: "synthetic-openai-secret" } },
+  } } })!.voice!;
+  const prepared = await prepareOpenClawCallVoice(customized, {}, {} as PluginRuntime, {
+    voiceSdk: { ...sdk, createRealtimeVoiceBridgeSession: (params: unknown) => { bridgeParams = params; return sdk.createRealtimeVoiceBridgeSession(params); }, resolveConfiguredRealtimeVoiceProvider: (params: any) => { selection = params; resolved++; return { provider: fake, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true } }; } }, audioSdk: audio,
   });
+  assert.deepEqual(selection.providerConfigOverrides, { model: "synthetic-realtime", voice: "synthetic-voice" });
+  assert.equal(selection.providerConfigs.openai.apiKey, "synthetic-openai-secret");
+  assert.equal(JSON.stringify(customized).includes("synthetic-openai-secret"), false);
   assert.equal(resolved, 1); let heard = 0; let clears = 0;
   const session = await prepared.open({ audio: (_value, metadata) => { heard++; assert.equal(metadata?.itemId, "item"); }, clear: () => { clears++; }, failed() { assert.fail("Unexpected provider failure"); } }, { senderId: "synthetic-peer", signal: new AbortController().signal });
+  assert.match(bridgeParams.instructions, /Use short sentences/);
+  assert.match(bridgeParams.instructions, /does not grant account-owner authority/);
   session.sendAudio(Buffer.alloc(960)); assert.equal(input.length, 1);
   providerRequest.onAudio(Buffer.alloc(960), { itemId: "item" }); providerRequest.onClearAudio("barge-in"); assert.equal(heard, 1); assert.equal(clears, 1);
   assert.deepEqual(providerRequest.tools, []); assert.equal(providerRequest.runAgentConsult, undefined); assert.equal(bridgeParams.onTranscript, undefined);
@@ -52,6 +65,10 @@ test("missing SDK and incompatible provider capabilities fail before creating a 
   const sdk = { createRealtimeVoiceBridgeSession() { created++; }, resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai" }, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [], supportsBargeIn: true } }), resolveRealtimeVoiceAgentConsultTools() {}, resolveRealtimeVoiceAgentConsultToolsAllow() {} };
   await assert.rejects(prepareOpenClawCallVoice(config(), {}, {} as PluginRuntime, { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } }), /capabilities unavailable/);
   assert.equal(created, 0);
+  await assert.rejects(prepareOpenClawCallVoice(config(), {}, {} as PluginRuntime, { voiceSdk: { ...sdk,
+    resolveConfiguredRealtimeVoiceProvider() { throw Error("synthetic-private-provider-detail"); },
+  }, audioSdk: { createStreamingPcmResampler() {} } }), error => error instanceof Error && error.message === "Calling realtime provider configuration unavailable");
+
 });
 
 test("opted-in consultation is isolated, non-owner, policy-limited and deduplicated", async () => {
@@ -66,11 +83,13 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
     consultRealtimeVoiceAgent: async (args: unknown) => { consultations.push(args); return { text: "Synthetic result" }; },
   };
   const runtime = { agent: { runEmbeddedAgent() {} } } as unknown as PluginRuntime;
-  const prepared = await prepareOpenClawCallVoice(config(true), {}, runtime, { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } });
+  const consulted = config(true); consulted.consultation = { model: "synthetic-provider/synthetic-model", timeoutMs: 15000 };
+  const prepared = await prepareOpenClawCallVoice(consulted, {}, runtime, { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } });
   const session = await prepared.open(callbacks, { senderId: "synthetic-peer", signal: new AbortController().signal });
   const event = { callId: "tool1", name: "openclaw_agent_consult", args: { question: "Read synthetic data" } };
   await bridgeArgs.onToolCall(event); await bridgeArgs.onToolCall(event);
   assert.equal(consultations.length, 1); assert.equal(results.length, 2); assert.equal(consultations[0].senderIsOwner, false);
+  assert.equal(consultations[0].provider, "synthetic-provider"); assert.equal(consultations[0].model, "synthetic-model"); assert.equal(consultations[0].timeoutMs, 15000);
   assert.deepEqual(consultations[0].toolsAllow, ["read"]); assert.deepEqual(consultations[0].transcript, []);
   assert.match(consultations[0].sessionKey, /^agent:agent:wechat-call:/); assert.equal(bridgeArgs.onTranscript, undefined);
   await bridgeArgs.onToolCall({ ...event, callId: "tool2", name: "exec" }); assert.equal(consultations.length, 1);

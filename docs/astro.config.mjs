@@ -79,6 +79,7 @@ export default defineConfig({
           { label: 'OpenClaw', items: [
             { label: 'Quick setup', slug: 'openclaw/setup' },
             { label: 'Managed or external', slug: 'openclaw/modes' },
+            { label: 'Calling', slug: 'openclaw/calling' },
             { label: 'Who the bot answers', slug: 'openclaw/access' },
             { label: 'Agent tools', slug: 'openclaw/tools' },
             { label: 'Read receipts', slug: 'openclaw/read-receipts' },

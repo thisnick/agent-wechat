@@ -10,3 +10,5 @@ Exchange raw PCM samples on media sockets with JSON stream setup; buffer, frame 
 Keep active direct voice calls connected across peer microphone mute and unmute updates without replacing their admitted media context.
 
 Report verified peer microphone mute/unmute as typed control events and current-call snapshots. Use WebSocket liveness for owner cleanup, attempt graceful call shutdown, and locally end abandoned sessions on restart while preserving uncertain network receipts.
+
+Configure voice and video permissions separately in OpenClaw. Group realtime speech settings, OpenAI SecretRef credentials and independent consultation model/timeouts under the voice configuration; keep unavailable video calls unclaimed.

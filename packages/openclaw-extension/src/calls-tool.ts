@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 import { resolveWeChatAccount } from "./types.ts";
+import { callsConfigurationKey } from "./calls-secrets.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 import type { NativeCallService } from "./calls-service.ts";
 
@@ -7,9 +8,9 @@ export function registerNativeCallTool(api: OpenClawPluginApi, service: () => Na
   api.registerTool({ contextVersion: 2, create: context => {
     const cfg = context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
     const account = cfg && resolveWeChatAccount(cfg as unknown as Record<string, unknown>);
-    if (!account?.enabled || !account.calls || !account.native) return [];
+    if (!account?.enabled || !account.calls?.voice || !account.native) return [];
     const configurationKey = nativeConfigurationKey(account.native);
-    const callConfiguration = JSON.stringify(account.calls);
+    const callConfiguration = callsConfigurationKey(account.calls);
     const check = () => assertCallingToolAccess(context, configurationKey, callConfiguration);
     return [{ name: "wechat_call", label: "WeChat Call", catalogMode: "direct-only" as const,
       description: "Check this plugin's voice-call status, initiate one authorized direct voice call, or end its owned call. Calls require separate calling allowlists and provider readiness. Never retry an uncertain dial or call without the user's request. This tool does not open a computer microphone, record calls, or grant caller owner privileges.",
@@ -35,6 +36,6 @@ export function assertCallingToolAccess(context: OpenClawPluginToolContext, conf
   context.assertInvocationCurrent();
   const cfg = context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
   const current = cfg && resolveWeChatAccount(cfg as unknown as Record<string, unknown>);
-  if (!current?.enabled || !current.native || !current.calls || nativeConfigurationKey(current.native) !== configurationKey || JSON.stringify(current.calls) !== callConfiguration
-    || context.agentId !== current.calls.agentId || context.senderIsOwner !== true || !context.requesterSenderId || !current.calls.outboundToolAllowFrom.includes(context.requesterSenderId)) throw Error("Calling tool is not permitted for this requester");
+  if (!current?.enabled || !current.native || !current.calls?.voice || nativeConfigurationKey(current.native) !== configurationKey || callsConfigurationKey(current.calls) !== callConfiguration
+    || context.agentId !== current.calls.voice.agentId || context.senderIsOwner !== true || !context.requesterSenderId || !current.calls.voice.outboundToolAllowFrom.includes(context.requesterSenderId)) throw Error("Calling tool is not permitted for this requester");
 }
