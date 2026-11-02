@@ -68,6 +68,7 @@ jobs:
         with:
           toolchain: 1.93.1
           components: rustfmt, clippy
+          targets: ${{ matrix.suite == 'test' && runner.arch == 'X64' && 'wasm32-unknown-unknown' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/native-client-rust -> target
@@ -125,6 +126,18 @@ jobs:
             packages+=(--exclude wechat-simulator)
           fi
           cargo test --workspace "${packages[@]}" --all-features --locked
+      # Workspace all-feature tests above already cover the native codec and
+      # audio libraries. Keep the virtual-device and portable-target checks here
+      # instead of scheduling another Linux runner for the same unit tests.
+      - name: Build isolated audio probe
+        if: matrix.suite == 'test' && runner.arch == 'X64'
+        run: cargo build --locked -p wechat-audio --features native-audio --example isolated_loopback
+      - name: Exercise generated audio through an isolated sound server
+        if: matrix.suite == 'test' && runner.arch == 'X64'
+        run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
+      - name: Check portable call media for WebAssembly
+        if: matrix.suite == 'test' && runner.arch == 'X64'
+        run: cargo check --locked -p wechat-calls --target wasm32-unknown-unknown
       - if: matrix.suite == 'test'
         run: |
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then
@@ -160,43 +173,3 @@ jobs:
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: node --experimental-strip-types scripts/native-calls-api-smoke.mjs
-
-  call-libraries:
-    name: Call libraries (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04, macos-15, windows-latest]
-    defaults:
-      run:
-        working-directory: packages/native-client-rust
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
-          components: rustfmt, clippy
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpulse-dev cmake
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/native-client-rust -> target
-          key: call-libraries-${{ matrix.runner }}
-      - name: Lint native call libraries
-        run: cargo clippy --locked -p wechat-calls -p wechat-audio --all-targets --features wechat-calls/native-opus,wechat-audio/native-audio -- -D warnings
-      - name: Test native Opus with generated audio
-        run: cargo test --locked -p wechat-calls --features native-opus
-      - name: Test native audio adapters without opening devices
-        run: cargo test --locked -p wechat-audio --features native-audio
-      - name: Build isolated audio probe
-        if: runner.os == 'Linux'
-        run: cargo build --locked -p wechat-audio --features native-audio --example isolated_loopback
-      - name: Exercise generated audio through an isolated sound server
-        if: runner.os == 'Linux'
-        run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
-      - name: Check portable call media for WebAssembly
-        if: runner.os == 'Linux'
-        run: cargo check --locked -p wechat-calls --target wasm32-unknown-unknown
