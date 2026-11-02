@@ -74,6 +74,8 @@ struct Host {
     gate: Gate,
     post_join_gate: Gate,
     sync_held: AtomicBool,
+    hold_acked_poll: AtomicBool,
+    reject_poll_gate: Gate,
     exit_members: Mutex<Vec<u32>>,
 }
 impl Host {
@@ -83,6 +85,8 @@ impl Host {
             ready_media,
             routes: Mutex::new(vec![]),
             sync_held: AtomicBool::new(false),
+            hold_acked_poll: AtomicBool::new(false),
+            reject_poll_gate: Gate::default(),
             exit_members: Mutex::new(vec![]),
             gate: Gate::default(),
             post_join_gate: Gate::default(),
@@ -135,6 +139,18 @@ impl TestCallIo for Host {
             } else {
                 self.gate.wait()?;
             }
+        }
+        if route == CallHostRoute::LiveSync
+            && self.hold_acked_poll.load(Ordering::Acquire)
+            && self
+                .routes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(route, _)| *route == CallHostRoute::LiveSync)
+            && !self.sync_held.swap(true, Ordering::AcqRel)
+        {
+            self.reject_poll_gate.wait()?;
         }
         if route == CallHostRoute::Transfer
             && ((command == Some(3361)
@@ -580,6 +596,7 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.host.gate.release();
         self.host.post_join_gate.release();
+        self.host.reject_poll_gate.release();
         if let Some(worker) = self.backend.inner.active.lock().unwrap().clone() {
             worker.stop.store(true, Ordering::Release);
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -814,23 +831,64 @@ async fn explicit_reject_preserves_lost_reply_without_retry_or_a_live_session() 
         (Case::LostReject, CallCommandStatus::Accepted),
     ] {
         let f = Fixture::new(case);
+        f.host.hold_acked_poll.store(true, Ordering::Release);
         let mut client = f.client().await;
         f.stage(false, 0);
         let offer = f.offer().await;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            f.host.reject_poll_gate.entered.notified(),
+        )
+        .await
+        .unwrap();
+        let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
+        let polls_before_reject = f
+            .host
+            .seen()
+            .iter()
+            .filter(|(route, _)| *route == CallHostRoute::LiveSync)
+            .count();
         f.core
             .call_service()
             .command(
                 &client.client_id,
                 CallCommand::Reject {
                     request_id: "reject".into(),
-                    call_id: offer.call_id,
+                    call_id: offer.call_id.clone(),
                     expected_revision: offer.revision,
                 },
             )
             .await
             .unwrap();
         assert_eq!(result(&mut client, "reject").await, expected);
+        f.host.reject_poll_gate.release();
+        // Starve the queued backend dispatch on this single-thread runtime.
+        // The unsent poll must not retire the actor before Reject arrives.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while worker.done.lock().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            worker.done.lock().unwrap().is_none(),
+            "accepted Reject lost its actor before backend dispatch"
+        );
         f.finished().await;
+        assert_eq!(
+            f.host
+                .seen()
+                .iter()
+                .filter(|(route, _)| *route == CallHostRoute::LiveSync)
+                .count(),
+            polls_before_reject
+        );
+        assert!(f
+            .core
+            .store
+            .call_action_records("one", &offer.call_id)
+            .unwrap()
+            .iter()
+            .any(|record| record.route == CallHostRoute::LiveSync.command()
+                && record.outcome == "not_submitted"));
         let snapshot = f.snapshot().await;
         assert!(!snapshot.availability.busy);
         if matches!(case, Case::LostReject) {

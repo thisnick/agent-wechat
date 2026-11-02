@@ -289,21 +289,39 @@ impl Ownership {
             .filter(|operation| matches!(operation, Operation::Dial | Operation::Answer))
     }
     #[cfg(feature = "native-calls")]
-    pub(super) fn pending_end(
+    pub(super) fn pending_terminal_operation(
         &self,
         authority: &AccountAuthority,
         identity: &CallIdentity,
-    ) -> bool {
-        self.session.as_ref().is_some_and(|session| {
+    ) -> Option<Operation> {
+        let session = self.session.as_ref().filter(|session| {
             &session.authority == authority
                 && session.attempt == identity.attempt
                 && session.id == identity.call_id
                 && !session.invalidated
                 && session.phase == Phase::Ending
-                && session.pending.as_ref().is_some_and(|ticket| {
-                    matches!(ticket.operation, Operation::Cancel | Operation::Hangup)
-                })
-        })
+        })?;
+        session
+            .pending
+            .as_ref()
+            .map(|ticket| ticket.operation)
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    Operation::Reject | Operation::Cancel | Operation::Hangup
+                )
+            })
+    }
+    #[cfg(feature = "native-calls")]
+    pub(super) fn pending_end(
+        &self,
+        authority: &AccountAuthority,
+        identity: &CallIdentity,
+    ) -> bool {
+        matches!(
+            self.pending_terminal_operation(authority, identity),
+            Some(Operation::Cancel | Operation::Hangup)
+        )
     }
     /// Reserve the global slot for the initiating client before Invite.
     pub fn dial(

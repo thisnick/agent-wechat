@@ -361,6 +361,12 @@ impl Actor {
             if self.drain_commands()? {
                 return Ok(());
             }
+            if self.awaiting_reject() {
+                // Broker admission precedes asynchronous backend delivery.
+                // Keep the actor, but do not retry its already fenced poll.
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             ensure!(
                 self.worker.lease.current(),
                 "Incoming account authority revoked"
@@ -432,6 +438,17 @@ impl Actor {
                 .as_ref()
                 .is_some_and(BackendSink::has_accepted_end)
     }
+    fn awaiting_reject(&self) -> bool {
+        self.phase() == IncomingPhase::Acknowledged
+            && self.worker.lease.current()
+            && self.worker.scope_current()
+            && !self.worker.stop.load(Ordering::Acquire)
+            && !self.mailbox.cancellation_pending()
+            && self
+                .core
+                .call_service()
+                .pending_incoming_reject(self.worker.lease.authority(), &self.worker.identity)
+    }
     fn register_member(&self) -> Result<()> {
         let room = self
             .session
@@ -468,6 +485,9 @@ impl Actor {
         {
             if self.drain_commands()? {
                 return Ok(true);
+            }
+            if self.awaiting_reject() {
+                return Ok(false);
             }
             if self.ignored_cancellations != ignored
                 && self.worker.lease.current()
