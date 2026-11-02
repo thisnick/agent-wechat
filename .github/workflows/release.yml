@@ -75,6 +75,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Install the verified CLI audio runtime dependency
+        if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpulse0
+
       - name: Verify native assets and embed npm checksum manifest
         if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
         run: node scripts/native-prepare-package.mjs --if-unpublished
