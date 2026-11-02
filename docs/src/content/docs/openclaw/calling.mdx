@@ -23,8 +23,8 @@ to disabled. The current daemon and plugin handle direct voice calls.
 
 ## Configure speech and access
 
-Merge this example into your OpenClaw configuration, preserving the channel's
-existing `enabled` and `native` settings. Replace the example contact and owner IDs.
+Merge this example into your existing channel and agent configuration. Replace
+the example contact and owner IDs.
 Set `OPENAI_API_KEY` in the **Gateway process's environment**.
 
 ```json
@@ -34,6 +34,15 @@ Set `OPENAI_API_KEY` in the **Gateway process's environment**.
       "voiceenv": {
         "source": "env",
         "allowlist": ["OPENAI_API_KEY"]
+      }
+    }
+  },
+  "agents": {
+    "entries": {
+      "main": {
+        "tools": {
+          "alsoAllow": ["wechat_call"]
+        }
       }
     }
   },
@@ -79,6 +88,9 @@ Set `OPENAI_API_KEY` in the **Gateway process's environment**.
 When omitted, OpenClaw uses the selected agent's OpenAI authentication or Gateway
 environment. A text-agent subscription alone does not necessarily grant realtime
 API access. The daemon token and OpenAI key are separate credentials.
+
+`wechat_call` is optional: the example grants it to `main` for status, outbound
+calls and hangup. Automatic inbound answering does not require this tool.
 
 Restart the Gateway after saving the configuration. An enabled, prepared voice
 service reports `available` when the daemon is free; provider or capability

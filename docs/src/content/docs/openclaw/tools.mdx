@@ -18,6 +18,13 @@ Besides replying, the agent gets tools for the **current chat**. They can't see 
 
 For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
 
+## Calling
+
+The optional `wechat_call` tool checks status, places an allowed direct voice
+call, or ends the call this plugin owns. It requires separate calling permissions
+and an authorized owner; messaging permission alone does not grant it.
+See [Set up calling](../calling/) for the tool grant, credentials and model setup.
+
 ## Choose a message destination
 
 For OpenClaw's built-in `message` tool, use the contact or chat ID returned by

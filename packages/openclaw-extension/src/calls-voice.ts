@@ -20,8 +20,8 @@ type ProviderCapabilities = { inputAudioFormats?: Array<{ encoding: string; samp
 const PCM = { encoding: "pcm16", sampleRateHz: 24000, channels: 1 };
 const fits = (formats: ProviderCapabilities["inputAudioFormats"]) => formats?.some(format => format.encoding === PCM.encoding && format.sampleRateHz === PCM.sampleRateHz && format.channels === 1) === true;
 
-/** 2026.10.7 publishes these subpaths as JavaScript without declarations. Check
- * its exported entry points at runtime; never import private hashed bundles. */
+/** Check the supported public realtime entry points at runtime; never import
+ * private hashed bundles to bridge differences between host versions. */
 export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsConfig, cfg: unknown, runtime: PluginRuntime,
   dependencies?: { voiceSdk: Record<string, any>; audioSdk: Record<string, any> }): Promise<PreparedCallVoice> {
   const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
