@@ -465,7 +465,7 @@ mod tests {
                     |row| row.get::<_, i64>(0)
                 )?))
                 .unwrap(),
-            11
+            12
         );
         drop(store);
         let store = Store::open_existing(&root).unwrap();
