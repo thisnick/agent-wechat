@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Real pinned Gateway/model runtime; both native API and model are local fixtures.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -13,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.7');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') {
@@ -54,7 +55,8 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
   try {
     await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
     for (const file of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', file), join(temporary, 'plugin', file));
-    await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
+    await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+    await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
     upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const nativePort = upstream.address().port;
     const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
     const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false },

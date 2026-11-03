@@ -22,27 +22,51 @@ process = subprocess.Popen([
     "--tmpfs", "/var/cache/agent-wechat:rw,uid=10001,gid=10001,mode=0700,size=16m",
     image, "serve", "--listen", "127.0.0.1:0", "--data-dir", "/var/lib/agent-wechat",
 ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+observer = None
 try:
     ready = False
+    listen = None
+    startup_lines = []
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline and process.poll() is None:
         readable, _, _ = select.select([process.stderr], [], [], min(1, max(0, deadline - time.monotonic())))
         if not readable:
             continue
         line = process.stderr.readline()
+        startup_lines.append(line)
         try:
             value = json.loads(line)
         except (ValueError, TypeError):
             continue
         if value.get("state") == "ready":
             ready = True
+            listen = value["listen"]
             break
-    assert ready, "native image did not reach readiness as non-root with read-only image and private data/scratch mounts"
+    if not ready:
+        if process.poll() is not None:
+            startup_lines.append(process.stderr.read())
+        raise AssertionError("native image did not reach readiness as non-root with read-only image and private data/scratch mounts: "
+                             + "".join(startup_lines)[-2000:])
+    client = ["docker", "exec", name, "/usr/local/bin/wx", "--json", "--server", f"http://{listen}",
+              "--token-file", "/var/lib/agent-wechat/api-token"]
+    subprocess.run([*client, "accounts", "create", "calls-smoke"], check=True, stdout=subprocess.DEVNULL)
+    current = subprocess.run([*client, "--account", "calls-smoke", "calls", "status"],
+                             check=True, capture_output=True, text=True, timeout=15)
+    snapshot = json.loads(current.stdout)
+    assert snapshot["capabilities"] == {} and snapshot["currentCall"] is None
+    observer = subprocess.Popen([*client, "--account", "calls-smoke", "calls", "monitor"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    readable, _, _ = select.select([observer.stdout], [], [], 15)
+    assert readable, "shipped image did not expose the call control socket"
+    hello = json.loads(observer.stdout.readline())
+    assert hello["type"] == "hello" and hello["protocolVersion"] == 1 and hello["capabilities"] == {}
     subprocess.run(["docker", "stop", "--time", "10", name], check=True, stdout=subprocess.DEVNULL)
     process.wait(timeout=15)
     assert process.returncode == 0, "native image did not stop gracefully"
-    print("Native image smoke passed: UID10001, private data/scratch permissions, read-only image startup and graceful stop. No ports, profile, login or send.")
+    print("Native image smoke passed: UID10001, private data/scratch permissions, read-only image startup, calling routes with transmission disabled, and graceful stop. No published ports, real profile, login or send.")
 finally:
     if process.poll() is None:
         subprocess.run(["docker", "stop", "--time", "10", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         process.wait(timeout=15)
+    if observer is not None:
+        observer.wait(timeout=15)

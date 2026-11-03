@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Real pinned Gateway, per-agent policies and provider tool calls; all data is synthetic.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -13,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.7');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
 const temporary = await mkdtemp(join(tmpdir(), 'native-archive-policy-'));
 const token = 'synthetic-native-token-'.repeat(3), streams = new Set(), requests = [], accesses = [];
 const roles = ['ungranted', 'ordinary', 'privileged'], inputRechecks = new Set();
@@ -123,7 +124,8 @@ const upstream = createServer(async (req, res) => {
 try {
   await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
   for (const name of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', name), join(temporary, 'plugin', name));
-  await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-archive-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
+  await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+  await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-archive-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const apiPort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const native = { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${apiPort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy: 'never' };
@@ -165,7 +167,7 @@ try {
   assert.ok(fileResult.attachment.path.startsWith(join(temporary, 'state/media') + '/'), 'Archive file path must be in managed media storage');
   assert.deepEqual(await readFile(fileResult.attachment.path), file, 'Provider file path must resolve to the verified attachment bytes');
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));
-  console.log(JSON.stringify({ gatewayVersion: '2026.10.7', startupEventReplay: true, sourceInputRechecks: true, optionalToolsAbsentWithoutGrant: true, denyOverridesFullProfile: true, guessedArchiveCallsRejected: true,
+  console.log(JSON.stringify({ gatewayVersion: '2026.10.9', startupEventReplay: true, sourceInputRechecks: true, optionalToolsAbsentWithoutGrant: true, denyOverridesFullProfile: true, guessedArchiveCallsRejected: true,
     accountWideSearchAndPagination: true, otherSenderHistoryAndMedia: true, defaultToolsRemainCurrentThread: true, archiveImageHashReachedProvider: true, archiveFilePathReachedProvider: true }));
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(5000)]); if (child.exitCode === null) child.kill('SIGKILL'); }

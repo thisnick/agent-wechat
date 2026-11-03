@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Actual pinned plugin/tool/intake runtime; all account and provider data is synthetic.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -13,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.7');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
 const temporary = await mkdtemp(join(tmpdir(), 'native-recall-model-'));
 const token = 'synthetic-native-token-'.repeat(3), serverId = '18446744073709551614';
 const messages = new Map(), journal = [], streams = new Set(), posts = [], sends = [], requests = [], acknowledgements = [];
@@ -136,7 +137,8 @@ const item = async id => { try { return (await custody()).items[id]; } catch { r
 try {
   await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
   for (const file of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', file), join(temporary, 'plugin', file));
-  await build({ entryPoints: [join(root, 'packages/openclaw-extension/index.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw'], outfile: join(temporary, 'plugin/dist/index.js') });
+  await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+  await build({ entryPoints: [join(root, 'packages/openclaw-extension/index.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const apiPort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false }, session: { dmScope: 'per-channel-peer' },
@@ -197,7 +199,7 @@ try {
   assert.equal((await item(reused.id)).message.body, reused.body);
   const persisted = await readFile(custodyPath, 'utf8');
   assert.ok(!persisted.includes('runtime-recall-blocked-original')); assert.ok(!persisted.includes('Late original must not be delivered'));
-  console.log(JSON.stringify({ gatewayVersion: '2026.10.7', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
+  console.log(JSON.stringify({ gatewayVersion: '2026.10.9', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
     recallPostAttempts: posts.length, nativeRecallAttempts: nativeRecalls, foreignThreadRejected: true, sseRecallWhileModelBlocked: true,
     lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, recycledIdRecallAckPreservesCurrent: true }));
 } finally {

@@ -75,6 +75,7 @@ jobs:
               - 'packages/openclaw-extension/**'
               - 'packages/shared/**'
               - 'scripts/native-gateway-smoke.mjs'
+              - 'scripts/native-smoke-plugin.mjs'
               - 'scripts/native-model-smoke.mjs'
               - 'scripts/native-media-model-smoke.mjs'
               - 'scripts/native-history-model-smoke.mjs'
@@ -184,6 +185,8 @@ jobs:
             type=gha,scope=native-linux-artifact-${{ runner.arch }}
             type=gha,scope=native-linux-${{ runner.arch }}
           cache-to: type=gha,mode=max,scope=native-linux-artifact-${{ runner.arch }}
+      - name: Install the extracted CLI audio runtime dependency
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpulse0
       - run: bash scripts/native-build-release.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci

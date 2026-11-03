@@ -1,5 +1,43 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.3
+
+### Patch Changes
+
+- [#370](https://github.com/thisnick/agent-wechat/pull/370) [`998830d`](https://github.com/thisnick/agent-wechat/commit/998830d5b2ab58f0ce13bbcf78bc35a78138d24c) Thanks [@thisnick](https://github.com/thisnick)! - Register the native call backend during normal daemon startup for authenticated accounts. Remove the separate test-startup flag and optional daemon/CLI calling/audio branches, retaining call ownership, credential, cleanup and media safety checks.
+
+## 1.4.0-beta.2
+
+### Patch Changes
+
+- [#368](https://github.com/thisnick/agent-wechat/pull/368) [`8c93201`](https://github.com/thisnick/agent-wechat/commit/8c9320117996e7bd91b71b5803a16fb506142d77) Thanks [@thisnick](https://github.com/thisnick)! - Install the CLI audio runtime dependency before verifying executables during Linux image publication.
+
+## 1.4.0-beta.1
+
+### Patch Changes
+
+- [#363](https://github.com/thisnick/agent-wechat/pull/363) [`476a041`](https://github.com/thisnick/agent-wechat/commit/476a041e7616bcb1485393facc715f69270baaab) Thanks [@thisnick](https://github.com/thisnick)! - Include local microphone/speaker support in released executables, add local audio-device discovery, and show live signal-level meters during interactive calls. Keep passive/JSON output free of terminal meters and retain separate daemon calling permissions and native transmission guards. Linux executables now require libpulse0; daemon operation does not require audio devices or a sound server.
+
+  Include the call API, native worker, codec and device adapters in normal Cargo builds. Use the same complete default features for development, CI and release artifacts, without feature-selection flags. Verify calling routes and a passive control connection in the packaged executable and image; runtime calling authorization remains separate.
+
+- [#364](https://github.com/thisnick/agent-wechat/pull/364) [`821eeb6`](https://github.com/thisnick/agent-wechat/commit/821eeb6cef8ed4fd049ded06bc11d0b9b1ab9f53) Thanks [@thisnick](https://github.com/thisnick)! - Fix group creation, member additions, and pin/mute preferences for contacts whose saved deletion flag is NULL. New contacts created by sparse updates default to a zero deletion flag while existing deletion state is preserved.
+
+- [#362](https://github.com/thisnick/agent-wechat/pull/362) [`b82cf37`](https://github.com/thisnick/agent-wechat/commit/b82cf37245ba3c4a944d852295ca91908b7e6528) Thanks [@thisnick](https://github.com/thisnick)! - Keep an incoming call's actor available when an accepted reject fences an unsent poll before the reject command reaches the backend. Send the reject once, without resending the poll, and retain uncertain rejection receipts.
+
+## 1.4.0-beta.0
+
+### Minor Changes
+
+- [#352](https://github.com/thisnick/agent-wechat/pull/352) [`498bd4e`](https://github.com/thisnick/agent-wechat/commit/498bd4e6f8a89e1f6bd9f435a1053fc2aae4c7bc) Thanks [@thisnick](https://github.com/thisnick)! - Add disabled-by-default direct voice calling: authenticated control/media WebSockets, single-call ownership, PCM SDK connections, CLI monitor/dial/answer controls, and an optional OpenClaw OpenAI audio bridge with separate calling allowlists. Add the opt-in native worker and internal call-media/audio libraries. Expose direct/conference kind and voice/video call type in call metadata, including same-account observer snapshots without ownership or audio access. Select call type when dialing and accept offers by identity/revision; remove redundant media flags and the unimplemented resume command. Advertise available calling capabilities only; missing flags mean unavailable. Use one `calls` API token scope for call state, control and owner-bound audio; messaging grants do not permit calls. Isolated live tests cover personal voice negotiation, duplex PCM and terminal handling. An accepted owner hangup completes known cleanup when it fences an unsent poll before the queued backend stop runs. Media security lifetime and physical device validation remain incomplete; the native worker is restricted to expiring isolated tests. Video and conference calling remain unavailable.
+
+  Exchange raw PCM samples on media sockets with JSON stream setup; buffer, frame and pace client audio in the daemon instead of requiring CLI or OpenClaw clients to construct custom binary headers.
+
+  Keep active direct voice calls connected across peer microphone mute and unmute updates without replacing their admitted media context.
+
+  Report verified peer microphone mute/unmute as typed control events and current-call snapshots. Use WebSocket liveness for owner cleanup, attempt graceful call shutdown, and locally end abandoned sessions on restart while preserving uncertain network receipts.
+
+  Configure voice and video permissions separately in OpenClaw. Group realtime speech settings, OpenAI SecretRef credentials and independent consultation model/timeouts under the voice configuration; keep unavailable video calls unclaimed.
+
 ## 1.3.3
 
 ### Patch Changes

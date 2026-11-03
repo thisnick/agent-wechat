@@ -1,5 +1,7 @@
 //! Authenticated, account-scoped native daemon API.
 mod actions;
+
+mod calls;
 pub mod contracts;
 mod groups;
 mod media;
@@ -497,7 +499,7 @@ async fn shutdown_daemon(
     {
         return Err(ApiError(StatusCode::CONFLICT, "daemon_ownership_mismatch"));
     }
-    app.core.shutdown();
+    app.core.shutdown_gracefully().await;
     Ok(Json(json!({"state":"stopping","logout":false})))
 }
 async fn status(State(app): State<App>, Extension(c): Extension<Claims>) -> ApiResult<Json<Value>> {
@@ -1158,6 +1160,9 @@ async fn revoke_token(
     }
     Ok(Json(json!({"revoked":app.core.store.revoke_token(&id)?})))
 }
+fn call_routes() -> Router<App> {
+    calls::routes()
+}
 pub fn router(core: Arc<Core>, token: &str) -> Router {
     let app = App {
         core,
@@ -1221,6 +1226,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .merge(media::routes())
         .merge(actions::routes())
         .merge(groups::routes())
+        .merge(call_routes())
         .with_state(app.clone());
     // Resolve aliases before route matching so scope checks and vault AAD always
     // use the canonical account identifier.

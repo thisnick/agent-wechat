@@ -12,6 +12,8 @@ import { registerNativeShareTools } from "./src/native-share-tool.js";
 import { registerNativeRecallTools } from "./src/native-recall-tools.js";
 import { registerNativeGroupTools } from "./src/native-group-tool.js";
 import { registerNativeLoginTool } from "./src/native-login.js";
+import { NativeCallService } from "./src/calls-service.js";
+import { registerNativeCallTool } from "./src/calls-tool.js";
 
 const plugin: {
   id: string;
@@ -33,6 +35,8 @@ const plugin: {
     registerNativeRecallTools(api);
     registerNativeGroupTools(api);
     registerNativeLoginTool(api);
+    let calls: NativeCallService | undefined;
+    registerNativeCallTool(api, () => calls);
     const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
     const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
       ? registerNativePreparedBoundary(api) : () => {};
@@ -42,8 +46,13 @@ const plugin: {
       start: async context => {
         const account = resolveWeChatAccount(context.config as unknown as Record<string, unknown>);
         if (account?.native && account.enabled) await ensureNativeHost(account.native);
+        if (account?.native && account.enabled && account.calls) {
+          calls = new NativeCallService(account, context.config, api.runtime);
+          await calls.start();
+          if (calls.status().state === "unavailable") context.logger.warn("WeChat calling unavailable; messaging remains active");
+        }
       },
-      stop: async () => { stopFacade(); stopPreparedBoundary(); await stopNativeHost(); },
+      stop: async () => { await calls?.stop(); calls = undefined; stopFacade(); stopPreparedBoundary(); await stopNativeHost(); },
     });
   },
 };

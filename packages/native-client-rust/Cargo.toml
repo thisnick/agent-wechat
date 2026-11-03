@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/wechat-platform", "crates/wechat-config", "crates/wechat-store", "crates/wechat-media", "crates/wechat-profile", "crates/wechat-protocol", "crates/wechat-core", "crates/wechat-api", "crates/wx", "crates/wechat-simulator"]
+members = ["crates/wechat-audio", "crates/wechat-calls", "crates/wechat-platform", "crates/wechat-config", "crates/wechat-store", "crates/wechat-media", "crates/wechat-profile", "crates/wechat-protocol", "crates/wechat-core", "crates/wechat-api", "crates/wx", "crates/wechat-simulator"]
 resolver = "2"
 
 [workspace.package]
-version = "1.3.3"
+version = "1.4.0-beta.3"
 edition = "2021"
 license = "MIT"
 rust-version = "1.93.1"

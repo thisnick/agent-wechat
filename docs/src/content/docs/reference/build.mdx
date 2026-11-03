@@ -21,6 +21,24 @@ pnpm build:image         # tags agent-wechat-native:local
 
 Release builds, CI and the publishing process are described in [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md). Contributor rules are in [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md).
 
+<span id="calling-features"></span>
+
+## Included features
+
+Normal builds include the call API, native call worker, Opus codec and local
+microphone/speaker adapters. Local development, CI and release builds use the
+same default feature set; no feature-selection flags are needed.
+
+```bash
+cargo build --manifest-path packages/native-client-rust/Cargo.toml -p wx-native
+```
+
+The executable is `packages/native-client-rust/target/debug/wx`. Install the
+selected OS's audio development libraries when building from source. A headless
+daemon does not open local audio devices. Account permissions and native
+transmission admission still determine which calls are available.
+
+
 ## Try the browser client
 
 1. Start the local simulator and connected browser client:

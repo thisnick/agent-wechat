@@ -1,3 +1,7 @@
+import { NativeCallsClient } from "./native-calls.ts";
+import type { NativeCallWebSocketFactory, NativeCallsClientOptions } from "./native-calls.ts";
+export * from "./native-calls.ts";
+
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
 import type { TextMentions } from "./native.generated.js";
 export type NativeTextSendOptions = { quote?: QuoteSendReference; mentions?: TextMentions };
@@ -109,6 +113,9 @@ export class NativeWeChatClient {
     const response = await this.response(path, init);
     if (response.status === 204) return undefined as T;
     return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as T;
+  }
+  calls(accountId: string, webSocketFactory: NativeCallWebSocketFactory, options: Pick<NativeCallsClientOptions, "handshakeTimeoutMs" | "commandTimeoutMs" | "maxEvents" | "maxBufferedBytes"> = {}): NativeCallsClient {
+    return new NativeCallsClient({ baseUrl: this.baseUrl.toString(), token: this.token, accountId, webSocketFactory, ...options });
   }
   status(): Promise<NativeStatus> { return this.request("v1/status"); }
   accounts(): Promise<{ items: Record<string, unknown>[] }> { return this.request("v1/accounts"); }

@@ -55,11 +55,11 @@ pnpm changeset
    Cargo publishes dependencies before their consumers. The other workspace
    crates and desktop package keep `publish = false`.
 
-8. Successful completion automatically retries the original Release push run for
-   the same source commit. That run verifies the native assets, embeds their
-   manifest in the CLI package, and publishes both npm packages with provenance.
-   Prereleases use their Changesets channel (such as `beta`); stable releases use
-   `latest`.
+8. After native assets, the runtime image and Rust libraries are published,
+   rerun the original Release push run for that same source commit. It verifies
+   the native assets, embeds their manifest in the CLI package, and publishes
+   both npm packages with provenance. Prereleases use their Changesets channel
+   (such as `beta`); stable releases use `latest`.
 
 ## Rust library release contract
 
@@ -182,14 +182,9 @@ published runtime image. Registry/API errors, mismatched source
 commits and invalid checksums remain failures. A published CLI version permits
 extension-only recovery without requiring another native artifact set.
 
-The native completion handler only retries the original main-branch push run
-from this repository. It does not publish npm directly from a `workflow_run`
-event: that event's default-branch SHA may have advanced since the artifacts
-were built. Retrying the original run preserves both its source SHA and its npm
-OIDC/provenance context.
-
-If automatic recovery fails, rerun the original Release push run for the native
-manifest's exact source commit. Do not push an unrelated commit to retry
+The operator reruns the original main-branch Release push run after native
+publication finishes. Keeping the original run preserves its source SHA and
+npm OIDC/provenance context. Do not push an unrelated commit to retry
 publication or replace existing release assets. If main advanced before native
 assets were prepared, reconcile the version/source tag before starting another
 native release; the preflight refuses conflicting tags or published npm versions.

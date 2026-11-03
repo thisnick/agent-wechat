@@ -9,5 +9,13 @@
     "@agent-wechat/agent-wechat": "1.3.3",
     "@agent-wechat/shared": "1.1.1"
   },
-  "changesets": []
+  "changesets": [
+    "cli-audio-levels-devices",
+    "image-publisher-runtime",
+    "normal-calling-startup",
+    "offline-call-foundation",
+    "openclaw-2026-10-9",
+    "ordinary-null-contact-flags",
+    "reject-intent-delivery"
+  ]
 }

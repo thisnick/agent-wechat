@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         # PRs cover each OS; releases/manual runs cover all five platforms.
-        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"macos-15","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"}]' || '[{"runner":"macos-15","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-2025","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","platform":"windows-arm64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64"}]') }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"macos-latest","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"}]' || '[{"runner":"macos-latest","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","platform":"windows-arm64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
@@ -61,7 +61,7 @@ jobs:
             sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/ubuntu.sources
           fi
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf dbus-x11 gnome-keyring xvfb x11-utils webkit2gtk-driver python3-dbus python3-gi
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev libpulse-dev patchelf dbus-x11 gnome-keyring xvfb x11-utils webkit2gtk-driver python3-dbus python3-gi
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh
@@ -78,13 +78,13 @@ jobs:
         with:
           workspaces: packages/native-client-rust -> target
           add-rust-environment-hash-key: false
-          key: desktop-cli-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}
+          key: desktop-cli-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}
           cache-on-failure: true
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/desktop/src-tauri -> target
           add-rust-environment-hash-key: false
-          key: desktop-v2-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}
+          key: desktop-v3-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile --filter @agent-wechat/desktop...
       - run: pnpm --filter @agent-wechat/desktop build
@@ -232,7 +232,7 @@ jobs:
             target: x86_64-pc-windows-msvc
           - arch: arm64
             target: aarch64-pc-windows-msvc
-    runs-on: windows-2025
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -320,7 +320,7 @@ jobs:
   sign-macos:
     needs: build
     if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7

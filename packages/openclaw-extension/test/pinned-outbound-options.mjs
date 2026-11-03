@@ -10,7 +10,7 @@ assert.equal(process.env.HOME, join(root, 'home')); assert.equal(process.env.OPE
 let networkCalls = 0;
 globalThis.fetch = async () => { networkCalls++; throw Error('Network forbidden in synthetic option check'); };
 const pkg = await realpath(join(extension, 'node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8')).version, '2026.10.7');
+assert.equal(JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8')).version, '2026.10.9');
 const files = await readdir(join(pkg, 'dist'));
 async function runtime(prefix, functionName) {
   for (const file of files.filter(file => file.startsWith(prefix) && file.endsWith('.mjs'))) {
@@ -140,5 +140,5 @@ for (const forceCoreDelivery of [false, true]) {
   assert.equal(calls.length, before);
 }
 assert.equal(networkCalls, 0);
-await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.7', checks, mentionChecks, messageToolListed: true,
+await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.9', checks, mentionChecks, messageToolListed: true,
   replyChecks, schemaIncludesReplies: true, schemaIncludesQuality: true, schemaIncludesMentions: true, queuedConflictRejected: true, queuedMentionsRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });

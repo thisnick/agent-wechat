@@ -13,6 +13,13 @@ npm install -g @agent-wechat/cli@VERSION
 wx --json version
 ```
 
+Linux executables require `libpulse0` in addition to glibc. Interactive calling
+uses the local PulseAudio or PipeWire-Pulse service; other commands do not need
+a sound server. Released executables include microphone/speaker support. Use
+`wx calls devices` to list endpoints without starting capture or playback, and
+`wx calls dial --help` for device selection. Call participation requires a daemon
+advertising the corresponding calling capability.
+
 During the native beta series, use a published exact version such as `1.0.0-beta.0`, or `@agent-wechat/cli@beta`. The stable `latest` channel retains the old container CLI until promotion. See the beta release instructions before assuming a beta has been published.
 
 The explicit npm installation downloads one exact-version asset over verified HTTPS. Its size and SHA-256 must match `native-release.json` inside the npm package, then a bounded local identity check must report the same version, native backend, Rust target and serve capability before atomic installation. Normal command invocation never downloads a missing runtime. A missing manifest, unsupported platform, corrupt asset or wrong backend is an error.

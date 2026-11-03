@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 use wechat_core::Core;
+mod calls_cli;
 mod client_actions;
 mod daemon;
 mod events;
@@ -77,7 +78,7 @@ enum Command {
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
-    Serve,
+    Serve {},
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
@@ -87,6 +88,11 @@ enum Command {
         command: profile_cli::ProfileCommand,
     },
     Status,
+    /// Observe calls or use this computer's microphone and speakers.
+    Calls {
+        #[command(subcommand)]
+        command: Option<calls_cli::CallsCommand>,
+    },
     LookupContacts {
         #[arg(required = true)]
         ids: Vec<String>,
@@ -854,7 +860,7 @@ async fn shutdown(core: Arc<Core>) {
     }
     #[cfg(windows)]
     tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{} }
-    core.shutdown();
+    core.shutdown_gracefully().await;
 }
 
 struct Remote {
@@ -1051,6 +1057,23 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Devices)
+        }
+    ) {
+        return calls_cli::devices(cli.json).await;
+    }
+    if matches!(&cli.command, Command::Calls { command: None }) {
+        let mut command = <Cli as clap::CommandFactory>::command();
+        command
+            .find_subcommand_mut("calls")
+            .context("missing calls command")?
+            .print_help()?;
+        println!();
+        return Ok(());
+    }
     if matches!(cli.command, Command::Licenses) {
         return output(
             &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
@@ -1076,7 +1099,7 @@ async fn run(cli: Cli) -> Result<()> {
     let cwd = std::env::current_dir()?;
     if matches!(
         &cli.command,
-        Command::Serve
+        Command::Serve { .. }
             | Command::Daemon { .. }
             | Command::Store { .. }
             | Command::Config {
@@ -1097,7 +1120,7 @@ async fn run(cli: Cli) -> Result<()> {
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve => serve(config, cli.token_stdin).await,
+            Command::Serve {} => serve(config, cli.token_stdin).await,
             Command::Daemon { command } => daemon::run(config, command).await,
             Command::Store { command } => offline(config, cli.account.unwrap_or_default(), command),
             Command::Config {
@@ -1285,7 +1308,11 @@ async fn run(cli: Cli) -> Result<()> {
             | Command::Tokens { .. }
             | Command::Config { .. }
     );
-    if requires_account {
+    // Calling grants can observe/control one selected account without also
+    // reading the account catalog. The API resolves aliases and checks scope.
+    let selected_call_account =
+        matches!(&cli.command, Command::Calls { .. }) && r.account.is_some();
+    if requires_account && !selected_call_account {
         let catalog = r.get("v1/accounts").await?;
         let items = catalog["items"]
             .as_array()
@@ -1325,6 +1352,9 @@ async fn run(cli: Cli) -> Result<()> {
     use reqwest::Method;
     let result = match cli.command {
         Command::Status => r.get("v1/status").await?,
+        Command::Calls { command } => {
+            return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
+        }
         Command::LookupContacts { ids } => {
             r.post(&r.path("contacts/lookup")?, json!({"ids":ids}))
                 .await?
@@ -1817,7 +1847,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Version
         | Command::Licenses
         | Command::Config { .. }
-        | Command::Serve
+        | Command::Serve { .. }
         | Command::Store { .. }
         | Command::Profile { .. }
         | Command::Daemon { .. } => {
@@ -1864,6 +1894,7 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result
         None => wechat_api::provision_token(&config.token_file, !config.token_explicit)?,
     };
     let core = Core::new(store.clone(), config.storage_key_file.as_deref())?;
+    core.call_service();
     if let Some(path) = &config.profile_format_key_file {
         core.configure_profile_format_key(&private_input(path, 16)?)?;
     }

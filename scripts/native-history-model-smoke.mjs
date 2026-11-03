@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Actual pinned Gateway, model tool calls, group catch-up and direct media.
 // Native account/messages/media and provider responses are local fixtures.
+import { stagePluginRuntimeDependencies } from './native-smoke-plugin.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -14,7 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.7');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
 const temporary = await mkdtemp(join(tmpdir(), 'native-history-model-'));
 const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0, loginStarts = 0, loginQrReads = 0, quoteRequests = 0;
 const token = 'synthetic-native-token-'.repeat(3), assets = new Map();
@@ -166,7 +167,8 @@ const upstream = createServer(async (req, res) => {
 try {
   await mkdir(join(temporary,'plugin/dist'), {recursive:true}); await mkdir(join(temporary,'workspace'));
   for (const file of ['package.json','openclaw.plugin.json']) await copyFile(join(root,'packages/openclaw-extension',file),join(temporary,'plugin',file));
-  await build({entryPoints:[join(root,'packages/openclaw-extension/test/fixtures/native-history-model-plugin.ts')],absWorkingDir:root,bundle:true,format:'esm',platform:'node',external:['openclaw'],outfile:join(temporary,'plugin/dist/index.js')});
+  await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
+  await build({entryPoints:[join(root,'packages/openclaw-extension/test/fixtures/native-history-model-plugin.ts')],absWorkingDir:root,bundle:true,format:'esm',platform:'node',external:['openclaw','ws'],outfile:join(temporary,'plugin/dist/index.js')});
   upstream.listen(0,'127.0.0.1'); await once(upstream,'listening'); const apiPort=upstream.address().port;
   const probe=createServer(); probe.listen(0,'127.0.0.1'); await once(probe,'listening'); const port=probe.address().port; await new Promise(resolve=>probe.close(resolve));
   const transcriber=join(temporary,'transcribe.mjs'); await writeFile(transcriber, "console.log('Synthetic historical voice transcript');\n");
@@ -229,7 +231,7 @@ try {
   }
   const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
   assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
-  console.log(JSON.stringify({gatewayVersion:'2026.10.7',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,ordinaryLinkCardReachedProvider:true,embeddedQuotesOnly:true,quoteRequests,loginStatusStartWait:true,loginQrHashReachedProvider:true,loginStarts,reads:reads.length}));
+  console.log(JSON.stringify({gatewayVersion:'2026.10.9',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,ordinaryLinkCardReachedProvider:true,embeddedQuotesOnly:true,quoteRequests,loginStatusStartWait:true,loginQrHashReachedProvider:true,loginStarts,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
   for(const stream of streams)stream.destroy();await new Promise(resolve=>upstream.close(resolve));upstream.closeAllConnections();await rm(temporary,{recursive:true,force:true});

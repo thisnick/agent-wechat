@@ -3,6 +3,8 @@
 # Build on a native x64 or ARM64 worker (CI runs each architecture separately).
 FROM rust:1.93.1-bookworm AS chef
 RUN cargo install cargo-chef --version 0.1.77 --locked
+RUN apt-get update && apt-get install -y --no-install-recommends libpulse-dev cmake \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 ENV CARGO_BUILD_JOBS=4
 
@@ -31,7 +33,7 @@ CMD ["/build/target/release/wx"]
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates tini ffmpeg libpulse0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 agent-wechat \
     && useradd --uid 10001 --gid 10001 --home-dir /var/lib/agent-wechat --no-create-home --shell /usr/sbin/nologin agent-wechat \

@@ -34,6 +34,7 @@ const moved = {
   'reference/environment-vars': 'reference/configuration',
   'reference/rust-protocol': 'reference/rust-libraries#send-one-text-message',
   'reference/rust-profile': 'reference/rust-libraries#profile-writes',
+  'reference/calls-architecture': 'how-it-works/rust-crates',
 };
 
 export default defineConfig({
@@ -94,6 +95,7 @@ export default defineConfig({
           { label: 'OpenClaw', translations: { 'zh-CN': 'OpenClaw' }, items: [
             { label: 'Quick setup', translations: { 'zh-CN': '快速接入' }, slug: 'openclaw/setup' },
             { label: 'Managed or external', translations: { 'zh-CN': '托管与外部模式' }, slug: 'openclaw/modes' },
+            { label: 'Calling', slug: 'openclaw/calling' },
             { label: 'Who the bot answers', translations: { 'zh-CN': '响应权限控制' }, slug: 'openclaw/access' },
             { label: 'Agent tools', translations: { 'zh-CN': '智能体工具' }, slug: 'openclaw/tools' },
             { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'openclaw/read-receipts' },
@@ -102,6 +104,7 @@ export default defineConfig({
         ] },
         { label: 'How it works', translations: { 'zh-CN': '工作原理' }, items: [
           { label: 'Architecture', translations: { 'zh-CN': '架构设计' }, slug: 'how-it-works/architecture' },
+          { label: 'Rust crate architecture', slug: 'how-it-works/rust-crates' },
           { label: 'How wx talks to WeChat', translations: { 'zh-CN': 'wx 与微信通信原理' }, slug: 'how-it-works/wechat' },
           { label: 'Sends and recovery', translations: { 'zh-CN': '消息发送与恢复' }, slug: 'how-it-works/sends' },
           { label: 'Message types', translations: { 'zh-CN': '消息类型' }, slug: 'how-it-works/message-types' },
@@ -111,6 +114,9 @@ export default defineConfig({
           { label: 'CLI', translations: { 'zh-CN': 'CLI 命令' }, slug: 'reference/cli' },
           { label: 'Configuration', translations: { 'zh-CN': '配置选项' }, slug: 'reference/configuration' },
           { label: 'API tokens', translations: { 'zh-CN': 'API 令牌' }, slug: 'reference/tokens' },
+          { label: 'Calling', slug: 'reference/calls' },
+          { label: 'Calls API', slug: 'reference/calls-api' },
+          { label: 'Call media API', slug: 'reference/calls-media' },
           { label: 'Rust libraries', translations: { 'zh-CN': 'Rust 开发库' }, slug: 'reference/rust-libraries' },
           { label: 'Troubleshooting', translations: { 'zh-CN': '故障排查' }, slug: 'reference/troubleshooting' },
           { label: 'Build from source', translations: { 'zh-CN': '源码构建' }, slug: 'reference/build' },
