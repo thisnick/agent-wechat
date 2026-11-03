@@ -770,14 +770,8 @@ pub fn apply_message_projection(
         }
         (*id, false)
     } else {
-        let schema = crate::schema::inspect(&tx, &db)?;
-        let expected = schema
-            .tables
-            .iter()
-            .find(|t| t.name == table)
-            .ok_or(ProfileError::InvalidMetadata)?;
-        if fields.len() + 1 != expected.columns.len()
-            || expected
+        if fields.len() + 1 != schema.columns.len()
+            || schema
                 .columns
                 .iter()
                 .any(|col| col.name != "local_id" && !fields.contains_key(&col.name))

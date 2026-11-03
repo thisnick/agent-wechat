@@ -879,6 +879,32 @@ fn conflicts_unknown_fields_schema_changes_and_unowned_writes_fail_without_new_r
 }
 
 #[test]
+fn new_message_projection_requires_the_validated_table_fields() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let options = options();
+    let valid = message("peer", "peer", "7", 100);
+    let mut invalid = valid.clone();
+    invalid.fields.remove("origin_source").unwrap();
+    invalid
+        .fields
+        .insert("unknown_column".into(), SqlValue::Null);
+    assert!(matches!(
+        apply_message_projection(&loc, &keys, &invalid, &options),
+        Err(ProfileError::InvalidMetadata)
+    ));
+    assert!(find_projected_message(&loc, &keys, "peer", "7", &options)
+        .unwrap()
+        .is_none());
+    assert!(
+        apply_message_projection(&loc, &keys, &valid, &options)
+            .unwrap()
+            .inserted
+    );
+}
+
+#[test]
 fn message_projection_validates_the_target_conversation_schema() {
     let d = fixture();
     let loc = ProfileLocation::new(d.path().join("account")).unwrap();
