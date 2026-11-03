@@ -1130,23 +1130,12 @@ fn run_media(
         },
         epoch,
     )?;
-    if cfg!(feature = "isolated-call-audio-range") {
-        const FIRST_AUDIO_SEQUENCE: u16 = 4096;
-        const TEST_DURATION_MS: u64 = 20_000;
-        channel.authorize_isolated_audio_range(
-            epoch,
-            FIRST_AUDIO_SEQUENCE,
-            crypto::random::<32>()?,
-            clock().saturating_add(TEST_DURATION_MS),
-        )?;
-    } else {
-        channel.authorize_transmit(
-            epoch,
-            TransmitScope::VerifiedGeneration {
-                key_generation: epoch.key_generation,
-            },
-        )?;
-    }
+    channel.authorize_transmit(
+        epoch,
+        TransmitScope::LegacyRelayAudio {
+            key_generation: epoch.key_generation,
+        },
+    )?;
     let format = AudioFormat::new(16000, 1, 20)?;
     let mut decoder = OpusDecoder::new(format)?;
     let mut encoder = OpusEncoder::new(format, 20_000)?;

@@ -4,6 +4,7 @@
 
 use anyhow::{bail, ensure, Result};
 use openssl::{
+    hash::MessageDigest,
     memcmp,
     pkey::{Id, PKey},
     sign::Signer,
@@ -16,6 +17,8 @@ const HEADER: usize = 19;
 const MAX_PACKET: usize = 1519;
 const MAX_CONF: usize = 1024;
 const WINDOW: u16 = 64;
+// Leave 60,000 sequences for the current 20-minute limit at 50 audio packets/sec.
+const MAX_LEGACY_AUDIO_START: u16 = u16::MAX - 59_999;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaEpoch {
@@ -42,12 +45,14 @@ pub struct MediaContext {
     pub connection_id: u16,
 }
 
-/// The owner must independently establish a new cryptographic generation before
-/// using VerifiedGeneration. IsolatedCompatibilityTest is intentionally separate:
-/// it may reproduce a known diagnostic audio overlap for one approved experiment,
-/// never silently relabel that behavior as production-safe nonce uniqueness.
+/// The owner must establish a fresh media generation before authorizing sends.
+/// The legacy relay scope trades cross-direction audio nonce uniqueness for
+/// interoperability with peers that share media key material.
 pub enum TransmitScope {
     VerifiedGeneration {
+        key_generation: u64,
+    },
+    LegacyRelayAudio {
         key_generation: u64,
     },
     IsolatedCompatibilityTest {
@@ -135,7 +140,8 @@ impl Live96 {
             "Media transmit scope already installed"
         );
         match &scope {
-            TransmitScope::VerifiedGeneration { key_generation } => ensure!(
+            TransmitScope::VerifiedGeneration { key_generation }
+            | TransmitScope::LegacyRelayAudio { key_generation } => ensure!(
                 *key_generation == current.key_generation,
                 "Media key generation mismatch"
             ),
@@ -148,39 +154,31 @@ impl Live96 {
                 "Missing isolated media test scope"
             ),
         };
+        if matches!(scope, TransmitScope::LegacyRelayAudio { .. }) {
+            self.first_tx_audio = self.legacy_audio_start()?;
+            self.next_audio = u32::from(self.first_tx_audio);
+        }
         self.tx_scope = Some(scope);
         Ok(())
     }
-    /// Reserve an outgoing audio range for one time-limited isolated test.
-    /// The peer must use the lower range for the duration of the test.
-    pub fn authorize_isolated_audio_range(
-        &mut self,
-        current: MediaEpoch,
-        first_sequence: u16,
-        intent_id: [u8; 32],
-        deadline_ms: u64,
-    ) -> Result<()> {
-        ensure!(
-            self.rx_seen.is_empty() && first_sequence != 0,
-            "Audio test range requires a fresh channel and nonzero sequence"
-        );
-        self.authorize_transmit(
-            current,
-            TransmitScope::IsolatedCompatibilityTest {
-                intent_id,
-                deadline_ms,
-                allow_known_audio_overlap: false,
-            },
-        )?;
-        self.first_tx_audio = first_sequence;
-        self.next_audio = u32::from(first_sequence);
-        Ok(())
+    fn legacy_audio_start(&self) -> Result<u16> {
+        let key = PKey::hmac(&self.key[..])?;
+        let mut mac = Signer::new(MessageDigest::sha256(), &key)?;
+        mac.update(b"agent-wechat/live96/audio-start/v1")?;
+        mac.update(&self.context.room_id.to_le_bytes())?;
+        mac.update(&self.base.to_le_bytes())?;
+        mac.update(&self.context.own_member.to_le_bytes())?;
+        let digest = Zeroizing::new(mac.sign_to_vec()?);
+        let prefix = u32::from_le_bytes(digest[..4].try_into()?);
+        Ok((prefix % u32::from(MAX_LEGACY_AUDIO_START) + 1) as u16)
     }
     fn tx_check(&mut self, current: MediaEpoch, now_ms: u64) -> Result<()> {
         self.check(current)?;
         match &self.tx_scope {
             None => bail!("Media transmission is not authorized"),
-            Some(TransmitScope::VerifiedGeneration { .. }) => Ok(()),
+            Some(
+                TransmitScope::VerifiedGeneration { .. } | TransmitScope::LegacyRelayAudio { .. },
+            ) => Ok(()),
             Some(TransmitScope::IsolatedCompatibilityTest { deadline_ms, .. }) => {
                 if now_ms >= *deadline_ms {
                     self.close();
@@ -200,10 +198,13 @@ impl Live96 {
         if kind == 0x10
             && matches!(
                 self.tx_scope,
-                Some(TransmitScope::IsolatedCompatibilityTest {
-                    allow_known_audio_overlap: true,
-                    ..
-                })
+                Some(
+                    TransmitScope::LegacyRelayAudio { .. }
+                        | TransmitScope::IsolatedCompatibilityTest {
+                            allow_known_audio_overlap: true,
+                            ..
+                        }
+                )
             )
         {
             self.audio_overlaps = self
@@ -311,10 +312,6 @@ impl Live96 {
         };
         if u32::from(sequence) < own_next && (kind != 0x10 || sequence >= self.first_tx_audio) {
             self.diagnostic_audio_overlap(kind)?;
-        }
-        if kind == 0x10 && self.first_tx_audio != 0 && sequence >= self.first_tx_audio {
-            self.close();
-            bail!("Peer entered the isolated audio nonce range");
         }
         // Retire every authenticated nonce before payload/member classification.
         // Fixed 65536-bit ledgers preserve known cross-direction overlap checks
@@ -587,32 +584,89 @@ mod tests {
         sender
     }
     #[test]
-    fn isolated_audio_range_delivers_duplex_and_rejects_peer_range_entry() {
+    fn legacy_audio_start_depends_on_the_authenticated_member() {
         let mut local = receiver();
-        let mut remote = peer();
-        let raw = ordinary95_pair(0, 1, 320, &[1], &[2]).unwrap();
-        local
-            .authorize_isolated_audio_range(epoch(), 4096, [1; 32], 100)
-            .unwrap();
-
-        let outbound = local.seal_audio(epoch(), 0, &raw).unwrap();
-        let inbound = remote.seal_audio(epoch(), 0, &raw).unwrap();
-        assert_eq!(local.open(epoch(), &inbound).unwrap().unwrap().sequence, 0);
-        assert_eq!(
-            remote.open(epoch(), &outbound).unwrap().unwrap().sequence,
-            4096
-        );
-        remote.next_audio = 4097;
-        let intruding = remote.seal_audio(epoch(), 1, &raw).unwrap();
-        assert!(local.open(epoch(), &intruding).is_err());
-        assert!(local.seal_audio(epoch(), 2, &raw).is_err());
-
-        let mut expired = receiver();
-        expired
-            .authorize_isolated_audio_range(epoch(), 4096, [1; 32], 100)
-            .unwrap();
-        assert!(expired.seal_audio(epoch(), 100, &raw).is_err());
+        let mut peer_context = context();
+        std::mem::swap(&mut peer_context.own_member, &mut peer_context.peer_member);
+        let mut remote = Live96::new([7; 32], 11, peer_context, epoch()).unwrap();
+        for channel in [&mut local, &mut remote] {
+            channel
+                .authorize_transmit(
+                    epoch(),
+                    TransmitScope::LegacyRelayAudio { key_generation: 1 },
+                )
+                .unwrap();
+        }
+        // Independent HMAC-SHA256 vectors for the same room and two member IDs.
+        assert_eq!(local.first_tx_audio, 440);
+        assert_eq!(remote.first_tx_audio, 429);
+        assert_eq!(local.next_audio, 440);
+        assert_eq!(remote.next_audio, 429);
     }
+
+    #[test]
+    fn legacy_relay_allows_opposite_direction_audio_overlap_in_either_order() {
+        let raw = ordinary95_pair(0, 1, 320, &[1], &[2]).unwrap();
+        for transmit_first in [false, true] {
+            let mut local = receiver();
+            local
+                .authorize_transmit(
+                    epoch(),
+                    TransmitScope::LegacyRelayAudio { key_generation: 1 },
+                )
+                .unwrap();
+            let mut remote = peer();
+            remote.next_audio = u32::from(local.first_tx_audio);
+            let inbound = remote.seal_audio(epoch(), 0, &raw).unwrap();
+            if transmit_first {
+                local.seal_audio(epoch(), 0, &raw).unwrap();
+            }
+            assert_eq!(
+                local.open(epoch(), &inbound).unwrap().unwrap().payload(),
+                raw
+            );
+            if !transmit_first {
+                local.seal_audio(epoch(), 0, &raw).unwrap();
+            }
+            assert!(local.open(epoch(), &inbound).unwrap().is_none());
+            assert_eq!(local.known_audio_overlaps(), 1);
+
+            let mut conflicting_peer = peer();
+            conflicting_peer.next_audio = u32::from(local.first_tx_audio);
+            let different = ordinary95_pair(0, 1, 320, &[3], &[4]).unwrap();
+            let conflict = conflicting_peer.seal_audio(epoch(), 0, &different).unwrap();
+            assert!(local.open(epoch(), &conflict).is_err());
+            assert!(local.seal_audio(epoch(), 0, &raw).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_relay_keeps_control_and_send_exhaustion_fences() {
+        let mut local = receiver();
+        local
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        let mut remote = peer();
+        local.seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 2]).unwrap();
+        let control = remote.seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 1]).unwrap();
+        assert!(local.open(epoch(), &control).is_err());
+
+        let mut local = receiver();
+        local
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        local.next_audio = u32::from(u16::MAX);
+        let raw = ordinary95_pair(0, 1, 320, &[1], &[2]).unwrap();
+        local.seal_audio(epoch(), 0, &raw).unwrap();
+        assert!(local.seal_audio(epoch(), 0, &raw).is_err());
+    }
+
     #[test]
     fn original_aead_matches_independent_literal_vectors() {
         // Independent original eight-byte-nonce ChaCha/Poly1305 known answers.
@@ -692,7 +746,7 @@ mod tests {
         assert!(receiver().open(epoch(), &packet).is_err());
     }
     #[test]
-    fn known_overlap_fails_closed_outside_explicit_test_scope() {
+    fn strict_scope_rejects_overlap_and_isolated_scope_expires() {
         let raw = ordinary95_pair(0, 1, 320, &[1], &[2]).unwrap();
         let mut peer = peer();
         let packet = peer.seal_audio(epoch(), 0, &raw).unwrap();
