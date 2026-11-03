@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.6
+
+### Patch Changes
+
+- [#382](https://github.com/thisnick/agent-wechat/pull/382) [`13000ed`](https://github.com/thisnick/agent-wechat/commit/13000eda9c5286a0899a85b2667029330e5608c9) Thanks [@thisnick](https://github.com/thisnick)! - Reduce the time message sync holds the account lock on profiles with many conversations by checking the target conversation table's schema directly.
+
+- [#382](https://github.com/thisnick/agent-wechat/pull/382) [`13000ed`](https://github.com/thisnick/agent-wechat/commit/13000eda9c5286a0899a85b2667029330e5608c9) Thanks [@thisnick](https://github.com/thisnick)! - Skip repeated message database schema scans when inserting a message into a conversation table already validated in the same transaction.
+
 ## 1.4.0-beta.5
 
 ### Patch Changes
