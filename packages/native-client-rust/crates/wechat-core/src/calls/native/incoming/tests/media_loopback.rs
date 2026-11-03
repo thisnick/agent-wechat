@@ -1,8 +1,13 @@
 //! Generated-media plumbing only: no external host, device or reference client.
-//! The relay uses independently specified synthetic D5 fields. Using maintained
-//! media helpers at both ends does not establish wire interoperability or a
+//! The relay uses independently specified synthetic D5 fields. Maintained media
+//! helpers and a synthetic envelope do not establish wire interoperability or a
 //! production-safe cryptographic lifetime.
 use super::*;
+use openssl::{
+    pkey::{Id, PKey},
+    sign::Signer,
+    symm::{encrypt, Cipher},
+};
 use std::net::Ipv4Addr;
 use wechat_calls::{
     frame::{self, MediaFrame, MediaHeader},
@@ -14,6 +19,9 @@ const FRAMES: usize = 40;
 const OWN_MEMBER: u16 = 3;
 const OWNER_HZ: f64 = 880.0;
 const PEER_HZ: f64 = 1320.0;
+// This short fixture reserves disjoint counters; it does not model negotiation
+// or a remote client's key/counter lifetime. Native TX must stay below this.
+const PEER_AUDIO_START: u16 = 1024;
 
 struct PeerStats {
     checkins: usize,
@@ -44,7 +52,6 @@ impl LocalPeer {
             bail!("Synthetic relay requires IPv4")
         };
         let key = crypto::random::<32>()?;
-        let intent = crypto::random::<32>()?;
         let stop = Arc::new(AtomicBool::new(false));
         let (start, receive_start) = mpsc::sync_channel(1);
         let stopping = stop.clone();
@@ -60,7 +67,6 @@ impl LocalPeer {
                         key,
                         frames_per_packet,
                     },
-                    intent,
                     receive_start,
                     &stopping,
                     &recording,
@@ -283,7 +289,6 @@ fn checkin(
 fn peer(
     socket: UdpSocket,
     media: ReadyMedia,
-    intent: [u8; 32],
     start: Receiver<(AudioFormat, MediaEpoch)>,
     stop: &AtomicBool,
     diagnostic: &PeerDiagnostic,
@@ -361,14 +366,7 @@ fn peer(
         },
         epoch,
     )?;
-    channel.authorize_transmit(
-        epoch,
-        TransmitScope::IsolatedCompatibilityTest {
-            intent_id: intent,
-            deadline_ms: 10_000,
-            allow_known_audio_overlap: true,
-        },
-    )?;
+    // Receive only: the fixture emitter below owns the peer's disjoint TX range.
     let mut encoder = OpusEncoder::new(format, 20_000)?;
     let mut decoder = OpusDecoder::new(format)?;
     let mut tone = tone(format, PEER_HZ)?;
@@ -395,7 +393,8 @@ fn peer(
                 &first,
                 &second,
             )?;
-            let packet = channel.seal_audio(epoch, began.elapsed().as_millis() as u64, &conf)?;
+            let sequence = PEER_AUDIO_START + u16::try_from(result.sent_primaries / 2)?;
+            let packet = peer_audio(&key, sequence, &conf)?;
             ensure!(
                 socket.send_to(&packet, source)? == packet.len(),
                 "Synthetic media short write"
@@ -409,6 +408,12 @@ fn peer(
                     .open(epoch, &buffer[..n])?
                     .context("Synthetic replay")?;
                 if opened.packed_kind == 0x10 {
+                    ensure!(
+                        usize::from(opened.sequence)
+                            == result.received_primaries / usize::from(frames_per_packet)
+                            && opened.sequence < PEER_AUDIO_START,
+                        "Synthetic native sender counter range or ordering"
+                    );
                     let audio = audio_packet::parse_ordinary95(opened.payload())?;
                     ensure!(
                         audio.primaries.len() == usize::from(frames_per_packet),
@@ -450,6 +455,43 @@ fn peer(
         thread::sleep(Duration::from_millis(2));
     }
     bail!("Synthetic media peer deadline")
+}
+fn peer_audio(key: &[u8; 32], sequence: u16, payload: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        (PEER_AUDIO_START..PEER_AUDIO_START + FRAMES as u16 / 2).contains(&sequence),
+        "Synthetic peer counter range"
+    );
+    // Fixture-only Live96 audio envelope: nonce = base + (kind << 32) + counter,
+    // original 64-bit-nonce ChaCha20, protected little-endian member then audio.
+    // The original Poly1305 transcript is zero AAD length, ciphertext, LE length;
+    // clear headers are not AAD. See audio_packet's independent primitive vectors.
+    let nonce = ROOM_KEY
+        .wrapping_add(0x10u64 << 32)
+        .wrapping_add(u64::from(sequence));
+    let mut iv = [0; 16];
+    iv[8..].copy_from_slice(&nonce.to_le_bytes());
+    let one_time_key = encrypt(Cipher::chacha20(), key, Some(&iv), &[0; 32])?;
+    iv[..8].copy_from_slice(&1u64.to_le_bytes());
+    let mut clear = PEER_MEMBER.to_le_bytes().to_vec();
+    clear.extend(payload);
+    let cipher = encrypt(Cipher::chacha20(), key, Some(&iv), &clear)?;
+    let signing_key = PKey::private_key_from_raw_bytes(&one_time_key, Id::POLY1305)?;
+    let mut signer = Signer::new_without_digest(&signing_key)?;
+    signer.update(&0u64.to_le_bytes())?;
+    signer.update(&cipher)?;
+    signer.update(&(cipher.len() as u64).to_le_bytes())?;
+    let tag = signer.sign_to_vec()?;
+    ensure!(tag.len() == 16, "Synthetic media tag size");
+    let mut packet = vec![0x96, 19];
+    packet.extend(ROOM.to_le_bytes());
+    packet.extend(PEER_MEMBER.to_le_bytes());
+    packet.extend((sequence - PEER_AUDIO_START).to_le_bytes());
+    packet.push(0x10);
+    packet.extend(sequence.to_le_bytes());
+    packet.extend([0, 1]);
+    packet.extend(cipher);
+    packet.extend(tag);
+    Ok(packet)
 }
 fn tone(format: AudioFormat, hz: f64) -> Result<PulseTone> {
     Ok(PulseTone::new(
@@ -668,7 +710,7 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
             assert_eq!(peer.checkins, 2);
             assert_eq!(peer.sent_primaries, FRAMES);
             assert!((FRAMES..=FRAMES + 8).contains(&peer.received_primaries));
-            assert!(peer.overlaps > 0);
+            assert_eq!(peer.overlaps, 0);
             // Delivery publishes PCM before the media worker updates its counter.
             tokio::time::timeout(Duration::from_millis(500), async {
                 while worker.metrics.rx_delivered_frames.load(Ordering::Relaxed) < FRAMES as u64 {
