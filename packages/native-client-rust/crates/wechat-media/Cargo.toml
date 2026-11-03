@@ -14,7 +14,7 @@ categories = ["network-programming"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
 
 [dependencies]
-wechat-platform = { path = "../wechat-platform", version = "=1.4.0-beta.3" }
+wechat-platform = { path = "../wechat-platform", version = "=1.4.0-beta.4" }
 anyhow.workspace = true
 serde.workspace = true
 tempfile.workspace = true

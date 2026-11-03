@@ -1,5 +1,29 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.4
+
+### Minor Changes
+
+- [#366](https://github.com/thisnick/agent-wechat/pull/366) [`76c3ac5`](https://github.com/thisnick/agent-wechat/commit/76c3ac55198ce43bccd249cd8a7774b4b9369b9f) Thanks [@thisnick](https://github.com/thisnick)! - Show readable CLI results by default, including tables for chats and message history. The message table shows the sender, a preview, the timestamp and a shortened ID. Use `--json` for full results, event streams and daemon startup records in scripts.
+
+### Patch Changes
+
+- [#374](https://github.com/thisnick/agent-wechat/pull/374) [`bbb5f92`](https://github.com/thisnick/agent-wechat/commit/bbb5f92473d512bb56a32d4d6b21def3e688cd18) Thanks [@thisnick](https://github.com/thisnick)! - Show incoming calls after the ringing acknowledgment and let an accepted answer interrupt a pending pre-answer poll. Reduce account lock contention by starting read workers before taking the lock and releasing it during plain-text message exchanges.
+
+- [#366](https://github.com/thisnick/agent-wechat/pull/366) [`76c3ac5`](https://github.com/thisnick/agent-wechat/commit/76c3ac55198ce43bccd249cd8a7774b4b9369b9f) Thanks [@thisnick](https://github.com/thisnick)! - Use `accounts`, `profiles` and `config servers` as the canonical CLI groups and `select` to save account, profile and server choices. Keep previous singular names and selection verbs as hidden compatibility aliases. Alphabetize subcommands at every help level and add command descriptions, selection guidance and examples. Update bundled instructions and repository callers to use the canonical names.
+
+  Use `wx auth logout --local` to sign out on the daemon and keep saved credentials without contacting WeChat. The old `logout-local` command remains available as a hidden alias.
+
+  Use `wx chats list` to list chats. The previous `wx threads` command remains available as a hidden compatibility command.
+
+  Use `wx contacts lookup` and `wx groups lookup` for lookups by ID. The previous top-level lookup commands remain available as hidden compatibility commands.
+
+  Contact lookup skips blank remarks and nicknames when choosing a display name.
+
+- [#366](https://github.com/thisnick/agent-wechat/pull/366) [`76c3ac5`](https://github.com/thisnick/agent-wechat/commit/76c3ac55198ce43bccd249cd8a7774b4b9369b9f) Thanks [@thisnick](https://github.com/thisnick)! - Shorten the interactive call prompts by removing the audio device startup message and the microphone status from the waiting prompt. Show which call controls require Enter and let users redisplay the keys with `?`.
+
+  Set `WX_CALL_DEBUG=1` to trace call events, audio frame writes and WebSocket closure details on stderr.
+
 ## 1.4.0-beta.3
 
 ### Patch Changes
