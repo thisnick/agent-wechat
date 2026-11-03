@@ -210,3 +210,42 @@ jobs:
     with:
       version: ${{ needs.plan.outputs.version }}
     secrets: inherit
+
+  npm:
+    name: Publish npm packages
+    needs: [plan, prepare, image, crates]
+    if: github.event_name == 'push' && needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      # setup-node registry-url generates an auth placeholder that conflicts with OIDC.
+      - name: Install verified standalone npm 11.12.1
+        run: bash scripts/install-ci-npm.sh
+      - name: Check npm publisher
+        run: |
+          test "$(npm --version)" = "11.12.1"
+          node scripts/verify-ci-publisher.mjs
+      - name: Validate npm stable or prerelease channel
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: node scripts/native-release-policy.mjs --check-registry
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @agent-wechat/cli build
+      - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - name: Install the verified CLI audio runtime dependency
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpulse0
+      - name: Verify native assets and embed npm checksum manifest
+        run: node scripts/native-prepare-package.mjs
+      - name: Publish to npm
+        env:
+          NPM_CONFIG_PROVENANCE: true
+        run: pnpm changeset publish
