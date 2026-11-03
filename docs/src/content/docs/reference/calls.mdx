@@ -53,8 +53,9 @@ reference for connection timeouts and media rules.
 | `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
 | `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
 
-Release executables include local audio support. A late answer stays tied to the
-selected offer; it must not answer a replacement caller.
+Release executables include local audio support. The monitor shows the incoming
+prompt after the daemon acknowledges ringing. Accepting stays tied to the
+selected call, even if another call arrives later.
 
 Run `wx calls devices` first, then select endpoints with
 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`.
@@ -80,10 +81,6 @@ Configure independent voice/video permissions, realtime speech models, OpenAI
 credentials and consultation in [Set up calling](/openclaw/calling/).
 
 :::note[Good to know]
-Calling is disabled in the default daemon. The native worker is restricted to an
-expiring isolated test. Media security across a call's lifetime and ordinary
-microphone/speaker calling still need validation. Video
-and conference capabilities remain off.
 Linux CLI audio needs `libpulse0` and a working PulseAudio or PipeWire-Pulse
 service. The headless image includes the client library but does not need audio
 devices or a sound server to run the daemon.
