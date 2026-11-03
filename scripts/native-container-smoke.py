@@ -20,7 +20,7 @@ process = subprocess.Popen([
     "docker", "run", "--rm", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges", "--tmpfs", "/var/lib/agent-wechat:rw,uid=10001,gid=10001,mode=0700,size=32m",
     "--tmpfs", "/var/cache/agent-wechat:rw,uid=10001,gid=10001,mode=0700,size=16m",
-    image, "serve", "--listen", "127.0.0.1:0", "--data-dir", "/var/lib/agent-wechat",
+    image, "serve", "--json", "--listen", "127.0.0.1:0", "--data-dir", "/var/lib/agent-wechat",
 ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 observer = None
 try:
