@@ -14,6 +14,8 @@ export WX=http://127.0.0.1:6174/v1 TOKEN=...   # 以及 ACCOUNT=<从 /v1/account
 curl -H "Authorization: Bearer $TOKEN" $WX/accounts
 ```
 
+关于实时通话，请参考单独的 [通话控制 API 参考](../../zh-cn/reference/calls-api/)（包含 WebSocket 命令、事件和载荷示例）以及 [通话媒体 API 参考](../../zh-cn/reference/calls-media/)（包含 PCM 分帧与传输规范）。
+
 ## 账号与 Profile 管理
 
 直接使用已有的 Daemon 连接密钥即可管理 Profile，无需配置额外的前端角色。

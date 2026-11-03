@@ -47,9 +47,7 @@ flowchart LR
 
 下载操作采用独立的并发限制：每个账号最多 2 个并发，整个 Daemon 最多 4 个并发。网络等待期间会释放账号的写入锁，并在保存结果前重新检查登录状态与任务状态。发送操作仍沿用原有的作业队列。发现并登记已保存的媒体文件仍然使用写入锁。
 
-[`packages/native-client-rust`](https://github.com/thisnick/agent-wechat/tree/main/packages/native-client-rust) 下的 Rust Crate 同样遵循此职责划分：`wechat-protocol`、`wechat-profile`、`wechat-store`、`wechat-core`、`wechat-api` 以及可执行程序 `wx`。
-
-如需直接调用底层库，请参考 [Rust 开发库](/zh-cn/reference/rust-libraries/)。
+查看 [Rust Crate 架构](../rust-crates/) 了解各包划分与依赖关系，直接调用底层库请参考 [Rust 开发库](/zh-cn/reference/rust-libraries/)。
 
 <Aside title="使用提示">
 - **单个 Daemon 可同时托管多个账号**，每个账号具备独立的 Worker 进程、登录凭据和事件日志。

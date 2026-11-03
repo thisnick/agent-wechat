@@ -21,6 +21,18 @@ pnpm build:image         # 打包镜像并打上 agent-wechat-native:local 标�
 
 正式发布构建、CI 流程与制品发布机制可参考 [`deploy/native/README.md`](https://github.com/thisnick/agent-wechat/blob/main/deploy/native/README.md)。代码贡献规范请查阅 [`AGENTS.md`](https://github.com/thisnick/agent-wechat/blob/main/AGENTS.md)。
 
+<span id="calling-features"></span>
+
+## 包含的构建特性
+
+常规构建默认包含通话 API、原生通话 Worker、Opus 编解码器以及本地麦克风/扬声器设备适配器。本地开发、CI 流水线与发布构建均采用相同的默认特性集；无需指定额外的 feature 选择标志。
+
+```bash
+cargo build --manifest-path packages/native-client-rust/Cargo.toml -p wx-native
+```
+
+编译生成的可执行文件位于 `packages/native-client-rust/target/debug/wx`。从源码编译时需预先安装对应操作系统的音频开发依赖库。无界面运行的守护进程不会主动打开本地音频硬件。账号权限及微信原生连接准入依然决定了具体哪些通话功能实际可用。
+
 ## 体验 Web 浏览器端界面
 
 1. 启动本地模拟器及关联的浏览器 Web 客户端：

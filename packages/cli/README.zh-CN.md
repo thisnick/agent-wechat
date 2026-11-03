@@ -13,6 +13,8 @@ npm install -g @agent-wechat/cli@VERSION
 wx --json version
 ```
 
+Linux 下的可执行文件除 glibc 外还需要安装 `libpulse0`。交互式语音通话使用本地的 PulseAudio 或 PipeWire-Pulse 服务；其他常规命令不需要声音服务。发布版二进制文件默认内置了麦克风与扬声器支持。使用 `wx calls devices` 可列出本地音频端点（不启动录音或播放），使用 `wx calls dial --help` 可查看音频设备选择参数。参与通话需要守护进程声明对应的通话能力 (calling capability)。
+
 在原生 Beta 测试期间，请使用明确发布的版本号（例如 `1.0.0-beta.0`）或 `@agent-wechat/cli@beta`。在正式晋级前，稳定的 `latest` 渠道仍保留旧版容器 CLI。在假设 Beta 版已发布前，请先查看 Beta 发布说明。
 
 显式 npm 安装会通过经验证的 HTTPS 下载指定版本的构件资产。构件的大小与 SHA-256 哈希必须与 npm 包内置的 `native-release.json` 完全一致，随后本地身份校验必须确认相同的版本、原生后端、Rust 目标架构以及服务提供能力，才会进行原子安装。常规命令调用绝不会自动下载缺失的运行时。清单缺失、不受支持的平台、损坏的构件或错误的后端均会被视为错误。
