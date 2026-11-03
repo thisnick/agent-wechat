@@ -12,10 +12,14 @@
   "changesets": [
     "cli-audio-levels-devices",
     "image-publisher-runtime",
+    "incoming-call-latency",
     "normal-calling-startup",
     "offline-call-foundation",
     "openclaw-2026-10-9",
     "ordinary-null-contact-flags",
-    "reject-intent-delivery"
+    "plural-cli-selection-help",
+    "readable-cli-results",
+    "reject-intent-delivery",
+    "shorten-call-prompts"
   ]
 }
