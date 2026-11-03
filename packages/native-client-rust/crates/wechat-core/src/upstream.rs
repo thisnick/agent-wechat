@@ -200,6 +200,24 @@ pub trait Upstream: Send + Sync {
                 Some(source),
             )
     }
+    fn send_text_guarded(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        content: &str,
+        created_at: u32,
+        client_message_id: u32,
+        before_submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<TextSendResult> {
+        self.native(NativeOptions::default())?.send_text_guarded(
+            state,
+            destination,
+            content,
+            created_at,
+            client_message_id,
+            before_submit,
+        )
+    }
     fn send_quote(
         &self,
         state: &mut AccountState,
