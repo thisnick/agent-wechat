@@ -219,7 +219,7 @@ The daemon automatically downloads image/video thumbnails and received voice
 notes. Other advertised image, video, file and sticker variants follow the
 account's automatic-download limit (50 MB by default). Unknown-size and larger
 versions remain manual. **Settings → Automatic downloads** updates the hub's
-account registry through the same API used by `wx account settings`; it does not
+account registry through the same API used by `wx accounts settings`; it does not
 change the official profile or the browser's separate temporary-storage budget.
 Incoming images show a thumbnail while a permitted standard version downloads,
 then use standard quality once verified. Clicking a photo or video opens a

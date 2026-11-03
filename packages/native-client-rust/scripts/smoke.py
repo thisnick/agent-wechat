@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix="wx-native-smoke-") as directory:
     server_id = None
     token_before = None
     for _ in range(2):
-        process = subprocess.Popen([binary, *map(str, args), "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen([binary, "--json", *map(str, args), "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             # select bounds readiness instead of blocking forever on an absent line.
             import select

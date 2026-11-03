@@ -283,6 +283,7 @@ impl Fixture {
             worker,
             admission: ControlAdmission::Incoming(request.guard),
             runtime: tokio::runtime::Handle::current(),
+            timeout: CALL_RPC_TIMEOUT,
             test_io: Some(host.clone()),
         });
         Self {

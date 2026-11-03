@@ -59,6 +59,20 @@ use tokio::sync::Mutex as AsyncMutex;
 use wechat_protocol::{AccountState, DeviceProfile, LoginStatus, NativeOptions};
 use wechat_store::{vault::Vault, Operation, SendIntent, Store};
 
+fn contact_lookup_item(contact: &wechat_protocol::wire::ContactRecord) -> Value {
+    let display_name = [contact.remark.as_deref(), contact.nickname.as_deref()]
+        .into_iter()
+        .flatten()
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or(&contact.username);
+    json!({
+        "id": contact.username,
+        "displayName": display_name,
+        "alias": contact.alias,
+        "profileProjection": "pending",
+    })
+}
+
 pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
     // Cookies can change on ordinary RPCs. A renewed key, account, device or
     // routing generation requires a new authenticated persistent connection.
@@ -109,6 +123,7 @@ pub struct CoreShared {
     pub(crate) bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) startup_profiles_recovered: AtomicBool,
     pub(crate) gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    text_send_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     pub(crate) media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     media_downloads: Mutex<BTreeMap<String, Arc<tokio::sync::Semaphore>>>,
     media_download_limit: Arc<tokio::sync::Semaphore>,
@@ -336,6 +351,7 @@ impl Core {
                 ownership_generation: uuid::Uuid::new_v4().to_string(),
                 gates: Mutex::new(BTreeMap::new()),
                 media_gates: Mutex::new(BTreeMap::new()),
+                text_send_gates: Mutex::new(BTreeMap::new()),
                 media_downloads: Mutex::new(BTreeMap::new()),
                 media_download_limit: Arc::new(tokio::sync::Semaphore::new(4)),
                 read_limit: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -390,6 +406,10 @@ impl Core {
     pub async fn remove_account(&self, account: &str) -> Result<()> {
         let gate = self.gate(account)?;
         let _guard = gate
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("operation_in_progress"))?;
+        let text_send_gate = self.text_send_gate(account)?;
+        let _text_send = text_send_gate
             .try_lock()
             .map_err(|_| anyhow::anyhow!("operation_in_progress"))?;
         let media_gate = self
@@ -477,6 +497,16 @@ impl Core {
             .lock()
             .map_err(|_| anyhow::anyhow!("account manager unavailable"))?;
         Ok(gates
+            .entry(account.into())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone())
+    }
+    fn text_send_gate(&self, account: &str) -> Result<Arc<AsyncMutex<()>>> {
+        self.store.account(account)?;
+        Ok(self
+            .text_send_gates
+            .lock()
+            .map_err(|_| anyhow::anyhow!("text send manager unavailable"))?
             .entry(account.into())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone())
@@ -1205,9 +1235,17 @@ impl Core {
         let _guard = gate.lock().await;
         let core = self.clone();
         let account = account.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let contacts=core.upstream.native(NativeOptions::default())?.lookup_contacts(&mut state,&ids)?;core.save_state(&account,&state)?;
-            Ok(json!({"items":contacts.contacts.into_iter().map(|c|json!({"id":c.username,"displayName":c.remark.or(c.nickname).unwrap_or_else(||c.username.clone()),"alias":c.alias,"profileProjection":"pending"})).collect::<Vec<_>>(),"results":contacts.results}))
-        }).await
+        blocking(move || {
+            let mut state = core.account_state(&account)?;
+            let contacts = core
+                .upstream
+                .native(NativeOptions::default())?
+                .lookup_contacts(&mut state, &ids)?;
+            core.save_state(&account, &state)?;
+            let items: Vec<_> = contacts.contacts.iter().map(contact_lookup_item).collect();
+            Ok(json!({"items": items, "results": contacts.results}))
+        })
+        .await
     }
     pub async fn lookup_room(
         self: &Arc<Self>,
@@ -1459,12 +1497,17 @@ impl Core {
         Ok(intent)
     }
     async fn perform_send(self: &Arc<Self>, account: &str, id: &str) -> Result<()> {
-        let gate = self.gate(account)?;
-        let _guard = gate.lock().await;
+        let send_guard = self.text_send_gate(account)?.lock_owned().await;
+        let guard = self.lock_account(account).await?;
         let core = self.clone();
         let account = account.to_string();
         let id = id.to_string();
         blocking(move || {
+            let _send = send_guard;
+            let mut permit = crate::account_network::AccountNetworkPermit {
+                guard: Some(guard),
+                runtime: tokio::runtime::Handle::current(),
+            };
             let intent = core.store.send(&account, &id)?;
             if core.stopping.load(Ordering::SeqCst)
                 || core.store.runtime(&account, "desired")?.as_deref() != Some(b"connected")
@@ -1524,9 +1567,29 @@ impl Core {
                     return Ok(());
                 }
             }
+            let plain_text = payload.quote.is_none()
+                && payload.share.is_none()
+                && payload.mentions.is_none()
+                && native.kind() == crate::upstream::UpstreamKind::Native;
+            let plain_authority = if plain_text {
+                Some((
+                    zeroize::Zeroizing::new(
+                        core.store
+                            .runtime(&account, "account-state")?
+                            .context("auth_required")?,
+                    ),
+                    SessionFence {
+                        authorization: authorization(&state)?,
+                        logout_epoch: core.store.runtime(&account, "logout-epoch")?,
+                    },
+                ))
+            } else {
+                None
+            };
             if !core.store.claim_send(&account, &id)? {
                 return Ok(());
             }
+            let mut admission_revoked = false;
             let result = if let Some(quote) = &payload.quote {
                 native
                     .send_quote(
@@ -1575,6 +1638,45 @@ impl Core {
                             && result.returned_client_id_matches,
                         server_message_id: result.server_message_id,
                     })
+            } else if let Some((_, fence)) = &plain_authority {
+                permit.transfer(&core, &account, || {
+                    let reply = native.send_text_guarded(
+                        &mut state,
+                        &payload.thread_id,
+                        &payload.text,
+                        payload.created_at,
+                        payload.client_id,
+                        &mut || {
+                            let check = (|| -> Result<()> {
+                                let current = core
+                                    .store
+                                    .runtime(&account, "account-state")?
+                                    .context("auth_required")?;
+                                core.session_state(&account, fence)?;
+                                anyhow::ensure!(
+                                    !core.stopping.load(Ordering::Acquire)
+                                        && core.store.runtime(&account, "desired")?.as_deref()
+                                            == Some(b"connected")
+                                        && core.store.saved_login_authorization_current(
+                                            &account,
+                                            &current,
+                                            fence.logout_epoch.as_deref(),
+                                        )?,
+                                    "text_send_admission_revoked",
+                                );
+                                Ok(())
+                            })();
+                            admission_revoked = check.is_err();
+                            check
+                        },
+                    );
+                    Ok(reply.map(|result| SendReceipt {
+                        accepted: result.accepted,
+                        correlated: result.returned_destination_matches
+                            && result.returned_client_id_matches,
+                        server_message_id: result.server_message_id,
+                    }))
+                })?
             } else {
                 native
                     .send_text(
@@ -1593,7 +1695,21 @@ impl Core {
             };
             // A logout may suppress credential installation during this RPC,
             // but cannot erase an authenticated, accepted send receipt.
-            let authorization_saved = core.save_state(&account, &state).is_ok();
+            let authorization_saved = match &plain_authority {
+                Some((expected, fence)) => {
+                    !admission_revoked
+                        && core
+                            .save_network_state(
+                                &account,
+                                &state,
+                                expected,
+                                fence,
+                                Some(b"connected"),
+                            )
+                            .is_ok()
+                }
+                None => core.save_state(&account, &state).is_ok(),
+            };
             if authorization_saved {
                 core.store
                     .mark_validated_if_active(&account, &core.ownership_generation)?;
@@ -1612,6 +1728,13 @@ impl Core {
                     "failed",
                     None,
                     Some("service_rejected"),
+                )?,
+                Err(_) if admission_revoked => core.store.update_send(
+                    &account,
+                    &id,
+                    "failed",
+                    None,
+                    Some("send_admission_revoked"),
                 )?,
                 _ => core.store.update_send(
                     &account,
@@ -2236,6 +2359,136 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contact_lookup_skips_blank_names() {
+        for (remark, nickname, expected) in [
+            (Some("My remark"), Some("Nickname"), "My remark"),
+            (Some(""), Some("Nickname"), "Nickname"),
+            (Some(" \t"), Some(""), "fixture-contact"),
+            (None, None, "fixture-contact"),
+        ] {
+            let contact = wechat_protocol::wire::ContactRecord {
+                username: "fixture-contact".into(),
+                nickname: nickname.map(str::to_owned),
+                remark: remark.map(str::to_owned),
+                alias: None,
+                large_avatar_url: None,
+                small_avatar_url: None,
+                raw: vec![],
+            };
+            assert_eq!(contact_lookup_item(&contact)["displayName"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_text_wait_releases_writer_and_preserves_the_submission_fence() {
+        struct PausedSend {
+            submitted_before_pause: bool,
+            paused: tokio::sync::Notify,
+            resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl crate::upstream::Upstream for PausedSend {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn send_text_guarded(
+                &self,
+                state: &mut AccountState,
+                _: &str,
+                _: &str,
+                _: u32,
+                _: u32,
+                before_submit: &mut dyn FnMut() -> Result<()>,
+            ) -> Result<wechat_protocol::wire::TextSendResult> {
+                if self.submitted_before_pause {
+                    before_submit()?;
+                }
+                self.paused.notify_one();
+                self.resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))?;
+                if !self.submitted_before_pause {
+                    before_submit()?;
+                }
+                state.cookie = vec![3];
+                Ok(wechat_protocol::wire::TextSendResult {
+                    accepted: true,
+                    outer_code: 0,
+                    item_code: Some(0),
+                    server_message_id: Some("9001".into()),
+                    returned_destination_matches: true,
+                    returned_client_id_matches: true,
+                })
+            }
+        }
+        for submitted in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open(&tmp.path().join("data")).unwrap());
+            store.create_account("one").unwrap();
+            let (release, resume) = std::sync::mpsc::channel();
+            let host = Arc::new(PausedSend {
+                submitted_before_pause: submitted,
+                paused: tokio::sync::Notify::new(),
+                resume: Mutex::new(resume),
+            });
+            let core = Core::with_upstream(store.clone(), None, host.clone()).unwrap();
+            core.save_state("one", &state()).unwrap();
+            store.put_runtime("one", "desired", b"connected").unwrap();
+            store
+                .mark_validated_if_active("one", &core.ownership_generation)
+                .unwrap();
+            let send = core
+                .send_text("one", "lock-probe", "synthetic_peer", "test")
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), host.paused.notified())
+                .await
+                .unwrap();
+            let writer = tokio::time::timeout(Duration::from_millis(500), core.lock_account("one"))
+                .await
+                .unwrap()
+                .unwrap();
+            if submitted {
+                let mut current = core.account_state("one").unwrap();
+                current.cookie = vec![2];
+                core.save_state("one", &current).unwrap();
+            } else {
+                store
+                    .put_runtime("one", "desired", b"disconnected")
+                    .unwrap();
+            }
+            drop(writer);
+            release.send(()).unwrap();
+            let receipt = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let receipt = store.send("one", &send.id).unwrap();
+                    if matches!(
+                        receipt.state.as_str(),
+                        "accepted" | "failed" | "needs_review"
+                    ) {
+                        break receipt;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if submitted {
+                assert_eq!(receipt.state, "accepted");
+                assert_eq!(receipt.server_id.as_deref(), Some("9001"));
+                assert_eq!(core.account_state("one").unwrap().cookie, [2]);
+            } else {
+                assert_eq!(receipt.state, "failed");
+                assert_eq!(
+                    receipt.error_code.as_deref(),
+                    Some("send_admission_revoked")
+                );
+                assert!(receipt.server_id.is_none());
+            }
+        }
+    }
+
     #[test]
     fn login_admission_preserves_the_failure_kind_without_disclosing_credential_material() {
         use wechat_profile::ProfileError;

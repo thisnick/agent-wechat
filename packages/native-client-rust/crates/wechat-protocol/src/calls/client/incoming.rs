@@ -1204,6 +1204,28 @@ mod tests {
     #[test]
     fn joined_callee_remote_hangup_requests_exit_even_after_peer_is_not_joined() {
         use super::super::tests::{recorded_exit_reason, roster_sync, RecordingTransport};
+        let endpoint = p::message(&[p::bytes(1, b"192.0.2.1"), p::uint(2, 24000)]).unwrap();
+        let connection = p::message(&[
+            p::uint(1, 3),
+            p::bytes(2, b"fixture"),
+            p::uint(3, 1),
+            p::bytes(4, &endpoint),
+            p::bytes(5, &endpoint),
+        ])
+        .unwrap();
+        let relay = p::message(&[p::bytes(1, &connection), p::bytes(2, &endpoint)]).unwrap();
+        let item = |kind, body: &[u8]| p::message(&[p::uint(1, kind), p::bytes(2, body)]).unwrap();
+        let notify = p::message(&[
+            p::uint(3, 7),
+            p::uint(4, 9),
+            p::bytes(5, &item(17, &relay)),
+            p::bytes(5, &item(12, &av_status(3, 0))),
+        ])
+        .unwrap();
+        let message = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+        let relay_update = host_reply(
+            &p::message(&[p::bytes(1, &item(1, &message)), p::bytes(2, b"updated")]).unwrap(),
+        );
         let transport = RecordingTransport {
             inner: transport(vec![
                 (CallHostRoute::AppAuth, auth_reply()),
@@ -1221,6 +1243,7 @@ mod tests {
                     CallHostRoute::LiveSync,
                     roster_sync(5, Some(1), Some(1), false),
                 ),
+                (CallHostRoute::LiveSync, relay_update),
                 (
                     CallHostRoute::LiveSync,
                     roster_sync(6, Some(1), Some(4), false),
@@ -1265,14 +1288,27 @@ mod tests {
             SyncProgress::MediaReady
         );
         assert_eq!(session.phase(), IncomingPhase::Joined);
-        assert!(matches!(
+        session.take_media(&state, authority(), 0, 0).unwrap();
+        let original_strategy = session.base.active.as_ref().unwrap().strategy.clone();
+        assert_eq!(
             session
                 .poll(&transport, &mut state, authority(), tasks(6))
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert_eq!(session.peer_microphone_muted(), Some(true));
+        let active = session.base.active.as_ref().unwrap();
+        assert_eq!(*active.strategy, *original_strategy);
+        assert_eq!(active.cookies, b"updated");
+        assert!(active.media_taken);
+        assert!(matches!(
+            session
+                .poll(&transport, &mut state, authority(), tasks(7))
                 .unwrap(),
             SyncProgress::Terminal(RemoteTermination::Exit(RemoteExitReason::LastPeerLeft))
         ));
         session
-            .finish_remote(&transport, &mut state, authority(), tasks(7), false)
+            .finish_remote(&transport, &mut state, authority(), tasks(8), false)
             .unwrap();
         assert_eq!(session.phase(), IncomingPhase::Finished);
         assert_eq!(

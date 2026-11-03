@@ -35,10 +35,11 @@ File attachments preserve source bytes. Image sends can resize/re-encode them. S
    wx jobs get JOB_ID
    ```
 
-   While verifying the uploaded bytes, the JSON includes:
+   While the daemon verifies the uploaded bytes, the job shows these fields:
 
-   ```json
-   { "state": "running", "phase": "readback" }
+   ```text
+   Phase: readback
+   State: running
    ```
 
    Keep the job ID and key. Ending the wait leaves the daemon working.

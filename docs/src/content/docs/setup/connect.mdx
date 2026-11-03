@@ -80,6 +80,8 @@ wx --account ACCOUNT_ID auth login
 wx --account ACCOUNT_ID auth logout
 ```
 
+Use `wx --account ACCOUNT_ID auth logout --local` to sign out on the daemon and keep saved credentials without sending a logout request to WeChat. Both forms stop automatic reconnection.
+
 After sign-out completes, remove the profile from the hub by repeating its exact ID:
 
 ```bash

@@ -41,8 +41,8 @@ use wechat_protocol::{
         app_session::AppAuthority,
         audio_packet::{self, Live96, MediaContext, MediaEpoch, TransmitScope},
         client::{
-            CallRpcNotSubmitted, NativePersonalSession, PersonalPhase, PersonalTransport,
-            SyncProgress, TaskIds, UnsupportedCallMedia, VoiceParameters,
+            CallLiveSyncInterrupted, CallRpcNotSubmitted, NativePersonalSession, PersonalPhase,
+            PersonalTransport, SyncProgress, TaskIds, UnsupportedCallMedia, VoiceParameters,
         },
         host_policy::{
             is_reject_request, is_teardown_request, selected_policy, CallHostPolicy, CallHostRoute,
@@ -491,6 +491,9 @@ impl ControlAdmission {
 }
 #[cfg(test)]
 trait TestCallIo: Send + Sync {
+    fn park_incoming_sync(&self) -> bool {
+        false
+    }
     fn call(
         &self,
         state: &mut AccountState,
@@ -499,6 +502,8 @@ trait TestCallIo: Send + Sync {
         handoff: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<u8>>;
 }
+const CALL_RPC_TIMEOUT: Duration = Duration::from_secs(12);
+
 struct FencedTransport {
     core: Weak<Core>,
     account: String,
@@ -508,10 +513,31 @@ struct FencedTransport {
     worker: Arc<Worker>,
     admission: ControlAdmission,
     runtime: tokio::runtime::Handle,
+    timeout: Duration,
     #[cfg(test)]
     test_io: Option<Arc<dyn TestCallIo>>,
 }
 impl FencedTransport {
+    fn pre_answer_poll(&self, route: CallHostRoute) -> bool {
+        route == CallHostRoute::LiveSync && matches!(self.admission, ControlAdmission::Incoming(_))
+    }
+    fn wait_for_incoming_sync<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mailbox = self
+            .worker
+            .incoming
+            .as_ref()
+            .context("Incoming mailbox missing")?;
+        self.runtime.block_on(async {
+            tokio::select! {
+                biased;
+                reply = exchange => reply,
+                _ = mailbox.answer_queued.notified() => Err(CallLiveSyncInterrupted.into()),
+            }
+        })
+    }
     fn admits(&self, teardown: bool, rejecting: bool) -> bool {
         if teardown {
             return true;
@@ -622,7 +648,7 @@ impl PersonalTransport for FencedTransport {
         );
         #[cfg(not(test))]
         let native = core.upstream.native(NativeOptions {
-            timeout: Duration::from_secs(12),
+            timeout: self.timeout,
             ..NativeOptions::default()
         })?;
         if !self.admits(teardown, rejecting) {
@@ -674,14 +700,40 @@ impl PersonalTransport for FencedTransport {
             self.test_io
                 .as_ref()
                 .context("Missing synthetic call host")
-                .and_then(|io| io.call(&mut exchanged, route, request, &mut handoff))
+                .and_then(|io| {
+                    if self.pre_answer_poll(route) && io.park_incoming_sync() {
+                        handoff()?;
+                        self.wait_for_incoming_sync(std::future::pending())
+                    } else {
+                        io.call(&mut exchanged, route, request, &mut handoff)
+                    }
+                })
         };
         #[cfg(not(test))]
-        let result = native.experimental_call_rpc_guarded(&mut exchanged, route, request, handoff);
+        let result = if self.pre_answer_poll(route) {
+            native.experimental_call_live_sync_guarded(
+                &mut exchanged,
+                request,
+                handoff,
+                |exchange| self.wait_for_incoming_sync(exchange),
+            )
+        } else {
+            native.experimental_call_rpc_guarded(&mut exchanged, route, request, handoff)
+        };
         // Retain the response before trying to reacquire: a poisoned/closed
         // writer must not discard an authenticated reply. These are operational
         // sealed receipts, never account/profile state or mutation permission.
         let handed_off = handed_off.load(Ordering::Acquire);
+        if self.pre_answer_poll(route)
+            && handed_off
+            && result
+                .as_ref()
+                .is_err_and(|error| error.is::<CallLiveSyncInterrupted>())
+        {
+            core.store
+                .finish_interrupted_live_sync(&self.account, &self.call_id, &action)?;
+            return result;
+        }
         let retained = self.retain_host_result(&core, &action, route, &result, handed_off);
         let reacquired = self.runtime.block_on(core.lock_account(&self.account));
         retained?;
@@ -759,6 +811,7 @@ fn run_control(
         worker: worker.clone(),
         admission: ControlAdmission::Owner(sink.clone()),
         runtime: runtime.clone(),
+        timeout: CALL_RPC_TIMEOUT,
         #[cfg(test)]
         test_io: inner.test_io.clone(),
     };

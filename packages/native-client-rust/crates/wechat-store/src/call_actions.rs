@@ -136,6 +136,28 @@ impl Store {
             Ok(())
         })
     }
+    /// Preserve a superseded read-only LiveSync outcome without marking the
+    /// session uncertain. This does not acknowledge receipt or allow replay.
+    pub fn finish_interrupted_live_sync(
+        &self,
+        account: &str,
+        call_id: &str,
+        action_id: &str,
+    ) -> Result<()> {
+        if !id(call_id) || !id(action_id) {
+            bail!("invalid_call_result");
+        }
+        self.control(account, |db| {
+            let changed = db.execute(
+                "UPDATE call_actions SET outcome='needs_review',updated_at=?3 WHERE call_id=?1 AND action_id=?2 AND route=9262 AND outcome='prepared'",
+                params![call_id, action_id, unix_seconds()],
+            )?;
+            if changed != 1 {
+                bail!("call_action_already_recorded");
+            }
+            Ok(())
+        })
+    }
     pub fn finish_call(
         &self,
         account: &str,
