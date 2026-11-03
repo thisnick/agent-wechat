@@ -1,0 +1,103 @@
+---
+title: 连接账号
+description: 启动后台服务并登录微信，可使用全新数据目录或继承现有数据。
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import qrLogin from '../../../../assets/qr-login.svg';
+
+<Steps>
+
+1. **启动 Daemon 服务** 并保持运行。
+
+   ```bash
+   wx serve
+   ```
+
+2. **在第二个终端中登录。**
+
+   <Tabs>
+   <TabItem label="全新 Profile">
+
+   适用于所有支持的平台。agent-wechat 会在其独立的数据目录中创建一个全新的微信 Profile。
+
+   ```bash
+   wx accounts create --alias me
+   wx auth login
+   ```
+
+   </TabItem>
+   <TabItem label="继承现有微信数据 (Linux)">
+
+   直接复用现有的 Linux 版微信文件以保留完整的本地聊天记录。操作前请先退出微信官方客户端并做好备份：
+
+   ```bash
+   tar -czf ~/wechat-profile-backup.tgz -C ~ xwechat_files .xwechat
+   wx auth login --official
+   ```
+
+   `--official` 默认扫描用户家目录。如果数据存放在其他位置，可指定所在目录路径：`--official=/path/to/home`。
+
+   </TabItem>
+   </Tabs>
+
+   使用手机微信扫描终端打印的二维码，或直接在手机端确认授权登录：
+
+   <img src={qrLogin.src} class="mock wide" alt="终端展示 wx auth login 打印二维码并成功确认登录的流程" />
+
+3. **验证连接状态。**
+
+   ```bash
+   wx messages list filehelper --limit 1
+   ```
+
+   ```json
+   {
+     "items": [
+       {
+         "id": "msg_eyJkYXRhYmFzZSI6Im1lc3NhZ2UvbWVzc2FnZV8wLmRi…",
+         "threadId": "filehelper",
+         "direction": "outgoing",
+         "type": 1,
+         "body": "notes for Monday",
+         "createdAt": "2026-10-21T09:14:03+00:00"
+       }
+     ],
+     "nextCursor": "…"
+   }
+   ```
+
+</Steps>
+
+连接成功！下一步：配置在后台[持续运行](/zh-cn/setup/run/)，然后通过 [CLI](/zh-cn/use/cli/)、[OpenClaw](/zh-cn/openclaw/setup/) 或 [HTTP API](/zh-cn/use/api/) 尽情使用。
+
+## 退出登录或删除 Profile
+
+使用 `wx accounts list` 查看所有账号，并获取对应的账号 ID：
+
+```bash
+wx --account ACCOUNT_ID auth login
+wx --account ACCOUNT_ID auth logout
+```
+
+退出登录完成后，可通过确认相同的 ID 将该 Profile 从管理列表中注销：
+
+```bash
+wx accounts remove ACCOUNT_ID --confirm ACCOUNT_ID
+```
+
+```json
+{ "accountId": "ACCOUNT_ID", "removed": true, "filesRetained": true }
+```
+
+注销只会从管理记录中移除该 Profile，本地数据文件将安全保留。`wx auth forget --yes` 则是一项独立操作，仅用于清除已保存的登录凭据，不会删除 Profile 注册记录。
+
+<Aside title="使用提示">
+- **新 Profile 不包含历史聊天记录。** 微信不会向新设备下发完整的历史云端消息，因此新 Profile 仅记录登录后产生的新消息。
+- **使用 `--official` 时请勿运行官方微信。** 两个进程同时写入同一批数据文件可能会导致数据损坏。
+- **账号必须一致。** 使用 `--official` 时登录的微信账号必须与该数据目录的所有者匹配；Daemon 会严格校验，禁止将其他账号的消息混入其中。
+- **服务下次重启时会自动重连。** 除非微信服务端结束登录会话，否则无需重复扫码。
+- **无图形或终端无法显示二维码？** `wx` 会将二维码图片保存为本地 PNG 文件并打印文件路径。
+- **手机确认无响应？** 部分手机确认流程需要手机能通过局域网直接访问 Daemon（端口 8050 至 8100）。请检查防火墙设置及 Wi-Fi AP 隔离策略。
+- **多账号管理：** 分别为每个账号创建并登录，之后使用 `--account 别名` 切换操作。
+</Aside>

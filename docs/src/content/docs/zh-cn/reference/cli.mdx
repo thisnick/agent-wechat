@@ -1,0 +1,60 @@
+---
+title: CLI 命令参考
+description: wx 命令分组、全局标志与退出状态码。
+---
+
+执行 `wx COMMAND --help` 可查看任意具体命令的完整参数选项。所有命令默认输出标准 JSON 格式。
+
+## 命令列表
+
+| 顶级命令 | 子命令与操作 |
+| --- | --- |
+| `wx serve` | 在前台启动守护服务进程 |
+| `wx daemon` | 后台托管命令：`start`、`status`、`logs [--follow]`、`stop` |
+| `wx auth` | 认证授权：`login [--official[=PATH]] [--qr] [--saved-only]`、`status`、`qr ID`、`attempts get/cancel ID`、`logout`、`forget --yes` |
+| `wx accounts` | 多账号管理：`list`、`create [--id ID] [--alias NAME]`、`get`、`default ID`、`alias ID NAME`、`remove ID --confirm ID` |
+| `wx account` | 当前账号状态：`status`、`settings [--auto-download-max-mb MB]`、`capabilities`、`connect`、`disconnect` |
+| `wx chats` | 会话管理：`list`、`get ID`、`find TEXT`、`read ID --expected-version V`、`mute ID`、`unmute ID`、`pin ID`、`unpin ID` |
+| `wx messages` | 消息收发：`list CHAT`、`get CHAT ID`、`send CHAT --text/--image/--file/--video/--voice/--share`、`media CHAT ID`、指定 `--video` 时搭配 `--video-quality normal/original`、`recall ID --server-id S`、`sends lookup/get/cancel` |
+| `wx contacts` | 联系人：`list`、`find TEXT`、`get ID`、`refresh ID`、`sync`、`avatar ID` |
+| `wx groups` | 群组操作：`list`、`get ID`、`members list/get/refresh/add/remove`、`create MEMBERS...`、`rename ID NAME`、`leave ID`、`my-name ID NAME`、`clear-announcement ID`、`refresh ID`、`sync` |
+| `wx events` | 事件流：`watch [--cursor-file F]`、`list`、`ack --consumer NAME --through CURSOR` |
+| `wx jobs` | 后台任务：`get ID`、`cancel ID`、`retry ID [--reuse-completed-upload]`、`repair-writeback` |
+| `wx operations` | 操作记录：`get ID` |
+| `wx sync` | 立即触发增量消息拉取同步 |
+| `wx tokens` | API 令牌：`list`、`create NAME --accounts ID --scopes S`、`revoke ID` |
+| `wx config` | CLI 配置：`show`、`server add/list/use` |
+| `wx profile` | 在无需 Daemon 启动的情况下离线只读审查 Profile（`add`、`inspect`、`messages`、`contacts`、`images` 等） |
+| `wx store` | 实验性：复制、导入与导出 Profile |
+| `wx version` | 查看版本与编译目标平台 |
+
+## 全局标志 (Global Flags)
+
+| 命令行标志 | 对应环境变量 | 作用说明 |
+| --- | --- | --- |
+| `--account ID` | `AGENT_WECHAT_ACCOUNT` | 指定操作的目标账号 ID 或别名 |
+| `--server-name NAME` | `AGENT_WECHAT_SERVER` | 指定通过 `wx config server add` 保存的服务器配置名称 |
+| `--server URL` | `AGENT_WECHAT_URL` | 指定 Daemon 服务的直接访问 URL |
+| `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | 存放 API 访问令牌的文件路径 |
+| | `AGENT_WECHAT_TOKEN` | 访问令牌直接字符串（建议优先使用文件路径形式） |
+| `--config PATH` | `AGENT_WECHAT_CONFIG` | CLI 配置文件路径 |
+| `--json` | | 输出机器友好的机器可读错误与进度；禁止在终端直接打印二维码字符画 |
+
+命令行标志优先级高于环境变量，环境变量优先级高于本地配置文件。所有耗时后台命令（发送、下载、登录、撤回等）均支持传入 `--detach`，使命令在任务成功入队后立即返回。
+
+`messages send --wait SECONDS` 参数对附件发送最长允许等待 3,600 秒，对文本或分享链接最长允许等待 900 秒（默认 30 秒）。发送大文件建议指定 `--wait 3600`。等待超时将返回退出状态码 7，此时后台任务仍在持续运行；可通过 `wx jobs get JOB_ID` 进行跟踪。参考[发送附件与媒体](/zh-cn/use/media/)。
+
+## 退出状态码 (Exit Codes)
+
+| 状态码 | 含义 |
+| --- | --- |
+| 0 | 成功完成，或已使用 `--detach` 成功入队 |
+| 2 | 输入参数或配置无效 |
+| 3 | 无法连接到 Daemon 服务 |
+| 4 | 令牌被拒绝或缺少必要权限范围 |
+| 5 | 需要登录 |
+| 6 | 需要用户交互：在手机端确认或扫码 |
+| 7 | 等待时间已结束但任务仍在后台运行；可稍后查询 |
+| 8 | 结果未决 (`needs_review`)：切勿直接盲目重发 |
+| 9 | 明确执行失败 |
+| 130 | 用户主动中断 Ctrl-C（后台任务仍在继续处理） |

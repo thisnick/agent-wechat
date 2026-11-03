@@ -1,0 +1,47 @@
+---
+title: 桌面应用
+description: 使用本地 agent-wechat Hub 或将桌面端连接到其他 Hub 节点。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+桌面应用程序集成了图形聊天界面、本地 agent-wechat Hub 节点以及 `wx` 命令行工具。独立 npm CLI 依然保持单独维护。
+
+1. 从 [GitHub Releases](https://github.com/thisnick/agent-wechat/releases) 下载适合你平台的应用安装包。
+
+   | 平台系统 | 下载格式 | 安装方式 |
+   | --- | --- | --- |
+   | macOS (Apple Silicon) | `.dmg` | 将 AgentWechat 拖入“应用程序”文件夹。 |
+   | Windows x64 或 ARM64 | 对应架构的 `-setup.exe` | 为当前用户运行安装程序。 |
+   | Ubuntu 24.04 x64 或 ARM64 | `.deb` | 使用系统软件包管理器安装。 |
+
+2. 打开 AgentWechat，选择 **使用当前设备 (Use this device)** 启动本地 Hub，或者选择 **连接到其他 Hub (Connect to another hub)** 输入节点地址及访问密钥。
+3. 添加微信 Profile 并按照提示完成登录。
+4. 打开 **设置 (Settings)** 配置网络访问权限、安装全局 `wx` 命令，或导出访问密钥供其他客户端使用。
+
+该应用在当前用户权限下运行，使用系统原生凭据管理和文件对话框；网络访问权限和开机自启均为可选配置。如果需要允许外部局域网设备连接，可能需要在系统防火墙中放行相应端口。
+
+## 连接命令行工具 (CLI)
+
+桌面端的访问密钥保存在系统的安全密钥环（Keyring）中。独立的 CLI 安装则使用受保护的文件凭据：
+
+```bash
+wx config server add desktop --url http://127.0.0.1:6174 --token-file /path/to/exported-key
+wx --server-name desktop status
+```
+
+状态返回信息中将包含该 Hub 及其 Native 后端详情。如果修改了桌面端监听端口，请使用实际显示的地址。
+
+## 开启局域网或远程访问
+
+网络访问采用 HTTPS 协议。桌面端会自动生成自签名证书，无需手动提供 TLS 证书文件。独立的 `wx serve` 同样支持 `--tls-cert-file` 与 `--tls-key-file`，方便接入已有证书（例如为局域网主机名签发的证书）。受公共信任的 HTTPS 地址（包括 Tailscale Serve 等）无需额外配置证书。若 Hub 使用自签名私有证书，可从该 Hub 的桌面端设置中复制证书内容，并在客户端桌面端的 **高级 (Advanced) → 私有证书 (Private certificate，可选)** 中粘贴配置。浏览器会遵循系统证书信任规则，而 CLI 可以在单次调用中显式指定受信任证书：
+
+```bash
+wx --server-name desktop --ca-cert-file /path/to/certificate.pem status
+```
+
+在配置远程连接时，请将对应的 HTTPS 地址保存为服务器 URL。
+
+<Aside title="使用提示">
+配置完成后，每当打开应用时本地 Hub 会自动启动（即使当前图形界面连接的是远程节点）。关闭窗口后应用仍将在托盘或状态栏中后台运行。如需彻底停止服务，请选择 **退出 AgentWechat**。退出程序不会导致微信退出登录或删除 Profile。Linux 桌面端需要运行未锁定的 Secret Service 密钥环。单独安装的 CLI 无法直接读取桌面密钥环，需导出密钥文件或创建独立的 [API 令牌](/zh-cn/reference/tokens/)。
+</Aside>

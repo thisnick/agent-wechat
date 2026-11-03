@@ -1,0 +1,90 @@
+---
+title: 设置
+description: 配置桌面端、本地存储与账号附件自动下载策略。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+在应用中打开 **设置 (Settings)**。不同的设置项作用范围不同：
+
+| 设置项 | 生效范围 |
+| --- | --- |
+| 外观与临时存储 | 当前设备 |
+| 本地 Hub、网络访问与开机自启 | 桌面端应用 |
+| 消息通知与提示音 | 桌面端应用 |
+| 桌面端连接密钥 | 系统密钥环 |
+| 附件自动下载 | Hub 上所选的微信账号 |
+
+本地/网络连接、证书和 CLI 配置请参考[桌面应用](/zh-cn/setup/desktop/)。独立 CLI 客户端维护自身受保护的令牌文件。
+
+## 消息通知
+
+桌面端的 **消息通知 (Message notifications)** 在窗口最小化或隐藏时依然有效。已开启免打扰的会话、当前正在浏览的会话，以及历史旧消息或重复消息均不会弹出通知。
+
+**通知提示音 (Notification sound)** 可独立开启或关闭。macOS 与 Linux 使用内置的柔和双音提示；Windows 使用系统原生通知音。点击 **试听预览 (Preview)** 可发送带声音的测试通知。系统全局通知与免打扰设置依然生效。密集连发的消息在 3 秒内最多触发一次提示音。
+
+## 附件自动下载
+
+agent-wechat Hub 能够在无需浏览器或 API 客户端保持打开的情况下自动下载收到的新附件。每个账号拥有独立的体积阈值，初始默认为 **50 MB (52,428,800 字节)**。
+
+| 附件类型 | 自动下载规则 |
+| --- | --- |
+| 图片与视频缩略图 | 只要提供源数据，始终自动下载 |
+| 语音留言 | 始终自动下载为可播放格式 |
+| 高清 (Standard) 与原图 (Original) 图片 | 只要声明大小在阈值内，各版本均自动下载 |
+| 高清 (Standard) 与原始 (Original) 视频 | 只要声明大小在阈值内，各版本均自动下载 |
+| 文件与表情包 | 声明大小在阈值内时自动下载 |
+| 超出阈值或大小未知的版本 | 仅在手动请求时按需下载 |
+
+### 修改下载阈值
+
+1. 选择账号并读取其当前配置：
+
+   ```bash
+   wx --account personal --json account settings
+   ```
+
+   ```json
+   { "autoDownloadMaxBytes": 52428800 }
+   ```
+
+2. 设置阈值（单位为 MB，CLI 按照 1 MB = 1,048,576 字节计算）：
+
+   ```bash
+   wx --account personal --json account settings --auto-download-max-mb 50
+   ```
+
+   ```json
+   { "autoDownloadMaxBytes": 52428800 }
+   ```
+
+   设置为 `0` 表示仅自动下载缩略图和语音。最高可设为 `512`（对应支持的文件下载上限 512 MiB）。修改将即时作用于后续新附件和尚未开始下载的任务；正在进行的传输与已下载的文件不会受到影响。
+
+在浏览器中，打开 **设置 → 自动下载**。该选项控制保存在 Hub 节点上的媒体文件。**在当前设备上** 选项则代表浏览器本地的临时副本。
+
+### API 与 SDK
+
+通过 `GET /v1/accounts/{account}/settings` 查询，并通过 `PATCH /v1/accounts/{account}/settings` 进行更新：
+
+```json
+{ "autoDownloadMaxBytes": 52428800 }
+```
+
+读取需要账号的 `read` 权限；更新需要 `media` 权限。接口返回已保存的设置，账号事件流将广播 `account.settings_updated` 事件。
+
+```ts
+const settings = await client.accountSettings(accountId);
+await client.updateAccountSettings(accountId, {
+  autoDownloadMaxBytes: 50 * 1024 * 1024,
+});
+```
+
+如果发送方提供了文件体积，媒体响应中将暴露 `advertisedByteLength`，并提供反映当前策略的 `autoDownloadAllowed` 标记。`byteLength` 依然表示经校验落盘的实际字节大小。未声明体积并不代表文件为空。
+
+<Aside title="使用提示">
+- 设置保存在 Hub 的账号注册库中，独立于官方微信 Profile。
+- 这是 Hub 的自主下载策略，与官方手机微信的行为相互独立。导入现有 Profile 或执行本地数据修复时绝不会自动发起网络全量同步。
+- 阈值在传输前依据对方声明的体积进行初筛。实际数据仍需经过完整性校验；高清图片的声明体积可能与最终下载的大小略有出入。
+- 超出阈值或未知大小的文件仍可通过[手动下载附件](/zh-cn/use/media/#下载文件)获取。
+- 调整阈值不会回溯扫描历史旧消息。翻看历史消息时可能会按当前策略拉取允许的预览图；其他画质版本仍需手动触发。
+</Aside>
