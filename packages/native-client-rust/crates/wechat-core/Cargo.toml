@@ -10,6 +10,8 @@ publish.workspace = true
 default = []
 experimental-calls = []
 native-calls = []
+# Only for short calls with isolated test accounts.
+isolated-call-audio-range = []
 
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }

@@ -82,6 +82,7 @@ pub struct Live96 {
     context: MediaContext,
     epoch: MediaEpoch,
     tx_scope: Option<TransmitScope>,
+    first_tx_audio: u16,
     next_audio: u32,
     next_control: u32,
     clear_sequence: u32,
@@ -109,6 +110,7 @@ impl Live96 {
             context,
             epoch,
             tx_scope: None,
+            first_tx_audio: 0,
             next_audio: 0,
             next_control: 0,
             clear_sequence: 0,
@@ -147,6 +149,31 @@ impl Live96 {
             ),
         };
         self.tx_scope = Some(scope);
+        Ok(())
+    }
+    /// Reserve an outgoing audio range for one time-limited isolated test.
+    /// The peer must use the lower range for the duration of the test.
+    pub fn authorize_isolated_audio_range(
+        &mut self,
+        current: MediaEpoch,
+        first_sequence: u16,
+        intent_id: [u8; 32],
+        deadline_ms: u64,
+    ) -> Result<()> {
+        ensure!(
+            self.rx_seen.is_empty() && first_sequence != 0,
+            "Audio test range requires a fresh channel and nonzero sequence"
+        );
+        self.authorize_transmit(
+            current,
+            TransmitScope::IsolatedCompatibilityTest {
+                intent_id,
+                deadline_ms,
+                allow_known_audio_overlap: false,
+            },
+        )?;
+        self.first_tx_audio = first_sequence;
+        self.next_audio = u32::from(first_sequence);
         Ok(())
     }
     fn tx_check(&mut self, current: MediaEpoch, now_ms: u64) -> Result<()> {
@@ -282,8 +309,12 @@ impl Live96 {
         } else {
             0
         };
-        if u32::from(sequence) < own_next {
+        if u32::from(sequence) < own_next && (kind != 0x10 || sequence >= self.first_tx_audio) {
             self.diagnostic_audio_overlap(kind)?;
+        }
+        if kind == 0x10 && self.first_tx_audio != 0 && sequence >= self.first_tx_audio {
+            self.close();
+            bail!("Peer entered the isolated audio nonce range");
         }
         // Retire every authenticated nonce before payload/member classification.
         // Fixed 65536-bit ledgers preserve known cross-direction overlap checks
@@ -554,6 +585,33 @@ mod tests {
             )
             .unwrap();
         sender
+    }
+    #[test]
+    fn isolated_audio_range_delivers_duplex_and_rejects_peer_range_entry() {
+        let mut local = receiver();
+        let mut remote = peer();
+        let raw = ordinary95_pair(0, 1, 320, &[1], &[2]).unwrap();
+        local
+            .authorize_isolated_audio_range(epoch(), 4096, [1; 32], 100)
+            .unwrap();
+
+        let outbound = local.seal_audio(epoch(), 0, &raw).unwrap();
+        let inbound = remote.seal_audio(epoch(), 0, &raw).unwrap();
+        assert_eq!(local.open(epoch(), &inbound).unwrap().unwrap().sequence, 0);
+        assert_eq!(
+            remote.open(epoch(), &outbound).unwrap().unwrap().sequence,
+            4096
+        );
+        remote.next_audio = 4097;
+        let intruding = remote.seal_audio(epoch(), 1, &raw).unwrap();
+        assert!(local.open(epoch(), &intruding).is_err());
+        assert!(local.seal_audio(epoch(), 2, &raw).is_err());
+
+        let mut expired = receiver();
+        expired
+            .authorize_isolated_audio_range(epoch(), 4096, [1; 32], 100)
+            .unwrap();
+        assert!(expired.seal_audio(epoch(), 100, &raw).is_err());
     }
     #[test]
     fn original_aead_matches_independent_literal_vectors() {
