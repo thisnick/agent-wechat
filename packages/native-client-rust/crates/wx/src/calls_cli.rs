@@ -15,16 +15,15 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 use wechat_core::call_types::CallEvent;
-#[cfg(feature = "call-audio")]
+
 use wechat_core::call_types::{
     CallAudioFormat, CallCapabilities, CallCommand, CallOffer, CallPendingOffer, CallView,
     CallsAvailability,
 };
 
-#[cfg(feature = "call-audio")]
 #[path = "calls_cli_audio.rs"]
 mod audio;
-#[cfg(feature = "call-audio")]
+
 #[path = "calls_cli_levels.rs"]
 mod levels;
 
@@ -61,11 +60,9 @@ pub(crate) enum CallsCommand {
 #[derive(Args, Clone, Default)]
 pub(crate) struct AudioOptions {
     /// Local backend source name or endpoint ID; defaults to the OS microphone.
-    #[cfg(feature = "call-audio")]
     #[arg(long)]
     input_device: Option<String>,
     /// Local backend sink name or endpoint ID; defaults to the OS speakers.
-    #[cfg(feature = "call-audio")]
     #[arg(long)]
     output_device: Option<String>,
 }
@@ -78,22 +75,11 @@ pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
             super::output(&value)
         }
         CallsCommand::Monitor { .. } if json => observe(remote).await,
-        command => {
-            #[cfg(feature = "call-audio")]
-            {
-                audio::run(remote, command, json).await
-            }
-            #[cfg(not(feature = "call-audio"))]
-            {
-                let _ = command;
-                bail!("call_audio_unavailable: this build supports calls status and calls monitor --json; interactive calls require a build with call-audio")
-            }
-        }
+        command => audio::run(remote, command, json).await,
     }
 }
 
 pub(crate) async fn devices(json: bool) -> Result<()> {
-    #[cfg(feature = "call-audio")]
     {
         let devices = tokio::task::spawn_blocking(wechat_audio::AudioSession::devices).await??;
         let values: Vec<_> = devices
@@ -133,11 +119,6 @@ pub(crate) async fn devices(json: bool) -> Result<()> {
             );
         }
         Ok(())
-    }
-    #[cfg(not(feature = "call-audio"))]
-    {
-        let _ = json;
-        bail!("call_audio_unavailable: this build does not include local audio devices")
     }
 }
 
@@ -203,7 +184,6 @@ fn verify_upgrade(headers: &header::HeaderMap, key: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "call-audio")]
 async fn send_json(socket: &mut Socket, value: &impl serde::Serialize) -> Result<()> {
     let text = serde_json::to_string(value)?;
     if text.len() > 16 * 1024 {
@@ -242,23 +222,23 @@ async fn receive_event(socket: &mut Socket) -> Result<CallEvent> {
 
 struct Control {
     socket: Socket,
-    #[cfg(feature = "call-audio")]
+
     cancellation: Option<Cancellation>,
-    #[cfg(feature = "call-audio")]
+
     client_id: String,
-    #[cfg(feature = "call-audio")]
+
     capabilities: CallCapabilities,
-    #[cfg(feature = "call-audio")]
+
     availability: CallsAvailability,
-    #[cfg(feature = "call-audio")]
+
     offer: Option<CallOffer>,
-    #[cfg(feature = "call-audio")]
+
     pending_offer: Option<CallPendingOffer>,
-    #[cfg(feature = "call-audio")]
+
     tracks: std::collections::BTreeMap<(String, u32), wechat_core::call_types::CallAudioTrack>,
-    #[cfg(feature = "call-audio")]
+
     call: Option<CallView>,
-    #[cfg(feature = "call-audio")]
+
     format: CallAudioFormat,
 }
 impl Control {
@@ -283,29 +263,29 @@ impl Control {
         Ok((
             Self {
                 socket,
-                #[cfg(feature = "call-audio")]
+
                 cancellation: None,
-                #[cfg(feature = "call-audio")]
+
                 client_id: _client_id.clone(),
-                #[cfg(feature = "call-audio")]
+
                 capabilities: *_capabilities,
-                #[cfg(feature = "call-audio")]
+
                 availability: *_availability,
-                #[cfg(feature = "call-audio")]
+
                 offer: _current_offer.clone(),
-                #[cfg(feature = "call-audio")]
+
                 pending_offer: _current_pending_offer.clone(),
-                #[cfg(feature = "call-audio")]
+
                 tracks: Default::default(),
-                #[cfg(feature = "call-audio")]
+
                 call: _current_call.clone(),
-                #[cfg(feature = "call-audio")]
+
                 format: *_audio_format,
             },
             event,
         ))
     }
-    #[cfg(feature = "call-audio")]
+
     fn update(&mut self, event: &CallEvent) {
         match event {
             CallEvent::Offered { offer } => self.offer = Some(offer.clone()),
@@ -346,7 +326,7 @@ impl Control {
             _ => {}
         }
     }
-    #[cfg(feature = "call-audio")]
+
     async fn command(&mut self, command: CallCommand) -> Result<OwnerResult> {
         let cancellation = self.cancellation.clone();
         if cancellation
@@ -406,10 +386,9 @@ impl Control {
 
 /// A signal stays latched across device preparation, attachment and socket
 /// awaits. A new waiter cannot miss a signal consumed by an earlier phase.
-#[cfg(feature = "call-audio")]
 #[derive(Clone)]
 struct Cancellation(tokio::sync::watch::Receiver<bool>);
-#[cfg(feature = "call-audio")]
+
 impl Cancellation {
     fn listen() -> (Self, SignalWatcher) {
         let (sender, receiver) = tokio::sync::watch::channel(false);
@@ -427,16 +406,15 @@ impl Cancellation {
         let _ = receiver.wait_for(|cancelled| *cancelled).await;
     }
 }
-#[cfg(feature = "call-audio")]
+
 struct SignalWatcher(tokio::task::JoinHandle<()>);
-#[cfg(feature = "call-audio")]
+
 impl Drop for SignalWatcher {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
 
-#[cfg(feature = "call-audio")]
 struct OwnerResult {
     call_id: Option<String>,
     owner_token: Option<String>,

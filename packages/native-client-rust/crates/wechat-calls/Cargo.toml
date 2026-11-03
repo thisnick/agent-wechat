@@ -9,12 +9,12 @@ description = "Portable call audio interfaces, pacing and native Opus codec"
 publish = false
 
 [features]
-default = ["native-opus"]
-native-opus = ["dep:opusic-c"]
+# Compatibility aliases; these features no longer select different builds.
+default = []
+native-opus = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-opusic-c = { version = "=1.6.1", optional = true }
+opusic-c = { version = "=1.6.1" }
 
 [[example]]
 name = "tone_roundtrip"
-required-features = ["native-opus"]

@@ -11,5 +11,5 @@ pub mod frame;
 pub mod playout;
 pub mod tone;
 
-#[cfg(all(feature = "native-opus", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod opus;

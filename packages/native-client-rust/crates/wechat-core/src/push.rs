@@ -261,7 +261,7 @@ impl Core {
         if fresh {
             self.store
                 .put_runtime(account, &format!("apply-origin:{id}"), origin.as_bytes())?;
-            #[cfg(feature = "experimental-calls")]
+
             crate::calls::notifications::after_sync_staged(self, account, &id, &batch, origin);
         }
         let projection = self.project_pending_with_media(account, true)?;

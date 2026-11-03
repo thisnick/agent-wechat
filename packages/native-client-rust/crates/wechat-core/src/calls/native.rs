@@ -67,81 +67,20 @@ use transport_state::CallNetworkState;
 type BackendFuture<T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, CallServiceError>> + Send + 'static>>;
 
-/// Transmission is closed by default until key-generation lifetimes are fully
-/// validated. The test variant is a single, expiring approved interoperability
-/// experiment. It cannot silently authorize later calls or production use.
-#[derive(Clone, Default)]
-pub enum NativeTransmitScope {
-    #[default]
-    ReceiveOnly,
-    IsolatedTest {
-        peer_id: String,
-        intent_id: [u8; 32],
-        expires_at_unix_ms: u64,
-        allow_known_audio_overlap: bool,
-    },
-}
-
 #[derive(Clone)]
-pub struct NativeCallConfig {
-    pub account_id: String,
-    pub parameters: VoiceParameters,
-    pub transmit_scope: NativeTransmitScope,
-    pub ring_timeout: Duration,
-    pub peer_idle_timeout: Duration,
-    pub max_duration: Duration,
+struct NativeCallConfig {
+    ring_timeout: Duration,
+    peer_idle_timeout: Duration,
+    max_duration: Duration,
 }
-impl NativeCallConfig {
-    pub fn receive_only(account_id: String, parameters: VoiceParameters) -> Self {
+impl Default for NativeCallConfig {
+    fn default() -> Self {
         Self {
-            account_id,
-            parameters,
-            transmit_scope: NativeTransmitScope::ReceiveOnly,
             ring_timeout: Duration::from_secs(60),
             peer_idle_timeout: Duration::from_secs(60),
-            max_duration: Duration::from_secs(20),
+            // The supported media counter must not roll over without rekeying.
+            max_duration: Duration::from_secs(1200),
         }
-    }
-    fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.account_id.is_empty() && self.account_id.len() <= 200,
-            "Invalid native calls account"
-        );
-        self.parameters.inputs().validate()?;
-        ensure!(
-            (Duration::from_secs(5)..=Duration::from_secs(60)).contains(&self.ring_timeout)
-                && !self.peer_idle_timeout.is_zero()
-                && self.peer_idle_timeout <= Duration::from_secs(60)
-                && (Duration::from_secs(1)..=Duration::from_secs(1200))
-                    .contains(&self.max_duration),
-            "Invalid native call time budget"
-        );
-        if let NativeTransmitScope::IsolatedTest {
-            peer_id,
-            intent_id,
-            expires_at_unix_ms,
-            ..
-        } = &self.transmit_scope
-        {
-            ensure!(
-                !peer_id.is_empty()
-                    && peer_id.len() <= 128
-                    && !peer_id.chars().any(char::is_control)
-                    && *intent_id != [0; 32]
-                    && *expires_at_unix_ms != 0,
-                "Missing isolated call test peer or intent"
-            );
-        }
-        Ok(())
-    }
-    fn tx_ready_at(&self, now: u64) -> bool {
-        matches!(self.transmit_scope,NativeTransmitScope::IsolatedTest{expires_at_unix_ms,..} if now<expires_at_unix_ms)
-    }
-    fn tx_ready(&self) -> bool {
-        unix_ms().is_ok_and(|now| self.tx_ready_at(now))
-    }
-    fn allows_peer(&self, peer: &str) -> bool {
-        matches!(&self.transmit_scope,NativeTransmitScope::IsolatedTest{peer_id,..} if peer_id==peer)
     }
 }
 
@@ -200,12 +139,12 @@ struct Inner {
     core: Weak<Core>,
     config: NativeCallConfig,
     active: Mutex<Option<Arc<Worker>>>,
-    test_spent: AtomicBool,
     #[cfg(test)]
     test_io: Option<Arc<dyn TestCallIo>>,
 }
 struct Worker {
     identity: CallIdentity,
+    peer_id: String,
     lease: CallAuthorityLease,
     stop: AtomicBool,
     media_stop: AtomicBool,
@@ -213,8 +152,6 @@ struct Worker {
     generation: AtomicU32,
     submission: SendAdmission,
     metrics: MediaMetrics,
-    scope_deadline: Instant,
-    scope_expires_unix_ms: u64,
     mutations_submitted: AtomicBool,
     incoming: Option<Arc<incoming::Mailbox>>,
     audio: SyncSender<QueuedAudio>,
@@ -235,11 +172,8 @@ impl Worker {
         })
     }
 
-    fn scope_current(&self) -> bool {
-        scope_current(self.scope_deadline, self.scope_expires_unix_ms)
-    }
     fn current(&self) -> bool {
-        self.lease.current() && !self.media_stop.load(Ordering::Acquire) && self.scope_current()
+        self.lease.current() && !self.media_stop.load(Ordering::Acquire)
     }
     fn finish(&self, outcome: BackendOutcome) {
         if let Ok(mut done) = self.done.lock() {
@@ -262,42 +196,27 @@ impl Worker {
     }
 }
 impl NativeCallBackend {
-    pub fn new(core: Weak<Core>, config: NativeCallConfig) -> Result<Self> {
-        config.validate()?;
-        Ok(Self {
+    pub fn new(core: Weak<Core>) -> Self {
+        Self {
             inner: Arc::new(Inner {
                 core,
-                config,
+                config: NativeCallConfig::default(),
                 active: Mutex::new(None),
-                test_spent: AtomicBool::new(false),
                 #[cfg(test)]
                 test_io: None,
             }),
-        })
+        }
     }
 }
 impl CallBackend for NativeCallBackend {
     fn authority(&self, account: &str) -> Option<AccountAuthority> {
-        if account != self.inner.config.account_id {
-            return None;
-        }
         let core = self.inner.core.upgrade()?;
         let lease = core.cached_call_authority(account)?;
         lease.current().then(|| lease.authority().clone())
     }
     fn capabilities(&self, account: &str) -> CallCapabilities {
         CallCapabilities {
-            direct_audio: account == self.inner.config.account_id
-                && self.inner.config.tx_ready()
-                && (!self.inner.test_spent.load(Ordering::Acquire)
-                    || self.inner.active.lock().ok().is_some_and(|active| {
-                        active.as_ref().is_some_and(|worker| {
-                            worker.lease.current()
-                                && worker.scope_current()
-                                && worker.done.lock().ok().is_some_and(|done| done.is_none())
-                        })
-                    }))
-                && self.authority(account).is_some(),
+            direct_audio: self.authority(account).is_some(),
             ..CallCapabilities::default()
         }
     }
@@ -331,17 +250,14 @@ impl CallBackend for NativeCallBackend {
                     return incoming::action(inner, request, sink).await
                 }
             }
-            if request.call_type != crate::call_types::CallType::Voice
-                || !inner.config.tx_ready()
-                || !inner.config.allows_peer(&request.peer_id)
-            {
+            if request.call_type != crate::call_types::CallType::Voice {
                 return Ok(BackendOutcome::Ended);
             }
             let Some(core) = inner.core.upgrade() else {
                 return Ok(BackendOutcome::Ended);
             };
             let admission_core = Arc::clone(&core);
-            let admission_account = inner.config.account_id.clone();
+            let admission_account = request.ticket.authority().account_id.clone();
             let Ok(Ok(lease)) = tokio::task::spawn_blocking(move || {
                 admission_core.call_authority(&admission_account)
             })
@@ -352,22 +268,10 @@ impl CallBackend for NativeCallBackend {
             if !sink.is_current() || lease.authority() != request.ticket.authority() {
                 return Ok(BackendOutcome::Ended);
             }
-            let now = unix_ms().map_err(|_| service_error(CallErrorCode::Stale))?;
-            let scope_expires_unix_ms = match inner.config.transmit_scope {
-                NativeTransmitScope::IsolatedTest {
-                    expires_at_unix_ms, ..
-                } => expires_at_unix_ms,
-                NativeTransmitScope::ReceiveOnly => {
-                    return Err(service_error(CallErrorCode::Unsupported))
-                }
-            };
-            let remaining = scope_expires_unix_ms
-                .checked_sub(now)
-                .ok_or_else(|| service_error(CallErrorCode::Stale))?;
-            let scope_deadline = Instant::now() + Duration::from_millis(remaining.min(300_000));
             let (audio, rx) = mpsc::sync_channel(32);
             let worker = Arc::new(Worker {
                 identity: request.ticket.identity(),
+                peer_id: request.peer_id.clone(),
                 lease,
                 stop: AtomicBool::new(false),
                 media_stop: AtomicBool::new(false),
@@ -375,8 +279,6 @@ impl CallBackend for NativeCallBackend {
                 generation: AtomicU32::new(1),
                 submission: SendAdmission::default(),
                 metrics: MediaMetrics::default(),
-                scope_deadline,
-                scope_expires_unix_ms,
                 mutations_submitted: AtomicBool::new(false),
                 incoming: None,
                 audio,
@@ -390,9 +292,6 @@ impl CallBackend for NativeCallBackend {
                     .map_err(|_| service_error(CallErrorCode::Closed))?;
                 if active.as_ref().is_some_and(|old| !old.reusable()) {
                     return Err(service_error(CallErrorCode::Busy));
-                }
-                if !consume_test_intent(&inner.test_spent) {
-                    return Ok(BackendOutcome::Ended);
                 }
                 *active = Some(worker.clone());
             }
@@ -421,13 +320,13 @@ impl CallBackend for NativeCallBackend {
                         if let Some(core) = actor_inner.core.upgrade() {
                             let _ = if no_mutation {
                                 core.store.close_call_locally(
-                                    &actor_inner.config.account_id,
+                                    &actor_worker.lease.authority().account_id,
                                     actor_worker.identity.call_id(),
                                     wechat_store::CallLocalEndReason::NoRemoteMutation,
                                 )
                             } else {
                                 core.store.finish_call(
-                                    &actor_inner.config.account_id,
+                                    &actor_worker.lease.authority().account_id,
                                     actor_worker.identity.call_id(),
                                     false,
                                 )
@@ -526,20 +425,23 @@ impl CallBackend for NativeCallBackend {
                     return Err(service_error(CallErrorCode::OutcomeUnknown));
                 }
             }
+            let worker = worker.ok_or_else(|| service_error(CallErrorCode::Stale))?;
             let core = inner
                 .core
                 .upgrade()
                 .ok_or_else(|| service_error(CallErrorCode::Closed))?;
             let _guard = core
-                .lock_account(&inner.config.account_id)
+                .lock_account(&worker.lease.authority().account_id)
                 .await
                 .map_err(|_| service_error(CallErrorCode::Closed))?;
             core.store
-                .close_call_locally(&inner.config.account_id, identity.call_id(), reason)
+                .close_call_locally(
+                    &worker.lease.authority().account_id,
+                    identity.call_id(),
+                    reason,
+                )
                 .map_err(|_| service_error(CallErrorCode::Closed))?;
-            if let Some(worker) = worker {
-                worker.locally_closed.store(true, Ordering::Release);
-            }
+            worker.locally_closed.store(true, Ordering::Release);
             Ok(())
         })
     }
@@ -603,8 +505,6 @@ struct FencedTransport {
     lease: CallAuthorityLease,
     call_id: String,
     ordinal: AtomicU64,
-    scope_deadline: Instant,
-    scope_expires_unix_ms: u64,
     worker: Arc<Worker>,
     admission: ControlAdmission,
     runtime: tokio::runtime::Handle,
@@ -627,8 +527,7 @@ impl FencedTransport {
         if rejecting {
             return self.admission.terminal_current();
         }
-        self.admission.nonterminal_current()
-            && scope_current(self.scope_deadline, self.scope_expires_unix_ms)
+        self.admission.nonterminal_current() && self.worker.lease.current()
     }
 }
 impl FencedTransport {
@@ -822,12 +721,11 @@ impl Tasks {
 }
 
 fn begin_operational_call(
-    inner: &Inner,
     worker: &Worker,
     core: &Core,
     runtime: &tokio::runtime::Handle,
 ) -> Result<()> {
-    let account = &inner.config.account_id;
+    let account = &worker.lease.authority().account_id;
     let call_id = worker.identity.call_id();
     let _guard = runtime.block_on(core.lock_account(account))?;
     ensure!(worker.lease.current(), "Call authority revoked");
@@ -836,15 +734,6 @@ fn begin_operational_call(
             .begin_call(account, call_id, &worker.lease.authority().generation)?,
         "Previous call requires reconciliation"
     );
-    if let NativeTransmitScope::IsolatedTest { intent_id, .. } = &inner.config.transmit_scope {
-        let marker = format!("call-test-intent:{:x}", Sha256::digest(intent_id));
-        ensure!(
-            core.store.runtime(account, &marker)?.is_none(),
-            "Isolated call test intent already spent"
-        );
-        core.store
-            .put_runtime(account, &marker, call_id.as_bytes())?;
-    }
     Ok(())
 }
 
@@ -858,17 +747,15 @@ fn run_control(
     runtime: &tokio::runtime::Handle,
 ) -> Result<()> {
     let core = inner.core.upgrade().context("Call core closed")?;
-    let account = &inner.config.account_id;
+    let account = &worker.lease.authority().account_id;
     let call_id = worker.identity.call_id();
-    begin_operational_call(inner, worker, &core, runtime)?;
+    begin_operational_call(worker, &core, runtime)?;
     let transport = FencedTransport {
         core: inner.core.clone(),
         account: account.clone(),
         lease: worker.lease.clone(),
         call_id: call_id.into(),
         ordinal: AtomicU64::new(1),
-        scope_deadline: worker.scope_deadline,
-        scope_expires_unix_ms: worker.scope_expires_unix_ms,
         worker: worker.clone(),
         admission: ControlAdmission::Owner(sink.clone()),
         runtime: runtime.clone(),
@@ -886,7 +773,7 @@ fn run_control(
     // media worker) has ended. A startup template is never reused on the wire.
     let voice_offer =
         VoiceOffer::from_owned_random(state.device.client_version, crypto::random::<32>()?)?;
-    let mut parameters = inner.config.parameters.clone();
+    let mut parameters = independent_voice_parameters()?;
     voice_offer.apply_to(&mut parameters);
     let mut session = NativePersonalSession::authenticate(
         &transport,
@@ -896,7 +783,7 @@ fn run_control(
         crypto::random::<32>()?,
         parameters,
     )?;
-    if worker.stop.load(Ordering::Acquire) || !worker.scope_current() {
+    if worker.stop.load(Ordering::Acquire) || !worker.lease.current() {
         core.store.finish_call(account, call_id, true)?;
         let _ = admitted.send(Ok(BackendOutcome::Ended));
         return Ok(());
@@ -939,7 +826,7 @@ fn run_control(
             }
             Err(error) => return Err(error),
         }
-        if Instant::now() >= ringing_end || !worker.scope_current() {
+        if Instant::now() >= ringing_end || !worker.lease.current() {
             worker.stop.store(true, Ordering::Release);
             break;
         }
@@ -1007,7 +894,7 @@ fn run_control(
             && Instant::now() < deadline
         {
             ensure!(worker.lease.current(), "Call authority revoked");
-            if !worker.scope_current() {
+            if !worker.lease.current() {
                 worker.stop.store(true, Ordering::Release);
                 break;
             }
@@ -1190,27 +1077,12 @@ fn run_media(
         },
         epoch,
     )?;
-    match &config.transmit_scope {
-        NativeTransmitScope::ReceiveOnly => bail!("Call media transmission remains gated"),
-        NativeTransmitScope::IsolatedTest {
-            intent_id,
-            expires_at_unix_ms,
-            allow_known_audio_overlap,
-            ..
-        } => {
-            let remaining = expires_at_unix_ms
-                .checked_sub(unix_ms()?)
-                .context("Isolated call test expired")?;
-            channel.authorize_transmit(
-                epoch,
-                TransmitScope::IsolatedCompatibilityTest {
-                    intent_id: *intent_id,
-                    deadline_ms: clock().saturating_add(remaining),
-                    allow_known_audio_overlap: *allow_known_audio_overlap,
-                },
-            )?;
-        }
-    }
+    channel.authorize_transmit(
+        epoch,
+        TransmitScope::VerifiedGeneration {
+            key_generation: epoch.key_generation,
+        },
+    )?;
     let format = AudioFormat::new(16000, 1, 20)?;
     let mut decoder = OpusDecoder::new(format)?;
     let mut encoder = OpusEncoder::new(format, 20_000)?;
@@ -1558,14 +1430,6 @@ fn send_datagram(
     }
     Ok(submitted)
 }
-fn consume_test_intent(spent: &AtomicBool) -> bool {
-    spent
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-}
-fn scope_current(deadline: Instant, expires_at_unix_ms: u64) -> bool {
-    Instant::now() < deadline && unix_ms().is_ok_and(|now| now < expires_at_unix_ms)
-}
 fn nonzero64(value: &[u8]) -> u64 {
     let digest = Sha256::digest(value);
     u64::from_le_bytes(digest[..8].try_into().expect("digest width")).max(1)
@@ -1645,32 +1509,5 @@ mod tests {
             )
             .unwrap()
             .is_none());
-    }
-
-    #[test]
-    fn test_scope_is_peer_bound_expiring_and_one_shot() {
-        let mut config =
-            NativeCallConfig::receive_only("test".into(), independent_voice_parameters().unwrap());
-        assert!(!config.tx_ready_at(0));
-        assert!(!config.allows_peer("only-peer"));
-        config.transmit_scope = NativeTransmitScope::IsolatedTest {
-            peer_id: "only-peer".into(),
-            intent_id: [7; 32],
-            expires_at_unix_ms: 100,
-            allow_known_audio_overlap: false,
-        };
-        config.validate().unwrap();
-        assert!(config.allows_peer("only-peer"));
-        assert!(!config.allows_peer("another-peer"));
-        assert!(config.tx_ready_at(99));
-        assert!(!config.tx_ready_at(100));
-        let spent = AtomicBool::new(false);
-        assert!(consume_test_intent(&spent));
-        assert!(!consume_test_intent(&spent));
-        assert!(!scope_current(
-            Instant::now() - Duration::from_millis(1),
-            u64::MAX
-        ));
-        assert!(!scope_current(Instant::now() + Duration::from_secs(1), 0));
     }
 }

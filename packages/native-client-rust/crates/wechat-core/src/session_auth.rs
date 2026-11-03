@@ -50,7 +50,7 @@ impl Core {
         let sealed = self
             .vault
             .seal(account, "account-state", &serde_json::to_vec(state)?)?;
-        #[cfg(feature = "experimental-calls")]
+
         self.prepare_call_authorization(account, state)?;
         self.store.save_network_authorization(
             account,
@@ -59,7 +59,7 @@ impl Core {
             fence.logout_epoch.as_deref(),
             desired,
         )?;
-        #[cfg(feature = "experimental-calls")]
+
         self.bind_call_authorization(account, state)?;
         let _ = self.project_saved_login(account, state);
         Ok(())

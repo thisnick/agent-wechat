@@ -160,24 +160,6 @@ pub trait CallBackend: Send + Sync {
         Box::pin(async { Err(error(CallErrorCode::Unsupported)) })
     }
 }
-pub struct DisabledBackend;
-impl CallBackend for DisabledBackend {
-    fn authority(&self, _: &str) -> Option<AccountAuthority> {
-        None
-    }
-    fn capabilities(&self, _: &str) -> CallCapabilities {
-        CallCapabilities::default()
-    }
-    fn submit(&self, _: BackendRequest, _: BackendSink) -> BackendFuture<Result<BackendOutcome>> {
-        Box::pin(async { Err(error(CallErrorCode::Unsupported)) })
-    }
-    fn send_audio(&self, _: BackendAudioRequest) -> BackendFuture<Result<()>> {
-        Box::pin(async { Err(error(CallErrorCode::Unsupported)) })
-    }
-    fn stop(&self, _: CallIdentity) -> BackendFuture<Result<BackendOutcome>> {
-        Box::pin(async { Ok(BackendOutcome::Uncertain) })
-    }
-}
 #[derive(Clone)]
 pub struct BackendSink {
     service: Weak<CallService>,
@@ -198,7 +180,6 @@ impl BackendSink {
     /// A successful owner end command fences nonterminal work before its
     /// backend task is polled. Match that accepted intent, not generic owner
     /// loss or uncertainty, so the joined actor can complete known cleanup.
-    #[cfg(feature = "native-calls")]
     pub(crate) fn has_accepted_end(&self) -> bool {
         let Some(service) = self.service.upgrade() else {
             return false;
@@ -223,7 +204,6 @@ impl BackendSink {
     /// A pre-media Answer can lose its original controller while Join is in
     /// flight. This identifies that narrow cleanup case; generic uncertainty
     /// or a stale ticket does not grant another remote operation.
-    #[cfg(feature = "native-calls")]
     pub(crate) fn lost_incoming_answer_owner(&self) -> bool {
         let Some(service) = self.service.upgrade() else {
             return false;
@@ -411,11 +391,6 @@ pub struct CallService {
     incoming_preparations: mpsc::Sender<super::notifications::IncomingRequest>,
     incoming_cancellations: mpsc::Sender<ingress::IncomingCancel>,
     incoming_receiver: Mutex<Option<ingress::IncomingReceivers>>,
-}
-impl Default for CallService {
-    fn default() -> Self {
-        Self::new(Arc::new(DisabledBackend))
-    }
 }
 impl CallService {
     /// Stop admission, then give the existing native actor one opportunity to
@@ -1007,7 +982,6 @@ impl CallService {
     }
     /// Keep an acknowledged actor available for its already accepted Reject.
     /// This permits waiting for delivery, never another poll or mutation.
-    #[cfg(feature = "native-calls")]
     pub(crate) fn pending_incoming_reject(
         &self,
         authority: &AccountAuthority,

@@ -26,6 +26,13 @@ async fn actual_parent_help_needs_no_config_token_stdin_or_network() {
         .unwrap()
         .unwrap();
     assert!(!absent.exists());
+    assert!(super::super::Cli::try_parse_from([
+        "wx",
+        "serve",
+        "--calls-test-config",
+        "unused.json"
+    ])
+    .is_err());
 }
 
 fn upgrade_headers(key: &str) -> header::HeaderMap {
@@ -171,7 +178,6 @@ async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
     server.await.unwrap();
 }
 
-#[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
     use wechat_calls::audio::AudioFormat;
@@ -439,7 +445,6 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
     server.await.unwrap();
 }
 
-#[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
     let (cancel, signal) = tokio::sync::watch::channel(false);
@@ -491,7 +496,6 @@ async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
     server.await.unwrap();
 }
 
-#[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
     use wechat_core::call_types::{CallKind, CallOffer, CallReadyScope};
@@ -583,7 +587,6 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
     server.await.unwrap();
 }
 
-#[cfg(feature = "call-audio")]
 #[tokio::test]
 async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
     use wechat_core::call_types::{CallDirection, CallKind, CallState, CallTarget, CallView};
