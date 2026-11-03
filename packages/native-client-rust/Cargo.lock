@@ -2587,6 +2587,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3241,6 +3247,7 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "fs2",
  "futures-util",
@@ -3254,6 +3261,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "unicode-width",
  "uuid",
  "wechat-api",
  "wechat-audio",

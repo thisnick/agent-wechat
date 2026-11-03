@@ -17,10 +17,12 @@ mod daemon;
 mod events;
 mod login;
 mod outcome;
+mod output;
 mod profile_cli;
 mod profile_export;
 mod settings;
 use outcome::{failure, set_exit};
+use output::Output;
 
 #[derive(Parser)]
 #[command(
@@ -803,12 +805,6 @@ enum StoreCommand {
     /// Replay saved local profile writes without sending or downloading.
     RecoverProjection,
 }
-fn output(value: &impl serde::Serialize) -> Result<()> {
-    let value = serde_json::to_value(value)?;
-    outcome::record(&value);
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(())
-}
 fn private_input(path: &Path, max: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let f = wechat_platform::OpenOptions::new()
@@ -1137,6 +1133,7 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
+    let output = Output::new(cli.json);
     if matches!(
         &cli.command,
         Command::Calls {
@@ -1156,12 +1153,12 @@ async fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
     if matches!(cli.command, Command::Licenses) {
-        return output(
+        return output.print(
             &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
         );
     }
     if matches!(cli.command, Command::Version) {
-        return output(&wechat_api::version());
+        return output.print(&wechat_api::version());
     }
     if cli.token_stdin
         && matches!(
@@ -1201,12 +1198,14 @@ async fn run(cli: Cli) -> Result<()> {
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve {} => serve(config, cli.token_stdin).await,
-            Command::Daemon { command } => daemon::run(config, command).await,
-            Command::Store { command } => offline(config, cli.account.unwrap_or_default(), command),
+            Command::Serve {} => serve(config, cli.token_stdin, cli.json).await,
+            Command::Daemon { command } => daemon::run(config, command, output).await,
+            Command::Store { command } => {
+                offline(config, cli.account.unwrap_or_default(), command, output)
+            }
             Command::Config {
                 command: ConfigCommand::Show,
-            } => output(&config),
+            } => output.print(&config),
             _ => unreachable!(),
         };
     }
@@ -1260,7 +1259,7 @@ async fn run(cli: Cli) -> Result<()> {
                     },
                 );
                 settings.save()?;
-                return output(&json!({"server":name,"state":"registered"}));
+                return output.print(&json!({"server":name,"state":"registered"}));
             }
             ServerCommand::Select { name } => {
                 if !settings.settings.servers.contains_key(&name) {
@@ -1268,10 +1267,10 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 settings.settings.active_server = Some(name.clone());
                 settings.save()?;
-                return output(&json!({"server":name}));
+                return output.print(&json!({"server":name}));
             }
             ServerCommand::List => {
-                return output(
+                return output.print(
                     &json!({"items":settings.settings.servers,"activeServer":settings.settings.active_server}),
                 )
             }
@@ -1300,6 +1299,7 @@ async fn run(cli: Cli) -> Result<()> {
             cli.local_profile.as_deref(),
             server.as_deref(),
             command,
+            output,
         );
     }
     let config = wechat_config::resolve(
@@ -1332,7 +1332,7 @@ async fn run(cli: Cli) -> Result<()> {
             command: ConfigCommand::Client
         }
     ) {
-        return output(&client);
+        return output.print(&client);
     }
     let env_token = if cli.token_stdin {
         Some(stdin_token().await?)
@@ -1430,6 +1430,13 @@ async fn run(cli: Cli) -> Result<()> {
         };
         r.account = Some(selected);
     }
+    let chat_list = matches!(
+        &cli.command,
+        Command::Threads { .. }
+            | Command::Chats {
+                command: ChatCommand::List { .. } | ChatCommand::Find { .. }
+            }
+    );
     use reqwest::Method;
     let result = match cli.command {
         Command::Status => r.get("v1/status").await?,
@@ -1738,7 +1745,7 @@ async fn run(cli: Cli) -> Result<()> {
                     .await?
             }
             MessageCommand::Watch { after, cursor_file } => {
-                return events::watch(&r, after, cursor_file, true).await
+                return events::watch(&r, after, cursor_file, true, cli.json).await
             }
             MessageCommand::Media {
                 thread,
@@ -1788,11 +1795,13 @@ async fn run(cli: Cli) -> Result<()> {
                 cursor,
                 limit,
             } => {
-                r.get(&query(
-                    r.path(&format!("threads/{}/messages", encode(&thread)))?,
-                    &[("cursor", cursor), ("limit", limit.map(|v| v.to_string()))],
-                ))
-                .await?
+                let page = r
+                    .get(&query(
+                        r.path(&format!("threads/{}/messages", encode(&thread)))?,
+                        &[("cursor", cursor), ("limit", limit.map(|v| v.to_string()))],
+                    ))
+                    .await?;
+                return output.messages(&page);
             }
             MessageCommand::Get { thread_or_id, id } => {
                 let message = r
@@ -1895,7 +1904,7 @@ async fn run(cli: Cli) -> Result<()> {
             ..
         } => match command {
             EventCommand::Watch { after, cursor_file } => {
-                return events::watch(&r, after, cursor_file, false).await
+                return events::watch(&r, after, cursor_file, false, cli.json).await
             }
             EventCommand::List { after, limit } => {
                 r.get(&query(
@@ -1918,7 +1927,7 @@ async fn run(cli: Cli) -> Result<()> {
             watch,
         } => {
             if watch {
-                return events::watch(&r, after, None, false).await;
+                return events::watch(&r, after, None, false, cli.json).await;
             }
             r.get(&query(r.path("events")?, &[("after", Some(after))]))
                 .await?
@@ -1933,8 +1942,11 @@ async fn run(cli: Cli) -> Result<()> {
             unreachable!()
         }
     };
-    outcome::record(&result);
-    output(&result)
+    if chat_list {
+        output.chats(&result)
+    } else {
+        output.print(&result)
+    }
 }
 async fn stdin_token() -> Result<String> {
     use std::io::IsTerminal;
@@ -1958,7 +1970,7 @@ async fn stdin_token() -> Result<String> {
     }
     Ok(token.into())
 }
-async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result<()> {
+async fn serve(config: wechat_config::ServerConfig, token_stdin: bool, json: bool) -> Result<()> {
     let supplied = if token_stdin {
         if config.token_explicit {
             bail!("--token-stdin cannot be combined with a configured tokenFile");
@@ -1989,10 +2001,15 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result
         None
     };
     core.start_workers()?;
-    eprintln!(
-        "{}",
-        json!({"state":"ready","listen":listener.local_addr()?.to_string(),"serverId":store.server_id,"nativeLogin":true})
-    );
+    let listen = listener.local_addr()?;
+    if json {
+        eprintln!(
+            "{}",
+            json!({"state":"ready","listen":listen.to_string(),"serverId":store.server_id,"nativeLogin":true})
+        );
+    } else {
+        eprintln!("Daemon ready on {listen} (server ID {}).", store.server_id);
+    }
     let router = wechat_api::router(core.clone(), &token);
     let local =
         axum::serve(listener, router.clone()).with_graceful_shutdown(shutdown(core.clone()));
@@ -2080,6 +2097,7 @@ fn offline(
     config: wechat_config::ServerConfig,
     account: String,
     command: StoreCommand,
+    output: Output,
 ) -> Result<()> {
     match &command {
         StoreCommand::Attach { path, .. } => {
@@ -2108,16 +2126,16 @@ fn offline(
         account
     };
     match command {
-        StoreCommand::List => output(&store.accounts()?),
-        StoreCommand::Create { id } => output(&store.create_account(&id)?),
+        StoreCommand::List => output.print(&store.accounts()?),
+        StoreCommand::Create { id } => output.print(&store.create_account(&id)?),
         StoreCommand::Attach {
             path,
             source_stopped,
-        } => output(&store.attach(&account, &path, source_stopped)?),
+        } => output.print(&store.attach(&account, &path, source_stopped)?),
         StoreCommand::Import {
             source,
             source_stopped,
-        } => output(&store.import(&account, &source, source_stopped)?),
+        } => output.print(&store.import(&account, &source, source_stopped)?),
         StoreCommand::Export {
             destination,
             source_stopped,
@@ -2126,12 +2144,12 @@ fn offline(
             let projection = profile_export::ProjectionState::read(&store, &account)?;
             projection.require_copy_permission(allow_incomplete)?;
             let manifest = store.export(&account, &destination, source_stopped)?;
-            output(&projection.receipt(manifest.entries.len())?)
+            output.print(&projection.receipt(manifest.entries.len())?)
         }
         StoreCommand::BindKeys { keys_file } => {
             wechat_profile::KeyFile::load(&keys_file)?;
             store.set_keys_file(&account, &keys_file)?;
-            output(&json!({"state":"bound"}))
+            output.print(&json!({"state":"bound"}))
         }
         StoreCommand::DeriveKeys {
             profile,
@@ -2159,7 +2177,7 @@ fn offline(
                 .join("agent/profile-keys.json");
             keys.write_new(&path)?;
             store.set_keys_file(&account, &path)?;
-            output(&json!({"state":"derived","keysFile":path}))
+            output.print(&json!({"state":"derived","keysFile":path}))
         }
         StoreCommand::RestoreCredentials { file, cursor_file } => {
             let core = Core::new(store, config.storage_key_file.as_deref())?;
@@ -2167,7 +2185,7 @@ fn offline(
             if let Some(cursor_file) = cursor_file {
                 core.restore_cursor(&account, &private_input(&cursor_file, 65536)?)?;
             }
-            output(
+            output.print(
                 &json!({"state":"restored","authentication":"saved_unvalidated","connection":"disconnected"}),
             )
         }
@@ -2184,7 +2202,7 @@ fn offline(
                 &mmkv_store,
                 &private_input(&format_key_file, 16)?,
             )?;
-            output(&json!({"state":"enabled","coverage":"verified_existing_schema_families"}))
+            output.print(&json!({"state":"enabled","coverage":"verified_existing_schema_families"}))
         }
         StoreCommand::BindIdentity {
             mmkv_store,
@@ -2197,15 +2215,15 @@ fn offline(
                 &mmkv_store,
                 &private_input(&format_key_file, 16)?,
             )?;
-            output(&json!({"state":"identity_bound","officialWritesEnabled":false}))
+            output.print(&json!({"state":"identity_bound","officialWritesEnabled":false}))
         }
         StoreCommand::RecoverProjection => {
             let core = Core::new(store, config.storage_key_file.as_deref())?;
-            output(&core.recover_projection(&account)?)
+            output.print(&core.recover_projection(&account)?)
         }
         StoreCommand::Schema => {
             let core = Core::new(store, config.storage_key_file.as_deref())?;
-            output(&core.profile_schema(&account)?)
+            output.print(&core.profile_schema(&account)?)
         }
     }
 }

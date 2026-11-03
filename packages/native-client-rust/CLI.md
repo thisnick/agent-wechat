@@ -272,8 +272,8 @@ Read marks the whole thread through the latest observed local message. The
 expected version prevents clearing a different snapshot, and rows with newer timestamps stay
 unread. The native cutoff has one-second precision. The result distinguishes local projection from accepted, rejected or
 uncertain cross-device notification. Uncertain notifications are not resent.
-Watch emits NDJSON;
-its cursor file records successful local emission, not model consumption.
+Watch prints readable event details. Add `--json` for one JSON event per line.
+The cursor file records successful local emission, not model consumption.
 Consumer ACK is a separate explicit operation. Interrupting a send watcher
 leaves daemon work running; only attached login explicitly requests cancel.
 
@@ -302,7 +302,8 @@ and show `keys_missing`; content reads fail explicitly until keys are available.
 Keyless inspect reports bounded filesystem inventory only. Readers require a
 stopped/consistent-source assertion and preserve source files. `--raw` is an
 explicit private-data choice; default projections omit raw transport/XML fields.
-Message observation IDs are bound to profile and source generation; they cannot
+Use `wx profiles messages --chat CHAT_ID --source-stopped --json` to copy full
+observation IDs. They are bound to the profile and source generation and cannot
 be reused after the view changes. Output derivatives/keys must remain outside
 the source tree, and no output is overwritten.
 
@@ -324,7 +325,8 @@ excluded. Preserve the complete durable root for a native backup.
 
 ## Machine results and verification
 
-`--json` emits one finite structured result; watch emits one JSON event per line.
+Commands print readable results by default. Chat lists and searches show a table.
+With `--json`, finite commands emit one structured result and watch emits one JSON event per line.
 Exit0 is read/action success or durable acceptance with detach. Exit2 is invalid
 input/configuration/selection;3 unavailable endpoint;4 API access;5 login needed;
 6 human action;7 a local wait deadline;8 an uncertain outcome;9 a declared terminal

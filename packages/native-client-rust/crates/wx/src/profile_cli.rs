@@ -235,6 +235,7 @@ pub fn run(
     selected: Option<&str>,
     server: Option<&str>,
     command: ProfileCommand,
+    output: Output,
 ) -> Result<()> {
     match command {
         ProfileCommand::Add {
@@ -269,11 +270,11 @@ pub fn run(
             let missing = profile.keys_file.as_ref().is_none_or(|p| !p.is_file());
             config.settings.local_profiles.insert(name.clone(), profile);
             config.save()?;
-            output(
+            output.print(
                 &json!({"localProfile":name,"state":"registered","path":location.root(),"keysState":if missing{"keys_missing"}else{"configured"}}),
             )
         }
-        ProfileCommand::List => output(
+        ProfileCommand::List => output.print(
             &json!({"items":config.settings.local_profiles,"standaloneDefault":config.settings.local_profile,"serverDefault":server.and_then(|s|config.settings.servers.get(s)).and_then(|s|s.local_profile.as_ref())}),
         ),
         ProfileCommand::Select { name } => {
@@ -291,7 +292,7 @@ pub fn run(
                 config.settings.local_profile = Some(name.clone());
             }
             config.save()?;
-            output(&json!({"localProfile":name,"server":server}))
+            output.print(&json!({"localProfile":name,"server":server}))
         }
         ProfileCommand::Keys {
             command:
@@ -332,7 +333,7 @@ pub fn run(
                 bail!("choose --password-file or --from-agent-data");
             };
             keys.write_new(&path)?;
-            output(
+            output.print(
                 &json!({"state":"keys_exported","localProfile":name,"output":path,"validatedDatabases":keys.databases.len(),"imageKeyAvailable":keys.image_dat.is_some()}),
             )
         }
@@ -347,14 +348,14 @@ pub fn run(
                     &mut files,
                     0,
                 )?;
-                return output(
+                return output.print(
                     &json!({"format":profile.format,"adapterVersion":1,"localProfile":name,"path":location.root(),"keysFile":profile.keys_file,"keysState":if profile.keys_file.as_ref().is_some_and(|p|p.is_file()){"configured"}else{"keys_missing"},"databases":files,"consistency":"content reads require --source-stopped or a consistent snapshot assertion"}),
                 );
             }
             match command {
                 ProfileCommand::Chats { read } => {
                     let view = reader(&profile, &read)?;
-                    output(&wrap(
+                    let page = wrap(
                         &name,
                         &view,
                         &view.threads(&ListQuery {
@@ -363,11 +364,16 @@ pub fn run(
                             search: read.search.clone(),
                         })?,
                         read.raw,
-                    )?)
+                    )?;
+                    if read.raw {
+                        output.print(&page)
+                    } else {
+                        output.chats(&page)
+                    }
                 }
                 ProfileCommand::Contacts { read } => {
                     let view = reader(&profile, &read)?;
-                    output(&wrap(
+                    output.print(&wrap(
                         &name,
                         &view,
                         &view.contacts(&ListQuery {
@@ -386,7 +392,7 @@ pub fn run(
                         search: read.search.clone(),
                     };
                     if members {
-                        output(&wrap(
+                        output.print(&wrap(
                             &name,
                             &view,
                             &view.group_members(
@@ -424,9 +430,9 @@ pub fn run(
                             if page.items.is_empty() {
                                 value["state"] = json!("not_found");
                             }
-                            return output(&value);
+                            return output.print(&value);
                         }
-                        output(&wrap(&name, &view, &page, read.raw)?)
+                        output.print(&wrap(&name, &view, &page, read.raw)?)
                     }
                 }
                 ProfileCommand::Messages {
@@ -452,7 +458,11 @@ pub fn run(
                         item["observationId"] =
                             json!(handle(&name, view.generation(), &message.id)?);
                     }
-                    output(&value)
+                    if read.raw {
+                        output.print(&value)
+                    } else {
+                        output.messages(&value)
+                    }
                 }
                 ProfileCommand::Images {
                     message,
@@ -471,7 +481,7 @@ pub fn run(
                     };
                     let image = view.cached_image(&id, quality)?;
                     private_output(&path, &image.media.bytes)?;
-                    output(
+                    output.print(
                         &json!({"localProfile":name,"state":"available","output":path,"requestedQuality":quality,"quality":image.quality,"width":image.width,"height":image.height,"mediaType":image.media.media_type,"byteLength":image.media.bytes.len(),"sha256":image.media.sha256,"sourceView":view.generation()}),
                     )
                 }
@@ -484,7 +494,7 @@ pub fn run(
                     let view = reader(&profile, &read)?;
                     let image = view.avatar(&username)?;
                     private_output(&path, &image.bytes)?;
-                    output(
+                    output.print(
                         &json!({"localProfile":name,"state":"available","output":path,"mediaType":image.media_type,"byteLength":image.bytes.len(),"sha256":image.sha256,"sourceView":view.generation()}),
                     )
                 }

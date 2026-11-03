@@ -20,6 +20,8 @@ use wechat_core::call_types::{
 };
 
 type Input = Lines<BufReader<Stdin>>;
+const CALL_KEYS: &str = "m + Enter  Mute/unmute    h + Enter  Hang up\n\
+                        Ctrl-C     End call       ? + Enter  Show keys";
 
 pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
     if json {
@@ -112,7 +114,7 @@ async fn monitor(
     // Readiness declares this interactive client's ability to prepare devices;
     // it does not open or continuously capture its microphone while waiting.
     ready(control, true).await?;
-    eprintln!("Waiting for calls. Microphone is closed. Ctrl-C exits.");
+    eprintln!("Waiting for calls. Ctrl-C exits.");
     let mut shown = None;
     let mut dismissed = None;
     let mut renew_after_terminal = false;
@@ -126,7 +128,7 @@ async fn monitor(
         }
         tokio::select! {
             _ = cancellation.wait() => return Ok(()),
-            event = receive_event(&mut control.socket) => {
+            event = control.next_event() => {
                 let event=event?; control.update(&event);
                 if renew_after_terminal&&matches!(event,CallEvent::Availability {availability} if !availability.busy) {
                     renew_after_terminal=false;restore_monitor_readiness(control).await?;
@@ -147,7 +149,7 @@ async fn monitor(
                         if cancellation.is_cancelled() {return Ok(());}
                         if completed {restore_monitor_readiness(control).await?;renew_after_terminal=false;}
                         shown=None;
-                        eprintln!("Waiting for calls. Microphone is closed. Ctrl-C exits.");
+                        eprintln!("Waiting for calls. Ctrl-C exits.");
                     }
                     "d" | "dismiss" => { dismissed=Some((offer.call_id,offer.revision)); }
                     "r" | "reject" => {
@@ -215,7 +217,7 @@ async fn await_exact_offer(
             }
             let event=tokio::select! {
                 _=cancellation.wait()=>return Err(failure(130,"client_interrupted","call preparation cancelled before answer")),
-                event=receive_event(&mut control.socket)=>event?,
+                event=control.next_event()=>event?,
             };
             control.update(&event);
             if let CallEvent::Error {code}=event {bail!("call preparation failed: {}",serde_json::to_value(code)?);}
@@ -233,7 +235,6 @@ async fn participate(
 ) -> Result<()> {
     // For late answers the exact ID/revision was captured before device startup.
     // The server revalidates it atomically; failure never targets the next offer.
-    eprintln!("Opening this computer's microphone and speakers…");
     let mut audio = tokio::select! {
         _=cancellation.wait()=>return Err(failure(130,"client_interrupted","device preparation cancelled; no call was placed or answered")),
         audio=LocalAudio::open(options)=>audio?,
@@ -281,6 +282,12 @@ async fn participate(
         media: None,
     };
     let outcome = owned_call(remote, control, &mut call, &mut audio, input, cancellation).await;
+    if let Err(error) = &outcome {
+        debug_call(
+            "session",
+            format_args!("call {0} failed: {error:#}", call.call_id),
+        );
+    }
     audio.request_stop();
     // Any local failure requests termination; a lost connection or response is
     // reported as uncertain. An accepted command alone never proves remote end.
@@ -308,7 +315,15 @@ impl OwnedCall {
         } else {
             terminate_owned(control, &self.call_id).await
         };
-        self.media.take();
+        if let Some(media) = self.media.take() {
+            debug_call(
+                "media",
+                format_args!(
+                    "local socket drop after {} completed PCM writes",
+                    media.pcm_writes
+                ),
+            );
+        }
         result
     }
 }
@@ -319,6 +334,7 @@ pub(super) struct Media {
     receive_track: u32,
     receive_generation: u32,
     started_generation: Option<u32>,
+    pcm_writes: u64,
 }
 impl Media {
     pub(super) async fn attach(
@@ -337,7 +353,7 @@ impl Media {
             },
         )
         .await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket))
+        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "media"))
             .await
             .context("media attachment timed out")??;
         if let CallEvent::Error { code } = &event {
@@ -360,12 +376,20 @@ impl Media {
         {
             bail!("unsupported call audio tracks");
         }
+        debug_call(
+            "media",
+            format_args!(
+                "media.ready call={call_id} generation={}",
+                send_track.generation
+            ),
+        );
         Ok(Self {
             socket,
             receive_track: receive_track.id,
             receive_generation: receive_track.generation,
             send_track,
             started_generation: None,
+            pcm_writes: 0,
         })
     }
     pub(super) fn synchronize_tracks(
@@ -404,33 +428,72 @@ impl Media {
     }
     pub(super) async fn send(&mut self, samples: &[i16], format: AudioFormat) -> Result<()> {
         format.validate_frame(samples)?;
-        if self.started_generation != Some(self.send_track.generation) {
-            send_json(
+        let generation = self.send_track.generation;
+        let first = self.started_generation != Some(generation);
+        if first {
+            debug_call(
+                "media",
+                format_args!("audio.start write attempted generation={generation}"),
+            );
+            if let Err(error) = send_json(
                 &mut self.socket,
-                &CallMediaCommand::AudioStart {
-                    generation: self.send_track.generation,
-                },
+                &CallMediaCommand::AudioStart { generation },
             )
-            .await?;
-            self.started_generation = Some(self.send_track.generation);
+            .await
+            {
+                debug_call("media", format_args!("audio.start write failed: {error:#}"));
+                return Err(error);
+            }
+            debug_call(
+                "media",
+                format_args!("audio.start write completed generation={generation}"),
+            );
+            self.started_generation = Some(generation);
         }
         let bytes: Vec<u8> = samples
             .iter()
             .flat_map(|sample| sample.to_le_bytes())
             .collect();
-        timeout(
+        if first {
+            debug_call(
+                "media",
+                format_args!(
+                    "first PCM write attempted generation={generation} bytes={}",
+                    bytes.len()
+                ),
+            );
+        }
+        if let Err(error) = timeout(
             WRITE_TIMEOUT,
             self.socket.send(Message::Binary(bytes.into())),
         )
         .await
-        .context("call media write timed out")??;
+        .context("call media write timed out")
+        .and_then(|result| result.map_err(Into::into))
+        {
+            debug_call(
+                "media",
+                format_args!(
+                    "PCM write failed after {} completed writes: {error:#}",
+                    self.pcm_writes
+                ),
+            );
+            return Err(error);
+        }
+        self.pcm_writes += 1;
+        if first {
+            debug_call(
+                "media",
+                format_args!("first PCM write completed generation={generation}"),
+            );
+        }
         Ok(())
     }
 }
 
 async fn next_media(media: &mut Option<Media>) -> Result<Message> {
     match media {
-        Some(media) => receive(&mut media.socket).await,
+        Some(media) => receive(&mut media.socket, "media").await,
         None => std::future::pending().await,
     }
 }
@@ -454,7 +517,7 @@ async fn owned_call(
     let mut muted = false;
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(control.format.frame_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    eprintln!("Call {call_id}. [m] Mute/unmute  [h] Hang up  Ctrl-C ends this call.");
+    eprintln!("Call {call_id}\n{CALL_KEYS}");
     let mut levels = super::levels::CallLevels::new();
     let mut meter_tick = tokio::time::interval(Duration::from_millis(100));
     meter_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -510,10 +573,11 @@ async fn owned_call(
                         levels.microphone(&[], muted);
                         levels.notice(if muted {"Microphone muted."} else {"Microphone unmuted."});
                     }
-                    _=>levels.notice("Choose m to mute/unmute or h to hang up, then Enter."),
+                    "?"|"help"=>levels.notice(CALL_KEYS),
+                    _=>levels.notice("Unknown key. Type ? then Enter to see the call controls."),
                 }
             }
-            event=receive_event(&mut control.socket)=> {
+            event=control.next_event()=> {
                 let event=event?;
                 control.update(&event);
                 match event {
@@ -567,7 +631,7 @@ async fn terminate(control: &mut Control, call_id: &str) -> Result<()> {
                     _ => break call.clone(),
                 }
             }
-            let event = receive_event(&mut control.socket).await?;
+            let event = control.next_event().await?;
             control.update(&event);
             if matches!(event, CallEvent::Availability { availability } if !availability.busy) {
                 return Ok(());
@@ -599,7 +663,7 @@ async fn terminate(control: &mut Control, call_id: &str) -> Result<()> {
             {
                 return Ok(());
             }
-            let event = receive_event(&mut control.socket).await?;
+            let event = control.next_event().await?;
             control.update(&event);
             match event {
                 CallEvent::State { call }

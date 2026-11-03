@@ -39,6 +39,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-smoke-") as temporary:
         return json.loads(output) if output else None
     try:
         assert run("daemon","status")["state"]=="stopped"
+        human_status = subprocess.run([arg for arg in base if arg != "--json"] + ["daemon", "status"],
+                                      env=env, capture_output=True, text=True, timeout=10, check=True)
+        assert "State: stopped" in human_status.stdout and "Managed: Yes" in human_status.stdout
         first=run("daemon","start"); owned=True
         assert first["version"]["backend"]=="native"
         assert run("daemon","start")["pid"]==first["pid"]

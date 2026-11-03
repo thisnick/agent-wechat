@@ -2,12 +2,28 @@
 """Real CLI transport tests against a synthetic HTTP fixture; never calls WeChat."""
 import base64, hashlib, json, os, pathlib, signal, subprocess, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 binary=str(pathlib.Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     root=pathlib.Path(temporary);token=root/"token";token.write_text("fixture-token-"*4);token.chmod(0o600)
     config=root/"client.toml"; state={"posts":0,"login_posts":0,"cancelled":0,"mode":"accepted","media_transfers":0,"official_posts":[],"official_first":False,"recall_posts":0,"recall_mode":"succeeded","recall_operations":{},"recall_drop":False,"recall_wrong_post":False,"recall_wrong_get":False}
     content={"thumbnail":b"synthetic-thumbnail","original":b"synthetic-original"}
+    chat_page = {
+        "items": [{
+            "id": "fixture-room@chatroom", "displayName": "讀書會", "kind": "group",
+            "unreadCount": 2, "lastMessage": {"text": "Next\nmeeting\x1b[31m"},
+        }],
+        "nextCursor": "fixture-next-page",
+    }
+    message_page = {
+        "items": [
+            {"id": "msg_fixture_12345678901", "serverId": "18446744073709551615", "senderId": "alex",
+             "createdAt": "2026-10-23T00:00:00+00:00", "body": "First line\nSecond line", "type": 1},
+            {"id": "photo", "direction": "outgoing", "type": 3},
+        ],
+        "coverage": {"partial": True, "databases": [{"relativePath": "message/message_0.db"}]},
+        "nextCursor": "fixture-next-message",
+    }
     def asset(name):return {"id":name,"state":"available","variant":name,"actualVariant":name,"sha256":hashlib.sha256(content[name]).hexdigest(),"byteLength":len(content[name])}
     class Fixture(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
@@ -19,6 +35,11 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if path=="/v1/accounts":
                 assert not state["official_first"],"catalog queried before official preparation"
                 return self.reply({"items":[{"id":"a"}]})
+            if path == "/v1/accounts/a/threads":
+                search = parse_qs(urlsplit(self.path).query).get("query")
+                return self.reply({"items": [], "nextCursor": None} if search == ["missing"] else chat_page)
+            if path == "/v1/accounts/a/threads/filehelper/messages":
+                return self.reply(message_page)
             if path.endswith("/sends/by-idempotency-key") or path.endswith("/sends/send-fixture"):return self.reply({"id":"send-fixture","state":state["mode"]})
             if path.endswith("/operations/login-fixture/qr"):
                 assert "generation=1" in self.path
@@ -79,12 +100,35 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     server=ThreadingHTTPServer(("127.0.0.1",0),Fixture);threading.Thread(target=server.serve_forever,daemon=True).start()
     env={k:v for k,v in os.environ.items() if not k.startswith("AGENT_WECHAT_")};env.update(HOME=str(root),XDG_CONFIG_HOME=str(root/"config"))
     args=[binary,"--json","--config",str(config),"--server",f"http://127.0.0.1:{server.server_port}","--token-file",str(token)]
+    human_args = [arg for arg in args if arg != "--json"]
+    def human(*command):
+        result = subprocess.run(human_args + list(command), env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (command, result.stdout, result.stderr)
+        return result.stdout
     def run(*command,code=0):
         result=subprocess.run(args+list(command),env=env,capture_output=True,text=True,timeout=10);assert result.returncode==code,(command,result.returncode,result.stdout,result.stderr)
         structured=result.stdout or next((line for line in reversed(result.stderr.splitlines()) if line.startswith("{")), "")
         return json.loads(structured)
     try:
         run("config","servers","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
+        for command in [("chats", "list"), ("chats", "find", "讀書會"), ("threads",)]:
+            header, row, cursor = human(*command).splitlines()
+            assert header.split("  ")[0] == "Name" and "Chat ID" in header
+            assert all(text in row for text in ("讀書會", "fixture-room@chatroom", "group", "2", "Next"))
+            assert "\x1b" not in row and cursor == "Next cursor: fixture-next-page"
+            assert run(*command) == chat_page
+        assert human("chats", "find", "missing") == "No chats found.\n"
+        assert human("messages", "get", "m") == "ID: m\nThread ID: filehelper\n"
+        history = human("messages", "list", "filehelper")
+        header, first, second, *_ = history.splitlines()
+        assert header.split() == ["Sender", "Message", "Timestamp", "ID"]
+        assert first.startswith("alex ") and "First line Second line" in first
+        assert "2026-10-23T00:00:00+00:00" in first and first.endswith("…12345678901")
+        assert second.startswith("You ") and "[Photo]" in second and second.endswith("photo")
+        assert message_page["items"][0]["id"] not in history
+        assert "Next cursor: fixture-next-message" in history and "Only partial message history" in history
+        assert "message_0.db" not in history
+        assert run("messages", "list", "filehelper") == message_page
         for group in ["chats", "messages"]:
             result=run(group,"read","filehelper","--expected-version","fixture-version")
             assert result["readScope"]=="thread" and result["phoneNotification"]["state"]=="accepted"
@@ -148,7 +192,6 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         finally:
             if login.poll() is None: login.kill();login.wait()
         state["lan_mode"]=True
-        human_args=[arg for arg in args if arg!="--json"]
         lan=subprocess.run(human_args+["auth","login","--strategy","qr","--qr-refresh","manual","--idempotency-key","fixture-lan-human"],env=env,capture_output=True,text=True,timeout=10)
         assert lan.returncode==0,(lan.stdout,lan.stderr)
         assert lan.stderr.count("WeChat requires a local network check.")==1,lan.stderr

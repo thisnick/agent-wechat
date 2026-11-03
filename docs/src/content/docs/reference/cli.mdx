@@ -5,7 +5,7 @@ description: Every wx command group, global flags and exit codes.
 
 Run `wx --help` for command groups, `wx accounts --help` for a group's subcommands,
 or `wx accounts select --help` for a specific action. Help lists commands alphabetically
-and explains what they do. Data responses are JSON.
+and explains what they do. Commands show readable results by default. Use `--json` for machine-readable output.
 
 ## Commands
 
@@ -52,9 +52,11 @@ accepted for existing scripts, but help shows the canonical commands.
 | `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | File holding the API token |
 | | `AGENT_WECHAT_TOKEN` | The token itself (prefer a file) |
 | `--config PATH` | `AGENT_WECHAT_CONFIG` | CLI config file |
-| `--json` | | Machine-readable errors and progress; no terminal QR code |
+| `--json` | | Machine-readable results and errors. Event watches emit one JSON event per line. |
 
 Flags win over environment variables, which win over saved settings. Commands that start background work (sends, downloads, login, recall) also take `--detach` to return as soon as the work is queued.
+
+Use `wx daemon status --json` to parse daemon status in a script. `wx serve --json` prints its readiness record to stderr. `wx daemon logs` streams the saved log in its original format.
 
 `messages send --wait SECONDS` waits up to 3,600 seconds for attachment jobs and 900 seconds for text or shared links (default 30). Use `--wait 3600` for a larger file. A wait ending returns exit code 7 while the same job continues; inspect it with `wx jobs get JOB_ID`. See [Send attachments](/use/media/).
 
