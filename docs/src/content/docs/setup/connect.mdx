@@ -41,7 +41,12 @@ import qrLogin from '../../../assets/qr-login.svg';
    </TabItem>
    </Tabs>
 
-   Scan the QR code with WeChat on your phone, or approve the login there:
+   Scan the QR code with WeChat on your phone. When the terminal says it is
+   waiting for confirmation, approve the login in WeChat.
+
+   With `wx --json auth login`, the waiting notice is a JSON line on stderr
+   with `event: "login.progress"` and `state: "awaiting_approval"`. Read the
+   final operation result as a single JSON document on stdout.
 
    <img src={qrLogin.src} class="mock wide" alt="Terminal showing wx auth login printing a QR code, then confirming the login" />
 
