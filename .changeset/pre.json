@@ -13,6 +13,8 @@
     "cli-audio-levels-devices",
     "image-publisher-runtime",
     "incoming-call-latency",
+    "legacy-relay-voice-compatibility",
+    "login-confirmation-progress",
     "normal-calling-startup",
     "offline-call-foundation",
     "openclaw-2026-10-9",
