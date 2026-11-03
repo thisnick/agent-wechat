@@ -11,6 +11,7 @@
   },
   "changesets": [
     "cli-audio-levels-devices",
+    "faster-message-projection",
     "image-publisher-runtime",
     "incoming-call-latency",
     "legacy-relay-voice-compatibility",
@@ -22,6 +23,7 @@
     "plural-cli-selection-help",
     "readable-cli-results",
     "reject-intent-delivery",
+    "reuse-validated-message-schema",
     "shorten-call-prompts"
   ]
 }
