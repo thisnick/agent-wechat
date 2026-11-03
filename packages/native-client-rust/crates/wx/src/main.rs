@@ -161,6 +161,7 @@ enum Command {
         command: AuthCommand,
     },
     /// List message threads for the selected account.
+    #[command(hide = true)]
     Threads {
         #[arg(long)]
         cursor: Option<String>,

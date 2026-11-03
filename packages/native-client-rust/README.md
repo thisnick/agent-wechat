@@ -168,7 +168,7 @@ wx serve
 wx auth login --official=/absolute/stopped-official-home
 wx accounts list
 wx accounts alias ACCOUNT_ID test
-wx --account test threads
+wx --account test chats list
 wx --account test contacts --search Example
 wx --account test groups
 wx --account test lookup-contacts username

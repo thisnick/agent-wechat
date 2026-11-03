@@ -118,8 +118,8 @@ fn help_advertises_only_plural_groups_and_select() {
     for (args, included, excluded) in [
         (
             vec![],
-            vec!["accounts", "profiles"],
-            vec!["account", "profile"],
+            vec!["accounts", "chats", "profiles"],
+            vec!["account", "profile", "threads"],
         ),
         (
             vec!["accounts"],
