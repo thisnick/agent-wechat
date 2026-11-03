@@ -40,6 +40,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
                 return self.reply({"items": [], "nextCursor": None} if search == ["missing"] else chat_page)
             if path == "/v1/accounts/a/threads/filehelper/messages":
                 return self.reply(message_page)
+            if path == "/v1/accounts/a/groups/fixture%40chatroom/lookup":
+                version = int(parse_qs(urlsplit(self.path).query)["version"][0])
+                return self.reply({"id": "fixture@chatroom", "version": version, "items": []})
             if path.endswith("/sends/by-idempotency-key") or path.endswith("/sends/send-fixture"):return self.reply({"id":"send-fixture","state":state["mode"]})
             if path.endswith("/operations/login-fixture/qr"):
                 assert "generation=1" in self.path
@@ -61,6 +64,9 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             self.reply({"error":{"code":"fixture_not_found"}},404)
         def do_POST(self):
             self.authenticated();body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or b"{}");path=urlsplit(self.path).path
+            if path == "/v1/accounts/a/contacts/lookup":
+                assert body == {"ids": ["one", "two"]}
+                return self.reply({"items": [{"id": "one"}, {"id": "two"}]})
             if path == "/v1/accounts/a/auth/logout-local":
                 assert body == {} and self.headers.get("Idempotency-Key") is None
                 return self.reply({"state": "logged_out", "serverRevocation": "not_requested"})
@@ -135,6 +141,13 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         assert "Next cursor: fixture-next-message" in history and "Only partial message history" in history
         assert "message_0.db" not in history
         assert run("messages", "list", "filehelper") == message_page
+        contacts = run("contacts", "lookup", "one", "two")
+        assert contacts["items"] == [{"id": "one"}, {"id": "two"}]
+        assert run("lookup-contacts", "one", "two") == contacts
+        group = run("groups", "lookup", "fixture@chatroom", "--version", "7")
+        assert group["id"] == "fixture@chatroom" and group["version"] == 7
+        assert run("lookup-group", "fixture@chatroom", "--version", "7") == group
+        assert run("groups", "lookup", "fixture@chatroom")["version"] == 0
         local_logout = {"state": "logged_out", "serverRevocation": "not_requested"}
         assert run("auth", "logout", "--local") == local_logout
         assert run("auth", "logout-local") == local_logout

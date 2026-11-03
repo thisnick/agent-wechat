@@ -17,8 +17,8 @@ and explains what they do. Commands show readable results by default. Use `--jso
 | `wx accounts` | `alias ID NAME`, `capabilities`, `connect`, `create [ID] [--alias NAME]`, `disconnect`, `get [ID]`, `list`, `remove ID --confirm ID`, `select ID`, `settings [--auto-download-max-mb MB]`, `status` |
 | `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V`, `mute ID`, `unmute ID`, `pin ID`, `unpin ID` |
 | `wx messages` | `list CHAT`, `get CHAT ID`, `send CHAT --text/--image/--file/--video/--voice/--share`, `media CHAT ID`, `--video-quality normal/original` with `--video`, `recall ID --server-id S`, `sends lookup/get/cancel` |
-| `wx contacts` | `list`, `find TEXT`, `get ID`, `refresh ID`, `sync`, `avatar ID` |
-| `wx groups` | `list`, `get ID`, `members list/get/refresh/add/remove`, `create MEMBERS...`, `rename ID NAME`, `leave ID`, `my-name ID NAME`, `clear-announcement ID`, `refresh ID`, `sync` |
+| `wx contacts` | `list`, `find TEXT`, `get ID`, `lookup ID...`, `refresh ID`, `sync`, `avatar ID` |
+| `wx groups` | `list`, `get ID`, `lookup ID [--version N]`, `members list/get/refresh/add/remove`, `create MEMBERS...`, `rename ID NAME`, `leave ID`, `my-name ID NAME`, `clear-announcement ID`, `refresh ID`, `sync` |
 | `wx events` | `watch [--cursor-file F]`, `list`, `ack --consumer NAME --through CURSOR` |
 | `wx calls` | [Calling](/reference/calls/): `status`, `monitor [--json]`, `dial CONTACT`, `answer [CALL_ID]` |
 | `wx jobs` | `get ID`, `cancel ID`, `retry ID [--reuse-completed-upload]`, `repair-writeback` |
@@ -29,6 +29,8 @@ and explains what they do. Commands show readable results by default. Use `--jso
 | `wx profiles` | Read a stopped profile directly, without a daemon (`add`, `avatars`, `chats`, `contacts`, `groups`, `images`, `inspect`, `keys export`, `list`, `messages`, `select`) |
 | `wx store` | Experimental: copy, import and export profiles |
 | `wx version` | Version and build target |
+
+`contacts find` and `groups find` search the saved catalog. `contacts lookup` requests one or more exact contact IDs from WeChat. `groups lookup` requests the member roster for an exact group ID from WeChat.
 
 `select` saves a default in this CLI's configuration:
 

@@ -8,3 +8,5 @@ Use `accounts`, `profiles` and `config servers` as the canonical CLI groups and 
 Use `wx auth logout --local` to sign out on the daemon and keep saved credentials without contacting WeChat. The old `logout-local` command remains available as a hidden alias.
 
 Use `wx chats list` to list chats. The previous `wx threads` command remains available as a hidden compatibility command.
+
+Use `wx contacts lookup` and `wx groups lookup` for lookups by ID. The previous top-level lookup commands remain available as hidden compatibility commands.

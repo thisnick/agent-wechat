@@ -117,11 +117,13 @@ enum Command {
         command: Option<calls_cli::CallsCommand>,
     },
     /// Look up known contact IDs on the selected account.
+    #[command(hide = true)]
     LookupContacts {
         #[arg(required = true)]
         ids: Vec<String>,
     },
     /// Look up a known group ID on the selected account.
+    #[command(hide = true)]
     LookupGroup {
         room: String,
         #[arg(long, default_value_t = 0)]
@@ -171,7 +173,7 @@ enum Command {
     /// Find contacts and refresh their saved information.
     Contacts {
         #[command(subcommand)]
-        command: Option<CatalogCommand>,
+        command: Option<ContactCommand>,
         #[arg(long)]
         search: Option<String>,
         #[arg(long)]
@@ -315,6 +317,17 @@ enum ResourceAction {
     },
 }
 #[derive(Subcommand)]
+enum ContactCommand {
+    #[command(flatten)]
+    Catalog(CatalogCommand),
+    /// Look up one or more known contact IDs on WeChat.
+    Lookup {
+        #[arg(required = true)]
+        ids: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum CatalogCommand {
     /// Retrieve a saved avatar or request an avatar refresh.
     Avatar {
@@ -427,6 +440,12 @@ struct MutationOptions {
 enum GroupCommand {
     #[command(flatten)]
     Catalog(CatalogCommand),
+    /// Fetch the member roster for a known group ID from WeChat.
+    Lookup {
+        room: String,
+        #[arg(long, default_value_t = 0)]
+        version: u32,
+    },
     /// Create a group with two to forty initial members.
     Create {
         #[arg(required = true, num_args = 2..=40)]
@@ -1448,16 +1467,16 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Calls { command } => {
             return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
         }
-        Command::LookupContacts { ids } => {
+        Command::LookupContacts { ids }
+        | Command::Contacts {
+            command: Some(ContactCommand::Lookup { ids }),
+            ..
+        } => {
             r.post(&r.path("contacts/lookup")?, json!({"ids":ids}))
                 .await?
         }
         Command::LookupGroup { room, version } => {
-            r.get(&format!(
-                "{}?version={version}",
-                r.path(&format!("groups/{}/lookup", encode(&room)))?
-            ))
-            .await?
+            client_actions::group(&r, &settings, GroupCommand::Lookup { room, version }).await?
         }
         Command::Accounts { command } => match command {
             AccountCommand::List => r.get("v1/accounts").await?,
@@ -1549,7 +1568,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await?
         }
         Command::Contacts {
-            command: Some(command),
+            command: Some(ContactCommand::Catalog(command)),
             ..
         } => client_actions::catalog(&r, &settings, "contacts", command).await?,
         Command::Contacts {

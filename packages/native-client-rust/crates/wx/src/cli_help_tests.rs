@@ -119,7 +119,13 @@ fn help_advertises_only_plural_groups_and_select() {
         (
             vec![],
             vec!["accounts", "chats", "profiles"],
-            vec!["account", "profile", "threads"],
+            vec![
+                "account",
+                "profile",
+                "threads",
+                "lookup-contacts",
+                "lookup-group",
+            ],
         ),
         (
             vec!["accounts"],
@@ -128,6 +134,8 @@ fn help_advertises_only_plural_groups_and_select() {
         ),
         (vec!["profiles"], vec!["select"], vec!["use"]),
         (vec!["auth"], vec!["logout"], vec!["logout-local"]),
+        (vec!["contacts"], vec!["lookup"], vec![]),
+        (vec!["groups"], vec!["lookup"], vec![]),
         (vec!["config"], vec!["servers"], vec!["server"]),
         (vec!["config", "servers"], vec!["select"], vec!["use"]),
     ] {

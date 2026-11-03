@@ -171,8 +171,8 @@ wx accounts alias ACCOUNT_ID test
 wx --account test chats list
 wx --account test contacts --search Example
 wx --account test groups
-wx --account test lookup-contacts username
-wx --account test lookup-group 'room@chatroom'
+wx --account test contacts lookup username
+wx --account test groups lookup 'room@chatroom'
 wx --account test messages list filehelper --limit 50
 wx --account test messages get msg_OPAQUE_ID
 wx --account test events --after 0 --watch
