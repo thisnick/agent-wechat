@@ -19,6 +19,7 @@ struct State {
 pub struct PlaybackHandle(Arc<Mutex<State>>);
 
 impl PlaybackHandle {
+    #[cfg(any(feature = "native-audio", test))]
     pub(crate) fn new(native_rate: u32, buffer_ms: u32) -> Result<Self, AudioError> {
         let max_samples = native_rate as usize * buffer_ms as usize / 1000;
         if max_samples == 0 {
@@ -118,7 +119,7 @@ impl PlaybackHandle {
             state.resampler = None;
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "native-audio", target_os = "macos"))]
     pub(crate) fn render_callback(&self, output: &mut [f32]) {
         if let Ok(mut state) = self.0.try_lock() {
             for sample in output {
@@ -132,7 +133,10 @@ impl PlaybackHandle {
             output.fill(0.0);
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(
+        feature = "native-audio",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub(crate) fn drain(&self, output: &mut [f32]) -> Result<u64, AudioError> {
         let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
         for sample in output {
@@ -144,7 +148,10 @@ impl PlaybackHandle {
         }
         Ok(state.generation)
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(all(
+        feature = "native-audio",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub(crate) fn generation(&self) -> Result<u64, AudioError> {
         Ok(self.token()?.0)
     }

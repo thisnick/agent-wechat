@@ -4,6 +4,7 @@
 //! Tests exercise queue/resampling behavior without opening a device. This adapter
 //! derives from the MIT-licensed sys-voice library; see THIRD-PARTY.md.
 
+#[cfg(feature = "native-audio")]
 mod backends;
 mod playback;
 mod resampler;
@@ -107,15 +108,24 @@ pub struct AudioSession {
 impl AudioSession {
     /// Query endpoint metadata without starting microphone capture or playback.
     pub fn devices() -> Result<Vec<AudioDevice>, AudioError> {
+        #[cfg(feature = "native-audio")]
         {
             backends::devices()
+        }
+        #[cfg(not(feature = "native-audio"))]
+        {
+            Err(AudioError::Unsupported)
         }
     }
     pub fn open(config: AudioConfig) -> Result<Self, AudioError> {
         config.validate()?;
-
+        #[cfg(feature = "native-audio")]
         {
             backends::open(config)
+        }
+        #[cfg(not(feature = "native-audio"))]
+        {
+            Err(AudioError::Unsupported)
         }
     }
 

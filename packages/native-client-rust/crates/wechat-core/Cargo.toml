@@ -44,3 +44,4 @@ crc32fast = "1"
 
 [dependencies.wechat-calls]
 path = "../wechat-calls"
+features = ["native-opus"]
