@@ -10,3 +10,5 @@ Use `wx auth logout --local` to sign out on the daemon and keep saved credential
 Use `wx chats list` to list chats. The previous `wx threads` command remains available as a hidden compatibility command.
 
 Use `wx contacts lookup` and `wx groups lookup` for lookups by ID. The previous top-level lookup commands remain available as hidden compatibility commands.
+
+Contact lookup skips blank remarks and nicknames when choosing a display name.
