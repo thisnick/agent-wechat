@@ -1,5 +1,7 @@
 # @agent-wechat/desktop
 
+## 1.4.0-beta.5
+
 ## 1.4.0-beta.4
 
 ### Minor Changes

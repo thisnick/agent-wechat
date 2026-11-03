@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.5
+
+### Patch Changes
+
+- [#379](https://github.com/thisnick/agent-wechat/pull/379) [`443f3bd`](https://github.com/thisnick/agent-wechat/commit/443f3bdff5f48eb2b6666a2e2e18746f152beb37) Thanks [@thisnick](https://github.com/thisnick)! - Keep direct voice calls connected when the legacy WeChat relay audio path reuses a nonce across senders. Derive each sender's starting sequence from room media material and sender identity to reduce early overlap. Continue to reject replay and conflicting packets from the same sender, and stop before the local counter wraps.
+
+- [#380](https://github.com/thisnick/agent-wechat/pull/380) [`3077cf7`](https://github.com/thisnick/agent-wechat/commit/3077cf797d335351574541c70997e521617888f6) Thanks [@thisnick](https://github.com/thisnick)! - Show a phone confirmation prompt while `wx auth login` waits for approval. With `--json`, report the waiting state on stderr and return the final result as JSON on stdout.
+
 ## 1.4.0-beta.4
 
 ### Minor Changes
