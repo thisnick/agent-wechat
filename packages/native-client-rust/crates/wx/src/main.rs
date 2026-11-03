@@ -569,9 +569,13 @@ enum AuthCommand {
     /// Disconnect while retaining the saved WeChat login.
     Disconnect,
     /// Sign out locally while retaining saved credentials.
+    #[command(hide = true)]
     LogoutLocal,
     /// Sign out of WeChat and disable automatic reconnection.
     Logout {
+        /// Sign out on the daemon and keep saved credentials, without contacting WeChat.
+        #[arg(long, conflicts_with_all = ["idempotency_key", "detach", "wait"])]
+        local: bool,
         #[arg(long)]
         idempotency_key: Option<String>,
         #[arg(long)]
@@ -1625,8 +1629,11 @@ async fn run(cli: Cli) -> Result<()> {
                 login::qr(&r, &settings, &id, output, cli.json).await?
             }
             AuthCommand::Disconnect => r.post(&r.path("auth/disconnect")?, json!({})).await?,
-            AuthCommand::LogoutLocal => r.post(&r.path("auth/logout-local")?, json!({})).await?,
+            AuthCommand::LogoutLocal | AuthCommand::Logout { local: true, .. } => {
+                r.post(&r.path("auth/logout-local")?, json!({})).await?
+            }
             AuthCommand::Logout {
+                local: false,
                 idempotency_key,
                 detach,
                 wait,

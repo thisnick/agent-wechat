@@ -128,6 +128,7 @@ response is labelled explicitly. Detach leaves the bounded attempt running. A pr
 wx --account home accounts connect
 wx --account home accounts disconnect
 wx --account home auth logout --idempotency-key deliberate-logout
+wx --account home auth logout --local
 wx --account home auth forget --yes --idempotency-key deliberate-local-forget
 ```
 
@@ -135,6 +136,8 @@ Disconnect retains reusable credentials. Logout commits persistent local
 inhibition before at most one authenticated native logout; remote acceptance,
 rejection, no attempt and unknown outcome are separate results. It never renews
 or logs in just to complete logout. Saved-device revocation remains unverified.
+Use `logout --local` to commit the local sign-out and keep saved credentials
+without a logout request to WeChat.
 Forgetting is separately confirmed, removes local authentication and retains
 history, device identity, media keys and uncertain intents. None proves deletion
 from backups or the phone's device inventory.

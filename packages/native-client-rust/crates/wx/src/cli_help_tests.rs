@@ -127,6 +127,7 @@ fn help_advertises_only_plural_groups_and_select() {
             vec!["default"],
         ),
         (vec!["profiles"], vec!["select"], vec!["use"]),
+        (vec!["auth"], vec!["logout"], vec!["logout-local"]),
         (vec!["config"], vec!["servers"], vec!["server"]),
         (vec!["config", "servers"], vec!["select"], vec!["use"]),
     ] {

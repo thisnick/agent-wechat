@@ -61,6 +61,12 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             self.reply({"error":{"code":"fixture_not_found"}},404)
         def do_POST(self):
             self.authenticated();body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or b"{}");path=urlsplit(self.path).path
+            if path == "/v1/accounts/a/auth/logout-local":
+                assert body == {} and self.headers.get("Idempotency-Key") is None
+                return self.reply({"state": "logged_out", "serverRevocation": "not_requested"})
+            if path == "/v1/accounts/a/logout":
+                assert body == {} and self.headers.get("Idempotency-Key") == "fixture-logout"
+                return self.reply({"id": "logout-fixture", "state": "succeeded"})
             if path=="/v1/profiles/official":
                 state["official_posts"].append(body);state["official_first"]=False
                 return self.reply({"accountId":"a","profilePath":"/daemon-home","storageMode":"official","savedDeviceLoginAvailable":False})
@@ -129,6 +135,12 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         assert "Next cursor: fixture-next-message" in history and "Only partial message history" in history
         assert "message_0.db" not in history
         assert run("messages", "list", "filehelper") == message_page
+        local_logout = {"state": "logged_out", "serverRevocation": "not_requested"}
+        assert run("auth", "logout", "--local") == local_logout
+        assert run("auth", "logout-local") == local_logout
+        assert run("auth", "logout", "--idempotency-key", "fixture-logout")["id"] == "logout-fixture"
+        for flag in [("--detach",), ("--wait", "1"), ("--idempotency-key", "fixture-logout")]:
+            assert run("auth", "logout", "--local", *flag, code=2)["error"]["code"] == "invalid_arguments"
         for group in ["chats", "messages"]:
             result=run(group,"read","filehelper","--expected-version","fixture-version")
             assert result["readScope"]=="thread" and result["phoneNotification"]["state"]=="accepted"
