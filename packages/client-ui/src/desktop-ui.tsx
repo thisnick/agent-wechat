@@ -467,7 +467,7 @@ export function DesktopPreferences({
       </div>
       <p className="desktop-help">
         Independent CLI connections use a protected token file. Copy an access
-        key and configure the server with <code>wx config server add</code>.
+        key and configure the server with <code>wx config servers add</code>.
       </p>
       {settings?.connections
         .filter((connection) => !connection.local)

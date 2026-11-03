@@ -721,7 +721,7 @@ try {
     "--account",
     "personal",
     "--json",
-    "account",
+    "accounts",
     "settings",
   ];
   await client.createAccount("cli-removal");

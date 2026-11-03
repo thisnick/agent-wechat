@@ -38,7 +38,7 @@ Sending again with the same key and the same content returns the original send. 
 
 Queued sends, downloads, read notices, the event log and the login all survive a restart. Work that was mid-flight when the daemon stopped comes back as `needs_review` rather than being repeated.
 
-Stopping the daemon (or disconnecting) doesn't log you out. Only `wx auth logout` does, and after that the daemon won't reconnect on its own until you log in again.
+Stopping the daemon (or disconnecting) keeps the saved login. Use `wx auth logout` to sign out, or `wx auth logout --local` to skip the request to WeChat. Both forms stop automatic reconnection until you sign in again.
 
 <Aside title="Good to know">
 - **Voice longer than 60 seconds is split** into equal notes. A partial result keeps the IDs of the notes that went out.

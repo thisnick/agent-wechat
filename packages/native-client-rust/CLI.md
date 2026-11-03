@@ -37,14 +37,14 @@ uses this foreground-only startup option. Use either this manager, systemd, Comp
 OpenClaw ownership for one process; do not nest owners.
 
 ```bash
-wx config server add local --url http://127.0.0.1:6174 \
+wx config servers add local --url http://127.0.0.1:6174 \
   --token-file /private/api-token
-wx config server use local
-wx config server list
+wx config servers select local
+wx config servers list
 wx accounts list
-wx accounts default ACCOUNT_ID
+wx accounts select ACCOUNT_ID
 wx accounts alias ACCOUNT_ID home
-wx --account home account status
+wx --account home accounts status
 ```
 
 `--server-name`, `--server URL`, `--token-file` and `--account` override saved
@@ -125,9 +125,10 @@ requests cancellation of the same operation and exits130; an unconfirmed cancel
 response is labelled explicitly. Detach leaves the bounded attempt running. A private pre-request login receipt retains the request key and operation ID; reusing `--idempotency-key` resumes that operation rather than starting a replacement.
 
 ```bash
-wx --account home account connect
-wx --account home account disconnect
+wx --account home accounts connect
+wx --account home accounts disconnect
 wx --account home auth logout --idempotency-key deliberate-logout
+wx --account home auth logout --local
 wx --account home auth forget --yes --idempotency-key deliberate-local-forget
 ```
 
@@ -135,6 +136,8 @@ Disconnect retains reusable credentials. Logout commits persistent local
 inhibition before at most one authenticated native logout; remote acceptance,
 rejection, no attempt and unknown outcome are separate results. It never renews
 or logs in just to complete logout. Saved-device revocation remains unverified.
+Use `logout --local` to commit the local sign-out and keep saved credentials
+without a logout request to WeChat.
 Forgetting is separately confirmed, removes local authentication and retains
 history, device identity, media keys and uncertain intents. None proves deletion
 from backups or the phone's device inventory.
@@ -272,8 +275,8 @@ Read marks the whole thread through the latest observed local message. The
 expected version prevents clearing a different snapshot, and rows with newer timestamps stay
 unread. The native cutoff has one-second precision. The result distinguishes local projection from accepted, rejected or
 uncertain cross-device notification. Uncertain notifications are not resent.
-Watch emits NDJSON;
-its cursor file records successful local emission, not model consumption.
+Watch prints readable event details. Add `--json` for one JSON event per line.
+The cursor file records successful local emission, not model consumption.
 Consumer ACK is a separate explicit operation. Interrupting a send watcher
 leaves daemon work running; only attached login explicitly requests cancel.
 
@@ -282,17 +285,17 @@ leaves daemon work running; only attached login explicitly requests cancel.
 These commands read files directly without a daemon, network or API bearer:
 
 ```bash
-wx profile add archive --path /private/stopped-account \
+wx profiles add archive --path /private/stopped-account \
   --keys-file /private/profile-keys.json
-wx profile use archive
-wx profile inspect
-wx profile contacts --source-stopped
-wx profile groups --id 'room@chatroom' --members --source-stopped
-wx profile messages --chat filehelper --source-stopped
-wx profile images --message OBSERVATION_ID --quality original \
+wx profiles select archive
+wx profiles inspect
+wx profiles contacts --source-stopped
+wx profiles groups --id 'room@chatroom' --members --source-stopped
+wx profiles messages --chat filehelper --source-stopped
+wx profiles images --message OBSERVATION_ID --quality original \
   --output /private/new-image.jpg --source-stopped
-wx profile avatars --username USERNAME --output /private/new-avatar.jpg --source-stopped
-wx profile keys export archive --password-file /private/account-password.bin \
+wx profiles avatars --username USERNAME --output /private/new-avatar.jpg --source-stopped
+wx profiles keys export archive --password-file /private/account-password.bin \
   --output /private/new-keys.json --source-stopped
 ```
 
@@ -302,7 +305,8 @@ and show `keys_missing`; content reads fail explicitly until keys are available.
 Keyless inspect reports bounded filesystem inventory only. Readers require a
 stopped/consistent-source assertion and preserve source files. `--raw` is an
 explicit private-data choice; default projections omit raw transport/XML fields.
-Message observation IDs are bound to profile and source generation; they cannot
+Use `wx profiles messages --chat CHAT_ID --source-stopped --json` to copy full
+observation IDs. They are bound to the profile and source generation and cannot
 be reused after the view changes. Output derivatives/keys must remain outside
 the source tree, and no output is overwritten.
 
@@ -324,7 +328,8 @@ excluded. Preserve the complete durable root for a native backup.
 
 ## Machine results and verification
 
-`--json` emits one finite structured result; watch emits one JSON event per line.
+Commands print readable results by default. Chat lists and searches show a table.
+With `--json`, finite commands emit one structured result and watch emits one JSON event per line.
 Exit0 is read/action success or durable acceptance with detach. Exit2 is invalid
 input/configuration/selection;3 unavailable endpoint;4 API access;5 login needed;
 6 human action;7 a local wait deadline;8 an uncertain outcome;9 a declared terminal

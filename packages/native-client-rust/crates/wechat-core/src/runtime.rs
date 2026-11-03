@@ -59,6 +59,20 @@ use tokio::sync::Mutex as AsyncMutex;
 use wechat_protocol::{AccountState, DeviceProfile, LoginStatus, NativeOptions};
 use wechat_store::{vault::Vault, Operation, SendIntent, Store};
 
+fn contact_lookup_item(contact: &wechat_protocol::wire::ContactRecord) -> Value {
+    let display_name = [contact.remark.as_deref(), contact.nickname.as_deref()]
+        .into_iter()
+        .flatten()
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or(&contact.username);
+    json!({
+        "id": contact.username,
+        "displayName": display_name,
+        "alias": contact.alias,
+        "profileProjection": "pending",
+    })
+}
+
 pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
     // Cookies can change on ordinary RPCs. A renewed key, account, device or
     // routing generation requires a new authenticated persistent connection.
@@ -1221,9 +1235,17 @@ impl Core {
         let _guard = gate.lock().await;
         let core = self.clone();
         let account = account.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let contacts=core.upstream.native(NativeOptions::default())?.lookup_contacts(&mut state,&ids)?;core.save_state(&account,&state)?;
-            Ok(json!({"items":contacts.contacts.into_iter().map(|c|json!({"id":c.username,"displayName":c.remark.or(c.nickname).unwrap_or_else(||c.username.clone()),"alias":c.alias,"profileProjection":"pending"})).collect::<Vec<_>>(),"results":contacts.results}))
-        }).await
+        blocking(move || {
+            let mut state = core.account_state(&account)?;
+            let contacts = core
+                .upstream
+                .native(NativeOptions::default())?
+                .lookup_contacts(&mut state, &ids)?;
+            core.save_state(&account, &state)?;
+            let items: Vec<_> = contacts.contacts.iter().map(contact_lookup_item).collect();
+            Ok(json!({"items": items, "results": contacts.results}))
+        })
+        .await
     }
     pub async fn lookup_room(
         self: &Arc<Self>,
@@ -2337,6 +2359,27 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contact_lookup_skips_blank_names() {
+        for (remark, nickname, expected) in [
+            (Some("My remark"), Some("Nickname"), "My remark"),
+            (Some(""), Some("Nickname"), "Nickname"),
+            (Some(" \t"), Some(""), "fixture-contact"),
+            (None, None, "fixture-contact"),
+        ] {
+            let contact = wechat_protocol::wire::ContactRecord {
+                username: "fixture-contact".into(),
+                nickname: nickname.map(str::to_owned),
+                remark: remark.map(str::to_owned),
+                alias: None,
+                large_avatar_url: None,
+                small_avatar_url: None,
+                raw: vec![],
+            };
+            assert_eq!(contact_lookup_item(&contact)["displayName"], expected);
+        }
+    }
+
     #[tokio::test]
     async fn plain_text_wait_releases_writer_and_preserves_the_submission_fence() {
         struct PausedSend {

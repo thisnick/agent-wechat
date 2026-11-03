@@ -143,6 +143,13 @@ pub async fn catalog(
 pub async fn group(r: &Remote, config: &settings::File, command: GroupCommand) -> Result<Value> {
     match command {
         GroupCommand::Catalog(command) => catalog(r, config, "groups", command).await,
+        GroupCommand::Lookup { room, version } => {
+            r.get(&query(
+                r.path(&format!("groups/{}/lookup", encode(&room)))?,
+                &[("version", Some(version.to_string()))],
+            ))
+            .await
+        }
         GroupCommand::Create {
             members,
             name,
