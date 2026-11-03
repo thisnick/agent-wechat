@@ -87,6 +87,10 @@ Configure independent voice/video permissions, realtime speech models, OpenAI
 credentials and consultation in [Set up calling](/openclaw/calling/).
 
 :::note[Good to know]
+The legacy WeChat relay can reuse an audio nonce across senders. The daemon
+continues the call for compatibility, which weakens audio confidentiality and
+integrity.
+
 Linux CLI audio needs `libpulse0` and a working PulseAudio or PipeWire-Pulse
 service. The headless image includes the client library but does not need audio
 devices or a sound server to run the daemon.
