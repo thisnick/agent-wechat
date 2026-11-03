@@ -3,7 +3,7 @@ members = ["crates/wechat-audio", "crates/wechat-calls", "crates/wechat-platform
 resolver = "2"
 
 [workspace.package]
-version = "1.4.0-beta.2"
+version = "1.4.0-beta.3"
 edition = "2021"
 license = "MIT"
 rust-version = "1.93.1"

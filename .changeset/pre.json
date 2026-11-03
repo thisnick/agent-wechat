@@ -12,6 +12,7 @@
   "changesets": [
     "cli-audio-levels-devices",
     "image-publisher-runtime",
+    "normal-calling-startup",
     "offline-call-foundation",
     "openclaw-2026-10-9",
     "ordinary-null-contact-flags",

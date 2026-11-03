@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 1.4.0-beta.3
+
+### Patch Changes
+
+- [#370](https://github.com/thisnick/agent-wechat/pull/370) [`998830d`](https://github.com/thisnick/agent-wechat/commit/998830d5b2ab58f0ce13bbcf78bc35a78138d24c) Thanks [@thisnick](https://github.com/thisnick)! - Register the native call backend during normal daemon startup for authenticated accounts. Remove the separate test-startup flag and optional daemon/CLI calling/audio branches, retaining call ownership, credential, cleanup and media safety checks.
+
 ## 1.4.0-beta.2
 
 ### Patch Changes
