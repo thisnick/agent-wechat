@@ -2,7 +2,7 @@
 mod account_network;
 mod business_contacts;
 pub mod call_types;
-#[cfg(feature = "experimental-calls")]
+
 pub mod calls;
 mod format;
 mod forwarded;

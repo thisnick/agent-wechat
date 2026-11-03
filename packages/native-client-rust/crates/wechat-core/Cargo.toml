@@ -6,9 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["native-calls"]
-experimental-calls = ["wechat-protocol/experimental-calls", "dep:wechat-calls"]
-native-calls = ["experimental-calls", "wechat-calls/native-opus"]
+# Compatibility aliases; these features no longer select different builds.
+default = []
+experimental-calls = []
+native-calls = []
 
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }
@@ -43,4 +44,4 @@ crc32fast = "1"
 
 [dependencies.wechat-calls]
 path = "../wechat-calls"
-optional = true
+features = ["native-opus"]

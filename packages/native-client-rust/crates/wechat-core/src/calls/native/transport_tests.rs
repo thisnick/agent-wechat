@@ -247,6 +247,7 @@ impl Fixture {
         let (audio, _) = mpsc::sync_channel(1);
         let worker = Arc::new(Worker {
             identity: request.identity.clone(),
+            peer_id: request.notification.caller_username.clone(),
             lease: lease.clone(),
             stop: AtomicBool::new(false),
             media_stop: AtomicBool::new(false),
@@ -254,8 +255,7 @@ impl Fixture {
             generation: AtomicU32::new(1),
             submission: SendAdmission::default(),
             metrics: MediaMetrics::default(),
-            scope_deadline: Instant::now() + Duration::from_secs(60),
-            scope_expires_unix_ms: unix_ms().unwrap() + 60_000,
+
             mutations_submitted: AtomicBool::new(false),
             incoming: None,
             audio,
@@ -279,8 +279,7 @@ impl Fixture {
             lease,
             call_id: request.identity.call_id().into(),
             ordinal: AtomicU64::new(1),
-            scope_deadline: worker.scope_deadline,
-            scope_expires_unix_ms: worker.scope_expires_unix_ms,
+
             worker,
             admission: ControlAdmission::Incoming(request.guard),
             runtime: tokio::runtime::Handle::current(),

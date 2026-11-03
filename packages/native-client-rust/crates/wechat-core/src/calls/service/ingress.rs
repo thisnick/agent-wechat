@@ -584,7 +584,6 @@ impl CallService {
     }
     /// Record only the source-verified current own member after authenticated
     /// ACK/Join admission. Original invitation and receipt bytes remain intact.
-    #[cfg(feature = "native-calls")]
     pub(crate) fn set_incoming_member(
         &self,
         authority: &AccountAuthority,
@@ -706,7 +705,6 @@ impl CallService {
     }
     /// Trusted native actors only: room, member, origin and terminal meaning
     /// must already be verified. A timeout is not terminal evidence.
-    #[cfg(any(feature = "native-calls", test))]
     pub(crate) fn verified_incoming_terminal(
         &self,
         authority: &AccountAuthority,

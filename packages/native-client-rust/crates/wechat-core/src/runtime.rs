@@ -91,9 +91,8 @@ impl std::ops::Deref for Core {
 
 #[doc(hidden)]
 pub struct CoreShared {
-    #[cfg(feature = "experimental-calls")]
     pub(crate) call_service: std::sync::OnceLock<Arc<crate::calls::service::CallService>>,
-    #[cfg(feature = "experimental-calls")]
+
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub ownership_generation: String,
@@ -319,9 +318,8 @@ impl Core {
             snapshot_reader: None,
             live_store: None,
             shared: Arc::new(CoreShared {
-                #[cfg(feature = "experimental-calls")]
                 call_service: std::sync::OnceLock::new(),
-                #[cfg(feature = "experimental-calls")]
+
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
                 leases: Mutex::new(leases),
@@ -360,6 +358,9 @@ impl Core {
             core.recover_logout(&account.id)?;
             core.store.recover_interrupted_operations(&account.id)?;
             core.store.recover_call_sessions(&account.id)?;
+            if let Some(call_id) = core.store.unresolved_call(&account.id)? {
+                core.call_service().recover_unknown(&account.id, &call_id)?;
+            }
             let _ = core.recover_metadata(&account.id)?;
             let _ = core.recover_saved_login(&account.id);
             let _ = core.recover_outgoing_recall_projections(&account.id);
@@ -545,7 +546,7 @@ impl Core {
                 bail!("account_identity_mismatch");
             }
         }
-        #[cfg(feature = "experimental-calls")]
+
         if accepted {
             self.prepare_call_authorization(account, state)?;
         } else {
@@ -556,7 +557,7 @@ impl Core {
             .seal(account, "account-state", &serde_json::to_vec(state)?)?;
         if accepted {
             self.store.save_accepted_authorization(account, &sealed)?;
-            #[cfg(feature = "experimental-calls")]
+
             self.bind_call_authorization(account, state)?;
             let _ = self.project_saved_login(account, state);
             Ok(())
@@ -588,7 +589,7 @@ impl Core {
                 bail!("account_identity_mismatch");
             }
         }
-        #[cfg(feature = "experimental-calls")]
+
         self.fence_call_authority(account);
         self.store.commit_login_authorization_for_operation(
             account,
@@ -599,7 +600,7 @@ impl Core {
             &self.ownership_generation,
             operation,
         )?;
-        #[cfg(feature = "experimental-calls")]
+
         self.accept_call_authorization(account, state)?;
         let _ = self.project_saved_login(account, state);
         Ok(())
@@ -612,7 +613,7 @@ impl Core {
             Err(_) => AccountState::from_baseline_json(input)?,
         };
         self.persist_state(account, &state, false)?;
-        #[cfg(feature = "experimental-calls")]
+
         self.fence_call_authority(account);
         self.store.clear_runtime(account, "validated-generation")?;
         self.store
@@ -669,7 +670,6 @@ impl Core {
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
-        #[cfg(feature = "experimental-calls")]
         self.fence_call_authority(account);
         self.store.clear_runtime(account, "validated-generation")?;
         if let Ok(map) = self.cancels.lock() {
@@ -1190,7 +1190,7 @@ impl Core {
                 "validated-generation",
                 core.ownership_generation.as_bytes(),
             )?;
-            #[cfg(feature = "experimental-calls")]
+
             core.bind_call_authorization(&account, &state)?;
             core.commit_sync_batch(&account, batch, "shortlink", "manual_or_fallback")
         })
@@ -2074,7 +2074,7 @@ impl Core {
                     "validated-generation",
                     core.ownership_generation.as_bytes(),
                 )?;
-                #[cfg(feature = "experimental-calls")]
+
                 core.bind_call_authorization(&account, &state)?;
                 Ok(beat)
             })
@@ -2118,7 +2118,6 @@ impl Core {
         // The task keeps running if the requesting HTTP connection disappears.
         let core = self.clone();
         if tokio::spawn(async move {
-            #[cfg(feature = "experimental-calls")]
             if let Some(service) = core.call_service.get() {
                 service.shutdown().await;
             }
@@ -2132,7 +2131,7 @@ impl Core {
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::SeqCst);
-        #[cfg(feature = "experimental-calls")]
+
         self.fence_all_call_authorities();
         if let Ok(cancels) = self.cancels.lock() {
             for cancel in cancels.values() {
@@ -2207,11 +2206,15 @@ fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
     white.write_to(&mut output, ImageFormat::Png)?;
     Ok(output.into_inner())
 }
-#[cfg(feature = "experimental-calls")]
+
 impl Core {
-    pub fn call_service(&self) -> Arc<crate::calls::service::CallService> {
+    pub fn call_service(self: &Arc<Self>) -> Arc<crate::calls::service::CallService> {
         self.call_service
-            .get_or_init(|| Arc::new(crate::calls::service::CallService::default()))
+            .get_or_init(|| {
+                Arc::new(crate::calls::service::CallService::new(Arc::new(
+                    crate::calls::native::NativeCallBackend::new(Arc::downgrade(self)),
+                )))
+            })
             .clone()
     }
     pub fn configure_calls(
@@ -2301,13 +2304,22 @@ mod tests {
             short_host: "short.weixin.qq.com".into(),
         }
     }
-    #[cfg(feature = "experimental-calls")]
-    #[test]
-    fn call_credentials_keep_cookies_but_fence_replacement_logout_and_shutdown() {
+
+    #[tokio::test]
+    async fn call_credentials_keep_cookies_but_fence_replacement_logout_and_shutdown() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
         store.create_account("one").unwrap();
         let core = Core::new(store.clone(), None).unwrap();
+        let calls = core.call_service();
+        assert!(
+            !calls
+                .current("one", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
         let first = state();
         core.restore_credentials("one", &serde_json::to_vec(&first).unwrap())
             .unwrap();
@@ -2323,6 +2335,33 @@ mod tests {
         assert!(core.cached_call_authority("one").is_none());
         core.accept_call_authorization("one", &first).unwrap();
         let old = core.call_authority("one").unwrap();
+        assert!(
+            calls
+                .current("one", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
+        store.create_account("two").unwrap();
+        let mut second = first.clone();
+        second.uin = 2;
+        second.own_username = "synthetic_other".into();
+        core.restore_credentials("two", &serde_json::to_vec(&second).unwrap())
+            .unwrap();
+        store.put_runtime("two", "desired", b"connected").unwrap();
+        store
+            .mark_validated_if_active("two", &core.ownership_generation)
+            .unwrap();
+        core.accept_call_authorization("two", &second).unwrap();
+        assert!(
+            calls
+                .current("two", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
         let mut cookie = first.clone();
         cookie.cookie = vec![99];
         core.save_state("one", &cookie).unwrap();
@@ -2358,6 +2397,22 @@ mod tests {
         );
         core.disconnect("one").unwrap();
         assert!(!replacement.current());
+        assert!(
+            !calls
+                .current("one", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
+        assert!(
+            calls
+                .current("two", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
         // A late response and even stale connection flags cannot reopen the
         // logout inhibit. Only a new accepted login may do that.
         store.put_runtime("one", "desired", b"connected").unwrap();
@@ -2375,6 +2430,22 @@ mod tests {
         assert!(fresh.current());
         core.shutdown();
         assert!(!fresh.current());
+        assert!(
+            !calls
+                .current("one", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
+        assert!(
+            !calls
+                .current("two", "test")
+                .await
+                .unwrap()
+                .capabilities
+                .direct_audio
+        );
     }
     #[test]
     fn only_authenticated_saved_trust_rejections_permit_qr_fallback() {

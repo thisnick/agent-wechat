@@ -392,23 +392,12 @@ impl Fixture {
         };
         core.save_state("one", &state).unwrap();
         assert!(core.call_authority("one").is_ok());
-        let mut config =
-            NativeCallConfig::receive_only("one".into(), independent_voice_parameters().unwrap());
-        config.transmit_scope = NativeTransmitScope::IsolatedTest {
-            peer_id: PEER.into(),
-            intent_id: if ready_media.is_some() {
-                crypto::random::<32>().unwrap()
-            } else {
-                [9; 32]
-            },
-            expires_at_unix_ms: unix_ms().unwrap() + 60_000,
-            allow_known_audio_overlap: ready_media.is_some(),
-        };
-        config.max_duration = Duration::from_secs(if ready_media.is_some() { 6 } else { 2 });
+        let mut backend = NativeCallBackend::new(Arc::downgrade(&core));
+        let inner = Arc::get_mut(&mut backend.inner).unwrap();
+        inner.config.max_duration = Duration::from_secs(if ready_media.is_some() { 6 } else { 2 });
         if ready_media.is_some() {
-            config.peer_idle_timeout = Duration::from_millis(500);
+            inner.config.peer_idle_timeout = Duration::from_millis(500);
         }
-        let mut backend = NativeCallBackend::new(Arc::downgrade(&core), config).unwrap();
         let host = Host::new(case, ready_media);
         Arc::get_mut(&mut backend.inner).unwrap().test_io = Some(host.clone());
         let backend = Arc::new(backend);
@@ -645,12 +634,11 @@ async fn owned_state(
 }
 
 #[tokio::test]
-async fn consumed_incoming_scope_can_answer_once_then_exit_without_media() {
+async fn incoming_call_can_answer_then_exit_without_media() {
     let f = Fixture::new(Case::HoldJoinedSync);
     let mut client = f.client().await;
     f.stage(false, 0);
     let offer = f.offer().await;
-    assert!(f.backend.inner.test_spent.load(Ordering::Acquire));
     assert!(f.backend.capabilities("one").direct_audio);
     let initial = f.host.seen();
     assert_eq!(
@@ -730,7 +718,7 @@ async fn consumed_incoming_scope_can_answer_once_then_exit_without_media() {
     );
     f.finished().await;
     assert!(!f.snapshot().await.availability.busy);
-    assert!(!f.backend.capabilities("one").direct_audio);
+    assert!(f.backend.capabilities("one").direct_audio);
     let seen = f.host.seen();
     assert_eq!(
         seen.iter()

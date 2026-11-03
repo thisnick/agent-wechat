@@ -68,7 +68,7 @@ impl Core {
                 }
                 return Ok(prior);
             }
-            #[cfg(feature = "experimental-calls")]
+
             self.fence_call_authority(account);
             let (op, created) = self
                 .store

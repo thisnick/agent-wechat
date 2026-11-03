@@ -288,7 +288,7 @@ impl Ownership {
             .map(|ticket| ticket.operation)
             .filter(|operation| matches!(operation, Operation::Dial | Operation::Answer))
     }
-    #[cfg(feature = "native-calls")]
+
     pub(super) fn pending_terminal_operation(
         &self,
         authority: &AccountAuthority,
@@ -312,7 +312,7 @@ impl Ownership {
                 )
             })
     }
-    #[cfg(feature = "native-calls")]
+
     pub(super) fn pending_end(
         &self,
         authority: &AccountAuthority,

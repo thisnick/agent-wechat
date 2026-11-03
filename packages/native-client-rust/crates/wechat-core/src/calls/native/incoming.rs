@@ -13,10 +13,9 @@ type PreparationReply =
     Arc<Mutex<Option<oneshot::Sender<std::result::Result<IncomingPreparation, CallServiceError>>>>>;
 
 pub(super) fn supported(inner: &Inner, authority: &AccountAuthority, caller: &str) -> bool {
-    authority.account_id == inner.config.account_id
-        && inner.config.tx_ready()
-        && inner.config.allows_peer(caller)
-        && !inner.test_spent.load(Ordering::Acquire)
+    !caller.is_empty()
+        && caller.len() <= 128
+        && !caller.chars().any(char::is_control)
         && inner.core.upgrade().is_some_and(|core| {
             core.cached_call_authority(&authority.account_id)
                 .is_some_and(|lease| lease.current() && lease.authority() == authority)
@@ -63,16 +62,6 @@ pub(super) async fn prepare(
     {
         return Ok(IncomingPreparation::Ignored);
     }
-    let NativeTransmitScope::IsolatedTest {
-        expires_at_unix_ms, ..
-    } = inner.config.transmit_scope
-    else {
-        return Ok(IncomingPreparation::Ignored);
-    };
-    let now = unix_ms().map_err(|_| service_error(CallErrorCode::Stale))?;
-    let Some(remaining) = expires_at_unix_ms.checked_sub(now) else {
-        return Ok(IncomingPreparation::Ignored);
-    };
     let NotificationPayload::Invite(invite) = &request.notification.control.payload else {
         return Ok(IncomingPreparation::Ignored);
     };
@@ -85,6 +74,7 @@ pub(super) async fn prepare(
     let (audio, receive_audio) = mpsc::sync_channel(32);
     let worker = Arc::new(Worker {
         identity: request.identity.clone(),
+        peer_id: request.notification.caller_username.clone(),
         lease: request.notification.lease.clone(),
         stop: AtomicBool::new(false),
         media_stop: AtomicBool::new(false),
@@ -92,8 +82,6 @@ pub(super) async fn prepare(
         generation: AtomicU32::new(1),
         submission: SendAdmission::default(),
         metrics: MediaMetrics::default(),
-        scope_deadline: Instant::now() + Duration::from_millis(remaining.min(300_000)),
-        scope_expires_unix_ms: expires_at_unix_ms,
         mutations_submitted: AtomicBool::new(false),
         incoming: Some(mailbox.clone()),
         audio,
@@ -106,9 +94,6 @@ pub(super) async fn prepare(
             .lock()
             .map_err(|_| service_error(CallErrorCode::Closed))?;
         if active.as_ref().is_some_and(|old| !old.reusable()) {
-            return Ok(IncomingPreparation::Ignored);
-        }
-        if !consume_test_intent(&inner.test_spent) {
             return Ok(IncomingPreparation::Ignored);
         }
         // Installation precedes profile proof and the first Auth wait. A Cancel
@@ -148,13 +133,13 @@ pub(super) async fn prepare(
             if let Some(core) = &core {
                 let retained = if no_mutation {
                     core.store.close_call_locally(
-                        &actor_inner.config.account_id,
+                        &actor_worker.lease.authority().account_id,
                         actor_worker.identity.call_id(),
                         wechat_store::CallLocalEndReason::NoRemoteMutation,
                     )
                 } else {
                     core.store.finish_call(
-                        &actor_inner.config.account_id,
+                        &actor_worker.lease.authority().account_id,
                         actor_worker.identity.call_id(),
                         confirmed,
                     )
@@ -238,15 +223,15 @@ impl Actor {
         runtime: tokio::runtime::Handle,
     ) -> Result<Self> {
         let core = inner.core.upgrade().context("Call core closed")?;
-        let admitted = core.call_authority(&inner.config.account_id)?;
+        let admitted = core.call_authority(&worker.lease.authority().account_id)?;
         ensure!(
             admitted.current()
                 && admitted.authority() == worker.lease.authority()
                 && request.guard.is_current(),
             "Incoming account admission revoked"
         );
-        begin_operational_call(&inner, &worker, &core, &runtime)?;
-        let state = core.account_state(&inner.config.account_id)?;
+        begin_operational_call(&worker, &core, &runtime)?;
+        let state = core.account_state(&worker.lease.authority().account_id)?;
         ensure!(
             state.own_username == request.notification.own_username,
             "Incoming account identity changed"
@@ -258,12 +243,10 @@ impl Actor {
         };
         let transport = FencedTransport {
             core: inner.core.clone(),
-            account: inner.config.account_id.clone(),
+            account: worker.lease.authority().account_id.clone(),
             lease: worker.lease.clone(),
             call_id: worker.identity.call_id().into(),
             ordinal: AtomicU64::new(1),
-            scope_deadline: worker.scope_deadline,
-            scope_expires_unix_ms: worker.scope_expires_unix_ms,
             worker: worker.clone(),
             admission: ControlAdmission::Incoming(request.guard.clone()),
             runtime,
@@ -301,7 +284,7 @@ impl Actor {
             self.state.device.client_version,
             crypto::random::<32>()?,
         )?;
-        let mut parameters = self.inner.config.parameters.clone();
+        let mut parameters = independent_voice_parameters()?;
         offer.apply_to(&mut parameters);
         let session = NativeIncomingSession::authenticate(
             &self.transport,
@@ -373,7 +356,7 @@ impl Actor {
             );
             if self.phase() == IncomingPhase::Joined {
                 if self.local_stop_requested()
-                    || !self.worker.scope_current()
+                    || !self.worker.lease.current()
                     || self
                         .joined_deadline
                         .is_some_and(|deadline| Instant::now() >= deadline)
@@ -393,7 +376,7 @@ impl Actor {
                 // No controller owns an unanswered offer. Neither local expiry
                 // nor disappearing listeners grants a user Reject operation.
                 ensure!(
-                    self.worker.scope_current()
+                    self.worker.lease.current()
                         && self.request.guard.is_current()
                         && !self.worker.stop.load(Ordering::Acquire),
                     "Unowned incoming admission expired"
@@ -407,7 +390,7 @@ impl Actor {
                         return Ok(());
                     }
                     if self.phase() == IncomingPhase::Joined
-                        && (self.local_stop_requested() || !self.worker.scope_current())
+                        && (self.local_stop_requested() || !self.worker.lease.current())
                     {
                         return self.exit();
                     }
@@ -441,7 +424,7 @@ impl Actor {
     fn awaiting_reject(&self) -> bool {
         self.phase() == IncomingPhase::Acknowledged
             && self.worker.lease.current()
-            && self.worker.scope_current()
+            && self.worker.lease.current()
             && !self.worker.stop.load(Ordering::Acquire)
             && !self.mailbox.cancellation_pending()
             && self
@@ -635,7 +618,7 @@ impl Actor {
             Operation::Answer => {
                 ensure!(
                     sink.is_current()
-                        && self.worker.scope_current()
+                        && self.worker.lease.current()
                         && !self.worker.stop.load(Ordering::Acquire),
                     "Incoming Answer admission revoked"
                 );
@@ -749,7 +732,7 @@ impl Actor {
             let failed = media.join().map_or(true, |result| result.is_err());
             if failed {
                 let _ = self.core.store.put_runtime(
-                    &self.inner.config.account_id,
+                    &self.worker.lease.authority().account_id,
                     &format!("call-media-error:{}", self.worker.identity.call_id()),
                     b"media_failed",
                 );
@@ -875,9 +858,7 @@ pub(super) async fn action(
     sink: BackendSink,
 ) -> std::result::Result<BackendOutcome, CallServiceError> {
     let worker = active(&inner, &request.ticket.identity())?;
-    if worker.lease.authority() != request.ticket.authority()
-        || !inner.config.allows_peer(&request.peer_id)
-    {
+    if worker.lease.authority() != request.ticket.authority() || worker.peer_id != request.peer_id {
         return Err(service_error(CallErrorCode::Stale));
     }
     let mailbox = worker

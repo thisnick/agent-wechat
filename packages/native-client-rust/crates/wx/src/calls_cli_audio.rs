@@ -763,7 +763,7 @@ mod tests {
     use super::*;
     use tokio::sync::oneshot;
     use wechat_core::call_types::CallCommandStatus;
-    #[cfg(feature = "call-audio")]
+
     #[tokio::test]
     async fn losing_answer_preserves_exact_offer_and_does_not_claim_a_new_caller() {
         use wechat_core::call_types::{CallErrorCode, CallKind, CallOffer};

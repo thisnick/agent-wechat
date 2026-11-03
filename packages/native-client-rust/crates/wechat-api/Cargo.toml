@@ -6,13 +6,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["experimental-calls"]
-experimental-calls = ["wechat-core/experimental-calls", "dep:wechat-calls", "axum/ws"]
+# Compatibility aliases; these features no longer select different builds.
+default = []
+experimental-calls = []
 
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }
 anyhow.workspace = true
-axum = { workspace = true, features = ["multipart"] }
+axum = { workspace = true, features = ["multipart", "ws"] }
 tokio = { workspace = true, features = ["sync", "time"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -22,7 +23,7 @@ rand = "0.8"
 libc.workspace = true
 wechat-store = { path = "../wechat-store" }
 wechat-core = { path = "../wechat-core" }
-wechat-calls = { path = "../wechat-calls", optional = true }
+wechat-calls = { path = "../wechat-calls" }
 wechat-profile = { path = "../wechat-profile" }
 futures-util = "0.3"
 async-stream = "0.3"

@@ -647,6 +647,17 @@ mod tests {
             )
             .unwrap();
         assert!(receiver.seal_audio(epoch(), 0, &raw).is_err());
+        // The same collision fails closed when local transmission happens first.
+        let mut sender_first = self::receiver();
+        sender_first
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::VerifiedGeneration { key_generation: 1 },
+            )
+            .unwrap();
+        sender_first.seal_audio(epoch(), 0, &raw).unwrap();
+        assert!(sender_first.open(epoch(), &packet).is_err());
+        assert!(sender_first.seal_audio(epoch(), 1, &raw).is_err());
         let mut diagnostic = self::receiver();
         diagnostic
             .authorize_transmit(

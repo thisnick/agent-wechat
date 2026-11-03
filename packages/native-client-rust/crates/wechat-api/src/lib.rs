@@ -1,6 +1,6 @@
 //! Authenticated, account-scoped native daemon API.
 mod actions;
-#[cfg(feature = "experimental-calls")]
+
 mod calls;
 pub mod contracts;
 mod groups;
@@ -1161,14 +1161,7 @@ async fn revoke_token(
     Ok(Json(json!({"revoked":app.core.store.revoke_token(&id)?})))
 }
 fn call_routes() -> Router<App> {
-    #[cfg(feature = "experimental-calls")]
-    {
-        calls::routes()
-    }
-    #[cfg(not(feature = "experimental-calls"))]
-    {
-        Router::new()
-    }
+    calls::routes()
 }
 pub fn router(core: Arc<Core>, token: &str) -> Router {
     let app = App {

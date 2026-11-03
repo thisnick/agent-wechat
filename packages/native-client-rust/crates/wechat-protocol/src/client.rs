@@ -926,7 +926,6 @@ impl NativeClient {
     /// operations. An active Ax policy is unsupported here; there is no ordinary
     /// packing fallback. Returned CommonResponse/application results still need
     /// their own checks. Accepted cookie updates follow normal native transport.
-    #[cfg(feature = "experimental-calls")]
     pub fn experimental_call_rpc(
         &self,
         state: &mut AccountState,
@@ -940,7 +939,6 @@ impl NativeClient {
     /// handshake/preparation and before handing business bytes to transport.
     /// A guard cannot retract bytes after transport handoff. Handshake traffic
     /// can already have occurred when this guard stops the business request.
-    #[cfg(feature = "experimental-calls")]
     pub fn experimental_call_rpc_guarded(
         &self,
         state: &mut AccountState,

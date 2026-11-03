@@ -11,8 +11,6 @@ use std::{
 };
 use wechat_core::Core;
 mod calls_cli;
-#[cfg(feature = "native-calls")]
-mod calls_server;
 mod client_actions;
 mod daemon;
 mod events;
@@ -80,12 +78,7 @@ enum Command {
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
-    Serve {
-        /// Enable one isolated direct-voice test using a private, expiring configuration.
-        #[cfg(feature = "native-calls")]
-        #[arg(long)]
-        calls_test_config: Option<PathBuf>,
-    },
+    Serve {},
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
@@ -1127,18 +1120,7 @@ async fn run(cli: Cli) -> Result<()> {
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve {
-                #[cfg(feature = "native-calls")]
-                calls_test_config,
-            } => {
-                serve(
-                    config,
-                    cli.token_stdin,
-                    #[cfg(feature = "native-calls")]
-                    calls_test_config,
-                )
-                .await
-            }
+            Command::Serve {} => serve(config, cli.token_stdin).await,
             Command::Daemon { command } => daemon::run(config, command).await,
             Command::Store { command } => offline(config, cli.account.unwrap_or_default(), command),
             Command::Config {
@@ -1897,11 +1879,7 @@ async fn stdin_token() -> Result<String> {
     }
     Ok(token.into())
 }
-async fn serve(
-    config: wechat_config::ServerConfig,
-    token_stdin: bool,
-    #[cfg(feature = "native-calls")] calls_test_config: Option<PathBuf>,
-) -> Result<()> {
+async fn serve(config: wechat_config::ServerConfig, token_stdin: bool) -> Result<()> {
     let supplied = if token_stdin {
         if config.token_explicit {
             bail!("--token-stdin cannot be combined with a configured tokenFile");
@@ -1916,12 +1894,9 @@ async fn serve(
         None => wechat_api::provision_token(&config.token_file, !config.token_explicit)?,
     };
     let core = Core::new(store.clone(), config.storage_key_file.as_deref())?;
+    core.call_service();
     if let Some(path) = &config.profile_format_key_file {
         core.configure_profile_format_key(&private_input(path, 16)?)?;
-    }
-    #[cfg(feature = "native-calls")]
-    if let Some(path) = calls_test_config.as_deref() {
-        calls_server::configure(&core, &config, path)?;
     }
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let network = if let Some(address) = config.network_listen {
