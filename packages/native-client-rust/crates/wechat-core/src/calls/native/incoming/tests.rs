@@ -718,7 +718,7 @@ async fn incoming_call_can_answer_then_exit_without_media() {
     );
     f.finished().await;
     assert!(!f.snapshot().await.availability.busy);
-    assert!(!f.backend.capabilities("one").direct_audio);
+    assert!(f.backend.capabilities("one").direct_audio);
     let seen = f.host.seen();
     assert_eq!(
         seen.iter()

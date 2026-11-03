@@ -93,8 +93,6 @@ impl std::ops::Deref for Core {
 pub struct CoreShared {
     pub(crate) call_service: std::sync::OnceLock<Arc<crate::calls::service::CallService>>,
 
-    pub(crate) call_core: std::sync::Weak<Core>,
-
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
     pub ownership_generation: String,
@@ -315,14 +313,12 @@ impl Core {
             })
             .map(|a| a.id)
             .collect();
-        let core = Arc::new_cyclic(|weak| Self {
+        let core = Arc::new(Self {
             store,
             snapshot_reader: None,
             live_store: None,
             shared: Arc::new(CoreShared {
                 call_service: std::sync::OnceLock::new(),
-
-                call_core: weak.clone(),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
@@ -2212,11 +2208,11 @@ fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl Core {
-    pub fn call_service(&self) -> Arc<crate::calls::service::CallService> {
+    pub fn call_service(self: &Arc<Self>) -> Arc<crate::calls::service::CallService> {
         self.call_service
             .get_or_init(|| {
                 Arc::new(crate::calls::service::CallService::new(Arc::new(
-                    crate::calls::native::NativeCallBackend::new(self.call_core.clone()),
+                    crate::calls::native::NativeCallBackend::new(Arc::downgrade(self)),
                 )))
             })
             .clone()
