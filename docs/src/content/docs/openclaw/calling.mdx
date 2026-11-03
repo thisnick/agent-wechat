@@ -3,8 +3,10 @@ title: Set up calling
 description: Configure voice and video permissions, realtime speech, OpenAI credentials and agent consultation.
 ---
 
-Configure calling under `channels.agent-wechat.calls`. Voice and video each default
-to disabled. The current daemon and plugin handle direct voice calls.
+Configure experimental calling under `channels.agent-wechat.calls` in an
+isolated test environment. Voice and video each default to disabled. Leave them
+disabled on deployed gateways. A direct voice call may connect and then end
+shortly after audio starts.
 
 ## Connect the daemon
 

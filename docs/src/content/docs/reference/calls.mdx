@@ -3,11 +3,13 @@ title: Calling
 description: Call availability, client ownership and CLI/OpenClaw participation.
 ---
 
-Check calling availability with `wx calls status`, then use the CLI, OpenClaw or
-the [control](../calls-api/) and [media](../calls-media/) APIs.
-The current backend handles direct voice calls; video and conference capabilities
-remain off. Call metadata separates `kind` (`direct`/`conference`) from
-`callType` (`voice`/`video`).
+Use `wx calls status` to check whether the daemon accepts direct voice attempts.
+Direct voice calling is experimental. A call can connect and then disconnect
+shortly after audio starts. Use the CLI, OpenClaw or the [control](../calls-api/)
+and [media](../calls-media/) APIs in an isolated test environment.
+
+Call metadata separates `kind` (`direct`/`conference`) from
+`callType` (`voice`/`video`). Video and conference capabilities remain off.
 
 ## Check availability
 
@@ -16,8 +18,8 @@ remain off. Call metadata separates `kind` (`direct`/`conference`) from
 2. Run `wx calls status` against your selected daemon. Normal startup includes
    the native call backend. Accounts without a current authenticated session
    report empty `capabilities: {}`.
-3. Require the corresponding capability before participating. An API route or a
-   configured plugin does not make a call available.
+3. Look for `directAudio: true` before attempting a direct voice call. This value
+   reports whether the daemon considers the account eligible to attempt the call.
 
 Normal source and release builds include calling and local audio support;
 [Build from source](../build/#included-features) lists the prerequisites.

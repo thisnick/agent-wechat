@@ -5,6 +5,7 @@ description: Call snapshots and complete client/server JSON payload examples.
 
 Use the control WebSocket for call commands and events. Its winning owner can
 attach the separate [raw PCM media socket](../calls-media/).
+See [Calling](../calls/) for the current direct voice support status.
 [Rust crate architecture](../../how-it-works/rust-crates/) explains package responsibilities.
 
 ## Routes and snapshot
@@ -494,6 +495,7 @@ audio does not count as a lost control connection.
 On daemon restart, previous calls are locally ended and `currentCall` is empty.
 Old requests are never replayed. A normal shutdown first attempts call cleanup;
 unconfirmed network outcomes remain recorded separately from local call state. `kind` is `direct` or `conference`;
-`callType` is `voice` or `video`. Only direct voice is currently implemented.
+`callType` is `voice` or `video`. The current backend accepts experimental
+direct voice attempts.
 Conference targets and video calls return `unsupported` with this backend.
 :::
