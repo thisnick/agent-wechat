@@ -879,6 +879,41 @@ fn conflicts_unknown_fields_schema_changes_and_unowned_writes_fail_without_new_r
 }
 
 #[test]
+fn message_projection_validates_the_target_conversation_schema() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let options = options();
+    let first = message("peer", "peer", "7", 100);
+    let source = apply_message_projection(&loc, &keys, &first, &options)
+        .unwrap()
+        .source_id;
+    let db = Connection::open(loc.root().join("db_storage").join(&source.database)).unwrap();
+    db.execute_batch(&format!(
+        r#"CREATE TRIGGER unsupported_target_trigger AFTER INSERT ON "{}" BEGIN SELECT 1; END"#,
+        source.table
+    ))
+    .unwrap();
+    assert!(matches!(
+        find_projected_message(&loc, &keys, "peer", "7", &options),
+        Err(ProfileError::UnsupportedSchema(_))
+    ));
+    assert!(matches!(
+        apply_message_projection(&loc, &keys, &message("peer", "peer", "8", 101), &options),
+        Err(ProfileError::UnsupportedSchema(_))
+    ));
+    let count: i64 = db
+        .query_row(
+            &format!(r#"SELECT count(*) FROM "{}""#, source.table),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    apply_message_projection(&loc, &keys, &message("other", "other", "9", 102), &options).unwrap();
+}
+
+#[test]
 fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remove_complete_members(
 ) {
     let d = fixture();
