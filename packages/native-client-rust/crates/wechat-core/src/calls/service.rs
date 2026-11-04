@@ -13,9 +13,9 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use wechat_calls::{
     audio::AudioFormat,
     frame::{self, MediaFrame, MediaHeader, MediaStream},
@@ -74,8 +74,57 @@ pub struct ControlConnection {
 }
 pub struct MediaConnection {
     pub id: String,
-    pub frames: mpsc::Receiver<Vec<u8>>,
+    pub frames: MediaReceiveQueue,
     pub ready: CallEvent,
+}
+
+const MEDIA_RECEIVE_CAPACITY: usize = 16;
+
+#[derive(Clone)]
+pub struct ReceivedCallAudio {
+    pub bytes: Vec<u8>,
+    pub enqueued_at: Instant,
+    pub producer_gap: Option<Duration>,
+}
+
+/// A single attachment keeps the newest waiting frames during a slow read.
+/// Loss is distinct from receiver closure, which still revokes ownership.
+pub struct MediaReceiveQueue(broadcast::Receiver<ReceivedCallAudio>);
+impl MediaReceiveQueue {
+    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+        loop {
+            match self.recv_frame().await {
+                Ok(frame) => return Some(frame.bytes),
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    pub fn try_recv(&mut self) -> std::result::Result<Vec<u8>, mpsc::error::TryRecvError> {
+        loop {
+            match self.0.try_recv() {
+                Ok(frame) => return Ok(frame.bytes),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    return Err(mpsc::error::TryRecvError::Disconnected);
+                }
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    return Err(mpsc::error::TryRecvError::Empty);
+                }
+            }
+        }
+    }
+
+    pub fn pending_frames(&self) -> usize {
+        self.0.len().min(MEDIA_RECEIVE_CAPACITY)
+    }
+
+    pub async fn recv_frame(
+        &mut self,
+    ) -> std::result::Result<ReceivedCallAudio, broadcast::error::RecvError> {
+        self.0.recv().await
+    }
 }
 #[derive(Clone, Copy)]
 pub enum BackendOutcome {
@@ -354,7 +403,8 @@ struct MediaPeer {
     client: String,
     identity: CallIdentity,
     stream: MediaStream,
-    frames: mpsc::Sender<Vec<u8>>,
+    frames: broadcast::Sender<ReceivedCallAudio>,
+    last_enqueued_at: Option<Instant>,
 }
 #[derive(Default)]
 struct State {
@@ -1793,7 +1843,7 @@ impl CallService {
         let identity = c.identity.clone();
         let generation = c.send_generation;
         let receive_generation = c.receive_generation;
-        let (tx, frames) = mpsc::channel(16);
+        let (tx, frames) = broadcast::channel(MEDIA_RECEIVE_CAPACITY);
         let id = uuid::Uuid::new_v4().to_string();
         s.media.insert(
             id.clone(),
@@ -1803,11 +1853,12 @@ impl CallService {
                 stream: MediaStream::new(1, generation)
                     .map_err(|_| error(CallErrorCode::InvalidRequest))?,
                 frames: tx,
+                last_enqueued_at: None,
             },
         );
         Ok(MediaConnection {
             id,
-            frames,
+            frames: MediaReceiveQueue(frames),
             ready: CallEvent::MediaReady {
                 send_track: CallAudioTrack {
                     id: 1,
@@ -1934,9 +1985,21 @@ impl CallService {
             .sample_clock
             .checked_add(samples.len() as u64)
             .ok_or_else(|| error(CallErrorCode::Capacity))?;
+        let enqueued_at = Instant::now();
         let mut failed = Vec::new();
-        for (id, m) in &s.media {
-            if &m.identity == identity && m.frames.try_send(bytes.clone()).is_err() {
+        for (id, m) in s.media.iter_mut().filter(|(_, m)| &m.identity == identity) {
+            let producer_gap = m
+                .last_enqueued_at
+                .replace(enqueued_at)
+                .map(|previous| enqueued_at.duration_since(previous));
+            if m.frames
+                .send(ReceivedCallAudio {
+                    bytes: bytes.clone(),
+                    enqueued_at,
+                    producer_gap,
+                })
+                .is_err()
+            {
                 failed.push(id.clone());
             }
         }

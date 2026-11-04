@@ -599,6 +599,24 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     timeout(Duration::from_secs(2), f.backend.audio_started.notified())
         .await
         .unwrap();
+    // The backend is still waiting to submit reply audio. A caller frame must
+    // be delivered independently on the same socket before we release it.
+    let peer = f.backend.sink.lock().unwrap().clone().unwrap();
+    peer.audio(&[321; 320]).await.unwrap();
+    timeout(Duration::from_secs(2), async {
+        while let Some(message) = media.next().await {
+            if let ClientMessage::Binary(bytes) = message.unwrap() {
+                assert_eq!(bytes.len(), 640);
+                assert!(bytes
+                    .chunks_exact(2)
+                    .all(|sample| sample == 321i16.to_le_bytes()));
+                return;
+            }
+        }
+        panic!("caller audio socket closed");
+    })
+    .await
+    .expect("caller audio blocked by reply submission");
     let (release_clear, clear_gate) = tokio::sync::oneshot::channel();
     *f.backend.held_clear.lock().unwrap() = Some(clear_gate);
     command(

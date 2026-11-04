@@ -125,6 +125,37 @@ test('revocation closes media and rejects pending control operations without exp
   assert.throws(() => media.sendPcm(new Int16Array(320), 1), error => error.code === 'media_not_ready');
 });
 
+test('PCM overrun keeps the latest chunks without detaching the owner or rewinding sample offsets', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
+    const arrivals = [];
+    const media = await owner.attachMedia('call-1', arrival => arrivals.push(arrival));
+    const socket = server.media[0];
+    for (let i = 0; i < 20; i++) socket.receive(new Uint8Array(640).fill(i));
+    assert.equal(socket.readyState, 1);
+    assert.equal(arrivals.length, 20);
+    assert.equal(Math.max(...arrivals.map(arrival => arrival.queueDepth)), 16);
+    assert.equal(arrivals.reduce((sum, arrival) => sum + arrival.droppedSamples, 0), 4 * 320);
+    const iterator = media.frames()[Symbol.asyncIterator]();
+    for (let i = 4; i < 20; i++) {
+      const { value: frame } = await iterator.next();
+      assert.equal(frame.payload[0], i);
+      assert.equal(frame.sampleOffset, i * 320);
+      assert.equal(frame.receivedAtMs, arrivals[i].receivedAtMs);
+    }
+    socket.receive(new Uint8Array(640).fill(20));
+    socket.receive({ type: 'track.updated', callId: 'call-1', track: { ...server.tracks.receiveTrack, generation: 2 } });
+    socket.receive(new Uint8Array(640).fill(21));
+    const { value: current } = await iterator.next();
+    assert.equal(current.payload[0], 21);
+    assert.equal(current.sampleOffset, 21 * 320);
+    const pending = iterator.next();
+    socket.close();
+    await assert.rejects(pending, error => error.code === 'media_closed');
+  } finally { owner.close(); }
+});
+
 test('slow control consumer and malformed media fail closed with fixed queue limits', async () => {
   const server = new MockCallServer(); const observer = client(server, { maxEvents: 1 });
   await observer.connect();
