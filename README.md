@@ -29,6 +29,11 @@ are linked below.
 
 https://github.com/user-attachments/assets/764bc53f-cea2-4b3e-99a1-34fdcb43ec09
 
+Make and answer direct WeChat voice calls from the terminal with `wx calls` or
+with the OpenClaw plugin after enabling voice calling. Desktop voice calling is
+coming soon. [CLI calling guide](https://thisnick.github.io/agent-wechat/reference/calls/) ·
+[OpenClaw calling setup](https://thisnick.github.io/agent-wechat/openclaw/calling/)
+
 ## Get started
 
 ### Desktop app
