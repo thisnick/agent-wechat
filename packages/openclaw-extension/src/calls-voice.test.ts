@@ -83,7 +83,7 @@ test("installed host bridge and streaming resampler work with an account-free fa
   assert.doesNotMatch(bridgeParams.instructions, /Synthetic default|openclaw_agent_consult|synthetic-openai-secret/);
   session.sendAudio(Buffer.alloc(960)); assert.equal(input.length, 1);
   providerRequest.onAudio(Buffer.alloc(960), { itemId: "item" }); providerRequest.onClearAudio("barge-in"); assert.equal(heard, 1); assert.equal(clears, 1);
-  assert.deepEqual(providerRequest.tools, []); assert.equal(providerRequest.runAgentConsult, undefined); assert.equal(bridgeParams.onTranscript, undefined);
+  assert.deepEqual(providerRequest.tools, []); assert.equal(providerRequest.runAgentConsult, undefined); assert.equal(typeof bridgeParams.onTranscript, "function");
   providerRequest.onTranscript("user", "Synthetic discarded transcript", true);
   await session.close(); providerRequest.onAudio(Buffer.alloc(960), { itemId: "late" }); assert.equal(heard, 1); assert.equal(closed, 1);
   const generated = Buffer.alloc(3200); for (let i = 0; i < 1600; i++) generated.writeInt16LE(Math.round(4000 * Math.sin(i * 2 * Math.PI * 440 / 16000)), i * 2);
@@ -252,10 +252,12 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
       return args.sessionKey === "agent:agent:conversation" ? { sessionId: parentId } : undefined;
     },
   } } } as unknown as PluginRuntime;
-  const consulted = config(true); consulted.consultation = { timeoutMs: 15000 };
+  const consulted = config(true); consulted.consultation = { timeoutMs: 15000, summary: true, recentMessages: 10 };
   consulted.realtime.consultPolicy = "substantive";
   consulted.realtime.consultThinkingLevel = "minimal";
   consulted.realtime.consultFastMode = true;
+  // Each call in its own session: this test checks isolation and parent seeding.
+  consulted.sessionScope = "per-call";
   const hostCfg = { session: { mainKey: "conversation" } };
   const dependencies = { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } };
   const prepared = await prepareOpenClawCallVoice(consulted, hostCfg, runtime, dependencies);
@@ -280,7 +282,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   assert.deepEqual(first.replyOptions.toolsAllow, READ_ONLY_TOOLS);
   assert.equal(first.ctx.ParentSessionKey, undefined);
   assert.match(first.ctx.BodyForAgent, /non-owner WeChat caller/);
-  assert.match(first.ctx.SessionKey, /^agent:agent:wechat-call:/); assert.equal(bridgeArgs.onTranscript, undefined);
+  assert.match(first.ctx.SessionKey, /^agent:agent:wechat-call:[0-9a-f-]{36}$/); assert.equal(typeof bridgeArgs.onTranscript, "function");
   await bridgeArgs.onToolCall({ ...event, callId: "tool2", name: "exec" }); assert.equal(consultations.length, 1);
   assert.deepEqual(await bridgeArgs.runAgentConsult({ prompt: "Check a synthetic fact" }), { text: "Synthetic result" });
   assert.equal(consultations[1].ctx.SessionKey, first.ctx.SessionKey);
@@ -302,7 +304,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
     assert.deepEqual(request.replyOptions.toolsAllow, READ_ONLY_TOOLS);
     await next.close();
   }
-  assert.deepEqual(lookups, ["agent:agent:conversation", "agent:agent:conversation", "agent:agent:conversation", "agent:agent:missing"]);
+  assert.deepEqual(lookups.filter(key => !key.includes(":wechat-call:")), ["agent:agent:conversation", "agent:agent:conversation", "agent:agent:conversation", "agent:agent:missing"]);
   assert.equal(new Set(consultations.map(request => request.ctx.SessionKey)).size, parentCases.length + 1);
   const afterReset = await runInBackgroundContext(() => prepared.open(callbacks, { ...voiceContext,
     parentSession: { key: "agent:agent:main", expectedSessionId: "parent-id" } }));
@@ -537,4 +539,70 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
   assertReadOnly(otherPeer);
   assert.match(spoken.at(-1)!, /synthetic-read-only-result/);
   await normalNonOwner.close();
+});
+
+test("per-contact calls share one session per contact, seed it once, and summarize into it without tools", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const host = await import(voicePath);
+  let bridgeArgs: any; let spoken = 0;
+  const sdk = { ...host,
+    createRealtimeVoiceBridgeSession(args: any) { bridgeArgs = args; return {
+      bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(), sendAudio() {}, setMediaTimestamp() {},
+      close() {}, submitToolResult() {}, sendUserMessage() { spoken++; },
+    }; },
+    resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai", createBridge() {} }, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true } }),
+  };
+  const sessions = new Set<string>(["agent:agent:conversation"]);
+  const { dispatches, reply } = fakeReply(async ({ ctx, replyOptions }) => { replyOptions.onAgentRunStart(); sessions.add(ctx.SessionKey); return "Synthetic answer"; });
+  const runtime = { channel: { reply }, agent: { session: { resolveStorePath: () => "/synthetic/store",
+    getSessionEntry: ({ sessionKey }: { sessionKey: string }) => sessions.has(sessionKey) ? { sessionId: `${sessionKey}-id` } : undefined } } } as unknown as PluginRuntime;
+  const hostCfg = { session: { mainKey: "conversation" } };
+  const dependencies = { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } };
+  const prepared = await prepareOpenClawCallVoice(config(true), hostCfg, runtime, dependencies);
+  const heard: Array<[string, string, boolean, boolean]> = [];
+  const context = { senderId: "Synthetic-Peer", signal: new AbortController().signal, parentSession: { key: "agent:agent:main" },
+    recentContext: "Recent context with this caller: synthetic earlier call.", consultContext: "Latest messages of your WeChat chat: synthetic chat." };
+  // Each consultation finishes (its answer is spoken) before the next starts.
+  const consult = async () => { const said = spoken; await bridgeArgs.onToolCall({ callId: `tool-${dispatches.length}`, name: "openclaw_agent_consult", args: { question: "Read synthetic data" } }); for (let i = 0; i < 100 && spoken === said; i++) await delay(5); };
+
+  const first = await prepared.open({ ...callbacks, transcript: (role, text, final, snapshot) => { heard.push([role, text, final, snapshot]); } }, context);
+  assert.match(bridgeArgs.instructions, /synthetic earlier call/);
+  assert.deepEqual(first.binding!(), { sessionKey: "agent:agent:wechat-call:synthetic-peer:read-only", owner: false });
+  bridgeArgs.onTranscript("user", "Hello", false); bridgeArgs.onTranscript("user", "Hello there", false, { textMode: "snapshot" });
+  bridgeArgs.onTranscript("user", "Hello there", true); bridgeArgs.onTranscript("system", "ignored", true);
+  assert.deepEqual(heard, [["user", "Hello", false, false], ["user", "Hello there", false, true], ["user", "Hello there", true, false]]);
+  await consult();
+  assert.equal(dispatches[0].ctx.SessionKey, "agent:agent:wechat-call:synthetic-peer:read-only");
+  assert.equal(dispatches[0].ctx.ParentSessionKey, "agent:agent:conversation");
+  // The chat context goes with the call's first consultation only.
+  assert.match(dispatches[0].ctx.BodyForAgent, /read-only consultation[\s\S]*synthetic chat\.\n\nCaller question:/);
+  await consult();
+  assert.doesNotMatch(dispatches[1].ctx.BodyForAgent, /synthetic chat/);
+  await first.close();
+
+  // The next call with this contact continues the same session; it is not seeded again.
+  const second = await prepared.open(callbacks, context);
+  await consult();
+  assert.equal(dispatches[2].ctx.SessionKey, dispatches[0].ctx.SessionKey);
+  assert.equal(dispatches[2].ctx.ParentSessionKey, undefined);
+  assert.match(dispatches[2].ctx.BodyForAgent, /synthetic chat/, "each call gets the chat context again");
+  await second.close();
+
+  const summary = await prepared.summarize({ binding: first.binding!(), senderId: "Synthetic-Peer", direction: "incoming", durationText: "1 min 5 s",
+    transcript: "[00:01] Caller: Hello there", signal: new AbortController().signal });
+  assert.equal(summary, "Synthetic answer");
+  const request = dispatches.at(-1)!;
+  assert.equal(request.ctx.SessionKey, "agent:agent:wechat-call:synthetic-peer:read-only");
+  assert.deepEqual(request.replyOptions.toolsAllow, []);
+  assert.match(request.ctx.BodyForAgent, /This WeChat voice call has ended[\s\S]*not the account owner[\s\S]*Call transcript:\nThey called you; the call lasted 1 min 5 s\.\n\[00:01\] Caller: Hello there$/);
+
+  // Summaries can be turned off; per-call scope gives each call its own session.
+  const quiet = config(true); quiet.consultation.summary = false; quiet.sessionScope = "per-call";
+  const isolated = await prepareOpenClawCallVoice(quiet, hostCfg, runtime, dependencies);
+  const before = dispatches.length;
+  assert.equal(await isolated.summarize({ binding: first.binding!(), senderId: "Synthetic-Peer", direction: "incoming", durationText: "1 s", transcript: "x", signal: new AbortController().signal }), undefined);
+  assert.equal(dispatches.length, before);
+  const [a, b] = [await isolated.open(callbacks, context), await isolated.open(callbacks, context)];
+  assert.match(a.binding!().sessionKey, /^agent:agent:wechat-call:[0-9a-f-]{36}$/); assert.notEqual(a.binding!().sessionKey, b.binding!().sessionKey);
+  await a.close(); await b.close();
 });
