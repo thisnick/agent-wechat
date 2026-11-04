@@ -279,13 +279,13 @@
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200,
-                          "description": "Use openai. Other providers and continuous-output models fail preflight without fallback."
+                          "description": "Use openai. Other providers fail preflight without fallback."
                         },
                         "model": {
                           "type": "string",
                           "minLength": 1,
                           "maxLength": 200,
-                          "description": "Realtime speech model; omitted uses the selected provider's default."
+                          "description": "Speech model, such as gpt-realtime-2.1 or the continuous gpt-live-1-codex; omitted uses the selected provider's default."
                         },
                         "voice": {
                           "type": "string",
@@ -317,7 +317,7 @@
                             "always"
                           ],
                           "default": "auto",
-                          "description": "Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult."
+                          "description": "Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult. GPT-Live models do not support always."
                         },
                         "consultThinkingLevel": {
                           "type": "string",

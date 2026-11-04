@@ -3,12 +3,17 @@ import type { CallAudioTrace } from "./calls-audio-trace.ts";
 import type { PreparedCallVoice, StreamingPcmResampler } from "./calls-voice.ts";
 
 const MAX_BACKLOG_MS = 8_000;
+// A continuous stream plays as it arrives; a longer backlog only adds delay.
+const MAX_CONTINUOUS_BACKLOG_MS = 3_000;
 const LOOK_AHEAD_FRAMES = 2;
 const MAX_QUEUED_SPANS = 256;
 type AudioSpan = { itemId: string; bytes: number };
 type PlayoutSpan = AudioSpan & { startsAt: number; endsAt: number };
 
-/** Clocked call output with silence in the slots the provider leaves empty. */
+/** Clocked call output with silence in the slots the provider leaves empty.
+ * Response mode tracks provider reply items so a clear can reject their late
+ * chunks. Continuous mode plays one unlabeled stream, keeps its newest audio
+ * when the backlog grows, and accepts new audio after each clear. */
 export class CallPcmOutput {
   private readonly queue: Buffer;
   private readOffset = 0;
@@ -36,8 +41,10 @@ export class CallPcmOutput {
   private readonly clearRemote: () => Promise<unknown>;
   private readonly failed: () => void;
   private readonly trace?: CallAudioTrace;
+  private readonly continuous: boolean;
   constructor(media: Pick<NativeCallMediaClient, "sendPcm" | "tracks">, format: CallAudioFormat,
-    voice: PreparedCallVoice, clearRemote: () => Promise<unknown>, failed: () => void, trace?: CallAudioTrace) {
+    voice: PreparedCallVoice, clearRemote: () => Promise<unknown>, failed: () => void, trace?: CallAudioTrace,
+    options?: { continuous?: boolean }) {
     if (format.channels !== 1 || format.frameMs !== 20 || ![8000, 12000, 16000, 24000, 48000].includes(format.sampleRate)) throw Error("Calling PCM format unsupported");
     this.media = media;
     this.format = format;
@@ -45,6 +52,7 @@ export class CallPcmOutput {
     this.clearRemote = clearRemote;
     this.failed = failed;
     this.trace = trace;
+    this.continuous = options?.continuous === true;
     this.bytesPerMs = format.sampleRate * 2 / 1000;
     this.frameBytes = this.bytesPerMs * format.frameMs;
     this.queue = Buffer.alloc(this.bytesPerMs * MAX_BACKLOG_MS);
@@ -70,7 +78,7 @@ export class CallPcmOutput {
   enqueue(audio: Buffer, metadata?: { itemId: string }): void {
     if (this.closed) return;
     const epoch = this.clearEpoch;
-    const item = metadata?.itemId;
+    const item = this.continuous ? `stream-${epoch}` : metadata?.itemId;
     const started = this.trace ? performance.now() : 0;
     this.trace?.add("providerOutputChunks");
     this.trace?.add("providerOutputSamples", audio.length / 2);
@@ -95,6 +103,15 @@ export class CallPcmOutput {
       return;
     }
     if (converted.length % 2 !== 0) return this.fail();
+    if (this.continuous) {
+      const limit = this.bytesPerMs * MAX_CONTINUOUS_BACKLOG_MS;
+      if (converted.length > limit) {
+        this.trace?.add("outputOverflowSamples", (converted.length - limit) / 2);
+        converted = converted.subarray(converted.length - limit);
+      }
+      const excess = this.pendingBytes + converted.length - limit;
+      if (excess > 0) this.dropOldest(excess);
+    }
     const lastSpan = this.queuedSpans.at(-1);
     const spanAvailable = lastSpan?.itemId === item || this.queuedSpans.length < MAX_QUEUED_SPANS;
     const accepted = spanAvailable ? Math.min(converted.length, this.queue.length - this.pendingBytes) : 0;
@@ -127,6 +144,9 @@ export class CallPcmOutput {
     this.discard();
     for (const item of this.items) this.revokedItems.add(item);
     this.truncatedItems.clear();
+    // Continuous stream labels change with each clear, so the epoch check
+    // already rejects audio from before it.
+    if (this.continuous) { this.items.clear(); this.revokedItems.clear(); }
     try {
       if (!this.resetResampler(epoch)) return;
       await this.clearRemote();
@@ -159,6 +179,18 @@ export class CallPcmOutput {
       if (!span.bytes) this.queuedSpans.shift();
       bytes -= used;
       startsAt = endsAt;
+    }
+  }
+  private dropOldest(bytes: number): void {
+    this.readOffset = (this.readOffset + bytes) % this.queue.length;
+    this.pendingBytes -= bytes;
+    this.trace?.add("outputOverflowSamples", bytes / 2);
+    while (bytes > 0 && this.queuedSpans.length) {
+      const span = this.queuedSpans[0];
+      const used = Math.min(bytes, span.bytes);
+      span.bytes -= used;
+      bytes -= used;
+      if (!span.bytes) this.queuedSpans.shift();
     }
   }
   private flush(): void {

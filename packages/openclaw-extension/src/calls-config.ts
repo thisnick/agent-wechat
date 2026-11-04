@@ -97,14 +97,14 @@ export const callsConfigSchema = {
       outboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, outboundAllowTo: allowlistSchema, outboundToolAllowFrom: allowlistSchema,
       agentId: nameSchema,
       realtime: { type: "object", additionalProperties: false, properties: {
-        provider: { ...nameSchema, description: "Use openai. Other providers and continuous-output models fail preflight without fallback." },
-        model: { ...nameSchema, description: "Realtime speech model; omitted uses the selected provider's default." },
+        provider: { ...nameSchema, description: "Use openai. Other providers fail preflight without fallback." },
+        model: { ...nameSchema, description: "Speech model, such as gpt-realtime-2.1 or the continuous gpt-live-1-codex; omitted uses the selected provider's default." },
         voice: { ...nameSchema, description: "Spoken voice; omitted uses the selected provider's default." },
         instructions: { type: "string", maxLength: 4000, description: "Additional conversation guidance; does not grant tool or account-owner authority." },
         agentContext: { type: "object", additionalProperties: false, properties: {
           enabled: { type: "boolean", default: false, description: "Send bounded excerpts of the selected agent's IDENTITY.md and SOUL.md to the Realtime provider. Configured agent identity is used independently." },
         } },
-        consultPolicy: { type: "string", enum: consultPolicies, default: "auto", description: "Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult." },
+        consultPolicy: { type: "string", enum: consultPolicies, default: "auto", description: "Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult. GPT-Live models do not support always." },
         consultThinkingLevel: { type: "string", enum: consultThinkingLevels, description: "Thinking level for the regular OpenClaw consultation run." },
         consultFastMode: { type: "boolean", description: "Set fast mode for the regular OpenClaw consultation run when its model supports it." },
         providers: { type: "object", additionalProperties: false, properties: {

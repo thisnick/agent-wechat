@@ -120,9 +120,14 @@ delegated questions and permitted tools. Incoming/outgoing policies default to `
 allowlists accept exact IDs, without `*`. Tool callers must also be authorized
 owners in `outboundToolAllowFrom`. Messaging permissions do not authorize calls.
 
-Choose `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, or `gpt-realtime-2` for
-`realtime.model` from the pinned OpenClaw catalog. Omit the setting to use the
-provider's default. These choices use the OpenAI Realtime API key.
+Set `realtime.model` to one of these OpenAI models. Omit it to use the
+provider's default, `gpt-realtime-2.1`.
+
+| Model | Conversation | Agent consultation | Sign-in |
+| --- | --- | --- | --- |
+| `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, `gpt-realtime-2` | Takes turns; stops when the caller interrupts. | Through a tool. | OpenAI API key. |
+| `gpt-live-1-codex` (voice `cove`) | Listens while it talks and handles interruptions itself. | Delegates to the agent. `consultPolicy: "always"` is not supported. | The agent's ChatGPT sign-in in OpenClaw, then the API key. |
+| `gpt-live-1` (voice `marin`) | Same as `gpt-live-1-codex`. | Same as `gpt-live-1-codex`. | OpenAI API key. |
 
 The speech model receives the selected agent's configured identity. When
 workspace context is enabled, the realtime provider also receives bounded
@@ -148,11 +153,12 @@ Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
 cannot handle video or convert it to voice.
 
-The bridge sends silence while it waits for the caller to speak. If the caller
-interrupts a reply, the bridge clears queued audio and reports the estimated
-playback position to the speech model. The voice agent can acknowledge a
-consultation and continue listening while the OpenClaw agent works.
+The bridge sends silence while it waits for the caller to speak. With a
+realtime model, if the caller interrupts a reply, the bridge clears queued audio
+and reports the estimated playback position to the speech model. GPT-Live models
+handle interruptions themselves. Either way, the voice agent can keep talking
+with the caller while the OpenClaw agent works on a consultation.
 This adapter does not record calls or store transcripts. Consultation can persist
-in OpenClaw when opted in. Continuous-output GPT-Live and other provider adapters
-fail preflight without automatic fallback.
+in OpenClaw when opted in. Other provider adapters fail preflight without
+automatic fallback.
 :::

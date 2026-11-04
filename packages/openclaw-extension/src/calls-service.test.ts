@@ -64,7 +64,7 @@ function voiceFactory() {
   const state = { opens: 0, closes: 0, incoming: [] as Buffer[], timestamps: [] as number[],
     contexts: [] as Array<Parameters<PreparedCallVoice["open"]>[1]>,
     callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined };
-  const prepared: PreparedCallVoice = { sampleRate: 16000, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
+  const prepared: PreparedCallVoice = { sampleRate: 16000, continuous: false, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
     async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; } }; } };
   return { state, prepared };
 }
@@ -300,6 +300,35 @@ test("response PCM stays ordered and resumes with small chunks after a timer sta
   await until(() => speech().length === burst.length / 2);
   assert.deepEqual(speech(), Array.from({ length: burst.length / 2 }, (_, i) => i + 1));
   assert.equal(failures, 0);
+});
+test("continuous PCM plays unlabeled audio and accepts new audio after each provider clear", async t => {
+  const media = new Media(); const voice = voiceFactory(); let failures = 0; let clears = 0;
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => { clears++; }, () => { failures++; }, undefined, { continuous: true });
+  t.after(() => output.close());
+  const speech = () => media.sent.flatMap(frame => Array.from(frame.samples).filter(Boolean));
+  output.start();
+  output.enqueue(Buffer.alloc(640, 1));
+  await until(() => speech().length === 320);
+  await output.clear();
+  output.enqueue(Buffer.alloc(640, 2));
+  await until(() => speech().length === 640);
+  assert.ok(speech().slice(320).every(value => value === 0x0202));
+  assert.equal(clears, 1); assert.equal(failures, 0);
+});
+test("continuous PCM keeps only the newest three seconds when its backlog grows", t => {
+  const media = new Media(); const voice = voiceFactory();
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => assert.fail("PCM send failed"), undefined, { continuous: true });
+  t.after(() => output.close());
+  output.start();
+  output.enqueue(Buffer.alloc(32 * 1000, 1));
+  for (let i = 0; i < 3; i++) output.enqueue(Buffer.alloc(32 * 1000, 2));
+  for (let i = 0; i < 220; i++) { now += 20; t.mock.timers.tick(20); }
+  const samples = media.sent.flatMap(frame => Array.from(frame.samples)).filter(Boolean);
+  assert.equal(samples.filter(value => value === 0x0101).length, 0);
+  assert.equal(samples.filter(value => value === 0x0202).length, 3000 * 16);
 });
 test("playout starts with silence and reports only the time played from each reply item", t => {
   const media = new Media();

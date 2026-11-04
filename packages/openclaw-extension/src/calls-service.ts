@@ -269,7 +269,8 @@ export class NativeCallService {
       if (!this.current(active)) { media.close(); return; }
       const tracks = media.tracks();
       if (JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTrack.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
-      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); }, trace);
+      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); }, trace,
+        { continuous: this.prepared!.continuous });
       active.output.start();
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
       void (async () => {

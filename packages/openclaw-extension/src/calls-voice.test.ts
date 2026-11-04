@@ -67,6 +67,8 @@ test("installed host bridge and streaming resampler work with an account-free fa
     voiceSdk: { ...sdk, createRealtimeVoiceBridgeSession: (params: unknown) => { bridgeParams = params; return sdk.createRealtimeVoiceBridgeSession(params); }, resolveConfiguredRealtimeVoiceProvider: (params: any) => { selection = params; resolved++; return { provider: fake, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true } }; } }, audioSdk: audio,
   });
   assert.deepEqual(selection.providerConfigOverrides, { model: "synthetic-realtime", voice: "synthetic-voice" });
+  assert.equal(selection.surface, "gateway-relay");
+  assert.equal(prepared.continuous, false);
   assert.equal(selection.providerConfigs.openai.apiKey, "synthetic-openai-secret");
   assert.equal(JSON.stringify(customized).includes("synthetic-openai-secret"), false);
   assert.equal(resolved, 1); let heard = 0; let clears = 0;
@@ -89,6 +91,58 @@ test("installed host bridge and streaming resampler work with an account-free fa
   const stream = prepared.resampler(16000, 24000); const pieces: Buffer[] = [];
   for (let i = 0; i < generated.length; i += 83) pieces.push(stream.process(generated.subarray(i, i + 83)));
   pieces.push(stream.flush()); assert.deepEqual(Buffer.concat(pieces), expected); assert.equal(expected.length, 4800);
+});
+
+test("a continuous model streams without the consult tool and delegates through the agent's normal route", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";
+  const [sdk, audio] = await Promise.all([import(voicePath), import(audioPath)]);
+  const live = { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: false, handlesInputAudioBargeIn: true,
+    supportsToolCalls: false, handlesAgentConsult: true };
+  let request: any; let selection: any; let outputAudioMode = "continuous";
+  const fake = { id: "openai", createBridge(params: any) { request = params; let connected = false; return {
+    connect: async () => { connected = true; params.onReady(); }, isConnected: () => connected, outputAudioMode, pacesInputAudio: true,
+    sendAudio() {}, setMediaTimestamp() {}, close: () => { connected = false; },
+  }; } };
+  const { dispatches, reply } = fakeReply(async ({ replyOptions }) => { replyOptions.onAgentRunStart(); return "Synthetic delegated result"; });
+  const runtime = { channel: { reply }, agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
+  const dependencies = { voiceSdk: { ...sdk, resolveConfiguredRealtimeVoiceProvider: (params: any) => {
+    selection = params; return { provider: fake, providerConfig: {}, capabilities: live };
+  } }, audioSdk: audio };
+  const signal = new AbortController().signal;
+  const failed = () => assert.fail("Unexpected provider failure");
+
+  const prepared = await prepareOpenClawCallVoice(config(true), {}, runtime, dependencies);
+  assert.equal(prepared.continuous, true);
+  assert.equal(selection.surface, "gateway-relay");
+  const heard: Array<string | undefined> = []; let clears = 0;
+  const session = await prepared.open({ audio: (_value, metadata) => { heard.push(metadata?.itemId); }, clear: () => { clears++; }, failed }, { senderId: "synthetic-peer", signal });
+  assert.deepEqual(request.tools, []);
+  assert.equal(request.interruptResponseOnInputAudio, false);
+  assert.match(request.instructions, /Delegate relevant lookups/);
+  assert.doesNotMatch(request.instructions, /openclaw_agent_consult/);
+  // Delegation sends the request with recent transcript, beyond a tool question's limit.
+  const prompt = `<realtime_delegation><input>Read synthetic data</input><transcript_delta>${"caller: synthetic words. ".repeat(250)}</transcript_delta></realtime_delegation>`;
+  assert.ok(prompt.length > 4000);
+  assert.deepEqual(await request.runAgentConsult({ prompt, signal }), { text: "Synthetic delegated result" });
+  assert.equal(dispatches.at(-1)!.ctx.Body, prompt);
+  assert.deepEqual(dispatches.at(-1)!.replyOptions.toolsAllow, READ_ONLY_TOOLS);
+  request.onAudio(Buffer.alloc(960)); request.onClearAudio("barge-in"); request.onAudio(Buffer.alloc(960));
+  assert.deepEqual(heard, [undefined, undefined]); assert.equal(clears, 1);
+  await session.close();
+
+  // GPT-Live needs a delegation handler even when consultation is off; it refuses.
+  const conversationOnly = await prepareOpenClawCallVoice(config(), {}, runtime, dependencies);
+  const quiet = await conversationOnly.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal });
+  assert.doesNotMatch(request.instructions, /Delegate/);
+  await assert.rejects(request.runAgentConsult({ prompt: "Read synthetic data", signal }));
+  assert.equal(dispatches.length, 1);
+  await quiet.close();
+
+  const always = config(true); always.realtime.consultPolicy = "always";
+  await assert.rejects(prepareOpenClawCallVoice(always, {}, runtime, dependencies), /capabilities unavailable/);
+  outputAudioMode = "response";
+  await assert.rejects(prepared.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal }), /provider unavailable/);
 });
 
 test("opted-in default-agent voice profile uses only bounded identity and persona files", async t => {
@@ -281,7 +335,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   assert.deepEqual(fallback.replyOptions.toolsAllow, READ_ONLY_TOOLS);
   await alwaysSession.close();
 });
-test("unverified providers and continuous output fail without connecting or falling back", async () => {
+test("unverified providers and a bridge contradicting its capabilities fail without connecting or falling back", async () => {
   let connects = 0; let closes = 0;
   const caps = { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true };
   const sdk = { createRealtimeVoiceBridgeSession: () => ({ bridge: { outputAudioMode: "continuous" }, connect: async () => { connects++; }, close() { closes++; }, sendAudio() {}, setMediaTimestamp() {} }),
