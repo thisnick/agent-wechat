@@ -42,6 +42,7 @@ class Media implements CallMediaPort {
 }
 class Control implements CallControlPort {
   eventsQueue = new Queue<CallEvent>(); media = new Media(); directAudio = true; closed = false; connects = 0; readied = 0; answers = 0; dials = 0; ends = 0; attaches = 0; clears = 0;
+  offerOnReady = true;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
   async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
@@ -49,7 +50,7 @@ class Control implements CallControlPort {
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);
     await this.readyHook?.();
-    if (scope?.kind === "offer") this.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: scope.callId, revision: scope.expectedRevision + 1 } });
+    if (scope?.kind === "offer" && this.offerOnReady) this.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: scope.callId, revision: scope.expectedRevision + 1 } });
     return accepted();
   }
   async answer(_request: string, callId: string) { this.answers++; await this.answerHook?.(); this.eventsQueue.push({ type: "call.state", call: view(callId) }); return accepted(callId, "private-lease"); }
@@ -141,6 +142,31 @@ test("uncertain exact-offer readiness never retries or guesses that ACK failed",
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
   await until(() => voice.state.closes === 1); assert.equal(client.readied, 1); assert.equal(client.answers, 0); assert.equal(service.status().state, "needs_review");
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } }); await delay(10); assert.equal(client.readied, 1); await service.stop();
+});
+test("a withdrawn pre-answer offer releases the listener for the next call", async t => {
+  const { service, client, voice } = await fixture();
+  t.after(() => service.stop());
+  client.offerOnReady = false;
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
+  await until(() => client.readied === 1);
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: true, ownedByThisClient: false } });
+  client.eventsQueue.push({ type: "call.pending", offer: null });
+  await delay(10);
+  assert.equal(service.status().state, "preparing");
+  assert.equal(voice.state.closes, 0);
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+  client.eventsQueue.push({ type: "call.pending", offer: null });
+  await until(() => voice.state.closes === 1);
+  assert.equal(service.status().state, "available");
+  assert.equal(client.closed, false);
+  assert.equal(client.answers, 0);
+
+  client.offerOnReady = true;
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, callId: "next-offer", phase: "waiting_for_ready" } });
+  await until(() => client.attaches === 1);
+  assert.equal(client.readied, 2);
+  assert.equal(client.answers, 1);
+  assert.equal(service.status().callId, "next-offer");
 });
 test("competing plugin clients accept one winner, close the losing provider and never retry", async () => {
   const first = await fixture(); const second = await fixture(); let won = false;

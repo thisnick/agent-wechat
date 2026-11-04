@@ -95,8 +95,16 @@ export class NativeCallService {
         if (event.type === "hello") {
           if (event.currentOffer) this.offer(event.currentOffer);
           else if (event.currentPendingOffer) this.pending(event.currentPendingOffer);
-        } else if (event.type === "call.pending" && event.offer) this.pending(event.offer);
-        else if (event.type === "call.offered") this.offer(event.offer);
+        } else if (event.type === "call.pending") {
+          const active = this.active;
+          if (event.offer) this.pending(event.offer);
+          // The daemon sends availability and any promoted offer before the
+          // pending snapshot. An idle daemon with neither offer withdrew it.
+          else if (!this.busy && active?.callId && !active.offered && !active.submitted) {
+            this.state = "available";
+            await this.retire(active);
+          }
+        } else if (event.type === "call.offered") this.offer(event.offer);
         else if (event.type === "call.state") {
           if (event.call.state === "ended" && this.unconfirmedCallId === event.call.callId && !this.active) {
             this.unconfirmedCallId = undefined;

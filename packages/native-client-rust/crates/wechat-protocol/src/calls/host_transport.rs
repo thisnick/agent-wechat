@@ -2,8 +2,10 @@
 //! A verified host transport may return either owned ordinary key mode. This
 //! does not change request selection or authorize Ax/app/media key substitution.
 
+use super::host_policy::CallHostRoute;
 use crate::{business, crypto, AccountState, MAX_MESSAGE_BYTES};
 use openssl::symm::Mode;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +96,29 @@ impl CallHostRpcError {
         }
         result
     }
+}
+
+pub(crate) fn connect_call_session<T>(
+    route: CallHostRoute,
+    timeout: Duration,
+    mut connect: impl FnMut(Duration) -> anyhow::Result<T>,
+) -> Result<T, CallHostRpcError> {
+    let started = Instant::now();
+    let diagnose = |error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error);
+    let first = connect(timeout).map_err(diagnose);
+    // A fresh, fully verified handshake can recover call authentication before
+    // any business request has been prepared or handed to the transport.
+    if route == CallHostRoute::AppAuth
+        && first
+            .as_ref()
+            .is_err_and(|error| error.code == "openssl_crypto")
+    {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if !remaining.is_zero() {
+            return connect(remaining).map_err(diagnose);
+        }
+    }
+    first
 }
 
 // Only exact messages emitted by the maintained session/framing/crypto checks
@@ -374,5 +399,48 @@ mod tests {
         let diagnostic = CallHostRpcError::from_cause(CallHostStage::Exchange, &rejected);
         assert_eq!(diagnostic.code, "unsupported_route");
         assert!(!diagnostic.may_have_submitted());
+    }
+
+    #[test]
+    fn call_auth_retries_a_crypto_handshake_once_with_the_remaining_budget() {
+        let timeout = Duration::from_secs(30);
+        let mut attempts = Vec::new();
+        let session = connect_call_session(CallHostRoute::AppAuth, timeout, |remaining| {
+            attempts.push(remaining);
+            if attempts.len() == 1 {
+                return Err(openssl::error::ErrorStack::get().into());
+            }
+            Ok("fresh session")
+        });
+        assert_eq!(session.unwrap(), "fresh session");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0], timeout);
+        assert!(!attempts[1].is_zero() && attempts[1] <= timeout);
+    }
+
+    #[test]
+    fn call_handshake_retry_is_limited_to_call_auth_crypto_failures() {
+        let timeout = Duration::from_secs(30);
+        for (route, budget, crypto_failure, expected_attempts) in [
+            (CallHostRoute::AppAuth, timeout, true, 2),
+            (CallHostRoute::LiveSync, timeout, true, 1),
+            (CallHostRoute::AppAuth, timeout, false, 1),
+            (CallHostRoute::AppAuth, Duration::ZERO, true, 1),
+        ] {
+            let mut attempts = 0;
+            let error = connect_call_session::<()>(route, budget, |_| {
+                attempts += 1;
+                if crypto_failure {
+                    return Err(openssl::error::ErrorStack::get().into());
+                }
+                Err(anyhow::anyhow!(
+                    "Pinned server signature verification failed"
+                ))
+            })
+            .unwrap_err();
+            assert_eq!(attempts, expected_attempts);
+            assert_eq!(error.stage, CallHostStage::Handshake);
+            assert!(!error.may_have_submitted());
+        }
     }
 }
