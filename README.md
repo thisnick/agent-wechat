@@ -25,9 +25,9 @@ are linked below.
 
 ![Agent WeChat desktop showing an image reply from Nick Bot; other conversations are blurred](docs/public/demo/desktop.jpg)
 
-### Your WeChat, from the terminal
+### A WeChat voice call
 
-![A real wx command downloading the conversation's image to walk.jpg](docs/public/demo/terminal.jpg)
+https://github.com/user-attachments/assets/764bc53f-cea2-4b3e-99a1-34fdcb43ec09
 
 ## Get started
 
