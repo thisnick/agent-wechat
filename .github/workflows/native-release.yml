@@ -88,8 +88,6 @@ jobs:
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=native-linux-${{ runner.arch }}
           cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
-      - name: Install the extracted CLI audio runtime dependency
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpulse0
       - run: bash scripts/native-build-release.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
@@ -241,8 +239,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
-      - name: Install the verified CLI audio runtime dependency
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpulse0
       - name: Verify native assets and embed npm checksum manifest
         run: node scripts/native-prepare-package.mjs
       - name: Publish to npm
