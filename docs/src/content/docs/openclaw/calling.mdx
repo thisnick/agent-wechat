@@ -114,7 +114,7 @@ All paths below are relative to `calls.voice`.
 | `consultation.inboundSessionKey` | Optional existing session of the selected agent to use as context for inbound calls. |
 | `consultation.model` | Optional `provider/model` for consultations; otherwise the selected agent's model. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
-| `maxDurationSeconds` | 300 by default; 30–3,600 seconds. |
+| `maxDurationSeconds` | 300 by default. Accepts 30–3,600 seconds. The native daemon caps calls at 20 minutes. |
 
 The speech model handles conversation; the consultation model handles delegated
 questions and permitted tools. Incoming/outgoing policies default to `disabled`;
@@ -141,6 +141,9 @@ same WeChat peer and channel account. Other allowed participants get read-only
 consultation in an isolated session. Add inbound callers to `inboundAllowFrom`
 separately.
 
+With the consultation model unset, verified-owner calls use OpenClaw's normal
+session model routing, including configured CLI runtimes and model fallbacks.
+
 :::note[Good to know]
 Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
@@ -148,8 +151,8 @@ cannot handle video or convert it to voice.
 
 The bridge sends silence while it waits for the caller to speak. If the caller
 interrupts a reply, the bridge clears queued audio and reports the estimated
-playback position to the speech model. The voice agent can acknowledge a consultation
-and continue listening while the OpenClaw agent works.
+playback position to the speech model. The voice agent can acknowledge a
+consultation and continue listening while the OpenClaw agent works.
 This adapter does not record calls or store transcripts. Consultation can persist
 in OpenClaw when opted in. Continuous-output GPT-Live and other provider adapters
 fail preflight without automatic fallback.

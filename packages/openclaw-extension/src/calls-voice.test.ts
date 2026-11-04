@@ -355,9 +355,9 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
     ...dependencies, voiceSdk: { ...sdk, REALTIME_VOICE_AGENT_CONSULT_SENDER_AUTH_VERSION: 0 },
   }), /Calling owner consultation unavailable/);
   const prepared = await prepareOpenClawCallVoice(consulted, exact, runtime, dependencies);
-  const open = (senderId: string, connectedPeer = () => senderId) => prepared.open(callbacks, {
+  const open = (senderId: string, connectedPeer = () => senderId, signal = new AbortController().signal) => prepared.open(callbacks, {
     senderId, connectedPeer, nativeAccountId: "native-account", channelAccountId: "default", logAudioTrace: line => trace.push(line),
-    parentSession: { key: parentKey, expectedSessionId: "trusted-parent" }, signal: new AbortController().signal,
+    parentSession: { key: parentKey, expectedSessionId: "trusted-parent" }, signal,
   });
   const consult = async (callId: string, question = "Read a synthetic value") => {
     await bridgeArgs.onToolCall({
@@ -459,4 +459,47 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
   await consult("live-opt-out");
   assert.equal(requests.length, beforeDisabled);
   await owner.close();
+
+  const dispatches: any[] = [];
+  Object.assign(runtime, { channel: { reply: {
+    finalizeInboundContext: (ctx: unknown) => ctx,
+    async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+      dispatches.push(params);
+      params.replyOptions.onAgentRunStart();
+      await params.dispatcherOptions.deliver({ text: "synthetic tool progress" }, { kind: "tool" });
+      await params.dispatcherOptions.deliver({ text: "synthetic normal session reply" }, { kind: "final" });
+      if (!params.ctx.Body.includes("simulate deferred run")) params.replyOptions.onAgentRunTerminalOutcome("completed");
+    },
+  } } });
+  live = exact;
+  const normalCall = new AbortController();
+  const normalOwner = await open(ownerPeer, () => ownerPeer, normalCall.signal);
+  const embeddedBefore = requests.length;
+  await consult("normal-owner-session");
+  assert.equal(requests.length, embeddedBefore);
+  assert.equal(dispatches.length, 1);
+  const normal = dispatches[0];
+  assert.equal(normal.cfg, live);
+  assert.equal(normal.ctx.Provider, "agent-wechat");
+  assert.equal(normal.ctx.Surface, "agent-wechat");
+  assert.equal(normal.ctx.SenderId, ownerPeer);
+  assert.equal(normal.ctx.ParentSessionKey, parentKey);
+  assert.match(normal.ctx.SessionKey, /^agent:agent:wechat-call:/);
+  assert.equal(normal.ctx.OriginatingTo, undefined);
+  assert.equal(normal.ctx.CommandInterpretationSuppressed, true);
+  assert.equal(normal.ctx.SuppressMessageReceivedHooks, true);
+  assert.equal(normal.replyOptions.thinkingLevelOverride, undefined);
+  assert.match(spoken.at(-1)!, /synthetic normal session reply/);
+  assert.doesNotMatch(spoken.at(-1)!, /synthetic tool progress/);
+  await consult("deferred-owner-session", "simulate deferred run");
+  assert.match(spoken.at(-1)!, /couldn't get an answer/);
+  normalCall.abort();
+  await normalOwner.close();
+  assert.equal(normal.replyOptions.abortSignal.aborted, true);
+
+  const normalNonOwner = await open(otherPeer);
+  await consult("restricted-session");
+  assert.equal(dispatches.length, 2);
+  assertReadOnly(otherPeer);
+  await normalNonOwner.close();
 });

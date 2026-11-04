@@ -8,3 +8,5 @@ Retry the connection handshake once if a cryptographic error occurs before sendi
 Keep the OpenClaw call listener available for the next caller when the daemon withdraws an unanswered offer.
 
 Keep the voice connection active with paced silence when the speech model has no audio ready. Track how much of each reply played so an interruption can discard the rest. Let the voice model acknowledge a consultation while the OpenClaw agent works.
+
+Route verified-owner consultations with no model override through OpenClaw's normal session model and fallback selection.

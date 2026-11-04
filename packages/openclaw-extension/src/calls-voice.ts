@@ -5,6 +5,7 @@ import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { resolveCallVoiceContext } from "./calls-voice-context.ts";
 import { canonicalCallSessionKey, currentCallParentKey, resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
 import { createCallForcedConsult } from "./calls-forced-consult.ts";
+import { consultOwnerCallSession } from "./calls-consult-session.ts";
 import { DEFAULT_ACCOUNT_ID, resolveWeChatAccount } from "./types.ts";
 
 export type StreamingPcmResampler = { process(chunk: Buffer): Buffer; flush(): Buffer };
@@ -225,7 +226,19 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             logger: { info() {}, warn() {}, error() {} } };
           dispatched = mode;
           traceConsult(mode, "started");
-          const result = await sdk.consultRealtimeVoiceAgent(request) as { text: string };
+          const reply = runtime.channel?.reply;
+          // The host can classify an authenticated owner on its normal
+          // channel route. A restricted call stays on the helper that can
+          // explicitly remove owner authority, even for a recognized sender.
+          const result = isOwner && !consultModel && typeof reply?.dispatchReplyWithBufferedBlockDispatcher === "function"
+            ? await consultOwnerCallSession({ cfg: access.cfg, reply, sessionKey, parentKey,
+              senderId: context.senderId, accountId: context.channelAccountId ?? DEFAULT_ACCOUNT_ID,
+              question, instructions: request.extraSystemPrompt,
+              thinking: config.realtime.consultThinkingLevel, fastMode: config.realtime.consultFastMode,
+              signal: AbortSignal.any([request.abortSignal, AbortSignal.timeout(request.timeoutMs)]),
+              assertCurrent: () => { if (!scopeIsCurrent(access.scope)) throw Error("Calling consultation authority changed"); },
+              onRunStarted: request.onRunStarted })
+            : await sdk.consultRealtimeVoiceAgent(request) as { text: string };
           const current = currentAccess();
           if (!current.allowed || current.scope !== access.scope || closed || signal.aborted) throw Error("Calling consultation authority changed");
           traceConsult(mode, "ok");
@@ -303,16 +316,14 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
                 toolConsulting = false;
                 throw error;
               }
-              void inBackground(async () => {
-                try {
-                  if (!scopeIsCurrent(access.scope)) return;
-                  const answer = await (forced ? forced.native(question, event.callId) : consult(question))
-                    .catch(() => ({ error: "Call consultation failed" }));
-                  if (!scopeIsCurrent(access.scope) || ("alreadyDelivered" in answer && answer.alreadyDelivered)) return;
-                  const text = "text" in answer ? answer.text : "I couldn't get an answer from my OpenClaw agent.";
-                  session!.sendUserMessage!(sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
-                } finally { toolConsulting = false; }
-              }).catch(() => { toolConsulting = false; });
+              void Promise.resolve().then(() => inBackground(async () => {
+                if (!scopeIsCurrent(access.scope)) return;
+                const answer = await (forced ? forced.native(question, event.callId) : consult(question))
+                  .catch(() => ({ error: "Call consultation failed" }));
+                if (!scopeIsCurrent(access.scope) || ("alreadyDelivered" in answer && answer.alreadyDelivered)) return;
+                const text = "text" in answer ? answer.text : "I couldn't get an answer from my OpenClaw agent.";
+                session!.sendUserMessage!(sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
+              })).catch(() => {}).finally(() => { toolConsulting = false; });
             });
           },
         }) as HostSession;
