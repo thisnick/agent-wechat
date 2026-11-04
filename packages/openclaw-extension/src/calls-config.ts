@@ -63,7 +63,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
     || (realtime.instructions !== undefined && (typeof realtime.instructions !== "string" || realtime.instructions.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(realtime.instructions)))
     || (agentContext !== undefined && (!object(agentContext) || Object.keys(agentContext).some(key => key !== "enabled")
       || (agentContext.enabled !== undefined && typeof agentContext.enabled !== "boolean")))) throw Error("Invalid calling configuration");
-  const maxDurationSeconds = value.maxDurationSeconds ?? 300;
+  const maxDurationSeconds = value.maxDurationSeconds ?? 3600;
   const timeoutMs = consultation.timeoutMs ?? 30000;
   if (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 30 || maxDurationSeconds > 3600) throw Error("Invalid calling duration");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw Error("Invalid calling consultation timeout");
@@ -120,7 +120,7 @@ export const callsConfigSchema = {
         inboundSessionKey: { type: "string", pattern: CALL_SESSION_KEY_PATTERN, maxLength: MAX_CALL_SESSION_KEY_LENGTH,
           description: "Optional existing session of the selected agent to fork into a separate consultation session for each admitted incoming call." },
       } },
-      maxDurationSeconds: { type: "integer", minimum: 30, maximum: 3600, default: 300 },
+      maxDurationSeconds: { type: "integer", minimum: 30, maximum: 3600, default: 3600 },
     } },
     video: { type: "object", additionalProperties: false, properties: {
       enabled: { type: "boolean", default: false, description: "Allow video independently of voice. Current video capability is unavailable; permission alone never answers a video call or routes it as voice." },

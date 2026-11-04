@@ -13,4 +13,6 @@ Run every call consultation as a normal session turn of the selected agent, so i
 
 Log a warning when an incoming call is not answered, naming the step that failed. Also warn when a call ends after a failure, when calling stops until the channel restarts, and when an incoming call is ignored for that reason.
 
+Raise the default call limit (`maxDurationSeconds`) from 5 minutes to 1 hour, and log a warning when the limit ends a call. The native daemon still ends calls after 20 minutes.
+
 Keep calling available when the plugin ends a call after a failure and the WeChat hangup takes longer than two seconds. Previously the plugin treated the slow hangup as an unknown outcome and stopped answering calls until the channel restarted.

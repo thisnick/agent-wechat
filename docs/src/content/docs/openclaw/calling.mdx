@@ -57,7 +57,7 @@ Set `OPENAI_API_KEY` in the **Gateway process's environment**.
           "outboundPolicy": "allowlist",
           "outboundAllowTo": ["allowed-contact-id"],
           "outboundToolAllowFrom": ["owner-id"],
-          "maxDurationSeconds": 300,
+          "maxDurationSeconds": 3600,
           "realtime": {
             "provider": "openai",
             "voice": "marin",
@@ -113,7 +113,7 @@ All paths below are relative to `calls.voice`.
 | `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for consultations. |
 | `consultation.inboundSessionKey` | Optional existing session of the selected agent to use as context for inbound calls. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
-| `maxDurationSeconds` | 300 by default. Accepts 30–3,600 seconds. The native daemon caps calls at 20 minutes. |
+| `maxDurationSeconds` | 3,600 (one hour) by default; 30–3,600 seconds. The plugin hangs up when it is reached. The native daemon currently ends calls after 20 minutes. |
 
 The speech model handles conversation; the selected OpenClaw agent handles
 delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;

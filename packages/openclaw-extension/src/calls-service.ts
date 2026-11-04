@@ -278,7 +278,11 @@ export class NativeCallService {
   }
   private armDuration(active: Owned): void {
     clearTimeout(active.timer);
-    active.timer = setTimeout(() => { if (this.current(active)) void this.end().catch(() => {}); }, this.config!.maxDurationSeconds * 1000);
+    active.timer = setTimeout(() => {
+      if (!this.current(active)) return;
+      this.warn(`ending call: it reached the ${this.config!.maxDurationSeconds}-second limit (maxDurationSeconds)`);
+      void this.end().catch(() => {});
+    }, this.config!.maxDurationSeconds * 1000);
     active.timer.unref?.();
   }
   private async attach(active: Owned): Promise<void> {

@@ -334,7 +334,7 @@
                 "type": "integer",
                 "minimum": 30,
                 "maximum": 3600,
-                "default": 300
+                "default": 3600
               }
             }
           },
@@ -711,7 +711,7 @@
                     "type": "integer",
                     "minimum": 30,
                     "maximum": 3600,
-                    "default": 300
+                    "default": 3600
                   }
                 }
               },

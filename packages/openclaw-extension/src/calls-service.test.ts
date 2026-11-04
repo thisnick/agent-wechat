@@ -79,6 +79,7 @@ test("calling stays disabled independently of open messaging and requires its ow
   assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", toolPolicy: "owner" } }), /persistence/);
   const consultation = { enabled: true, realtime: { provider: "p" }, agentId: "a" };
   assert.equal(resolveWeChatCallsConfig({ voice: consultation })!.voice!.toolPolicy, "none");
+  assert.equal(resolveWeChatCallsConfig({ voice: consultation })!.voice!.maxDurationSeconds, 3600);
   assert.equal(resolveWeChatCallsConfig({ voice: { ...consultation, allowConsultSessionPersistence: true } })!.voice!.toolPolicy, "safe-read-only");
   assert.equal(resolveWeChatCallsConfig({ voice: { ...consultation, allowConsultSessionPersistence: true, toolPolicy: "none" } })!.voice!.toolPolicy, "none");
   const cfg = configuration(); delete (cfg.channels["agent-wechat"] as any).calls;
