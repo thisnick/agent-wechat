@@ -539,8 +539,9 @@ test("an answered call is summarized in its session, remembered for the contact'
   const first = voice.state.contexts[0].recentContext!;
   assert.match(first, /Latest WeChat messages with them, oldest first:\n- \(1 h ago\) You: \[image\]\n- \(1 h ago\) Caller: See you then/);
   assert.doesNotMatch(first, /Earlier calls|beyond the limit/);
-  voice.state.callbacks!.transcript!("user", "Can we meet Friday?");
-  voice.state.callbacks!.transcript!("assistant", "Friday at 3 works.");
+  voice.state.callbacks!.transcript!("user", "Can we ", false, false);
+  voice.state.callbacks!.transcript!("user", "meet Friday?", false, false);
+  voice.state.callbacks!.transcript!("assistant", "Friday at 3 works.", true, false);
   client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing" } });
   await until(() => events.length === 1);
   const [request] = voice.state.summaries;

@@ -559,18 +559,18 @@ test("per-contact calls share one session per contact, seed it once, and summari
   const hostCfg = { session: { mainKey: "conversation" } };
   const dependencies = { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } };
   const prepared = await prepareOpenClawCallVoice(config(true), hostCfg, runtime, dependencies);
-  const heard: Array<[string, string]> = [];
+  const heard: Array<[string, string, boolean, boolean]> = [];
   const context = { senderId: "Synthetic-Peer", signal: new AbortController().signal, parentSession: { key: "agent:agent:main" },
     recentContext: "Recent context with this caller: synthetic earlier call." };
   let consulted = 0;
   const consult = async () => { await bridgeArgs.onToolCall({ callId: `tool-${dispatches.length}`, name: "openclaw_agent_consult", args: { question: "Read synthetic data" } }); for (let i = 0; i < 100 && dispatches.length === consulted; i++) await delay(5); };
 
-  const first = await prepared.open({ ...callbacks, transcript: (role, text) => { heard.push([role, text]); } }, context);
+  const first = await prepared.open({ ...callbacks, transcript: (role, text, final, snapshot) => { heard.push([role, text, final, snapshot]); } }, context);
   assert.match(bridgeArgs.instructions, /synthetic earlier call/);
   assert.deepEqual(first.binding!(), { sessionKey: "agent:agent:wechat-call:synthetic-peer:read-only", owner: false });
-  bridgeArgs.onTranscript("user", "Hello there", false); bridgeArgs.onTranscript("user", "Hello there", true);
-  bridgeArgs.onTranscript("assistant", "Hi!", true); bridgeArgs.onTranscript("user", "   ", true);
-  assert.deepEqual(heard, [["user", "Hello there"], ["assistant", "Hi!"]]);
+  bridgeArgs.onTranscript("user", "Hello", false); bridgeArgs.onTranscript("user", "Hello there", false, { textMode: "snapshot" });
+  bridgeArgs.onTranscript("user", "Hello there", true); bridgeArgs.onTranscript("system", "ignored", true);
+  assert.deepEqual(heard, [["user", "Hello", false, false], ["user", "Hello there", false, true], ["user", "Hello there", true, false]]);
   await consult(); consulted = dispatches.length;
   assert.equal(dispatches[0].ctx.SessionKey, "agent:agent:wechat-call:synthetic-peer:read-only");
   assert.equal(dispatches[0].ctx.ParentSessionKey, "agent:agent:conversation");

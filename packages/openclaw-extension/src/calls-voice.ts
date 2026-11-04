@@ -14,8 +14,9 @@ export type VoiceCallbacks = {
   playbackState?(): Array<{ itemId: string; audioEndMs: number }>;
   /** A fixed cause such as `provider-closed:<reason>` or `provider-error`. */
   failed(reason?: string): void;
-  /** A final transcript of what the caller (user) or the voice model (assistant) said. */
-  transcript?(role: "user" | "assistant", text: string): void;
+  /** Transcript text of the caller (user) or the voice model (assistant): a delta, or the
+   * whole turn so far when `snapshot`; `final` ends the turn. It also arrives while closing. */
+  transcript?(role: "user" | "assistant", text: string, final: boolean, snapshot: boolean): void;
 };
 /** The session a call's consultations run in, and whether it is the owner's. */
 export type CallBinding = { sessionKey: string; owner: boolean };
@@ -275,9 +276,9 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             ...(continuous ? {} : { getPlaybackState: callbacks.playbackState }) },
           onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: (reason?: unknown) => fail(typeof reason === "string" && /^[a-z_-]{1,32}$/.test(reason) ? `provider-closed:${reason}` : "provider-closed"),
           onError: () => fail("provider-error"),
-          onTranscript: (role: string, text: string, isFinal: boolean) => {
+          onTranscript: (role: string, text: string, isFinal: boolean, meta?: { textMode?: string }) => {
+            if ((role === "user" || role === "assistant") && typeof text === "string") callbacks.transcript?.(role, text, isFinal === true, meta?.textMode === "snapshot");
             if (!isFinal || closed || signal.aborted) return;
-            if ((role === "user" || role === "assistant") && text.trim()) callbacks.transcript?.(role, text);
             if (forced && role === "user") inBackground(() => {
               if (currentAccess().allowed) forced?.onTranscript(role, text, isFinal);
             });

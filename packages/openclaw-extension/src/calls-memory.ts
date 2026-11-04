@@ -14,6 +14,37 @@ const TRANSCRIPT_HEAD_CHARS = 6_000;
 const TRANSCRIPT_TAIL_CHARS = 24_000;
 const MAX_CONTEXT_CHARS = 3_000;
 const MAX_MESSAGE_CHARS = 300;
+const MAX_TRANSCRIPT_ENTRIES = 2_000;
+const MAX_ENTRY_CHARS = 4_000;
+
+/**
+ * A call transcript assembled from the bridge's transcript events, one entry
+ * per turn. Realtime models send deltas or snapshots, then a final text per
+ * turn. GPT-Live streams deltas and publishes finals only when it delegates or
+ * flushes, as one aggregate per role, so a final for a role that already
+ * streamed deltas repeats them and is skipped.
+ */
+export class CallTranscript {
+  readonly entries: CallTranscriptEntry[] = [];
+  private open?: CallTranscriptEntry;
+  private streamed = { user: false, assistant: false };
+  add(role: "user" | "assistant", text: string, final: boolean, snapshot: boolean, at = Date.now()): void {
+    if (snapshot || (final && !this.streamed[role])) this.write(role, text, at, true);
+    else if (!final) { this.write(role, text, at, false); this.streamed[role] = true; }
+    if (final) {
+      this.streamed[role] = false;
+      if (this.open?.role === role) this.open = undefined;
+    }
+  }
+  private write(role: "user" | "assistant", text: string, at: number, replace: boolean): void {
+    if (this.open?.role === role) {
+      this.open.text = (replace ? text : this.open.text + text).slice(0, MAX_ENTRY_CHARS);
+    } else if (this.entries.length < MAX_TRANSCRIPT_ENTRIES && text.trim()) {
+      this.open = { at, role, text: text.slice(0, MAX_ENTRY_CHARS) };
+      this.entries.push(this.open);
+    }
+  }
+}
 
 /**
  * The last few call summaries for each contact, which the next call's voice
@@ -78,7 +109,7 @@ function stamp(ms: number): string {
 
 /** "Caller"/"You" lines with call-relative times, cut in the middle when long. */
 export function formatCallTranscript(entries: CallTranscriptEntry[], startedAt: number): string {
-  const lines = entries.map(entry => `[${stamp(entry.at - startedAt)}] ${entry.role === "user" ? "Caller" : "You"}: ${entry.text.replace(/\s+/g, " ").trim()}`);
+  const lines = entries.filter(entry => entry.text.trim()).map(entry => `[${stamp(entry.at - startedAt)}] ${entry.role === "user" ? "Caller" : "You"}: ${entry.text.replace(/\s+/g, " ").trim()}`);
   const text = lines.join("\n");
   if (text.length <= TRANSCRIPT_HEAD_CHARS + TRANSCRIPT_TAIL_CHARS) return text;
   const head = text.slice(0, TRANSCRIPT_HEAD_CHARS);

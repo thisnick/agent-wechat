@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { NativeMessage } from "@agent-wechat/shared";
-import { CallSummaryStore, formatCallTranscript, formatRecentCallContext } from "./calls-memory.ts";
+import { CallSummaryStore, CallTranscript, formatCallTranscript, formatRecentCallContext } from "./calls-memory.ts";
 
 test("the summary store keeps the newest three summaries per contact in a private file", async t => {
   const dir = await mkdtemp(join(tmpdir(), "wechat-call-memory-"));
@@ -46,4 +46,25 @@ test("recent context lists earlier calls, then the newest chat messages that fit
   const clipped = formatRecentCallContext([], long.reverse(), now)!;
   assert.ok(clipped.length <= 3000);
   assert.match(clipped, /Caller: 39 x+$/); assert.doesNotMatch(clipped, /: 0 x/);
+});
+
+test("transcripts come out one entry per turn for both realtime and GPT-Live event patterns", () => {
+  // GPT-Live: interleaved deltas, then per-role aggregates when it delegates or closes.
+  const live = new CallTranscript();
+  live.add("assistant", "Hi, I'm ", false, false, 1); live.add("assistant", "Nick Bot.", false, false, 2);
+  live.add("user", "What did I ", false, false, 3); live.add("user", "ask last time?", false, false, 4);
+  live.add("assistant", "You asked about tomorrow.", false, false, 5);
+  live.add("assistant", "Hi, I'm Nick Bot.You asked about tomorrow.", true, false, 6);
+  live.add("user", "What did I ask last time?", true, false, 7);
+  live.add("user", "Thanks", false, false, 8);
+  assert.deepEqual(live.entries.map(entry => [entry.at, entry.role, entry.text]), [
+    [1, "assistant", "Hi, I'm Nick Bot."], [3, "user", "What did I ask last time?"], [5, "assistant", "You asked about tomorrow."], [8, "user", "Thanks"],
+  ]);
+  // Realtime: user snapshots then a final; assistant deltas then a final.
+  const realtime = new CallTranscript();
+  realtime.add("user", "Can", false, true, 1); realtime.add("user", "Can we meet", false, true, 2); realtime.add("user", "Can we meet Friday?", true, true, 3);
+  realtime.add("assistant", "Sure, ", false, false, 4); realtime.add("assistant", "Friday works.", false, false, 5); realtime.add("assistant", "Sure, Friday works.", true, false, 6);
+  // Finals alone (no deltas) still make entries; blank text does not.
+  realtime.add("user", "   ", true, false, 7); realtime.add("user", "Great.", true, false, 8);
+  assert.deepEqual(realtime.entries.map(entry => [entry.role, entry.text]), [["user", "Can we meet Friday?"], ["assistant", "Sure, Friday works."], ["user", "Great."]]);
 });

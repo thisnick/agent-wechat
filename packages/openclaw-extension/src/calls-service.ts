@@ -9,7 +9,7 @@ import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, 
 import { CallPcmOutput } from "./calls-audio.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
 import { resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
-import { CallSummaryStore, formatCallTranscript, formatDuration, formatRecentCallContext, type CallTranscriptEntry } from "./calls-memory.ts";
+import { CallSummaryStore, CallTranscript, formatCallTranscript, formatDuration, formatRecentCallContext } from "./calls-memory.ts";
 
 export type CallMediaPort = Pick<NativeCallMediaClient, "frames" | "tracks" | "sendPcm" | "stopAudio" | "close">;
 export type CallControlPort = Pick<NativeCallsClient, "connect" | "events" | "ready" | "dial" | "answer" | "end" | "clearAudio" | "close"> & { attachMedia(callId: string, observePcm?: NativeCallPcmObserver): Promise<CallMediaPort> };
@@ -29,12 +29,11 @@ export type CallServiceDependencies = {
   stateDir?: string;
   summaries?: CallSummaryStore;
 };
-type Owned = { key: string; peer: string; direction: "incoming" | "outgoing"; transcript: CallTranscriptEntry[]; connectedAt?: number; binding?: CallBinding; summarized?: boolean;
+type Owned = { key: string; peer: string; direction: "incoming" | "outgoing"; transcript: CallTranscript; connectedAt?: number; binding?: CallBinding; summarized?: boolean;
   callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
   ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; trace?: CallAudioTrace; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
 const TERMINAL_WAIT_MS = 30_000;
 const RECENT_CONTEXT_WAIT_MS = 2_000;
-const MAX_TRANSCRIPT_ENTRIES = 2_000;
 const MAX_RECOVERY_ATTEMPTS = 30;
 /** A fixed error code for logs; other error text can contain private details. */
 const codeOf = (error: unknown): string => error instanceof NativeCallError ? `:${error.code}` : "";
@@ -265,7 +264,7 @@ export class NativeCallService {
     } catch (error) { await this.claimFailed(active, error, stage, started); }
   }
   private reserve(peer: string, direction: Owned["direction"], callId?: string): Owned {
-    const active: Owned = { key: randomUUID(), peer, direction, transcript: [], callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
+    const active: Owned = { key: randomUUID(), peer, direction, transcript: new CallTranscript(), callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
     this.active = active; this.state = "preparing"; return active;
   }
   /** Earlier call summaries and the latest chat messages with a contact; never delays a call long. */
@@ -290,9 +289,8 @@ export class NativeCallService {
       clear: () => { if (this.current(active)) void active.output?.clear(); },
       playbackState: () => this.current(active) ? active.output?.playbackState() ?? [] : [],
       failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); },
-      transcript: (role, text) => {
-        if (this.active === active && !active.retired && active.transcript.length < MAX_TRANSCRIPT_ENTRIES) active.transcript.push({ at: Date.now(), role, text: text.slice(0, 2000) });
-      } },
+      // Closing can publish the last transcript; it counts until the summary starts.
+      transcript: (role, text, final, snapshot) => { if (!active.summarized) active.transcript.add(role, text, final, snapshot); } },
     { senderId: active.peer, signal: active.abort.signal, parentSession: active.parentSession, recentContext,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
       connectedPeer: () => this.current(active) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
@@ -473,7 +471,7 @@ export class NativeCallService {
   /** After an answered call, in the background: the agent summarizes it in the
    * call's session; the summary is kept for the next call with this contact. */
   private summarizeLater(active: Owned): void {
-    if (this.stopped || active.summarized || !active.claimed || active.connectedAt === undefined || !active.binding || !active.transcript.length || !this.prepared) return;
+    if (this.stopped || active.summarized || !active.claimed || active.connectedAt === undefined || !active.binding || !active.transcript.entries.length || !this.prepared) return;
     active.summarized = true;
     const run = () => this.summarize(active);
     const runner = this.dependencies.runInBackgroundContext;
@@ -485,7 +483,7 @@ export class NativeCallService {
     const seconds = Math.round((endedAt - active.connectedAt!) / 1000);
     const summary = await this.prepared!.summarize({ binding: active.binding!, senderId: active.peer, channelAccountId: this.account.accountId,
       nativeAccountId: this.account.native?.accountId, direction: active.direction, durationText: formatDuration(seconds),
-      transcript: formatCallTranscript(active.transcript, active.connectedAt!), signal: this.lifetime.signal });
+      transcript: formatCallTranscript(active.transcript.entries, active.connectedAt!), signal: this.lifetime.signal });
     if (!summary || this.lifetime.signal.aborted) return;
     await this.summaries?.record(this.account.accountId, active.peer, { endedAt, seconds, direction: active.direction, summary });
     this.info(`call summary saved: seconds=${seconds} chars=${summary.length}`);
