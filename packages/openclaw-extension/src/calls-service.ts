@@ -17,6 +17,8 @@ export type CallServiceDependencies = {
   host?: typeof ensureNativeHost;
   socketFactory?: NativeCallWebSocketFactory;
   logAudioTrace?: (line: string) => void;
+  /** Opens a fresh control client, e.g. to resume after calling stopped (tests). */
+  createClient?: () => CallControlPort;
   /** Always-on warnings, independent of audio tracing. */
   warn?: (line: string) => void;
   runInBackgroundContext?: CallBackgroundRunner;
@@ -24,6 +26,9 @@ export type CallServiceDependencies = {
 type Owned = { key: string; peer: string; callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
   ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; trace?: CallAudioTrace; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
 const TERMINAL_WAIT_MS = 30_000;
+const MAX_RECOVERY_ATTEMPTS = 30;
+/** A fixed error code for logs; other error text can contain private details. */
+const codeOf = (error: unknown): string => error instanceof NativeCallError ? `:${error.code}` : "";
 const bounded = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error("Calling operation timed out")), ms); })]); }
@@ -53,6 +58,8 @@ export class NativeCallService {
   private readonly config?: ResolvedWeChatVoiceCallsConfig;
   private readonly logAudioTrace?: (line: string) => void;
   private callingStopped = false;
+  private recovery?: ReturnType<typeof setTimeout>;
+  private recoveryAttempts = 0;
   private account: ResolvedWeChatAccount;
   private cfg: unknown;
   private runtime: PluginRuntime;
@@ -71,13 +78,7 @@ export class NativeCallService {
     try {
       this.prepared = await bounded((this.dependencies.prepareVoice ?? prepareOpenClawCallVoice)(this.config, this.cfg, this.runtime), 10000);
       if (this.stopped) return;
-      if (this.dependencies.client) this.client = this.dependencies.client;
-      else {
-        const native = this.account.native;
-        if (!native) throw Error("Native calling configuration unavailable");
-        const host = await (this.dependencies.host ?? ensureNativeHost)(native);
-        this.client = host.client.calls(native.accountId, this.dependencies.socketFactory ?? await nativeCallSocketFactory());
-      }
+      this.client = await this.openClient();
       if (this.stopped) { this.client.close(); return; }
       const hello = await this.client.connect();
       if (this.stopped) { this.client.close(); return; }
@@ -93,11 +94,52 @@ export class NativeCallService {
   private warn(line: string): void {
     try { this.dependencies.warn?.(`[wechat-call] ${line}`); } catch { /* Diagnostics cannot affect calling. */ }
   }
-  /** Closing the control socket ends event delivery until the channel restarts. */
+  private async openClient(): Promise<CallControlPort> {
+    if (this.dependencies.createClient) return this.dependencies.createClient();
+    if (this.dependencies.client) return this.dependencies.client;
+    const native = this.account.native;
+    if (!native) throw Error("Native calling configuration unavailable");
+    const host = await (this.dependencies.host ?? ensureNativeHost)(native);
+    return host.client.calls(native.accountId, this.dependencies.socketFactory ?? await nativeCallSocketFactory());
+  }
+  /** Closing the control socket ends event delivery; calling resumes on a new
+   * connection once the daemon reports that no call is in progress. */
   private stopCalling(reason: string): void {
     this.callingStopped = true;
-    this.warn(`calling stopped: state=${this.state} reason=${reason}; reload the agent-wechat channel or restart the gateway to resume`);
+    this.warn(`calling stopped: state=${this.state} reason=${reason}; it resumes once the daemon reports no call in progress`);
     this.client?.close();
+    this.scheduleRecovery();
+  }
+  private scheduleRecovery(): void {
+    // A single injected client cannot reconnect (tests without createClient).
+    // Only a prepared service can resume; a failed start is not a lost call.
+    if (this.stopped || this.recovery || !this.prepared || (this.dependencies.client && !this.dependencies.createClient)) return;
+    if (this.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
+      this.warn(`calling still stopped after ${MAX_RECOVERY_ATTEMPTS} reconnect attempts; reload the agent-wechat channel or restart the gateway`);
+      return;
+    }
+    const delay = Math.min(60_000, 5_000 * 2 ** this.recoveryAttempts);
+    this.recovery = setTimeout(() => { this.recovery = undefined; void this.recover(); }, delay);
+    this.recovery.unref?.();
+  }
+  /** Resume only when the daemon, the source of truth, has no call in progress:
+   * an uncertain outcome is settled there, never by redialing or guessing. */
+  private async recover(): Promise<void> {
+    if (this.stopped) return;
+    if (this.active) { this.scheduleRecovery(); return; }
+    this.recoveryAttempts++;
+    let client: CallControlPort | undefined;
+    try {
+      client = await this.openClient();
+      const hello = await client.connect();
+      if (this.stopped || this.active) { client.close(); if (!this.stopped) this.scheduleRecovery(); return; }
+      if (!hello.capabilities.directAudio || hello.audioFormat.channels !== 1 || hello.audioFormat.frameMs !== 20
+        || hello.availability.busy || hello.currentCall) { client.close(); this.scheduleRecovery(); return; }
+      this.client = client; this.format = hello.audioFormat; this.busy = false;
+      this.callingStopped = false; this.recoveryAttempts = 0; this.state = "available";
+      this.loop = this.consume();
+      this.warn("calling resumed: the daemon reports no call in progress");
+    } catch { client?.close(); this.scheduleRecovery(); }
   }
   private current(owned: Owned): boolean { return !this.stopped && this.active === owned && !owned.retired && !owned.abort.signal.aborted; }
   private async consume(): Promise<void> {
@@ -153,7 +195,7 @@ export class NativeCallService {
         // The daemon closed the control connection; no further offers arrive.
         this.state = "unavailable"; if (this.active) await this.retire(this.active); this.stopCalling("events-ended");
       }
-    } catch { if (!this.stopped) { this.state = "needs_review"; if (this.active) await this.retire(this.active); this.stopCalling("events-failed"); } }
+    } catch (error) { if (!this.stopped) { this.state = "needs_review"; if (this.active) await this.retire(this.active); this.stopCalling(`events-failed${codeOf(error)}`); } }
   }
   private offer(offer: CallOffer): void {
     if (!this.allowedIncoming(offer)) return;
@@ -330,7 +372,7 @@ export class NativeCallService {
             trace?.gap("realtimeInputGapMs", forwardAt);
             trace?.measure("realtimeForwardMs", performance.now() - forwardAt);
           }
-        } catch { if (this.current(active) && !active.endStarted) await this.fail(active, "media-input"); }
+        } catch (error) { if (this.current(active) && !active.endStarted) await this.fail(active, `media-input${codeOf(error)}`); }
       })();
     } catch { if (this.current(active)) await this.fail(active, "media-attach"); }
     finally { active.attaching = false; }
@@ -345,7 +387,7 @@ export class NativeCallService {
     try {
       await this.client.end(["dialing", "ringing"].includes(active.call.state) ? "call.cancel" : "call.hangup", randomUUID(), active.callId, active.call.revision);
       // Acceptance is not a terminal result. Keep the owner until server state arrives.
-    } catch { this.state = "needs_review"; this.stopCalling("end-outcome-unknown"); await this.retire(active); throw Error("Call end outcome needs review"); }
+    } catch (error) { this.state = "needs_review"; this.stopCalling(`end-outcome-unknown${codeOf(error)}`); await this.retire(active); throw Error("Call end outcome needs review"); }
   }
   private async fail(active: Owned, cause: string): Promise<void> {
     if (active.endStarted && !this.stopped && this.active === active && !active.retired) {
@@ -393,6 +435,7 @@ export class NativeCallService {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    clearTimeout(this.recovery); this.recovery = undefined;
     if (this.active?.claimed && !this.active.endStarted) { try { await bounded(this.end(), 2000); } catch {} }
     this.client?.close(); if (this.active) await this.retire(this.active);
     this.state = "stopped"; if (this.loop) { try { await bounded(this.loop, 1000); } catch {} }

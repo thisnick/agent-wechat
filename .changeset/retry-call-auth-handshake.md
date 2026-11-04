@@ -16,3 +16,5 @@ Log a warning when an incoming call is not answered, naming the step that failed
 Raise the default call limit (`maxDurationSeconds`) from 5 minutes to 1 hour, and log a warning when the limit ends a call. The native daemon still ends calls after 20 minutes.
 
 Keep calling available when the plugin ends a call after a failure and the WeChat hangup takes longer than two seconds. Previously the plugin treated the slow hangup as an unknown outcome and stopped answering calls until the channel restarted.
+
+Resume calling automatically after it stops: reconnect with backoff and accept calls again once the daemon reports no call in progress. Warnings now include the daemon's error code for media, hangup and event-stream failures.

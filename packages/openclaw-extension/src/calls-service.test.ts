@@ -154,7 +154,7 @@ test("an incoming call whose voice session fails to open logs only its stage", a
   await until(() => lines.length > 1);
   assert.deepEqual(lines.map(line => line.replace(/ms=\d+/, "ms=N")), [
     "[wechat-call] incoming call not answered: stage=voice ms=N code=none state=unavailable",
-    "[wechat-call] calling stopped: state=unavailable reason=preflight-failed; reload the agent-wechat channel or restart the gateway to resume",
+    "[wechat-call] calling stopped: state=unavailable reason=preflight-failed; it resumes once the daemon reports no call in progress",
   ]);
   assert.equal(lines.some(line => line.includes("synthetic-private")), false);
   assert.equal(client.readied, 0); assert.equal(client.answers, 0);
@@ -165,8 +165,54 @@ test("a control connection that closes unexpectedly is reported once", async () 
   const { service, client } = await fixture(undefined, configuration(), line => lines.push(line));
   client.eventsQueue.close();
   await until(() => lines.length > 0); await delay(10);
-  assert.deepEqual(lines, ["[wechat-call] calling stopped: state=unavailable reason=events-ended; reload the agent-wechat channel or restart the gateway to resume"]);
+  assert.deepEqual(lines, ["[wechat-call] calling stopped: state=unavailable reason=events-ended; it resumes once the daemon reports no call in progress"]);
   assert.equal(service.status().state, "unavailable");
+  await service.stop();
+});
+test("after calling stops, a new connection resumes it once the daemon reports no call in progress", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const lines: string[] = [];
+  const clients: Control[] = [];
+  const voice = voiceFactory(); const cfg = configuration();
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, {} as PluginRuntime, {
+    createClient: () => { const client = new Control(); clients.push(client); return client; },
+    prepareVoice: async () => voice.prepared, warn: line => lines.push(line),
+  });
+  await service.start(); assert.equal(service.status().state, "available");
+  clients[0].eventsQueue.close(); // the daemon closed the control connection
+  await until(() => lines.length > 0);
+  assert.match(lines[0], /calling stopped: state=unavailable reason=events-ended; it resumes once/);
+  t.mock.timers.tick(5_000); await delay(0);
+  await until(() => service.status().state === "available");
+  assert.equal(clients.length, 2); assert.equal(lines.at(-1), "[wechat-call] calling resumed: the daemon reports no call in progress");
+  clients[1].eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: "after-recovery" } });
+  await until(() => clients[1].answers === 1);
+  await service.stop();
+});
+test("calling does not resume while the daemon still reports a call in progress", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const clients: Control[] = [];
+  const voice = voiceFactory(); const cfg = configuration();
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, {} as PluginRuntime, {
+    createClient: () => {
+      const client = new Control(); clients.push(client);
+      if (clients.length === 2) {
+        const connect = client.connect.bind(client);
+        client.connect = async () => ({ ...(await connect()), availability: { busy: true, ownedByThisClient: false } });
+      }
+      return client;
+    },
+    prepareVoice: async () => voice.prepared,
+  });
+  await service.start();
+  clients[0].eventsQueue.close();
+  await until(() => service.status().state === "unavailable");
+  t.mock.timers.tick(5_000); await delay(0);
+  await until(() => clients.length === 2 && clients[1].closed);
+  assert.equal(service.status().state, "unavailable", "busy daemon: stay stopped");
+  t.mock.timers.tick(10_000); await delay(0);
+  await until(() => service.status().state === "available");
+  assert.equal(clients.length, 3);
   await service.stop();
 });
 test("a withdrawn pre-answer offer releases the listener for the next call", async t => {
