@@ -21,7 +21,7 @@ const OWNER_HZ: f64 = 880.0;
 const PEER_HZ: f64 = 1320.0;
 // This short fixture reserves disjoint counters; it does not model negotiation
 // or a remote client's key/counter lifetime. Native TX must stay below this.
-const PEER_AUDIO_START: u16 = 1024;
+const PEER_AUDIO_START: u16 = 8192;
 
 struct PeerStats {
     checkins: usize,
@@ -379,6 +379,7 @@ fn peer(
         samples: vec![],
     };
     let mut next = Instant::now();
+    let mut native_audio_start = None;
     let mut buffer = [0; 8198];
     diagnostic.stage.store(9, Ordering::Release);
     while !stop.load(Ordering::Acquire) && began.elapsed() < Duration::from_secs(7) {
@@ -408,9 +409,12 @@ fn peer(
                     .open(epoch, &buffer[..n])?
                     .context("Synthetic replay")?;
                 if opened.packed_kind == 0x10 {
+                    let first = *native_audio_start.get_or_insert(opened.sequence);
                     ensure!(
-                        usize::from(opened.sequence)
-                            == result.received_primaries / usize::from(frames_per_packet)
+                        first > 0
+                            && usize::from(opened.sequence)
+                                == usize::from(first)
+                                    + result.received_primaries / usize::from(frames_per_packet)
                             && opened.sequence < PEER_AUDIO_START,
                         "Synthetic native sender counter range or ordering"
                     );
@@ -548,7 +552,7 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
         let mut h = Harness::new(frames_per_packet)?;
         let test = async {
             let f = &h.fixture;
-            let service = f.core.call_service();
+            let service = f.core.call_service("one").unwrap();
             let mut client = service.connect("one", "fixture", true).await?;
             let Some(CallEvent::Hello { audio_format, .. }) = client.events.recv().await else {
                 bail!("Synthetic missing Hello")

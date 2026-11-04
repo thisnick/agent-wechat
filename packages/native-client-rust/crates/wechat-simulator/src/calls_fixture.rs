@@ -356,7 +356,8 @@ async fn control(
             }
             let authority = backend.authority(ACCOUNT).ok_or("fixture_unavailable")?;
             let identity = core
-                .call_service()
+                .call_service(ACCOUNT)
+                .map_err(|_| "fixture_unavailable")?
                 .offer(
                     authority,
                     uuid::Uuid::new_v4().to_string(),

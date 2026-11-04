@@ -5,7 +5,7 @@ description: Common wx commands for reading chats, sending messages and media, a
 
 import { Aside } from '@astrojs/starlight/components';
 
-Every command prints JSON. With several accounts, add `--account ID` (or an alias) to each command.
+`wx` prints readable text by default. Add `--json` for scripts that parse the output. With several accounts, add `--account ID` or an alias.
 
 ## Read
 
@@ -17,6 +17,15 @@ wx messages list CHAT_ID --limit 50       # newest first; pass --cursor to page
 wx contacts find Alice
 wx groups members list 'family@chatroom'
 ```
+
+Chat lists and searches show a table with the chat name, ID, kind, unread count and latest message when available. If another page is available, copy the next cursor into `wx chats list --cursor CURSOR`.
+
+```text
+Name       Chat ID          Kind   Unread  Last message
+Book club  books@chatroom   group  2       See you Friday
+```
+
+`wx messages list` shows the sender, message preview, timestamp and a shortened message ID in a table. If history is partial, a note appears below the table. Use `--json` for full text, IDs and database coverage.
 
 Chat notification preferences come from the saved profile. The daemon receives phone contact changes through its contact sync stream. `null` means missing or unresolved preference data; notification consumers should stay silent for that chat. Use `wx contacts refresh CONTACT_ID` for a manual refresh. `wx chats mute/unmute` edits direct chats and groups. Each direct edit reads the current contact first so unrelated contact fields are preserved.
 
@@ -49,7 +58,7 @@ For larger files, use `--wait 3600` to allow an hour. See [attachment limits and
 
 ### Quoted replies
 
-1. Copy `id` and `serverId` from `wx messages list CHAT_ID`; keep both as strings.
+1. Copy the full `id` and `serverId` from `wx messages list CHAT_ID --json`.
 2. Send a text reply with both quote flags:
 
    ```bash
@@ -57,7 +66,7 @@ For larger files, use `--wait 3600` to allow an hour. See [attachment limits and
      --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID --detach
    ```
 
-   A queued reply includes `id`, `"state":"queued"` and `receiptPath`. Check `wx messages sends get SEND_ID`.
+   A queued reply shows its ID, state and receipt path. Check `wx messages sends get SEND_ID`.
 
 For a group reply, add `--mention MEMBER_ID` or `--mention-all` to the same command.
 
@@ -87,23 +96,23 @@ wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
 wx events watch --cursor-file ~/.cache/wx-events.cursor
 ```
 
-Prints one JSON event per line as messages arrive. The cursor file lets you resume where you stopped.
+Prints event details as messages arrive. Add `--json` for one JSON event per line. The cursor file lets you resume where you stopped.
 
 ## Mark read and recall
 
 ```bash
-wx chats get CHAT_ID          # note "readStateVersion"
+wx chats get CHAT_ID          # note the Read State Version
 wx chats read CHAT_ID --expected-version VERSION
 wx messages recall MESSAGE_ID --server-id SERVER_ID
 ```
 
-Reading marks the whole chat read and tells your other devices. Recall needs the message's `id` and `serverId` from `messages list`.
+Reading marks the whole chat read and tells your other devices. Recall needs the full `id` and `serverId` from `wx messages list CHAT_ID --json`.
 
 ## Use a daemon on another machine
 
 ```bash
-wx config server add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
-wx config server use box
+wx config servers add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
+wx config servers select box
 ```
 
 <Aside title="Good to know">

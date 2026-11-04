@@ -4,7 +4,11 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header;
-use std::time::Duration;
+use std::{
+    fmt,
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::time::timeout;
 use tokio_tungstenite::{
     tungstenite::{
@@ -31,6 +35,20 @@ type Socket = WebSocketStream<reqwest::Upgraded>;
 const SOCKET_LIMIT: usize = 64 * 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn call_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("WX_CALL_DEBUG").as_deref() == Ok("1"))
+}
+
+fn debug_call(socket: &str, detail: fmt::Arguments<'_>) {
+    if call_debug_enabled() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        eprintln!("[call-debug {}] {socket} {detail}", now.as_millis());
+    }
+}
 
 #[derive(Subcommand)]
 pub(crate) enum CallsCommand {
@@ -68,11 +86,12 @@ pub(crate) struct AudioOptions {
 }
 
 pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
+    debug_call("session", format_args!("debug enabled"));
     match command {
         CallsCommand::Devices => devices(json).await,
         CallsCommand::Status => {
             let value = remote.get(&remote.path("calls/current")?).await?;
-            super::output(&value)
+            super::Output::new(json).print(&value)
         }
         CallsCommand::Monitor { .. } if json => observe(remote).await,
         command => audio::run(remote, command, json).await,
@@ -92,7 +111,7 @@ pub(crate) async fn devices(json: bool) -> Result<()> {
             })
             .collect();
         if json {
-            return super::output(&serde_json::json!({"devices": values}));
+            return super::Output::new(json).print(&serde_json::json!({"devices": values}));
         }
         println!("Local audio devices (no microphone capture or playback started):");
         for device in devices {
@@ -195,29 +214,69 @@ async fn send_json(socket: &mut Socket, value: &impl serde::Serialize) -> Result
     Ok(())
 }
 
-async fn receive(socket: &mut Socket) -> Result<Message> {
+async fn receive(socket: &mut Socket, label: &str) -> Result<Message> {
     loop {
-        match socket.next().await.context("call socket closed")?? {
+        let message = match socket.next().await {
+            Some(Ok(message)) => message,
+            Some(Err(error)) => {
+                debug_call(label, format_args!("read error: {error}"));
+                return Err(error.into());
+            }
+            None => {
+                debug_call(label, format_args!("read reached end of stream"));
+                bail!("call socket closed");
+            }
+        };
+        match message {
             Message::Ping(data) => {
-                timeout(WRITE_TIMEOUT, socket.send(Message::Pong(data)))
+                if let Err(error) = timeout(WRITE_TIMEOUT, socket.send(Message::Pong(data)))
                     .await
-                    .context("call socket pong timed out")??;
+                    .context("call socket pong timed out")
+                    .and_then(|result| result.map_err(Into::into))
+                {
+                    debug_call(label, format_args!("pong write failed: {error:#}"));
+                    return Err(error);
+                }
             }
             Message::Pong(_) => {}
-            Message::Close(_) => bail!("call socket closed"),
+            Message::Close(frame) => {
+                if let Some(frame) = frame {
+                    let code = u16::from(frame.code);
+                    debug_call(
+                        label,
+                        format_args!(
+                            "received close frame code={code} reason={:?}",
+                            frame.reason.as_str()
+                        ),
+                    );
+                } else {
+                    debug_call(
+                        label,
+                        format_args!("received close frame without a code or reason"),
+                    );
+                }
+                bail!("call socket closed");
+            }
             message => return Ok(message),
         }
     }
 }
 
-async fn receive_event(socket: &mut Socket) -> Result<CallEvent> {
-    let Message::Text(text) = receive(socket).await? else {
+async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
+    let Message::Text(text) = receive(socket, label).await? else {
         bail!("unexpected binary control message");
     };
     if text.len() > 16 * 1024 {
         bail!("call event exceeds the message limit");
     }
-    serde_json::from_str(&text).context("invalid call event")
+    let event = serde_json::from_str(&text).context("invalid call event")?;
+    if call_debug_enabled() {
+        match event_json(&event) {
+            Ok(line) => debug_call(label, format_args!("<- {line}")),
+            Err(error) => debug_call(label, format_args!("could not format event: {error}")),
+        }
+    }
+    Ok(event)
 }
 
 struct Control {
@@ -244,7 +303,7 @@ struct Control {
 impl Control {
     async fn connect(remote: &Remote) -> Result<(Self, CallEvent)> {
         let mut socket = open_socket(remote, "calls/socket").await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket))
+        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "control"))
             .await
             .context("call socket hello timed out")??;
         let CallEvent::Hello {
@@ -284,6 +343,10 @@ impl Control {
             },
             event,
         ))
+    }
+
+    async fn next_event(&mut self) -> Result<CallEvent> {
+        receive_event(&mut self.socket, "control").await
     }
 
     fn update(&mut self, event: &CallEvent) {
@@ -340,10 +403,13 @@ impl Control {
             ));
         }
         let id = command.request_id().to_owned();
-        send_json(&mut self.socket, &command).await?;
+        if let Err(error) = send_json(&mut self.socket, &command).await {
+            debug_call("control", format_args!("command write failed: {error:#}"));
+            return Err(error);
+        }
         let response = async {
             loop {
-                let event = receive_event(&mut self.socket).await?;
+                let event = self.next_event().await?;
                 self.update(&event);
                 match event {
                     CallEvent::CommandResult {
@@ -380,7 +446,9 @@ impl Control {
         }
     }
     async fn close(&mut self) {
-        let _ = timeout(WRITE_TIMEOUT, self.socket.close(None)).await;
+        debug_call("control", format_args!("local close requested"));
+        let result = timeout(WRITE_TIMEOUT, self.socket.close(None)).await;
+        debug_call("control", format_args!("local close result: {result:?}"));
     }
 }
 
@@ -422,7 +490,7 @@ struct OwnerResult {
 
 fn event_json(event: &CallEvent) -> Result<String> {
     let mut value = serde_json::to_value(event)?;
-    // This is defense in depth: a passive observer never sends a claim command.
+    // Owner tokens authorize media attachment and must stay out of CLI output.
     if let Some(object) = value.as_object_mut() {
         object.remove("ownerToken");
     }
@@ -443,7 +511,7 @@ async fn observe_until(remote: &Remote, stop: impl std::future::Future<Output = 
     let result = loop {
         tokio::select! {
             _ = &mut stop => break Ok(()),
-            event = receive_event(&mut control.socket) => match event {
+            event = control.next_event() => match event {
                 Ok(event) => { println!("{}",event_json(&event)?); }
                 Err(error) => break Err(error),
             }

@@ -580,7 +580,7 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
     super::audio::restore_monitor_readiness(&mut control)
         .await
         .unwrap();
-    let event = receive_event(&mut control.socket).await.unwrap();
+    let event = control.next_event().await.unwrap();
     control.update(&event);
     assert_eq!(control.offer.as_ref().unwrap().call_id, "offer-b");
     control.close().await;

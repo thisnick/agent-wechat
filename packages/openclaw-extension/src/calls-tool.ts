@@ -25,7 +25,8 @@ export function registerNativeCallTool(api: OpenClawPluginApi, service: () => Na
         signal?.throwIfAborted(); check();
         const current = service(); if (!current) throw Error("Calling service unavailable");
         const result = value.action === "status" ? current.status() : value.action === "dial"
-          ? await current.dial(value.contactId as string, { signal, assertCurrent: check }) : await current.end();
+          ? await current.dial(value.contactId as string, { signal, assertCurrent: check,
+            parentSession: context.sessionKey ? { key: context.sessionKey, expectedSessionId: context.sessionId } : undefined }) : await current.end();
         return { content: [{ type: "text" as const, text: JSON.stringify(result ?? { requested: true }) }], details: result ?? { requested: true } };
       } }];
   } }, { names: ["wechat_call"], optional: true });

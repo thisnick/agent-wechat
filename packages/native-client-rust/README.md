@@ -168,11 +168,11 @@ wx serve
 wx auth login --official=/absolute/stopped-official-home
 wx accounts list
 wx accounts alias ACCOUNT_ID test
-wx --account test threads
+wx --account test chats list
 wx --account test contacts --search Example
 wx --account test groups
-wx --account test lookup-contacts username
-wx --account test lookup-group 'room@chatroom'
+wx --account test contacts lookup username
+wx --account test groups lookup 'room@chatroom'
 wx --account test messages list filehelper --limit 50
 wx --account test messages get msg_OPAQUE_ID
 wx --account test events --after 0 --watch
@@ -189,7 +189,7 @@ are preserved, and changed source files are refused.
 
 An accepted active heartbeat resumes the saved session; authenticated expiry permits one renewal. Saved-device approval and explicit QR are separate paths. Transport/integrity failures do not clear credentials or establish trust expiry. Automatic reconnect never opens a QR. Saved credentials restored offline remain unvalidated until an accepted native exchange in this process.
 
-`auth disconnect` stops desired network activity while retaining trust. `auth logout` commits durable local inhibition before one optional authenticated native logout. It reports local commitment, credential retention, remote confirmation/rejection/unknown outcome and unverified saved-device revocation separately. `auth forget --yes` is a separate confirmed local action that retains history. Legacy `auth logout-local` performs only local inhibition. Native active secrets and cursors are stored in encrypted sidecars; native session persistence is not a claim that the official app can reuse them.
+`auth disconnect` stops desired network activity while retaining trust. `auth logout` commits durable local inhibition before one optional authenticated native logout. It reports local commitment, credential retention, remote confirmation/rejection/unknown outcome and unverified saved-device revocation separately. `auth logout --local` performs only local inhibition and retains saved credentials. `auth forget --yes` is a separate confirmed local action that retains history. Native active secrets and cursors are stored in encrypted sidecars; native session persistence is not a claim that the official app can reuse them.
 
 For operator-selected standalone credential backup/checkpoints only, offline `store restore-credentials --file /private/state.json [--cursor-file /private/raw-cursor.bin]` installs saved-unvalidated state. This is not an official-profile credential extractor. Raw cursors are opaque bytes, not message IDs or JSON; do not edit their values.
 

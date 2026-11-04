@@ -3,7 +3,9 @@ title: CLI reference
 description: Every wx command group, global flags and exit codes.
 ---
 
-Run `wx COMMAND --help` for the full options of any command. Output is JSON.
+Run `wx --help` for command groups, `wx accounts --help` for a group's subcommands,
+or `wx accounts select --help` for a specific action. Help lists commands alphabetically
+and explains what they do. Commands show readable results by default. Use `--json` for machine-readable output.
 
 ## Commands
 
@@ -11,37 +13,52 @@ Run `wx COMMAND --help` for the full options of any command. Output is JSON.
 | --- | --- |
 | `wx serve` | Run the daemon in the foreground |
 | `wx daemon` | `start`, `status`, `logs [--follow]`, `stop` |
-| `wx auth` | `login [--official[=PATH]] [--qr] [--saved-only]`, `status`, `qr ID`, `attempts get/cancel ID`, `logout`, `forget --yes` |
-| `wx accounts` | `list`, `create [--id ID] [--alias NAME]`, `get`, `default ID`, `alias ID NAME`, `remove ID --confirm ID` |
-| `wx account` | `status`, `settings [--auto-download-max-mb MB]`, `capabilities`, `connect`, `disconnect` |
+| `wx auth` | `login [--official[=PATH]] [--qr] [--saved-only]`, `status`, `qr ID`, `attempts get/cancel ID`, `logout [--local]`, `forget --yes` |
+| `wx accounts` | `alias ID NAME`, `capabilities`, `connect`, `create [ID] [--alias NAME]`, `disconnect`, `get [ID]`, `list`, `remove ID --confirm ID`, `select ID`, `settings [--auto-download-max-mb MB]`, `status` |
 | `wx chats` | `list`, `get ID`, `find TEXT`, `read ID --expected-version V`, `mute ID`, `unmute ID`, `pin ID`, `unpin ID` |
 | `wx messages` | `list CHAT`, `get CHAT ID`, `send CHAT --text/--image/--file/--video/--voice/--share`, `media CHAT ID`, `--video-quality normal/original` with `--video`, `recall ID --server-id S`, `sends lookup/get/cancel` |
-| `wx contacts` | `list`, `find TEXT`, `get ID`, `refresh ID`, `sync`, `avatar ID` |
-| `wx groups` | `list`, `get ID`, `members list/get/refresh/add/remove`, `create MEMBERS...`, `rename ID NAME`, `leave ID`, `my-name ID NAME`, `clear-announcement ID`, `refresh ID`, `sync` |
+| `wx contacts` | `list`, `find TEXT`, `get ID`, `lookup ID...`, `refresh ID`, `sync`, `avatar ID` |
+| `wx groups` | `list`, `get ID`, `lookup ID [--version N]`, `members list/get/refresh/add/remove`, `create MEMBERS...`, `rename ID NAME`, `leave ID`, `my-name ID NAME`, `clear-announcement ID`, `refresh ID`, `sync` |
 | `wx events` | `watch [--cursor-file F]`, `list`, `ack --consumer NAME --through CURSOR` |
 | `wx calls` | [Calling](/reference/calls/): `status`, `monitor [--json]`, `dial CONTACT`, `answer [CALL_ID]` |
 | `wx jobs` | `get ID`, `cancel ID`, `retry ID [--reuse-completed-upload]`, `repair-writeback` |
 | `wx operations` | `get ID` |
 | `wx sync` | Fetch new messages now |
 | `wx tokens` | `list`, `create NAME --accounts ID --scopes S`, `revoke ID` |
-| `wx config` | `show`, `server add/list/use` |
-| `wx profile` | Read a stopped profile directly, without a daemon (`add`, `inspect`, `messages`, `contacts`, `images`, …) |
+| `wx config` | `client`, `servers add/list/select`, `show` |
+| `wx profiles` | Read a stopped profile directly, without a daemon (`add`, `avatars`, `chats`, `contacts`, `groups`, `images`, `inspect`, `keys export`, `list`, `messages`, `select`) |
 | `wx store` | Experimental: copy, import and export profiles |
 | `wx version` | Version and build target |
+
+`contacts find` and `groups find` search the saved catalog. `contacts lookup` requests one or more exact contact IDs from WeChat. The display name uses the contact ID if both the remark and nickname are blank. `groups lookup` requests the member roster for an exact group ID from WeChat.
+
+`select` saves a default in this CLI's configuration:
+
+| Command | Saved choice |
+| --- | --- |
+| `wx config servers select NAME` | Server used by subsequent commands |
+| `wx accounts select ID` | Account ID or alias for the selected named server |
+| `wx profiles select NAME` | Local profile for the selected named server, or the standalone profile when no server is selected |
+
+Selection does not sign in or start a connection. Use `--server-name`, `--account`
+or `--local-profile` to override a choice for one command. Previous spellings remain
+accepted for existing scripts, but help shows the canonical commands.
 
 ## Global flags
 
 | Flag | Environment variable | Meaning |
 | --- | --- | --- |
 | `--account ID` | `AGENT_WECHAT_ACCOUNT` | Account ID or alias |
-| `--server-name NAME` | `AGENT_WECHAT_SERVER` | Saved server from `wx config server add` |
+| `--server-name NAME` | `AGENT_WECHAT_SERVER` | Saved server from `wx config servers add` |
 | `--server URL` | `AGENT_WECHAT_URL` | Daemon URL |
 | `--token-file PATH` | `AGENT_WECHAT_TOKEN_FILE` | File holding the API token |
 | | `AGENT_WECHAT_TOKEN` | The token itself (prefer a file) |
 | `--config PATH` | `AGENT_WECHAT_CONFIG` | CLI config file |
-| `--json` | | Machine-readable errors and progress; no terminal QR code |
+| `--json` | | Machine-readable results and errors. Event watches emit one JSON event per line. |
 
 Flags win over environment variables, which win over saved settings. Commands that start background work (sends, downloads, login, recall) also take `--detach` to return as soon as the work is queued.
+
+Use `wx daemon status --json` to parse daemon status in a script. `wx serve --json` prints its readiness record to stderr. `wx daemon logs` streams the saved log in its original format.
 
 `messages send --wait SECONDS` waits up to 3,600 seconds for attachment jobs and 900 seconds for text or shared links (default 30). Use `--wait 3600` for a larger file. A wait ending returns exit code 7 while the same job continues; inspect it with `wx jobs get JOB_ID`. See [Send attachments](/use/media/).
 

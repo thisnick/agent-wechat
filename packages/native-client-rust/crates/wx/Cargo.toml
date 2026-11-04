@@ -24,6 +24,7 @@ axum.workspace = true
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 wechat-config = { path = "../wechat-config" }
 wechat-store = { path = "../wechat-store" }
 wechat-api = { path = "../wechat-api" }
@@ -43,6 +44,7 @@ tempfile.workspace = true
 sha2.workspace = true
 toml = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
+unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

@@ -42,10 +42,6 @@ export async function prepareNativePackage({ root = resolve('packages/cli'), sou
   return manifest;
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  if (process.argv.includes('--if-unpublished') && !await nativePackageUnpublished()) {
-    console.error('CLI version is already published; ordinary/recovery pushes do not require a new native artifact set.');
-  } else {
-    await prepareNativePackage();
-    console.error('Verified native release assets; npm package now contains their exact checksums.');
-  }
+  await prepareNativePackage();
+  console.error('Verified native release assets; npm package now contains their exact checksums.');
 }

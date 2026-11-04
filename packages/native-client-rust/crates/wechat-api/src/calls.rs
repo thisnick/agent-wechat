@@ -10,16 +10,23 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
-use std::{collections::VecDeque, time::Duration};
-use tokio::time::{interval, timeout, Instant, MissedTickBehavior};
+use futures_util::{
+    future::{select, Either},
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
+use std::{collections::VecDeque, pin::pin, time::Duration};
+use tokio::{
+    sync::{broadcast::error::RecvError, mpsc, watch},
+    time::{interval, timeout, Instant, MissedTickBehavior},
+};
 use wechat_calls::{
     audio::AudioFormat,
     frame::{encode_payload, MediaFrame, MediaHeader},
 };
 use wechat_core::{
     call_types::{CallCommand, CallErrorCode, CallEvent, CallMediaCommand, CallSnapshot},
-    calls::service::CallServiceError,
+    calls::service::{CallService, CallServiceError, MediaReceiveQueue},
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024;
@@ -140,7 +147,7 @@ async fn current(
     app.core.store.account(&account)?;
     let snapshot: CallSnapshot = app
         .core
-        .call_service()
+        .call_service(&account)?
         .current(&account, &principal(&claims))
         .await
         .map_err(service_error)?;
@@ -246,7 +253,9 @@ async fn send_event(
 }
 
 async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: String) {
-    let service = app.core.call_service();
+    let Ok(service) = app.core.call_service(&account) else {
+        return;
+    };
     let control_allowed = claims.require(Some(&account), "calls").is_ok();
     let Ok(mut connection) = service
         .connect(&account, &principal(&claims), control_allowed)
@@ -302,7 +311,9 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
 }
 
 async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: String, call: String) {
-    let service = app.core.call_service();
+    let Ok(service) = app.core.call_service(&account) else {
+        return;
+    };
     let (mut sink, mut input) = socket.split();
     let first = timeout(ATTACH_TIMEOUT, input.next()).await;
     let Ok(Some(Ok(Message::Text(text)))) = first else {
@@ -350,7 +361,13 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
         service.detach_media(&connection.id).await;
         return;
     };
-    let mut pcm = PcmInput {
+    let scope = MediaScope {
+        app: &app,
+        claims: &claims,
+        service: &service,
+        id: &connection.id,
+    };
+    let pcm = PcmInput {
         format,
         track: send_track.id,
         generation: None,
@@ -358,67 +375,294 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
         sequence: 0,
         timestamp: 0,
     };
-    let mut audio_tick = interval(Duration::from_millis(u64::from(format.frame_ms())));
-    // Keep a steady sample clock without adding processing time to every
-    // period or emitting catch-up bursts after a scheduling stall.
-    audio_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut valid_tick = interval(Duration::from_secs(1));
+    let trace = std::env::var("WX_CALL_AUDIO_TRACE").as_deref() == Ok("1");
+    let mut receive_trace = trace.then(ReceiveTrace::default);
+    let mut reply_trace = trace.then(ReplyTrace::default);
+    // Only the writer touches the sink. Limit queued pongs if the peer floods
+    // control frames while the socket is blocked.
+    let (pongs, pending_pongs) = mpsc::channel(4);
+    let (stop, shutdown) = watch::channel(());
+    let reason = {
+        let writer = pin!(write_media(
+            &scope,
+            &mut sink,
+            &mut connection.frames,
+            pending_pongs,
+            format,
+            &mut receive_trace,
+            shutdown.clone(),
+        ));
+        let reader = pin!(read_media(
+            &scope,
+            &mut input,
+            pongs,
+            pcm,
+            &mut reply_trace,
+            shutdown,
+        ));
+        let (reason, finishing) = match select(writer, reader).await {
+            Either::Left((reason, reader)) => (reason, Either::Left(reader)),
+            Either::Right((reason, writer)) => (reason, Either::Right(writer)),
+        };
+        // Revoke ownership promptly, then finish any fence the other direction
+        // has already taken from the service. Dropping it mid-await could lose
+        // pending maintenance work.
+        stop.send_replace(());
+        service.detach_media(&connection.id).await;
+        finishing.await;
+        reason
+    };
+    if let Some(trace) = &mut receive_trace {
+        trace.report(connection.frames.pending_frames());
+    }
+    if let Some(trace) = &mut reply_trace {
+        trace.report();
+    }
+    if trace {
+        eprintln!("[wechat-call-audio] daemon close reason={reason}");
+    }
+    let _ = send(&mut sink, Message::Close(None)).await;
+}
+
+struct MediaScope<'a> {
+    app: &'a App,
+    claims: &'a Claims,
+    service: &'a CallService,
+    id: &'a str,
+}
+
+#[derive(Default)]
+struct ReceiveTrace {
+    dequeued: u64,
+    written: u64,
+    dropped: u64,
+    peak_depth: usize,
+    producer_gap_min: Option<Duration>,
+    producer_gap_max: Duration,
+    queue_age_max: Duration,
+    credential_max: Duration,
+    delivery_check_max: Duration,
+    socket_write_max: Duration,
+}
+impl ReceiveTrace {
+    fn report(&mut self, pending_frames: usize) {
+        if self.dequeued != 0 || self.dropped != 0 || pending_frames != 0 {
+            eprintln!(
+                "[wechat-call-audio] daemon receive dequeued={} written={} dropped={} pending_frames={} peak_depth={} producer_gap_min_us={} producer_gap_max_us={} queue_age_max_us={} credential_max_us={} delivery_check_max_us={} socket_write_max_us={}",
+                self.dequeued,
+                self.written,
+                self.dropped,
+                pending_frames,
+                self.peak_depth.max(pending_frames),
+                self.producer_gap_min.unwrap_or_default().as_micros(),
+                self.producer_gap_max.as_micros(),
+                self.queue_age_max.as_micros(),
+                self.credential_max.as_micros(),
+                self.delivery_check_max.as_micros(),
+                self.socket_write_max.as_micros(),
+            );
+        }
+        *self = Self::default();
+    }
+}
+
+#[derive(Default)]
+struct ReplyTrace {
+    chunks: u64,
+    bytes: usize,
+    peak_pending_bytes: usize,
+    submitted_frames: u64,
+    credential_max: Duration,
+    backend_max: Duration,
+}
+impl ReplyTrace {
+    fn report(&mut self) {
+        if self.chunks != 0 || self.submitted_frames != 0 || self.peak_pending_bytes != 0 {
+            eprintln!(
+                "[wechat-call-audio] daemon reply chunks={} bytes={} peak_pending_bytes={} submitted_frames={} credential_max_us={} backend_max_us={}",
+                self.chunks,
+                self.bytes,
+                self.peak_pending_bytes,
+                self.submitted_frames,
+                self.credential_max.as_micros(),
+                self.backend_max.as_micros(),
+            );
+        }
+        *self = Self::default();
+    }
+}
+
+async fn write_media(
+    scope: &MediaScope<'_>,
+    sink: &mut SplitSink<WebSocket, Message>,
+    frames: &mut MediaReceiveQueue,
+    mut pongs: mpsc::Receiver<Message>,
+    format: AudioFormat,
+    trace: &mut Option<ReceiveTrace>,
+    mut shutdown: watch::Receiver<()>,
+) -> &'static str {
     let mut ping_tick = interval(Duration::from_secs(15));
-    let mut last_seen = Instant::now();
-    loop {
+    let mut trace_tick = interval(Duration::from_secs(1));
+    trace_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    while !shutdown.has_changed().unwrap_or(true) {
         tokio::select! {
-            _ = audio_tick.tick() => {
-                if pcm.pending.is_empty() { continue; }
-                let Ok(current) = service.media_generation(&connection.id).await else { break; };
-                match pcm.next_frame(current) {
-                    Ok(Some(frame)) => {
-                        if ensure_current(&app, &claims).await.is_err()
-                            || service.media_frame(&connection.id, &frame).await.is_err() { break; }
+            _ = shutdown.changed() => break,
+            _ = ping_tick.tick() => {
+                if !send(sink, Message::Ping(Default::default())).await { return "media-ping-send-failed"; }
+            }
+            pong = pongs.recv() => {
+                let Some(pong) = pong else { return "media-pong-source-closed"; };
+                if !send(sink, pong).await { return "media-pong-send-failed"; }
+            }
+            _ = trace_tick.tick(), if trace.is_some() => {
+                if let Some(trace) = trace { trace.report(frames.pending_frames()); }
+            }
+            frame = frames.recv_frame() => {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(RecvError::Lagged(dropped)) => {
+                        if let Some(trace) = trace {
+                            trace.dropped += dropped;
+                            trace.peak_depth = trace.peak_depth.max(frames.pending_frames());
+                        }
+                        continue;
                     }
-                    Ok(None) => {},
-                    Err(()) => break,
+                    Err(RecvError::Closed) => return "media-receiver-closed",
+                };
+                if let Some(trace) = trace {
+                    trace.dequeued += 1;
+                    trace.peak_depth = trace.peak_depth.max(1 + frames.pending_frames());
+                    trace.queue_age_max = trace.queue_age_max.max(frame.enqueued_at.elapsed());
+                    if let Some(gap) = frame.producer_gap {
+                        trace.producer_gap_min = Some(trace.producer_gap_min.map_or(gap, |min| min.min(gap)));
+                        trace.producer_gap_max = trace.producer_gap_max.max(gap);
+                    }
                 }
-            }
-            _ = valid_tick.tick() => {
-                if last_seen.elapsed() >= IDLE_TIMEOUT || ensure_current(&app, &claims).await.is_err()
-                    || service.validate_media(&connection.id).await.is_err() { break; }
-            }
-            _ = ping_tick.tick() => { if !send(&mut sink, Message::Ping(Default::default())).await { break; } }
-            frame = connection.frames.recv() => {
-                let Some(frame) = frame else { break; };
-                if ensure_current(&app, &claims).await.is_err() || frame.len() > MEDIA_LIMIT { break; }
-                match service.media_delivery_allowed(&connection.id).await {
+                let start = Instant::now();
+                let credential = ensure_current(scope.app, scope.claims).await;
+                if let Some(trace) = trace {
+                    trace.credential_max = trace.credential_max.max(start.elapsed());
+                }
+                if credential.is_err() || frame.bytes.len() > MEDIA_LIMIT { return "media-receive-fenced"; }
+                let start = Instant::now();
+                let delivery = scope.service.media_delivery_allowed(scope.id).await;
+                if let Some(trace) = trace {
+                    trace.delivery_check_max = trace.delivery_check_max.max(start.elapsed());
+                }
+                match delivery {
                     Ok(true) => {
-                        let Ok(frame) = MediaFrame::decode(&frame, format) else { break; };
-                        if !send(&mut sink, Message::Binary(frame.payload().to_vec().into())).await { break; }
+                        let Ok(frame) = MediaFrame::decode(&frame.bytes, format) else { return "media-received-frame-invalid"; };
+                        let start = Instant::now();
+                        let sent = send(sink, Message::Binary(frame.payload().to_vec().into())).await;
+                        if let Some(trace) = trace {
+                            trace.socket_write_max = trace.socket_write_max.max(start.elapsed());
+                            trace.written += u64::from(sent);
+                        }
+                        if !sent { return "media-receive-send-failed"; }
                     }
                     Ok(false) => {},
-                    Err(_) => break,
-                }
-            }
-            message = input.next() => {
-                let Some(Ok(message)) = message else { break; };
-                last_seen = Instant::now();
-                if ensure_current(&app, &claims).await.is_err() { break; }
-                match message {
-                    Message::Binary(bytes) if bytes.len() <= MEDIA_LIMIT => {
-                        let Ok(current) = service.media_generation(&connection.id).await else { break; };
-                        if pcm.push(&bytes, current).is_err() { break; }
-                    }
-                    Message::Text(text) if text.len() <= CONTROL_LIMIT => {
-                        let Ok(CallMediaCommand::AudioStart { generation }) = serde_json::from_str(&text) else { break; };
-                        let Ok(current) = service.media_generation(&connection.id).await else { break; };
-                        if pcm.start(generation, current).is_err() { break; }
-                    }
-                    Message::Ping(bytes) => { if !send(&mut sink, Message::Pong(bytes)).await { break; } }
-                    Message::Pong(_) => {}
-                    _ => break,
+                    Err(_) => return "media-delivery-fenced",
                 }
             }
         }
     }
-    service.detach_media(&connection.id).await;
-    let _ = send(&mut sink, Message::Close(None)).await;
+    "media-other-direction-closed"
+}
+
+async fn read_media(
+    scope: &MediaScope<'_>,
+    input: &mut SplitStream<WebSocket>,
+    pongs: mpsc::Sender<Message>,
+    mut pcm: PcmInput,
+    trace: &mut Option<ReplyTrace>,
+    mut shutdown: watch::Receiver<()>,
+) -> &'static str {
+    let mut audio_tick = interval(Duration::from_millis(u64::from(pcm.format.frame_ms())));
+    // Keep a steady sample clock without adding processing time to every
+    // period or emitting catch-up bursts after a scheduling stall.
+    audio_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut valid_tick = interval(Duration::from_secs(1));
+    let mut trace_tick = interval(Duration::from_secs(1));
+    trace_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut last_seen = Instant::now();
+    while !shutdown.has_changed().unwrap_or(true) {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = audio_tick.tick() => {
+                if pcm.pending.is_empty() { continue; }
+                let Ok(current) = scope.service.media_generation(scope.id).await else { return "media-generation-unavailable"; };
+                match pcm.next_frame(current) {
+                    Ok(Some(frame)) => {
+                        let start = Instant::now();
+                        let credential = ensure_current(scope.app, scope.claims).await;
+                        if let Some(trace) = trace {
+                            trace.credential_max = trace.credential_max.max(start.elapsed());
+                        }
+                        if credential.is_err() { return "media-credential-fenced"; }
+                        let start = Instant::now();
+                        let result = scope.service.media_frame(scope.id, &frame).await;
+                        if let Some(trace) = trace {
+                            trace.backend_max = trace.backend_max.max(start.elapsed());
+                            trace.submitted_frames += u64::from(result.is_ok());
+                        }
+                        if result.is_err() {
+                            return "media-frame-rejected";
+                        }
+                    }
+                    Ok(None) => {},
+                    Err(()) => return "media-frame-invalid",
+                }
+            }
+            _ = valid_tick.tick() => {
+                if last_seen.elapsed() >= IDLE_TIMEOUT { return "media-idle-timeout"; }
+                if ensure_current(scope.app, scope.claims).await.is_err() { return "media-credential-fenced"; }
+                if scope.service.validate_media(scope.id).await.is_err() {
+                    return "media-validation-failed";
+                }
+            }
+            _ = trace_tick.tick(), if trace.is_some() => {
+                if let Some(trace) = trace {
+                    trace.report();
+                    trace.peak_pending_bytes = pcm.pending.len();
+                }
+            }
+            message = input.next() => {
+                let Some(Ok(message)) = message else { return "media-client-stream-closed"; };
+                last_seen = Instant::now();
+                let credential = ensure_current(scope.app, scope.claims).await;
+                if let Some(trace) = trace {
+                    trace.credential_max = trace.credential_max.max(last_seen.elapsed());
+                }
+                if credential.is_err() { return "media-credential-fenced"; }
+                match message {
+                    Message::Binary(bytes) if bytes.len() <= MEDIA_LIMIT => {
+                        let Ok(current) = scope.service.media_generation(scope.id).await else { return "media-generation-unavailable"; };
+                        if let Some(trace) = trace {
+                            trace.chunks += 1;
+                            trace.bytes += bytes.len();
+                        }
+                        if pcm.push(&bytes, current).is_err() {
+                            return "media-pcm-rejected";
+                        }
+                        if let Some(trace) = trace {
+                            trace.peak_pending_bytes = trace.peak_pending_bytes.max(pcm.pending.len());
+                        }
+                    }
+                    Message::Text(text) if text.len() <= CONTROL_LIMIT => {
+                        let Ok(CallMediaCommand::AudioStart { generation }) = serde_json::from_str(&text) else { return "media-audio-start-invalid"; };
+                        let Ok(current) = scope.service.media_generation(scope.id).await else { return "media-generation-unavailable"; };
+                        if pcm.start(generation, current).is_err() { return "media-generation-rejected"; }
+                    }
+                    Message::Ping(bytes) => {
+                        if pongs.try_send(Message::Pong(bytes)).is_err() { return "media-pong-backpressure"; }
+                    }
+                    Message::Pong(_) => {}
+                    _ => return "media-unexpected-message",
+                }
+            }
+        }
+    }
+    "media-other-direction-closed"
 }
 
 #[cfg(test)]

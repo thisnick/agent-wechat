@@ -198,7 +198,8 @@ impl Fixture {
     async fn client(&self, control: bool) -> ControlConnection {
         let mut client = self
             .core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .connect("one", "fixture", control)
             .await
             .unwrap();
@@ -275,7 +276,8 @@ async fn ready(
     scope: CallReadyScope,
 ) -> CallCommandStatus {
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Ready {
@@ -297,7 +299,8 @@ async fn offered(f: &Fixture) -> CallOffer {
     for _ in 0..100 {
         if let Some(offer) = f
             .core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .current("one", "fixture")
             .await
             .unwrap()
@@ -333,7 +336,8 @@ async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projectio
     );
     assert!(f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap()
@@ -344,7 +348,8 @@ async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projectio
     f.stage(batch(40, false, 2, "other-self"));
     assert!(f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap()
@@ -354,7 +359,8 @@ async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projectio
     let id = f.stage(raw.clone());
     let snapshot = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap();
@@ -369,23 +375,27 @@ async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projectio
         cancellation_note(&f, batch(42, true, 2, "synthetic_self"), lease.clone());
     wrong_header.header_from = "different-system".into();
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .ingest_incoming(wrong_header, Duration::from_secs(30));
     let mut wrong_recipient = cancellation_note(&f, batch(42, true, 2, "synthetic_self"), lease);
     wrong_recipient.own_username = "different-self".into();
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .ingest_incoming(wrong_recipient, Duration::from_secs(30));
     let stale = cancellation_note(&f, batch(42, true, 2, "synthetic_self"), old);
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .ingest_incoming(stale, Duration::from_secs(30));
     settle().await;
     assert_eq!(f.backend.cancelled.load(Ordering::SeqCst), 0);
     assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 0);
     assert_eq!(
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .current("one", "fixture")
             .await
             .unwrap()
@@ -421,7 +431,8 @@ async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projectio
     assert!(attempt.request.guard.is_current());
     let snapshot = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap();
@@ -460,7 +471,8 @@ async fn cancelled_candidate_scope_cannot_ack_its_replacement_or_outgoing_readin
     f.stage(batch(42, false, 2, "synthetic_self"));
     let first = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap()
@@ -488,7 +500,8 @@ async fn cancelled_candidate_scope_cannot_ack_its_replacement_or_outgoing_readin
     assert_eq!(f.backend.prepared.load(Ordering::SeqCst), 0);
     let snapshot = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap();
@@ -570,7 +583,8 @@ async fn cancellation_error_or_timeout_holds_slot_and_late_ignored_prepare_canno
         settle().await;
         let snapshot = f
             .core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .current("one", "fixture")
             .await
             .unwrap();
@@ -586,7 +600,8 @@ async fn cancellation_error_or_timeout_holds_slot_and_late_ignored_prepare_canno
         .await
         .unwrap();
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .verified_incoming_terminal(&authority, &identity)
             .unwrap();
         let mut terminal_event = false;
@@ -601,7 +616,8 @@ async fn cancellation_error_or_timeout_holds_slot_and_late_ignored_prepare_canno
         assert!(terminal_event, "Unanswered offers need a terminal event");
         assert!(
             !f.core
-                .call_service()
+                .call_service("one")
+                .unwrap()
                 .current("one", "fixture")
                 .await
                 .unwrap()
@@ -640,7 +656,8 @@ async fn same_staging_turn_cancellation_waits_for_explicit_actor_registration() 
     settle().await;
     let snapshot = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .current("one", "fixture")
         .await
         .unwrap();
@@ -666,7 +683,8 @@ async fn unregistered_synchronous_preparation_ignores_or_ends_without_false_canc
         settle().await;
         let snapshot = f
             .core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .current("one", "fixture")
             .await
             .unwrap();

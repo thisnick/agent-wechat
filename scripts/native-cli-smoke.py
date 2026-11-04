@@ -39,25 +39,34 @@ with tempfile.TemporaryDirectory(prefix="native-cli-smoke-") as temporary:
         return json.loads(output) if output else None
     try:
         assert run("daemon","status")["state"]=="stopped"
+        human_status = subprocess.run([arg for arg in base if arg != "--json"] + ["daemon", "status"],
+                                      env=env, capture_output=True, text=True, timeout=10, check=True)
+        assert "State: stopped" in human_status.stdout and "Managed: Yes" in human_status.stdout
         first=run("daemon","start"); owned=True
         assert first["version"]["backend"]=="native"
         assert run("daemon","start")["pid"]==first["pid"]
         assert run("daemon","status")["ownershipGeneration"]==first["ownershipGeneration"]
-        run("config","server","add","local","--url",f"http://127.0.0.1:{port}","--token-file",str(token))
-        run("config","server","use","local")
+        run("config","servers","add","local","--url",f"http://127.0.0.1:{port}","--token-file",str(token))
+        run("config","servers","select","local")
         assert run("auth","status",code=2)["error"]["code"]=="account_not_selected"
         a=run("accounts","create","a","--alias","alpha"); assert a["id"]=="a"
         assert run("accounts","get")["id"]=="a"
         run("accounts","create","b")
         assert run("auth","status",code=2)["error"]["code"]=="account_ambiguous"
+        run("accounts","select","alpha")
+        assert run("accounts","status")["id"]=="a"
+        # Legacy spellings remain executable but are hidden from help.
+        assert run("config","server","list")==run("config","servers","list")
+        run("config","server","use","local")
         run("accounts","default","alpha")
-        assert run("account","status")["id"]=="a"
+        assert run("account","status")==run("accounts","status")
+        assert run("account","settings")==run("accounts","settings")
         run("accounts","alias","a","renamed")
-        assert run("--account","renamed","account","status")["id"]=="a"
+        assert run("--account","renamed","accounts","status")["id"]=="a"
         checkpoint=root/"cursor.json"
         watcher=subprocess.Popen(base+["events","watch","--cursor-file",str(checkpoint)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
-            time.sleep(.3); run("account","disconnect")
+            time.sleep(.3); run("accounts","disconnect")
             deadline=time.monotonic()+5
             while not checkpoint.exists() and time.monotonic()<deadline: time.sleep(.05)
             assert checkpoint.exists(),"actual daemon events were not emitted/checkpointed"

@@ -946,6 +946,42 @@ impl NativeClient {
         request: &[u8],
         before_submit: impl FnOnce() -> Result<()>,
     ) -> Result<Vec<u8>> {
+        self.call_rpc_with_exchange(state, route, request, before_submit, mmtls::short_exchange)
+    }
+
+    /// Allow the embedding daemon to stop awaiting a pre-answer LiveSync.
+    /// The returned interruption does not assert that the request was unsent.
+    #[doc(hidden)]
+    pub fn experimental_call_live_sync_guarded(
+        &self,
+        state: &mut AccountState,
+        request: &[u8],
+        before_submit: impl FnOnce() -> Result<()>,
+        wait: impl for<'a> FnOnce(
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>>,
+        ) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        self.call_rpc_with_exchange(
+            state,
+            crate::calls::host_policy::CallHostRoute::LiveSync,
+            request,
+            before_submit,
+            |session, host, path, payload, timeout| {
+                wait(Box::pin(mmtls::short_exchange_interruptible(
+                    session, host, path, payload, timeout,
+                )))
+            },
+        )
+    }
+
+    fn call_rpc_with_exchange(
+        &self,
+        state: &mut AccountState,
+        route: crate::calls::host_policy::CallHostRoute,
+        request: &[u8],
+        before_submit: impl FnOnce() -> Result<()>,
+        exchange: impl FnOnce(&mmtls::ShortSession, &str, &str, &[u8], Duration) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
         use crate::calls::{
             host_policy::{selected_policy, CallHostPolicy},
             host_transport::{CallHostRpcError, CallHostStage},
@@ -963,14 +999,20 @@ impl NativeClient {
         let packet = AuthenticatedPacket::prepare(state, route.command(), request)
             .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Prepare, &error))?;
         before_submit()?;
-        let reply = mmtls::short_exchange(
+        let reply = exchange(
             &session.short,
             &state.short_host,
             route.path(),
             &packet.packet,
             self.options.timeout,
         )
-        .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Exchange, &error))?;
+        .map_err(|error| {
+            if error.is::<crate::calls::client::CallLiveSyncInterrupted>() {
+                error
+            } else {
+                CallHostRpcError::from_cause(CallHostStage::Exchange, &error).into()
+            }
+        })?;
         let (plain, cookie) =
             crate::calls::host_transport::decode_verified_reply(state, route.command(), &reply)?;
         if !cookie.is_empty() {
@@ -986,8 +1028,19 @@ impl NativeClient {
         path: &str,
         request: &[u8],
     ) -> Result<Vec<u8>> {
+        self.authenticated_rpc_guarded(state, cgi, path, request, || Ok(()))
+    }
+    fn authenticated_rpc_guarded(
+        &self,
+        state: &mut AccountState,
+        cgi: u16,
+        path: &str,
+        request: &[u8],
+        before_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<u8>> {
         let session = self.session(&state.long_host)?;
         let packet = AuthenticatedPacket::prepare(state, cgi, request)?;
+        before_submit()?;
         let reply = mmtls::short_exchange(
             &session.short,
             &state.short_host,
@@ -1049,13 +1102,43 @@ impl NativeClient {
         created_at: u32,
         client_message_id: u32,
     ) -> Result<TextSendResult> {
-        self.send_text_with_source(
+        self.send_text_guarded(
             state,
             destination,
             content,
             created_at,
             client_message_id,
+            || Ok(()),
+        )
+    }
+    /// Recheck the embedding daemon's admission immediately before submitting.
+    #[doc(hidden)]
+    pub fn send_text_guarded(
+        &self,
+        state: &mut AccountState,
+        destination: &str,
+        content: &str,
+        created_at: u32,
+        client_message_id: u32,
+        before_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<TextSendResult> {
+        let request = wire::text_send_request_with_source(
+            destination,
+            content,
+            created_at,
+            client_message_id,
             None,
+        )?;
+        wire::decode_text_send(
+            &self.authenticated_rpc_guarded(
+                state,
+                522,
+                "/cgi-bin/micromsg-bin/newsendmsg",
+                &request,
+                before_submit,
+            )?,
+            destination,
+            client_message_id,
         )
     }
     /// Submit text with optional native message-source XML. For a simple send use

@@ -36,7 +36,7 @@ sequenceDiagram
 4. The changes are written to the profile: new messages, unread counts, contacts and groups.
 5. Only then does each new message become a `message.committed` event. Clients follow the [event stream](/use/api/#receive), fetch the message, and acknowledge how far they've read.
 
-If the push connection drops, the daemon polls instead until it's back (`incomingTransport` in `wx account status`). Anything that arrived while the daemon was offline comes in a catch-up batch when it reconnects. It's stored, but marked as catch-up so clients don't treat it as new.
+If the push connection drops, the daemon polls instead until it's back (`incomingTransport` in `wx accounts status`). Anything that arrived while the daemon was offline comes in a catch-up batch when it reconnects. It's stored, but marked as catch-up so clients don't treat it as new.
 
 ## 3. Sending
 

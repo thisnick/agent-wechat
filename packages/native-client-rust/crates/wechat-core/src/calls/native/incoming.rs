@@ -4,6 +4,7 @@ use super::*;
 use crate::calls::notifications::{
     IncomingCancellation, IncomingNotification, IncomingPreparation, IncomingRequest,
 };
+use std::sync::mpsc::RecvTimeoutError;
 use wechat_protocol::calls::{
     client::{IncomingPhase, NativeIncomingSession},
     incoming::NotificationPayload,
@@ -11,6 +12,7 @@ use wechat_protocol::calls::{
 
 type PreparationReply =
     Arc<Mutex<Option<oneshot::Sender<std::result::Result<IncomingPreparation, CallServiceError>>>>>;
+const FIRST_ANSWER_WINDOW: Duration = Duration::from_secs(3);
 
 pub(super) fn supported(inner: &Inner, authority: &AccountAuthority, caller: &str) -> bool {
     !caller.is_empty()
@@ -25,7 +27,7 @@ pub(super) fn supported(inner: &Inner, authority: &AccountAuthority, caller: &st
 fn known_invitation(note: &IncomingNotification) -> bool {
     // Only the selected conference bytes describe the admitted operation.
     // Opaque outer-carrier fields remain in the original notification; the
-    // ACK still has to bind the caller's member before an offer is published.
+    // The verified ACK binds the room and our member before an offer is published.
     matches!(&note.control.payload, NotificationPayload::Invite(invite) if invite.unknown_fields.is_empty())
         && note.control.conference.unknown_fields.is_empty()
 }
@@ -154,15 +156,18 @@ pub(super) async fn prepare(
             } else {
                 BackendOutcome::Uncertain
             });
-            if let Some(core) = core {
+            let service = core.and_then(|core| {
+                core.call_service(&actor_worker.lease.authority().account_id)
+                    .ok()
+            });
+            if let Some(service) = service {
                 if confirmed {
-                    let _ = core.call_service().verified_incoming_terminal(
+                    let _ = service.verified_incoming_terminal(
                         actor_worker.lease.authority(),
                         &actor_worker.identity,
                     );
                 } else if !terminal {
-                    let _ = core
-                        .call_service()
+                    let _ = service
                         .incoming_uncertain(actor_worker.lease.authority(), &actor_worker.identity);
                 }
             }
@@ -250,6 +255,7 @@ impl Actor {
             worker: worker.clone(),
             admission: ControlAdmission::Incoming(request.guard.clone()),
             runtime,
+            timeout: CALL_RPC_TIMEOUT,
             #[cfg(test)]
             test_io: inner.test_io.clone(),
         };
@@ -331,15 +337,21 @@ impl Actor {
         if self.drain_commands()? {
             return Ok(());
         }
-        // Mode1 starts LiveSync in ACKed status3. Inspect the first whole batch
-        // before publishing; ACKed polling continues while no winner exists.
-        if self.poll()? {
-            return self.finish_remote();
-        }
         ensure!(
             reply_prepared(&self.prepared, IncomingPreparation::Acked),
             "Incoming preparation receiver closed"
         );
+        // Give the offered client a chance to answer before a blocking poll
+        // starts. The actor still serializes Join, cancellation and LiveSync.
+        let wait = FIRST_ANSWER_WINDOW.min(
+            self.request
+                .expires
+                .saturating_duration_since(Instant::now()),
+        );
+        if self.wait_for_commands(wait)? {
+            return Ok(());
+        }
+        let mut first_poll = true;
         loop {
             if self.drain_commands()? {
                 return Ok(());
@@ -382,9 +394,20 @@ impl Actor {
                     "Unowned incoming admission expired"
                 );
             }
-            match self.poll() {
+            let poll = if first_poll && self.phase() == IncomingPhase::Acknowledged {
+                let timeout =
+                    std::mem::replace(&mut self.transport.timeout, Duration::from_secs(60));
+                let result = self.poll();
+                self.transport.timeout = timeout;
+                result
+            } else {
+                self.poll()
+            };
+            first_poll = false;
+            match poll {
                 Ok(true) => return self.finish_remote(),
                 Ok(false) => {}
+                Err(error) if error.is::<CallLiveSyncInterrupted>() => continue,
                 Err(error) if error.is::<CallRpcNotSubmitted>() => {
                     if self.drain_commands()? {
                         return Ok(());
@@ -429,8 +452,13 @@ impl Actor {
             && !self.mailbox.cancellation_pending()
             && self
                 .core
-                .call_service()
-                .pending_incoming_reject(self.worker.lease.authority(), &self.worker.identity)
+                .call_service(&self.worker.lease.authority().account_id)
+                .is_ok_and(|service| {
+                    service.pending_incoming_reject(
+                        self.worker.lease.authority(),
+                        &self.worker.identity,
+                    )
+                })
     }
     fn register_member(&self) -> Result<()> {
         let room = self
@@ -441,13 +469,15 @@ impl Actor {
         // Publish the already authenticated member before exposing it through
         // the broker. Delivery cannot keep an old snapshot past this point.
         self.mailbox.publish_member(room.own_member)?;
-        self.core.call_service().set_incoming_member(
-            self.worker.lease.authority(),
-            &self.worker.identity,
-            room.room,
-            room.room_key,
-            room.own_member,
-        )?;
+        self.core
+            .call_service(&self.worker.lease.authority().account_id)?
+            .set_incoming_member(
+                self.worker.lease.authority(),
+                &self.worker.identity,
+                room.room,
+                room.room_key,
+                room.own_member,
+            )?;
         Ok(())
     }
     fn poll(&mut self) -> Result<bool> {
@@ -496,12 +526,19 @@ impl Actor {
         Ok(matches!(progress, SyncProgress::Terminal(_)))
     }
     fn drain_commands(&mut self) -> Result<bool> {
-        for _ in 0..8 {
-            let command = match self.commands.try_recv() {
-                Ok(command) => self.mailbox.next(command),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => bail!("Incoming actor mailbox closed"),
-            };
+        self.wait_for_commands(Duration::ZERO)
+    }
+    fn wait_for_commands(&mut self, wait: Duration) -> Result<bool> {
+        for index in 0..8 {
+            let command =
+                match self
+                    .commands
+                    .recv_timeout(if index == 0 { wait } else { Duration::ZERO })
+                {
+                    Ok(command) => self.mailbox.next(command),
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => bail!("Incoming actor mailbox closed"),
+                };
             match command {
                 Command::Cancel { note, result, .. } => {
                     let verdict = self.cancel_note(&note);
@@ -791,6 +828,7 @@ pub(super) enum Command {
 }
 pub(super) struct Mailbox {
     send: SyncSender<Command>,
+    pub(super) answer_queued: Notify,
     pending_cancellations: AtomicU32,
     room: u64,
     room_key: u64,
@@ -803,6 +841,7 @@ impl Mailbox {
         (
             Arc::new(Self {
                 send,
+                answer_queued: Notify::new(),
                 pending_cancellations: AtomicU32::new(0),
                 room,
                 room_key,
@@ -866,6 +905,7 @@ pub(super) async fn action(
         .as_ref()
         .ok_or_else(|| service_error(CallErrorCode::Unsupported))?;
     let (send, receive) = oneshot::channel();
+    let answering = request.ticket.operation() == Operation::Answer;
     mailbox
         .send
         .try_send(Command::Action {
@@ -874,6 +914,9 @@ pub(super) async fn action(
             result: send,
         })
         .map_err(|_| service_error(CallErrorCode::Capacity))?;
+    if answering {
+        mailbox.answer_queued.notify_one();
+    }
     receive
         .await
         .unwrap_or(Err(service_error(CallErrorCode::OutcomeUnknown)))
