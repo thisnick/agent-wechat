@@ -2,12 +2,28 @@
 """Real CLI transport tests against a synthetic HTTP fixture; never calls WeChat."""
 import base64, hashlib, json, os, pathlib, signal, subprocess, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 binary=str(pathlib.Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     root=pathlib.Path(temporary);token=root/"token";token.write_text("fixture-token-"*4);token.chmod(0o600)
     config=root/"client.toml"; state={"posts":0,"login_posts":0,"cancelled":0,"mode":"accepted","media_transfers":0,"official_posts":[],"official_first":False,"recall_posts":0,"recall_mode":"succeeded","recall_operations":{},"recall_drop":False,"recall_wrong_post":False,"recall_wrong_get":False}
     content={"thumbnail":b"synthetic-thumbnail","original":b"synthetic-original"}
+    chat_page = {
+        "items": [{
+            "id": "fixture-room@chatroom", "displayName": "讀書會", "kind": "group",
+            "unreadCount": 2, "lastMessage": {"text": "Next\nmeeting\x1b[31m"},
+        }],
+        "nextCursor": "fixture-next-page",
+    }
+    message_page = {
+        "items": [
+            {"id": "msg_fixture_12345678901", "serverId": "18446744073709551615", "senderId": "alex",
+             "createdAt": "2026-10-23T00:00:00+00:00", "body": "First line\nSecond line", "type": 1},
+            {"id": "photo", "direction": "outgoing", "type": 3},
+        ],
+        "coverage": {"partial": True, "databases": [{"relativePath": "message/message_0.db"}]},
+        "nextCursor": "fixture-next-message",
+    }
     def asset(name):return {"id":name,"state":"available","variant":name,"actualVariant":name,"sha256":hashlib.sha256(content[name]).hexdigest(),"byteLength":len(content[name])}
     class Fixture(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
@@ -19,6 +35,14 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             if path=="/v1/accounts":
                 assert not state["official_first"],"catalog queried before official preparation"
                 return self.reply({"items":[{"id":"a"}]})
+            if path == "/v1/accounts/a/threads":
+                search = parse_qs(urlsplit(self.path).query).get("query")
+                return self.reply({"items": [], "nextCursor": None} if search == ["missing"] else chat_page)
+            if path == "/v1/accounts/a/threads/filehelper/messages":
+                return self.reply(message_page)
+            if path == "/v1/accounts/a/groups/fixture%40chatroom/lookup":
+                version = int(parse_qs(urlsplit(self.path).query)["version"][0])
+                return self.reply({"id": "fixture@chatroom", "version": version, "items": []})
             if path.endswith("/sends/by-idempotency-key") or path.endswith("/sends/send-fixture"):return self.reply({"id":"send-fixture","state":state["mode"]})
             if path.endswith("/operations/login-fixture/qr"):
                 assert "generation=1" in self.path
@@ -40,6 +64,15 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             self.reply({"error":{"code":"fixture_not_found"}},404)
         def do_POST(self):
             self.authenticated();body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))) or b"{}");path=urlsplit(self.path).path
+            if path == "/v1/accounts/a/contacts/lookup":
+                assert body == {"ids": ["one", "two"]}
+                return self.reply({"items": [{"id": "one"}, {"id": "two"}]})
+            if path == "/v1/accounts/a/auth/logout-local":
+                assert body == {} and self.headers.get("Idempotency-Key") is None
+                return self.reply({"state": "logged_out", "serverRevocation": "not_requested"})
+            if path == "/v1/accounts/a/logout":
+                assert body == {} and self.headers.get("Idempotency-Key") == "fixture-logout"
+                return self.reply({"id": "logout-fixture", "state": "succeeded"})
             if path=="/v1/profiles/official":
                 state["official_posts"].append(body);state["official_first"]=False
                 return self.reply({"accountId":"a","profilePath":"/daemon-home","storageMode":"official","savedDeviceLoginAvailable":False})
@@ -79,12 +112,48 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
     server=ThreadingHTTPServer(("127.0.0.1",0),Fixture);threading.Thread(target=server.serve_forever,daemon=True).start()
     env={k:v for k,v in os.environ.items() if not k.startswith("AGENT_WECHAT_")};env.update(HOME=str(root),XDG_CONFIG_HOME=str(root/"config"))
     args=[binary,"--json","--config",str(config),"--server",f"http://127.0.0.1:{server.server_port}","--token-file",str(token)]
+    human_args = [arg for arg in args if arg != "--json"]
+    def human(*command):
+        result = subprocess.run(human_args + list(command), env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (command, result.stdout, result.stderr)
+        return result.stdout
     def run(*command,code=0):
         result=subprocess.run(args+list(command),env=env,capture_output=True,text=True,timeout=10);assert result.returncode==code,(command,result.returncode,result.stdout,result.stderr)
         structured=result.stdout or next((line for line in reversed(result.stderr.splitlines()) if line.startswith("{")), "")
         return json.loads(structured)
     try:
-        run("config","server","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
+        run("config","servers","add","fixture","--url",f"http://127.0.0.1:{server.server_port}","--token-file",str(token))
+        for command in [("chats", "list"), ("chats", "find", "讀書會"), ("threads",)]:
+            header, row, cursor = human(*command).splitlines()
+            assert header.split("  ")[0] == "Name" and "Chat ID" in header
+            assert all(text in row for text in ("讀書會", "fixture-room@chatroom", "group", "2", "Next"))
+            assert "\x1b" not in row and cursor == "Next cursor: fixture-next-page"
+            assert run(*command) == chat_page
+        assert human("chats", "find", "missing") == "No chats found.\n"
+        assert human("messages", "get", "m") == "ID: m\nThread ID: filehelper\n"
+        history = human("messages", "list", "filehelper")
+        header, first, second, *_ = history.splitlines()
+        assert header.split() == ["Sender", "Message", "Timestamp", "ID"]
+        assert first.startswith("alex ") and "First line Second line" in first
+        assert "2026-10-23T00:00:00+00:00" in first and first.endswith("…12345678901")
+        assert second.startswith("You ") and "[Photo]" in second and second.endswith("photo")
+        assert message_page["items"][0]["id"] not in history
+        assert "Next cursor: fixture-next-message" in history and "Only partial message history" in history
+        assert "message_0.db" not in history
+        assert run("messages", "list", "filehelper") == message_page
+        contacts = run("contacts", "lookup", "one", "two")
+        assert contacts["items"] == [{"id": "one"}, {"id": "two"}]
+        assert run("lookup-contacts", "one", "two") == contacts
+        group = run("groups", "lookup", "fixture@chatroom", "--version", "7")
+        assert group["id"] == "fixture@chatroom" and group["version"] == 7
+        assert run("lookup-group", "fixture@chatroom", "--version", "7") == group
+        assert run("groups", "lookup", "fixture@chatroom")["version"] == 0
+        local_logout = {"state": "logged_out", "serverRevocation": "not_requested"}
+        assert run("auth", "logout", "--local") == local_logout
+        assert run("auth", "logout-local") == local_logout
+        assert run("auth", "logout", "--idempotency-key", "fixture-logout")["id"] == "logout-fixture"
+        for flag in [("--detach",), ("--wait", "1"), ("--idempotency-key", "fixture-logout")]:
+            assert run("auth", "logout", "--local", *flag, code=2)["error"]["code"] == "invalid_arguments"
         for group in ["chats", "messages"]:
             result=run(group,"read","filehelper","--expected-version","fixture-version")
             assert result["readScope"]=="thread" and result["phoneNotification"]["state"]=="accepted"
@@ -148,7 +217,6 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         finally:
             if login.poll() is None: login.kill();login.wait()
         state["lan_mode"]=True
-        human_args=[arg for arg in args if arg!="--json"]
         lan=subprocess.run(human_args+["auth","login","--strategy","qr","--qr-refresh","manual","--idempotency-key","fixture-lan-human"],env=env,capture_output=True,text=True,timeout=10)
         assert lan.returncode==0,(lan.stdout,lan.stderr)
         assert lan.stderr.count("WeChat requires a local network check.")==1,lan.stderr
@@ -163,10 +231,16 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
             assert json.loads(pathlib.Path(result["receiptPath"]).read_text())["accountId"]=="a"
             assert state["official_posts"][-1]=={"path":path,"accountId":None}
         stopped=root/"stopped-home";storage=stopped/"xwechat_files"/"synthetic_account"/"db_storage";storage.mkdir(parents=True);(storage/"contact.db").write_bytes(b"synthetic-inventory-only")
-        run("profile","add","archive","--path",str(stopped),"--account-dir","synthetic_account","--keys-file",str(root/"not-yet-exported.keys.json"))
+        run("profiles","add","archive","--path",str(stopped),"--account-dir","synthetic_account","--keys-file",str(root/"not-yet-exported.keys.json"))
+        run("profiles","select","archive")
+        assert run("profiles","list")["serverDefault"]=="archive"
+        # Intentional compatibility checks for scripts using the old spellings.
+        assert run("profile","list")==run("profiles","list")
+        run("profile","use","archive")
         renamed=token.with_name("token-offline");token.rename(renamed)
         try:
-            inspected=run("--local-profile","archive","profile","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
+            inspected=run("--local-profile","archive","profiles","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
+            assert run("profile","inspect")==inspected
         finally:renamed.rename(token)
         print("Native CLI fixture passed: pre-request send/recall/login receipts, same-key lookup/conflict, exact recall IDs, recall uncertainty/lost-response recovery without automatic resubmission, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation, official-file login discovery/explicit server paths, and token-free offline inspection. No WeChat request.")
     finally:server.shutdown();server.server_close()

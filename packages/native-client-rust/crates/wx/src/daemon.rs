@@ -9,12 +9,16 @@ use std::{
 
 #[derive(Subcommand)]
 pub enum DaemonCommand {
+    /// Start the local daemon in the background and wait until ready.
     Start,
+    /// Show the local managed daemon's state and identity.
     Status,
+    /// Stop the owned local daemon without logging out of WeChat.
     Stop {
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
+    /// Read the local daemon log, optionally following new lines.
     Logs {
         #[arg(long)]
         follow: bool,
@@ -80,7 +84,11 @@ async fn identity(config: &wechat_config::ServerConfig, owned: &OwnedProcess) ->
     }
     Ok(value)
 }
-pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) -> Result<()> {
+pub async fn run(
+    config: wechat_config::ServerConfig,
+    command: DaemonCommand,
+    output: Output,
+) -> Result<()> {
     let mut config = config;
     if config.data_dir.exists() {
         config.data_dir = std::fs::canonicalize(&config.data_dir)?;
@@ -108,7 +116,7 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
             }
             if let Some(owned) = load(&record)? {
                 if fingerprint(owned.pid).is_some() {
-                    return output(&identity(&config, &owned).await?);
+                    return output.print(&identity(&config, &owned).await?);
                 }
                 std::fs::remove_file(&record)?;
             }
@@ -200,7 +208,7 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
             }
             .await;
             match readiness {
-                Ok(value) => output(&value),
+                Ok(value) => output.print(&value),
                 Err(error) => {
                     if child.try_wait()?.is_some() {
                         return Err(error);
@@ -227,9 +235,9 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
         }
         DaemonCommand::Status => match load(&record)? {
             Some(owned) if fingerprint(owned.pid).is_some() => {
-                output(&identity(&config, &owned).await?)
+                output.print(&identity(&config, &owned).await?)
             }
-            _ => output(&json!({"state":"stopped","managed":true,"dataDir":config.data_dir})),
+            _ => output.print(&json!({"state":"stopped","managed":true,"dataDir":config.data_dir})),
         },
         DaemonCommand::Stop { timeout } => {
             if directory.exists() {
@@ -254,11 +262,11 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
                 bail!("daemon stop timeout must be1..300seconds");
             }
             let Some(owned) = load(&record)? else {
-                return output(&json!({"state":"stopped","managed":true}));
+                return output.print(&json!({"state":"stopped","managed":true}));
             };
             if fingerprint(owned.pid).is_none() {
                 std::fs::remove_file(&record)?;
-                return output(&json!({"state":"stopped","managed":true}));
+                return output.print(&json!({"state":"stopped","managed":true}));
             }
             identity(&config, &owned).await?;
             #[cfg(windows)]
@@ -275,7 +283,7 @@ pub async fn run(config: wechat_config::ServerConfig, command: DaemonCommand) ->
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             std::fs::remove_file(&record)?;
-            output(&json!({"state":"stopped","pid":owned.pid,"logout":false}))
+            output.print(&json!({"state":"stopped","pid":owned.pid,"logout":false}))
         }
         DaemonCommand::Logs { follow } => {
             let mut file = wechat_platform::OpenOptions::new()

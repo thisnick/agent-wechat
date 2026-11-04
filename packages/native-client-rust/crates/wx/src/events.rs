@@ -68,6 +68,7 @@ pub async fn watch(
     mut after: String,
     cursor_file: Option<PathBuf>,
     messages_only: bool,
+    json: bool,
 ) -> Result<()> {
     if after.parse::<u64>().is_err() || !after.bytes().all(|b| b.is_ascii_digit()) {
         bail!("invalid event cursor");
@@ -161,9 +162,12 @@ pub async fn watch(
                         .is_some_and(|v| v.starts_with("message."))
                 {
                     let mut stdout = std::io::stdout().lock();
-                    if let Err(error) = writeln!(stdout, "{}", serde_json::to_string(&event)?)
-                        .and_then(|_| stdout.flush())
-                    {
+                    let result = if json {
+                        writeln!(stdout, "{}", serde_json::to_string(&event)?)
+                    } else {
+                        writeln!(stdout, "{}", super::output::details(&event))
+                    };
+                    if let Err(error) = result.and_then(|_| stdout.flush()) {
                         if error.kind() == std::io::ErrorKind::BrokenPipe {
                             return Ok(());
                         }

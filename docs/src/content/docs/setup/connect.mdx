@@ -41,7 +41,12 @@ import qrLogin from '../../../assets/qr-login.svg';
    </TabItem>
    </Tabs>
 
-   Scan the QR code with WeChat on your phone, or approve the login there:
+   Scan the QR code with WeChat on your phone. When the terminal says it is
+   waiting for confirmation, approve the login in WeChat.
+
+   With `wx --json auth login`, the waiting notice is a JSON line on stderr
+   with `event: "login.progress"` and `state: "awaiting_approval"`. Read the
+   final operation result as a single JSON document on stdout.
 
    <img src={qrLogin.src} class="mock wide" alt="Terminal showing wx auth login printing a QR code, then confirming the login" />
 
@@ -79,6 +84,8 @@ List profiles with `wx accounts list`. Use the account ID from that response:
 wx --account ACCOUNT_ID auth login
 wx --account ACCOUNT_ID auth logout
 ```
+
+Use `wx --account ACCOUNT_ID auth logout --local` to sign out on the daemon and keep saved credentials without sending a logout request to WeChat. Both forms stop automatic reconnection.
 
 After sign-out completes, remove the profile from the hub by repeating its exact ID:
 

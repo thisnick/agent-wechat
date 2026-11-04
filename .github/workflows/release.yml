@@ -4,15 +4,12 @@ on:
   push:
     branches: [main]
 
-# Serialize releases on the same branch.
+# Serialize updates to the Changesets version PR.
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  actions: read
   contents: write
   pull-requests: write
-  packages: write
-  id-token: write
 
 jobs:
   release:
@@ -33,22 +30,9 @@ jobs:
         with:
           toolchain: 1.93.1
 
-      # No setup-node registry auth placeholder: publishing uses GitHub OIDC.
-      - name: Install verified standalone npm 11.12.1
-        run: bash scripts/install-ci-npm.sh
-
-      - name: Check npm publisher
-        run: |
-          test "$(npm --version)" = "11.12.1"
-          node --test scripts/verify-ci-publisher.test.mjs
-          node scripts/verify-ci-publisher.mjs
-
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm build
-
       - name: Create Release PR
-        id: changesets
         uses: changesets/action@v1
         with:
           version: pnpm version-packages
@@ -56,39 +40,3 @@ jobs:
           commit: "Version Packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Native assets are published separately with explicit operator approval.
-      # Missing assets are expected until that workflow completes.
-      - name: Validate npm stable or prerelease channel
-        if: steps.changesets.outputs.hasChangesets == 'false'
-        run: node scripts/native-release-policy.mjs --check-registry
-
-      - name: Check whether native assets are ready
-        id: native_release
-        if: steps.changesets.outputs.hasChangesets == 'false'
-        run: node scripts/native-release-orchestration.mjs ready
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Install the verified CLI audio runtime dependency
-        if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpulse0
-
-      - name: Verify native assets and embed npm checksum manifest
-        if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
-        run: node scripts/native-prepare-package.mjs --if-unpublished
-
-      # Publish separately so npm can use OIDC (no NODE_AUTH_TOKEN needed)
-      - name: Publish to npm
-        id: publish
-        if: steps.changesets.outputs.hasChangesets == 'false' && steps.native_release.outputs.ready == 'true'
-        run: |
-          if ! OUTPUT=$(pnpm changeset publish 2>&1); then
-            echo "$OUTPUT"
-            exit 1
-          fi
-          echo "$OUTPUT"
-
-        env:
-          NPM_CONFIG_PROVENANCE: true
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

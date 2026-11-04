@@ -9,7 +9,16 @@ export type { CallAudioFormat, CallAudioTrack, CallCommand, CallControl, CallPar
 
 export const NATIVE_CALL_MAX_FRAME_BYTES = 64 * 1024;
 export type NativeCallPcmFormat = CallAudioFormat;
-export type NativeCallMediaFrame = { payload: Uint8Array };
+export type NativeCallMediaFrame = {
+  payload: Uint8Array;
+  /** Offset in per-channel samples received on this socket, including local queue drops. */
+  sampleOffset?: number;
+  /** Monotonic arrival time when a PCM observer is attached. */
+  receivedAtMs?: number;
+};
+export type NativeCallPcmObserver = (arrival: {
+  receivedAtMs: number; samples: number; queueDepth: number; droppedSamples: number;
+}) => void;
 
 function pcmBytes(format: NativeCallPcmFormat): number {
   if (![8000, 12000, 16000, 24000, 48000].includes(format.sampleRate)
@@ -59,6 +68,12 @@ class EventQueue<T> implements AsyncIterable<T> {
     if (this.waiter) { const waiter = this.waiter; this.waiter = undefined; waiter.resolve({ value, done: false }); return true; }
     if (this.values.length >= this.limit) return false;
     this.values.push(value); return true;
+  }
+  get depth(): number { return this.values.length; }
+  pushLatest(value: T): T | undefined {
+    const dropped = this.values.length === this.limit ? this.values.shift() : undefined;
+    this.push(value);
+    return dropped;
   }
   clear(): void { this.values = []; }
   close(failure?: Error): void {
@@ -255,11 +270,11 @@ export class NativeCallsClient {
    * the terminal call.state event; a lost confirmation leaves an unknown outcome. */
   end(type: "call.reject" | "call.cancel" | "call.hangup", requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type, requestId, callId, expectedRevision }); }
   clearAudio(requestId: string, callId: string): Promise<CallResult> { return this.command({ type: "call.clear_audio", requestId, callId }); }
-  async attachMedia(callId: string): Promise<NativeCallMediaClient> {
+  async attachMedia(callId: string, observePcm?: NativeCallPcmObserver): Promise<NativeCallMediaClient> {
     if (!this.hello || this.closed || this.owner?.callId !== callId) throw new NativeCallError("not_owner");
     if (this.media.has(callId)) throw new NativeCallError("media_already_attached");
     const attachment: CallMediaCommand = { type: "media.attach", clientId: this.hello.clientId, ownerToken: this.owner.token };
-    const media = new NativeCallMediaClient(this.options, callId, attachment);
+    const media = new NativeCallMediaClient(this.options, callId, attachment, observePcm);
     this.media.set(callId, media);
     try { await media.connect(); return media; } catch (error) { this.media.delete(callId); throw error; }
   }
@@ -281,7 +296,9 @@ export class NativeCallMediaClient {
   private readonly options: NativeCallsClientOptions;
   private readonly callId: string;
   private readonly attachment: CallMediaCommand;
+  private readonly observePcm?: NativeCallPcmObserver;
   private readonly queue = new EventQueue<NativeCallMediaFrame>(16);
+  private nextSampleOffset = 0;
   private socket?: NativeCallSocket;
   private opening?: Promise<MediaReady>;
   private openResolve?: (ready: MediaReady) => void;
@@ -291,12 +308,12 @@ export class NativeCallMediaClient {
   private sendGeneration?: number;
   private ending = false;
   private closed = false;
-  constructor(options: NativeCallsClientOptions, callId: string, attachment: CallMediaCommand) {
+  constructor(options: NativeCallsClientOptions, callId: string, attachment: CallMediaCommand, observePcm?: NativeCallPcmObserver) {
     const url = validateNativeBaseUrl(options.baseUrl); resourceId(callId);
     const env = (globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } }).process?.env;
     if (url.protocol === "https:" && env?.NODE_TLS_REJECT_UNAUTHORIZED === "0") throw new Error("Call API requires TLS verification");
     if (typeof options.token !== "string" || !options.token || /[\r\n]/.test(options.token)) throw new Error("Call API bearer token is required");
-    this.options = options; this.callId = callId; this.attachment = attachment;
+    this.options = options; this.callId = callId; this.attachment = attachment; this.observePcm = observePcm;
   }
   connect(): Promise<MediaReady> {
     if (this.closed) return Promise.reject(new NativeCallError("closed"));
@@ -331,8 +348,20 @@ export class NativeCallMediaClient {
     const bytes = binaryBytes(data);
     if (!bytes || !this.readyEvent) throw new Error("Unattached media");
     if (this.ending) return;
-    if (bytes.byteLength === 0 || bytes.byteLength > NATIVE_CALL_MAX_FRAME_BYTES || bytes.byteLength % (this.readyEvent.receiveTrack.format.channels * 2) !== 0) throw new Error("Invalid PCM samples");
-    if (!this.queue.push({ payload: bytes })) this.fail(new NativeCallError("media_backpressure"));
+    const sampleBytes = this.readyEvent.receiveTrack.format.channels * 2;
+    if (bytes.byteLength === 0 || bytes.byteLength > NATIVE_CALL_MAX_FRAME_BYTES || bytes.byteLength % sampleBytes !== 0) throw new Error("Invalid PCM samples");
+    const samples = bytes.byteLength / sampleBytes;
+    const frame: NativeCallMediaFrame = { payload: bytes, sampleOffset: this.nextSampleOffset };
+    this.nextSampleOffset += samples;
+    if (this.observePcm) frame.receivedAtMs = performance.now();
+    // A late consumer needs current PCM. Control events still fail on overflow.
+    const dropped = this.queue.pushLatest(frame);
+    if (this.observePcm && frame.receivedAtMs !== undefined) {
+      try {
+        this.observePcm({ receivedAtMs: frame.receivedAtMs, samples, queueDepth: this.queue.depth,
+          droppedSamples: (dropped?.payload.byteLength ?? 0) / sampleBytes });
+      } catch { /* Diagnostics must not detach the media owner. */ }
+    }
   }
   /** Called from authenticated control track updates as well as this socket. */
   updateTrack(track: CallAudioTrack): void {
