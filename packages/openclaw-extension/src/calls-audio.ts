@@ -5,10 +5,20 @@ import type { PreparedCallVoice, StreamingPcmResampler } from "./calls-voice.ts"
 const MAX_BACKLOG_MS = 8_000;
 // A continuous stream plays as it arrives; a longer backlog only adds delay.
 const MAX_CONTINUOUS_BACKLOG_MS = 3_000;
+// A continuous stream arrives as fast as it plays, so a backlog left by a
+// provider stall never drains by itself. Above this lead, silent chunks are
+// skipped so the next pause catches up without cutting speech.
+const CONTINUOUS_TARGET_LEAD_MS = 250;
+const SILENT_PEAK = 64;
 const LOOK_AHEAD_FRAMES = 2;
 const MAX_QUEUED_SPANS = 256;
 type AudioSpan = { itemId: string; bytes: number };
 type PlayoutSpan = AudioSpan & { startsAt: number; endsAt: number };
+
+function isSilent(pcm: Buffer): boolean {
+  for (let i = 0; i + 1 < pcm.length; i += 2) if (Math.abs(pcm.readInt16LE(i)) > SILENT_PEAK) return false;
+  return true;
+}
 
 /** Clocked call output with silence in the slots the provider leaves empty.
  * Response mode tracks provider reply items so a clear can reject their late
@@ -103,6 +113,10 @@ export class CallPcmOutput {
       return;
     }
     if (converted.length % 2 !== 0) return this.fail();
+    if (this.continuous && this.pendingBytes > this.bytesPerMs * CONTINUOUS_TARGET_LEAD_MS && isSilent(converted)) {
+      this.trace?.add("outputSkippedSilenceSamples", converted.length / 2);
+      return;
+    }
     if (this.continuous) {
       const limit = this.bytesPerMs * MAX_CONTINUOUS_BACKLOG_MS;
       if (converted.length > limit) {

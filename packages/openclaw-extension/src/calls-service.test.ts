@@ -344,6 +344,28 @@ test("continuous PCM keeps only the newest three seconds when its backlog grows"
   assert.equal(samples.filter(value => value === 0x0101).length, 0);
   assert.equal(samples.filter(value => value === 0x0202).length, 3000 * 16);
 });
+test("continuous PCM skips silence while a stall's backlog drains, without dropping speech", t => {
+  const media = new Media(); const voice = voiceFactory();
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const skipped: number[] = [];
+  const trace = { add: (key: string, count = 1) => { if (key === "outputSkippedSilenceSamples") skipped.push(count); }, gap() {}, measure() {} } as unknown as CallAudioTrace;
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => assert.fail("PCM send failed"), trace, { continuous: true });
+  t.after(() => output.close());
+  output.start();
+  // A stalled provider catches up with one second of speech, then sends silence.
+  output.enqueue(Buffer.alloc(32 * 1000, 1));
+  for (let i = 0; i < 25; i++) output.enqueue(Buffer.alloc(640));
+  assert.equal(skipped.reduce((sum, count) => sum + count, 0), 25 * 320);
+  for (let i = 0; i < 60; i++) { now += 20; t.mock.timers.tick(20); }
+  const samples = media.sent.flatMap(frame => Array.from(frame.samples));
+  assert.equal(samples.filter(value => value === 0x0101).length, 1000 * 16);
+  // Once the backlog is short again, silence from the provider plays normally.
+  const before = skipped.length;
+  output.enqueue(Buffer.alloc(640));
+  assert.equal(skipped.length, before);
+});
 test("playout starts with silence and reports only the time played from each reply item", t => {
   const media = new Media();
   const voice = voiceFactory();
