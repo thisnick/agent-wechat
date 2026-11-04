@@ -69,7 +69,7 @@ function voiceFactory() {
   return { state, prepared };
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(5); } assert.fail("Condition did not become true"); }
-async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration()) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, logAudioTrace }); await service.start(); return { service, client, voice }; }
+async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration(), warn?: (line: string) => void) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, logAudioTrace, warn }); await service.start(); return { service, client, voice }; }
 
 test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
@@ -138,10 +138,24 @@ test("pending calls are observed without global readiness; only a preflighted al
   assert.deepEqual(client.scopes, [{ kind: "offer", callId: "offer", expectedRevision: 1 }]); assert.equal(client.answers, 1); await service.stop();
 });
 test("uncertain exact-offer readiness never retries or guesses that ACK failed", async () => {
-  const { service, client, voice } = await fixture(); client.readyHook = async () => { throw new NativeCallError("command_timeout", true); };
+  const lines: string[] = [];
+  const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line)); client.readyHook = async () => { throw new NativeCallError("command_timeout", true); };
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
   await until(() => voice.state.closes === 1); assert.equal(client.readied, 1); assert.equal(client.answers, 0); assert.equal(service.status().state, "needs_review");
+  assert.ok(lines.some(line => /^\[wechat-call\] incoming call not answered: stage=ready ms=\d+ code=command_timeout state=needs_review$/.test(line)));
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } }); await delay(10); assert.equal(client.readied, 1); await service.stop();
+});
+test("an incoming call whose voice session fails to open logs only its stage", async () => {
+  const lines: string[] = [];
+  const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line));
+  voice.prepared.open = async () => { throw Error("synthetic-private-provider-detail"); };
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
+  await until(() => lines.length > 0);
+  assert.deepEqual(lines.map(line => line.replace(/ms=\d+/, "ms=N")),
+    ["[wechat-call] incoming call not answered: stage=voice ms=N code=none state=unavailable"]);
+  assert.equal(lines.some(line => line.includes("synthetic-private")), false);
+  assert.equal(client.readied, 0); assert.equal(client.answers, 0);
+  await service.stop();
 });
 test("a withdrawn pre-answer offer releases the listener for the next call", async t => {
   const { service, client, voice } = await fixture();

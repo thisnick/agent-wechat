@@ -17,6 +17,8 @@ export type CallServiceDependencies = {
   host?: typeof ensureNativeHost;
   socketFactory?: NativeCallWebSocketFactory;
   logAudioTrace?: (line: string) => void;
+  /** Always-on warnings, independent of audio tracing. */
+  warn?: (line: string) => void;
   runInBackgroundContext?: CallBackgroundRunner;
 };
 type Owned = { key: string; peer: string; callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
@@ -175,14 +177,17 @@ export class NativeCallService {
     active.timer.unref?.(); return active;
   }
   private async prepareIncoming(active: Owned): Promise<void> {
+    const started = performance.now();
+    let stage: "voice" | "ready" = "voice";
     try {
       await this.openVoice(active); if (!this.current(active)) return;
+      stage = "ready";
       active.incomingReadinessAttempted = true;
       await this.client!.ready(randomUUID(), true, this.format!, { kind: "offer", callId: active.callId!, expectedRevision: active.candidateRevision! });
       if (!this.current(active)) return;
       active.ready = true;
-      if (active.offered) void this.claim(active, active.offered);
-    } catch (error) { await this.claimFailed(active, error); }
+      if (active.offered) void this.claim(active, active.offered, started);
+    } catch (error) { await this.claimFailed(active, error, stage, started); }
   }
   private reserve(peer: string, callId?: string): Owned {
     const active: Owned = { key: randomUUID(), peer, callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
@@ -204,7 +209,7 @@ export class NativeCallService {
     active.voice = await bounded(opening, 10000);
     if (!this.current(active)) throw Error("Calling preflight superseded");
   }
-  private async claim(active: Owned, offer: CallOffer): Promise<void> {
+  private async claim(active: Owned, offer: CallOffer, started = performance.now()): Promise<void> {
     if (!this.current(active) || active.claiming || active.claimed || !active.ready || !active.voice) return;
     active.claiming = true;
     try {
@@ -214,12 +219,18 @@ export class NativeCallService {
       if (result.callId !== offer.callId || !result.ownerToken) throw Error("Calling claim not admitted");
       active.claimed = true; this.armDuration(active); this.state = "busy";
       if (active.call?.state === "connected") void this.attach(active);
-    } catch (error) { await this.claimFailed(active, error); }
+    } catch (error) { await this.claimFailed(active, error, "answer", started); }
   }
-  private async claimFailed(active: Owned, error: unknown): Promise<void> {
+  private async claimFailed(active: Owned, error: unknown, stage: "voice" | "ready" | "answer", started: number): Promise<void> {
     if (this.current(active)) {
         const knownLoss = error instanceof NativeCallError && ["already_claimed", "offer_expired", "stale", "busy", "unsupported"].includes(error.code) && !error.outcomeUnknown;
         this.state = knownLoss ? (this.busy ? "busy" : "available") : active.submitted || active.incomingReadinessAttempted ? "needs_review" : "unavailable";
+        // An unanswered call otherwise leaves no trace. Only fixed values reach
+        // logs: provider errors can contain private details.
+        try {
+          this.dependencies.warn?.(`[wechat-call] incoming call not answered: stage=${stage} ms=${Math.round(performance.now() - started)}`
+            + ` code=${error instanceof NativeCallError ? error.code : "none"} state=${this.state}`);
+        } catch { /* Diagnostics cannot affect calling. */ }
         await this.retire(active);
         if (!knownLoss) this.client?.close();
     }
