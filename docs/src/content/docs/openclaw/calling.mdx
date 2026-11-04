@@ -110,14 +110,13 @@ All paths below are relative to `calls.voice`.
 | `toolPolicy` | `none`, `safe-read-only`, or `owner`. Opting in to session persistence defaults to `safe-read-only`. |
 | `allowConsultSessionPersistence` | Set to `true` to allow consultation in a separate OpenClaw session per call. |
 | `realtime.consultPolicy` | `auto` lets the provider choose when to consult. `substantive` directs it to consult for facts and context. `always` also starts a consult from the caller's current turn if the provider skips it. |
-| `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for the consultation model. |
+| `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for consultations. |
 | `consultation.inboundSessionKey` | Optional existing session of the selected agent to use as context for inbound calls. |
-| `consultation.model` | Optional `provider/model` for consultations; otherwise the selected agent's model. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
 | `maxDurationSeconds` | 300 by default. Accepts 30–3,600 seconds. The native daemon caps calls at 20 minutes. |
 
-The speech model handles conversation; the consultation model handles delegated
-questions and permitted tools. Incoming/outgoing policies default to `disabled`;
+The speech model handles conversation; the selected OpenClaw agent handles
+delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
 allowlists accept exact IDs, without `*`. Tool callers must also be authorized
 owners in `outboundToolAllowFrom`. Messaging permissions do not authorize calls.
 
@@ -141,8 +140,8 @@ same WeChat peer and channel account. Other allowed participants get read-only
 consultation in an isolated session. Add inbound callers to `inboundAllowFrom`
 separately.
 
-With the consultation model unset, verified-owner calls use OpenClaw's normal
-session model routing, including configured CLI runtimes and model fallbacks.
+Consultations run like the agent's normal chat turns. They use its configured
+model, including CLI runtimes such as `claude-cli`, and its fallback models.
 
 :::note[Good to know]
 Disabled call types are ignored without answering or declining. Video permission

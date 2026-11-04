@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 
-type OwnerConsultation = {
+type CallConsultation = {
   cfg: OpenClawConfig;
   reply: PluginRuntime["channel"]["reply"];
   sessionKey: string;
@@ -10,6 +10,8 @@ type OwnerConsultation = {
   accountId: string;
   question: string;
   instructions: string;
+  /** Restricts the run to these tools; omitted keeps the caller's normal tool policy. */
+  toolsAllow?: string[];
   thinking?: string;
   fastMode?: boolean;
   signal: AbortSignal;
@@ -17,8 +19,9 @@ type OwnerConsultation = {
   onRunStarted(): void;
 };
 
-/** Use normal session execution for a verified owner without delivering a chat reply. */
-export async function consultOwnerCallSession(params: OwnerConsultation): Promise<{ text: string }> {
+/** Run a call consultation through the agent's normal session, without delivering a chat reply.
+ * This uses the agent's configured model routing, including CLI runtimes and fallbacks. */
+export async function consultCallSession(params: CallConsultation): Promise<{ text: string }> {
   const { reply, cfg, senderId, sessionKey, parentKey, accountId, signal, question } = params;
   params.assertCurrent();
   signal.throwIfAborted();
@@ -53,6 +56,7 @@ export async function consultOwnerCallSession(params: OwnerConsultation): Promis
       sourceReplyDeliveryMode: "automatic",
       suppressDefaultToolProgressMessages: true, suppressToolProgressMessages: true,
       thinkingLevelOverride: params.thinking, fastModeOverride: params.fastMode,
+      ...(params.toolsAllow ? { toolsAllow: [...params.toolsAllow] } : {}),
       onAgentRunStart: () => {
         try { params.assertCurrent(); }
         catch (error) { authority.abort(error); throw error; }

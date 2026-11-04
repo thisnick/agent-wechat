@@ -373,13 +373,6 @@
                       "type": "object",
                       "additionalProperties": false,
                       "properties": {
-                        "model": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 200,
-                          "pattern": "^[^/]+/.+$",
-                          "description": "Agent-consult provider/model override; omitted uses the selected agent's model."
-                        },
                         "timeoutMs": {
                           "type": "integer",
                           "minimum": 1000,

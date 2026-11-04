@@ -29,14 +29,14 @@ export type WeChatVoiceCallsConfig = {
   toolPolicy?: "none" | "safe-read-only" | "owner";
   /** Host agent consultation creates its own session; opt in to that retention. */
   allowConsultSessionPersistence?: boolean;
-  consultation?: { model?: string; timeoutMs?: number; inboundSessionKey?: string };
+  consultation?: { timeoutMs?: number; inboundSessionKey?: string };
   maxDurationSeconds?: number;
 };
 export type WeChatCallsConfig = { voice?: WeChatVoiceCallsConfig; video?: { enabled?: boolean } };
 export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfig, "realtime" | "consultation">> & {
   realtime: { provider: string; model?: string; voice?: string; instructions?: string; agentContext: { enabled: boolean };
     consultPolicy: ConsultPolicy; consultThinkingLevel?: ConsultThinkingLevel; consultFastMode?: boolean };
-  consultation: { model?: string; timeoutMs: number; inboundSessionKey?: string };
+  consultation: { timeoutMs: number; inboundSessionKey?: string };
 };
 export type ResolvedWeChatCallsConfig = { voice?: ResolvedWeChatVoiceCallsConfig; video: { enabled: boolean } };
 const identifier = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -55,8 +55,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
     || ![undefined, "disabled", "allowlist"].includes(value.inboundPolicy)
     || ![undefined, "disabled", "allowlist"].includes(value.outboundPolicy)
     || ![undefined, "none", "safe-read-only", "owner"].includes(value.toolPolicy)
-    || [realtime.model, realtime.voice, consultation.model].some(item => item !== undefined && !identifier(item))
-    || (consultation.model !== undefined && !/^[^/]+\/.+$/.test(consultation.model))
+    || [realtime.model, realtime.voice].some(item => item !== undefined && !identifier(item))
     || (consultation.inboundSessionKey !== undefined && !isCallSessionKey(consultation.inboundSessionKey))
     || (realtime.consultPolicy !== undefined && !consultPolicies.includes(realtime.consultPolicy))
     || (realtime.consultThinkingLevel !== undefined && !consultThinkingLevels.includes(realtime.consultThinkingLevel))
@@ -76,7 +75,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
       consultThinkingLevel: realtime.consultThinkingLevel, consultFastMode: realtime.consultFastMode },
     toolPolicy: value.toolPolicy ?? (value.allowConsultSessionPersistence === true ? "safe-read-only" : "none"),
     allowConsultSessionPersistence: value.allowConsultSessionPersistence === true,
-    consultation: { model: consultation.model, timeoutMs, inboundSessionKey: consultation.inboundSessionKey }, maxDurationSeconds }, realtime.providers?.openai?.apiKey);
+    consultation: { timeoutMs, inboundSessionKey: consultation.inboundSessionKey }, maxDurationSeconds }, realtime.providers?.openai?.apiKey);
 }
 export function resolveWeChatCallsConfig(value: WeChatCallsConfig | undefined): ResolvedWeChatCallsConfig | undefined {
   if (!value) return undefined;
@@ -117,7 +116,6 @@ export const callsConfigSchema = {
       toolPolicy: { type: "string", enum: ["none", "safe-read-only", "owner"], description: "Owner uses the normal agent tool policy only for an exact agent-wechat entry in commands.ownerAllowFrom matching the connected voice peer. Other admitted peers get read-only consultation. Defaults to safe-read-only with session persistence, otherwise none." },
       allowConsultSessionPersistence: { type: "boolean", default: false, description: "Required for consultation. OpenClaw creates separate agent sessions for calls which can persist. This adapter does not store transcripts or recordings." },
       consultation: { type: "object", additionalProperties: false, properties: {
-        model: { ...nameSchema, pattern: "^[^/]+/.+$", description: "Agent-consult provider/model override; omitted uses the selected agent's model." },
         timeoutMs: { type: "integer", minimum: 1000, maximum: 120000, default: 30000 },
         inboundSessionKey: { type: "string", pattern: CALL_SESSION_KEY_PATTERN, maxLength: MAX_CALL_SESSION_KEY_LENGTH,
           description: "Optional existing session of the selected agent to fork into a separate consultation session for each admitted incoming call." },
