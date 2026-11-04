@@ -38,5 +38,5 @@ export function assertCallingToolAccess(context: OpenClawPluginToolContext, conf
   const cfg = context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
   const current = cfg && resolveWeChatAccount(cfg as unknown as Record<string, unknown>);
   if (!current?.enabled || !current.native || !current.calls?.voice || nativeConfigurationKey(current.native) !== configurationKey || callsConfigurationKey(current.calls) !== callConfiguration
-    || context.agentId !== current.calls.voice.agentId || context.senderIsOwner !== true || !context.requesterSenderId || !current.calls.voice.outboundToolAllowFrom.includes(context.requesterSenderId)) throw Error("Calling tool is not permitted for this requester");
+    || context.senderIsOwner !== true || !context.requesterSenderId || !current.calls.voice.outboundToolAllowFrom.includes(context.requesterSenderId)) throw Error("Calling tool is not permitted for this requester");
 }

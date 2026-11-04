@@ -71,6 +71,18 @@ function readParentSession(cfg: OpenClawConfig, runtime: PluginRuntime, agentId:
   } catch { /* A missing or unavailable parent leaves the new call session isolated. */ }
 }
 
+/** The session that placed a call, in its own agent's store; it may belong to an
+ * agent other than the calling agent, e.g. a group's. Reports go there; only a
+ * session of the calling agent can also seed the call's session. */
+export async function resolveDialingSession(cfg: OpenClawConfig, runtime: PluginRuntime,
+  requested: CallParentSession): Promise<(BoundCallParentSession & { agentId: string }) | undefined> {
+  const routingPath: string = "openclaw/plugin-sdk/routing";
+  const routing = await import(routingPath) as typeof import("openclaw/plugin-sdk/routing");
+  const agentId = routing.parseAgentSessionKey(requested.key)?.agentId;
+  const bound = agentId ? await resolveCallParentSession(cfg, runtime, agentId, requested) : undefined;
+  return bound && agentId ? { ...bound, agentId } : undefined;
+}
+
 export async function resolveCallParentSession(cfg: OpenClawConfig, runtime: PluginRuntime,
   agentId: string, requested: CallParentSession): Promise<BoundCallParentSession | undefined> {
   const key = await canonicalCallSessionKey(cfg, agentId, requested.key);

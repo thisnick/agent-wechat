@@ -271,7 +271,8 @@ test("outgoing target and tool requester permissions are separate from chat and 
   assert.doesNotThrow(() => assertCallingToolAccess(context, key, calls));
   assert.throws(() => assertCallingToolAccess({ ...context, senderIsOwner: false }, key, calls), /not permitted/);
   assert.throws(() => assertCallingToolAccess({ ...context, requesterSenderId: "allowed-peer" }, key, calls), /not permitted/);
-  assert.throws(() => assertCallingToolAccess({ ...context, agentId: "another" }, key, calls), /not permitted/);
+  // Any agent the tool is allowed for may place calls for the owner; the call runs as the calling agent.
+  assert.doesNotThrow(() => assertCallingToolAccess({ ...context, agentId: "another" }, key, calls));
   (cfg.channels["agent-wechat"].calls.voice.realtime as any).providers.openai.apiKey = "synthetic-replaced-key";
   assert.throws(() => assertCallingToolAccess(context, key, calls), /not permitted/);
 
@@ -570,6 +571,30 @@ test("an answered call is summarized in its session, remembered for the contact'
   client.eventsQueue.push({ type: "call.state", call: view(offer.callId, "ended") });
   await until(() => service.status().state === "available"); await delay(10);
   assert.equal(voice.state.summaries.length, 1); assert.equal(events.length, 2);
+});
+test("a call placed from another agent's group session reports its summary there", async t => {
+  const cfg = configuration();
+  Object.assign(cfg.channels["agent-wechat"].calls.voice, { toolPolicy: "safe-read-only", allowConsultSessionPersistence: true });
+  const groupKey = "agent:groups:agent-wechat:group:family@chatroom";
+  const events: Array<{ text: string; sessionKey: string }> = []; const wakes: Array<{ sessionKey?: string; agentId?: string }> = []; const stores: string[] = [];
+  const runtime = {
+    system: { enqueueSystemEvent: (text: string, options: { sessionKey: string }) => { events.push({ text, sessionKey: options.sessionKey }); return true; },
+      requestHeartbeatNow: (options: { sessionKey?: string; agentId?: string }) => { wakes.push(options); } },
+    agent: { session: { resolveStorePath: (_store: unknown, { agentId }: { agentId: string }) => { stores.push(agentId); return `/synthetic/${agentId}`; },
+      getSessionEntry: ({ sessionKey }: { sessionKey: string }) => sessionKey === groupKey ? { sessionId: "group-session" } : undefined } },
+  } as unknown as PluginRuntime;
+  const client = new Control(); const voice = voiceFactory(); voice.state.summaryText = "She will call back tonight.";
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, runtime, { client, prepareVoice: async () => voice.prepared });
+  t.after(() => service.stop());
+  await service.start();
+  await service.dial("allowed-peer", { assertCurrent() {}, parentSession: { key: groupKey, expectedSessionId: "group-session" } });
+  await until(() => client.attaches === 1);
+  voice.state.callbacks!.transcript!("user", "I'll call back tonight.", true, false);
+  client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing" } });
+  await until(() => events.length === 1);
+  assert.equal(events[0].sessionKey, groupKey); assert.match(events[0].text, /She will call back tonight\./);
+  assert.deepEqual(wakes, [{ sessionKey: groupKey, agentId: "groups", reason: "agent-wechat call ended", source: "other" }]);
+  assert.ok(stores.includes("groups"), "the group session is read from its own agent's store");
 });
 test("terminal ownership revocation stops old audio callbacks and does not manufacture a hangup", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);

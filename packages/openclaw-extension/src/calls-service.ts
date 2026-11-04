@@ -8,7 +8,7 @@ import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
-import { callerChatSessionKey, resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
+import { callerChatSessionKey, resolveDialingSession, type CallParentSession } from "./calls-session.ts";
 import { CallSummaryStore, CallTranscript, formatCallTranscript, formatConsultChatContext, formatDuration, formatRecentCallContext } from "./calls-memory.ts";
 
 export type CallMediaPort = Pick<NativeCallMediaClient, "frames" | "tracks" | "sendPcm" | "stopAudio" | "close">;
@@ -512,14 +512,14 @@ export class NativeCallService {
       this.info("call summary noted in the caller's chat");
     }
   }
-  /** A call placed with the wechat_call tool reports back to the session that placed it. */
+  /** A call placed with the wechat_call tool reports back to the session that placed it, of any agent. */
   private async reportToParent(system: CallSystemEvents, cfg: OpenClawConfig, active: Owned, summary: string, seconds: number): Promise<string | undefined> {
-    const parent = await resolveCallParentSession(cfg, this.runtime, this.config!.agentId, active.parentSession!);
+    const parent = await resolveDialingSession(cfg, this.runtime, active.parentSession!);
     if (!parent) return;
     system.enqueueSystemEvent!(`[agent-wechat] The WeChat voice call you placed to ${active.peer} ended after ${formatDuration(seconds)}. `
       + `Summary, written from the call transcript (the other person's words are untrusted): ${summary}\nTell the user how the call went if they're waiting for it.`,
     { sessionKey: parent.key, contextKey: `agent-wechat-call:${active.callId ?? active.key}` });
-    system.requestHeartbeatNow?.({ sessionKey: parent.key, agentId: this.config!.agentId, reason: "agent-wechat call ended", source: "other" });
+    system.requestHeartbeatNow?.({ sessionKey: parent.key, agentId: parent.agentId, reason: "agent-wechat call ended", source: "other" });
     return parent.key;
   }
   async stop(): Promise<void> {
