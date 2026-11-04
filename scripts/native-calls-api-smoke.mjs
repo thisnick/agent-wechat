@@ -296,8 +296,10 @@ try {
   assert.equal(afterClear.audioFrames, beforeClear.audioFrames + 1); assert.equal(afterClear.lastTxGeneration, 2); assert.equal(afterClear.lastTxPeak, 3100);
   await control("hold_clear", { enabled: false });
   assert.equal(pluginMedia.tracks().receiveTrack.generation, 1);
-  callbacks.audio(pcm(2300), { itemId: "interrupted" }); await delay(30);
-  assert.equal((await control("stats")).stats.audioFrames, afterClear.audioFrames);
+  // Playout now sends paced silence between replies, so frame counts keep
+  // growing while the call is active. Check the stale chunk itself instead.
+  callbacks.audio(pcm(2300), { itemId: "interrupted" }); await delay(60);
+  assert.ok(!providerInput.some(value => value.equals(pcm(2300))), "A late chunk from a cleared reply never reaches the backend");
   // Delay one genuine SDK frame before the WebSocket write, then deliver it
   // after Ending. Cross-socket in-flight audio must not detach the owner while
   // the real backend's termination future still awaits its terminal result.
@@ -308,6 +310,8 @@ try {
   callbacks.audio(pcm(3600), { itemId: "after-local-end" });
   await ending;
   await until("plugin observes Ending before backend terminal", () => pluginEvents.some(event => event.type === "call.state" && event.call.state === "ending"));
+  // Local end closed playout, so paced frames stopped before this count.
+  const atEnding = (await control("stats")).stats;
   assert.equal(service.status().owned, true); assert.equal(service.status().state, "busy"); assert.equal(providerCloses, 1);
   assert.throws(() => pluginMedia.sendPcm(samples(pcm(3500)), 2),
     error => error instanceof NativeCallError && error.code === "call_ending");
@@ -317,7 +321,8 @@ try {
   const heldEnd = (await control("stats")).stats;
   assert.equal(service.status().owned, true); assert.equal(service.status().state, "busy");
   assert.equal(heldEnd.active, true); assert.equal(heldEnd.hangup, before.hangup + 1); assert.equal(heldEnd.stop, afterClear.stop);
-  assert.equal(heldEnd.audioFrames, afterClear.audioFrames, "In-flight PCM after Ending must not reach the backend");
+  assert.equal(heldEnd.audioFrames, atEnding.audioFrames, "In-flight PCM after Ending must not reach the backend");
+  assert.notEqual(heldEnd.lastTxPeak, 3400, "The held in-flight frame must not reach the backend");
   assert.ok(!pluginEvents.some(event => event.type === "call.state" && ["ended", "uncertain"].includes(event.call.state)), "No terminal result exists before release");
   await control("release_end");
   await until("plugin explicit hangup terminal", () => service.status().state === "available");
