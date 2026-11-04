@@ -11,9 +11,10 @@ npm install -g @agent-wechat/cli@VERSION
 wx --json version
 ```
 
-Linux executables require `libpulse0` in addition to glibc. Interactive calling
-uses the local PulseAudio or PipeWire-Pulse service; other commands do not need
-a sound server. Released executables include microphone/speaker support. Use
+Linux executables need only glibc to start. Interactive calling uses the local
+PulseAudio or PipeWire-Pulse service and loads its client library, `libpulse0`,
+when it opens the microphone and speakers; other commands need neither.
+Released executables include microphone/speaker support. Use
 `wx calls devices` to list endpoints without starting capture or playback, and
 `wx calls dial --help` for device selection. Call participation requires a daemon
 advertising the corresponding calling capability.
