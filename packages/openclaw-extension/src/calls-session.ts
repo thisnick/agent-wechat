@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
+import type { CallSessionScope } from "./calls-config.ts";
 
 export const CALL_SESSION_KEY_PATTERN = "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$";
 export const MAX_CALL_SESSION_KEY_LENGTH = 1024;
@@ -31,6 +33,25 @@ export async function canonicalCallSessionKey(cfg: OpenClawConfig, agentId: stri
   const scoped = routing.parseAgentSessionKey(canonical);
   if (isCallSessionKey(canonical) && scoped?.agentId === owner.value
     && scoped.rest !== "global" && !scoped.rest.startsWith("agent:") && !routing.isIncognitoSessionKey(canonical)) return canonical;
+}
+
+const CONTACT_ID = /^[A-Za-z0-9_.@-]{1,200}$/;
+
+/** The session a call's consultations run in, decided as OpenClaw's voice-call
+ * plugin decides it. per-contact keeps one session for each contact, so the
+ * agent remembers earlier calls; read-only callers get a separate session from
+ * the owner's, so a later loss of owner status never exposes an owner session.
+ * per-call, or a contact ID unfit for a key, gets a new session for each call. */
+export function callSessionKey(agentId: string, scope: CallSessionScope, contactId: string, owner: boolean): string {
+  if (scope === "per-contact" && CONTACT_ID.test(contactId) && !contactId.endsWith("@chatroom")) {
+    return `agent:${agentId}:wechat-call:${contactId.toLowerCase()}${owner ? "" : ":read-only"}`;
+  }
+  return `agent:${agentId}:wechat-call:${randomUUID()}`;
+}
+
+/** Whether a call session already exists, i.e. an earlier call created it. */
+export function callSessionExists(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string, key: string): boolean {
+  return Boolean(readParentSession(cfg, runtime, agentId, key)?.sessionId);
 }
 
 function readParentSession(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string, key: string) {

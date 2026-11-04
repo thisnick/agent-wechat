@@ -10,6 +10,8 @@ type CallConsultation = {
   accountId: string;
   question: string;
   instructions: string;
+  /** Heads the question in the agent's prompt (default "Caller question"). */
+  inputLabel?: string;
   /** Restricts the run to these tools; omitted keeps the caller's normal tool policy. */
   toolsAllow?: string[];
   thinking?: string;
@@ -26,7 +28,7 @@ export async function consultCallSession(params: CallConsultation): Promise<{ te
   params.assertCurrent();
   signal.throwIfAborted();
   const runId = `wechat-call-${randomUUID()}`;
-  const body = `${params.instructions}\n\nCaller question:\n${question}`;
+  const body = `${params.instructions}\n\n${params.inputLabel ?? "Caller question"}:\n${question}`;
   const authority = new AbortController();
   const runSignal = AbortSignal.any([signal, authority.signal]);
   const ctx = reply.finalizeInboundContext({

@@ -108,10 +108,12 @@ All paths below are relative to `calls.voice`.
 | `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include excerpts from the selected agent's `IDENTITY.md` and `SOUL.md`. |
 | `agentId` | Required. Selects the voice persona, provider authentication and agent for permitted consultations. |
 | `toolPolicy` | `none`, `safe-read-only`, or `owner`. Opting in to session persistence defaults to `safe-read-only`. |
-| `allowConsultSessionPersistence` | Set to `true` to allow consultation in a separate OpenClaw session per call. |
+| `allowConsultSessionPersistence` | Set to `true` to allow consultation in OpenClaw sessions for calls. |
+| `sessionScope` | `per-contact` (one session per contact, so the agent remembers earlier calls) or `per-call`. See [Remember earlier calls](../call-memory/). |
+| `consultation.summary`, `realtime.recentContext` | Summarize each answered call (on by default) and give the next call a recap (off by default). See [Remember earlier calls](../call-memory/). |
 | `realtime.consultPolicy` | `auto` lets the provider choose when to consult. `substantive` directs it to consult for facts and context. `always` also starts a consult from the caller's current turn if the provider skips it. |
 | `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for consultations. |
-| `consultation.inboundSessionKey` | Optional existing session of the selected agent to use as context for inbound calls. |
+| `consultation.inboundSessionKey` | Optional existing session of the selected agent that seeds a new call session for inbound calls. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
 | `maxDurationSeconds` | 3,600 (one hour) by default; 30–3,600 seconds. The plugin hangs up when it is reached. The native daemon currently ends calls after 20 minutes. |
 
@@ -134,15 +136,16 @@ workspace context is enabled, the realtime provider also receives bounded
 excerpts of the two persona files. Keep those files suitable for this use.
 
 Calls placed with `wechat_call` use the requesting session as context when
-consultation is enabled. Set `consultation.inboundSessionKey` to bind inbound
-calls to a session. OpenClaw copies the bound session's context into a separate
-session for the call. Choose a session whose history is suitable for the callers.
+consultation is enabled. Set `consultation.inboundSessionKey` to do the same for
+inbound calls. OpenClaw copies that session's context into the call's session
+when the call session is first created. Choose a session whose history is
+suitable for the callers.
 
 With `toolPolicy: "owner"`, a call participant whose WeChat ID exactly matches
 an `agent-wechat:<WeChat ID>` entry in `commands.ownerAllowFrom` can consult
 with the agent's normal tool policy. An owner can use a bound session with the
 same WeChat peer and channel account. Other allowed participants get read-only
-consultation in an isolated session. Add inbound callers to `inboundAllowFrom`
+consultation in a separate session. Add inbound callers to `inboundAllowFrom`
 separately.
 
 Consultations run like the agent's normal chat turns. They use its configured
@@ -158,7 +161,8 @@ realtime model, if the caller interrupts a reply, the bridge clears queued audio
 and reports the estimated playback position to the speech model. GPT-Live models
 handle interruptions themselves. Either way, the voice agent can keep talking
 with the caller while the OpenClaw agent works on a consultation.
-This adapter does not record calls or store transcripts. Consultation can persist
-in OpenClaw when opted in. Other provider adapters fail preflight without
-automatic fallback.
+This adapter does not record calls. Consultations, and the transcript the agent
+summarizes after a call, persist in OpenClaw when opted in; the adapter keeps only
+short call summaries. Other provider adapters fail preflight without automatic
+fallback.
 :::

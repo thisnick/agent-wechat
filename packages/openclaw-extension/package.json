@@ -309,6 +309,24 @@
                             }
                           }
                         },
+                        "recentContext": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean",
+                              "default": false,
+                              "description": "When a call starts, send the Realtime provider the summaries of the last few calls with this contact and the latest messages of your WeChat chat with them, so the voice model knows what you last talked about."
+                            },
+                            "maxMessages": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 50,
+                              "default": 10,
+                              "description": "How many of the latest chat messages to include."
+                            }
+                          }
+                        },
                         "consultPolicy": {
                           "type": "string",
                           "enum": [
@@ -367,7 +385,7 @@
                     "allowConsultSessionPersistence": {
                       "type": "boolean",
                       "default": false,
-                      "description": "Required for consultation. OpenClaw creates separate agent sessions for calls which can persist. This adapter does not store transcripts or recordings."
+                      "description": "Required for consultation. OpenClaw creates separate agent sessions for calls which can persist. This adapter stores no recordings; with consultation.summary it keeps the last few call summaries for each contact."
                     },
                     "consultation": {
                       "type": "object",
@@ -383,9 +401,23 @@
                           "type": "string",
                           "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
                           "maxLength": 1024,
-                          "description": "Optional existing session of the selected agent to fork into a separate consultation session for each admitted incoming call."
+                          "description": "Optional existing session of the selected agent to fork into a call's session when that session is first created by an admitted incoming call."
+                        },
+                        "summary": {
+                          "type": "boolean",
+                          "default": true,
+                          "description": "After an answered call, give the call's transcript to the agent in the call's session and keep its short summary. Calls placed with the wechat_call tool also report the summary to the session that placed them."
                         }
                       }
+                    },
+                    "sessionScope": {
+                      "type": "string",
+                      "enum": [
+                        "per-contact",
+                        "per-call"
+                      ],
+                      "default": "per-contact",
+                      "description": "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session."
                     },
                     "maxDurationSeconds": {
                       "type": "integer",

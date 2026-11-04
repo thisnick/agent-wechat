@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
-import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import { NativeCallError, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type NativeCallMediaClient, type NativeCallsClient, type NativeCallPcmObserver, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
+import { join } from "node:path";
+import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
+import { isNativeTombstone, NativeCallError, type NativeMessage, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type NativeCallMediaClient, type NativeCallsClient, type NativeCallPcmObserver, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
 import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
-import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
+import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
-import type { CallParentSession } from "./calls-session.ts";
+import { resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
+import { CallSummaryStore, formatCallTranscript, formatDuration, formatRecentCallContext, type CallTranscriptEntry } from "./calls-memory.ts";
 
 export type CallMediaPort = Pick<NativeCallMediaClient, "frames" | "tracks" | "sendPcm" | "stopAudio" | "close">;
 export type CallControlPort = Pick<NativeCallsClient, "connect" | "events" | "ready" | "dial" | "answer" | "end" | "clearAudio" | "close"> & { attachMedia(callId: string, observePcm?: NativeCallPcmObserver): Promise<CallMediaPort> };
@@ -21,11 +23,18 @@ export type CallServiceDependencies = {
   createClient?: () => CallControlPort;
   /** Always-on warnings, independent of audio tracing. */
   warn?: (line: string) => void;
+  info?: (line: string) => void;
   runInBackgroundContext?: CallBackgroundRunner;
+  /** The plugin state directory, where call summaries are kept. */
+  stateDir?: string;
+  summaries?: CallSummaryStore;
 };
-type Owned = { key: string; peer: string; callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
+type Owned = { key: string; peer: string; direction: "incoming" | "outgoing"; transcript: CallTranscriptEntry[]; connectedAt?: number; binding?: CallBinding; summarized?: boolean;
+  callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
   ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; trace?: CallAudioTrace; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
 const TERMINAL_WAIT_MS = 30_000;
+const RECENT_CONTEXT_WAIT_MS = 2_000;
+const MAX_TRANSCRIPT_ENTRIES = 2_000;
 const MAX_RECOVERY_ATTEMPTS = 30;
 /** A fixed error code for logs; other error text can contain private details. */
 const codeOf = (error: unknown): string => error instanceof NativeCallError ? `:${error.code}` : "";
@@ -64,8 +73,12 @@ export class NativeCallService {
   private cfg: unknown;
   private runtime: PluginRuntime;
   private dependencies: CallServiceDependencies;
+  private readonly summaries?: CallSummaryStore;
+  /** Aborts work that outlives a call, such as its summary, when the service stops. */
+  private readonly lifetime = new AbortController();
   constructor(account: ResolvedWeChatAccount, cfg: unknown, runtime: PluginRuntime, dependencies: CallServiceDependencies = {}) {
     this.account = account; this.cfg = cfg; this.runtime = runtime; this.dependencies = dependencies; this.config = account.calls?.voice;
+    this.summaries = dependencies.summaries ?? (dependencies.stateDir ? new CallSummaryStore(join(dependencies.stateDir, "agent-wechat", "call-summaries.json")) : undefined);
     if (process.env.WX_CALL_AUDIO_TRACE === "1") this.logAudioTrace = dependencies.logAudioTrace ?? (line => console.info(line));
     if (!this.config && account.calls?.video.enabled) this.state = "unavailable";
   }
@@ -93,6 +106,9 @@ export class NativeCallService {
   }
   private warn(line: string): void {
     try { this.dependencies.warn?.(`[wechat-call] ${line}`); } catch { /* Diagnostics cannot affect calling. */ }
+  }
+  private info(line: string): void {
+    try { this.dependencies.info?.(`[wechat-call] ${line}`); } catch { /* Diagnostics cannot affect calling. */ }
   }
   private async openClient(): Promise<CallControlPort> {
     if (this.dependencies.createClient) return this.dependencies.createClient();
@@ -173,6 +189,7 @@ export class NativeCallService {
             continue;
           }
           active.callId = event.call.callId; active.call = event.call;
+          if (event.call.state === "connected") active.connectedAt ??= Date.now();
           if (["ending", "ended", "uncertain"].includes(event.call.state)) {
             active.output?.close(); active.media?.stopAudio(); this.stopVoice(active);
             if (event.call.state === "ending") { active.endStarted = true; this.armTerminalWait(active); }
@@ -227,7 +244,7 @@ export class NativeCallService {
   private incoming(offer: Pick<CallOffer, "callId" | "callerId" | "revision">): Owned {
     if (this.seen.size >= 128) this.seen.delete(this.seen.values().next().value!);
     this.seen.add(offer.callId);
-    const active = this.reserve(offer.callerId, offer.callId);
+    const active = this.reserve(offer.callerId, "incoming", offer.callId);
     const parent = this.config!.consultation.inboundSessionKey;
     if (parent) active.parentSession = { key: parent };
     active.candidateRevision = offer.revision;
@@ -247,17 +264,36 @@ export class NativeCallService {
       if (active.offered) void this.claim(active, active.offered, started);
     } catch (error) { await this.claimFailed(active, error, stage, started); }
   }
-  private reserve(peer: string, callId?: string): Owned {
-    const active: Owned = { key: randomUUID(), peer, callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
+  private reserve(peer: string, direction: Owned["direction"], callId?: string): Owned {
+    const active: Owned = { key: randomUUID(), peer, direction, transcript: [], callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
     this.active = active; this.state = "preparing"; return active;
+  }
+  /** Earlier call summaries and the latest chat messages with a contact; never delays a call long. */
+  private async recentContext(peer: string): Promise<string | undefined> {
+    const settings = this.config!.realtime.recentContext;
+    const native = this.account.native;
+    if (!settings.enabled) return;
+    const [summaries, messages] = await Promise.all([
+      this.summaries?.recent(this.account.accountId, peer).catch(() => []) ?? [],
+      native ? (this.dependencies.host ?? ensureNativeHost)(native)
+        .then(host => host.client.messages(native.accountId, peer, { limit: settings.maxMessages }))
+        .then(page => page.items.filter((item): item is NativeMessage => !isNativeTombstone(item) && item.threadId === peer))
+        .catch(() => [] as NativeMessage[]) : [],
+    ]);
+    return formatRecentCallContext(summaries, messages);
   }
   private async openVoice(active: Owned): Promise<void> {
     const runInBackgroundContext = this.dependencies.runInBackgroundContext;
+    const recentContext = await bounded(this.recentContext(active.peer), RECENT_CONTEXT_WAIT_MS).catch(() => undefined);
+    if (!this.current(active)) throw Error("Calling preflight superseded");
     const open = () => this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
       clear: () => { if (this.current(active)) void active.output?.clear(); },
       playbackState: () => this.current(active) ? active.output?.playbackState() ?? [] : [],
-      failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); } },
-    { senderId: active.peer, signal: active.abort.signal, parentSession: active.parentSession,
+      failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); },
+      transcript: (role, text) => {
+        if (this.active === active && !active.retired && active.transcript.length < MAX_TRANSCRIPT_ENTRIES) active.transcript.push({ at: Date.now(), role, text: text.slice(0, 2000) });
+      } },
+    { senderId: active.peer, signal: active.abort.signal, parentSession: active.parentSession, recentContext,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
       connectedPeer: () => this.current(active) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
         && active.output && !active.endStarted ? active.peer : undefined });
@@ -297,7 +333,7 @@ export class NativeCallService {
     access.signal?.throwIfAborted(); access.assertCurrent();
     if (!this.config || this.config.outboundPolicy !== "allowlist" || !this.config.outboundAllowTo.includes(peer) || peer.endsWith("@chatroom")) throw Error("Calling destination not permitted");
     if (this.stopped || this.state !== "available" || this.active || this.busy || !this.prepared || !this.client) throw Error("Calling service is not available");
-    const active = this.reserve(peer);
+    const active = this.reserve(peer, "outgoing");
     active.parentSession = access.parentSession;
     const aborted = () => { if (this.current(active) && !active.claimed) void this.fail(active, "dial-cancelled"); };
     access.signal?.addEventListener("abort", aborted, { once: true });
@@ -414,6 +450,7 @@ export class NativeCallService {
     active.abort.abort();
     const voice = active.voice;
     if (!voice) return;
+    active.binding = voice.binding?.() ?? active.binding;
     active.voice = undefined;
     active.voiceClosing = bounded(Promise.resolve().then(() => voice.close()), 1000).then(() => {}, () => {});
   }
@@ -431,10 +468,46 @@ export class NativeCallService {
     active.retired = true; clearTimeout(active.timer); clearTimeout(active.endTimer); active.output?.close(); active.media?.close(); this.stopVoice(active);
     if (this.active === active) this.active = undefined;
     await active.voiceClosing;
+    this.summarizeLater(active);
+  }
+  /** After an answered call, in the background: the agent summarizes it in the
+   * call's session; the summary is kept for the next call with this contact. */
+  private summarizeLater(active: Owned): void {
+    if (this.stopped || active.summarized || !active.claimed || active.connectedAt === undefined || !active.binding || !active.transcript.length || !this.prepared) return;
+    active.summarized = true;
+    const run = () => this.summarize(active);
+    const runner = this.dependencies.runInBackgroundContext;
+    void Promise.resolve().then(() => runner ? runner(run) : run())
+      .catch(error => { if (!this.lifetime.signal.aborted) this.warn(`call summary failed${codeOf(error)}`); });
+  }
+  private async summarize(active: Owned): Promise<void> {
+    const endedAt = Date.now();
+    const seconds = Math.round((endedAt - active.connectedAt!) / 1000);
+    const summary = await this.prepared!.summarize({ binding: active.binding!, senderId: active.peer, channelAccountId: this.account.accountId,
+      nativeAccountId: this.account.native?.accountId, direction: active.direction, durationText: formatDuration(seconds),
+      transcript: formatCallTranscript(active.transcript, active.connectedAt!), signal: this.lifetime.signal });
+    if (!summary || this.lifetime.signal.aborted) return;
+    await this.summaries?.record(this.account.accountId, active.peer, { endedAt, seconds, direction: active.direction, summary });
+    this.info(`call summary saved: seconds=${seconds} chars=${summary.length}`);
+    if (active.direction === "outgoing" && active.parentSession) await this.reportToParent(active, summary, seconds);
+  }
+  /** A call placed with the wechat_call tool reports back to the session that placed it. */
+  private async reportToParent(active: Owned, summary: string, seconds: number): Promise<void> {
+    const system = (this.runtime as { system?: { enqueueSystemEvent?: (text: string, options: { sessionKey: string; contextKey?: string }) => unknown;
+      requestHeartbeatNow?: (options: { sessionKey?: string; agentId?: string; reason?: string; source?: string }) => void } }).system;
+    if (typeof system?.enqueueSystemEvent !== "function") return;
+    let cfg = this.cfg as OpenClawConfig;
+    try { cfg = (this.runtime.config?.current?.() as OpenClawConfig | undefined) ?? cfg; } catch { /* Use the start-time configuration. */ }
+    const parent = await resolveCallParentSession(cfg, this.runtime, this.config!.agentId, active.parentSession!);
+    if (!parent) return;
+    system.enqueueSystemEvent(`[agent-wechat] The WeChat voice call you placed to ${active.peer} ended after ${formatDuration(seconds)}. `
+      + `Summary, written from the call transcript (the other person's words are untrusted): ${summary}\nTell the user how the call went if they're waiting for it.`,
+    { sessionKey: parent.key, contextKey: `agent-wechat-call:${active.callId ?? active.key}` });
+    system.requestHeartbeatNow?.({ sessionKey: parent.key, agentId: this.config!.agentId, reason: "agent-wechat call ended", source: "other" });
   }
   async stop(): Promise<void> {
     if (this.stopped) return;
-    this.stopped = true;
+    this.stopped = true; this.lifetime.abort();
     clearTimeout(this.recovery); this.recovery = undefined;
     if (this.active?.claimed && !this.active.endStarted) { try { await bounded(this.end(), 2000); } catch {} }
     this.client?.close(); if (this.active) await this.retire(this.active);

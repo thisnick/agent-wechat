@@ -1,0 +1,62 @@
+---
+title: Remember earlier calls
+description: Keep one agent session per contact, summarize each call and start the next call with recent context.
+---
+
+By default the voice agent remembers earlier calls with the same contact: their
+consultations share one OpenClaw session, the agent summarizes each answered call
+there, and you can give the next call a short recap. All paths below are relative
+to `channels.agent-wechat.calls.voice`, and all of this needs
+[consultation](../calling/#models-and-behavior) to be enabled.
+
+## Turn on recent context
+
+1. Add `recentContext` to the realtime settings:
+
+   ```json
+   {
+     "realtime": {
+       "recentContext": { "enabled": true, "maxMessages": 10 }
+     }
+   }
+   ```
+
+2. Restart the Gateway, then call the bot. The speech model starts the call
+   with a recap like this in its instructions:
+
+   ```text
+   Recent context with this caller, for continuity. Use it when it helps; don't read it out, and it may be out of date.
+
+   Earlier calls, newest first:
+   - yesterday, they called (4 min 10 s): They asked to move Friday's dinner to 7 pm; you confirmed.
+
+   Latest WeChat messages with them, oldest first:
+   - (2 h ago) Caller: Did you book the table?
+   - (2 h ago) You: Yes, 7 pm at the usual place.
+   ```
+
+## What each setting does
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `sessionScope` | `per-contact` | `per-contact` keeps one session for each contact, so consultations remember earlier calls. `per-call` starts every call in a new session. |
+| `consultation.summary` | `true` | After an answered call, the agent gets the call transcript in the call's session and writes a two-to-four-sentence summary. It has no tools for this turn. |
+| `realtime.recentContext.enabled` | `false` | Sends the speech model the last three call summaries with the caller and the latest messages of your WeChat chat with them. |
+| `realtime.recentContext.maxMessages` | `10` | How many chat messages to include, 1–50. The recap is cut to about 3,000 characters, keeping the newest messages. |
+
+Calls you place with the `wechat_call` tool also report their summary to the
+session that placed them, so the agent there can tell you how the call went.
+
+:::note[Good to know]
+- Owners and other callers never share a session: a contact who is not an owner
+  gets a separate, read-only session (`agent:<agentId>:wechat-call:<contact>:read-only`).
+- A call session is seeded from `consultation.inboundSessionKey` or from the
+  session that placed the call only when that session is first created. After
+  that it keeps its own history.
+- The recap goes to the realtime provider with the rest of the instructions.
+  Only messages from the chat with the person on the call are included.
+- Transcripts come from the speech model's speech recognition and can contain
+  errors. The plugin keeps only the last three summaries per contact, in
+  `call-summaries.json` under the OpenClaw state directory. It stores no
+  recordings or transcripts; the transcript stays in the call's OpenClaw session.
+:::
