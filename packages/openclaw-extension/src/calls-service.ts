@@ -1,22 +1,26 @@
 import { randomUUID } from "node:crypto";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import { NativeCallError, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type NativeCallMediaClient, type NativeCallsClient, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
+import { NativeCallError, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type NativeCallMediaClient, type NativeCallsClient, type NativeCallPcmObserver, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
 import type { ResolvedWeChatAccount } from "./types.ts";
 import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
-import { prepareOpenClawCallVoice, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
+import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
+import { CallAudioTrace } from "./calls-audio-trace.ts";
+import type { CallParentSession } from "./calls-session.ts";
 
 export type CallMediaPort = Pick<NativeCallMediaClient, "frames" | "tracks" | "sendPcm" | "stopAudio" | "close">;
-export type CallControlPort = Pick<NativeCallsClient, "connect" | "events" | "ready" | "dial" | "answer" | "end" | "clearAudio" | "close"> & { attachMedia(callId: string): Promise<CallMediaPort> };
+export type CallControlPort = Pick<NativeCallsClient, "connect" | "events" | "ready" | "dial" | "answer" | "end" | "clearAudio" | "close"> & { attachMedia(callId: string, observePcm?: NativeCallPcmObserver): Promise<CallMediaPort> };
 export type CallServiceDependencies = {
   client?: CallControlPort;
   prepareVoice?: typeof prepareOpenClawCallVoice;
   host?: typeof ensureNativeHost;
   socketFactory?: NativeCallWebSocketFactory;
+  logAudioTrace?: (line: string) => void;
+  runInBackgroundContext?: CallBackgroundRunner;
 };
-type Owned = { key: string; peer: string; callId?: string; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
-  ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
+type Owned = { key: string; peer: string; callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
+  ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; trace?: CallAudioTrace; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
 const TERMINAL_WAIT_MS = 30_000;
 const bounded = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -45,12 +49,14 @@ export class NativeCallService {
   private loop?: Promise<void>;
   private state = "disabled";
   private readonly config?: ResolvedWeChatVoiceCallsConfig;
+  private readonly logAudioTrace?: (line: string) => void;
   private account: ResolvedWeChatAccount;
   private cfg: unknown;
   private runtime: PluginRuntime;
   private dependencies: CallServiceDependencies;
   constructor(account: ResolvedWeChatAccount, cfg: unknown, runtime: PluginRuntime, dependencies: CallServiceDependencies = {}) {
     this.account = account; this.cfg = cfg; this.runtime = runtime; this.dependencies = dependencies; this.config = account.calls?.voice;
+    if (process.env.WX_CALL_AUDIO_TRACE === "1") this.logAudioTrace = dependencies.logAudioTrace ?? (line => console.info(line));
     if (!this.config && account.calls?.video.enabled) this.state = "unavailable";
   }
   status(): { state: string; owned: boolean; callId?: string } {
@@ -78,6 +84,7 @@ export class NativeCallService {
       // provider-ready exact offer registers incoming readiness below.
       this.state = this.busy ? "busy" : "available";
       this.loop = this.consume();
+      try { this.logAudioTrace?.(`[wechat-call-audio] plugin service-ready state=${this.state}`); } catch { /* Diagnostics cannot disable calling. */ }
     } catch { this.state = this.stopped ? "stopped" : "unavailable"; this.client?.close(); }
   }
   private current(owned: Owned): boolean { return !this.stopped && this.active === owned && !owned.retired && !owned.abort.signal.aborted; }
@@ -153,6 +160,8 @@ export class NativeCallService {
     if (this.seen.size >= 128) this.seen.delete(this.seen.values().next().value!);
     this.seen.add(offer.callId);
     const active = this.reserve(offer.callerId, offer.callId);
+    const parent = this.config!.consultation.inboundSessionKey;
+    if (parent) active.parentSession = { key: parent };
     active.candidateRevision = offer.revision;
     active.timer = setTimeout(() => { if (this.current(active) && !active.claimed) void this.fail(active); }, 20000);
     active.timer.unref?.(); return active;
@@ -172,9 +181,14 @@ export class NativeCallService {
     this.active = active; this.state = "preparing"; return active;
   }
   private async openVoice(active: Owned): Promise<void> {
-    const opening = this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
+    const runInBackgroundContext = this.dependencies.runInBackgroundContext;
+    const open = () => this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
       clear: () => { if (this.current(active)) void active.output?.clear(); }, failed: () => { if (this.current(active)) void this.fail(active); } },
-    { senderId: active.peer, signal: active.abort.signal });
+    { senderId: active.peer, signal: active.abort.signal, parentSession: active.parentSession,
+      channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
+      connectedPeer: () => this.current(active) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
+        && active.output && !active.endStarted ? active.peer : undefined });
+    const opening = runInBackgroundContext ? runInBackgroundContext(open) : open();
     // If timeout wins, a late provider must still be closed rather than adopted.
     void opening.then(voice => { if (!this.current(active)) void Promise.resolve(voice.close()).catch(() => {}); }, () => {});
     active.voice = await bounded(opening, 10000);
@@ -200,11 +214,12 @@ export class NativeCallService {
         if (!knownLoss) this.client?.close();
     }
   }
-  async dial(peer: string, access: { signal?: AbortSignal; assertCurrent: () => void }): Promise<{ callId: string }> {
+  async dial(peer: string, access: { signal?: AbortSignal; assertCurrent: () => void; parentSession?: CallParentSession }): Promise<{ callId: string }> {
     access.signal?.throwIfAborted(); access.assertCurrent();
     if (!this.config || this.config.outboundPolicy !== "allowlist" || !this.config.outboundAllowTo.includes(peer) || peer.endsWith("@chatroom")) throw Error("Calling destination not permitted");
     if (this.stopped || this.state !== "available" || this.active || this.busy || !this.prepared || !this.client) throw Error("Calling service is not available");
     const active = this.reserve(peer);
+    active.parentSession = access.parentSession;
     const aborted = () => { if (this.current(active) && !active.claimed) void this.fail(active); };
     access.signal?.addEventListener("abort", aborted, { once: true });
     try {
@@ -233,25 +248,44 @@ export class NativeCallService {
     if (!this.current(active) || !active.claimed || active.attaching || active.media || !active.callId || active.endStarted) return;
     active.attaching = true;
     try {
-      const media = await this.client!.attachMedia(active.callId);
+      const trace = this.logAudioTrace ? new CallAudioTrace(this.logAudioTrace, {
+        daemonHz: this.format!.sampleRate, realtimeHz: this.prepared!.sampleRate,
+      }) : undefined;
+      active.trace = trace;
+      const media = await this.client!.attachMedia(active.callId, trace?.observePcm);
       if (this.stopped || this.active !== active || active.retired) { media.close(); return; }
       active.media = media;
       if (active.endStarted) { media.stopAudio(); this.armTerminalWait(active); return; }
       if (!this.current(active)) { media.close(); return; }
       const tracks = media.tracks();
       if (JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTrack.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
-      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); });
+      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); }, trace);
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
       void (async () => {
         let receivedMs = 0;
         try {
           for await (const frame of media.frames()) {
             if (!this.current(active) || active.endStarted) break;
+            const consumedAt = trace ? performance.now() : 0;
+            const samples = frame.payload.byteLength / (this.format!.channels * 2);
+            trace?.add("inputConsumedChunks");
+            trace?.add("inputConsumedSamples", samples);
+            trace?.gap("inputConsumeGapMs", consumedAt);
+            if (frame.receivedAtMs !== undefined) trace?.measure("sdkRxWaitMs", consumedAt - frame.receivedAtMs);
             const audio = resampler.process(Buffer.from(frame.payload));
-            if (audio.length > this.prepared!.sampleRate * 2 || !Number.isFinite(receivedMs) || receivedMs > Number.MAX_SAFE_INTEGER) throw Error("Calling input budget exceeded");
-            active.voice!.setMediaTimestamp(receivedMs);
-            receivedMs += frame.payload.byteLength * 1000 / (this.format!.sampleRate * this.format!.channels * 2);
+            const forwardAt = trace ? performance.now() : 0;
+            trace?.measure("inputResampleMs", forwardAt - consumedAt);
+            const timestampMs = frame.sampleOffset === undefined ? receivedMs : frame.sampleOffset * 1000 / this.format!.sampleRate;
+            if (audio.length > this.prepared!.sampleRate * 2 || !Number.isFinite(timestampMs) || timestampMs > Number.MAX_SAFE_INTEGER) throw Error("Calling input budget exceeded");
+            if (!this.current(active) || active.endStarted) break;
+            receivedMs = timestampMs + samples * 1000 / this.format!.sampleRate;
+            active.voice!.setMediaTimestamp(timestampMs);
+            if (!this.current(active) || active.endStarted) break;
             active.voice!.sendAudio(audio);
+            trace?.add("realtimeInputChunks");
+            trace?.add("realtimeInputSamples", audio.length / 2);
+            trace?.gap("realtimeInputGapMs", forwardAt);
+            trace?.measure("realtimeForwardMs", performance.now() - forwardAt);
           }
         } catch { if (this.current(active) && !active.endStarted) await this.fail(active); }
       })();
@@ -282,6 +316,7 @@ export class NativeCallService {
     this.state = active.submitted || active.incomingReadinessAttempted ? "needs_review" : "unavailable"; await this.retire(active); this.client?.close();
   }
   private stopVoice(active: Owned): void {
+    active.trace?.close();
     active.abort.abort();
     const voice = active.voice;
     if (!voice) return;

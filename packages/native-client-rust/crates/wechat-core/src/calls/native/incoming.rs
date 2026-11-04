@@ -156,15 +156,18 @@ pub(super) async fn prepare(
             } else {
                 BackendOutcome::Uncertain
             });
-            if let Some(core) = core {
+            let service = core.and_then(|core| {
+                core.call_service(&actor_worker.lease.authority().account_id)
+                    .ok()
+            });
+            if let Some(service) = service {
                 if confirmed {
-                    let _ = core.call_service().verified_incoming_terminal(
+                    let _ = service.verified_incoming_terminal(
                         actor_worker.lease.authority(),
                         &actor_worker.identity,
                     );
                 } else if !terminal {
-                    let _ = core
-                        .call_service()
+                    let _ = service
                         .incoming_uncertain(actor_worker.lease.authority(), &actor_worker.identity);
                 }
             }
@@ -449,8 +452,13 @@ impl Actor {
             && !self.mailbox.cancellation_pending()
             && self
                 .core
-                .call_service()
-                .pending_incoming_reject(self.worker.lease.authority(), &self.worker.identity)
+                .call_service(&self.worker.lease.authority().account_id)
+                .is_ok_and(|service| {
+                    service.pending_incoming_reject(
+                        self.worker.lease.authority(),
+                        &self.worker.identity,
+                    )
+                })
     }
     fn register_member(&self) -> Result<()> {
         let room = self
@@ -461,13 +469,15 @@ impl Actor {
         // Publish the already authenticated member before exposing it through
         // the broker. Delivery cannot keep an old snapshot past this point.
         self.mailbox.publish_member(room.own_member)?;
-        self.core.call_service().set_incoming_member(
-            self.worker.lease.authority(),
-            &self.worker.identity,
-            room.room,
-            room.room_key,
-            room.own_member,
-        )?;
+        self.core
+            .call_service(&self.worker.lease.authority().account_id)?
+            .set_incoming_member(
+                self.worker.lease.authority(),
+                &self.worker.identity,
+                room.room,
+                room.room_key,
+                room.own_member,
+            )?;
         Ok(())
     }
     fn poll(&mut self) -> Result<bool> {
