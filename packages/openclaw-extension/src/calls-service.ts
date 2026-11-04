@@ -52,6 +52,7 @@ export class NativeCallService {
   private state = "disabled";
   private readonly config?: ResolvedWeChatVoiceCallsConfig;
   private readonly logAudioTrace?: (line: string) => void;
+  private callingStopped = false;
   private account: ResolvedWeChatAccount;
   private cfg: unknown;
   private runtime: PluginRuntime;
@@ -87,7 +88,16 @@ export class NativeCallService {
       this.state = this.busy ? "busy" : "available";
       this.loop = this.consume();
       try { this.logAudioTrace?.(`[wechat-call-audio] plugin service-ready state=${this.state}`); } catch { /* Diagnostics cannot disable calling. */ }
-    } catch { this.state = this.stopped ? "stopped" : "unavailable"; this.client?.close(); }
+    } catch { this.state = this.stopped ? "stopped" : "unavailable"; if (this.stopped) this.client?.close(); else this.stopCalling("start-failed"); }
+  }
+  private warn(line: string): void {
+    try { this.dependencies.warn?.(`[wechat-call] ${line}`); } catch { /* Diagnostics cannot affect calling. */ }
+  }
+  /** Closing the control socket ends event delivery until the channel restarts. */
+  private stopCalling(reason: string): void {
+    this.callingStopped = true;
+    this.warn(`calling stopped: state=${this.state} reason=${reason}; reload the agent-wechat channel or restart the gateway to resume`);
+    this.client?.close();
   }
   private current(owned: Owned): boolean { return !this.stopped && this.active === owned && !owned.retired && !owned.abort.signal.aborted; }
   private async consume(): Promise<void> {
@@ -114,7 +124,7 @@ export class NativeCallService {
           }
           const active = this.active;
           if (!active || (active.callId && active.callId !== event.call.callId)) continue;
-          if (event.call.kind !== "direct" || event.call.callType !== "voice") { this.state = "needs_review"; await this.retire(active); this.client?.close(); continue; }
+          if (event.call.kind !== "direct" || event.call.callType !== "voice") { this.state = "needs_review"; await this.retire(active); this.stopCalling("unsupported-call"); continue; }
           if (!event.call.ownedByThisClient) {
             // An offered call may be won by another connection during preflight.
             if (active.callId === event.call.callId && event.call.state !== "offered") { await this.retire(active); this.state = event.call.state === "ended" ? "available" : "busy"; }
@@ -136,10 +146,14 @@ export class NativeCallService {
           if (event.availability.busy && !this.active && this.state !== "needs_review") this.state = "busy";
           if (!event.availability.busy) { if (this.active?.claimed) await this.retire(this.active); if (this.state !== "needs_review") this.state = "available"; }
         } else if (event.type === "call.error" && ["outcome_unknown", "forbidden", "closed"].includes(event.code)) {
-          this.state = "needs_review"; if (this.active) await this.retire(this.active); this.client?.close(); break;
+          this.state = "needs_review"; if (this.active) await this.retire(this.active); this.stopCalling(`call-error-${event.code}`); break;
         }
       }
-    } catch { if (!this.stopped) { this.state = "needs_review"; if (this.active) await this.retire(this.active); this.client?.close(); } }
+      if (!this.stopped && !this.callingStopped) {
+        // The daemon closed the control connection; no further offers arrive.
+        this.state = "unavailable"; if (this.active) await this.retire(this.active); this.stopCalling("events-ended");
+      }
+    } catch { if (!this.stopped) { this.state = "needs_review"; if (this.active) await this.retire(this.active); this.stopCalling("events-failed"); } }
   }
   private offer(offer: CallOffer): void {
     if (!this.allowedIncoming(offer)) return;
@@ -149,6 +163,7 @@ export class NativeCallService {
       if (existing.ready && existing.voice) void this.claim(existing, offer);
       return;
     }
+    if (this.state === "needs_review" && !this.seen.has(offer.callId)) { this.seen.add(offer.callId); this.warn("incoming call ignored: calling stopped after an uncertain outcome (state=needs_review)"); }
     if (existing || this.seen.has(offer.callId) || this.state === "needs_review") return;
     const active = this.incoming(offer);
     active.offered = offer;
@@ -163,6 +178,7 @@ export class NativeCallService {
     if (this.active?.callId === offer.callId && this.active.peer === offer.callerId && !this.active.submitted) {
       this.active.candidateRevision = offer.revision; return;
     }
+    if (this.state === "needs_review" && !this.seen.has(offer.callId)) { this.seen.add(offer.callId); this.warn("incoming call ignored: calling stopped after an uncertain outcome (state=needs_review)"); }
     if (this.active || this.seen.has(offer.callId) || this.state === "needs_review") return;
     void this.prepareIncoming(this.incoming(offer));
   }
@@ -173,7 +189,7 @@ export class NativeCallService {
     const parent = this.config!.consultation.inboundSessionKey;
     if (parent) active.parentSession = { key: parent };
     active.candidateRevision = offer.revision;
-    active.timer = setTimeout(() => { if (this.current(active) && !active.claimed) void this.fail(active); }, 20000);
+    active.timer = setTimeout(() => { if (this.current(active) && !active.claimed) void this.fail(active, "unanswered-timeout"); }, 20000);
     active.timer.unref?.(); return active;
   }
   private async prepareIncoming(active: Owned): Promise<void> {
@@ -198,7 +214,7 @@ export class NativeCallService {
     const open = () => this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
       clear: () => { if (this.current(active)) void active.output?.clear(); },
       playbackState: () => this.current(active) ? active.output?.playbackState() ?? [] : [],
-      failed: () => { if (this.current(active)) void this.fail(active); } },
+      failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); } },
     { senderId: active.peer, signal: active.abort.signal, parentSession: active.parentSession,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
       connectedPeer: () => this.current(active) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
@@ -228,11 +244,11 @@ export class NativeCallService {
         // An unanswered call otherwise leaves no trace. Only fixed values reach
         // logs: provider errors can contain private details.
         try {
-          this.dependencies.warn?.(`[wechat-call] incoming call not answered: stage=${stage} ms=${Math.round(performance.now() - started)}`
+          this.warn(`incoming call not answered: stage=${stage} ms=${Math.round(performance.now() - started)}`
             + ` code=${error instanceof NativeCallError ? error.code : "none"} state=${this.state}`);
         } catch { /* Diagnostics cannot affect calling. */ }
         await this.retire(active);
-        if (!knownLoss) this.client?.close();
+        if (!knownLoss) this.stopCalling("preflight-failed");
     }
   }
   async dial(peer: string, access: { signal?: AbortSignal; assertCurrent: () => void; parentSession?: CallParentSession }): Promise<{ callId: string }> {
@@ -241,7 +257,7 @@ export class NativeCallService {
     if (this.stopped || this.state !== "available" || this.active || this.busy || !this.prepared || !this.client) throw Error("Calling service is not available");
     const active = this.reserve(peer);
     active.parentSession = access.parentSession;
-    const aborted = () => { if (this.current(active) && !active.claimed) void this.fail(active); };
+    const aborted = () => { if (this.current(active) && !active.claimed) void this.fail(active, "dial-cancelled"); };
     access.signal?.addEventListener("abort", aborted, { once: true });
     try {
       await this.openVoice(active); access.signal?.throwIfAborted(); access.assertCurrent();
@@ -256,7 +272,7 @@ export class NativeCallService {
       return { callId: result.callId };
     } catch (error) {
       const unknown = active.submitted && (!(error instanceof NativeCallError) || error.outcomeUnknown);
-      if (this.current(active)) { this.state = unknown ? "needs_review" : active.submitted ? "available" : "unavailable"; await this.retire(active); if (unknown || !active.submitted) this.client.close(); }
+      if (this.current(active)) { this.state = unknown ? "needs_review" : active.submitted ? "available" : "unavailable"; await this.retire(active); if (unknown || !active.submitted) this.stopCalling("dial-failed"); }
       throw Error(unknown ? "Call outcome needs review; no automatic redial" : "Call was not admitted");
     } finally { access.signal?.removeEventListener("abort", aborted); }
   }
@@ -280,7 +296,7 @@ export class NativeCallService {
       if (!this.current(active)) { media.close(); return; }
       const tracks = media.tracks();
       if (JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTrack.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
-      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); }, trace,
+      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active, "output"); }, trace,
         { continuous: this.prepared!.continuous });
       active.output.start();
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
@@ -310,9 +326,9 @@ export class NativeCallService {
             trace?.gap("realtimeInputGapMs", forwardAt);
             trace?.measure("realtimeForwardMs", performance.now() - forwardAt);
           }
-        } catch { if (this.current(active) && !active.endStarted) await this.fail(active); }
+        } catch { if (this.current(active) && !active.endStarted) await this.fail(active, "media-input"); }
       })();
-    } catch { if (this.current(active)) await this.fail(active); }
+    } catch { if (this.current(active)) await this.fail(active, "media-attach"); }
     finally { active.attaching = false; }
   }
   async end(): Promise<void> {
@@ -325,18 +341,27 @@ export class NativeCallService {
     try {
       await this.client.end(["dialing", "ringing"].includes(active.call.state) ? "call.cancel" : "call.hangup", randomUUID(), active.callId, active.call.revision);
       // Acceptance is not a terminal result. Keep the owner until server state arrives.
-    } catch { this.state = "needs_review"; this.client.close(); await this.retire(active); throw Error("Call end outcome needs review"); }
+    } catch { this.state = "needs_review"; this.stopCalling("end-outcome-unknown"); await this.retire(active); throw Error("Call end outcome needs review"); }
   }
-  private async fail(active: Owned): Promise<void> {
+  private async fail(active: Owned, cause: string): Promise<void> {
     if (active.endStarted && !this.stopped && this.active === active && !active.retired) {
       active.output?.close(); active.media?.stopAudio(); this.stopVoice(active); this.armTerminalWait(active); return;
     }
     if (!this.current(active)) return;
+    this.warn(`ending call after a failure: cause=${cause} answered=${active.claimed}`);
     active.output?.close();
     if (active.claimed && active.call && !active.endStarted) {
-      try { await bounded(this.end(), 2000); return; } catch {}
+      const ending = this.end();
+      try { await bounded(ending, 2000); return; }
+      catch (error) {
+        // A WeChat hangup can take several seconds. While it is in flight, its
+        // result, the terminal call state or the terminal wait settles the
+        // call; closing control now would stop calling for no reason.
+        if (error instanceof Error && error.message === "Calling operation timed out" && active.endStarted) { void ending.catch(() => {}); return; }
+        if (!this.current(active)) return;
+      }
     }
-    this.state = active.submitted || active.incomingReadinessAttempted ? "needs_review" : "unavailable"; await this.retire(active); this.client?.close();
+    this.state = active.submitted || active.incomingReadinessAttempted ? "needs_review" : "unavailable"; await this.retire(active); this.stopCalling(`failed-${cause}`);
   }
   private stopVoice(active: Owned): void {
     active.trace?.close();
@@ -351,7 +376,7 @@ export class NativeCallService {
     if (active.endTimer) return;
     active.endTimer = setTimeout(() => {
       if (this.stopped || this.active !== active || active.retired) return;
-      this.state = "needs_review"; this.client?.close(); void this.retire(active);
+      this.state = "needs_review"; this.stopCalling("no-terminal-state"); void this.retire(active);
     }, TERMINAL_WAIT_MS);
     active.endTimer.unref?.();
   }

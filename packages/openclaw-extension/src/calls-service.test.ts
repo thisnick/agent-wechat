@@ -150,11 +150,22 @@ test("an incoming call whose voice session fails to open logs only its stage", a
   const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line));
   voice.prepared.open = async () => { throw Error("synthetic-private-provider-detail"); };
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
-  await until(() => lines.length > 0);
-  assert.deepEqual(lines.map(line => line.replace(/ms=\d+/, "ms=N")),
-    ["[wechat-call] incoming call not answered: stage=voice ms=N code=none state=unavailable"]);
+  await until(() => lines.length > 1);
+  assert.deepEqual(lines.map(line => line.replace(/ms=\d+/, "ms=N")), [
+    "[wechat-call] incoming call not answered: stage=voice ms=N code=none state=unavailable",
+    "[wechat-call] calling stopped: state=unavailable reason=preflight-failed; reload the agent-wechat channel or restart the gateway to resume",
+  ]);
   assert.equal(lines.some(line => line.includes("synthetic-private")), false);
   assert.equal(client.readied, 0); assert.equal(client.answers, 0);
+  await service.stop();
+});
+test("a control connection that closes unexpectedly is reported once", async () => {
+  const lines: string[] = [];
+  const { service, client } = await fixture(undefined, configuration(), line => lines.push(line));
+  client.eventsQueue.close();
+  await until(() => lines.length > 0); await delay(10);
+  assert.deepEqual(lines, ["[wechat-call] calling stopped: state=unavailable reason=events-ended; reload the agent-wechat channel or restart the gateway to resume"]);
+  assert.equal(service.status().state, "unavailable");
   await service.stop();
 });
 test("a withdrawn pre-answer offer releases the listener for the next call", async t => {
@@ -466,6 +477,21 @@ test("provider failure requests one end while retaining the owner until terminal
   assert.equal(client.media.closed, false); assert.equal(client.closed, false); assert.equal(service.status().owned, true);
   client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
   await until(() => service.status().state === "available"); await service.stop(); assert.equal(client.ends, 1); assert.equal(client.closed, true);
+});
+test("a slow hangup after a provider failure keeps calling available for the next call", async () => {
+  const lines: string[] = [];
+  const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line));
+  (client as any).end = async () => { client.ends++; await delay(2300); return accepted(); };
+  await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
+  voice.state.callbacks!.failed("provider-closed:error");
+  await delay(2500);
+  assert.equal(client.ends, 1); assert.equal(client.closed, false); assert.notEqual(service.status().state, "needs_review");
+  assert.deepEqual(lines, ["[wechat-call] ending call after a failure: cause=provider-closed:error answered=true"]);
+  client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
+  await until(() => service.status().state === "available");
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: "next" } });
+  await until(() => client.answers === 1);
+  await service.stop();
 });
 test("media attachment completing after end is retained without starting audio until terminal", async t => {
   const { service, client, voice } = await fixture();

@@ -13,7 +13,8 @@ export type VoiceCallbacks = {
   audio(audio: Buffer, metadata?: { itemId: string }): void;
   clear(): void;
   playbackState?(): Array<{ itemId: string; audioEndMs: number }>;
-  failed(): void;
+  /** A fixed cause such as `provider-closed:<reason>` or `provider-error`. */
+  failed(reason?: string): void;
 };
 export type CallBackgroundRunner = <T>(run: () => T) => T;
 export type CallVoiceSession = { sendAudio(audio: Buffer): void; setMediaTimestamp(ms: number): void; close(): void | Promise<void> };
@@ -172,7 +173,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       void admission.catch(() => {});
       const consults = new Set<string>();
       let toolConsulting = false;
-      const fail = () => { if (!closed) { forced?.close(); rejectReady(Error("Calling provider failed")); callbacks.failed(); } };
+      const fail = (reason: string) => { if (!closed) { forced?.close(); rejectReady(Error("Calling provider failed")); callbacks.failed(reason); } };
       const abort = () => { closed = true; forced?.close(); consults.clear(); rejectReady(Error("Calling provider stopped")); void Promise.resolve(session?.close()).catch(() => {}); };
       signal.throwIfAborted(); signal.addEventListener("abort", abort, { once: true });
       const makeScope = (isOwner: boolean) => ({ isOwner, sessionKey: `agent:${config.agentId}:wechat-call:${randomUUID()}` });
@@ -256,7 +257,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
           instructions, tools: tools.slice(), triggerGreetingOnReady: false, markStrategy: "ignore",
           audioSink: { isOpen: () => ready && !closed && !signal.aborted, sendAudio: callbacks.audio, clearAudio: callbacks.clear,
             ...(continuous ? {} : { getPlaybackState: callbacks.playbackState }) },
-          onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: fail, onError: fail,
+          onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: (reason?: unknown) => fail(typeof reason === "string" && /^[a-z_-]{1,32}$/.test(reason) ? `provider-closed:${reason}` : "provider-closed"),
+          onError: () => fail("provider-error"),
           ...(forced ? { onTranscript: (role: string, text: string, isFinal: boolean) => {
             if (role !== "user" || !isFinal || closed || signal.aborted) return;
             inBackground(() => {

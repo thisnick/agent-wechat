@@ -126,8 +126,8 @@ provider's default, `gpt-realtime-2.1`.
 | Model | Conversation | Agent consultation | Sign-in |
 | --- | --- | --- | --- |
 | `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, `gpt-realtime-2` | Takes turns; stops when the caller interrupts. | Through a tool. | OpenAI API key. |
-| `gpt-live-1-codex` (voice `cove`) | Listens while it talks and handles interruptions itself. | Delegates to the agent. `consultPolicy: "always"` is not supported. | The agent's ChatGPT sign-in in OpenClaw (2026.10.10 or later), then the API key. |
-| `gpt-live-1` (voice `marin`) | Same as `gpt-live-1-codex`. | Same as `gpt-live-1-codex`. | OpenAI API key. |
+| `gpt-live-1-codex` (voice `cove`) | Listens while it talks and handles interruptions itself. Introduces itself as ChatGPT: this route does not use the agent's name or persona. | Delegates to the agent. `consultPolicy: "always"` is not supported. | The agent's ChatGPT sign-in in OpenClaw (2026.10.10 or later), then the API key. |
+| `gpt-live-1` (voice `marin`) | Listens while it talks and handles interruptions itself. Uses the agent's name and persona. | Same as `gpt-live-1-codex`. | OpenAI API key. |
 
 The speech model receives the selected agent's configured identity. When
 workspace context is enabled, the realtime provider also receives bounded
