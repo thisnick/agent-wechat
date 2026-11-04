@@ -56,8 +56,9 @@ only when it is that caller's own (not a shared main session); otherwise the
 call uses the contact's call session.
 
 :::note[Good to know]
-- Owners and other callers never share a session: a contact who is not an owner
-  gets a separate, read-only session (`agent:<agentId>:wechat-call:<contact>:read-only`).
+- Owners and other callers never share a call session: a contact who is not an
+  owner gets a separate, read-only one (`agent:<agentId>:wechat-call:<contact>:read-only`).
+  Their consultations stay read-only in `chat` scope too.
 - A call session is seeded from `consultation.inboundSessionKey` or from the
   session that placed the call only when that session is first created. After
   that it keeps its own history.
