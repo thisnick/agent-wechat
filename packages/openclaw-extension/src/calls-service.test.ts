@@ -559,7 +559,7 @@ test("an answered call is summarized in its session, remembered for the contact'
   assert.equal(events[1].options.sessionKey, "agent:chat-agent:agent-wechat:direct:allowed-peer");
   assert.match(events[1].text, /A WeChat voice call with this contact just ended \(you called them, \d+ s\)\. .*They confirmed Friday at 3 pm\./);
   assert.equal(wakes.length, 1);
-  assert.match(infos.join("\n"), /call summary saved: seconds=\d+ chars=30/);
+  assert.match(infos.join("\n"), /call summary saved: seconds=\d+ chars=30\n.*call summary noted in the caller's chat/);
   assert.match(await readFile(join(dir, "agent-wechat", "call-summaries.json"), "utf8"), /They confirmed Friday/);
 
   // The contact's next call starts with that summary; a call without a transcript is not summarized.
