@@ -62,7 +62,7 @@ systemctl --user enable --now agent-wechat-native
 
    ```bash
    docker compose up -d
-   wx config server add box --url http://127.0.0.1:6174 \
+   wx config servers add box --url http://127.0.0.1:6174 \
      --token-file ~/.config/agent-wechat/box-token
    wx --server-name box accounts create --alias me
    wx --server-name box auth login

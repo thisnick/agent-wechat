@@ -5,7 +5,7 @@ description: 用于读取会话、收发消息与媒体附件、编写自动化�
 
 import { Aside } from '@astrojs/starlight/components';
 
-所有命令默认输出标准 JSON 格式。多账号环境下，请在命令中添加 `--account ID`（或账号别名）。
+所有命令默认输出易读的文本格式。在脚本中解析输出时请加上 `--json` 参数。多账号环境下，请在命令中添加 `--account ID`（或账号别名）。
 
 ## 查看与读取
 
@@ -17,6 +17,15 @@ wx messages list CHAT_ID --limit 50       # 分页获取消息（最新在前）
 wx contacts find Alice                    # 查找联系人
 wx groups members list 'family@chatroom'  # 列出群成员
 ```
+
+会话列表与搜索会呈现表格视图，包含会话名称、Chat ID、类型、未读数以及最新消息。若存在下一页，复制游标执行 `wx chats list --cursor CURSOR` 即可翻页。
+
+```text
+Name       Chat ID          Kind   Unread  Last message
+Book club  books@chatroom   group  2       See you Friday
+```
+
+`wx messages list` 会在表格中展示发送者、消息预览、时间戳及缩略消息 ID。如果历史记录处于部分拉取状态，表格下方会显示提示。如需获取完整消息文本、完整 ID 及数据库覆盖详情，请添加 `--json`。
 
 会话通知静音设置直接读取自本地已保存的 Profile。Daemon 通过联系人同步流实时接收手机端联系人变更。若返回 `null`，表示该字段缺失或尚未确定，通知消费端在此期间应对该会话保持静音。可执行 `wx contacts refresh CONTACT_ID` 手动拉取最新信息。`wx chats mute/unmute` 可修改单聊或群聊设置，单聊修改会优先拉取当前联系人信息以保证无关字段不被覆盖。
 
@@ -48,7 +57,7 @@ wx messages send CHAT_ID --share https://example.com/post --title "值得一读"
 
 ### 引用回复
 
-1. 在 `wx messages list CHAT_ID` 的返回结果中复制被引用消息的 `id` 与 `serverId`（保持为字符串）。
+1. 在 `wx messages list CHAT_ID --json` 的返回结果中复制被引用消息的完整 `id` 与 `serverId`（保持为字符串）。
 2. 发送带有两项引用参数的文本回复：
 
    ```bash
@@ -56,7 +65,7 @@ wx messages send CHAT_ID --share https://example.com/post --title "值得一读"
      --quote-message-id MESSAGE_ID --quote-server-id SERVER_ID --detach
    ```
 
-   已进入队列的回复包含 `id`、`"state":"queued"` 以及本地 `receiptPath`。可通过 `wx messages sends get SEND_ID` 查询状态。
+   已进入队列的回复会展示其任务 ID、状态以及本地收据路径。可通过 `wx messages sends get SEND_ID` 查询状态。
 
 对于群聊中的引用回复，可以在同一命令中添加 `--mention 成员ID` 或 `--mention-all`。
 
@@ -86,23 +95,23 @@ wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
 wx events watch --cursor-file ~/.cache/wx-events.cursor
 ```
 
-在新消息到达时逐行打印 JSON 事件。配合游标文件可在意外中断后精准断点续传。
+在新消息到达时实时输出事件详情。添加 `--json` 可逐行输出 JSON 事件。配合游标文件可在意外中断后精准断点续传。
 
 ## 标记已读与撤回消息
 
 ```bash
-wx chats get CHAT_ID          # 获取会话当前的 "readStateVersion"
+wx chats get CHAT_ID          # 获取会话当前的 Read State Version
 wx chats read CHAT_ID --expected-version VERSION
 wx messages recall MESSAGE_ID --server-id SERVER_ID
 ```
 
-标记已读会更新整个会话的已读状态，并同步至你的其他微信登录端。撤回消息需要传入 `messages list` 中对应的 `id` 与 `serverId`。
+标记已读会更新整个会话的已读状态，并同步至你的其他微信登录端。撤回消息需要传入 `wx messages list CHAT_ID --json` 中对应的完整 `id` 与 `serverId`。
 
 ## 连接远程机器上的 Daemon
 
 ```bash
-wx config server add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
-wx config server use box
+wx config servers add box --url https://wx.example.com --token-file ~/.config/agent-wechat/box-token
+wx config servers select box
 ```
 
 <Aside title="使用提示">
