@@ -49,6 +49,7 @@ const plugin: {
         if (account?.native && account.enabled && account.calls) {
           calls = new NativeCallService(account, context.config, api.runtime, {
             logAudioTrace: line => context.logger.info(line),
+            warn: line => context.logger.warn(line),
             runInBackgroundContext: api.lifecycle?.runInBackgroundContext,
           });
           await calls.start();
