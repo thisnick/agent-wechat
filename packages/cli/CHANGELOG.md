@@ -1,5 +1,29 @@
 # @agent-wechat/cli
 
+## 1.5.0
+
+### Patch Changes
+
+- [#386](https://github.com/thisnick/agent-wechat/pull/386) [`32a35c2`](https://github.com/thisnick/agent-wechat/commit/32a35c29cd0c888172c0943cf751eaec46b90423) Thanks [@thisnick](https://github.com/thisnick)! - Keep voice calls connected when a brief slowdown fills the caller audio queue. Forward recent caller audio and pace the OpenClaw voice reply so queued playback can stop promptly when the caller interrupts.
+
+- [#386](https://github.com/thisnick/agent-wechat/pull/386) [`32a35c2`](https://github.com/thisnick/agent-wechat/commit/32a35c29cd0c888172c0943cf751eaec46b90423) Thanks [@thisnick](https://github.com/thisnick)! - Allow each account on a shared WeChat daemon to handle its own voice call. An active call still reserves that account's slot.
+
+- [#389](https://github.com/thisnick/agent-wechat/pull/389) [`f5ec098`](https://github.com/thisnick/agent-wechat/commit/f5ec098aaa9665e7e2c96f0ab7c5af0c72326d9d) Thanks [@thisnick](https://github.com/thisnick)! - Retry the connection handshake once if a cryptographic error occurs before sending the call authentication request. Keep the original handshake timeout and send the call request only after a verified connection.
+
+  Keep the OpenClaw call listener available for the next caller when the daemon withdraws an unanswered offer.
+
+  Keep the voice connection active with paced silence when the speech model has no audio ready. Track how much of each reply played so an interruption can discard the rest. Let the voice model acknowledge a consultation while the OpenClaw agent works.
+
+  Run every call consultation as a normal session turn of the selected agent, so it uses the agent's model, CLI runtime and fallbacks. Callers other than the verified owner stay limited to read-only tools. Remove `calls.voice.consultation.model`; delete it from your configuration if you set it.
+
+  Log a warning when an incoming call is not answered, naming the step that failed. Also warn when a call ends after a failure, when calling stops until the channel restarts, and when an incoming call is ignored for that reason.
+
+  Raise the default call limit (`maxDurationSeconds`) from 5 minutes to 1 hour, and log a warning when the limit ends a call. The native daemon still ends calls after 20 minutes.
+
+  Keep calling available when the plugin ends a call after a failure and the WeChat hangup takes longer than two seconds. Previously the plugin treated the slow hangup as an unknown outcome and stopped answering calls until the channel restarted.
+
+  Resume calling automatically after it stops: reconnect with backoff and accept calls again once the daemon reports no call in progress. Warnings now include the daemon's error code for media, hangup and event-stream failures.
+
 ## 1.4.0
 
 ### Minor Changes
