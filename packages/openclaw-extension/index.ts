@@ -47,7 +47,10 @@ const plugin: {
         const account = resolveWeChatAccount(context.config as unknown as Record<string, unknown>);
         if (account?.native && account.enabled) await ensureNativeHost(account.native);
         if (account?.native && account.enabled && account.calls) {
-          calls = new NativeCallService(account, context.config, api.runtime);
+          calls = new NativeCallService(account, context.config, api.runtime, {
+            logAudioTrace: line => context.logger.info(line),
+            runInBackgroundContext: api.lifecycle?.runInBackgroundContext,
+          });
           await calls.start();
           if (calls.status().state === "unavailable") context.logger.warn("WeChat calling unavailable; messaging remains active");
         }

@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/agent-wechat",
-  "version": "1.4.0-beta.3",
+  "version": "1.4.0",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -298,6 +298,46 @@
                           "maxLength": 4000,
                           "description": "Additional conversation guidance; does not grant tool or account-owner authority."
                         },
+                        "agentContext": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "enabled": {
+                              "type": "boolean",
+                              "default": false,
+                              "description": "Send bounded excerpts of the selected agent's IDENTITY.md and SOUL.md to the Realtime provider. Configured agent identity is used independently."
+                            }
+                          }
+                        },
+                        "consultPolicy": {
+                          "type": "string",
+                          "enum": [
+                            "auto",
+                            "substantive",
+                            "always"
+                          ],
+                          "default": "auto",
+                          "description": "Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult."
+                        },
+                        "consultThinkingLevel": {
+                          "type": "string",
+                          "enum": [
+                            "off",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "adaptive",
+                            "max",
+                            "ultra"
+                          ],
+                          "description": "Thinking level for the regular OpenClaw consultation run."
+                        },
+                        "consultFastMode": {
+                          "type": "boolean",
+                          "description": "Set fast mode for the regular OpenClaw consultation run when its model supports it."
+                        },
                         "providers": {
                           "type": "object",
                           "additionalProperties": false,
@@ -319,14 +359,15 @@
                       "type": "string",
                       "enum": [
                         "none",
-                        "safe-read-only"
+                        "safe-read-only",
+                        "owner"
                       ],
-                      "default": "none"
+                      "description": "Owner uses the normal agent tool policy only for an exact agent-wechat entry in commands.ownerAllowFrom matching the connected voice peer. Other admitted peers get read-only consultation. Defaults to safe-read-only with session persistence, otherwise none."
                     },
                     "allowConsultSessionPersistence": {
                       "type": "boolean",
                       "default": false,
-                      "description": "Required for safe-read-only consultation: OpenClaw creates a separate per-call agent session which can persist. This adapter does not store transcripts or recordings."
+                      "description": "Required for consultation. OpenClaw creates separate agent sessions for calls which can persist. This adapter does not store transcripts or recordings."
                     },
                     "consultation": {
                       "type": "object",
@@ -344,6 +385,12 @@
                           "minimum": 1000,
                           "maximum": 120000,
                           "default": 30000
+                        },
+                        "inboundSessionKey": {
+                          "type": "string",
+                          "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
+                          "maxLength": 1024,
+                          "description": "Optional existing session of the selected agent to fork into a separate consultation session for each admitted incoming call."
                         }
                       }
                     },

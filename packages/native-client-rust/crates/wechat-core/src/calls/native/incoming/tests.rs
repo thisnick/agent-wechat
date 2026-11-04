@@ -32,6 +32,7 @@ enum Case {
     OtherDevice,
     HoldAuth,
     HoldJoinedSync,
+    ParkIncomingSync,
     ChangedMember,
     LostReject,
     HoldJoin,
@@ -104,6 +105,14 @@ impl Host {
     }
 }
 impl TestCallIo for Host {
+    fn park_incoming_sync(&self) -> bool {
+        if matches!(self.case, Case::ParkIncomingSync) {
+            self.gate.entered.notify_one();
+            return true;
+        }
+        false
+    }
+
     fn call(
         &self,
         state: &mut AccountState,
@@ -498,7 +507,8 @@ impl Fixture {
     async fn client(&self) -> ControlConnection {
         let mut client = self
             .core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .connect("one", "fixture", true)
             .await
             .unwrap();
@@ -507,7 +517,8 @@ impl Fixture {
             Some(CallEvent::Hello { .. })
         ));
         self.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Ready {
@@ -527,7 +538,8 @@ impl Fixture {
     }
     async fn snapshot(&self) -> CallSnapshot {
         self.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .current("one", "fixture")
             .await
             .unwrap()
@@ -642,18 +654,18 @@ async fn incoming_call_can_answer_then_exit_without_media() {
     assert!(f.backend.capabilities("one").direct_audio);
     let initial = f.host.seen();
     assert_eq!(
-        initial[0..3],
+        initial,
         [
             (CallHostRoute::AppAuth, None),
-            (CallHostRoute::RingingAck, None),
-            (CallHostRoute::LiveSync, None)
+            (CallHostRoute::RingingAck, None)
         ]
     );
     assert!(!initial
         .iter()
         .any(|(route, _)| *route == CallHostRoute::Transfer));
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Answer {
@@ -673,6 +685,7 @@ async fn incoming_call_can_answer_then_exit_without_media() {
     tokio::time::timeout(Duration::from_secs(2), f.host.gate.entered.notified())
         .await
         .unwrap();
+    assert_eq!(f.host.seen()[2], (CallHostRoute::Transfer, Some(3361)));
     f.stage(true, 3);
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -701,7 +714,8 @@ async fn incoming_call_can_answer_then_exit_without_media() {
         .unwrap()
         .is_none());
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Hangup {
@@ -748,6 +762,75 @@ async fn incoming_call_can_answer_then_exit_without_media() {
     assert_eq!(unsent.len(), 1);
     assert_eq!(unsent[0].route, 9262);
     assert!(unsent[0].encrypted_request.is_some() && unsent[0].encrypted_reply.is_none());
+}
+
+#[tokio::test]
+async fn incoming_answer_interrupts_submitted_poll_and_joins_once() {
+    let f = Fixture::new(Case::ParkIncomingSync);
+    let mut client = f.client().await;
+    f.stage(false, 0);
+    let offer = f.offer().await;
+    tokio::time::timeout(
+        FIRST_ANSWER_WINDOW + Duration::from_secs(2),
+        f.host.gate.entered.notified(),
+    )
+    .await
+    .unwrap();
+    f.core
+        .call_service("one")
+        .unwrap()
+        .command(
+            &client.client_id,
+            CallCommand::Answer {
+                request_id: "answer".into(),
+                call_id: offer.call_id.clone(),
+                expected_revision: offer.revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut client, "answer").await,
+        CallCommandStatus::Accepted
+    );
+    let call = owned_state(&mut client, CallState::Connecting, offer.revision + 2).await;
+    let records = f
+        .core
+        .store
+        .call_action_records("one", &offer.call_id)
+        .unwrap();
+    assert_eq!(records[2].route, CallHostRoute::LiveSync.command());
+    assert_eq!(records[2].outcome, "needs_review");
+    assert!(records[2].encrypted_request.is_some() && records[2].encrypted_reply.is_none());
+    assert_eq!(records[3].route, CallHostRoute::Transfer.command());
+    assert_eq!(records[3].outcome, "received");
+    assert_eq!(
+        f.host
+            .seen()
+            .iter()
+            .filter(|(_, command)| *command == Some(3361))
+            .count(),
+        1
+    );
+    f.core
+        .call_service("one")
+        .unwrap()
+        .command(
+            &client.client_id,
+            CallCommand::Hangup {
+                request_id: "end".into(),
+                call_id: call.call_id,
+                expected_revision: call.revision,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut client, "end").await,
+        CallCommandStatus::Accepted
+    );
+    f.finished().await;
+    assert!(!f.core.store.has_unresolved_call("one").unwrap());
 }
 
 #[tokio::test]
@@ -824,7 +907,7 @@ async fn explicit_reject_preserves_lost_reply_without_retry_or_a_live_session() 
         f.stage(false, 0);
         let offer = f.offer().await;
         tokio::time::timeout(
-            Duration::from_secs(2),
+            FIRST_ANSWER_WINDOW + Duration::from_secs(2),
             f.host.reject_poll_gate.entered.notified(),
         )
         .await
@@ -837,7 +920,8 @@ async fn explicit_reject_preserves_lost_reply_without_retry_or_a_live_session() 
             .filter(|(route, _)| *route == CallHostRoute::LiveSync)
             .count();
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Reject {
@@ -913,7 +997,8 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
         }
     };
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(&client.client_id, command)
         .await
         .unwrap();
@@ -967,7 +1052,8 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
             .unwrap();
         }
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Hangup {
@@ -1149,14 +1235,16 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
     let mut client = f.client().await;
     let mut observer = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .connect("one", "observer", false)
         .await
         .unwrap();
     f.stage(false, 0);
     let offer = f.offer().await;
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Answer {
@@ -1185,12 +1273,17 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
         JoinReplyChange::Uncertain | JoinReplyChange::UncertainThenDisconnect
     ) {
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .incoming_uncertain(worker.lease.authority(), &worker.identity)
             .unwrap();
     }
     if !matches!(change, JoinReplyChange::Uncertain) {
-        f.core.call_service().disconnect(&client.client_id).await;
+        f.core
+            .call_service("one")
+            .unwrap()
+            .disconnect(&client.client_id)
+            .await;
     }
     if matches!(change, JoinReplyChange::DisconnectAndFence) {
         f.core.fence_call_authority("one");

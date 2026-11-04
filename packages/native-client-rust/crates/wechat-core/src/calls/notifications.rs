@@ -383,7 +383,9 @@ pub(crate) fn after_sync_staged(
             core: Arc::downgrade(core),
             header_from: message.from,
         };
-        core.call_service().ingest_incoming(note, remaining);
+        if let Ok(service) = core.call_service(&lease.authority().account_id) {
+            service.ingest_incoming(note, remaining);
+        }
     }
 }
 fn valid_identity(value: &str) -> bool {

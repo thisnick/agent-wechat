@@ -92,16 +92,14 @@ impl Core {
         let permit = pool.permits.clone().acquire_owned().await?;
         let global = self.read_limit.clone().acquire_owned().await?;
         let admitted = Instant::now();
-        let guard = self.lock_account(account).await?;
-        let locked = Instant::now();
         let core = self.clone();
         let account = account.to_owned();
         let result = tokio::task::spawn_blocking(move || {
             let working = Instant::now();
             let mut timing = ReadTimings {
                 queue: admitted - start,
-                account: locked - admitted,
-                worker: working - locked,
+                account: Duration::ZERO,
+                worker: working - admitted,
                 snapshot: Duration::ZERO,
                 query: Duration::ZERO,
                 parallel: false,
@@ -118,10 +116,14 @@ impl Core {
                 pool,
                 cache: Some(cache),
             };
+            let waiting = Instant::now();
+            let guard = tokio::runtime::Handle::current().block_on(core.lock_account(&account))?;
+            let locked = Instant::now();
+            timing.account = locked - waiting;
             // Offline/non-WAL layouts retain the existing serialized adapter.
             if !core.owns_profile(&account)? {
                 let result = query(&core);
-                timing.query = working.elapsed();
+                timing.query = locked.elapsed();
                 return result.map(|value| (value, timing));
             }
             let Ok((location, keys)) = core.profile_location_keys(&account) else {
@@ -129,7 +131,7 @@ impl Core {
                 // Keep the old serialized path; profile queries still perform
                 // their own key/path admission and return the original error.
                 let result = query(&core);
-                timing.query = working.elapsed();
+                timing.query = locked.elapsed();
                 return result.map(|value| (value, timing));
             };
             let reader = match slot.cache.as_mut().unwrap().read_snapshot(
@@ -168,7 +170,7 @@ impl Core {
             } else {
                 Some(guard)
             };
-            timing.snapshot = working.elapsed();
+            timing.snapshot = locked.elapsed();
             timing.parallel = parallel;
             let querying = Instant::now();
             let result = query(&view);

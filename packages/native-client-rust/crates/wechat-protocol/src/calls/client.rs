@@ -42,6 +42,17 @@ impl std::fmt::Display for CallRpcNotSubmitted {
 }
 impl std::error::Error for CallRpcNotSubmitted {}
 
+/// A pre-answer LiveSync was superseded locally. The transport may have sent
+/// it, but its reply must never update the room cursor or account state.
+#[derive(Debug)]
+pub struct CallLiveSyncInterrupted;
+impl std::fmt::Display for CallLiveSyncInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Incoming LiveSync was interrupted for Answer")
+    }
+}
+impl std::error::Error for CallLiveSyncInterrupted {}
+
 impl PersonalTransport for NativeClient {
     fn call_rpc(
         &self,
@@ -504,7 +515,9 @@ impl NativePersonalSession {
         self.reserve(tasks)?;
         let result = self.poll_once(client, state, tasks);
         if result.as_ref().is_err_and(|error| {
-            !error.is::<CallRpcNotSubmitted>() && !error.is::<UnsupportedCallMedia>()
+            !error.is::<CallRpcNotSubmitted>()
+                && !error.is::<CallLiveSyncInterrupted>()
+                && !error.is::<UnsupportedCallMedia>()
         }) {
             self.phase = PersonalPhase::Uncertain;
         }
@@ -695,6 +708,15 @@ impl NativePersonalSession {
                         );
                         next.av_sequence = sequence;
                         next.av = av;
+                    }
+                    17 if matches!(origin, termination::Origin::Callee) => {
+                        ensure!(
+                            number(&notify, 4, None)? == next.identity.room_key,
+                            "Callee relay notification room key mismatch"
+                        );
+                        // This advertises caller connections. A callee validates
+                        // the message without changing its admitted relay.
+                        validate_callee_relay_info(bytes)?;
                     }
                     _ => bail!("Unsupported caller notification kind"),
                 }
@@ -1082,6 +1104,38 @@ fn only(values: &[Field], allowed: &[u32]) -> Result<()> {
         values.iter().all(|f| allowed.contains(&f.number)),
         "Unknown personal signaling field"
     );
+    Ok(())
+}
+fn validate_callee_relay_info(raw: &[u8]) -> Result<()> {
+    let info = fields(raw)?;
+    only(&info, &[1, 2])?;
+    for raw in repeated(&info, 1, 32)? {
+        let connection = fields(raw)?;
+        only(&connection, &[1, 2, 3, 4, 5])?;
+        i32::try_from(number(&connection, 1, Some(0))? as i64)?;
+        i32::try_from(number(&connection, 3, Some(0))? as i64)?;
+        if let Some(nic) = p::optional_data(&connection, 2)? {
+            std::str::from_utf8(nic)?;
+        }
+        for addr in repeated(&connection, 4, 32)?
+            .into_iter()
+            .chain(repeated(&connection, 5, 32)?)
+        {
+            validate_advertised_addr(addr)?;
+        }
+    }
+    for addr in repeated(&info, 2, 32)? {
+        validate_advertised_addr(addr)?;
+    }
+    Ok(())
+}
+fn validate_advertised_addr(raw: &[u8]) -> Result<()> {
+    let addr = fields(raw)?;
+    only(&addr, &[1, 2])?;
+    if let Some(ip) = p::optional_data(&addr, 1)? {
+        std::str::from_utf8(ip)?;
+    }
+    u32::try_from(number(&addr, 2, Some(0))?)?;
     Ok(())
 }
 fn matches_room_key(values: &[Field], n: u32, expected: u64) -> Result<bool> {

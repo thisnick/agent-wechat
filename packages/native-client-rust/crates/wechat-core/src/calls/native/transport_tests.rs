@@ -207,7 +207,8 @@ impl Fixture {
         Core::configure_calls(&core, backend.clone()).unwrap();
         store.put_runtime("one", "history-caught-up", b"1").unwrap();
         let mut client = core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .connect("one", "transport-fixture", true)
             .await
             .unwrap();
@@ -215,7 +216,8 @@ impl Fixture {
             client.events.recv().await,
             Some(CallEvent::Hello { .. })
         ));
-        core.call_service()
+        core.call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Ready {
@@ -283,6 +285,7 @@ impl Fixture {
             worker,
             admission: ControlAdmission::Incoming(request.guard),
             runtime: tokio::runtime::Handle::current(),
+            timeout: CALL_RPC_TIMEOUT,
             test_io: Some(host.clone()),
         });
         Self {

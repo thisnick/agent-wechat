@@ -53,11 +53,113 @@ pub(crate) fn message_table(s: &str) -> bool {
     s.len() == 36 && s.starts_with("Msg_") && s.as_bytes()[4..].iter().all(u8::is_ascii_hexdigit)
 }
 
+const MAX_SCHEMA_TABLES: usize = 16384;
+
+pub(crate) fn inspect_named_table(c: &Connection, name: &str) -> Result<Option<TableSchema>> {
+    let count = c.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table'",
+        [],
+        |row| row.get::<_, usize>(0),
+    )?;
+    if count > MAX_SCHEMA_TABLES {
+        return Err(ProfileError::ResourceLimit);
+    }
+    let definition = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    definition
+        .map(|sql| inspect_table(c, name.into(), sql))
+        .transpose()
+}
+
+fn inspect_table(c: &Connection, name: String, definition: Option<String>) -> Result<TableSchema> {
+    // Custom WCDB tokenizers/modules are not part of this reader. Retain
+    // their SQL in the fingerprint without asking SQLite to instantiate it.
+    if definition.as_ref().is_some_and(|s| {
+        s.trim_start()
+            .to_ascii_uppercase()
+            .starts_with("CREATE VIRTUAL TABLE")
+    }) {
+        return Ok(TableSchema {
+            name,
+            definition,
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            triggers: Vec::new(),
+        });
+    }
+    let q = quote_identifier(&name);
+    let mut s = c.prepare(&format!("PRAGMA table_xinfo({q})"))?;
+    let columns = s
+        .query_map([], |r| {
+            Ok(ColumnSchema {
+                name: r.get(1)?,
+                declared_type: r.get(2)?,
+                not_null: r.get::<_, i64>(3)? != 0,
+                default_sql: r.get(4)?,
+                primary_key_position: r.get(5)?,
+                hidden: r.get(6)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut s = c.prepare(&format!("PRAGMA index_list({q})"))?;
+    let raw = s
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)? != 0,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut indexes = Vec::new();
+    for (name, unique, origin, partial) in raw {
+        let mut s = c.prepare(&format!("PRAGMA index_info({})", quote_identifier(&name)))?;
+        let columns = s
+            .query_map([], |r| r.get::<_, Option<String>>(2))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let definition = c
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+                [&name],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        indexes.push(IndexSchema {
+            name,
+            unique,
+            origin,
+            partial,
+            columns,
+            definition,
+        });
+    }
+    indexes.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut s = c.prepare(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?1 ORDER BY name",
+    )?;
+    let triggers = s
+        .query_map([&name], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(TableSchema {
+        name,
+        definition,
+        columns,
+        indexes,
+        triggers,
+    })
+}
+
 pub(crate) fn inspect(c: &Connection, database: &str) -> Result<SchemaReport> {
     let user_version = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let application_id = c.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let counter = c.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
-    let mut tables = Vec::new();
     let mut stm =
         c.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name")?;
     let names = stm
@@ -65,89 +167,13 @@ pub(crate) fn inspect(c: &Connection, database: &str) -> Result<SchemaReport> {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    if names.len() > 16384 {
+    if names.len() > MAX_SCHEMA_TABLES {
         return Err(ProfileError::ResourceLimit);
     }
-    for (name, definition) in names {
-        // Custom WCDB tokenizers/modules are not part of this reader. Retain
-        // their SQL in the fingerprint without asking SQLite to instantiate it.
-        if definition.as_ref().is_some_and(|s| {
-            s.trim_start()
-                .to_ascii_uppercase()
-                .starts_with("CREATE VIRTUAL TABLE")
-        }) {
-            tables.push(TableSchema {
-                name,
-                definition,
-                columns: Vec::new(),
-                indexes: Vec::new(),
-                triggers: Vec::new(),
-            });
-            continue;
-        }
-        let q = quote_identifier(&name);
-        let mut s = c.prepare(&format!("PRAGMA table_xinfo({q})"))?;
-        let columns = s
-            .query_map([], |r| {
-                Ok(ColumnSchema {
-                    name: r.get(1)?,
-                    declared_type: r.get(2)?,
-                    not_null: r.get::<_, i64>(3)? != 0,
-                    default_sql: r.get(4)?,
-                    primary_key_position: r.get(5)?,
-                    hidden: r.get(6)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut s = c.prepare(&format!("PRAGMA index_list({q})"))?;
-        let raw = s
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)? != 0,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)? != 0,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut indexes = Vec::new();
-        for (name, unique, origin, partial) in raw {
-            let mut s = c.prepare(&format!("PRAGMA index_info({})", quote_identifier(&name)))?;
-            let columns = s
-                .query_map([], |r| r.get::<_, Option<String>>(2))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let definition = c
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
-                    [&name],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten();
-            indexes.push(IndexSchema {
-                name,
-                unique,
-                origin,
-                partial,
-                columns,
-                definition,
-            });
-        }
-        indexes.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut s = c.prepare(
-            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?1 ORDER BY name",
-        )?;
-        let triggers = s
-            .query_map([&name], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        tables.push(TableSchema {
-            name,
-            definition,
-            columns,
-            indexes,
-            triggers,
-        });
-    }
+    let tables = names
+        .into_iter()
+        .map(|(name, definition)| inspect_table(c, name, definition))
+        .collect::<Result<Vec<_>>>()?;
     // Counter excluded: rebuilding an identical schema need not change the
     // compatibility fingerprint. The actual definitions/columns/indexes bind it.
     let canonical = serde_json::to_vec(&(user_version, application_id, &tables))

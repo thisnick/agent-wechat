@@ -290,6 +290,7 @@ pub async fn login(r: &Remote, settings: &settings::File, options: Options) -> R
     let deadline = std::time::Instant::now() + Duration::from_secs(options.timeout + 35);
     let mut shown = 0;
     let mut lan_notice_shown = false;
+    let mut awaiting_approval = false;
     loop {
         if terminal(operation["state"].as_str().unwrap_or("")) {
             return Ok(operation);
@@ -311,6 +312,19 @@ pub async fn login(r: &Remote, settings: &settings::File, options: Options) -> R
             operation["qrPath"] = json!(path);
             shown = generation;
         }
+        let needs_approval = operation["state"] == "awaiting_approval";
+        if needs_approval && !awaiting_approval {
+            let message = "Waiting for confirmation. Approve the login in WeChat on your phone.";
+            if options.json {
+                eprintln!(
+                    "{}",
+                    json!({"event":"login.progress","operationId":id,"state":"awaiting_approval","message":message})
+                );
+            } else {
+                eprintln!("{message}");
+            }
+        }
+        awaiting_approval = needs_approval;
         let next = tokio::select! {
             _=tokio::signal::ctrl_c()=>{let cancellation=tokio::time::timeout(Duration::from_secs(3),r.request(reqwest::Method::DELETE,&r.path(&format!("operations/{}",encode(&id)))?,None,None)).await;match cancellation{Ok(Ok(value))=>{operation=value;operation["cancellationConfirmed"]=json!(true);},_=>{operation["cancellationConfirmed"]=json!(false);}}operation["clientInterrupted"]=json!(true);operation["receiptPath"]=json!(receipt_path);set_exit(130);return Ok(operation);},
             result=async{tokio::time::sleep(Duration::from_millis(500)).await;r.get(&r.path(&format!("operations/{}",encode(&id)))?).await}=>result

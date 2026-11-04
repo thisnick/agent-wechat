@@ -694,33 +694,7 @@ pub fn short_exchange(
     payload: &[u8],
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    validate_host(host)?;
-    validate_short_route(path)?;
-    ensure!(
-        payload.len() <= crate::MAX_MESSAGE_BYTES,
-        "Payload too large"
-    );
-    let (hello, extensions) = early_hello(&session.ticket)?;
-    let keys = expand(
-        &session.access_psk,
-        &[b"early data key expansion".as_slice(), &sha256(&hello)].concat(),
-        28,
-    )?;
-    let route = section(
-        &[
-            sized(path.as_bytes())?,
-            sized(host.as_bytes())?,
-            section(payload),
-        ]
-        .concat(),
-    );
-    let wire = [
-        frame(0x19, &hello)?,
-        seal(0x19, &extensions, &keys[..16], &keys[16..], 1)?,
-        seal(0x17, &route, &keys[..16], &keys[16..], 2)?,
-        seal(0x15, &section(&[0, 1, 1]), &keys[..16], &keys[16..], 3)?,
-    ]
-    .concat();
+    let (hello, extensions, wire) = prepare_short_exchange(session, host, path, payload)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(10)))
@@ -754,6 +728,86 @@ pub fn short_exchange(
         bytes.len() <= crate::MAX_MESSAGE_BYTES,
         "Shortlink receive budget exceeded"
     );
+    decode_short_reply(&bytes, session, &hello, &extensions)
+}
+fn prepare_short_exchange(
+    session: &ShortSession,
+    host: &str,
+    path: &str,
+    payload: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    validate_host(host)?;
+    validate_short_route(path)?;
+    ensure!(
+        payload.len() <= crate::MAX_MESSAGE_BYTES,
+        "Payload too large"
+    );
+    let (hello, extensions) = early_hello(&session.ticket)?;
+    let keys = expand(
+        &session.access_psk,
+        &[b"early data key expansion".as_slice(), &sha256(&hello)].concat(),
+        28,
+    )?;
+    let route = section(
+        &[
+            sized(path.as_bytes())?,
+            sized(host.as_bytes())?,
+            section(payload),
+        ]
+        .concat(),
+    );
+    let wire = [
+        frame(0x19, &hello)?,
+        seal(0x19, &extensions, &keys[..16], &keys[16..], 1)?,
+        seal(0x17, &route, &keys[..16], &keys[16..], 2)?,
+        seal(0x15, &section(&[0, 1, 1]), &keys[..16], &keys[16..], 3)?,
+    ]
+    .concat();
+    Ok((hello, extensions, wire))
+}
+
+/// The pre-answer poll can stop waiting without applying a late reply.
+pub(crate) async fn short_exchange_interruptible(
+    session: &ShortSession,
+    host: &str,
+    path: &str,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let (hello, extensions, wire) = prepare_short_exchange(session, host, path, payload)?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()?;
+    let mut response = client
+        .post(format!(
+            "http://{host}/mmtls/{}",
+            hex::encode(random::<4>()?)
+        ))
+        .header("Content-Type", "application/octet-stream")
+        .header("User-Agent", "MicroMessenger Client")
+        .header("Upgrade", "mmtls")
+        .header("Accept", "*/*")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "close")
+        .body(wire)
+        .send()
+        .await?;
+    ensure!(
+        response.status() == 200,
+        "Native shortlink HTTP status {}",
+        response.status().as_u16()
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(
+            chunk.len() <= crate::MAX_MESSAGE_BYTES - bytes.len(),
+            "Shortlink receive budget exceeded"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
     decode_short_reply(&bytes, session, &hello, &extensions)
 }
 fn early_hello(ticket: &Ticket) -> Result<(Vec<u8>, Vec<u8>)> {

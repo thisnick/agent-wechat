@@ -4,7 +4,7 @@
 //! retries reconcile the same server identity rather than resend anything.
 use crate::{
     keys::verify_first_page,
-    schema::{inspect, quote_identifier},
+    schema::{inspect, inspect_named_table, message_table, quote_identifier},
     snapshot::configure_cipher,
     KeyFile, ProfileError, ProfileLocation, ReadOptions, Result, SourceMessageId,
 };
@@ -135,12 +135,14 @@ pub(crate) fn exact_columns(
     table: &str,
     expected: &[&str],
 ) -> Result<crate::TableSchema> {
-    let report = inspect(c, db)?;
-    let t = report
-        .tables
-        .into_iter()
-        .find(|t| t.name == table)
-        .ok_or_else(|| ProfileError::UnsupportedSchema(db.into()))?;
+    // A message shard may have one table per conversation. Validate the
+    // target table without rebuilding the schema report for every conversation.
+    let t = if message_table(table) {
+        inspect_named_table(c, table)?
+    } else {
+        inspect(c, db)?.tables.into_iter().find(|t| t.name == table)
+    }
+    .ok_or_else(|| ProfileError::UnsupportedSchema(db.into()))?;
     let names = t
         .columns
         .iter()

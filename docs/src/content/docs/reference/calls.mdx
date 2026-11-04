@@ -49,12 +49,13 @@ reference for connection timeouts and media rules.
 | --- | --- |
 | `wx calls devices` | List local microphone/speaker IDs without connecting to a daemon or starting audio |
 | `wx calls monitor --json` | Observe events without opening audio devices |
-| `wx calls monitor` | Register readiness and show incoming prompts; open audio on acceptance |
+| `wx calls monitor` | Show “Waiting for calls. Ctrl-C exits.” until a call comes in. Open audio on acceptance. |
 | `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
 | `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
 
-Release executables include local audio support. A late answer stays tied to the
-selected offer; it must not answer a replacement caller.
+Release executables include local audio support. The monitor shows the incoming
+prompt after the daemon acknowledges ringing. Accepting stays tied to the
+selected call, even if another call arrives later.
 
 Run `wx calls devices` first, then select endpoints with
 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`.
@@ -62,9 +63,11 @@ Without those options, the OS defaults are used. Linux accepts PulseAudio or
 PipeWire-Pulse names; Windows accepts endpoint IDs. On macOS, select the defaults
 in System Settings; custom endpoint IDs are not supported by the current adapter.
 
-Interactive terminals show the audio signal levels while a call is active:
+Interactive calls show the keyboard controls above the audio meters.
 
 ```text
+m + Enter  Mute/unmute    h + Enter  Hang up
+Ctrl-C     End call       ? + Enter  Show keys
 Mic [#######...] -18dB  Speaker [########..] -10dB
 >
 ```
@@ -72,18 +75,22 @@ Mic [#######...] -18dB  Speaker [########..] -10dB
 The bars rise with louder audio and fall toward silence. `0 dB` is digital full
 scale; `!` marks a recent peak near clipping. A muted microphone shows no outgoing
 signal. The speaker meter measures audio sent to playback, not the hardware
-volume setting or sound in the room. Type `m` then Enter to mute/unmute, or `h`
-then Enter to hang up. Meters stay out of JSON, redirected output and terminals
+volume setting or sound in the room. Meters stay out of JSON, redirected output and terminals
 too narrow to show both levels on one line.
+
+Run `WX_CALL_DEBUG=1 wx calls monitor` to print a timestamped trace to stderr
+while using the call controls. It shows incoming call events with the media
+owner token removed, whether the first audio frame was written to the socket,
+and any WebSocket close code or reason the CLI received.
 
 Configure independent voice/video permissions, realtime speech models, OpenAI
 credentials and consultation in [Set up calling](/openclaw/calling/).
 
 :::note[Good to know]
-Calling is disabled in the default daemon. The native worker is restricted to an
-expiring isolated test. Media security across a call's lifetime and ordinary
-microphone/speaker calling still need validation. Video
-and conference capabilities remain off.
+The legacy WeChat relay can reuse an audio nonce across senders. The daemon
+continues the call for compatibility, which weakens audio confidentiality and
+integrity.
+
 Linux CLI audio needs `libpulse0` and a working PulseAudio or PipeWire-Pulse
 service. The headless image includes the client library but does not need audio
 devices or a sound server to run the daemon.
