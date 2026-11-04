@@ -32,7 +32,7 @@ export type WeChatVoiceCallsConfig = {
   toolPolicy?: "none" | "safe-read-only" | "owner";
   /** Host agent consultation creates its own session; opt in to that retention. */
   allowConsultSessionPersistence?: boolean;
-  consultation?: { timeoutMs?: number; inboundSessionKey?: string; summary?: boolean };
+  consultation?: { timeoutMs?: number; inboundSessionKey?: string; summary?: boolean; recentMessages?: number };
   /** Which session consultations run in, as in OpenClaw's voice-call plugin. */
   sessionScope?: CallSessionScope;
   maxDurationSeconds?: number;
@@ -42,7 +42,7 @@ export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfi
   realtime: { provider: string; model?: string; voice?: string; instructions?: string; agentContext: { enabled: boolean };
     recentContext: { enabled: boolean; maxMessages: number };
     consultPolicy: ConsultPolicy; consultThinkingLevel?: ConsultThinkingLevel; consultFastMode?: boolean };
-  consultation: { timeoutMs: number; inboundSessionKey?: string; summary: boolean };
+  consultation: { timeoutMs: number; inboundSessionKey?: string; summary: boolean; recentMessages: number };
 };
 export type ResolvedWeChatCallsConfig = { voice?: ResolvedWeChatVoiceCallsConfig; video: { enabled: boolean } };
 const identifier = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -65,6 +65,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
     || [realtime.model, realtime.voice].some(item => item !== undefined && !identifier(item))
     || (consultation.inboundSessionKey !== undefined && !isCallSessionKey(consultation.inboundSessionKey))
     || (consultation.summary !== undefined && typeof consultation.summary !== "boolean")
+    || (consultation.recentMessages !== undefined && (!Number.isInteger(consultation.recentMessages) || consultation.recentMessages < 0 || consultation.recentMessages > 50))
     || (value.sessionScope !== undefined && !callSessionScopes.includes(value.sessionScope))
     || (recentContext !== undefined && (!object(recentContext) || Object.keys(recentContext).some(key => !["enabled", "maxMessages"].includes(key))
       || (recentContext.enabled !== undefined && typeof recentContext.enabled !== "boolean")
@@ -88,7 +89,8 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
       consultThinkingLevel: realtime.consultThinkingLevel, consultFastMode: realtime.consultFastMode },
     toolPolicy: value.toolPolicy ?? (value.allowConsultSessionPersistence === true ? "safe-read-only" : "none"),
     allowConsultSessionPersistence: value.allowConsultSessionPersistence === true,
-    consultation: { timeoutMs, inboundSessionKey: consultation.inboundSessionKey, summary: consultation.summary ?? true },
+    consultation: { timeoutMs, inboundSessionKey: consultation.inboundSessionKey, summary: consultation.summary ?? true,
+      recentMessages: consultation.recentMessages ?? 10 },
     sessionScope: value.sessionScope ?? "per-contact", maxDurationSeconds }, realtime.providers?.openai?.apiKey);
 }
 export function resolveWeChatCallsConfig(value: WeChatCallsConfig | undefined): ResolvedWeChatCallsConfig | undefined {
@@ -137,7 +139,8 @@ export const callsConfigSchema = {
         timeoutMs: { type: "integer", minimum: 1000, maximum: 120000, default: 30000 },
         inboundSessionKey: { type: "string", pattern: CALL_SESSION_KEY_PATTERN, maxLength: MAX_CALL_SESSION_KEY_LENGTH,
           description: "Optional existing session of the selected agent to fork into a call's session when that session is first created by an admitted incoming call." },
-        summary: { type: "boolean", default: true, description: "After an answered call, give the call's transcript to the agent in the call's session and keep its short summary. Calls placed with the wechat_call tool also report the summary to the session that placed them." },
+        summary: { type: "boolean", default: true, description: "After an answered call, give the call's transcript to the agent in the call's session and keep its short summary. The summary is also left as a note in your WeChat chat with the caller, and calls placed with the wechat_call tool report it to the session that placed them." },
+        recentMessages: { type: "integer", minimum: 0, maximum: 50, default: 10, description: "How many of the latest messages of your WeChat chat with the caller the call's first consultation gets as context; 0 turns this off." },
       } },
       sessionScope: { type: "string", enum: callSessionScopes, default: "per-contact", description: "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session." },
       maxDurationSeconds: { type: "integer", minimum: 30, maximum: 3600, default: 3600 },

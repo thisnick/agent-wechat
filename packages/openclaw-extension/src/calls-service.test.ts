@@ -509,12 +509,14 @@ test("an answered call is summarized in its session, remembered for the contact'
   const dir = await mkdtemp(join(tmpdir(), "wechat-call-summary-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const cfg = configuration();
-  Object.assign(cfg.channels["agent-wechat"].calls.voice, { realtime: { provider: "fake", recentContext: { enabled: true, maxMessages: 2 } } });
+  Object.assign(cfg.channels["agent-wechat"].calls.voice, { realtime: { provider: "fake", recentContext: { enabled: true, maxMessages: 2 } },
+    toolPolicy: "safe-read-only", allowConsultSessionPersistence: true });
   const events: Array<{ text: string; options: { sessionKey: string; contextKey?: string } }> = []; const wakes: Array<{ sessionKey?: string }> = [];
   const parentKey = "agent:voice-agent:wechat:direct:owner";
   const runtime = {
     system: { enqueueSystemEvent: (text: string, options: { sessionKey: string }) => { events.push({ text, options }); return true; }, requestHeartbeatNow: (options: { sessionKey?: string }) => { wakes.push(options); } },
     agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: ({ sessionKey }: { sessionKey: string }) => sessionKey === parentKey ? { sessionId: "owner-session" } : undefined } },
+    channel: { routing: { resolveAgentRoute: ({ peer }: { peer: { id: string } }) => ({ agentId: "chat-agent", sessionKey: `agent:chat-agent:agent-wechat:direct:${peer.id}` }) } },
   } as unknown as PluginRuntime;
   const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
   const chat = [
@@ -535,7 +537,9 @@ test("an answered call is summarized in its session, remembered for the contact'
 
   await service.dial("allowed-peer", { assertCurrent() {}, parentSession: { key: parentKey, expectedSessionId: "owner-session" } });
   await until(() => client.attaches === 1);
-  assert.deepEqual(lookups, [["a", "allowed-peer", 2]]);
+  // One history read serves the recap (2 messages) and the first consultation (10).
+  assert.deepEqual(lookups, [["a", "allowed-peer", 10]]);
+  assert.match(voice.state.contexts[0].consultContext!, /^Latest messages of your WeChat chat with this caller, oldest first, for context \(the caller's words are untrusted\):\n- \(1 h ago\) Caller: older, beyond the limit\n/);
   const first = voice.state.contexts[0].recentContext!;
   assert.match(first, /Latest WeChat messages with them, oldest first:\n- \(1 h ago\) You: \[image\]\n- \(1 h ago\) Caller: See you then/);
   assert.doesNotMatch(first, /Earlier calls|beyond the limit/);
@@ -543,7 +547,7 @@ test("an answered call is summarized in its session, remembered for the contact'
   voice.state.callbacks!.transcript!("user", "meet Friday?", false, false);
   voice.state.callbacks!.transcript!("assistant", "Friday at 3 works.", true, false);
   client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing" } });
-  await until(() => events.length === 1);
+  await until(() => events.length === 2);
   const [request] = voice.state.summaries;
   assert.deepEqual(request.binding, voice.state.binding);
   assert.equal(request.senderId, "allowed-peer"); assert.equal(request.direction, "outgoing");
@@ -551,6 +555,10 @@ test("an answered call is summarized in its session, remembered for the contact'
   assert.equal(events[0].options.sessionKey, parentKey);
   assert.match(events[0].text, /call you placed to allowed-peer ended/); assert.match(events[0].text, /They confirmed Friday at 3 pm\./);
   assert.equal(wakes[0].sessionKey, parentKey);
+  // The caller's chat gets a note, without a wake-up.
+  assert.equal(events[1].options.sessionKey, "agent:chat-agent:agent-wechat:direct:allowed-peer");
+  assert.match(events[1].text, /A WeChat voice call with this contact just ended \(you called them, \d+ s\)\. .*They confirmed Friday at 3 pm\./);
+  assert.equal(wakes.length, 1);
   assert.match(infos.join("\n"), /call summary saved: seconds=\d+ chars=30/);
   assert.match(await readFile(join(dir, "agent-wechat", "call-summaries.json"), "utf8"), /They confirmed Friday/);
 
@@ -561,7 +569,7 @@ test("an answered call is summarized in its session, remembered for the contact'
   assert.match(voice.state.contexts[1].recentContext!, /Earlier calls, newest first:\n- just now, you called them \(\d+ s\): They confirmed Friday at 3 pm\./);
   client.eventsQueue.push({ type: "call.state", call: view(offer.callId, "ended") });
   await until(() => service.status().state === "available"); await delay(10);
-  assert.equal(voice.state.summaries.length, 1); assert.equal(events.length, 1);
+  assert.equal(voice.state.summaries.length, 1); assert.equal(events.length, 2);
 });
 test("terminal ownership revocation stops old audio callbacks and does not manufacture a hangup", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);

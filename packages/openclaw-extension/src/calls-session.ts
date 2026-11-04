@@ -49,6 +49,15 @@ export function callSessionKey(agentId: string, scope: CallSessionScope, contact
   return `agent:${agentId}:wechat-call:${randomUUID()}`;
 }
 
+/** The session the caller's direct WeChat messages route to, for a note about their call. */
+export function callerChatSessionKey(cfg: OpenClawConfig, runtime: PluginRuntime, accountId: string, contactId: string): string | undefined {
+  if (!CONTACT_ID.test(contactId) || contactId.endsWith("@chatroom")) return;
+  try {
+    const key = runtime.channel?.routing?.resolveAgentRoute?.({ cfg, channel: "agent-wechat", accountId, peer: { kind: "direct", id: contactId } })?.sessionKey;
+    return key && isCallSessionKey(key) ? key : undefined;
+  } catch { /* Without a route the note is skipped. */ }
+}
+
 /** Whether a call session already exists, i.e. an earlier call created it. */
 export function callSessionExists(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string, key: string): boolean {
   return Boolean(readParentSession(cfg, runtime, agentId, key)?.sessionId);

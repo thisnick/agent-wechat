@@ -5,7 +5,10 @@ description: Keep one agent session per contact, summarize each call and start t
 
 By default the voice agent remembers earlier calls with the same contact: their
 consultations share one OpenClaw session, the agent summarizes each answered call
-there, and you can give the next call a short recap. All paths below are relative
+there, and you can give the next call a short recap. Calls and your WeChat chat
+with the caller also share context both ways: the agent's first consultation in
+a call gets the latest chat messages, and the call summary is left as a note in
+the chat. All paths below are relative
 to `channels.agent-wechat.calls.voice`, and all of this needs
 [consultation](../calling/#models-and-behavior) to be enabled.
 
@@ -40,7 +43,8 @@ to `channels.agent-wechat.calls.voice`, and all of this needs
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `sessionScope` | `per-contact` | `per-contact` keeps one session for each contact, so consultations remember earlier calls. `per-call` starts every call in a new session. |
-| `consultation.summary` | `true` | After an answered call, the agent gets the call transcript in the call's session and writes a two-to-four-sentence summary. It has no tools for this turn. |
+| `consultation.summary` | `true` | After an answered call, the agent gets the call transcript in the call's session and writes a two-to-four-sentence summary. It has no tools for this turn. The summary is also left as a note in your chat with the caller, which the chat's agent sees with the next message there. |
+| `consultation.recentMessages` | `10` | How many of the latest chat messages the agent's first consultation in a call gets as context, 0–50. `0` turns this off. |
 | `realtime.recentContext.enabled` | `false` | Sends the speech model the last three call summaries with the caller and the latest messages of your WeChat chat with them. |
 | `realtime.recentContext.maxMessages` | `10` | How many chat messages to include, 1–50. The recap is cut to about 3,000 characters, keeping the newest messages. |
 
@@ -53,6 +57,9 @@ session that placed them, so the agent there can tell you how the call went.
 - A call session is seeded from `consultation.inboundSessionKey` or from the
   session that placed the call only when that session is first created. After
   that it keeps its own history.
+- The note in your chat waits for the chat's next message; a Gateway restart
+  before then drops it. It never starts a turn on its own, so the chat's agent
+  keeps its conversation.
 - The recap goes to the realtime provider with the rest of the instructions.
   Only messages from the chat with the person on the call are included.
 - Transcripts come from the speech model's speech recognition and can contain

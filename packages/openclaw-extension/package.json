@@ -406,7 +406,14 @@
                         "summary": {
                           "type": "boolean",
                           "default": true,
-                          "description": "After an answered call, give the call's transcript to the agent in the call's session and keep its short summary. Calls placed with the wechat_call tool also report the summary to the session that placed them."
+                          "description": "After an answered call, give the call's transcript to the agent in the call's session and keep its short summary. The summary is also left as a note in your WeChat chat with the caller, and calls placed with the wechat_call tool report it to the session that placed them."
+                        },
+                        "recentMessages": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 50,
+                          "default": 10,
+                          "description": "How many of the latest messages of your WeChat chat with the caller the call's first consultation gets as context; 0 turns this off."
                         }
                       }
                     },
