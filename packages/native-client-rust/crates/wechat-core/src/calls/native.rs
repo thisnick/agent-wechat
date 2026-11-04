@@ -1132,7 +1132,7 @@ fn run_media(
     )?;
     channel.authorize_transmit(
         epoch,
-        TransmitScope::VerifiedGeneration {
+        TransmitScope::LegacyRelayAudio {
             key_generation: epoch.key_generation,
         },
     )?;

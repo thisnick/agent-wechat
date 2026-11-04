@@ -1,6 +1,6 @@
 # Release Process
 
-> **Package renamed (2026-08-31):** the OpenClaw extension moved from `@agent-wechat/wechat` to `@agent-wechat/agent-wechat` so the unscoped package basename matches the plugin id `agent-wechat` (OpenClaw validates plugin ids against the npm basename and hard-fails updates on mismatch; the official catalog also reserves the `wechat` id). The first version (0.11.15) was published manually with a one-off granular token — OIDC trusted publishing only covers packages that already exist — and the token was revoked afterward. The trusted publisher for the new package is configured at https://www.npmjs.com/package/@agent-wechat/agent-wechat/access (GitHub Actions: thisnick/agent-wechat, workflow release.yml), so CI publishes via OIDC as before. Once rollout is done, deprecate the old `@agent-wechat/wechat`: `npm deprecate @agent-wechat/wechat "Renamed to @agent-wechat/agent-wechat (plugin id agent-wechat); openclaw >=2026.8 reserves the wechat id for the official Tencent plugin."`
+> **Package renamed (2026-08-31):** the OpenClaw extension moved from `@agent-wechat/wechat` to `@agent-wechat/agent-wechat` so the unscoped package basename matches the plugin id `agent-wechat` (OpenClaw validates plugin ids against the npm basename and hard-fails updates on mismatch; the official catalog also reserves the `wechat` id). The first version (0.11.15) was published manually with a one-off granular token — OIDC trusted publishing only covers packages that already exist — and the token was revoked afterward. See [Trusted Publishing](#trusted-publishing-oidc) for the CI publisher configuration. Once rollout is done, deprecate the old `@agent-wechat/wechat`: `npm deprecate @agent-wechat/wechat "Renamed to @agent-wechat/agent-wechat (plugin id agent-wechat); openclaw >=2026.8 reserves the wechat id for the official Tencent plugin."`
 
 
 The native/npm release process publishes these artifacts:
@@ -27,39 +27,34 @@ pnpm changeset
    entries for that exact version. Empty fixed-group entries are omitted; a
    desktop-only release can leave both npm package entries empty.
 
-4. Merge the Version Packages PR. The Release workflow checks the npm channel and
-   reports **Waiting for native release assets** if the matching artifacts have
-   not been published. This is an expected waiting state, not a failed build.
-
-5. That merge automatically starts **Prepare native release assets**
-   (`native-release.yml`) for the exact version commit. Only merged PRs from this
-   repository's `changeset-release/main` branch qualify; ordinary pushes do not
-   publish native assets. It builds and tests the configured targets, verifies
+4. Merge the Version Packages PR. GitHub automatically starts
+   **Prepare native release assets** (`native-release.yml`) for that exact commit.
+   The automatic run requires a merged PR from this repository's
+   `changeset-release/main` branch. It builds and tests the configured targets, verifies
    source and checksums, and publishes the GitHub release assets. Existing
-   `native-release` environment reviewer requirements still apply. For recovery,
-   run the workflow manually on main with the version and `confirm_publish=true`.
+   `native-release` environment reviewer requirements still apply.
 
    Releases skip the development-only `wx-dev` upstream simulator and its smoke
    checks. PR validation runs the simulator on Linux x64, Windows x64 and macOS
    ARM64. Production Rust tests, native platform/media checks, packaged CLI
    checks and desktop acceptance still gate publication.
 
-6. Successful native asset publication calls **Publish native runtime image** for
+5. Successful native asset publication calls **Publish native runtime image** for
    the same commit/version. It tests and pushes Linux x64/ARM64 images and combines
    them into the versioned multi-architecture tag. Stable versions also update
-   `latest`. npm waits until image manifest publication succeeds.
+   `latest`.
 
-7. The same native release run packages and publishes the four Rust libraries,
+6. The same native release run packages and publishes the four Rust libraries,
    after the runtime image succeeds and the `native-release` environment permits
    publication. Each crate uses the native version and exact release source.
    Cargo publishes dependencies before their consumers. The other workspace
    crates and desktop package keep `publish = false`.
 
-8. After native assets, the runtime image and Rust libraries are published,
-   rerun the original Release push run for that same source commit. It verifies
-   the native assets, embeds their manifest in the CLI package, and publishes
-   both npm packages with provenance. Prereleases use their Changesets channel
-   (such as `beta`); stable releases use `latest`.
+7. The same run automatically starts **Publish npm packages** once native
+   assets, the multi-architecture image and all four Rust libraries succeed.
+   The job verifies the native assets, embeds their manifest in the CLI package
+   and publishes both npm packages with provenance. Prereleases use their
+   Changesets channel (such as `beta`). Stable releases use `latest`.
 
 ## Rust library release contract
 
@@ -176,36 +171,36 @@ change with a unit test, since the frozen file can't show it.
 
 ## What CI/CD Does
 
-The npm workflow waits until every configured native target, checksum manifest,
-and third-party notice is uploaded and the same source commit has a successfully
-published runtime image. Registry/API errors, mismatched source
-commits and invalid checksums remain failures. A published CLI version permits
-extension-only recovery without requiring another native artifact set.
+The `release.yml` workflow opens or updates the Changesets version PR.
+The automatic `native-release.yml` run publishes from the version PR's merge
+commit. The npm job verifies the complete native manifest and each binary
+against that commit before publishing. Registry and checksum errors fail the job.
 
-The operator reruns the original main-branch Release push run after native
-publication finishes. Keeping the original run preserves its source SHA and
-npm OIDC/provenance context. Do not push an unrelated commit to retry
-publication or replace existing release assets. If main advanced before native
-assets were prepared, reconcile the version/source tag before starting another
-native release; the preflight refuses conflicting tags or published npm versions.
-
-Docker image publication and deployment remain separate from these workflows.
+If a job fails, use **Re-run failed jobs** on that original native release run
+after resolving the cause. Successful jobs stay in place. If npm publication
+partially succeeded, Changesets skips versions already on the registry. A
+manual dispatch on `main` with the version and `confirm_publish=true` remains
+available for native recovery. npm publication runs only on the automatic
+version-merge run. Preserve existing release assets when recovering a release.
+The preflight refuses conflicting tags or published npm versions. Host deployment
+is a separate operation.
 
 ## Trusted Publishing (OIDC)
 
-npm trusted publishing lets GitHub Actions publish without a long-lived token. Setup:
+Configure a GitHub Actions trusted publisher for both public npm packages
+before the next release. npm requires a first successful publish within two
+days of creating the configuration.
 
-1. Go to https://www.npmjs.com/package/@agent-wechat/cli/access
-2. Under "Trusted publishers", add GitHub Actions:
-   - **Owner**: `thisnick`
-   - **Repository**: `agent-wechat`
-   - **Workflow**: `release.yml`
-   - **Environment**: (leave blank)
-3. Repeat for https://www.npmjs.com/package/@agent-wechat/agent-wechat/access
+1. Open the [CLI package access settings](https://www.npmjs.com/package/@agent-wechat/cli/access).
+2. Under **Trusted publishers**, add GitHub Actions with owner `thisnick`,
+   repository `agent-wechat` and workflow filename `native-release.yml`.
+   Leave **Environment** blank and enable **Allow npm publish**.
+3. Repeat in the [OpenClaw package access settings](https://www.npmjs.com/package/@agent-wechat/agent-wechat/access).
 
-Once configured, delete the `NPM_TOKEN` secret from GitHub repo settings. The workflow uses OIDC automatically (requires npm >= 11.5.1, installed in CI).
-
-**Note**: Trusted publishing can only be configured for packages that already exist on npm. For brand-new packages, the first publish must use a token.
+Keep the old `release.yml` publisher until any in-flight releases using it
+finish. CI uses the pinned npm CLI to exchange GitHub OIDC credentials and
+attach provenance. The native signing and crates.io publisher settings stay
+on their current workflows and environments.
 
 ## Desktop installers
 

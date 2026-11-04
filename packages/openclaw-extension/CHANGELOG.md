@@ -1,5 +1,29 @@
 # @agent-wechat/wechat
 
+## 1.4.0
+
+### Minor Changes
+
+- [#352](https://github.com/thisnick/agent-wechat/pull/352) [`498bd4e`](https://github.com/thisnick/agent-wechat/commit/498bd4e6f8a89e1f6bd9f435a1053fc2aae4c7bc) Thanks [@thisnick](https://github.com/thisnick)! - Add disabled-by-default direct voice calling: authenticated control/media WebSockets, single-call ownership, PCM SDK connections, CLI monitor/dial/answer controls, and an optional OpenClaw OpenAI audio bridge with separate calling allowlists. Add the opt-in native worker and internal call-media/audio libraries. Expose direct/conference kind and voice/video call type in call metadata, including same-account observer snapshots without ownership or audio access. Select call type when dialing and accept offers by identity/revision; remove redundant media flags and the unimplemented resume command. Advertise available calling capabilities only; missing flags mean unavailable. Use one `calls` API token scope for call state, control and owner-bound audio; messaging grants do not permit calls. Isolated live tests cover personal voice negotiation, duplex PCM and terminal handling. An accepted owner hangup completes known cleanup when it fences an unsent poll before the queued backend stop runs. Media security lifetime and physical device validation remain incomplete; the native worker is restricted to expiring isolated tests. Video and conference calling remain unavailable.
+
+  Exchange raw PCM samples on media sockets with JSON stream setup; buffer, frame and pace client audio in the daemon instead of requiring CLI or OpenClaw clients to construct custom binary headers.
+
+  Keep active direct voice calls connected across peer microphone mute and unmute updates without replacing their admitted media context.
+
+  Report verified peer microphone mute/unmute as typed control events and current-call snapshots. Use WebSocket liveness for owner cleanup, attempt graceful call shutdown, and locally end abandoned sessions on restart while preserving uncertain network receipts.
+
+  Configure voice and video permissions separately in OpenClaw. Group realtime speech settings, OpenAI SecretRef credentials and independent consultation model/timeouts under the voice configuration; keep unavailable video calls unclaimed.
+
+### Patch Changes
+
+- [#359](https://github.com/thisnick/agent-wechat/pull/359) [`b32fce8`](https://github.com/thisnick/agent-wechat/commit/b32fce8b7682807002622784166a10288bdade24) Thanks [@thisnick](https://github.com/thisnick)! - Validate the OpenClaw integration against 2026.10.9. No plugin changes were needed; the pinned Gateway and model-handoff smokes pass unchanged.
+
+## 1.4.0-beta.6
+
+## 1.4.0-beta.5
+
+## 1.4.0-beta.4
+
 ## 1.4.0-beta.3
 
 ## 1.4.0-beta.2
