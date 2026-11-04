@@ -1,0 +1,162 @@
+---
+title: 管理群聊
+description: 查看群成员、创建与编辑群聊、调整群通知设置，以及发送与接收 @ 提醒。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+使用 `wx groups` 命令管理普通微信群聊与群成员，使用 `wx chats mute/unmute` 修改群免打扰设置，并支持通过[@ 提醒](#mention-group-members)指定成员。修改群操作需要拥有 `admin` 范围的 Daemon 令牌，且微信服务端仍会严格校验你的账号在对应群聊中的实际权限。
+
+## 查看与刷新
+
+1. 查找群聊并读取本地已保存的群成员：
+
+   ```bash
+   wx groups list
+   wx groups get '123456@chatroom'
+   wx groups members list '123456@chatroom' --limit 50
+   wx groups members get '123456@chatroom' wxid_alice
+   ```
+
+   精准查询群成员将返回 `{"state":"present","member":{...}}` 或 `{"state":"unconfirmed","member":null}`。本地未找到该记录并不代表该成员已退群。
+
+2. 在需要时从微信服务器拉取最新数据：
+
+   ```bash
+   wx groups refresh '123456@chatroom'
+   wx groups members refresh '123456@chatroom'
+   ```
+
+   群信息刷新将拉取群名称、通知状态和群公告。群成员刷新将拉取群成员名单、群主与管理员列表，并在操作结果中明确指示成员名单是否完整。
+
+## 修改与管理
+
+1. 创建至少包含除你之外两名联系人的群聊，或编辑现有群聊：
+
+   ```bash
+   wx groups create wxid_alice wxid_bob --name '读书俱乐部' --idempotency-key group-create-001
+   wx groups rename '123456@chatroom' '读书俱乐部' --idempotency-key group-name-001
+   wx groups members add '123456@chatroom' wxid_alice --idempotency-key group-add-001
+   wx groups members remove '123456@chatroom' wxid_alice --idempotency-key group-remove-001
+   wx groups my-name '123456@chatroom' 'Sam' --idempotency-key group-my-name-001
+   wx chats mute '123456@chatroom' --idempotency-key group-mute-001
+   wx chats unmute '123456@chatroom' --idempotency-key group-unmute-001
+   wx groups clear-announcement '123456@chatroom' --idempotency-key group-clear-001
+   wx groups leave '123456@chatroom' --idempotency-key group-leave-001
+   ```
+
+2. 每条命令均会输出操作 ID 及本地收据路径：
+
+   ```bash
+   wx operations get OPERATION_ID
+   ```
+
+   检查操作记录中的 `remoteOutcome`、`members`、`unconfirmedMembers` 以及 `profileProjection`。`succeeded` 代表建群或修改请求已被服务端接受；对于部分成功的邀请操作请检查各个成员的具体状态。退出群聊会保留本地已保存的历史聊天记录。若遇到网络丢失响应，请务必复用相同的幂等键与一致参数重试。`needs_review` 表示微信端可能已经接收了请求，切勿随意更换新键重试，应主动查询已有操作记录。
+
+## API 与 SDK
+
+[群组相关 API 路由](/zh-cn/use/api/#路由列表)要求在请求头中传入 `Idempotency-Key`，并返回带有操作任务的 HTTP 202 响应。可通过 `GET /group-mutations/by-idempotency-key?key=...` 进行查询。TypeScript SDK 提供了 `createGroup`、`renameGroup`、`leaveGroup`、`addGroupMembers`、`removeGroupMembers`、`setMyGroupName`、`clearGroupAnnouncement`、`setThreadMuted`、`groupMember` 以及 `groupMutationByKey`。
+
+```ts
+const op = await client.renameGroup(accountId, groupId, '读书俱乐部', 'group-name-001');
+const status = await client.operation(accountId, op.id);
+```
+
+## 群成员 @ 提醒
+
+<a id="mention-group-members"></a>
+
+使用微信成员 ID (wxid) 来实现真实的微信 @ 提醒。在普通文本中直接手打 `@昵称` 并不会触发系统的 @ 提醒机制；Daemon 会自动填充群成员的显示名称并附带接收者元数据。
+
+### 桌面端应用
+
+在群聊输入框中键入 `@` 字符，或点击附件按钮旁的 **@ 提醒**。选择相应群成员即可在光标处插入 @ 标签；按退格键 (Backspace) 或标签上的 × 按钮即可将其移除。选中的接收成员将保存在草稿中。
+
+**“所有人” (Everyone)** 仅对群主和群管理员可用。如果你的群权限发生变更，应用会保留草稿，并允许你移除“所有人”或刷新群信息。省略该权限字段的旧版服务端将保留原有行为。
+
+### CLI 命令行
+
+使用 `wx groups members list GROUP_ID` 查询群成员 ID：
+
+```bash
+wx messages send GROUP_ID --text "请帮忙查阅一下" \
+  --mention MEMBER_ID --idempotency-key mention-001
+wx messages send GROUP_ID --text "会议马上开始" --mention-all
+```
+
+可多次传入 `--mention` 按顺序提醒多位成员。只有群主和群管理员可以使用 `--mention-all`。命令输出包含发送任务 ID、`state` 状态及 `receiptPath` 收据路径。
+
+### OpenClaw
+
+使用现有的 `message` 工具配合 `agent-wechat` 通道即可：
+
+```json
+{
+  "action": "send",
+  "channel": "agent-wechat",
+  "target": "GROUP_ID",
+  "message": "请帮忙查阅一下",
+  "channelData": {
+    "agent-wechat": { "mentions": { "userIds": ["MEMBER_ID"] } }
+  }
+}
+```
+
+使用 `"mentions": { "all": true }` 可提醒全员。加载微信通道后，工具 schema 中会自动暴露这些选项。
+
+### HTTP 与 SDK
+
+向 `POST /v1/accounts/ACCOUNT_ID/sends` 发送请求并附带 `Idempotency-Key` 请求头：
+
+```json
+{
+  "threadId": "GROUP_ID",
+  "text": "请帮忙查阅一下",
+  "mentions": { "userIds": ["MEMBER_ID"] }
+}
+```
+
+使用 `userIds` 或 `all: true`（二选一）。使用 `GET /sends/SEND_ID` 查询发送收据与进度。
+
+`GET /groups/GROUP_ID` 包含 `ownerId`、`administratorIds`（除非微信协议单独下发，否则不重复包含群主）以及 `canMentionAll`。`null` 权限表示根据本地已存数据尚无法确认权限资格；请先刷新群成员后再重试。普通群成员提交新的 `all: true` 发送将返回 `403 mention_all_forbidden`；权限未知时返回 `409 mention_all_permission_unavailable`。排队中的发送在实际提交前会重新核验当前群成员身份与权限，同时保留其原有的成员名称。复用已有发送幂等键仍会返回该发送记录。
+
+```ts
+await client.sendText(accountId, groupId, "请帮忙查阅一下", "mention-001", {
+  mentions: { userIds: [memberId] },
+});
+```
+
+未指定 `positions` 时，成员名称将自动前置在文本开头。如需在正文中嵌入行内 @ 标签，需传入 UTF-16 偏移量区间：每个位置区间以 `@` 起始，并包含末尾的 U+2005 专用空白符；`end` 为开区间，`index` 索引对应 `userIds` 数组中的元素：
+
+```ts
+await client.sendText(accountId, groupId, "你好 @Alice\u2005，请查收此文件", "mention-002", {
+  mentions: { userIds: [memberId], positions: [{ start: 3, end: 11, index: 0 }] },
+});
+```
+
+选中的每一位成员必须至少在一个区间中出现；允许多个区间指定相同的成员。对于 `all: true`，请使用索引 `0`。支持此格式的 Hub 节点会在账号 capability 中声明 `inlineTextMentions: true`。使用成员信息中的 `mentionName` 可获取精准预览。名称依次优先取用群昵称、个人微信昵称，兜底为账号 ID；个人的私有好友备注不包含在内。重放原发送幂等键仍会保留最初的成员名称与元数据。
+
+### 接收 @ 提醒
+
+消息的 GET/list 返回结果中包含以下字段：
+
+```json
+{
+  "mentions": {
+    "state": "known",
+    "userIds": ["MEMBER_ID"],
+    "self": true,
+    "all": false,
+    "source": "msgsource.atuserlist"
+  }
+}
+```
+
+`self` 为 `true` 表示你在被提醒名单中；`all` 为 `true` 表示这是一条 @所有人 消息，独立于 `userIds`。若元数据缺失或异常，返回 `state: "unknown"` 且相关标记为 null。监听 `message.committed` 事件后获取消息详情即可读取这些字段。OpenClaw 的群 @ 触发门禁同时支持命中自身或者命中全员提醒。
+
+<Aside title="使用提示">
+- 已保存的群聊变更会触发 `group.updated`；版本号变动通知可能会触发群名单和公告的主动刷新。联系人同步流也会携带群免打扰状态。群免打扰处理具备测试 Fixture；独立的手机端免打扰切换以及其他设备编辑操作的自动下发仍待实机验证。
+- 未知的同步指令字段保持挂起状态。未完整重建的本地提示消息、全文搜索索引和部分私有配置可能会在受支持字段保存后使操作报告 `profileProjection: "partial"`。
+- 免打扰支持普通联系人单聊与群聊。自定义群备注、发布群公告、生成邀请二维码链接、转让群主及变更群管理员等操作暂不支持。OpenClaw 仅暴露了群主/管理员权限的[群信息工具](/zh-cn/openclaw/tools/)，未开放群修改工具。
+- 群成员提醒支持在本地已保存的群聊中发送普通文本。未知或重复的成员 ID、单聊会话以及富媒体消息载荷均不支持提醒。提醒可以配合[引用纯文本回复](/zh-cn/use/cli/#引用回复)同时使用；包含成员名称在内的引用评论正文上限为 16 KiB，其他文本（含名称）上限为 64 KiB。遇到网络超时请保留原有的发送幂等键；详见[消息发送与恢复机制](/zh-cn/how-it-works/sends/)。
+</Aside>

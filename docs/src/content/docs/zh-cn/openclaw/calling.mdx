@@ -1,0 +1,123 @@
+---
+title: 配置语音通话
+description: 配置语音与视频权限、实时语音对话模型、OpenAI 凭据与智能体协作咨询。
+---
+
+在 `channels.agent-wechat.calls` 下配置实时通话支持。语音和视频默认均处于禁用状态。当前的守护进程和插件支持直接单聊语音通话。
+
+## 连接守护进程
+
+1. 完成[快速接入](../setup/)并执行 `wx calls status`。守护进程必须声明 `directAudio: true`；构建选项请参见[实时通话](/zh-cn/reference/calls/)。
+2. 为通道令牌补充 `calls` 权限作用域（与既有的消息读写权限并列）：
+
+   ```bash
+   wx tokens create openclaw-calling --accounts ACCOUNT_ID \
+     --scopes read --scopes media --scopes send --scopes login \
+     --scopes read-state --scopes calls
+   ```
+
+   在通道既有的 `native.token` SecretRef 中使用生成的新令牌。未包含 `calls` 权限的令牌无法调用通话接口。
+
+## 配置实时语音与访问控制
+
+将以下示例合并到你的 OpenClaw 通道及智能体配置中。替换示例中的联系人 ID 与管理员所有者 ID。
+在 **Gateway 进程的环境变量** 中设置 `OPENAI_API_KEY`。
+
+```json
+{
+  "secrets": {
+    "providers": {
+      "voiceenv": {
+        "source": "env",
+        "allowlist": ["OPENAI_API_KEY"]
+      }
+    }
+  },
+  "agents": {
+    "entries": {
+      "main": {
+        "tools": {
+          "alsoAllow": ["wechat_call"]
+        }
+      }
+    }
+  },
+  "channels": {
+    "agent-wechat": {
+      "calls": {
+        "voice": {
+          "enabled": true,
+          "agentId": "main",
+          "inboundPolicy": "allowlist",
+          "inboundAllowFrom": ["allowed-contact-id"],
+          "outboundPolicy": "allowlist",
+          "outboundAllowTo": ["allowed-contact-id"],
+          "outboundToolAllowFrom": ["owner-id"],
+          "maxDurationSeconds": 300,
+          "realtime": {
+            "provider": "openai",
+            "voice": "marin",
+            "instructions": "Keep spoken replies concise.",
+            "agentContext": { "enabled": true },
+            "providers": {
+              "openai": {
+                "apiKey": {
+                  "source": "env",
+                  "provider": "voiceenv",
+                  "id": "OPENAI_API_KEY"
+                }
+              }
+            }
+          },
+          "toolPolicy": "none"
+        },
+        "video": {
+          "enabled": false
+        }
+      }
+    }
+  }
+}
+```
+
+`apiKey` 还支持通过 OpenClaw 文件/可执行命令/密钥存储形式的 SecretRef，或直接传入字符串密钥。若省略，OpenClaw 将取用选定智能体的 OpenAI 认证或 Gateway 环境变量。仅拥有普通文本智能体订阅并不一定具备实时语音 API (Realtime) 的访问权限。守护进程 Token 与 OpenAI Key 属于完全隔离的两种凭据。
+
+`wechat_call` 工具是可选的：上述示例将其授权给 `main` 智能体用于查看状态、发起外呼或挂断通话。自动接听呼入电话并不强制要求智能体具备该工具。
+
+保存配置文件后重启 OpenClaw Gateway。当守护进程空闲时，已就绪的语音服务会汇报为 `available`；若提供商异常或能力不匹配则会汇报为 `unavailable`，此时呼入电话将保持不予接听状态。
+
+## 模型配置与运行行为
+
+以下所有配置路径均相对于 `calls.voice`。
+
+| 配置项 | 行为 / 默认值 |
+| --- | --- |
+| `realtime.provider` | 必填项；目前支持的适配器为 `openai`。 |
+| `realtime.model`, `realtime.voice` | 可选语音模型/声音角色；若未指定则使用提供商默认值。 |
+| `realtime.instructions` | 可选的对话系统提示词引导，最长 4,000 字符。 |
+| `realtime.agentContext.enabled` | 默认为 `false`。设为 `true` 可自动注入所选智能体 `IDENTITY.md` 与 `SOUL.md` 的片段。 |
+| `agentId` | 必填项。用于确定声音角色、提供商鉴权以及被允许协同咨询的对应智能体。 |
+| `toolPolicy` | 可设为 `none`、`safe-read-only` 或 `owner`。开启会话持久化时默认为 `safe-read-only`。 |
+| `allowConsultSessionPersistence` | 设为 `true` 允许在每次通话时使用独立的 OpenClaw 宿主会话进行协同咨询。 |
+| `realtime.consultPolicy` | `auto` 由模型自主决定何时咨询；`substantive` 要求其就事实与上下文发起咨询；`always` 在模型漏查时由呼叫方轮次强制触发咨询。 |
+| `realtime.consultThinkingLevel`, `realtime.consultFastMode` | 可选的 OpenClaw 推理级别与咨询模型极速模式覆盖。 |
+| `consultation.inboundSessionKey` | 可选的选定智能体已有会话，作为呼入通话的上下文。 |
+| `consultation.model` | 可选的协同咨询 `provider/model`；未指定时沿用选定智能体的模型。 |
+| `consultation.timeoutMs` | 默认 30,000 毫秒；有效区间 1,000–120,000 毫秒。 |
+| `maxDurationSeconds` | 默认 300 秒；有效区间 30–3,600 秒。 |
+
+语音实时模型负责自然语音对话；协同咨询模型负责处理委托的复杂提问与允许的工具调用。呼入/呼出策略默认处于 `disabled`；白名单必须使用确切的联系人 ID，不支持 `*` 通配符。工具调用者还必须被列入 `outboundToolAllowFrom` 授权列表。普通文字消息收发权限不代表通话权限。
+
+在 `realtime.model` 中可选择 `gpt-realtime-2.1`、`gpt-realtime-2.1-mini` 或 `gpt-realtime-2`（选自锁定的 OpenClaw 目录）。省略时使用提供商默认值。这些选项均使用 OpenAI Realtime API 密钥。
+
+语音模型会继承选定智能体已配置的身份。当开启工作区上下文 (`agentContext`) 时，实时提供商还会接收两个角色文件有边界的摘录内容。请确保这些文件内容适宜语音交互。
+
+使用 `wechat_call` 发起的呼叫在启用协同咨询时，会使用发起请求的会话作为上下文。配置 `consultation.inboundSessionKey` 可将来电呼入绑定到某个已有会话。OpenClaw 会将绑定会话的上下文复制到该通话的独立会话中。请确保所选会话的历史记录适合呼入者。
+
+当设置 `toolPolicy: "owner"` 时，如果通话参与者的微信 ID 与 `commands.ownerAllowFrom` 中的 `agent-wechat:<WeChat ID>` 条目完全一致，该所有者可以按照智能体的常规工具策略进行协同咨询。所有者可以使用针对相同微信对端和通道账号的绑定会话。其他被允许的参与者则在隔离会话中获得只读咨询权限。请单独将呼入者添加到 `inboundAllowFrom` 中。
+
+:::note[使用提示]
+未启用的通话类型将直接被忽略，既不主动接听也不主动拒绝。开启视频权限并不代表具备视频通话能力：即使设置 `video.enabled: true`，当前后端也无法处理视频画面，亦无法将其自动转为语音。
+
+语音桥接器会等待呼入者说话，并在智能体说话期间支持被打断。该适配器不会录制通话音频或持久化转录文本。在显式开启时，OpenClaw 可在本地保留咨询会话。连续输出的 GPT-Live 或其他实验性适配器若预检失败将报错退出，不会自动静默降级。
+:::

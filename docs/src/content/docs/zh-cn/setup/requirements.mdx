@@ -1,0 +1,39 @@
+---
+title: 准备条件
+description: 在安装 agent-wechat 前需准备的机器、环境工具和微信账号。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+| 需求项 | 说明 |
+| --- | --- |
+| **运行 Daemon 的设备**：Linux、macOS (Apple Silicon) 或 Windows | 用于持续运行 `wx serve` 并保持微信在线。Linux 要求 glibc 2.36+（Debian 12、Ubuntu 24.04 或更新版本）。 |
+| **手机微信** | 用于扫码或在手机端确认授权登录。 |
+| **FFmpeg 与 FFprobe** | 用于发送语音和视频以及部分图片预览。Docker 镜像中已内置。 |
+| **Node 24.16+** | 仅在通过 npm 或 pnpm 安装 CLI 时需要。 |
+| **可选：Linux 版微信数据** | 如需保留历史聊天记录，agent-wechat 可直接使用现有的 Linux 版微信数据目录；若不提供，则会创建全新的 Profile。 |
+
+同样支持 Docker 部署，适用于 Linux 或 macOS/Windows 上的 Docker Desktop。
+
+下一步：[安装](/zh-cn/setup/install/)。
+
+## 功能支持现状
+
+| 已支持 | 暂不支持 |
+| --- | --- |
+| 二维码扫码或手机端确认授权登录 | 通过群邀请链接加群、发布群公告 |
+| 读取本地聊天历史、联系人、群聊及群成员 | 从微信服务器主动拉取旧历史记录 |
+| 实时接收新收到的消息 | 发送自定义表情包（Sticker）或超过 512 MiB 的大文件 |
+| 发送文本、图片、文件、视频、语音和链接卡片 | 直接读取 macOS 或 Windows 版微信的数据目录 |
+| 下载图片、文件、视频及语音 | 针对外发网络连接的代理配置 |
+| 撤回自己发送的消息 | |
+| 携带管理令牌[创建并编辑普通群聊](/zh-cn/use/groups/) | 手机端群编辑事件的主动推送 |
+| 标记会话已读并同步已读状态至其他设备 | |
+
+<Aside title="使用提示">
+- **历史记录来自本地微信数据，而非云端。** 微信不会向新登录的设备同步全部云端历史，因此新创建的 Profile 仅记录自登录起收到的消息。
+- **数据保留微信官方原生格式。** agent-wechat 直接读写 Linux 版微信的数据文件，可完美继承原有数据。
+- OpenClaw 和其他客户端可以运行在能访问 Daemon 端口的任意机器上。
+- 查看 [功能验证清单](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) 获取具体测试验证详情。
+- 发送不同类型的附件具有[不同的体积限制](/zh-cn/use/media/)；大文件通道具有独立的状态验证流程。
+</Aside>

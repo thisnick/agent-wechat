@@ -1,0 +1,63 @@
+---
+title: 响应权限控制
+description: 精确控制哪些单聊和群聊消息允许传递给 AI 智能体。
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+每一条收到的新消息在呈现给智能体之前，均须通过严格的前置安全校验。默认策略下拦截所有消息。
+
+```mermaid
+flowchart LR
+  DM[单聊消息] --> DC["发送者在白名单?<br/>dmPolicy, allowFrom"]
+  GM[群聊消息] --> GC["群聊已启用且<br/>发送者在白名单?<br/>groupPolicy, groups"]
+  GC --> MC["是否 @ 提醒机器人?<br/>requireMention"]
+  DC -- 是 --> A[智能体处理并回复]
+  MC -- 是 --> A
+  MC -- 否 --> C[保留作为上下文]
+```
+
+未通过校验的消息将被直接忽略，并在你的微信中保持未读。
+
+## 单聊控制 (Direct Messages)
+
+| `dmPolicy` 策略 | 允许谁触发回复 |
+| --- | --- |
+| `disabled` (默认) | 拒绝所有人 |
+| `allowlist` | 仅允许 `allowFrom` 白名单中列出的联系人 |
+| `open` | 允许任何私聊你的微信好友 |
+
+## 群聊控制 (Groups)
+
+| `groupPolicy` 策略 | 允许谁在群里触发回复 |
+| --- | --- |
+| `disabled` (默认) | 拒绝所有群消息 |
+| `allowlist` | 允许 `groupAllowFrom` 中的人员（若未设置则继承 `allowFrom`） |
+| `open` | 允许该群内的任何成员 |
+
+在群聊中，智能体默认仅在被 **@ 提及** 时才会作出回复。没有 @ 的普通消息会被保存在内存缓冲中，在下一次收到 @ 提醒时一并作为上下文提供给模型。
+
+可在 `groups` 中为各个特定群聊定制覆盖规则（以群 ID 为键，`"*"` 代表全局兜底）：
+
+```json
+"agent-wechat": {
+  "dmPolicy": "allowlist",
+  "allowFrom": ["wxid_alice", "wxid_bob"],
+  "groupPolicy": "allowlist",
+  "groups": {
+    "*": { "enabled": false },
+    "family@chatroom": { "enabled": true, "requireMention": false },
+    "project@chatroom": { "enabled": true, "allowFrom": ["wxid_carol"] }
+  }
+}
+```
+
+在该配置下：智能体会直接回复 Alice 和 Bob 的私聊。在家人群中，无需 @ 即可直接响应 Alice 和 Bob 的消息。在项目群中，仅在 Carol @ 机器人时才予回复。其余未提及的群聊全部保持静默。
+
+<Aside title="使用提示">
+- **查询 ID：** 用户 ID 可通过 `wx contacts find 姓名` 获取；群聊 ID 可通过 `wx chats find 群名` 获取（以 `@chatroom` 结尾）。你自己的 ID 为已发消息中的 `senderId`。
+- **@ 提醒指微信原生的 @ 结构化元数据**（包括命中你或全员 @所有人）。Daemon 直接读取微信底层协议中的元数据，手打纯文本形式的“@机器人”不会被识别。参见[群成员 @ 提醒](/zh-cn/use/groups/#mention-group-members)。
+- **群聊上下文长度：** `messages.groupChat.historyLimit` 用于控制每个群最多暂存多少条未 @ 提醒的历史上下文（默认为 50 条，上限 200 条，设为 0 完全关闭）。上下文中的图片只有在真正触发回复时才会下载。
+- **被撤回的消息** 会立即从上下文缓存中剔除，即便此前从未回复过。
+- **媒体附件在发送者校验之后拉取。** 被策略拦截忽略的消息，其附件绝不会被下载或送入转录流程。
+</Aside>

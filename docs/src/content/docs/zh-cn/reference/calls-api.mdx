@@ -1,0 +1,471 @@
+---
+title: 通话控制 API
+description: 通话状态快照与完整的客户端/服务端 JSON 载荷交互示例。
+---
+
+使用控制 WebSocket 处理通话控制信令命令与事件流。获得呼叫独占所有权的客户端可附加独立的 [原始 PCM 媒体 Socket](../calls-media/)。
+[Rust Crate 架构](../../zh-cn/how-it-works/rust-crates/) 详细介绍了各模块分工与依赖。
+
+## 接口路由与状态快照
+
+所有接口均需要在 HTTP `Authorization` 头部中携带具有对应账号 `calls` 作用域的 Bearer 令牌（包含 WebSocket Upgrade 握手）。路径中的各类标识符必须经过 URL 编码；严禁将令牌或机密暴露在 URL 查询参数中。
+
+| 请求方式 | 请求路径 | 响应说明 |
+| --- | --- | --- |
+| GET | `/v1/accounts/{account}/calls/current` | 获取当前通话快照 JSON |
+| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON 双向通话控制信令 |
+| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON 初始化与二进制 PCM 音频流 |
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v1/accounts/$ACCOUNT/calls/current"
+```
+
+```json
+{
+  "capabilities": {
+    "directAudio": true
+  },
+  "availability": {
+    "busy": false,
+    "ownedByThisClient": false
+  },
+  "currentOffer": null,
+  "currentPendingOffer": null,
+  "currentCall": null,
+  "audioFormat": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "frameMs": 20
+  }
+}
+```
+
+| 字段 | 含义说明 |
+| --- | --- |
+| `capabilities` | 声明支持的特性标志；缺失标志代表能力不可用；`{}` 代表完全未开启通话 |
+| `currentPendingOffer` | 处于等待接听就绪或预处理状态的候选来电；此时尚不可直接接听 |
+| `currentOffer` | 可立即应答的来电邀请；在认领或通话结束后清空 |
+| `currentCall` | 活跃中的通话元数据，包含 `kind`、`callType`、呼叫方向、状态以及参与者控制项 |
+| `audioFormat` | 客户端与守护进程之间交互的标准 PCM 采样格式，独立于微信内部使用的编码 |
+
+同一账号下的观察者可以看到通话元数据，但无法拿到所有者机密令牌，亦无法访问音频流。
+普通 HTTP 查询的 `ownedByThisClient` 恒为 `false`：所有权严格归属于建立控制连接的 WebSocket 会话。全局 `busy` 状态还会综合考虑其他账号；其他账号的具体通话细节保持隐蔽。
+
+## 客户端信令命令 (Client messages)
+
+在**控制** WebSocket 上发送以下 JSON 文本消息。每个命令均需携带 `requestId`；仅在完全相同的重试时才复用它。接听/拒绝/取消/挂断时请传入最近接收到的 `expectedRevision` 版本号。
+
+### 注册就绪状态 (Readiness)
+
+在准备好本地音频链路后，向服务端声明就绪状态。仅建立连接保持被动监听。
+
+声明外呼就绪：
+
+```json
+{
+  "type": "call.ready",
+  "requestId": "ready-outgoing",
+  "ready": true,
+  "format": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "frameMs": 20
+  },
+  "scope": {
+    "kind": "outgoing"
+  }
+}
+```
+
+声明针对某个特定待处理来电就绪：
+
+```json
+{
+  "type": "call.ready",
+  "requestId": "ready-offer",
+  "ready": true,
+  "format": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "frameMs": 20
+  },
+  "scope": {
+    "kind": "offer",
+    "callId": "example-call",
+    "expectedRevision": 1
+  }
+}
+```
+
+声明全局就绪（呼入与外呼）或撤销就绪：
+
+```json
+{
+  "type": "call.ready",
+  "requestId": "ready-all",
+  "ready": true,
+  "format": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "frameMs": 20
+  },
+  "scope": {
+    "kind": "all"
+  }
+}
+```
+
+```json
+{
+  "type": "call.ready",
+  "requestId": "not-ready",
+  "ready": false,
+  "format": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "frameMs": 20
+  }
+}
+```
+
+省略 `scope` 默认等同于 `all`。
+
+### 发起与应答 (Start or answer)
+
+发起呼叫：
+
+```json
+{
+  "type": "call.dial",
+  "requestId": "dial-1",
+  "target": {
+    "kind": "direct",
+    "contactId": "example-contact"
+  },
+  "callType": "voice"
+}
+```
+
+应答来电：
+
+```json
+{
+  "type": "call.answer",
+  "requestId": "answer-1",
+  "callId": "example-call",
+  "expectedRevision": 3
+}
+```
+
+发起呼叫的 Socket 自然拥有外呼所有权。对于呼入来电，首个成功应答的客户端胜出；并发应答的其他客户端将收到 `already_claimed`。
+
+### 拒绝、取消与挂断 (Reject, cancel or hang up)
+
+拒绝来电邀请、在外呼接听前取消呼叫，或在通话中执行挂断：
+
+```json
+{
+  "type": "call.reject",
+  "requestId": "reject-1",
+  "callId": "example-call",
+  "expectedRevision": 3
+}
+```
+
+```json
+{
+  "type": "call.cancel",
+  "requestId": "cancel-1",
+  "callId": "example-call",
+  "expectedRevision": 4
+}
+```
+
+```json
+{
+  "type": "call.hangup",
+  "requestId": "hangup-1",
+  "callId": "example-call",
+  "expectedRevision": 5
+}
+```
+
+### 音频控制 (Audio controls)
+
+静音外发音频（发送 `muted: false` 取消静音）。在打断回复时清空已排队的外发音频（参见[音频代际机制](../calls-media/#静音与打断机制)）。`call.mute` 在守护进程侧抑制该客户端的外发流，不会向对端发送麦克风控制请求，亦不会修改对端的麦克风状态。
+
+```json
+{
+  "type": "call.mute",
+  "requestId": "mute-1",
+  "callId": "example-call",
+  "muted": true
+}
+```
+
+```json
+{
+  "type": "call.clear_audio",
+  "requestId": "clear-1",
+  "callId": "example-call"
+}
+```
+
+## 服务端推送事件 (Server messages)
+
+以下 JSON 文本消息由**控制** Socket 推送送达。媒体附加过程有其独立的 [`media.ready` 响应](../calls-media/#附加通道并交换音频)。
+
+### 初始握手 (Hello)
+
+连接建立时的首个事件包含分配的 `clientId` 以及当前状态快照：
+
+```json
+{
+  "type": "hello",
+  "clientId": "example-client",
+  "capabilities": {
+    "directAudio": true
+  },
+  "availability": {
+    "busy": false,
+    "ownedByThisClient": false
+  },
+  "currentOffer": null,
+  "currentPendingOffer": null,
+  "currentCall": null,
+  "audioFormat": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "frameMs": 20
+  }
+}
+```
+
+### 命令执行结果 (Command results)
+
+根据 `requestId` 匹配你发出的命令。声明就绪执行成功无需认领通话：
+
+```json
+{
+  "type": "command.result",
+  "requestId": "ready-outgoing",
+  "status": "accepted",
+  "callId": null,
+  "ownerToken": null,
+  "code": null
+}
+```
+
+成功认领通话包含用于附加媒体通道的保密所有者凭据 `ownerToken`：
+
+```json
+{
+  "type": "command.result",
+  "requestId": "dial-1",
+  "status": "accepted",
+  "callId": "example-call",
+  "ownerToken": "<保密 ownerToken>",
+  "code": null
+}
+```
+
+接受执行 (`accepted`) 代表开始处理操作，并不意味着已经接通。完全相同的请求可能会返回 `replayed`。被拒绝的命令返回 `error` 及固定的错误码：
+
+```json
+{
+  "type": "command.result",
+  "requestId": "ready-outgoing",
+  "status": "replayed",
+  "callId": null,
+  "ownerToken": null,
+  "code": null
+}
+```
+
+```json
+{
+  "type": "command.result",
+  "requestId": "answer-1",
+  "status": "error",
+  "callId": null,
+  "ownerToken": null,
+  "code": "already_claimed"
+}
+```
+
+### 待处理与可应答来电 (Pending and actionable offers)
+
+等待接听就绪的候选来电阶段为 `waiting_for_ready` 或 `preparing`：
+
+```json
+{
+  "type": "call.pending",
+  "offer": {
+    "callId": "example-call",
+    "revision": 1,
+    "kind": "direct",
+    "callType": "voice",
+    "callerId": "example-contact",
+    "phase": "waiting_for_ready"
+  }
+}
+```
+
+```json
+{
+  "type": "call.pending",
+  "offer": null
+}
+```
+
+可立即接听或拒绝的正式邀请包含版本号 `revision`：
+
+```json
+{
+  "type": "call.offered",
+  "offer": {
+    "callId": "example-call",
+    "revision": 3,
+    "kind": "direct",
+    "callType": "voice",
+    "callerId": "example-contact"
+  }
+}
+```
+
+### 状态迁移与全局可用性 (State and availability)
+
+```json
+{
+  "type": "call.state",
+  "call": {
+    "callId": "example-call",
+    "revision": 5,
+    "kind": "direct",
+    "callType": "voice",
+    "direction": "incoming",
+    "state": "connected",
+    "ownedByThisClient": true,
+    "controls": [
+      {
+        "participantId": "example-contact",
+        "control": {
+          "kind": "microphone",
+          "muted": false
+        }
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "type": "call.state",
+  "call": {
+    "callId": "example-call",
+    "revision": 6,
+    "kind": "direct",
+    "callType": "voice",
+    "direction": "incoming",
+    "state": "ending",
+    "ownedByThisClient": true
+  }
+}
+```
+
+```json
+{
+  "type": "call.state",
+  "call": {
+    "callId": "example-call",
+    "revision": 7,
+    "kind": "direct",
+    "callType": "voice",
+    "direction": "incoming",
+    "state": "ended",
+    "ownedByThisClient": true
+  }
+}
+```
+
+```json
+{
+  "type": "calls.availability",
+  "availability": {
+    "busy": false,
+    "ownedByThisClient": false
+  }
+}
+```
+
+通话状态依次包含：`offered`（来电）、`dialing`（呼出中）、`ringing`（对方振铃）、`connecting`（接通协商中）、`connected`（已接通）、`ending`（正在挂断清理）、`ended`（已结束）以及 `uncertain`（未决）。在 `ending` 阶段必须立即停止发送音频；保持控制连接直到守护进程完成挂断清理。`uncertain` 标识后端遇到了未确认的结果，底层收据即使在本地会话关闭后依然会被完整保留。
+
+### 参与者控制事件 (Participant control events)
+
+`call.control` 汇报参与者的硬件控制状态。当前控制类型为 `microphone`（麦克风）；`muted: true` 表示静音，`false` 表示未静音。`participantId` 为单聊呼叫目标或呼入邀请使用的联系人 ID。
+
+```json
+{
+  "type": "call.control",
+  "callId": "example-call",
+  "participantId": "example-contact",
+  "control": {
+    "kind": "microphone",
+    "muted": true
+  }
+}
+```
+
+```json
+{
+  "type": "call.control",
+  "callId": "example-call",
+  "participantId": "example-contact",
+  "control": {
+    "kind": "microphone",
+    "muted": false
+  }
+}
+```
+
+该事件会推送给所有者和同账号观察者，无需回复，客户端亦可忽略。麦克风状态重复未变时不产生事件。最新已知的值也会展示在 HTTP 快照、`hello` 和 `call.state` 的 `currentCall.controls` 中；省略 `controls` 表示尚未上报任何状态。控制状态更新不推进版本号 `revision`，不改变 PCM 音频格式，不会结束通话，亦不中断对向音频。
+
+### 音频代际与错误处理 (Audio generation and errors)
+
+在成功执行 `call.clear_audio`（打断）后，发送轨道的音频代际将推进递增：
+
+```json
+{
+  "type": "track.updated",
+  "callId": "example-call",
+  "track": {
+    "id": 1,
+    "generation": 2,
+    "direction": "send",
+    "format": {
+      "sampleRate": 16000,
+      "channels": 1,
+      "frameMs": 20
+    }
+  }
+}
+```
+
+控制 Socket 发生协议级异常时推送 `call.error`：
+
+```json
+{
+  "type": "call.error",
+  "code": "forbidden"
+}
+```
+
+错误码包括：`invalid_request`、`busy`、`already_claimed`、`offer_expired`、`not_owner`、`unsupported`、`media_not_ready`、`outcome_unknown`、`capacity`、`stale`、`forbidden` 和 `closed`。响应丢失不代表可以盲目自动重试。
+
+:::note[使用提示]
+断线重连无法夺回已有所有权。控制消息上限为 16 KiB。服务端每隔 15 秒发送一次 WebSocket Ping；60 秒内无流量的空闲连接将被关闭。所有者的控制 Socket 意外断开会立即停止音频流并触发呼叫清理；普通观察者断开不影响通话。静音或发送静音音频不被视为空闲超时。
+
+守护进程重启时，之前的通话会在本地被标记为已结束，`currentCall` 为空。旧请求绝不会被重放。正常停机时守护进程会优先尝试挂断清理；未确认的网络交互收据与本地通话状态严格隔离存证。`kind` 包含 `direct`（单聊）与 `conference`（会议）；`callType` 包含 `voice`（语音）与 `video`（视频）。当前后端仅支持单聊语音通话；多人会议与视频呼叫均返回 `unsupported`。
+:::
