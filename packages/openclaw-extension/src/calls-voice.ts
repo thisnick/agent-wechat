@@ -2,7 +2,7 @@ import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { resolveCallVoiceApiKey } from "./calls-secrets.ts";
 import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { resolveCallVoiceContext } from "./calls-voice-context.ts";
-import { callSessionExists, callSessionKey, canonicalCallSessionKey, currentCallParentKey, resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
+import { callSessionExists, callSessionKey, canonicalCallSessionKey, chatSessionKey, currentCallParentKey, resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
 import { createCallForcedConsult } from "./calls-forced-consult.ts";
 import { consultCallSession } from "./calls-consult-session.ts";
 import { DEFAULT_ACCOUNT_ID, resolveWeChatAccount } from "./types.ts";
@@ -190,18 +190,24 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       const fail = (reason: string) => { if (!closed) { forced?.close(); rejectReady(Error("Calling provider failed")); callbacks.failed(reason); } };
       const abort = () => { closed = true; forced?.close(); consults.clear(); rejectReady(Error("Calling provider stopped")); void Promise.resolve(session?.close()).catch(() => {}); };
       signal.throwIfAborted(); signal.addEventListener("abort", abort, { once: true });
-      const makeScope = (isOwner: boolean) => ({ isOwner, sessionKey: callSessionKey(config.agentId, config.sessionScope, context.senderId, isOwner) });
+      // A contact who loses owner status mid-call moves to the read-only call
+      // session, never staying in a chat session that held owner runs.
+      const makeScope = (isOwner: boolean, demoted = false) => {
+        const chat = config.sessionScope === "chat" && !demoted
+          ? chatSessionKey(hostCfg, runtime, config.agentId, context.channelAccountId ?? DEFAULT_ACCOUNT_ID, context.senderId, isOwner) : undefined;
+        return { isOwner, sessionKey: chat ?? callSessionKey(config.agentId, config.sessionScope, context.senderId, isOwner), chat: chat !== undefined };
+      };
       type ConsultScope = ReturnType<typeof makeScope>;
       let scope = makeScope(owner);
       // A parent seeds a call session when it is created. A session kept from
-      // earlier calls with this contact already has its own history.
-      const seedable = new Set([scope.sessionKey].filter(key => !callSessionExists(hostCfg, runtime, config.agentId, key)));
+      // earlier calls with this contact, or their chat, has its own history.
+      const seedable = new Set([scope].filter(item => !item.chat && !callSessionExists(hostCfg, runtime, config.agentId, item.sessionKey)).map(item => item.sessionKey));
       const currentAccess = (): { scope: ConsultScope; cfg: OpenClawConfig; allowed: boolean } => {
         const access = ownerMode ? currentOwnerAccess(runtime, config.agentId, context) : { allowed: true, owner: false, cfg: hostCfg };
         if (scope.isOwner && !access.owner) {
           // A read-only run must not see the former owner's private fork or
           // cached results. A later config change cannot promote this call.
-          scope = makeScope(false);
+          scope = makeScope(false, true);
           consults.clear();
           if (forced) { forced.close(); forced = createForced(scope); }
           if (!closed && !signal.aborted) callbacks.clear();

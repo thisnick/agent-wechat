@@ -43,10 +43,27 @@ const CONTACT_ID = /^[A-Za-z0-9_.@-]{1,200}$/;
  * the owner's, so a later loss of owner status never exposes an owner session.
  * per-call, or a contact ID unfit for a key, gets a new session for each call. */
 export function callSessionKey(agentId: string, scope: CallSessionScope, contactId: string, owner: boolean): string {
-  if (scope === "per-contact" && CONTACT_ID.test(contactId) && !contactId.endsWith("@chatroom")) {
+  if (scope !== "per-call" && CONTACT_ID.test(contactId) && !contactId.endsWith("@chatroom")) {
     return `agent:${agentId}:wechat-call:${contactId.toLowerCase()}${owner ? "" : ":read-only"}`;
   }
   return `agent:${agentId}:wechat-call:${randomUUID()}`;
+}
+
+/**
+ * The caller's WeChat chat session, which `chat` scope shares with calls: the
+ * session their direct messages route to. Only a session of the calling
+ * agent qualifies, and for anyone but the owner only one specific to them:
+ * with dmScope main, every chat routes to the owner's main session.
+ */
+export function chatSessionKey(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string, accountId: string, contactId: string, owner: boolean): string | undefined {
+  if (!CONTACT_ID.test(contactId) || contactId.endsWith("@chatroom")) return;
+  try {
+    const route = runtime.channel?.routing?.resolveAgentRoute?.({ cfg, channel: "agent-wechat", accountId, peer: { kind: "direct", id: contactId } });
+    const key = route?.sessionKey;
+    if (!key || !isCallSessionKey(key) || route.agentId?.toLowerCase() !== agentId.toLowerCase()) return;
+    if (!owner && !key.toLowerCase().includes(contactId.toLowerCase())) return;
+    return key;
+  } catch { /* Routing failure keeps the call in its own session. */ }
 }
 
 /** Whether a call session already exists, i.e. an earlier call created it. */
