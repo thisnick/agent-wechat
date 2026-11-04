@@ -478,7 +478,7 @@ impl CallService {
     }
     /// Install an unresolved operational journal record before serving clients.
     /// No owner, direction, room context or terminal result is fabricated. The
-    /// global barrier remains until a separately verified recovery resolves it.
+    /// account barrier remains until a separately verified recovery resolves it.
     pub fn recover_unknown(&self, account_id: &str, public_call_id: &str) -> Result<()> {
         if [account_id, public_call_id].into_iter().any(|value| {
             value.is_empty() || value.len() > 200 || value.chars().any(char::is_control)
@@ -1765,12 +1765,16 @@ impl CallService {
     ) -> Result<MediaConnection> {
         self.maintenance().await;
         let mut s = self.lock()?;
-        self.valid_peer(&s, client)?;
-        Self::owner(&s, client, call_id)?;
-        let peer = &s.clients[client];
+        // A media socket cannot reuse control identity from another account.
+        let peer = s
+            .clients
+            .get(client)
+            .ok_or_else(|| error(CallErrorCode::Forbidden))?;
         if peer.account != account || peer.principal != principal {
             return Err(error(CallErrorCode::Forbidden));
         }
+        self.valid_peer(&s, client)?;
+        Self::owner(&s, client, call_id)?;
         let c = s.call.as_ref().expect("owner call");
         if c.state != CallState::Connected {
             return Err(error(CallErrorCode::MediaNotReady));

@@ -324,7 +324,8 @@ async fn calls_grant_stays_passive_until_ready_and_revocation_closes_socket() {
     .await;
     assert_eq!(json_event(&mut malformed).await["code"], "invalid_request");
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .offer(
             f.backend.authority("one").unwrap(),
             "passive-offer".into(),
@@ -369,7 +370,8 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     f.grant(calls_token, &["calls"], &["one", "two"]);
     let authority = f.backend.authority("one").unwrap();
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .offer(
             authority,
             "incoming-fixture".into(),
@@ -648,9 +650,68 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     }
     assert!(f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .validate_control(hello["clientId"].as_str().unwrap())
         .await
         .is_ok());
     assert_eq!(f.backend.received.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn active_outgoing_call_does_not_block_another_accounts_incoming_call() {
+    let f = Fixture::new(true).await;
+    let mut caller = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
+    json_event(&mut caller).await;
+    ready(&mut caller, "ready-caller").await;
+    command(
+        &mut caller,
+        json!({"type":"call.dial","requestId":"dial-first","target":{"kind":"direct","contactId":"synthetic-peer"},"callType":"voice"}),
+    )
+    .await;
+    let outgoing = until(&mut caller, |v| {
+        v["type"] == "call.state" && v["call"]["state"] == "connected"
+    })
+    .await;
+    assert_eq!(outgoing["call"]["ownedByThisClient"], true);
+
+    let mut callee = f.socket("/v1/accounts/two/calls/socket", OWNER).await;
+    assert_eq!(json_event(&mut callee).await["availability"]["busy"], false);
+    f.core
+        .call_service("two")
+        .unwrap()
+        .offer(
+            f.backend.authority("two").unwrap(),
+            "second-account-offer".into(),
+            "synthetic-caller".into(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    ready(&mut callee, "ready-callee").await;
+    command(
+        &mut callee,
+        json!({"type":"call.answer","requestId":"answer-second","callId":"second-account-offer","expectedRevision":1}),
+    )
+    .await;
+    let incoming = until(&mut callee, |v| {
+        v["type"] == "call.state" && v["call"]["state"] == "connected"
+    })
+    .await;
+    assert_eq!(incoming["call"]["ownedByThisClient"], true);
+
+    let mut competitor = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
+    let hello = json_event(&mut competitor).await;
+    assert_eq!(hello["availability"]["busy"], true);
+    assert_eq!(hello["currentCall"]["callId"], outgoing["call"]["callId"]);
+    assert_eq!(hello["currentCall"]["ownedByThisClient"], false);
+    ready(&mut competitor, "ready-competitor").await;
+    command(
+        &mut competitor,
+        json!({"type":"call.dial","requestId":"dial-while-busy","target":{"kind":"direct","contactId":"other-synthetic-peer"},"callType":"voice"}),
+    )
+    .await;
+    let denied = until(&mut competitor, |v| v["code"] == "busy").await;
+    assert_eq!(denied["ownerToken"], Value::Null);
+    assert_eq!(f.backend.submits.load(Ordering::SeqCst), 2);
 }

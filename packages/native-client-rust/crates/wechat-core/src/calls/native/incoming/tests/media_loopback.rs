@@ -552,7 +552,7 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
         let mut h = Harness::new(frames_per_packet)?;
         let test = async {
             let f = &h.fixture;
-            let service = f.core.call_service();
+            let service = f.core.call_service("one").unwrap();
             let mut client = service.connect("one", "fixture", true).await?;
             let Some(CallEvent::Hello { audio_format, .. }) = client.events.recv().await else {
                 bail!("Synthetic missing Hello")

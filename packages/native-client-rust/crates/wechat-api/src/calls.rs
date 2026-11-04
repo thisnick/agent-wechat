@@ -140,7 +140,7 @@ async fn current(
     app.core.store.account(&account)?;
     let snapshot: CallSnapshot = app
         .core
-        .call_service()
+        .call_service(&account)?
         .current(&account, &principal(&claims))
         .await
         .map_err(service_error)?;
@@ -246,7 +246,9 @@ async fn send_event(
 }
 
 async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: String) {
-    let service = app.core.call_service();
+    let Ok(service) = app.core.call_service(&account) else {
+        return;
+    };
     let control_allowed = claims.require(Some(&account), "calls").is_ok();
     let Ok(mut connection) = service
         .connect(&account, &principal(&claims), control_allowed)
@@ -302,7 +304,9 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
 }
 
 async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: String, call: String) {
-    let service = app.core.call_service();
+    let Ok(service) = app.core.call_service(&account) else {
+        return;
+    };
     let (mut sink, mut input) = socket.split();
     let first = timeout(ATTACH_TIMEOUT, input.next()).await;
     let Ok(Some(Ok(Message::Text(text)))) = first else {

@@ -103,9 +103,16 @@ impl std::ops::Deref for Core {
     }
 }
 
+#[derive(Default)]
+struct AccountCalls {
+    services: BTreeMap<String, Arc<crate::calls::service::CallService>>,
+    configured_backend: Option<Arc<dyn crate::calls::service::CallBackend>>,
+    closing: bool,
+}
+
 #[doc(hidden)]
 pub struct CoreShared {
-    pub(crate) call_service: std::sync::OnceLock<Arc<crate::calls::service::CallService>>,
+    account_calls: Mutex<AccountCalls>,
 
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
@@ -333,7 +340,7 @@ impl Core {
             snapshot_reader: None,
             live_store: None,
             shared: Arc::new(CoreShared {
-                call_service: std::sync::OnceLock::new(),
+                account_calls: Mutex::new(AccountCalls::default()),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
@@ -375,7 +382,8 @@ impl Core {
             core.store.recover_interrupted_operations(&account.id)?;
             core.store.recover_call_sessions(&account.id)?;
             if let Some(call_id) = core.store.unresolved_call(&account.id)? {
-                core.call_service().recover_unknown(&account.id, &call_id)?;
+                core.call_service(&account.id)?
+                    .recover_unknown(&account.id, &call_id)?;
             }
             let _ = core.recover_metadata(&account.id)?;
             let _ = core.recover_saved_login(&account.id);
@@ -2241,9 +2249,19 @@ impl Core {
         // The task keeps running if the requesting HTTP connection disappears.
         let core = self.clone();
         if tokio::spawn(async move {
-            if let Some(service) = core.call_service.get() {
-                service.shutdown().await;
+            let services = {
+                let mut calls = core
+                    .account_calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                calls.closing = true;
+                calls.services.values().cloned().collect::<Vec<_>>()
+            };
+            let mut shutdowns = tokio::task::JoinSet::new();
+            for service in services {
+                shutdowns.spawn(async move { service.shutdown().await });
             }
+            while shutdowns.join_next().await.is_some() {}
             core.shutdown();
         })
         .await
@@ -2331,28 +2349,45 @@ fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl Core {
-    pub fn call_service(self: &Arc<Self>) -> Arc<crate::calls::service::CallService> {
-        self.call_service
-            .get_or_init(|| {
-                Arc::new(crate::calls::service::CallService::new(Arc::new(
-                    crate::calls::native::NativeCallBackend::new(Arc::downgrade(self)),
-                )))
-            })
-            .clone()
+    /// Keep both the call controller and its native worker scoped to one account.
+    pub fn call_service(
+        self: &Arc<Self>,
+        account: &str,
+    ) -> Result<Arc<crate::calls::service::CallService>> {
+        let mut calls = self
+            .account_calls
+            .lock()
+            .map_err(|_| anyhow::anyhow!("call registry poisoned"))?;
+        if let Some(service) = calls.services.get(account) {
+            return Ok(service.clone());
+        }
+        anyhow::ensure!(
+            !calls.closing && !self.stopping.load(Ordering::Acquire),
+            "call registry closed"
+        );
+        let backend = calls.configured_backend.clone().unwrap_or_else(|| {
+            Arc::new(crate::calls::native::NativeCallBackend::new(
+                Arc::downgrade(self),
+            ))
+        });
+        let service = Arc::new(crate::calls::service::CallService::new(backend));
+        calls.services.insert(account.to_owned(), service.clone());
+        Ok(service)
     }
     pub fn configure_calls(
         core: &Arc<Self>,
         backend: Arc<dyn crate::calls::service::CallBackend>,
     ) -> Result<()> {
-        let service = Arc::new(crate::calls::service::CallService::new(backend));
-        for account in core.store.accounts()? {
-            if let Some(call_id) = core.store.unresolved_call(&account.id)? {
-                service.recover_unknown(&account.id, &call_id)?;
-            }
-        }
-        core.call_service
-            .set(service)
-            .map_err(|_| anyhow::anyhow!("call backend must be configured before starting the API"))
+        let mut calls = core
+            .account_calls
+            .lock()
+            .map_err(|_| anyhow::anyhow!("call registry poisoned"))?;
+        anyhow::ensure!(
+            !calls.closing && calls.services.is_empty() && calls.configured_backend.is_none(),
+            "call backend must be configured before starting the API"
+        );
+        calls.configured_backend = Some(backend);
+        Ok(())
     }
 }
 
@@ -2564,7 +2599,7 @@ mod tests {
         let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
         store.create_account("one").unwrap();
         let core = Core::new(store.clone(), None).unwrap();
-        let calls = core.call_service();
+        let calls = core.call_service("one").unwrap();
         assert!(
             !calls
                 .current("one", "test")
