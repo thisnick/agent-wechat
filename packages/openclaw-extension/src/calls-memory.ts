@@ -136,10 +136,18 @@ function ago(ms: number, now: number): string {
 
 const KINDS: Record<number, string> = { 3: "image", 34: "voice message", 42: "contact card", 43: "video", 47: "sticker", 48: "location", 49: "shared item", 50: "call" };
 
+/** A message's text: plain text, a reply's own text, a link's title; otherwise its kind. Never raw XML. */
+function messageText(message: NativeMessage): string {
+  const app = message.type === 49 ? message.appMessageType : undefined;
+  if (message.type === 1 || (app === 57 && message.body?.trim())) return clip(message.body ?? "", MAX_MESSAGE_CHARS);
+  if (app !== undefined && [3, 4, 5].includes(app) && message.link?.title) return `[link] ${clip(message.link.title, MAX_MESSAGE_CHARS)}`;
+  return `[${app === 19 ? "forwarded chat" : KINDS[message.type] ?? "message"}]`;
+}
+
 /** One chat message as the voice model sees it; system notices and recalls are skipped. */
 function chatLine(message: NativeMessage, now: number): string | undefined {
   if (message.recall || message.type === 10000 || message.type === 10002) return;
-  const body = message.type === 1 ? clip(message.body ?? "", MAX_MESSAGE_CHARS) : `[${KINDS[message.type] ?? "message"}]`;
+  const body = messageText(message);
   if (!body) return;
   const at = message.createdAt ? Date.parse(message.createdAt) : NaN;
   const who = message.direction === "outgoing" ? "You" : "Caller";
