@@ -229,6 +229,51 @@ async fn connected_call(
 }
 
 #[tokio::test]
+async fn slow_media_reader_retains_recent_audio_and_call_ownership() {
+    let (backend, mut attempts) = FakeBackend::new();
+    let service = Arc::new(CallService::new(backend));
+    let mut owner = ready(&service, "a", "owner").await;
+    let (sink, call, token) = connected_call(&service, &mut attempts, &mut owner).await;
+    let mut media = service
+        .attach_media("a", "owner", &call, &owner.client_id, &token)
+        .await
+        .unwrap();
+
+    let overflow = 4;
+    let sent = MEDIA_RECEIVE_CAPACITY + overflow;
+    for sequence in 0..sent {
+        sink.audio(&[sequence as i16; 320]).await.unwrap();
+    }
+    assert_eq!(media.frames.pending_frames(), MEDIA_RECEIVE_CAPACITY);
+    assert!(matches!(
+        media.frames.recv_frame().await,
+        Err(broadcast::error::RecvError::Lagged(frames)) if frames == overflow as u64
+    ));
+    let format = AudioFormat::new(16000, 1, 20).unwrap();
+    for sequence in overflow..sent {
+        let bytes = media.frames.try_recv().unwrap();
+        let frame = MediaFrame::decode(&bytes, format).unwrap();
+        assert_eq!(frame.header.sequence, sequence as u64);
+        assert_eq!(frame.header.timestamp_micros, sequence as u64 * 20_000);
+        assert_eq!(frame.samples().next(), Some(sequence as i16));
+    }
+    assert_eq!(media.frames.pending_frames(), 0);
+    assert!(service.media_delivery_allowed(&media.id).await.unwrap());
+    service.validate_control(&owner.client_id).await.unwrap();
+
+    sink.audio(&[123; 320]).await.unwrap();
+    let bytes = media.frames.try_recv().unwrap();
+    let frame = MediaFrame::decode(&bytes, format).unwrap();
+    assert_eq!(frame.header.sequence, sent as u64);
+    assert_eq!(frame.samples().next(), Some(123));
+
+    // Losing the actual receiver still revokes the control owner.
+    drop(media.frames);
+    sink.audio(&[123; 320]).await.unwrap();
+    assert!(service.validate_control(&owner.client_id).await.is_err());
+}
+
+#[tokio::test]
 async fn mute_interrupts_queued_audio_once_and_sends_silence_in_the_new_generation() {
     let (backend, mut attempts) = FakeBackend::new();
     let service = Arc::new(CallService::new(backend.clone()));

@@ -507,7 +507,8 @@ impl Fixture {
     async fn client(&self) -> ControlConnection {
         let mut client = self
             .core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .connect("one", "fixture", true)
             .await
             .unwrap();
@@ -516,7 +517,8 @@ impl Fixture {
             Some(CallEvent::Hello { .. })
         ));
         self.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Ready {
@@ -536,7 +538,8 @@ impl Fixture {
     }
     async fn snapshot(&self) -> CallSnapshot {
         self.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .current("one", "fixture")
             .await
             .unwrap()
@@ -661,7 +664,8 @@ async fn incoming_call_can_answer_then_exit_without_media() {
         .iter()
         .any(|(route, _)| *route == CallHostRoute::Transfer));
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Answer {
@@ -710,7 +714,8 @@ async fn incoming_call_can_answer_then_exit_without_media() {
         .unwrap()
         .is_none());
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Hangup {
@@ -772,7 +777,8 @@ async fn incoming_answer_interrupts_submitted_poll_and_joins_once() {
     .await
     .unwrap();
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Answer {
@@ -807,7 +813,8 @@ async fn incoming_answer_interrupts_submitted_poll_and_joins_once() {
         1
     );
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Hangup {
@@ -913,7 +920,8 @@ async fn explicit_reject_preserves_lost_reply_without_retry_or_a_live_session() 
             .filter(|(route, _)| *route == CallHostRoute::LiveSync)
             .count();
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Reject {
@@ -989,7 +997,8 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
         }
     };
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(&client.client_id, command)
         .await
         .unwrap();
@@ -1043,7 +1052,8 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
             .unwrap();
         }
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .command(
                 &client.client_id,
                 CallCommand::Hangup {
@@ -1225,14 +1235,16 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
     let mut client = f.client().await;
     let mut observer = f
         .core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .connect("one", "observer", false)
         .await
         .unwrap();
     f.stage(false, 0);
     let offer = f.offer().await;
     f.core
-        .call_service()
+        .call_service("one")
+        .unwrap()
         .command(
             &client.client_id,
             CallCommand::Answer {
@@ -1261,12 +1273,17 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
         JoinReplyChange::Uncertain | JoinReplyChange::UncertainThenDisconnect
     ) {
         f.core
-            .call_service()
+            .call_service("one")
+            .unwrap()
             .incoming_uncertain(worker.lease.authority(), &worker.identity)
             .unwrap();
     }
     if !matches!(change, JoinReplyChange::Uncertain) {
-        f.core.call_service().disconnect(&client.client_id).await;
+        f.core
+            .call_service("one")
+            .unwrap()
+            .disconnect(&client.client_id)
+            .await;
     }
     if matches!(change, JoinReplyChange::DisconnectAndFence) {
         f.core.fence_call_authority("one");

@@ -2012,7 +2012,6 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool, json: boo
         None => wechat_api::provision_token(&config.token_file, !config.token_explicit)?,
     };
     let core = Core::new(store.clone(), config.storage_key_file.as_deref())?;
-    core.call_service();
     if let Some(path) = &config.profile_format_key_file {
         core.configure_profile_format_key(&private_input(path, 16)?)?;
     }
