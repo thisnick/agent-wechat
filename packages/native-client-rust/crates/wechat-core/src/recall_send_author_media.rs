@@ -166,6 +166,7 @@ mod tests {
             file_upload_progress_id: None,
             uploaded_file: None,
             uploaded_image: None,
+            image_variant_sizing: Default::default(),
             uploaded_video: None,
             prepared_video_thumbnail_source_id: None,
             prepared_video_source_id: None,
