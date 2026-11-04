@@ -244,27 +244,51 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 ### 命令执行结果 (Command results)
 
-命令执行成功返回 `ok: true`，拨号或接听成功时会额外返回该通话的保密所有者凭据 `ownerToken`：
+根据 `requestId` 匹配你发出的命令。声明就绪执行成功无需认领通话：
+
+```json
+{
+  "type": "command.result",
+  "requestId": "ready-outgoing",
+  "status": "accepted",
+  "callId": null,
+  "ownerToken": null,
+  "code": null
+}
+```
+
+成功认领通话包含用于附加媒体通道的保密所有者凭据 `ownerToken`：
 
 ```json
 {
   "type": "command.result",
   "requestId": "dial-1",
-  "ok": true,
+  "status": "accepted",
   "callId": "example-call",
   "ownerToken": "<保密 ownerToken>",
   "code": null
 }
 ```
 
-若操作失败（例如来电已被其他客户端抢先接听）：
+接受执行 (`accepted`) 代表开始处理操作，并不意味着已经接通。完全相同的请求可能会返回 `replayed`。被拒绝的命令返回 `error` 及固定的错误码：
+
+```json
+{
+  "type": "command.result",
+  "requestId": "ready-outgoing",
+  "status": "replayed",
+  "callId": null,
+  "ownerToken": null,
+  "code": null
+}
+```
 
 ```json
 {
   "type": "command.result",
   "requestId": "answer-1",
-  "ok": false,
-  "callId": "example-call",
+  "status": "error",
+  "callId": null,
   "ownerToken": null,
   "code": "already_claimed"
 }
@@ -285,6 +309,13 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
     "callerId": "example-contact",
     "phase": "waiting_for_ready"
   }
+}
+```
+
+```json
+{
+  "type": "call.pending",
+  "offer": null
 }
 ```
 
@@ -331,6 +362,36 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 ```json
 {
+  "type": "call.state",
+  "call": {
+    "callId": "example-call",
+    "revision": 6,
+    "kind": "direct",
+    "callType": "voice",
+    "direction": "incoming",
+    "state": "ending",
+    "ownedByThisClient": true
+  }
+}
+```
+
+```json
+{
+  "type": "call.state",
+  "call": {
+    "callId": "example-call",
+    "revision": 7,
+    "kind": "direct",
+    "callType": "voice",
+    "direction": "incoming",
+    "state": "ended",
+    "ownedByThisClient": true
+  }
+}
+```
+
+```json
+{
   "type": "calls.availability",
   "availability": {
     "busy": false,
@@ -339,11 +400,11 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
-通话状态依次包含：`offered`（来电）、`dialing`（呼出中）、`ringing`（对方振铃）、`connecting`（接通协商中）、`connected`（已接通）、`ending`（正在挂断清理）、`ended`（已结束）以及 `uncertain`（未决）。在 `ending` 阶段必须立即停止发送音频；保持控制连接直到收到终态 `ended`。`uncertain` 标识后端遇到了未确认的结果，底层收据即使在本地会话关闭后依然会被完整保留。
+通话状态依次包含：`offered`（来电）、`dialing`（呼出中）、`ringing`（对方振铃）、`connecting`（接通协商中）、`connected`（已接通）、`ending`（正在挂断清理）、`ended`（已结束）以及 `uncertain`（未决）。在 `ending` 阶段必须立即停止发送音频；保持控制连接直到守护进程完成挂断清理。`uncertain` 标识后端遇到了未确认的结果，底层收据即使在本地会话关闭后依然会被完整保留。
 
 ### 参与者控制事件 (Participant control events)
 
-`call.control` 汇报参与者的硬件控制状态（目前支持麦克风 `microphone`）：
+`call.control` 汇报参与者的硬件控制状态。当前控制类型为 `microphone`（麦克风）；`muted: true` 表示静音，`false` 表示未静音。`participantId` 为单聊呼叫目标或呼入邀请使用的联系人 ID。
 
 ```json
 {
@@ -357,7 +418,19 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
-该事件会广播给所有者和同账号观察者，无需回复。麦克风状态重复未变时不产生事件。控制状态更新不推进版本号 `revision`，不改变 PCM 音频格式，亦不中断对向音频。
+```json
+{
+  "type": "call.control",
+  "callId": "example-call",
+  "participantId": "example-contact",
+  "control": {
+    "kind": "microphone",
+    "muted": false
+  }
+}
+```
+
+该事件会推送给所有者和同账号观察者，无需回复，客户端亦可忽略。麦克风状态重复未变时不产生事件。最新已知的值也会展示在 HTTP 快照、`hello` 和 `call.state` 的 `currentCall.controls` 中；省略 `controls` 表示尚未上报任何状态。控制状态更新不推进版本号 `revision`，不改变 PCM 音频格式，不会结束通话，亦不中断对向音频。
 
 ### 音频代际与错误处理 (Audio generation and errors)
 

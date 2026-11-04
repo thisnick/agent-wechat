@@ -64,7 +64,7 @@ tlsKeyFile = "/srv/secrets/private-key.pem"
 
 ## CLI 客户端配置
 
-`~/.config/agent-wechat/client.toml` 用于存储通过 `wx config server add` 添加的服务器列表以及每个服务器的默认账号。CLI 独立读取各服务器配置的令牌文件。`--token-stdin` 支持通过私有管道标准输入传入令牌（适用于单次 HTTP 调用或 `serve`），该标志不可与 `--token-file` 混用。环境变量对应关系参见[全局标志](/zh-cn/reference/cli/#全局标志-global-flags)。
+`~/.config/agent-wechat/client.toml` 用于存储通过 `wx config servers add` 添加的服务器列表以及每个服务器的默认账号。CLI 独立读取各服务器配置的令牌文件。`--token-stdin` 支持通过私有管道标准输入传入令牌（适用于单次 HTTP 调用或 `serve`），该标志不可与 `--token-file` 混用。环境变量对应关系参见[全局标志](/zh-cn/reference/cli/#全局标志-global-flags)。
 
 ## 安装器相关环境变量
 

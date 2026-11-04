@@ -41,7 +41,9 @@ import qrLogin from '../../../../assets/qr-login.svg';
    </TabItem>
    </Tabs>
 
-   使用手机微信扫描终端打印的二维码，或直接在手机端确认授权登录：
+   使用手机微信扫描终端打印的二维码。当终端提示正在等待确认时，在手机微信中点击同意登录。
+
+   使用 `wx --json auth login` 时，等待确认的通知会作为 JSON 行输出到 stderr（附带 `event: "login.progress"` 与 `state: "awaiting_approval"`）。最终的操作结果将作为一个单独的 JSON 文档输出到 stdout。
 
    <img src={qrLogin.src} class="mock wide" alt="终端展示 wx auth login 打印二维码并成功确认登录的流程" />
 
@@ -79,6 +81,8 @@ import qrLogin from '../../../../assets/qr-login.svg';
 wx --account ACCOUNT_ID auth login
 wx --account ACCOUNT_ID auth logout
 ```
+
+使用 `wx --account ACCOUNT_ID auth logout --local` 仅在守护进程本地登出并保留保存的登录凭据，无需向微信服务端发送登出注销请求。两种形式均会停止自动重连。
 
 退出登录完成后，可通过确认相同的 ID 将该 Profile 从管理列表中注销：
 

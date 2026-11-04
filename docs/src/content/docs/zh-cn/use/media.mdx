@@ -35,10 +35,11 @@ import { Aside } from '@astrojs/starlight/components';
    wx jobs get JOB_ID
    ```
 
-   在回读校验已上传字节期间，返回的 JSON 会包含：
+   在回读校验已上传字节期间，任务信息会包含以下字段：
 
-   ```json
-   { "state": "running", "phase": "readback" }
+   ```text
+   Phase: readback
+   State: running
    ```
 
    请妥善保存任务 ID 和幂等键。退出本地等待并不影响 Daemon 在后台继续处理上传。
