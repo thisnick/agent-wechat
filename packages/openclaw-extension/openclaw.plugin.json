@@ -357,11 +357,10 @@
                 "type": "string",
                 "enum": [
                   "per-contact",
-                  "per-call",
-                  "chat"
+                  "per-call"
                 ],
                 "default": "per-contact",
-                "description": "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session; chat runs calls in the caller's WeChat chat session when it belongs to the calling agent (and, for anyone but the owner, to that caller alone), otherwise per-contact."
+                "description": "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session."
               },
               "maxDurationSeconds": {
                 "type": "integer",
@@ -767,11 +766,10 @@
                     "type": "string",
                     "enum": [
                       "per-contact",
-                      "per-call",
-                      "chat"
+                      "per-call"
                     ],
                     "default": "per-contact",
-                    "description": "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session; chat runs calls in the caller's WeChat chat session when it belongs to the calling agent (and, for anyone but the owner, to that caller alone), otherwise per-contact."
+                    "description": "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session."
                   },
                   "maxDurationSeconds": {
                     "type": "integer",

@@ -5,7 +5,7 @@ const consultPolicies = ["auto", "substantive", "always"] as const;
 const consultThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max", "ultra"] as const;
 type ConsultPolicy = (typeof consultPolicies)[number];
 type ConsultThinkingLevel = (typeof consultThinkingLevels)[number];
-export const callSessionScopes = ["per-contact", "per-call", "chat"] as const;
+export const callSessionScopes = ["per-contact", "per-call"] as const;
 export type CallSessionScope = (typeof callSessionScopes)[number];
 
 /** Calling permissions and providers are configured independently for each type. */
@@ -139,7 +139,7 @@ export const callsConfigSchema = {
           description: "Optional existing session of the selected agent to fork into a call's session when that session is first created by an admitted incoming call." },
         summary: { type: "boolean", default: true, description: "After an answered call, give the call's transcript to the agent in the call's session and keep its short summary. Calls placed with the wechat_call tool also report the summary to the session that placed them." },
       } },
-      sessionScope: { type: "string", enum: callSessionScopes, default: "per-contact", description: "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session; chat runs calls in the caller's WeChat chat session when it belongs to the calling agent (and, for anyone but the owner, to that caller alone), otherwise per-contact." },
+      sessionScope: { type: "string", enum: callSessionScopes, default: "per-contact", description: "per-contact keeps one session for each contact, so the agent remembers earlier calls with them; per-call starts every call in a new session." },
       maxDurationSeconds: { type: "integer", minimum: 30, maximum: 3600, default: 3600 },
     } },
     video: { type: "object", additionalProperties: false, properties: {

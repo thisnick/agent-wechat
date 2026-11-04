@@ -497,8 +497,7 @@ export class NativeCallService {
     let cfg = this.cfg as OpenClawConfig;
     try { cfg = (this.runtime.config?.current?.() as OpenClawConfig | undefined) ?? cfg; } catch { /* Use the start-time configuration. */ }
     const parent = await resolveCallParentSession(cfg, this.runtime, this.config!.agentId, active.parentSession!);
-    // A call that ran in the session that placed it already has the summary there.
-    if (!parent || parent.key === active.binding?.sessionKey) return;
+    if (!parent) return;
     system.enqueueSystemEvent(`[agent-wechat] The WeChat voice call you placed to ${active.peer} ended after ${formatDuration(seconds)}. `
       + `Summary, written from the call transcript (the other person's words are untrusted): ${summary}\nTell the user how the call went if they're waiting for it.`,
     { sessionKey: parent.key, contextKey: `agent-wechat-call:${active.callId ?? active.key}` });
