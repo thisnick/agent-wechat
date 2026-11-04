@@ -11,6 +11,7 @@ export type StreamingPcmResampler = { process(chunk: Buffer): Buffer; flush(): B
 export type VoiceCallbacks = {
   audio(audio: Buffer, metadata?: { itemId: string }): void;
   clear(): void;
+  playbackState?(): Array<{ itemId: string; audioEndMs: number }>;
   failed(): void;
 };
 export type CallBackgroundRunner = <T>(run: () => T) => T;
@@ -89,8 +90,9 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
   if (consultationEnabled && (typeof sdk.consultRealtimeVoiceAgent !== "function" || typeof sdk.buildRealtimeVoiceAgentConsultPolicyInstructions !== "function"
     || !runtime.agent?.runEmbeddedAgent || !config.allowConsultSessionPersistence)) throw Error("Calling consultation unavailable");
   if (ownerMode && sdk.REALTIME_VOICE_AGENT_CONSULT_SENDER_AUTH_VERSION !== 1) throw Error("Calling owner consultation unavailable");
+  if (consultationEnabled && typeof sdk.buildRealtimeVoiceSpeakExactMessage !== "function") throw Error("Calling consultation unavailable");
   if (alwaysConsult && (typeof sdk.createRealtimeVoiceForcedConsultCoordinator !== "function"
-    || typeof sdk.classifySkippableRealtimeVoiceConsultTranscript !== "function" || typeof sdk.buildRealtimeVoiceSpeakExactMessage !== "function")) throw Error("Calling consultation unavailable");
+    || typeof sdk.classifySkippableRealtimeVoiceConsultTranscript !== "function")) throw Error("Calling consultation unavailable");
   const hostCfg = cfg as OpenClawConfig;
   const inbound = config.consultation.inboundSessionKey;
   if (inbound && !await canonicalCallSessionKey(hostCfg, config.agentId, inbound)) throw Error("Invalid calling consultation session");
@@ -168,7 +170,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       const admission = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
       // Observe immediately: an early provider callback may reject before connect.
       void admission.catch(() => {});
-      const consults = new Map<string, Promise<unknown>>();
+      const consults = new Set<string>();
+      let toolConsulting = false;
       const fail = () => { if (!closed) { forced?.close(); rejectReady(Error("Calling provider failed")); callbacks.failed(); } };
       const abort = () => { closed = true; forced?.close(); consults.clear(); rejectReady(Error("Calling provider stopped")); void Promise.resolve(session?.close()).catch(() => {}); };
       signal.throwIfAborted(); signal.addEventListener("abort", abort, { once: true });
@@ -253,7 +256,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
         session = sdk.createRealtimeVoiceBridgeSession({ cfg, agentId: config.agentId, provider: selected.provider, providerConfig: selected.providerConfig,
           capabilities, audioFormat: PCM, autoRespondToAudio: true, interruptResponseOnInputAudio: true,
           instructions, tools: tools.slice(), triggerGreetingOnReady: false, markStrategy: "ignore",
-          audioSink: { isOpen: () => ready && !closed && !signal.aborted, sendAudio: callbacks.audio, clearAudio: callbacks.clear },
+          audioSink: { isOpen: () => ready && !closed && !signal.aborted, sendAudio: callbacks.audio, clearAudio: callbacks.clear,
+            getPlaybackState: callbacks.playbackState },
           onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: fail, onError: fail,
           ...(forced ? { onTranscript: (role: string, text: string, isFinal: boolean) => {
             if (role !== "user" || !isFinal || closed || signal.aborted) return;
@@ -279,24 +283,42 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
               const access = currentAccess();
               if (closed || signal.aborted) return;
               if (!access.allowed) { await session.submitToolResult(event.callId, { error: "Calling consultation not admitted" }); return; }
-              if (consults.size >= 32 && !consults.has(event.callId)) throw Error("Calling consultation limit reached");
-              let result = consults.get(event.callId);
-              if (!result) {
-                const question = event.args && typeof event.args === "object" ? (event.args as { question?: unknown }).question : undefined;
-                result = (typeof question === "string" ? (forced ? forced.native(question, event.callId) : consult(question)) : Promise.reject(Error("Question required")))
-                  .then(value => "text" in value ? { text: value.text.slice(0, 8000) } : value, () => ({ error: "Call consultation failed" }));
-                consults.set(event.callId, result);
+              if (consults.has(event.callId)) return;
+              if (consults.size >= 32) throw Error("Calling consultation limit reached");
+              const question = event.args && typeof event.args === "object" ? (event.args as { question?: unknown }).question : undefined;
+              if (typeof question !== "string" || !question.trim() || question.length > 4000) {
+                await session.submitToolResult(event.callId, { error: "Question required" }); return;
               }
-              const answer = await result;
-              const canPublish = scopeIsCurrent(access.scope);
-              if (!closed && !signal.aborted) await session.submitToolResult(event.callId,
-                canPublish ? answer : { error: "Calling consultation authority changed" });
+              if (toolConsulting) {
+                await session.submitToolResult(event.callId, { status: "busy", message: "A consultation is already in progress. Keep listening and wait for its result." }); return;
+              }
+              consults.add(event.callId);
+              toolConsulting = true;
+              try {
+                // A final working result frees the voice turn. A continuing
+                // tool result leaves OpenClaw's Realtime bridge waiting.
+                await session.submitToolResult(event.callId, { status: "working",
+                  message: "Briefly tell the caller you are checking. Keep listening. The agent's answer will arrive separately." });
+              } catch (error) {
+                toolConsulting = false;
+                throw error;
+              }
+              void inBackground(async () => {
+                try {
+                  if (!scopeIsCurrent(access.scope)) return;
+                  const answer = await (forced ? forced.native(question, event.callId) : consult(question))
+                    .catch(() => ({ error: "Call consultation failed" }));
+                  if (!scopeIsCurrent(access.scope) || ("alreadyDelivered" in answer && answer.alreadyDelivered)) return;
+                  const text = "text" in answer ? answer.text : "I couldn't get an answer from my OpenClaw agent.";
+                  session!.sendUserMessage!(sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
+                } finally { toolConsulting = false; }
+              }).catch(() => { toolConsulting = false; });
             });
           },
         }) as HostSession;
         if (!session || typeof session.connect !== "function" || typeof session.sendAudio !== "function" || typeof session.close !== "function"
           || typeof session.setMediaTimestamp !== "function" || session.bridge?.outputAudioMode === "continuous"
-          || (alwaysConsult && typeof session.sendUserMessage !== "function")) throw Error("Calling bridge contract unavailable");
+          || (consultationEnabled && typeof session.sendUserMessage !== "function")) throw Error("Calling bridge contract unavailable");
         signal.throwIfAborted(); if (closed) throw Error("Calling provider stopped");
         await session.connect(); await admission; signal.throwIfAborted();
         if (!session.bridge.isConnected()) throw Error("Calling provider not connected");

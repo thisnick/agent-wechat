@@ -4,14 +4,18 @@ import type { PreparedCallVoice, StreamingPcmResampler } from "./calls-voice.ts"
 
 const MAX_BACKLOG_MS = 8_000;
 const LOOK_AHEAD_FRAMES = 2;
+const MAX_QUEUED_SPANS = 256;
+type AudioSpan = { itemId: string; bytes: number };
+type PlayoutSpan = AudioSpan & { startsAt: number; endsAt: number };
 
-/** Generated/provider PCM only; this module opens no devices and records no media. */
+/** Clocked call output with silence in the slots the provider leaves empty. */
 export class CallPcmOutput {
   private readonly queue: Buffer;
   private readOffset = 0;
   private pendingBytes = 0;
   private readonly bytesPerMs: number;
   private readonly frameBytes: number;
+  private started = false;
   private timer?: ReturnType<typeof setTimeout>;
   private submittedUntilMs = 0;
   private generation?: number;
@@ -20,6 +24,9 @@ export class CallPcmOutput {
   private readonly items = new Set<string>();
   private readonly revokedItems = new Set<string>();
   private readonly truncatedItems = new Set<string>();
+  private readonly queuedSpans: AudioSpan[] = [];
+  private readonly scheduledSpans: PlayoutSpan[] = [];
+  private readonly playedBytes = new Map<string, number>();
   private closed = false;
   private paused = false;
   private clearEpoch = 0;
@@ -42,6 +49,23 @@ export class CallPcmOutput {
     this.frameBytes = this.bytesPerMs * format.frameMs;
     this.queue = Buffer.alloc(this.bytesPerMs * MAX_BACKLOG_MS);
     this.resampler = voice.resampler(voice.sampleRate, format.sampleRate);
+  }
+  start(): void {
+    if (this.started || this.closed) return;
+    this.started = true;
+    this.flush();
+  }
+  playbackState(): Array<{ itemId: string; audioEndMs: number }> {
+    const now = performance.now();
+    this.settlePlayback(now);
+    const items = new Map<string, number>();
+    for (const { itemId } of this.queuedSpans) items.set(itemId, this.playedBytes.get(itemId) ?? 0);
+    for (const span of this.scheduledSpans) {
+      const elapsed = Math.max(0, now - span.startsAt);
+      items.set(span.itemId, (items.get(span.itemId) ?? this.playedBytes.get(span.itemId) ?? 0)
+        + Math.min(span.bytes, elapsed * this.bytesPerMs));
+    }
+    return [...items].map(([itemId, bytes]) => ({ itemId, audioEndMs: Math.floor(bytes / this.bytesPerMs) }));
   }
   enqueue(audio: Buffer, metadata?: { itemId: string }): void {
     if (this.closed) return;
@@ -71,7 +95,9 @@ export class CallPcmOutput {
       return;
     }
     if (converted.length % 2 !== 0) return this.fail();
-    const accepted = Math.min(converted.length, this.queue.length - this.pendingBytes);
+    const lastSpan = this.queuedSpans.at(-1);
+    const spanAvailable = lastSpan?.itemId === item || this.queuedSpans.length < MAX_QUEUED_SPANS;
+    const accepted = spanAvailable ? Math.min(converted.length, this.queue.length - this.pendingBytes) : 0;
     if (accepted < converted.length) {
       // Keep the coherent prefix. Future chunks from this item cannot follow a cut.
       this.truncatedItems.add(item);
@@ -85,6 +111,10 @@ export class CallPcmOutput {
     converted.copy(this.queue, tail, 0, first);
     if (first < converted.length) converted.copy(this.queue, 0, first);
     this.pendingBytes += converted.length;
+    if (converted.length) {
+      if (lastSpan?.itemId === item) lastSpan.bytes += converted.length;
+      else this.queuedSpans.push({ itemId: item, bytes: converted.length });
+    }
     this.trace?.measure("outputQueuedAudioMs", this.pendingBytes / this.bytesPerMs);
     // New response items remain bounded in pending while the daemon clear is
     // outstanding. Only its current acknowledgement can resume playout.
@@ -113,8 +143,26 @@ export class CallPcmOutput {
     this.resamplerNeedsReset = false;
     return true;
   }
+  private settlePlayback(now: number): void {
+    while (this.scheduledSpans.length && this.scheduledSpans[0].endsAt <= now) {
+      const span = this.scheduledSpans.shift()!;
+      this.playedBytes.set(span.itemId, (this.playedBytes.get(span.itemId) ?? 0) + span.bytes);
+    }
+  }
+  private schedulePlayback(bytes: number, startsAt: number): void {
+    while (bytes > 0) {
+      const span = this.queuedSpans[0];
+      const used = Math.min(bytes, span.bytes);
+      const endsAt = startsAt + used / this.bytesPerMs;
+      this.scheduledSpans.push({ itemId: span.itemId, bytes: used, startsAt, endsAt });
+      span.bytes -= used;
+      if (!span.bytes) this.queuedSpans.shift();
+      bytes -= used;
+      startsAt = endsAt;
+    }
+  }
   private flush(): void {
-    if (this.closed || this.paused || this.pendingBytes === 0) return;
+    if (!this.started || this.closed || this.paused) return;
     const now = performance.now();
     const lead = Math.max(0, this.submittedUntilMs - now);
     // Limit our lead even after a timer stall. The daemon owns the packet clock.
@@ -125,21 +173,26 @@ export class CallPcmOutput {
       const generation = this.generation ?? this.media.tracks().sendTrack.generation;
       if (this.closed || this.clearEpoch !== epoch) return;
       this.generation = generation;
-      const bytes = Math.min(this.pendingBytes, available * this.frameBytes);
-      const samples = new Int16Array(bytes / 2);
-      for (let i = 0; i < samples.length; i++) samples[i] = this.queue.readInt16LE((this.readOffset + i * 2) % this.queue.length);
+      const slotBytes = available * this.frameBytes;
+      const bytes = Math.min(this.pendingBytes, slotBytes);
+      const samples = new Int16Array(slotBytes / 2);
+      for (let i = 0; i < bytes / 2; i++) samples[i] = this.queue.readInt16LE((this.readOffset + i * 2) % this.queue.length);
       this.readOffset = (this.readOffset + bytes) % this.queue.length;
       this.pendingBytes -= bytes;
       const started = performance.now();
-      this.submittedUntilMs = Math.max(started, this.submittedUntilMs) + bytes / this.bytesPerMs;
+      const playoutStart = Math.max(started, this.submittedUntilMs);
+      this.settlePlayback(started);
+      this.schedulePlayback(bytes, playoutStart);
+      this.submittedUntilMs = playoutStart + slotBytes / this.bytesPerMs;
       const leadAfterSubmit = this.submittedUntilMs - started;
       this.media.sendPcm(samples, generation);
       this.trace?.add("daemonOutputChunks");
       this.trace?.add("daemonOutputSamples", samples.length);
+      this.trace?.add("outputSilenceSamples", (slotBytes - bytes) / 2);
       this.trace?.gap("daemonOutputGapMs", started);
       this.trace?.measure("daemonForwardMs", performance.now() - started);
       this.trace?.measure("outputLeadMs", leadAfterSubmit);
-      if (!this.closed && this.clearEpoch === epoch && this.pendingBytes && !this.timer) this.schedule();
+      if (!this.closed && this.clearEpoch === epoch && !this.timer) this.schedule();
     } catch { if (this.clearEpoch === epoch) this.fail(); }
   }
   private schedule(): void {
@@ -153,6 +206,9 @@ export class CallPcmOutput {
     if (this.pendingBytes) this.trace?.add("outputDiscardedSamples", this.pendingBytes / 2);
     this.readOffset = 0;
     this.pendingBytes = 0;
+    this.queuedSpans.length = 0;
+    this.scheduledSpans.length = 0;
+    this.playedBytes.clear();
     this.submittedUntilMs = 0;
     this.generation = undefined;
   }

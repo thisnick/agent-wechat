@@ -271,6 +271,7 @@ test("a clear discards the paced backlog and fresh PCM waits for the new track",
   for (let i = 0; i < old.length; i += 2) old.writeInt16LE(100, i);
   for (let i = 0; i < fresh.length; i += 2) fresh.writeInt16LE(200, i);
   output.enqueue(old, { itemId: "interrupted" });
+  output.start();
   assert.deepEqual(media.sent.map(frame => frame.samples.length), [640]);
   const clearing = output.clear();
   output.enqueue(fresh, { itemId: "fresh-response" });
@@ -287,16 +288,36 @@ test("response PCM stays ordered and resumes with small chunks after a timer sta
   const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
   t.after(() => output.close());
   const burst = Buffer.alloc(640 * 8);
-  for (let i = 0; i < burst.length / 2; i++) burst.writeInt16LE(i, i * 2);
+  for (let i = 0; i < burst.length / 2; i++) burst.writeInt16LE(i + 1, i * 2);
   output.enqueue(burst, { itemId: "burst" });
+  output.start();
   assert.deepEqual(media.sent.map(frame => frame.samples.length), [640]);
   // Hold the event loop across several slots. A late timer must not send its debt.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 65);
   await until(() => media.sent.length >= 2);
   assert.ok(media.sent[1].samples.length <= 640);
-  await until(() => media.sent.reduce((total, frame) => total + frame.samples.length, 0) === burst.length / 2);
-  assert.deepEqual(media.sent.flatMap(frame => Array.from(frame.samples)), Array.from({ length: burst.length / 2 }, (_, i) => i));
+  const speech = () => media.sent.flatMap(frame => Array.from(frame.samples).filter(Boolean));
+  await until(() => speech().length === burst.length / 2);
+  assert.deepEqual(speech(), Array.from({ length: burst.length / 2 }, (_, i) => i + 1));
   assert.equal(failures, 0);
+});
+test("playout starts with silence and reports only the time played from each reply item", t => {
+  const media = new Media();
+  const voice = voiceFactory();
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => assert.fail("PCM send failed"));
+  t.after(() => output.close());
+  output.start();
+  assert.deepEqual(media.sent[0].samples, new Int16Array(640));
+  assert.deepEqual(output.playbackState(), []);
+  output.enqueue(Buffer.alloc(320, 1), { itemId: "one" });
+  output.enqueue(Buffer.alloc(320, 2), { itemId: "two" });
+  now = 120;
+  t.mock.timers.tick(20);
+  now = 145;
+  assert.deepEqual(output.playbackState(), [{ itemId: "one", audioEndMs: 5 }, { itemId: "two", audioEndMs: 0 }]);
 });
 test("audio trace aggregates each boundary and a discarded PCM chunk still advances provider time", async t => {
   const previous = process.env.WX_CALL_AUDIO_TRACE;
@@ -310,8 +331,9 @@ test("audio trace aggregates each boundary and a discarded PCM chunk still advan
   const receivedAtMs = performance.now();
   client.media.observePcm!({ receivedAtMs, samples: 320, queueDepth: 16, droppedSamples: 320 });
   client.media.input.push({ payload: new Uint8Array(640), receivedAtMs, sampleOffset: 320 });
-  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "private-response-item" });
-  await until(() => voice.state.incoming.length === 1 && client.media.sent.length === 1);
+  const reply = Buffer.alloc(640, 1);
+  voice.state.callbacks!.audio(reply, { itemId: "private-response-item" });
+  await until(() => voice.state.incoming.length === 1 && client.media.sent.some(frame => frame.samples.includes(257)));
   assert.deepEqual(voice.state.timestamps, [20]);
   await service.stop();
   const prefix = "[wechat-call-audio] plugin ";
@@ -321,7 +343,7 @@ test("audio trace aggregates each boundary and a discarded PCM chunk still advan
   assert.equal(report.counts.wsRxDroppedSamples, 320);
   assert.equal(report.counts.inputConsumedSamples, 320);
   assert.equal(report.counts.realtimeInputSamples, 320);
-  assert.equal(report.counts.daemonOutputSamples, 320);
+  assert.equal(report.counts.daemonOutputSamples - report.counts.outputSilenceSamples, 320);
   assert.equal(report.measures.sdkRxQueueDepth.max, 16);
   assert.equal(report.measures.sdkRxWaitMs.count, 1);
   assert.equal(typeof report.eventLoopDelayMs.count, "number");
@@ -335,6 +357,7 @@ test("overlapping clears keep interrupted late chunks revoked and stale acknowle
   t.after(() => output.close());
   const pcm = (sample: number) => { const value = Buffer.alloc(640); for (let i = 0; i < value.length; i += 2) value.writeInt16LE(sample, i); return value; };
   output.enqueue(pcm(100), { itemId: "first-response" });
+  output.start();
   const first = output.clear();
   output.enqueue(pcm(200), { itemId: "second-response" });
   const second = output.clear();
@@ -346,15 +369,19 @@ test("overlapping clears keep interrupted late chunks revoked and stale acknowle
   media.generation = 3; releases[1](); await second;
   await until(() => media.sent.length === 2);
   assert.equal(media.sent[1].generation, 3);
-  assert.deepEqual(media.sent[1].samples, new Int16Array(320).fill(300));
+  assert.deepEqual(media.sent[1].samples.slice(0, 320), new Int16Array(320).fill(300));
+  assert.ok(media.sent[1].samples.slice(320).every(value => value === 0));
   output.enqueue(pcm(102), { itemId: "first-response" });
   output.enqueue(pcm(202), { itemId: "second-response" });
-  await delay(30); assert.equal(media.sent.length, 2); assert.equal(failures, 0);
+  await delay(30);
+  assert.equal(media.sent.filter(frame => frame.samples.some(Boolean)).length, 2);
+  assert.equal(failures, 0);
 });
 test("terminal ownership revocation stops old audio callbacks and does not manufacture a hangup", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
   client.eventsQueue.push({ type: "call.state", call: view("dial", "uncertain") }); await until(() => voice.state.closes === 1);
-  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "late" }); await delay(10); assert.equal(client.media.sent.length, 0); assert.equal(client.ends, 0);
+  const sentBeforeLateCallback = client.media.sent.length;
+  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "late" }); await delay(10); assert.equal(client.media.sent.length, sentBeforeLateCallback); assert.equal(client.ends, 0);
   client.eventsQueue.push({ type: "call.state", call: view("other-call", "ended") });
   await delay(1); assert.equal(service.status().state, "needs_review");
   client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
@@ -421,6 +448,7 @@ test("the PCM budget truncates a reply without ending the call or stitching late
   const bounded = new CallPcmOutput(media, format, voice.prepared, () => held, () => { failures++; }, trace);
   t.after(() => { bounded.close(); trace.close(); });
   const clearing = bounded.clear();
+  bounded.start();
   for (const size of [64000, 64000, 64000, 63400]) bounded.enqueue(Buffer.alloc(size, 0x11), { itemId: "first" });
   bounded.enqueue(Buffer.alloc(640, 0x22), { itemId: "first" });
   assert.equal(media.sent.length, 0);

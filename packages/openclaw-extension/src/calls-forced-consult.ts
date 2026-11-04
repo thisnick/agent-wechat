@@ -17,7 +17,7 @@ type ForcedConsultSdk = {
   createRealtimeVoiceForcedConsultCoordinator: () => ConsultCoordinator;
   classifySkippableRealtimeVoiceConsultTranscript: (text: string) => string | undefined;
 };
-type ConsultResult = { text: string } | { error: string; retryable?: boolean; started?: boolean };
+type ConsultResult = { text: string; alreadyDelivered?: true } | { error: string; retryable?: boolean; started?: boolean };
 type ConsultHooks = {
   consult(question: string, signal?: AbortSignal): Promise<{ text: string }>;
   active(): boolean;
@@ -85,7 +85,7 @@ export function createCallForcedConsult(sdk: ForcedConsultSdk, hooks: ConsultHoo
       if (!active()) return { error: "Calling consultation unavailable" };
       if (!question.trim() || question.length > 4000) return { error: "Question required" };
       const match = coordinator.recordNativeConsult({ question }, callId);
-      if (match.kind === "already_delivered") return { text: "The caller already received this answer. Do not repeat it." };
+      if (match.kind === "already_delivered") return { text: "The caller already received this answer. Do not repeat it.", alreadyDelivered: true };
       if (fallback && match.kind === "in_flight" && fallback.handle === match.handle) {
         fallback.deliverViaTool = true;
         return fallback.result;

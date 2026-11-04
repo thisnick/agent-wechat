@@ -146,7 +146,10 @@ Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
 cannot handle video or convert it to voice.
 
-The bridge waits for the caller to speak and supports interruption while speaking.
+The bridge sends silence while it waits for the caller to speak. If the caller
+interrupts a reply, the bridge clears queued audio and reports the estimated
+playback position to the speech model. The voice agent can acknowledge a consultation
+and continue listening while the OpenClaw agent works.
 This adapter does not record calls or store transcripts. Consultation can persist
 in OpenClaw when opted in. Continuous-output GPT-Live and other provider adapters
 fail preflight without automatic fallback.

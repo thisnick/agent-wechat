@@ -191,14 +191,19 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   const dependencies = { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } };
   const prepared = await prepareOpenClawCallVoice(consulted, hostCfg, runtime, dependencies);
   const session = await runInBackgroundContext(() => prepared.open(callbacks, voiceContext));
+  const invoke = async (event: unknown) => {
+    await bridgeArgs.onToolCall(event);
+    await delay(0);
+  };
   assert.deepEqual(bridgeArgs.tools.map((tool: { name: string }) => tool.name), ["openclaw_agent_consult"]);
   assert.match(bridgeArgs.instructions, /Call openclaw_agent_consult before answering/);
   assert.match(bridgeArgs.instructions, /Consultation is read-only/);
   const event = { callId: "tool1", name: "openclaw_agent_consult", args: { question: "Read synthetic data" } };
   // A provider callback may inherit an already released request context.
-  await instance.run({ active: false }, () => bridgeArgs.onToolCall(event));
-  await bridgeArgs.onToolCall(event);
-  assert.equal(consultations.length, 1); assert.equal(results.length, 2); assert.equal(consultations[0].senderIsOwner, false);
+  await instance.run({ active: false }, () => invoke(event));
+  await invoke(event);
+  assert.equal(consultations.length, 1); assert.equal(results.length, 1); assert.equal(consultations[0].senderIsOwner, false);
+  assert.match(spoken[0], /Synthetic result/);
   assert.equal(consultations[0].provider, "synthetic-provider"); assert.equal(consultations[0].model, "synthetic-model"); assert.equal(consultations[0].timeoutMs, 15000);
   assert.equal(consultations[0].thinkLevel, "minimal"); assert.equal(consultations[0].fastMode, true);
   assert.deepEqual(consultations[0].toolsAllow, ["read", "web_search", "web_fetch", "x_search", "memory_search", "memory_get"]);
@@ -221,7 +226,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   ];
   for (const { forked, ...parentSession } of parentCases) {
     const next = await runInBackgroundContext(() => prepared.open(callbacks, { ...voiceContext, parentSession }));
-    await bridgeArgs.onToolCall(event);
+    await invoke(event);
     const request = consultations.at(-1);
     assert.equal(request.contextMode, forked ? "fork" : "isolated");
     assert.equal(request.spawnedBy, forked ? "agent:agent:conversation" : undefined);
@@ -234,7 +239,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   const afterReset = await runInBackgroundContext(() => prepared.open(callbacks, { ...voiceContext,
     parentSession: { key: "agent:agent:main", expectedSessionId: "parent-id" } }));
   parentId = "new-parent-id";
-  await bridgeArgs.onToolCall(event);
+  await invoke(event);
   assert.equal(consultations.at(-1).contextMode, "isolated");
   assert.equal(consultations.at(-1).spawnedBy, undefined);
   await afterReset.close();
@@ -248,6 +253,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   always.realtime.consultPolicy = "always";
   const configuredHost = { agents: { list: [{ id: "agent", model: "synthetic-provider/synthetic-model" }] } };
   const alwaysPrepared = await prepareOpenClawCallVoice(always, configuredHost, runtime, dependencies);
+  spoken.length = 0;
   let clears = 0;
   const alwaysSession = await runInBackgroundContext(() => alwaysPrepared.open({ ...callbacks, clear: () => { clears++; } }, voiceContext));
   assert.match(bridgeArgs.instructions, /before every substantive answer/);
@@ -311,6 +317,7 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
   const requests: any[] = [];
   const toolPolicies: string[] = [];
   const results: unknown[] = [];
+  const spoken: string[] = [];
   const trace: string[] = [];
   let release!: () => void;
   const hold = new Promise<void>(resolve => { release = resolve; });
@@ -319,6 +326,7 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
       bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(),
       sendAudio() {}, setMediaTimestamp() {}, close() {},
       submitToolResult(_id: string, result: unknown) { results.push(result); },
+      sendUserMessage(text: string) { spoken.push(text); },
     }; },
     resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai", createBridge() {} }, providerConfig: {},
       capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true } }),
@@ -351,9 +359,12 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
     senderId, connectedPeer, nativeAccountId: "native-account", channelAccountId: "default", logAudioTrace: line => trace.push(line),
     parentSession: { key: parentKey, expectedSessionId: "trusted-parent" }, signal: new AbortController().signal,
   });
-  const consult = (callId: string, question = "Read a synthetic value") => bridgeArgs.onToolCall({
-    name: host.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId, args: { question, senderIsOwner: true },
-  });
+  const consult = async (callId: string, question = "Read a synthetic value") => {
+    await bridgeArgs.onToolCall({
+      name: host.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId, args: { question, senderIsOwner: true },
+    });
+    await delay(0);
+  };
   const assertReadOnly = (peer: string) => {
     const request = requests.at(-1);
     assert.equal(request.senderId, peer);
@@ -407,13 +418,16 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
   assert.equal(privileged.spawnedBy, parentKey);
   assert.deepEqual(privileged.transcript, []);
   assert.equal(privileged.cfg, live);
-  assert.deepEqual(results.at(-1), { text: "synthetic-privileged-result" });
-  const inFlight = consult("pending-owner-result", "hold owner result");
+  assert.match(spoken.at(-1)!, /synthetic-privileged-result/);
+  const spokenBeforePending = spoken.length;
+  await consult("pending-owner-result", "hold owner result");
+  assert.equal((results.at(-1) as { status: string }).status, "working");
+  assert.equal(spoken.length, spokenBeforePending);
   assert.equal(requests.at(-1).senderIsOwner, true);
   live = settings([]);
   release();
-  await inFlight;
-  assert.deepEqual(results.at(-1), { error: "Calling consultation authority changed" });
+  await delay(0);
+  assert.equal(spoken.length, spokenBeforePending);
   assert.deepEqual(trace.slice(-2), [
     "[wechat-call-audio] plugin consult mode=owner stage=started",
     "[wechat-call-audio] plugin consult mode=owner stage=failed category=authority-changed",
@@ -425,7 +439,7 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
   await consult("cached-owner-result");
   assertReadOnly(ownerPeer);
   assert.notEqual(requests.at(-1).sessionKey, privileged.sessionKey);
-  assert.deepEqual(results.at(-1), { text: "synthetic-read-only-result" });
+  assert.match(spoken.at(-1)!, /synthetic-read-only-result/);
   assert.deepEqual(trace.slice(-2), [
     "[wechat-call-audio] plugin consult mode=safe-read-only stage=started",
     "[wechat-call-audio] plugin consult mode=safe-read-only stage=ok",
@@ -436,7 +450,7 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
     ["simulate run failure", "embedded-run"],
   ]) {
     await consult(category, question);
-    assert.deepEqual(results.at(-1), { error: "Call consultation failed" });
+    assert.match(spoken.at(-1)!, /couldn't get an answer/);
     assert.equal(trace.at(-1), `[wechat-call-audio] plugin consult mode=safe-read-only stage=failed category=${category}`);
   }
   assert.ok(trace.every(line => /^\[wechat-call-audio\] plugin consult mode=(owner|safe-read-only) stage=(started|ok|failed category=(authority-changed|inactive-registry|filesystem|embedded-run))$/.test(line)));

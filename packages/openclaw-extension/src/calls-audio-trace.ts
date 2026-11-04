@@ -5,7 +5,7 @@ type Counter = "wsRxChunks" | "wsRxSamples" | "wsRxDroppedChunks" | "wsRxDropped
   | "inputConsumedChunks" | "inputConsumedSamples" | "realtimeInputChunks" | "realtimeInputSamples"
   | "providerOutputChunks" | "providerOutputSamples" | "daemonOutputChunks" | "daemonOutputSamples"
   | "outputDiscardedSamples" | "outputOverflowSamples" | "outputOverflowProviderSamples" | "outputTruncatedItems"
-  | "outputStaleChunks" | "outputFailures";
+  | "outputStaleChunks" | "outputFailures" | "outputSilenceSamples";
 type Gap = "wsRxGapMs" | "inputConsumeGapMs" | "realtimeInputGapMs" | "providerOutputGapMs" | "daemonOutputGapMs";
 type Measure = Gap | "sdkRxQueueDepth" | "sdkRxWaitMs" | "inputResampleMs" | "realtimeForwardMs"
   | "providerOutputChunkMs" | "outputResampleMs" | "outputQueuedAudioMs" | "outputLeadMs" | "daemonForwardMs";

@@ -191,7 +191,9 @@ export class NativeCallService {
   private async openVoice(active: Owned): Promise<void> {
     const runInBackgroundContext = this.dependencies.runInBackgroundContext;
     const open = () => this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
-      clear: () => { if (this.current(active)) void active.output?.clear(); }, failed: () => { if (this.current(active)) void this.fail(active); } },
+      clear: () => { if (this.current(active)) void active.output?.clear(); },
+      playbackState: () => this.current(active) ? active.output?.playbackState() ?? [] : [],
+      failed: () => { if (this.current(active)) void this.fail(active); } },
     { senderId: active.peer, signal: active.abort.signal, parentSession: active.parentSession,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
       connectedPeer: () => this.current(active) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
@@ -268,6 +270,7 @@ export class NativeCallService {
       const tracks = media.tracks();
       if (JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTrack.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
       active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active); }, trace);
+      active.output.start();
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
       void (async () => {
         let receivedMs = 0;
