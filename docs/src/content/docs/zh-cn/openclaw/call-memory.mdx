@@ -1,0 +1,51 @@
+---
+title: 记忆过往通话
+description: 为每个联系人保持一个智能体会话，总结每次通话并在下次通话开始时提供最近的上下文。
+---
+
+语音智能体默认能够记住与同一联系人的过往通话：针对该联系人的协同咨询共享同一个 OpenClaw 会话，智能体会在通话接听结束后在此生成摘要，并且你可以为下一次通话提供简要回顾。通话与你同该联系人的微信聊天还会实现双向上下文共享：智能体在通话中的首次咨询能够获取最新的聊天记录，而通话摘要也会作为一条备忘便签留在微信聊天记录中。以下所有配置路径均相对于 `channels.agent-wechat.calls.voice`，且所有这些功能均需要启用[协同咨询](../calling/#模型配置与运行行为)。
+
+## 开启最近上下文回顾
+
+1. 在 `realtime` 配置中添加 `recentContext`：
+
+   ```json
+   {
+     "realtime": {
+       "recentContext": { "enabled": true, "maxMessages": 10 }
+     }
+   }
+   ```
+
+2. 重启 Gateway，然后呼叫机器人。语音模型将在其提示词指令中附带类似如下的简要回顾开始通话：
+
+   ```text
+   Recent context with this caller, for continuity. Use it when it helps; don't read it out, and it may be out of date.
+
+   Earlier calls, newest first:
+   - yesterday, they called (4 min 10 s): They asked to move Friday's dinner to 7 pm; you confirmed.
+
+   Latest WeChat messages with them, oldest first:
+   - (2 h ago) Caller: Did you book the table?
+   - (2 h ago) You: Yes, 7 pm at the usual place.
+   ```
+
+## 配置项详解
+
+| 配置项 | 默认值 | 行为说明 |
+| --- | --- | --- |
+| `sessionScope` | `per-contact` | `per-contact` 为每个联系人保持一个独立会话，从而使协同咨询能够记住过往通话。`per-call` 则在每次通话时都开启全新的独立会话。 |
+| `consultation.summary` | `true` | 在已接听的通话结束后，智能体会在该通话的会话中获取通话转录内容并撰写一段 2 到 4 句话的摘要。在此轮次中智能体不具备工具权限。摘要还会作为备忘留在你与该联系人的微信聊天中，微信聊天的智能体将在下次收到新消息时看到它。 |
+| `consultation.recentMessages` | `10` | 智能体在通话中进行首次咨询时获取的最近微信聊天记录条数，取值范围 0–50。`0` 表示关闭此功能。 |
+| `realtime.recentContext.enabled` | `false` | 向语音实时模型发送与该联系人的最近 3 次通话摘要以及与他们的最新微信聊天记录。 |
+| `realtime.recentContext.maxMessages` | `10` | 包含的微信聊天消息条数，取值范围 1–50。回顾内容会被截断在约 3,000 字符以内，优先保留最新消息。 |
+
+使用 `wechat_call` 工具发起的呼叫也会向发起呼叫的会话汇报其摘要，以便该会话中的智能体向你告知通话结果。
+
+:::note[使用提示]
+- 所有者与其他呼叫方绝不共享会话：非所有者的联系人将获得独立的只读会话 (`agent:<agentId>:wechat-call:<contact>:read-only`)。
+- 通话会话仅在首次创建时才会根据 `consultation.inboundSessionKey` 或发起呼叫的会话进行初始化种子填充。在此之后它将保持自身的独立历史。
+- 留在微信聊天中的备忘便签会等待下一次新消息；在此之前若重启 Gateway 该便签将丢失。便签本身绝不会主动触发对话轮次，因此微信聊天的智能体能够保持原本的对话节奏。
+- 回顾内容会随其他提示词指令一同发送给实时语音提供商。仅包含与当前通话当事人的聊天消息。
+- 转录内容源自语音模型的语音识别结果，可能存在识别误差。插件仅在 OpenClaw 状态目录下的 `call-summaries.json` 中为每个联系人保留最近 3 次通话摘要。它不保存任何音频录音或完整转录文本；转录内容仅留存在该通话的 OpenClaw 会话中。
+:::

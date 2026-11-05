@@ -96,7 +96,7 @@ export default defineConfig({
             { label: 'Quick setup', translations: { 'zh-CN': '快速接入' }, slug: 'openclaw/setup' },
             { label: 'Managed or external', translations: { 'zh-CN': '托管与外部模式' }, slug: 'openclaw/modes' },
             { label: 'Calling', translations: { 'zh-CN': '语音通话' }, slug: 'openclaw/calling' },
-            { label: 'Remember earlier calls', slug: 'openclaw/call-memory' },
+            { label: 'Remember earlier calls', translations: { 'zh-CN': '记忆过往通话' }, slug: 'openclaw/call-memory' },
             { label: 'Who the bot answers', translations: { 'zh-CN': '响应权限控制' }, slug: 'openclaw/access' },
             { label: 'Agent tools', translations: { 'zh-CN': '智能体工具' }, slug: 'openclaw/tools' },
             { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'openclaw/read-receipts' },
