@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 1.5.1
+
+### Patch Changes
+
+- [#395](https://github.com/thisnick/agent-wechat/pull/395) [`7c08402`](https://github.com/thisnick/agent-wechat/commit/7c0840209458cc13c0822bccafc1feae390cf2c3) Thanks [@thisnick](https://github.com/thisnick)! - Fix image sends that fail when an automatically generated JPEG variant is larger than its source. Generated variants now fit within the source dimensions and the existing byte limit.
+
+- [#394](https://github.com/thisnick/agent-wechat/pull/394) [`bf4ddd0`](https://github.com/thisnick/agent-wechat/commit/bf4ddd0ace76308d4992ebcb17ed0494ff17947e) Thanks [@thisnick](https://github.com/thisnick)! - `wx` starts again on Linux machines without PulseAudio, such as servers and slim containers. It now loads `libpulse` only when a call opens this computer's microphone and speakers, and reports what to install if it is missing; installing the package no longer fails there.
+
 ## 1.5.0
 
 ### Patch Changes
