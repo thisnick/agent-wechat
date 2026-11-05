@@ -57,7 +57,7 @@ Set `OPENAI_API_KEY` in the **Gateway process's environment**.
           "outboundPolicy": "allowlist",
           "outboundAllowTo": ["allowed-contact-id"],
           "outboundToolAllowFrom": ["owner-id"],
-          "maxDurationSeconds": 300,
+          "maxDurationSeconds": 3600,
           "realtime": {
             "provider": "openai",
             "voice": "marin",
@@ -90,7 +90,9 @@ environment. A text-agent subscription alone does not necessarily grant realtime
 API access. The daemon token and OpenAI key are separate credentials.
 
 `wechat_call` is optional: the example grants it to `main` for status, outbound
-calls and hangup. Automatic inbound answering does not require this tool.
+calls and hangup. Grant it to any other agent that should place calls for you,
+such as the agent that answers a group; the call itself always runs as
+`calls.voice.agentId`. Automatic inbound answering does not require this tool.
 
 Restart the Gateway after saving the configuration. An enabled, prepared voice
 service reports `available` when the daemon is free; provider or capability
@@ -108,46 +110,61 @@ All paths below are relative to `calls.voice`.
 | `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include excerpts from the selected agent's `IDENTITY.md` and `SOUL.md`. |
 | `agentId` | Required. Selects the voice persona, provider authentication and agent for permitted consultations. |
 | `toolPolicy` | `none`, `safe-read-only`, or `owner`. Opting in to session persistence defaults to `safe-read-only`. |
-| `allowConsultSessionPersistence` | Set to `true` to allow consultation in a separate OpenClaw session per call. |
+| `allowConsultSessionPersistence` | Set to `true` to allow consultation in OpenClaw sessions for calls. |
+| `sessionScope` | `per-contact` (one session per contact, so the agent remembers earlier calls) or `per-call`. See [Remember earlier calls](../call-memory/). |
+| `consultation.summary`, `consultation.recentMessages`, `realtime.recentContext` | Summarize each answered call and share recent chat with the agent (on by default), and give the next call a recap (off by default). See [Remember earlier calls](../call-memory/). |
 | `realtime.consultPolicy` | `auto` lets the provider choose when to consult. `substantive` directs it to consult for facts and context. `always` also starts a consult from the caller's current turn if the provider skips it. |
-| `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for the consultation model. |
-| `consultation.inboundSessionKey` | Optional existing session of the selected agent to use as context for inbound calls. |
-| `consultation.model` | Optional `provider/model` for consultations; otherwise the selected agent's model. |
+| `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for consultations. |
+| `consultation.inboundSessionKey` | Optional existing session of the selected agent that seeds a new call session for inbound calls. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
-| `maxDurationSeconds` | 300 by default; 30–3,600 seconds. |
+| `maxDurationSeconds` | 3,600 (one hour) by default; 30–3,600 seconds. The plugin hangs up when it is reached. The native daemon currently ends calls after 20 minutes. |
 
-The speech model handles conversation; the consultation model handles delegated
-questions and permitted tools. Incoming/outgoing policies default to `disabled`;
+The speech model handles conversation; the selected OpenClaw agent handles
+delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
 allowlists accept exact IDs, without `*`. Tool callers must also be authorized
 owners in `outboundToolAllowFrom`. Messaging permissions do not authorize calls.
 
-Choose `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, or `gpt-realtime-2` for
-`realtime.model` from the pinned OpenClaw catalog. Omit the setting to use the
-provider's default. These choices use the OpenAI Realtime API key.
+Set `realtime.model` to one of these OpenAI models. Omit it to use the
+provider's default, `gpt-realtime-2.1`.
+
+| Model | Conversation | Agent consultation | Sign-in |
+| --- | --- | --- | --- |
+| `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, `gpt-realtime-2` | Takes turns; stops when the caller interrupts. | Through a tool. | OpenAI API key. |
+| `gpt-live-1-codex` (voice `cove`) | Listens while it talks and handles interruptions itself. Introduces itself as ChatGPT: this route does not use the agent's name or persona. | Delegates to the agent. `consultPolicy: "always"` is not supported. | The agent's ChatGPT sign-in in OpenClaw (2026.10.10 or later), then the API key. |
+| `gpt-live-1` (voice `marin`) | Listens while it talks and handles interruptions itself. Uses the agent's name and persona. | Same as `gpt-live-1-codex`. | OpenAI API key. |
 
 The speech model receives the selected agent's configured identity. When
 workspace context is enabled, the realtime provider also receives bounded
 excerpts of the two persona files. Keep those files suitable for this use.
 
 Calls placed with `wechat_call` use the requesting session as context when
-consultation is enabled. Set `consultation.inboundSessionKey` to bind inbound
-calls to a session. OpenClaw copies the bound session's context into a separate
-session for the call. Choose a session whose history is suitable for the callers.
+consultation is enabled and that session belongs to `calls.voice.agentId`. Set `consultation.inboundSessionKey` to do the same for
+inbound calls. OpenClaw copies that session's context into the call's session
+when the call session is first created. Choose a session whose history is
+suitable for the callers.
 
 With `toolPolicy: "owner"`, a call participant whose WeChat ID exactly matches
 an `agent-wechat:<WeChat ID>` entry in `commands.ownerAllowFrom` can consult
 with the agent's normal tool policy. An owner can use a bound session with the
 same WeChat peer and channel account. Other allowed participants get read-only
-consultation in an isolated session. Add inbound callers to `inboundAllowFrom`
+consultation in a separate session. Add inbound callers to `inboundAllowFrom`
 separately.
+
+Consultations run like the agent's normal chat turns. They use its configured
+model, including CLI runtimes such as `claude-cli`, and its fallback models.
 
 :::note[Good to know]
 Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
 cannot handle video or convert it to voice.
 
-The bridge waits for the caller to speak and supports interruption while speaking.
-This adapter does not record calls or store transcripts. Consultation can persist
-in OpenClaw when opted in. Continuous-output GPT-Live and other provider adapters
-fail preflight without automatic fallback.
+The bridge sends silence while it waits for the caller to speak. With a
+realtime model, if the caller interrupts a reply, the bridge clears queued audio
+and reports the estimated playback position to the speech model. GPT-Live models
+handle interruptions themselves. Either way, the voice agent can keep talking
+with the caller while the OpenClaw agent works on a consultation.
+This adapter does not record calls. Consultations, and the transcript the agent
+summarizes after a call, persist in OpenClaw when opted in; the adapter keeps only
+short call summaries. Other provider adapters fail preflight without automatic
+fallback.
 :::

@@ -984,7 +984,7 @@ impl NativeClient {
     ) -> Result<Vec<u8>> {
         use crate::calls::{
             host_policy::{selected_policy, CallHostPolicy},
-            host_transport::{CallHostRpcError, CallHostStage},
+            host_transport::{connect_call_session, CallHostRpcError, CallHostStage},
         };
         mmtls::validate_short_route(route.path())
             .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Route, &error))?;
@@ -993,9 +993,9 @@ impl NativeClient {
         if policy != CallHostPolicy::Ordinary {
             return Err(CallHostRpcError::new(CallHostStage::Route, "ax_unsupported", None).into());
         }
-        let session = self
-            .session(&state.long_host)
-            .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error))?;
+        let session = connect_call_session(route, self.options.timeout, |timeout| {
+            Session::connect(&state.long_host, timeout, self.options.receive_budget)
+        })?;
         let packet = AuthenticatedPacket::prepare(state, route.command(), request)
             .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Prepare, &error))?;
         before_submit()?;

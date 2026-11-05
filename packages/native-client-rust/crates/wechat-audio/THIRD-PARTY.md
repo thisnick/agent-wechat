@@ -12,7 +12,8 @@ Local changes:
 - Playback has a sample-count limit and generation tokens. Clearing rejects old
   producers and discards old resampler history. New chunks reuse resampler state.
 - Linux uses polled libpulse streams instead of blocking PulseAudio Simple reads,
-  allowing worker shutdown even without new capture data. Playback fills the
+  allowing worker shutdown even without new capture data. libpulse is loaded at
+  run time rather than linked, so executables start without PulseAudio installed. Playback fills the
   complete server write request, avoiding cumulative per-request polling delay. Explicit configured
   source/sink names are supported; global defaults and modules are never changed.
 - macOS uses VoiceProcessingIO with paired render/capture callbacks. Custom device

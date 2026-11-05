@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { manifestName, targetFor, validateManifest } from '../packages/cli/scripts/native-runtime.mjs';
+import { assetName, manifestName, targetFor, validateManifest } from '../packages/cli/scripts/native-runtime.mjs';
 const exec = promisify(execFile);
 const artifactDir = resolve(process.argv[2] ?? 'artifacts/native');
 const source = resolve('packages/cli');
@@ -44,6 +44,11 @@ try {
   assert.equal(identity.version, pkg.version);
   assert.equal(identity.target, targetFor().rustTarget);
   assert.ok(identity.capabilities.includes('serve'));
+  if (process.platform === 'linux') {
+    // Local call audio loads libpulse when it opens; wx itself must start without it.
+    const { stdout: dynamic } = await exec('readelf', ['-d', join(artifactDir, assetName(pkg.version))]);
+    assert.doesNotMatch(dynamic, /NEEDED.*libpulse/, 'The Linux wx executable must not link libpulse');
+  }
   // Release executables must include local audio, but help must not open a
   // microphone, contact a daemon or require account credentials.
   const audioHelp = await exec(process.execPath, [launcher, 'calls', 'dial', '--help'], { env: { ...process.env, AGENT_WECHAT_NATIVE_BINARY: '' } });

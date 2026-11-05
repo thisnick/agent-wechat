@@ -27,9 +27,9 @@ are linked below.
 
 ![Agent WeChat desktop showing an image reply from Nick Bot; other conversations are blurred](docs/public/demo/desktop.jpg)
 
-### Your WeChat, from the terminal
+### A WeChat voice call
 
-![A real wx command downloading the conversation's image to walk.jpg](docs/public/demo/terminal.jpg)
+https://github.com/user-attachments/assets/764bc53f-cea2-4b3e-99a1-34fdcb43ec09
 
 ## Get started
 
@@ -94,7 +94,8 @@ See [CLI examples](https://thisnick.github.io/agent-wechat/use/cli/),
 | Conversations | Use DMs and groups; browse and search locally stored history; read unread counts and mark chats read. |
 | Messages | Send and receive text, images, videos, files, and voice notes; recall eligible own messages and display incoming recalls. |
 | Images and video | Preview and download available quality variants, including original images/video; send normal or original-quality video. |
-| Voice | Play received notes and send audio as native voice notes. Longer audio can split into multiple notes; playback validation for longer notes remains incomplete. |
+| Voice notes | Play received notes and send audio as native voice notes. Longer audio can split into multiple notes; playback validation for longer notes remains incomplete. |
+| Voice calls | Make and answer direct WeChat voice calls with the [`wx calls` CLI](https://thisnick.github.io/agent-wechat/reference/calls/) or the [OpenClaw plugin](https://thisnick.github.io/agent-wechat/openclaw/calling/) after enabling voice calling in the plugin. Desktop voice calling is coming soon. |
 | Rich content | Read embedded quotes, link-card metadata, and forwarded conversations. Forwarded bundles become text; their nested attachments remain placeholders. |
 | Stickers | Retrieve supported ordinary/shared stickers, including animated originals. Sending stickers and managing packs are unsupported. |
 | Mentions | Send real member mentions or mention everyone where permitted; inspect incoming mention metadata. |

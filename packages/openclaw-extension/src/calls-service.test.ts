@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpenClawPluginApi, OpenClawPluginToolContext, PluginRuntime } from "openclaw/plugin-sdk/core";
-import { NativeCallError, type CallEvent, type CallOffer, type CallReadyScope, type CallView, type NativeCallMediaFrame, type NativeCallPcmObserver } from "@agent-wechat/shared";
+import { NativeCallError, type NativeMessage, type CallEvent, type CallOffer, type CallReadyScope, type CallView, type NativeCallMediaFrame, type NativeCallPcmObserver } from "@agent-wechat/shared";
 import { resolveWeChatAccount } from "./types.ts";
 import { NativeCallService, type CallControlPort, type CallMediaPort } from "./calls-service.ts";
-import { type PreparedCallVoice, type VoiceCallbacks } from "./calls-voice.ts";
+import { type CallSummaryRequest, type PreparedCallVoice, type VoiceCallbacks } from "./calls-voice.ts";
 import { resolveWeChatCallsConfig } from "./calls-config.ts";
 import { callsConfigurationKey, resolveCallVoiceApiKey } from "./calls-secrets.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
@@ -42,6 +45,7 @@ class Media implements CallMediaPort {
 }
 class Control implements CallControlPort {
   eventsQueue = new Queue<CallEvent>(); media = new Media(); directAudio = true; closed = false; connects = 0; readied = 0; answers = 0; dials = 0; ends = 0; attaches = 0; clears = 0;
+  offerOnReady = true;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
   async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
@@ -49,7 +53,7 @@ class Control implements CallControlPort {
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);
     await this.readyHook?.();
-    if (scope?.kind === "offer") this.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: scope.callId, revision: scope.expectedRevision + 1 } });
+    if (scope?.kind === "offer" && this.offerOnReady) this.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: scope.callId, revision: scope.expectedRevision + 1 } });
     return accepted();
   }
   async answer(_request: string, callId: string) { this.answers++; await this.answerHook?.(); this.eventsQueue.push({ type: "call.state", call: view(callId) }); return accepted(callId, "private-lease"); }
@@ -62,13 +66,15 @@ class Control implements CallControlPort {
 function voiceFactory() {
   const state = { opens: 0, closes: 0, incoming: [] as Buffer[], timestamps: [] as number[],
     contexts: [] as Array<Parameters<PreparedCallVoice["open"]>[1]>,
-    callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined };
-  const prepared: PreparedCallVoice = { sampleRate: 16000, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
-    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; } }; } };
+    callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined,
+    binding: { sessionKey: "agent:agent:wechat-call:peer", owner: false }, summaries: [] as CallSummaryRequest[], summaryText: undefined as string | undefined };
+  const prepared: PreparedCallVoice = { sampleRate: 16000, continuous: false, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
+    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
+    async summarize(request) { state.summaries.push(request); return state.summaryText; } };
   return { state, prepared };
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(5); } assert.fail("Condition did not become true"); }
-async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration()) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, logAudioTrace }); await service.start(); return { service, client, voice }; }
+async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration(), warn?: (line: string) => void) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, logAudioTrace, warn }); await service.start(); return { service, client, voice }; }
 
 test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
@@ -78,6 +84,7 @@ test("calling stays disabled independently of open messaging and requires its ow
   assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", toolPolicy: "owner" } }), /persistence/);
   const consultation = { enabled: true, realtime: { provider: "p" }, agentId: "a" };
   assert.equal(resolveWeChatCallsConfig({ voice: consultation })!.voice!.toolPolicy, "none");
+  assert.equal(resolveWeChatCallsConfig({ voice: consultation })!.voice!.maxDurationSeconds, 3600);
   assert.equal(resolveWeChatCallsConfig({ voice: { ...consultation, allowConsultSessionPersistence: true } })!.voice!.toolPolicy, "safe-read-only");
   assert.equal(resolveWeChatCallsConfig({ voice: { ...consultation, allowConsultSessionPersistence: true, toolPolicy: "none" } })!.voice!.toolPolicy, "none");
   const cfg = configuration(); delete (cfg.channels["agent-wechat"] as any).calls;
@@ -137,10 +144,106 @@ test("pending calls are observed without global readiness; only a preflighted al
   assert.deepEqual(client.scopes, [{ kind: "offer", callId: "offer", expectedRevision: 1 }]); assert.equal(client.answers, 1); await service.stop();
 });
 test("uncertain exact-offer readiness never retries or guesses that ACK failed", async () => {
-  const { service, client, voice } = await fixture(); client.readyHook = async () => { throw new NativeCallError("command_timeout", true); };
+  const lines: string[] = [];
+  const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line)); client.readyHook = async () => { throw new NativeCallError("command_timeout", true); };
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
   await until(() => voice.state.closes === 1); assert.equal(client.readied, 1); assert.equal(client.answers, 0); assert.equal(service.status().state, "needs_review");
+  assert.ok(lines.some(line => /^\[wechat-call\] incoming call not answered: stage=ready ms=\d+ code=command_timeout state=needs_review$/.test(line)));
   client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } }); await delay(10); assert.equal(client.readied, 1); await service.stop();
+});
+test("an incoming call whose voice session fails to open logs only its stage", async () => {
+  const lines: string[] = [];
+  const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line));
+  voice.prepared.open = async () => { throw Error("synthetic-private-provider-detail"); };
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
+  await until(() => lines.length > 1);
+  assert.deepEqual(lines.map(line => line.replace(/ms=\d+/, "ms=N")), [
+    "[wechat-call] incoming call not answered: stage=voice ms=N code=none state=unavailable",
+    "[wechat-call] calling stopped: state=unavailable reason=preflight-failed; it resumes once the daemon reports no call in progress",
+  ]);
+  assert.equal(lines.some(line => line.includes("synthetic-private")), false);
+  assert.equal(client.readied, 0); assert.equal(client.answers, 0);
+  await service.stop();
+});
+test("a control connection that closes unexpectedly is reported once", async () => {
+  const lines: string[] = [];
+  const { service, client } = await fixture(undefined, configuration(), line => lines.push(line));
+  client.eventsQueue.close();
+  await until(() => lines.length > 0); await delay(10);
+  assert.deepEqual(lines, ["[wechat-call] calling stopped: state=unavailable reason=events-ended; it resumes once the daemon reports no call in progress"]);
+  assert.equal(service.status().state, "unavailable");
+  await service.stop();
+});
+test("after calling stops, a new connection resumes it once the daemon reports no call in progress", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const lines: string[] = [];
+  const clients: Control[] = [];
+  const voice = voiceFactory(); const cfg = configuration();
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, {} as PluginRuntime, {
+    createClient: () => { const client = new Control(); clients.push(client); return client; },
+    prepareVoice: async () => voice.prepared, warn: line => lines.push(line),
+  });
+  await service.start(); assert.equal(service.status().state, "available");
+  clients[0].eventsQueue.close(); // the daemon closed the control connection
+  await until(() => lines.length > 0);
+  assert.match(lines[0], /calling stopped: state=unavailable reason=events-ended; it resumes once/);
+  t.mock.timers.tick(5_000); await delay(0);
+  await until(() => service.status().state === "available");
+  assert.equal(clients.length, 2); assert.equal(lines.at(-1), "[wechat-call] calling resumed: the daemon reports no call in progress");
+  clients[1].eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: "after-recovery" } });
+  await until(() => clients[1].answers === 1);
+  await service.stop();
+});
+test("calling does not resume while the daemon still reports a call in progress", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const clients: Control[] = [];
+  const voice = voiceFactory(); const cfg = configuration();
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, {} as PluginRuntime, {
+    createClient: () => {
+      const client = new Control(); clients.push(client);
+      if (clients.length === 2) {
+        const connect = client.connect.bind(client);
+        client.connect = async () => ({ ...(await connect()), availability: { busy: true, ownedByThisClient: false } });
+      }
+      return client;
+    },
+    prepareVoice: async () => voice.prepared,
+  });
+  await service.start();
+  clients[0].eventsQueue.close();
+  await until(() => service.status().state === "unavailable");
+  t.mock.timers.tick(5_000); await delay(0);
+  await until(() => clients.length === 2 && clients[1].closed);
+  assert.equal(service.status().state, "unavailable", "busy daemon: stay stopped");
+  t.mock.timers.tick(10_000); await delay(0);
+  await until(() => service.status().state === "available");
+  assert.equal(clients.length, 3);
+  await service.stop();
+});
+test("a withdrawn pre-answer offer releases the listener for the next call", async t => {
+  const { service, client, voice } = await fixture();
+  t.after(() => service.stop());
+  client.offerOnReady = false;
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, phase: "waiting_for_ready" } });
+  await until(() => client.readied === 1);
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: true, ownedByThisClient: false } });
+  client.eventsQueue.push({ type: "call.pending", offer: null });
+  await delay(10);
+  assert.equal(service.status().state, "preparing");
+  assert.equal(voice.state.closes, 0);
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+  client.eventsQueue.push({ type: "call.pending", offer: null });
+  await until(() => voice.state.closes === 1);
+  assert.equal(service.status().state, "available");
+  assert.equal(client.closed, false);
+  assert.equal(client.answers, 0);
+
+  client.offerOnReady = true;
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, callId: "next-offer", phase: "waiting_for_ready" } });
+  await until(() => client.attaches === 1);
+  assert.equal(client.readied, 2);
+  assert.equal(client.answers, 1);
+  assert.equal(service.status().callId, "next-offer");
 });
 test("competing plugin clients accept one winner, close the losing provider and never retry", async () => {
   const first = await fixture(); const second = await fixture(); let won = false;
@@ -168,7 +271,8 @@ test("outgoing target and tool requester permissions are separate from chat and 
   assert.doesNotThrow(() => assertCallingToolAccess(context, key, calls));
   assert.throws(() => assertCallingToolAccess({ ...context, senderIsOwner: false }, key, calls), /not permitted/);
   assert.throws(() => assertCallingToolAccess({ ...context, requesterSenderId: "allowed-peer" }, key, calls), /not permitted/);
-  assert.throws(() => assertCallingToolAccess({ ...context, agentId: "another" }, key, calls), /not permitted/);
+  // Any agent the tool is allowed for may place calls for the owner; the call runs as the calling agent.
+  assert.doesNotThrow(() => assertCallingToolAccess({ ...context, agentId: "another" }, key, calls));
   (cfg.channels["agent-wechat"].calls.voice.realtime as any).providers.openai.apiKey = "synthetic-replaced-key";
   assert.throws(() => assertCallingToolAccess(context, key, calls), /not permitted/);
 
@@ -245,6 +349,7 @@ test("a clear discards the paced backlog and fresh PCM waits for the new track",
   for (let i = 0; i < old.length; i += 2) old.writeInt16LE(100, i);
   for (let i = 0; i < fresh.length; i += 2) fresh.writeInt16LE(200, i);
   output.enqueue(old, { itemId: "interrupted" });
+  output.start();
   assert.deepEqual(media.sent.map(frame => frame.samples.length), [640]);
   const clearing = output.clear();
   output.enqueue(fresh, { itemId: "fresh-response" });
@@ -261,16 +366,87 @@ test("response PCM stays ordered and resumes with small chunks after a timer sta
   const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
   t.after(() => output.close());
   const burst = Buffer.alloc(640 * 8);
-  for (let i = 0; i < burst.length / 2; i++) burst.writeInt16LE(i, i * 2);
+  for (let i = 0; i < burst.length / 2; i++) burst.writeInt16LE(i + 1, i * 2);
   output.enqueue(burst, { itemId: "burst" });
+  output.start();
   assert.deepEqual(media.sent.map(frame => frame.samples.length), [640]);
   // Hold the event loop across several slots. A late timer must not send its debt.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 65);
   await until(() => media.sent.length >= 2);
   assert.ok(media.sent[1].samples.length <= 640);
-  await until(() => media.sent.reduce((total, frame) => total + frame.samples.length, 0) === burst.length / 2);
-  assert.deepEqual(media.sent.flatMap(frame => Array.from(frame.samples)), Array.from({ length: burst.length / 2 }, (_, i) => i));
+  const speech = () => media.sent.flatMap(frame => Array.from(frame.samples).filter(Boolean));
+  await until(() => speech().length === burst.length / 2);
+  assert.deepEqual(speech(), Array.from({ length: burst.length / 2 }, (_, i) => i + 1));
   assert.equal(failures, 0);
+});
+test("continuous PCM plays unlabeled audio and accepts new audio after each provider clear", async t => {
+  const media = new Media(); const voice = voiceFactory(); let failures = 0; let clears = 0;
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => { clears++; }, () => { failures++; }, undefined, { continuous: true });
+  t.after(() => output.close());
+  const speech = () => media.sent.flatMap(frame => Array.from(frame.samples).filter(Boolean));
+  output.start();
+  output.enqueue(Buffer.alloc(640, 1));
+  await until(() => speech().length === 320);
+  await output.clear();
+  output.enqueue(Buffer.alloc(640, 2));
+  await until(() => speech().length === 640);
+  assert.ok(speech().slice(320).every(value => value === 0x0202));
+  assert.equal(clears, 1); assert.equal(failures, 0);
+});
+test("continuous PCM keeps only the newest three seconds when its backlog grows", t => {
+  const media = new Media(); const voice = voiceFactory();
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => assert.fail("PCM send failed"), undefined, { continuous: true });
+  t.after(() => output.close());
+  output.start();
+  output.enqueue(Buffer.alloc(32 * 1000, 1));
+  for (let i = 0; i < 3; i++) output.enqueue(Buffer.alloc(32 * 1000, 2));
+  for (let i = 0; i < 220; i++) { now += 20; t.mock.timers.tick(20); }
+  const samples = media.sent.flatMap(frame => Array.from(frame.samples)).filter(Boolean);
+  assert.equal(samples.filter(value => value === 0x0101).length, 0);
+  assert.equal(samples.filter(value => value === 0x0202).length, 3000 * 16);
+});
+test("continuous PCM skips silence while a stall's backlog drains, without dropping speech", t => {
+  const media = new Media(); const voice = voiceFactory();
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const skipped: number[] = [];
+  const trace = { add: (key: string, count = 1) => { if (key === "outputSkippedSilenceSamples") skipped.push(count); }, gap() {}, measure() {} } as unknown as CallAudioTrace;
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => assert.fail("PCM send failed"), trace, { continuous: true });
+  t.after(() => output.close());
+  output.start();
+  // A stalled provider catches up with one second of speech, then sends silence.
+  output.enqueue(Buffer.alloc(32 * 1000, 1));
+  for (let i = 0; i < 25; i++) output.enqueue(Buffer.alloc(640));
+  assert.equal(skipped.reduce((sum, count) => sum + count, 0), 25 * 320);
+  for (let i = 0; i < 60; i++) { now += 20; t.mock.timers.tick(20); }
+  const samples = media.sent.flatMap(frame => Array.from(frame.samples));
+  assert.equal(samples.filter(value => value === 0x0101).length, 1000 * 16);
+  // Once the backlog is short again, silence from the provider plays normally.
+  const before = skipped.length;
+  output.enqueue(Buffer.alloc(640));
+  assert.equal(skipped.length, before);
+});
+test("playout starts with silence and reports only the time played from each reply item", t => {
+  const media = new Media();
+  const voice = voiceFactory();
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => assert.fail("PCM send failed"));
+  t.after(() => output.close());
+  output.start();
+  assert.deepEqual(media.sent[0].samples, new Int16Array(640));
+  assert.deepEqual(output.playbackState(), []);
+  output.enqueue(Buffer.alloc(320, 1), { itemId: "one" });
+  output.enqueue(Buffer.alloc(320, 2), { itemId: "two" });
+  now = 120;
+  t.mock.timers.tick(20);
+  now = 145;
+  assert.deepEqual(output.playbackState(), [{ itemId: "one", audioEndMs: 5 }, { itemId: "two", audioEndMs: 0 }]);
 });
 test("audio trace aggregates each boundary and a discarded PCM chunk still advances provider time", async t => {
   const previous = process.env.WX_CALL_AUDIO_TRACE;
@@ -284,8 +460,9 @@ test("audio trace aggregates each boundary and a discarded PCM chunk still advan
   const receivedAtMs = performance.now();
   client.media.observePcm!({ receivedAtMs, samples: 320, queueDepth: 16, droppedSamples: 320 });
   client.media.input.push({ payload: new Uint8Array(640), receivedAtMs, sampleOffset: 320 });
-  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "private-response-item" });
-  await until(() => voice.state.incoming.length === 1 && client.media.sent.length === 1);
+  const reply = Buffer.alloc(640, 1);
+  voice.state.callbacks!.audio(reply, { itemId: "private-response-item" });
+  await until(() => voice.state.incoming.length === 1 && client.media.sent.some(frame => frame.samples.includes(257)));
   assert.deepEqual(voice.state.timestamps, [20]);
   await service.stop();
   const prefix = "[wechat-call-audio] plugin ";
@@ -295,7 +472,7 @@ test("audio trace aggregates each boundary and a discarded PCM chunk still advan
   assert.equal(report.counts.wsRxDroppedSamples, 320);
   assert.equal(report.counts.inputConsumedSamples, 320);
   assert.equal(report.counts.realtimeInputSamples, 320);
-  assert.equal(report.counts.daemonOutputSamples, 320);
+  assert.equal(report.counts.daemonOutputSamples - report.counts.outputSilenceSamples, 320);
   assert.equal(report.measures.sdkRxQueueDepth.max, 16);
   assert.equal(report.measures.sdkRxWaitMs.count, 1);
   assert.equal(typeof report.eventLoopDelayMs.count, "number");
@@ -309,6 +486,7 @@ test("overlapping clears keep interrupted late chunks revoked and stale acknowle
   t.after(() => output.close());
   const pcm = (sample: number) => { const value = Buffer.alloc(640); for (let i = 0; i < value.length; i += 2) value.writeInt16LE(sample, i); return value; };
   output.enqueue(pcm(100), { itemId: "first-response" });
+  output.start();
   const first = output.clear();
   output.enqueue(pcm(200), { itemId: "second-response" });
   const second = output.clear();
@@ -320,15 +498,109 @@ test("overlapping clears keep interrupted late chunks revoked and stale acknowle
   media.generation = 3; releases[1](); await second;
   await until(() => media.sent.length === 2);
   assert.equal(media.sent[1].generation, 3);
-  assert.deepEqual(media.sent[1].samples, new Int16Array(320).fill(300));
+  assert.deepEqual(media.sent[1].samples.slice(0, 320), new Int16Array(320).fill(300));
+  assert.ok(media.sent[1].samples.slice(320).every(value => value === 0));
   output.enqueue(pcm(102), { itemId: "first-response" });
   output.enqueue(pcm(202), { itemId: "second-response" });
-  await delay(30); assert.equal(media.sent.length, 2); assert.equal(failures, 0);
+  await delay(30);
+  assert.equal(media.sent.filter(frame => frame.samples.some(Boolean)).length, 2);
+  assert.equal(failures, 0);
+});
+test("an answered call is summarized in its session, remembered for the contact's next call and reported to the session that placed it", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "wechat-call-summary-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const cfg = configuration();
+  Object.assign(cfg.channels["agent-wechat"].calls.voice, { realtime: { provider: "fake", recentContext: { enabled: true, maxMessages: 2 } },
+    toolPolicy: "safe-read-only", allowConsultSessionPersistence: true });
+  const events: Array<{ text: string; options: { sessionKey: string; contextKey?: string } }> = []; const wakes: Array<{ sessionKey?: string }> = [];
+  const parentKey = "agent:voice-agent:wechat:direct:owner";
+  const runtime = {
+    system: { enqueueSystemEvent: (text: string, options: { sessionKey: string }) => { events.push({ text, options }); return true; }, requestHeartbeatNow: (options: { sessionKey?: string }) => { wakes.push(options); } },
+    agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: ({ sessionKey }: { sessionKey: string }) => sessionKey === parentKey ? { sessionId: "owner-session" } : undefined } },
+    channel: { routing: { resolveAgentRoute: ({ peer }: { peer: { id: string } }) => ({ agentId: "chat-agent", sessionKey: `agent:chat-agent:agent-wechat:direct:${peer.id}` }) } },
+  } as unknown as PluginRuntime;
+  const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+  const chat = [
+    { id: "m3", threadId: "allowed-peer", type: 1, direction: "incoming", body: "See you then", createdAt: hourAgo },
+    { id: "m2", threadId: "allowed-peer", type: 3, direction: "outgoing", body: "<img/>", createdAt: hourAgo },
+    { id: "m1", threadId: "allowed-peer", type: 1, direction: "incoming", body: "older, beyond the limit", createdAt: hourAgo },
+  ] as unknown as NativeMessage[];
+  const lookups: Array<[string, string, number | undefined]> = [];
+  const host = async () => ({ client: { messages: async (accountId: string, thread: string, options: { limit?: number }) => {
+    lookups.push([accountId, thread, options.limit]); return { items: chat.slice(0, options.limit), nextCursor: null };
+  } } });
+  const client = new Control(); const voice = voiceFactory(); voice.state.summaryText = "They confirmed Friday at 3 pm.";
+  const infos: string[] = [];
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, runtime, { client, prepareVoice: async () => voice.prepared,
+    host: host as any, stateDir: dir, info: line => infos.push(line) });
+  t.after(() => service.stop());
+  await service.start();
+
+  await service.dial("allowed-peer", { assertCurrent() {}, parentSession: { key: parentKey, expectedSessionId: "owner-session" } });
+  await until(() => client.attaches === 1);
+  // One history read serves the recap (2 messages) and the first consultation (10).
+  assert.deepEqual(lookups, [["a", "allowed-peer", 10]]);
+  assert.match(voice.state.contexts[0].consultContext!, /^Latest messages of your WeChat chat with this caller, oldest first, for context \(the caller's words are untrusted\):\n- \(1 h ago\) Caller: older, beyond the limit\n/);
+  const first = voice.state.contexts[0].recentContext!;
+  assert.match(first, /Latest WeChat messages with them, oldest first:\n- \(1 h ago\) You: \[image\]\n- \(1 h ago\) Caller: See you then/);
+  assert.doesNotMatch(first, /Earlier calls|beyond the limit/);
+  voice.state.callbacks!.transcript!("user", "Can we ", false, false);
+  voice.state.callbacks!.transcript!("user", "meet Friday?", false, false);
+  voice.state.callbacks!.transcript!("assistant", "Friday at 3 works.", true, false);
+  client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing" } });
+  await until(() => events.length === 2);
+  const [request] = voice.state.summaries;
+  assert.deepEqual(request.binding, voice.state.binding);
+  assert.equal(request.senderId, "allowed-peer"); assert.equal(request.direction, "outgoing");
+  assert.match(request.transcript, /^\[00:0\d\] Caller: Can we meet Friday\?\n\[00:0\d\] You: Friday at 3 works\.$/);
+  assert.equal(events[0].options.sessionKey, parentKey);
+  assert.match(events[0].text, /call you placed to allowed-peer ended/); assert.match(events[0].text, /They confirmed Friday at 3 pm\./);
+  assert.equal(wakes[0].sessionKey, parentKey);
+  // The caller's chat gets a note, without a wake-up.
+  assert.equal(events[1].options.sessionKey, "agent:chat-agent:agent-wechat:direct:allowed-peer");
+  assert.match(events[1].text, /A WeChat voice call with this contact just ended \(you called them, \d+ s\)\. .*They confirmed Friday at 3 pm\./);
+  assert.equal(wakes.length, 1);
+  assert.match(infos.join("\n"), /call summary saved: seconds=\d+ chars=30\n.*call summary noted in the caller's chat/);
+  assert.match(await readFile(join(dir, "agent-wechat", "call-summaries.json"), "utf8"), /They confirmed Friday/);
+
+  // The contact's next call starts with that summary; a call without a transcript is not summarized.
+  await until(() => service.status().state === "available");
+  client.eventsQueue.push({ type: "call.offered", offer });
+  await until(() => client.attaches === 2);
+  assert.match(voice.state.contexts[1].recentContext!, /Earlier calls, newest first:\n- just now, you called them \(\d+ s\): They confirmed Friday at 3 pm\./);
+  client.eventsQueue.push({ type: "call.state", call: view(offer.callId, "ended") });
+  await until(() => service.status().state === "available"); await delay(10);
+  assert.equal(voice.state.summaries.length, 1); assert.equal(events.length, 2);
+});
+test("a call placed from another agent's group session reports its summary there", async t => {
+  const cfg = configuration();
+  Object.assign(cfg.channels["agent-wechat"].calls.voice, { toolPolicy: "safe-read-only", allowConsultSessionPersistence: true });
+  const groupKey = "agent:groups:agent-wechat:group:family@chatroom";
+  const events: Array<{ text: string; sessionKey: string }> = []; const wakes: Array<{ sessionKey?: string; agentId?: string }> = []; const stores: string[] = [];
+  const runtime = {
+    system: { enqueueSystemEvent: (text: string, options: { sessionKey: string }) => { events.push({ text, sessionKey: options.sessionKey }); return true; },
+      requestHeartbeatNow: (options: { sessionKey?: string; agentId?: string }) => { wakes.push(options); } },
+    agent: { session: { resolveStorePath: (_store: unknown, { agentId }: { agentId: string }) => { stores.push(agentId); return `/synthetic/${agentId}`; },
+      getSessionEntry: ({ sessionKey }: { sessionKey: string }) => sessionKey === groupKey ? { sessionId: "group-session" } : undefined } },
+  } as unknown as PluginRuntime;
+  const client = new Control(); const voice = voiceFactory(); voice.state.summaryText = "She will call back tonight.";
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, runtime, { client, prepareVoice: async () => voice.prepared });
+  t.after(() => service.stop());
+  await service.start();
+  await service.dial("allowed-peer", { assertCurrent() {}, parentSession: { key: groupKey, expectedSessionId: "group-session" } });
+  await until(() => client.attaches === 1);
+  voice.state.callbacks!.transcript!("user", "I'll call back tonight.", true, false);
+  client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing" } });
+  await until(() => events.length === 1);
+  assert.equal(events[0].sessionKey, groupKey); assert.match(events[0].text, /She will call back tonight\./);
+  assert.deepEqual(wakes, [{ sessionKey: groupKey, agentId: "groups", reason: "agent-wechat call ended", source: "other" }]);
+  assert.ok(stores.includes("groups"), "the group session is read from its own agent's store");
 });
 test("terminal ownership revocation stops old audio callbacks and does not manufacture a hangup", async () => {
   const { service, client, voice } = await fixture(); await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
   client.eventsQueue.push({ type: "call.state", call: view("dial", "uncertain") }); await until(() => voice.state.closes === 1);
-  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "late" }); await delay(10); assert.equal(client.media.sent.length, 0); assert.equal(client.ends, 0);
+  const sentBeforeLateCallback = client.media.sent.length;
+  voice.state.callbacks!.audio(Buffer.alloc(640), { itemId: "late" }); await delay(10); assert.equal(client.media.sent.length, sentBeforeLateCallback); assert.equal(client.ends, 0);
   client.eventsQueue.push({ type: "call.state", call: view("other-call", "ended") });
   await delay(1); assert.equal(service.status().state, "needs_review");
   client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
@@ -348,6 +620,21 @@ test("provider failure requests one end while retaining the owner until terminal
   assert.equal(client.media.closed, false); assert.equal(client.closed, false); assert.equal(service.status().owned, true);
   client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
   await until(() => service.status().state === "available"); await service.stop(); assert.equal(client.ends, 1); assert.equal(client.closed, true);
+});
+test("a slow hangup after a provider failure keeps calling available for the next call", async () => {
+  const lines: string[] = [];
+  const { service, client, voice } = await fixture(undefined, configuration(), line => lines.push(line));
+  (client as any).end = async () => { client.ends++; await delay(2300); return accepted(); };
+  await service.dial("allowed-peer", { assertCurrent() {} }); await until(() => client.attaches === 1);
+  voice.state.callbacks!.failed("provider-closed:error");
+  await delay(2500);
+  assert.equal(client.ends, 1); assert.equal(client.closed, false); assert.notEqual(service.status().state, "needs_review");
+  assert.deepEqual(lines, ["[wechat-call] ending call after a failure: cause=provider-closed:error answered=true"]);
+  client.eventsQueue.push({ type: "call.state", call: view("dial", "ended") });
+  await until(() => service.status().state === "available");
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: "next" } });
+  await until(() => client.answers === 1);
+  await service.stop();
 });
 test("media attachment completing after end is retained without starting audio until terminal", async t => {
   const { service, client, voice } = await fixture();
@@ -395,6 +682,7 @@ test("the PCM budget truncates a reply without ending the call or stitching late
   const bounded = new CallPcmOutput(media, format, voice.prepared, () => held, () => { failures++; }, trace);
   t.after(() => { bounded.close(); trace.close(); });
   const clearing = bounded.clear();
+  bounded.start();
   for (const size of [64000, 64000, 64000, 63400]) bounded.enqueue(Buffer.alloc(size, 0x11), { itemId: "first" });
   bounded.enqueue(Buffer.alloc(640, 0x22), { itemId: "first" });
   assert.equal(media.sent.length, 0);
