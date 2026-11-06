@@ -113,6 +113,7 @@ export class NativeCallService {
       // provider-ready exact offer registers incoming readiness below.
       this.state = this.busy ? "busy" : "available";
       this.loop = this.consume();
+      this.info(`calling ready: state=${this.state}`);
       try { this.logAudioTrace?.(`[wechat-call-audio] plugin service-ready state=${this.state}`); } catch { /* Diagnostics cannot disable calling. */ }
     } catch { this.state = this.stopped ? "stopped" : "unavailable"; if (this.stopped) this.client?.close(); else this.stopCalling("start-failed"); }
   }
