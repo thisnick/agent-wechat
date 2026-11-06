@@ -1857,7 +1857,28 @@ impl Core {
 // Only a whole numeric suffix on these fixed library messages may cross the
 // protected boundary. General error strings can contain URLs or account data.
 fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
-    use wechat_protocol::media::LargeFileDownloadError;
+    use wechat_protocol::media::{LargeFileDownloadError, SourceEvidence};
+    if let Some(mismatch) = video_representation_mismatch(error) {
+        let evidence = |value: Option<SourceEvidence>| {
+            value.map(|value| {
+                json!({
+                    "matchesAdvertised": value.matches_advertised,
+                    "matchesDelivered": value.matches_delivered,
+                })
+            })
+        };
+        return Some(json!({
+            "kind": "video_representation_mismatch",
+            "advertisedBytes": mismatch.advertised_bytes,
+            "deliveredBytes": mismatch.delivered_bytes,
+            "advertisedDigestMatches": mismatch.advertised_digest_matches,
+            "substituteftype": mismatch.substituted_filetype,
+            "istrans": mismatch.istrans,
+            "videoformat": mismatch.videoformat,
+            "rawfilesize": evidence(mismatch.rawfilesize),
+            "rawfilemd5": evidence(mismatch.rawfilemd5),
+        }));
+    }
     let failure = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<LargeFileDownloadError>())?;
@@ -1867,6 +1888,11 @@ fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
             json!({"kind":"fixed_control_mismatch","field":control.field_name(),"actual":actual})
         }
     })
+}
+fn video_representation_mismatch(
+    error: &anyhow::Error,
+) -> Option<&wechat_protocol::media::VideoRepresentationMismatch> {
+    error.chain().find_map(|cause| cause.downcast_ref())
 }
 fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
     for cause in error.chain() {
@@ -1909,6 +1935,9 @@ fn classify_error(error: &anyhow::Error) -> String {
             return "transport_unavailable".into();
         }
         return "media_service_rejected".into();
+    }
+    if video_representation_mismatch(error).is_some() {
+        return "media_integrity_failed".into();
     }
     for cause in error.chain() {
         let message = cause.to_string();
@@ -1968,7 +1997,11 @@ fn classify_error(error: &anyhow::Error) -> String {
             return code.into();
         }
     }
-    if message.contains("checksum") || message.contains("length mismatch") {
+    // Delivered bytes or reply metadata disagree with the advertised tuple.
+    if message.contains("checksum")
+        || message.contains("length mismatch")
+        || message.contains("size mismatch")
+    {
         return "media_integrity_failed".into();
     }
     if message.contains("unsupported") || message.contains("Unsupported") {
@@ -3792,6 +3825,91 @@ mod tests {
             "Unsupported large-file download response field with private details"
         ))
         .is_none());
+    }
+    #[test]
+    fn video_representation_mismatch_is_an_integrity_failure_with_a_typed_diagnostic() {
+        use wechat_protocol::media::{SourceEvidence, VideoRepresentationMismatch};
+        let (_dir, core) = test_core();
+        let (row, created) = core
+            .store
+            .create_media_job(
+                "one",
+                "video-mismatch",
+                "download:asset-video",
+                &digest(b"asset-video"),
+                "download",
+                &json!({"assetId":"asset-video","completedBytes":0}),
+                b"",
+            )
+            .unwrap();
+        assert!(created);
+        let mut row = row;
+        row.state = "running".into();
+        row.phase = "downloading".into();
+        core.store.save_media_job("one", &row).unwrap();
+        let mismatch = VideoRepresentationMismatch {
+            advertised_bytes: Some(9_390_687),
+            delivered_bytes: 15_272_939,
+            advertised_digest_matches: Some(false),
+            substituted_filetype: Some(4),
+            istrans: None,
+            videoformat: Some(1),
+            rawfilesize: Some(SourceEvidence {
+                matches_advertised: false,
+                matches_delivered: true,
+            }),
+            rawfilemd5: None,
+        };
+        let secret = "private raw body route file-id auth-key value";
+        let error = anyhow::Error::new(mismatch).context(secret);
+        assert_eq!(classify_error(&error), "media_integrity_failed");
+        core.record_media_failure_diagnostics("one", "video-mismatch", &error)
+            .unwrap();
+        core.fail_media_job("one", "video-mismatch", &classify_error(&error))
+            .unwrap();
+        let saved = core.store.media_job("one", "video-mismatch").unwrap();
+        assert_eq!(
+            saved.data["result"]["cdnDownloadFailure"],
+            json!({
+                "kind": "video_representation_mismatch",
+                "advertisedBytes": 9_390_687,
+                "deliveredBytes": 15_272_939,
+                "advertisedDigestMatches": false,
+                "substituteftype": 4,
+                "istrans": null,
+                "videoformat": 1,
+                "rawfilesize": {"matchesAdvertised": false, "matchesDelivered": true},
+                "rawfilemd5": null,
+            })
+        );
+        assert_eq!(saved.error_code.as_deref(), Some("media_integrity_failed"));
+        assert_eq!(saved.state, "failed");
+        assert!(!saved.retryable);
+        assert!(!serde_json::to_string(&saved.data).unwrap().contains(secret));
+        let public = public_job("one", &saved);
+        assert_eq!(public.reason.as_deref(), Some("media_integrity_failed"));
+    }
+    #[test]
+    fn advertised_size_and_checksum_mismatches_share_the_integrity_code() {
+        for message in [
+            "Advertised media size mismatch",
+            "Advertised media checksum mismatch",
+            "Large-video download source size mismatch",
+            "Large-file download source size mismatch",
+            "CDN source checksum mismatch",
+        ] {
+            let error = anyhow::anyhow!(message).context("opaque wrapper");
+            assert_eq!(
+                classify_error(&error),
+                "media_integrity_failed",
+                "{message}"
+            );
+            assert!(cdn_download_failure(&error).is_none());
+        }
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("Inconsistent CDN range response")),
+            "media_processing_failed"
+        );
     }
     // Large metadata with a tiny sealed fixture keeps admission tests from
     // allocating hundreds of MiB. Full worker source authentication is tested

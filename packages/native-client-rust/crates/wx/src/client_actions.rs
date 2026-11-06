@@ -853,15 +853,10 @@ pub async fn media(
                 Duration::from_secs(3600),
             )
             .await?;
-        let max_bytes = if asset["kind"] == "file" {
-            wechat_core::MAX_SOURCE_BYTES
-        } else {
-            128 * 1024 * 1024
-        };
         super::private_media_output(
             &path,
             response,
-            max_bytes,
+            media_output_limit(asset["kind"].as_str()),
             asset["byteLength"].as_u64(),
             asset["sha256"].as_str(),
         )
@@ -873,9 +868,32 @@ pub async fn media(
     Ok(asset)
 }
 
+/// Saved files and videos use the daemon's 512 MiB download ceiling; the
+/// output writer streams to disk and still checks size and SHA-256.
+fn media_output_limit(kind: Option<&str>) -> usize {
+    match kind {
+        Some("file" | "video") => wechat_core::MAX_SOURCE_BYTES,
+        _ => 128 * 1024 * 1024,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_output_limits_follow_download_ceilings_not_send_limits() {
+        assert_eq!(
+            media_output_limit(Some("file")),
+            wechat_core::MAX_SOURCE_BYTES
+        );
+        // Matches wechat-protocol's incoming MAX_VIDEO_DOWNLOAD_BYTES.
+        assert_eq!(media_output_limit(Some("video")), 536_870_912);
+        for kind in [Some("image"), Some("voice"), Some("sticker"), None] {
+            assert_eq!(media_output_limit(kind), 128 * 1024 * 1024);
+        }
+        assert_eq!(wechat_core::MAX_VIDEO_SOURCE_BYTES, 52_428_800);
+    }
 
     #[test]
     fn chat_pin_commands_keep_mutation_options_and_require_a_target() {
