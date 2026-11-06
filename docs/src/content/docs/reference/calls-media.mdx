@@ -63,16 +63,10 @@ their limits and require a new key generation when exhausted.
    ```
 
    That chunk decodes to bytes `00 80 ff 7f ff ff`: samples `-32768`, `32767`,
-   and `-1`. Incoming chunks have the same shape, using a receive track's ID.
+   and `-1`. Incoming chunks use a receive track's ID.
    Receiving audio does not require starting an outgoing track.
-   Received chunks also carry `sequence` and `sampleOffset`, the sample position
-   on the shared call timeline. Applications must not supply these two fields.
-
-   Conference sources are announced with `track.added` and removed with
-   `track.removed` on this same media socket, before affected audio. Each source
-   has its own generation and queue; optional `participantId` is a verified
-   association. The daemon exposes one outgoing room track and does not mix
-   incoming tracks. A source can be silent without being muted or leaving.
+   The daemon also supplies `sequence` and `sampleOffset` on received chunks;
+   see [receive tracks and timing](#receive-tracks-and-timing).
 
 | Property | Current value |
 | --- | --- |
@@ -85,6 +79,93 @@ their limits and require a new key generation when exhausted.
 
 Chunks need not match codec frame boundaries. The daemon combines smaller chunks
 and splits larger chunks. Binary WebSocket messages are rejected.
+
+## Receive tracks and timing
+
+With `conferenceAudio` available, a conference has one outgoing room track and
+independent receive tracks. The daemon does not mix them. For example:
+
+```json
+{
+  "type": "media.ready",
+  "protocolVersion": 2,
+  "sendTrack": {
+    "id": 1,
+    "generation": 1,
+    "direction": "send",
+    "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+  },
+  "receiveTracks": [
+    {
+      "id": 6,
+      "generation": 1,
+      "direction": "receive",
+      "participantId": "member-4",
+      "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+    },
+    {
+      "id": 7,
+      "generation": 1,
+      "direction": "receive",
+      "participantId": "member-5",
+      "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+    }
+  ]
+}
+```
+
+The optional `participantId` associates a track with the reported roster. Use
+that association rather than inferring identity from audio or track numbers.
+Sources can appear or disappear during a call:
+
+```json
+{
+  "type": "track.added",
+  "callId": "example-conference",
+  "track": {
+    "id": 8,
+    "generation": 1,
+    "direction": "receive",
+    "participantId": "member-6",
+    "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+  }
+}
+```
+
+```json
+{
+  "type": "track.removed",
+  "callId": "example-conference",
+  "trackId": 6,
+  "generation": 1,
+  "reason": "source_unavailable"
+}
+```
+
+Receive-track events arrive on both sockets. Apply the media socket's ordered
+events to its audio: additions precede the source's chunks, and removal stops
+delivery for that generation. A returning source has a newer generation; a
+replacement emits removal followed by addition. Each source has its own queue.
+Silence alone does not establish that a participant muted or left.
+
+This received chunk contains one 20 ms frame of silence (640 decoded bytes):
+
+```json
+{
+  "type": "audio.chunk",
+  "trackId": 7,
+  "generation": 1,
+  "sequence": 50,
+  "sampleOffset": 16000,
+  "pcmBase64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+}
+```
+
+`sequence` orders chunks within a source. `sampleOffset` is the position in
+per-channel samples on the shared call timeline: at 16,000 Hz, offset 16,000 is
+one second. Chunks from different tracks at the same offset cover the same
+playback interval even when their sequence numbers differ. Preserve gaps when
+aligning or mixing tracks. Applications must not send either clock field.
 
 ## Direct Node.js example
 
@@ -119,7 +200,8 @@ media.on("message", (data, isBinary) => {
     }));
   } else if (event.type === "audio.chunk") {
     const pcm = Buffer.from(event.pcmBase64, "base64");
-    console.log("Audio", event.trackId, event.generation, pcm.length);
+    console.log("Audio", event.trackId, event.generation,
+      event.sequence, event.sampleOffset, pcm.length);
   }
 });
 ```
@@ -127,19 +209,37 @@ media.on("message", (data, isBinary) => {
 ## Mute and interrupt
 
 Send `call.mute` or `call.clear_audio` through the control socket. Clearing audio
-emits `track.updated` with the outgoing track's new generation. Stop the old
-producer, send `audio.start` for the new generation, then send fresh chunks.
+or changing mute emits `track.updated` with the outgoing track's new generation:
+
+```json
+{
+  "type": "track.updated",
+  "callId": "example-conference",
+  "track": {
+    "id": 1,
+    "generation": 2,
+    "direction": "send",
+    "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+  }
+}
+```
+
+Stop the old producer, send `audio.start` for the new generation, then send fresh
+chunks.
 Old-generation chunks are discarded; future or unknown track IDs are rejected.
 Process track updates from the owning control socket throughout the call.
+Conference mute also requests our room microphone state; it does not mute other
+participants or end membership.
 
 ## Good to know
 
 - Omitting `supportedProtocolVersions` means version 1. This daemon supports
   version 2 only and returns `protocol.error` before closing with code 1002.
   An empty, null or malformed list is invalid.
-- Track IDs distinguish streams; an array alone does not establish conference
-  support. Check the daemon's capabilities. Conference audio remains unavailable.
+- Check `conferenceAudio` before attaching conference media. Video and
+  direct-to-conference promotion are unavailable. Native calls currently have a
+  20-minute safety limit.
 - PCM queue overruns keep recent incoming audio. A slow control consumer closes
   its connection. Losing the owning connection starts call cleanup.
-- A remote microphone control event describes the peer's microphone; it does not
-  replace media tracks or change the PCM format.
+- A remote microphone update describes that participant's microphone. It does
+  not change the PCM format or establish that the participant left the room.

@@ -5,7 +5,7 @@
  * protocol actions. There are no device or codec dependencies. */
 import { validateNativeBaseUrl } from "./native-client.ts";
 import type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallMediaCommand, CallSnapshot, CallReadyScope } from "./native.generated.js";
-export type { CallAudioFormat, CallAudioTrack, CallCommand, CallControl, CallParticipantControl, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope } from "./native.generated.js";
+export type { CallAudioFormat, CallAudioTrack, CallCommand, CallControl, CallParticipantControl, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope, CallConferenceInvitation, CallParticipant, CallInvitationResult } from "./native.generated.js";
 
 export const NATIVE_CALL_MAX_FRAME_BYTES = 64 * 1024;
 export const NATIVE_CALL_PROTOCOL_VERSION = 2;
@@ -15,7 +15,9 @@ export type NativeCallMediaFrame = {
   trackId: number;
   generation: number;
   payload: Uint8Array;
-  /** Offset in per-channel samples received on this socket, including local queue drops. */
+  /** Per-track sequence, independent of transport and application generations. */
+  sequence?: number;
+  /** Per-channel sample position on the shared call timeline, including queue drops. */
   sampleOffset?: number;
   /** Monotonic arrival time when a PCM observer is attached. */
   receivedAtMs?: number;
@@ -127,7 +129,8 @@ function formatValue(value: unknown): value is CallAudioFormat {
 }
 function trackValue(value: unknown): value is CallAudioTrack {
   return object(value) && uint32(value.id) && value.id > 0 && uint32(value.generation) && value.generation > 0
-    && ["send", "receive"].includes(String(value.direction)) && formatValue(value.format);
+    && ["send", "receive"].includes(String(value.direction)) && formatValue(value.format)
+    && (value.participantId === undefined || idValue(value.participantId));
 }
 function availabilityValue(value: unknown): boolean { return object(value) && typeof value.busy === "boolean" && typeof value.ownedByThisClient === "boolean"; }
 function participantControlValue(value: unknown): boolean {
@@ -146,7 +149,10 @@ function callValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision)
     && ["direct", "conference"].includes(String(value.kind)) && ["voice", "video"].includes(String(value.callType)) && ["incoming", "outgoing"].includes(String(value.direction))
     && ["offered", "dialing", "ringing", "connecting", "connected", "ending", "ended", "uncertain"].includes(String(value.state)) && typeof value.ownedByThisClient === "boolean"
-    && (value.controls === undefined || (Array.isArray(value.controls) && value.controls.length <= 16 && value.controls.every(participantControlValue)));
+    && (value.groupId === undefined || idValue(value.groupId))
+    && (value.participants === undefined || (Array.isArray(value.participants) && value.participants.length <= 256 && value.participants.every(participantValue)
+      && new Set(value.participants.map(item => (item as Record<string, unknown>).participantId)).size === value.participants.length))
+    && (value.controls === undefined || (Array.isArray(value.controls) && value.controls.length <= 256 && value.controls.every(participantControlValue)));
 }
 function offerValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision) && idValue(value.callerId)
@@ -169,11 +175,13 @@ function parseCallEvent(data: unknown, byteLimit = CONTROL_BYTES): CallEvent {
   switch (value.type) {
     case "hello":
       if (value.currentPendingOffer === undefined) value.currentPendingOffer = null;
+      if (value.conferenceInvitations === undefined) value.conferenceInvitations = [];
       valid = value.protocolVersion === NATIVE_CALL_PROTOCOL_VERSION && idValue(value.clientId) && object(value.capabilities)
       && Object.entries(value.capabilities).every(([key, enabled]) => idValue(key) && typeof enabled === "boolean")
       && availabilityValue(value.availability) && (value.currentOffer === null || offerValue(value.currentOffer))
       && (value.currentPendingOffer === null || pendingOfferValue(value.currentPendingOffer))
-      && (value.currentCall === null || callValue(value.currentCall)) && formatValue(value.audioFormat); break;
+      && (value.currentCall === null || callValue(value.currentCall)) && formatValue(value.audioFormat)
+      && Array.isArray(value.conferenceInvitations) && value.conferenceInvitations.length <= 16 && value.conferenceInvitations.every(invitationValue); break;
     case "command.result": valid = idValue(value.requestId) && ["accepted", "replayed", "error"].includes(String(value.status))
       && (value.callId === null || idValue(value.callId)) && (value.ownerToken === null || idValue(value.ownerToken))
       && (value.code === null || errorCode(value.code)); break;
@@ -300,6 +308,9 @@ export class NativeCallsClient {
     pcmBytes(format); return this.command({ type: "call.ready", requestId, ready, format, ...(scope ? {scope} : {}) });
   }
   dial(requestId: string, contactId: string): Promise<CallResult> { return this.command({ type: "call.dial", requestId, target: { kind: "direct", contactId }, callType: "voice" }); }
+  startConference(requestId: string, groupId: string, invitees: string[]): Promise<CallResult> { return this.command({ type: "call.dial", requestId, target: { kind: "conference", groupId, invitees }, callType: "voice" }); }
+  joinConference(requestId: string, invitationId: string, invitationRevision: number): Promise<CallResult> { return this.command({ type: "call.join", requestId, invitationId, invitationRevision }); }
+  invite(requestId: string, callId: string, contactIds: string[]): Promise<CallResult> { return this.command({ type: "call.invite", requestId, callId, contactIds }); }
   answer(requestId: string, callId: string, expectedRevision: number): Promise<CallResult> { return this.command({ type: "call.answer", requestId, callId, expectedRevision }); }
   /** Acceptance starts termination. Retain control and media transports until
    * the terminal call.state event; a lost confirmation leaves an unknown outcome. */
@@ -403,7 +414,8 @@ export class NativeCallMediaClient {
     if (value.sampleOffset !== undefined && (!Number.isSafeInteger(value.sampleOffset) || Number(value.sampleOffset) < 0)) throw new Error("Invalid media clock");
     if (value.sequence !== undefined && (!Number.isSafeInteger(value.sequence) || Number(value.sequence) < 0)) throw new Error("Invalid media sequence");
     const offset = value.sampleOffset === undefined ? this.sampleOffsets.get(track.id) ?? 0 : Number(value.sampleOffset);
-    const frame: NativeCallMediaFrame = { trackId: track.id, generation: track.generation, payload: bytes, sampleOffset: offset };
+    const frame: NativeCallMediaFrame = { trackId: track.id, generation: track.generation, payload: bytes, sampleOffset: offset,
+      ...(value.sequence === undefined ? {} : { sequence: Number(value.sequence) }) };
     this.sampleOffsets.set(track.id, offset + samples);
     if (this.observePcm) frame.receivedAtMs = performance.now();
     // A late consumer needs current PCM. Control events still fail on overflow.

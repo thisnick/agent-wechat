@@ -157,7 +157,7 @@
       "calls": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Independent voice and video permissions. Both default off; the current backend supports direct voice only.",
+        "description": "Independent voice and video permissions. Voice includes direct calls and separately configured conferences; both default off.",
         "properties": {
           "voice": {
             "type": "object",
@@ -166,7 +166,7 @@
               "enabled": {
                 "type": "boolean",
                 "default": false,
-                "description": "Enable direct voice calling. Disabled voice calls are ignored without answering or declining."
+                "description": "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining."
               },
               "inboundPolicy": {
                 "type": "string",
@@ -207,6 +207,48 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 200
+                }
+              },
+              "conferences": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "groups": {
+                    "type": "object",
+                    "maxProperties": 128,
+                    "propertyNames": {
+                      "type": "string",
+                      "pattern": "^.+@chatroom$",
+                      "maxLength": 200
+                    },
+                    "additionalProperties": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "autoJoin": {
+                          "type": "boolean",
+                          "default": false,
+                          "description": "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation."
+                        },
+                        "toolPolicy": {
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "safe-read-only",
+                            "owner"
+                          ],
+                          "default": "safe-read-only",
+                          "description": "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only."
+                        },
+                        "sessionKey": {
+                          "type": "string",
+                          "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
+                          "maxLength": 1024,
+                          "description": "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority."
+                        }
+                      }
+                    }
+                  }
                 }
               },
               "agentId": {
@@ -573,7 +615,7 @@
           "calls": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Independent voice and video permissions. Both default off; the current backend supports direct voice only.",
+            "description": "Independent voice and video permissions. Voice includes direct calls and separately configured conferences; both default off.",
             "properties": {
               "voice": {
                 "type": "object",
@@ -582,7 +624,7 @@
                   "enabled": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Enable direct voice calling. Disabled voice calls are ignored without answering or declining."
+                    "description": "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining."
                   },
                   "inboundPolicy": {
                     "type": "string",
@@ -623,6 +665,48 @@
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 200
+                    }
+                  },
+                  "conferences": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "groups": {
+                        "type": "object",
+                        "maxProperties": 128,
+                        "propertyNames": {
+                          "type": "string",
+                          "pattern": "^.+@chatroom$",
+                          "maxLength": 200
+                        },
+                        "additionalProperties": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "autoJoin": {
+                              "type": "boolean",
+                              "default": false,
+                              "description": "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation."
+                            },
+                            "toolPolicy": {
+                              "type": "string",
+                              "enum": [
+                                "none",
+                                "safe-read-only",
+                                "owner"
+                              ],
+                              "default": "safe-read-only",
+                              "description": "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only."
+                            },
+                            "sessionKey": {
+                              "type": "string",
+                              "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
+                              "maxLength": 1024,
+                              "description": "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority."
+                            }
+                          }
+                        }
+                      }
                     }
                   },
                   "agentId": {

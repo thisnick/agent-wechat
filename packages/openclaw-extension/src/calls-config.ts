@@ -7,6 +7,8 @@ type ConsultPolicy = (typeof consultPolicies)[number];
 type ConsultThinkingLevel = (typeof consultThinkingLevels)[number];
 export const callSessionScopes = ["per-contact", "per-call"] as const;
 export type CallSessionScope = (typeof callSessionScopes)[number];
+export type WeChatConferenceGroupConfig = { autoJoin?: boolean; toolPolicy?: "none" | "safe-read-only" | "owner"; sessionKey?: string };
+export type ResolvedWeChatConferenceGroupConfig = { autoJoin: boolean; toolPolicy: "none" | "safe-read-only" | "owner"; sessionKey?: string };
 
 /** Calling permissions and providers are configured independently for each type. */
 export type WeChatVoiceCallsConfig = {
@@ -16,6 +18,8 @@ export type WeChatVoiceCallsConfig = {
   outboundPolicy?: "disabled" | "allowlist";
   outboundAllowTo?: string[];
   outboundToolAllowFrom?: string[];
+  /** Exact group IDs. An empty map enables neither conference tools nor auto-join. */
+  conferences?: { groups?: Record<string, WeChatConferenceGroupConfig> };
   agentId?: string;
   realtime?: {
     provider?: string;
@@ -38,7 +42,8 @@ export type WeChatVoiceCallsConfig = {
   maxDurationSeconds?: number;
 };
 export type WeChatCallsConfig = { voice?: WeChatVoiceCallsConfig; video?: { enabled?: boolean } };
-export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfig, "realtime" | "consultation">> & {
+export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfig, "realtime" | "consultation" | "conferences">> & {
+  conferences: { groups: Record<string, ResolvedWeChatConferenceGroupConfig> };
   realtime: { provider: string; model?: string; voice?: string; instructions?: string; agentContext: { enabled: boolean };
     recentContext: { enabled: boolean; maxMessages: number };
     consultPolicy: ConsultPolicy; consultThinkingLevel?: ConsultThinkingLevel; consultFastMode?: boolean };
@@ -51,6 +56,22 @@ function names(value: unknown): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 128 || value.some(name => !identifier(name) || name === "*")) throw Error("Invalid calling allowlist");
   return [...new Set(value)];
+}
+function conferenceGroups(value: WeChatVoiceCallsConfig["conferences"], toolPolicy: ResolvedWeChatVoiceCallsConfig["toolPolicy"]): Record<string, ResolvedWeChatConferenceGroupConfig> {
+  if (value === undefined) return {};
+  if (!object(value) || Object.keys(value).some(key => key !== "groups") || (value.groups !== undefined && !object(value.groups))) throw Error("Invalid conference configuration");
+  const entries = Object.entries(value.groups ?? {});
+  if (entries.length > 128) throw Error("Too many conference groups");
+  const groups = Object.create(null) as Record<string, ResolvedWeChatConferenceGroupConfig>;
+  for (const [id, group] of entries) {
+    if (!identifier(id) || !id.endsWith("@chatroom") || !object(group) || Object.keys(group).some(key => !["autoJoin", "toolPolicy", "sessionKey"].includes(key))
+      || (group.autoJoin !== undefined && typeof group.autoJoin !== "boolean")
+      || ![undefined, "none", "safe-read-only", "owner"].includes(group.toolPolicy)
+      || (group.toolPolicy === "owner" && toolPolicy !== "owner")
+      || (group.sessionKey !== undefined && !isCallSessionKey(group.sessionKey))) throw Error("Invalid conference group policy");
+    groups[id] = { autoJoin: group.autoJoin === true, toolPolicy: toolPolicy === "none" ? "none" : group.toolPolicy ?? "safe-read-only", sessionKey: group.sessionKey };
+  }
+  return groups;
 }
 function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatVoiceCallsConfig | undefined {
   if (!value || value.enabled !== true) return undefined;
@@ -81,13 +102,14 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
   if (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 30 || maxDurationSeconds > 3600) throw Error("Invalid calling duration");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw Error("Invalid calling consultation timeout");
   if ((value.toolPolicy === "safe-read-only" || value.toolPolicy === "owner") && value.allowConsultSessionPersistence !== true) throw Error("Calling consultation requires opting in to host session persistence");
+  const toolPolicy = value.toolPolicy ?? (value.allowConsultSessionPersistence === true ? "safe-read-only" : "none");
   return bindCallVoiceSecret({ enabled: true, inboundPolicy: value.inboundPolicy ?? "disabled", inboundAllowFrom: names(value.inboundAllowFrom),
     outboundPolicy: value.outboundPolicy ?? "disabled", outboundAllowTo: names(value.outboundAllowTo), outboundToolAllowFrom: names(value.outboundToolAllowFrom),
     agentId: value.agentId, realtime: { provider: realtime.provider, model: realtime.model, voice: realtime.voice, instructions: realtime.instructions,
       agentContext: { enabled: agentContext?.enabled === true },
       recentContext: { enabled: recentContext?.enabled === true, maxMessages: recentContext?.maxMessages ?? 10 }, consultPolicy: realtime.consultPolicy ?? "auto",
       consultThinkingLevel: realtime.consultThinkingLevel, consultFastMode: realtime.consultFastMode },
-    toolPolicy: value.toolPolicy ?? (value.allowConsultSessionPersistence === true ? "safe-read-only" : "none"),
+    toolPolicy, conferences: { groups: conferenceGroups(value.conferences, toolPolicy) },
     allowConsultSessionPersistence: value.allowConsultSessionPersistence === true,
     consultation: { timeoutMs, inboundSessionKey: consultation.inboundSessionKey, summary: consultation.summary ?? true,
       recentMessages: consultation.recentMessages ?? 10 },
@@ -105,12 +127,21 @@ const nameSchema = { type: "string", minLength: 1, maxLength: 200 };
 const allowlistSchema = { type: "array", maxItems: 128, items: nameSchema };
 export const callsConfigSchema = {
   type: "object", additionalProperties: false,
-  description: "Independent voice and video permissions. Both default off; the current backend supports direct voice only.",
+  description: "Independent voice and video permissions. Voice includes direct calls and separately configured conferences; both default off.",
   properties: {
     voice: { type: "object", additionalProperties: false, properties: {
-      enabled: { type: "boolean", default: false, description: "Enable direct voice calling. Disabled voice calls are ignored without answering or declining." },
+      enabled: { type: "boolean", default: false, description: "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining." },
       inboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, inboundAllowFrom: allowlistSchema,
       outboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, outboundAllowTo: allowlistSchema, outboundToolAllowFrom: allowlistSchema,
+      conferences: { type: "object", additionalProperties: false, properties: {
+        groups: { type: "object", maxProperties: 128, propertyNames: { type: "string", pattern: "^.+@chatroom$", maxLength: 200 }, additionalProperties: {
+          type: "object", additionalProperties: false, properties: {
+            autoJoin: { type: "boolean", default: false, description: "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation." },
+            toolPolicy: { type: "string", enum: ["none", "safe-read-only", "owner"], default: "safe-read-only", description: "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only." },
+            sessionKey: { type: "string", pattern: CALL_SESSION_KEY_PATTERN, maxLength: MAX_CALL_SESSION_KEY_LENGTH, description: "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority." },
+          },
+        } },
+      } },
       agentId: nameSchema,
       realtime: { type: "object", additionalProperties: false, properties: {
         provider: { ...nameSchema, description: "Use openai. Other providers fail preflight without fallback." },

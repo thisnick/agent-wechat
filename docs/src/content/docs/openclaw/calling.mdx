@@ -4,12 +4,14 @@ description: Configure voice and video permissions, realtime speech, OpenAI cred
 ---
 
 Configure calling under `channels.agent-wechat.calls`. Voice and video each default
-to disabled. The current daemon and plugin handle direct voice calls.
+to disabled. Voice supports direct calls and separately configured conferences.
 
 ## Connect the daemon
 
 1. Finish [Quick setup](../setup/) and check `wx calls status`. The daemon must
-   advertise `directAudio: true`; see [Calling](/reference/calls/) for build options.
+   advertise `directAudio: true` for direct calls, or the corresponding
+   `conferenceJoin`, `conferenceCreate`, `conferenceInvite` and `conferenceAudio`
+   capabilities; see [Calling](/reference/calls/).
 2. Give the channel token the `calls` scope alongside its existing messaging scopes:
 
    ```bash
@@ -97,6 +99,62 @@ such as the agent that answers a group; the call itself always runs as
 Restart the Gateway after saving the configuration. An enabled, prepared voice
 service reports `available` when the daemon is free; provider or capability
 failure reports `unavailable` and leaves calls unanswered.
+
+## Conference calls
+
+Add exact group IDs under `calls.voice.conferences.groups`:
+
+```json
+{
+  "conferences": {
+    "groups": {
+      "test-group@chatroom": {
+        "autoJoin": true,
+        "toolPolicy": "safe-read-only"
+      }
+    }
+  }
+}
+```
+
+An empty map enables no conference automation or conference tool destinations.
+`autoJoin` defaults to `false`; when enabled, the plugin prepares speech before
+joining a current invitation. Direct-call allowlists remain separate.
+
+The optional `wechat_call` tool supports these additional actions:
+
+| Action | Arguments |
+| --- | --- |
+| `conference_start` | `groupId`, `contactIds: ["contact-a", "contact-b"]` |
+| `conference_join` | `groupId`; requires one current invitation and never creates a room |
+| `invite` | `contactIds`; requires this plugin's connected conference |
+| `hangup` | Leave our participation while other members remain connected |
+
+Tool requesters still need owner authorization and `outboundToolAllowFrom`.
+Starting or inviting also requires `outboundPolicy: "allowlist"` and every
+invitee in `outboundAllowTo`. Submission does not mean an invitee joined;
+`status` includes the roster and latest individual invitation results.
+
+The speech model hears a timed mix of the receive tracks and sends one room
+uplink. It converses without a name or mention gate and does not claim verified
+speaker identity. Missing sources contribute silence; late audio is discarded
+rather than building a backlog. Existing interruption handling and output silence
+fill remain active.
+
+Consultation defaults to read-only and needs the same persistence opt-in as
+direct calls. Owner consultation requires all three settings:
+
+1. `calls.voice.toolPolicy: "owner"`.
+2. This group's `toolPolicy: "owner"`.
+3. An exact `agent-wechat:test-group@chatroom` entry in OpenClaw's
+   `commands.ownerAllowFrom`.
+
+This trusts the whole group as its own principal, not an individual speaker.
+Normal agent tools and approvals still apply; changing group authority cancels
+pending consultations. The plugin does not modify the owner allowlist during calls.
+Sessions are separated by account, group and authority. An optional group
+`sessionKey` seeds a new session only from that same group's route; a tool
+requester's private direct-message session is not copied into the room.
 
 ## Models and behavior
 

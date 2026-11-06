@@ -77,6 +77,7 @@ jobs:
               - 'scripts/native-gateway-smoke.mjs'
               - 'scripts/native-smoke-plugin.mjs'
               - 'scripts/native-model-smoke.mjs'
+              - 'scripts/native-conference-model-smoke.mjs'
               - 'scripts/native-media-model-smoke.mjs'
               - 'scripts/native-history-model-smoke.mjs'
               - 'scripts/native-recall-model-smoke.mjs'
@@ -136,6 +137,7 @@ jobs:
             model|media-model) node "scripts/native-${SMOKE_SUITE}-smoke.mjs" ;;
             tools)
               node scripts/native-gateway-smoke.mjs
+              node scripts/native-conference-model-smoke.mjs
               node scripts/native-history-model-smoke.mjs
               node scripts/native-recall-model-smoke.mjs
               node scripts/native-archive-tools-smoke.mjs

@@ -17,6 +17,8 @@ class MockCallServer {
   capabilities = { directAudio: true };
   protocolVersion = 2;
   mediaProtocolVersion = 2;
+  conferenceInvitations = [];
+  currentCall = null;
   sockets = []; controls = []; media = []; owner = null; counter = 0; hold = false;
   tracks = { sendTrack: { id: 1, generation: 1, direction: 'send', format: audio }, receiveTracks: [{ id: 2, generation: 1, direction: 'receive', format: audio }] };
   result(socket, requestId, extra = {}) { queueMicrotask(() => socket.receive({ type: 'command.result', requestId, status: 'accepted', callId: null, ownerToken: null, code: null, ...extra })); }
@@ -62,7 +64,7 @@ class MockCallServer {
     queueMicrotask(() => {
       socket.open(); socket.receive({ type: 'hello', protocolVersion: this.protocolVersion, clientId: id,
         capabilities: this.capabilities,
-        availability: { busy: false, ownedByThisClient: false }, currentOffer: offer, currentCall: null, audioFormat: audio });
+        availability: { busy: false, ownedByThisClient: false }, conferenceInvitations: this.conferenceInvitations, currentOffer: offer, currentCall: this.currentCall, audioFormat: audio });
     });
     return socket;
   };
@@ -303,5 +305,41 @@ test('conference metadata does not detach the owner and media socket owns source
     const frame=(await frames.next()).value;
     assert.equal(frame.generation,2);assert.equal(frame.sampleOffset,5000);
     assert.equal(server.controls[0].readyState,1);assert.equal(server.media[0].readyState,1);
+  } finally { owner.close(); }
+});
+
+test('conference helpers use exact opaque invitations and keep submission separate from membership', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('conference-ready', true);
+    await owner.startConference('conference-create', 'group@chatroom', ['contact-a', 'contact-b']);
+    await owner.joinConference('conference-join', 'opaque-invitation', 7);
+    await owner.invite('conference-invite', 'call-1', ['contact-c']);
+    const commands = server.controls[0].sent.map(value => JSON.parse(value));
+    assert.deepEqual(commands.find(value => value.requestId === 'conference-create'), { type: 'call.dial', requestId: 'conference-create', target: { kind: 'conference', groupId: 'group@chatroom', invitees: ['contact-a', 'contact-b'] }, callType: 'voice' });
+    assert.deepEqual(commands.find(value => value.requestId === 'conference-join'), { type: 'call.join', requestId: 'conference-join', invitationId: 'opaque-invitation', invitationRevision: 7 });
+    assert.deepEqual(commands.find(value => value.requestId === 'conference-invite'), { type: 'call.invite', requestId: 'conference-invite', callId: 'call-1', contactIds: ['contact-c'] });
+  } finally { owner.close(); }
+});
+test('hello validates conference invitation and participant authority fields before commands', async () => {
+  const invitation = { invitationId: 'inv', revision: 1, groupId: 'group@chatroom', callerId: 'contact-a' };
+  for (const invalid of [null, [{ ...invitation, revision: '1' }], [{ ...invitation, groupId: null }]]) {
+    const server = new MockCallServer(); server.conferenceInvitations = invalid;
+    const owner = client(server); await assert.rejects(owner.connect(), error => error.code === 'invalid_event'); owner.close();
+  }
+  const participant = { participantId: 'a', contactId: 'contact-a', membership: 'joined' };
+  for (const participants of [[{ ...participant, microphoneEnabled: 'false' }], [participant, participant]]) {
+    const server = new MockCallServer(); server.currentCall = { ...offer, direction: 'incoming', state: 'connected', ownedByThisClient: false, kind: 'conference', groupId: 'group@chatroom', participants };
+    const owner = client(server); await assert.rejects(owner.connect(), error => error.code === 'invalid_event'); owner.close();
+  }
+});
+test('received audio preserves its independent sequence and shared presentation position', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'contact-a');
+    const media = await owner.attachMedia('call-1');
+    const frames = media.frames()[Symbol.asyncIterator]();
+    server.media[0].receive({ type: 'audio.chunk', trackId: 2, generation: 1, sequence: 91, sampleOffset: 32000, pcmBase64: 'AQACAA==' });
+    const { value } = await frames.next(); assert.equal(value.sequence, 91); assert.equal(value.sampleOffset, 32000); assert.deepEqual([...value.payload], [1, 0, 2, 0]);
   } finally { owner.close(); }
 });
