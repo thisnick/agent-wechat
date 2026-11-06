@@ -751,7 +751,7 @@ test('conference auto-join is off without an exact configured group and never an
   await manual.service.joinConference(conferenceGroup, { assertCurrent() {} }); await until(() => manual.client.attaches === 1);
   assert.equal(manual.client.joins, 1); assert.equal(manual.client.answers, 0);
   assert.equal(manual.voice.state.contexts[0].senderId, conferenceGroup);
-  assert.deepEqual(manual.voice.state.contexts[0].conference, { groupId: conferenceGroup }); await manual.service.stop();
+  assert.deepEqual(manual.voice.state.contexts[0].conference, { groupId: conferenceGroup, inviterId: conferenceInvitation.callerId, policyAtAdmission: "none" }); await manual.service.stop();
 });
 test('an admitted conference mixes simultaneous tracks once, updates mute and source lifecycle, and leaves without dismissing the room', async () => {
   const { service, client, voice } = await conferenceFixture(true);
@@ -858,4 +858,14 @@ test("conference context keeps its inviter, coalesces joins/leaves and stops upd
   await delay(20); await service.end(); await delay(280);
   assert.equal(voice.state.updates.length, 2);
   assert.equal(client.clears, 0);
+});
+
+test("manual conference admission fences a changed inviter even at the same invitation revision", async t => {
+  const { service, client, voice } = await conferenceFixture(); t.after(() => service.stop());
+  let release!: () => void; voice.state.opening = new Promise(resolve => { release = resolve; });
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] }); await delay(5);
+  const joining = service.joinConference(conferenceGroup, { assertCurrent() {} });
+  await until(() => voice.state.opens === 1);
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [{ ...conferenceInvitation, callerId: "changed-inviter" }] });
+  await delay(5); release(); await assert.rejects(joining, /not admitted/); assert.equal(client.joins, 0);
 });

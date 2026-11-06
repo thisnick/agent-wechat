@@ -167,6 +167,27 @@ Sessions are separated by account, group and authority. An optional group
 `sessionKey` seeds a new session only from that same group's route; a tool
 requester's private direct-message session is not copied into the room.
 
+To use owner tools only when an owner invited the bot, keep the group's default
+read-only and add `ownerInviterToolPolicy`:
+
+```json
+{
+  "autoJoin": true,
+  "toolPolicy": "safe-read-only",
+  "ownerInviterToolPolicy": "owner"
+}
+```
+
+The authenticated inviter must have an exact `agent-wechat:CONTACT_ID` entry in
+`commands.ownerAllowFrom`; voice-level owner policy and the group's host owner
+grant are also required. Other invitations use `toolPolicy`. Leaving out
+`autoJoinAllowFrom` admits any inviter for this configured group. The override
+trusts everyone in that call, including later joiners, and stays in effect if the
+inviter leaves. Permissions can decrease during a call; increases require a new
+call. Status reports the inviter and effective policy. Owner and read-only calls
+use separate sessions and recaps; old conference recaps without a known permission
+level are not reused.
+
 ## Models and behavior
 
 All paths below are relative to `calls.voice`.

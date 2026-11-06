@@ -77,3 +77,56 @@ test('group consultation needs both exact grants, uses the group principal and i
   await delay(40); assert.equal(spoken.length, 2, 'a revoked owner result must not be spoken'); assert.equal(session.binding?.().owner, false);
   assert.notEqual(session.binding?.().sessionKey, request.ctx.SessionKey); await session.close();
 });
+
+test('owner inviter policy binds to the invitation, rechecks revocation and cannot rise again within the call', async () => {
+  const path: string = 'openclaw/plugin-sdk/realtime-voice'; const sdk = await import(path);
+  const voice = { enabled: true, agentId: 'main', toolPolicy: 'owner' as const, allowConsultSessionPersistence: true,
+    realtime: { provider: 'openai' }, conferences: { groups: { [groupId]: { toolPolicy: 'safe-read-only' as const, ownerInviterToolPolicy: 'owner' as 'owner' | 'none' } } } };
+  const cfg = { commands: { ownerAllowFrom: ['agent-wechat:trusted', `agent-wechat:${groupId}`] }, channels: { 'agent-wechat': { enabled: true,
+    native: { mode: 'external', accountId: 'a', endpoint: 'http://127.0.0.1:6174', token: 'synthetic-token-'.repeat(4), consumerStateDir: '/synthetic/consumer' }, calls: { voice } } } };
+  let bridge: any, evaluate: any, hold: Promise<void> | undefined; let clears = 0;
+  const dispatches: any[] = [], spoken: string[] = [];
+  const runtime = { config: { current: () => cfg }, channel: { reply: {
+    finalizeInboundContext: (ctx: any) => ctx,
+    dispatchReplyWithBufferedBlockDispatcher: async (params: any) => {
+      dispatches.push(params); params.replyOptions.onAgentRunStart(); await hold;
+      await params.dispatcherOptions.deliver({ text: 'synthetic result' }, { kind: 'final' }); params.replyOptions.onAgentRunTerminalOutcome('completed');
+    },
+  } }, agent: { session: { resolveStorePath: () => '/synthetic/store', getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
+  installCallConsultAuthority({ runtime, registerTrustedToolPolicy(policy: any) { evaluate = policy.evaluate; } } as unknown as OpenClawPluginApi);
+  const prepared = await prepareOpenClawCallVoice(resolveWeChatCallsConfig({ voice })!.voice!, cfg, runtime, {
+    voiceSdk: { ...sdk, resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: 'openai', createBridge() {} }, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true } }),
+      createRealtimeVoiceBridgeSession: (params: any) => { bridge = params; return { bridge: { isConnected: () => true, outputAudioMode: 'response' }, connect: async () => params.onReady(), sendAudio() {}, setMediaTimestamp() {}, close() {}, sendUserMessage: (text: string) => spoken.push(text), submitToolResult() {} }; },
+    }, audioSdk: { createStreamingPcmResampler() {} },
+  });
+  const open = (inviterId?: string) => prepared.open({ audio() {}, clear() { clears++; }, failed() {} },
+    { senderId: groupId, conference: { groupId, inviterId }, channelAccountId: 'default', nativeAccountId: 'a', signal: new AbortController().signal, connectedPeer: () => groupId });
+  const consult = (id: string) => bridge.onToolCall({ name: sdk.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId: id, args: { question: 'Synthetic lookup' } });
+  let session = await open('trusted'); assert.equal(session.binding!().toolPolicy, 'owner'); assert.equal(session.binding!().policyReason, 'owner_inviter');
+  await consult('owner'); await until(() => spoken.length === 1);
+  const ownerSession = session.binding!().sessionKey;
+  assert.equal(dispatches[0].replyOptions.toolsAllow, undefined); assert.equal(dispatches[0].ctx.SenderId, groupId);
+  await session.close();
+  for (const inviter of ['other', undefined]) {
+    session = await open(inviter); assert.equal(session.binding!().owner, false);
+    assert.notEqual(session.binding!().sessionKey, ownerSession);
+    await consult(`readonly-${inviter}`); await until(() => dispatches.length === (inviter ? 2 : 3));
+    assert.ok(dispatches.at(-1).replyOptions.toolsAllow.includes('read'));
+    await until(() => spoken.length === dispatches.length); await session.close();
+  }
+  session = await open('trusted'); let release!: () => void; hold = new Promise(resolve => { release = resolve; });
+  await consult('revoking'); await until(() => dispatches.length === 4);
+  const run = dispatches.at(-1).replyOptions.runId;
+  cfg.commands.ownerAllowFrom = [`agent-wechat:${groupId}`];
+  assert.equal(evaluate({ runId: run }, { runId: run, sessionKey: ownerSession }).block, true);
+  release(); await delay(40); assert.equal(spoken.length, 3); assert.ok(clears > 0);
+  assert.equal(session.binding!().toolPolicy, 'safe-read-only'); assert.equal(session.binding!().summaryAllowed, false);
+  cfg.commands.ownerAllowFrom.push('agent-wechat:trusted');
+  assert.equal(session.binding!().toolPolicy, 'safe-read-only', 'restoring owner status cannot upgrade this call');
+  assert.equal(session.binding!().owner, false); await session.close();
+  session = await open('trusted'); assert.equal(session.binding!().owner, true); await session.close();
+  voice.conferences.groups[groupId].ownerInviterToolPolicy = 'none';
+  session = await open('trusted'); assert.equal(session.binding!().toolPolicy, 'none');
+  assert.deepEqual(bridge.tools, []); voice.conferences.groups[groupId].ownerInviterToolPolicy = 'owner';
+  assert.equal(session.binding!().toolPolicy, 'none'); await session.close();
+});
