@@ -7,13 +7,33 @@ import {
   type DesktopSettings,
 } from "./desktop.ts";
 import type { Connection } from "./connection.ts";
+import { syncDesktopLocale, t, useLocale, type Locale } from "./i18n.ts";
 import { Welcome } from "./ui.tsx";
 const message = (error: unknown) =>
   typeof error === "string"
     ? error
     : error instanceof Error
     ? error.message
-    : "The operation could not be completed.";
+    : t("The operation could not be completed.", "无法完成该操作。");
+function translateNotificationStatus(status?: string): string {
+  switch (status) {
+    case "Listening for new messages":
+      return t("Listening for new messages", "正在监听新消息");
+    case "Waiting for the hub":
+      return t("Waiting for the hub", "正在等待 Hub");
+    case "Connect to a hub to receive notifications":
+      return t(
+        "Connect to a hub to receive notifications",
+        "连接 Hub 后即可接收通知",
+      );
+    case "Notifications off":
+      return t("Notifications off", "通知已关闭");
+    default:
+      return (
+        status || t("New messages in unmuted chats.", "未静音会话中的新消息。")
+      );
+  }
+}
 export function DesktopWelcome({
   onConnect,
   error: initialError,
@@ -21,6 +41,7 @@ export function DesktopWelcome({
   onConnect: (connection: Connection) => void;
   error: string;
 }) {
+  useLocale();
   const [settings, setSettings] = useState<DesktopSettings | null>(null);
   const [mode, setMode] = useState<"choose" | "remote" | "settings">("choose");
   const [error, setError] = useState(initialError),
@@ -35,6 +56,7 @@ export function DesktopWelcome({
     let cancelled = false;
     void desktopInvoke<DesktopSettings>("desktop_settings")
       .then((value) => {
+        syncDesktopLocale(value.language);
         if (!cancelled) setSettings(value);
       })
       .catch((error) => {
@@ -70,11 +92,11 @@ export function DesktopWelcome({
     return (
       <Welcome simulator={false}>
         <div className="welcome-heading">
-          <h1>Desktop settings</h1>
+          <h1>{t("Desktop settings", "桌面设置")}</h1>
         </div>
         <DesktopPreferences onConnection={onConnect} manageLocal />
         <button className="secondary" onClick={() => setMode("choose")}>
-          Back
+          {t("Back", "返回")}
         </button>
       </Welcome>
     );
@@ -82,12 +104,20 @@ export function DesktopWelcome({
     <Welcome simulator={false}>
       <div className="welcome-heading">
         <h1>
-          {mode === "remote" ? "Connect to a hub" : "Welcome to AgentWechat"}
+          {mode === "remote"
+            ? t("Connect to a hub", "连接到 Hub")
+            : t("Welcome to AgentWechat", "欢迎使用 AgentWechat")}
         </h1>
         <p>
           {mode === "remote"
-            ? "Save this connection in your system keyring."
-            : "Use this device, or connect to an existing agent-wechat hub."}
+            ? t(
+                "Save this connection in your system keyring.",
+                "将此连接保存在系统密钥环中。",
+              )
+            : t(
+                "Use this device, or connect to an existing agent-wechat hub.",
+                "使用此设备，或连接到现有的 agent-wechat Hub。",
+              )}
         </p>
       </div>
       {mode === "choose" ? (
@@ -97,14 +127,14 @@ export function DesktopWelcome({
             disabled={busy}
             onClick={() => void open("desktop_local")}
           >
-            {busy ? "Opening…" : "Use this device"}
+            {busy ? t("Opening…", "正在打开…") : t("Use this device", "使用此设备")}
           </button>
           <button
             className="secondary"
             disabled={busy}
             onClick={() => setMode("remote")}
           >
-            Connect to another hub
+            {t("Connect to another hub", "连接到其他 Hub")}
           </button>
           {settings?.connections
             .filter((connection) => !connection.local)
@@ -122,13 +152,13 @@ export function DesktopWelcome({
               </button>
             ))}
           <button className="text-button" onClick={() => setMode("settings")}>
-            Desktop settings
+            {t("Desktop settings", "桌面设置")}
           </button>
         </div>
       ) : (
         <form onSubmit={remote} className="desktop-form">
           <label>
-            Connection name
+            {t("Connection name", "连接名称")}
             <input
               required
               value={name}
@@ -137,7 +167,7 @@ export function DesktopWelcome({
             />
           </label>
           <label>
-            Hub address
+            {t("Hub address", "Hub 地址")}
             <input
               required
               type="url"
@@ -147,7 +177,7 @@ export function DesktopWelcome({
             />
           </label>
           <label>
-            Access key
+            {t("Access key", "访问密钥")}
             <input
               required
               type="password"
@@ -158,13 +188,15 @@ export function DesktopWelcome({
           </label>
           {https && (
             <details className="desktop-certificate">
-              <summary>Advanced</summary>
+              <summary>{t("Advanced", "高级选项")}</summary>
               <p>
-                Most hubs need no extra certificate. For a hub using a private
-                certificate, paste the PEM certificate supplied by its owner.
+                {t(
+                  "Most hubs need no extra certificate. For a hub using a private certificate, paste the PEM certificate supplied by its owner.",
+                  "大多数 Hub 无需额外证书。若 Hub 使用私有证书，请粘贴其管理员提供的 PEM 证书。",
+                )}
               </p>
               <label>
-                Private certificate (optional)
+                {t("Private certificate (optional)", "私有证书（可选）")}
                 <textarea
                   value={certificate}
                   onChange={(event) => setCertificate(event.target.value)}
@@ -175,7 +207,7 @@ export function DesktopWelcome({
             </details>
           )}
           <button className="continue-button" disabled={busy}>
-            {busy ? "Connecting…" : "Connect"}
+            {busy ? t("Connecting…", "正在连接…") : t("Connect", "连接")}
           </button>
           <button
             type="button"
@@ -187,7 +219,7 @@ export function DesktopWelcome({
               setMode("choose");
             }}
           >
-            Back
+            {t("Back", "返回")}
           </button>
         </form>
       )}
@@ -208,6 +240,7 @@ export function DesktopPreferences({
   onDisconnect?: () => void;
   manageLocal?: boolean;
 }) {
+  const [locale, setLocale] = useLocale();
   const [settings, setSettings] = useState<DesktopSettings | null>(null),
     [error, setError] = useState("");
   const [busy, setBusy] = useState(false),
@@ -220,6 +253,7 @@ export function DesktopPreferences({
     [autostart, setAutostart] = useState(false);
   async function refresh() {
     const value = await desktopInvoke<DesktopSettings>("desktop_settings");
+    syncDesktopLocale(value.language);
     setSettings(value);
     setLocalPort(value.localPort);
     setNetworkPort(value.networkPort);
@@ -251,7 +285,7 @@ export function DesktopPreferences({
         { settings: { localPort, networkPort, networkEnabled: network } },
       );
       await refresh();
-      setNotice("Saved");
+      setNotice(t("Saved", "已保存"));
       if (session && onConnection) onConnection(await desktopConnect(session));
     });
   }
@@ -262,17 +296,30 @@ export function DesktopPreferences({
     : settings?.active;
   return (
     <div className="desktop-preferences">
+      {manageLocal && (
+        <div className="setting">
+          <span>{t("Language", "语言")}</span>
+          <select
+            aria-label={t("Language", "语言")}
+            value={locale}
+            onChange={(event) => setLocale(event.target.value as Locale)}
+          >
+            <option value="en">English</option>
+            <option value="zh-CN">简体中文</option>
+          </select>
+        </div>
+      )}
       <DesktopUpdates />
       <div className="setting">
         <span>
-          Message notifications
+          {t("Message notifications", "消息通知")}
           <small>
-            {settings?.notificationStatus || "New messages in unmuted chats."}
+            {translateNotificationStatus(settings?.notificationStatus)}
           </small>
         </span>
         <input
           type="checkbox"
-          aria-label="Message notifications"
+          aria-label={t("Message notifications", "消息通知")}
           checked={settings?.notificationsEnabled ?? true}
           disabled={busy || !settings}
           onChange={(event) => {
@@ -286,10 +333,10 @@ export function DesktopPreferences({
         />
       </div>
       <div className="setting">
-        <span>Notification sound</span>
+        <span>{t("Notification sound", "提示音")}</span>
         <input
           type="checkbox"
-          aria-label="Notification sound"
+          aria-label={t("Notification sound", "提示音")}
           checked={settings?.notificationSoundEnabled ?? true}
           disabled={busy || !settings}
           onChange={(event) => {
@@ -302,7 +349,7 @@ export function DesktopPreferences({
         />
       </div>
       <div className="setting">
-        <span>Open at login</span>
+        <span>{t("Open at login", "开机自启")}</span>
         <input
           type="checkbox"
           checked={autostart}
@@ -322,8 +369,13 @@ export function DesktopPreferences({
         <form className="desktop-form" onSubmit={save}>
           <div className="setting">
             <span>
-              Allow network connections
-              <small>HTTPS access for other devices using an access key.</small>
+              {t("Allow network connections", "允许局域网连接")}
+              <small>
+                {t(
+                  "HTTPS access for other devices using an access key.",
+                  "允许其他设备使用访问密钥通过 HTTPS 连接。",
+                )}
+              </small>
             </span>
             <input
               type="checkbox"
@@ -333,10 +385,10 @@ export function DesktopPreferences({
             />
           </div>
           <details>
-            <summary>Connection ports</summary>
+            <summary>{t("Connection ports", "连接端口")}</summary>
             <div className="desktop-port-fields">
               <label>
-                Local
+                {t("Local", "本地")}
                 <input
                   type="number"
                   min={1024}
@@ -347,7 +399,7 @@ export function DesktopPreferences({
                 />
               </label>
               <label>
-                Network
+                {t("Network", "局域网")}
                 <input
                   type="number"
                   min={1024}
@@ -362,7 +414,7 @@ export function DesktopPreferences({
             </div>
           </details>
           <button className="secondary" disabled={busy}>
-            {busy ? "Applying…" : "Apply"}
+            {busy ? t("Applying…", "正在应用…") : t("Apply", "应用")}
           </button>
         </form>
       )}
@@ -375,20 +427,22 @@ export function DesktopPreferences({
             className="text-button"
             onClick={() => setShowCertificate(!showCertificate)}
           >
-            {showCertificate ? "Hide certificate" : "Show certificate"}
+            {showCertificate
+              ? t("Hide certificate", "隐藏证书")
+              : t("Show certificate", "显示证书")}
           </button>
           {showCertificate && (
             <textarea
               readOnly
               value={settings.certificate ?? ""}
-              aria-label="Hub certificate"
+              aria-label={t("Hub certificate", "Hub 证书")}
             />
           )}
         </div>
       )}
       {credentialId && (
         <div className="setting desktop-access-key">
-          <span>Access key</span>
+          <span>{t("Access key", "访问密钥")}</span>
           <button
             className="secondary"
             disabled={busy}
@@ -404,14 +458,14 @@ export function DesktopPreferences({
                 );
             }}
           >
-            {revealed ? "Hide" : "Show"}
+            {revealed ? t("Hide", "隐藏") : t("Show", "显示")}
           </button>
           {revealed && (
             <>
               <input
                 readOnly
                 value={revealed}
-                aria-label="Access key"
+                aria-label={t("Access key", "访问密钥")}
                 autoComplete="off"
               />
               <button
@@ -421,11 +475,11 @@ export function DesktopPreferences({
                     await desktopInvoke("desktop_copy_key", {
                       id: credentialId,
                     });
-                    setNotice("Copied");
+                    setNotice(t("Copied", "已复制"));
                   })
                 }
               >
-                Copy
+                {t("Copy", "复制")}
               </button>
             </>
           )}
@@ -442,16 +496,19 @@ export function DesktopPreferences({
                   id: credentialId,
                 })
               )
-                setNotice("Exported a protected token file");
+                setNotice(
+                  t("Exported a protected token file", "已导出受保护的密钥文件"),
+                );
             })
           }
         >
-          Export key for CLI
+          {t("Export key for CLI", "导出 CLI 密钥")}
         </button>
       )}
       <div className="setting">
         <span>
-          Command-line tool<small>{settings?.cliPath}</small>
+          {t("Command-line tool", "命令行工具")}
+          <small>{settings?.cliPath}</small>
         </span>
         <button
           className="secondary"
@@ -462,12 +519,16 @@ export function DesktopPreferences({
             )
           }
         >
-          Install wx
+          {t("Install wx", "安装 wx")}
         </button>
       </div>
       <p className="desktop-help">
-        Independent CLI connections use a protected token file. Copy an access
-        key and configure the server with <code>wx config servers add</code>.
+        {t(
+          "Independent CLI connections use a protected token file. Copy an access key and configure the server with ",
+          "独立 CLI 连接使用受保护的密钥文件。复制访问密钥并通过 ",
+        )}
+        <code>wx config server add</code>
+        {t(".", " 配置服务器。")}
       </p>
       {settings?.connections
         .filter((connection) => !connection.local)
@@ -488,7 +549,7 @@ export function DesktopPreferences({
                 })
               }
             >
-              Forget
+              {t("Forget", "移除")}
             </button>
           </div>
         ))}

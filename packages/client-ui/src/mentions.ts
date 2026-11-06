@@ -1,4 +1,5 @@
 import type { NativeGroup, TextMentions } from "@agent-wechat/shared";
+import { t } from "./i18n.ts";
 
 export type MentionToken = {
   userId: string | null;
@@ -20,13 +21,13 @@ export function canMentionAll(group: NativeGroup | null, thread: string | null):
 export function allMentionProblem(group: NativeGroup | null, thread: string | null): string {
   if (canMentionAll(group, thread)) return "";
   return group?.id === thread && group.canMentionAll === false
-    ? "You can’t mention everyone in this group."
-    : "Group permissions are unavailable. Refresh the group before mentioning everyone.";
+    ? t("You can’t mention everyone in this group.", "你无法在此群聊中提及所有人。")
+    : t("Group permissions are unavailable. Refresh the group before mentioning everyone.", "群权限暂不可用，请先刷新群聊后再提及所有人。");
 }
 
 /** Remove only selected Everyone spans; retain the authored body and other tokens. */
 export function removeAllMentions(text: string, tokens: MentionToken[]): { text: string; tokens: MentionToken[] } {
-  if (!validMentionTokens(text, tokens)) throw new Error("Choose the mentioned members again.");
+  if (!validMentionTokens(text, tokens)) throw new Error(t("Choose the mentioned members again.", "请重新选择要提及的群成员。"));
   let removed = 0, offset = 0, output = "";
   const kept: MentionToken[] = [];
   for (const token of tokens) {
@@ -59,9 +60,9 @@ export function validMentionTokens(text: string, value: unknown): value is Menti
 }
 
 export function mentionOptions(text: string, tokens: MentionToken[]): TextMentions | undefined {
-  if (!validMentionTokens(text, tokens)) throw new Error("Choose the mentioned members again.");
+  if (!validMentionTokens(text, tokens)) throw new Error(t("Choose the mentioned members again.", "请重新选择要提及的群成员。"));
   if (!tokens.length) return undefined;
-  if (new TextEncoder().encode(text).length > 65536 || text.includes("\0")) throw new Error("Message is too long or contains unsupported characters.");
+  if (new TextEncoder().encode(text).length > 65536 || text.includes("\0")) throw new Error(t("Message is too long or contains unsupported characters.", "消息过长或包含不支持的字符。"));
   const ids = [...new Set(tokens.flatMap(token => token.userId === null ? [] : [token.userId]))];
   return {
     ...(ids.length ? { userIds: ids } : { all: true }),

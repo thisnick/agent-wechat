@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from "react";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import { embeddedQuotePreview, localQuote } from "./quote-preview.ts";
 import { MediaCard } from "./media.tsx";
 import { SharedLink } from "./shared-link.tsx";
@@ -16,6 +17,7 @@ export function QuotedReply({
   connection: Connection;
   name: (id: string) => string;
 }) {
+  useLocale();
   const state = useSyncExternalStore(
     connection.session.subscribe,
     connection.session.snapshot,
@@ -37,11 +39,11 @@ export function QuotedReply({
   return (
     <blockquote
       className="quote-preview"
-      aria-label="Quoted message"
+      aria-label={t("Quoted message", "引用消息")}
       role={canJump ? "button" : undefined}
       tabIndex={canJump ? 0 : undefined}
       aria-busy={jumping || undefined}
-      title={canJump ? "Go to quoted message" : undefined}
+      title={canJump ? t("Go to quoted message", "跳转到引用消息") : undefined}
       onClick={canJump ? () => void jump() : undefined}
       onKeyDown={(event) => {
         if (canJump && ["Enter", " "].includes(event.key)) {
@@ -52,10 +54,10 @@ export function QuotedReply({
     >
       <strong>
         {quote.own
-          ? "You"
+          ? t("You", "我")
           : quote.senderId
           ? name(quote.senderId)
-          : "Quoted message"}
+          : t("Quoted message", "引用消息")}
       </strong>
       {quote.content?.link ? (
         <SharedLink message={quote.content} connection={connection} compact />
@@ -71,8 +73,11 @@ export function QuotedReply({
       {(jumping || jumpFailed) && (
         <small role="status">
           {jumping
-            ? "Finding message…"
-            : "Message isn’t in this chat’s history."}
+            ? t("Finding message…", "正在查找消息…")
+            : t(
+                "Message isn’t in this chat’s history.",
+                "该消息不在此会话的聊天记录中。",
+              )}
         </small>
       )}
     </blockquote>

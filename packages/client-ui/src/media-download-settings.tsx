@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import { readableError } from "./session.ts";
 
 const MB = 1024 * 1024;
@@ -11,6 +12,7 @@ export function MediaDownloadSettings({
   connection: Connection;
   account: string;
 }) {
+  useLocale();
   const id = useId();
   const active = useRef(new AbortController());
   const [saved, setSaved] = useState<number>();
@@ -60,7 +62,7 @@ export function MediaDownloadSettings({
             if (lifetime.signal.aborted) return;
             setSaved(settings.autoDownloadMaxBytes);
             setLimit(String(settings.autoDownloadMaxBytes / MB));
-            setNotice("Saved.");
+            setNotice(t("Saved.", "已保存。"));
             connection.incomingMedia.refreshAccount(account);
           })
           .catch((error) => {
@@ -71,9 +73,9 @@ export function MediaDownloadSettings({
           });
       }}
     >
-      <label htmlFor={id}>Automatic downloads</label>
+      <label htmlFor={id}>{t("Automatic downloads", "自动下载")}</label>
       <div className="media-limit-setting">
-        <span>Up to</span>
+        <span>{t("Up to", "上限")}</span>
         <input
           id={id}
           type="number"
@@ -91,11 +93,14 @@ export function MediaDownloadSettings({
           className="secondary"
           disabled={busy || !valid || saved === undefined || bytes === saved}
         >
-          {busy ? "Saving…" : "Save"}
+          {busy ? t("Saving…", "正在保存…") : t("Save", "保存")}
         </button>
       </div>
       <small id={`${id}-help`}>
-        On agent-wechat hub. Thumbnails and voice notes always download.
+        {t(
+          "On agent-wechat hub. Thumbnails and voice notes always download.",
+          "在 agent-wechat Hub 上生效。缩略图和语音消息始终自动下载。",
+        )}
       </small>
       {notice && <small role="status">{notice}</small>}
     </form>

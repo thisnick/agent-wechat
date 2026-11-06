@@ -3,6 +3,7 @@ import type { MediaAsset, NativeMessage } from "@agent-wechat/shared";
 import { Link2, ArrowUpRight } from "lucide-react";
 import { sharedLinkTarget } from "./shared-link-target.ts";
 import type { Connection } from "./connection.ts";
+import { t, useLocale } from "./i18n.ts";
 import { cachedVariant } from "./media-variants.ts";
 import { mediaPreviewIdentity } from "./media-preview-cache.ts";
 import { useVisible } from "./visible.tsx";
@@ -18,6 +19,7 @@ export function SharedLink({
   connection: Connection;
   compact?: boolean;
 }) {
+  useLocale();
   const link = message.link!;
   const { element, visible } = useVisible<HTMLSpanElement>();
   const opening = useSyncExternalStore(
@@ -36,7 +38,8 @@ export function SharedLink({
     if (visible && !opening && thumbnail) model.ensure(thumbnail);
   }, [model, visible, opening, thumbnail]);
   const target = sharedLinkTarget(link.url);
-  const title = link.title?.trim() || target?.host || "Shared link";
+  const title =
+    link.title?.trim() || target?.host || t("Shared link", "分享的链接");
   const content = (
     <>
       <span className="shared-link-art" ref={element} aria-hidden="true">
@@ -50,10 +53,12 @@ export function SharedLink({
         <span className="shared-link-source">
           <span>
             {message.appMessageType === 51
-              ? `WeChat Channels${
+              ? `${t("WeChat Channels", "微信视频号")}${
                   link.sourceName ? ` · ${link.sourceName}` : ""
                 }`
-              : target?.host || link.sourceName || "Shared link"}
+              : target?.host ||
+                link.sourceName ||
+                t("Shared link", "分享的链接")}
           </span>
           {!compact && target && <ArrowUpRight aria-hidden="true" size={14} />}
         </span>
@@ -70,7 +75,10 @@ export function SharedLink({
       href={target.href}
       target="_blank"
       rel="noopener noreferrer"
-      aria-label={`Open ${title} (${target.host})`}
+      aria-label={t(
+        `Open ${title} (${target.host})`,
+        `打开 ${title} (${target.host})`,
+      )}
     >
       {content}
     </a>

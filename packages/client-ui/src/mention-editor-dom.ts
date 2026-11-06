@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import { MENTION_SEPARATOR, type MentionToken } from "./mentions.ts";
 
 export type EditorToken = MentionToken & { node: HTMLElement };
@@ -81,7 +82,7 @@ export function mentionNode(token: MentionToken, remove: (node: HTMLElement) => 
   node.dataset.mentionId = token.userId ?? ""; node.dataset.mentionLabel = token.label;
   const name = document.createElement("span"); name.textContent = `@${token.label}${MENTION_SEPARATOR}`;
   const button = document.createElement("button"); button.type = "button"; button.className = "inline-mention-remove";
-  button.setAttribute("aria-label", `Remove mention of ${token.label}`); button.textContent = "×";
+  button.setAttribute("aria-label", t(`Remove mention of ${token.label}`, `移除对 ${token.label} 的提及`)); button.textContent = "×";
   button.onpointerdown = event => event.preventDefault();
   button.onclick = event => { event.preventDefault(); event.stopPropagation(); remove(node); };
   node.append(name, button); return node;
