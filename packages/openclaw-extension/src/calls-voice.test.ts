@@ -51,9 +51,11 @@ test("installed host bridge and streaming resampler work with an account-free fa
   let providerRequest: any; let bridgeParams: any; const input: Buffer[] = []; let closed = 0; let connected = false;
   const fake = { id: "openai", createBridge(request: any) { providerRequest = request; return {
     connect: async () => { connected = true; request.onReady(); }, isConnected: () => connected, outputAudioMode: "response",
+    sendUserMessage: (text: string) => spoken.push(text),
     sendAudio: (value: Buffer) => input.push(value), setMediaTimestamp() {}, acknowledgeMark() {}, submitToolResult() {},
     close: () => { closed++; connected = false; },
   }; } };
+  const spoken: string[] = [];
   let resolved = 0; let selection: any;
   const customized = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: "agent", realtime: {
     provider: "openai", model: "synthetic-realtime", voice: "synthetic-voice", instructions: "Use short sentences.", consultPolicy: "always",
@@ -102,7 +104,7 @@ test("a continuous model streams without the consult tool and delegates through 
   let request: any; let selection: any; let outputAudioMode = "continuous";
   const fake = { id: "openai", createBridge(params: any) { request = params; let connected = false; return {
     connect: async () => { connected = true; params.onReady(); }, isConnected: () => connected, outputAudioMode, pacesInputAudio: true,
-    sendAudio() {}, setMediaTimestamp() {}, close: () => { connected = false; },
+    sendUserMessage() {}, sendAudio() {}, setMediaTimestamp() {}, close: () => { connected = false; },
   }; } };
   const { dispatches, reply } = fakeReply(async ({ replyOptions }) => { replyOptions.onAgentRunStart(); return "Synthetic delegated result"; });
   const runtime = { channel: { reply }, agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
@@ -172,7 +174,7 @@ test("opted-in default-agent voice profile uses only bounded identity and person
     createRealtimeVoiceBridgeSession(args: any) {
       instructions = args.instructions;
       return { bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(),
-        sendAudio() {}, setMediaTimestamp() {}, close() {} };
+        sendUserMessage() {}, sendAudio() {}, setMediaTimestamp() {}, close() {} };
     },
     resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai", createBridge() {} }, providerConfig: {},
       capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true } }),

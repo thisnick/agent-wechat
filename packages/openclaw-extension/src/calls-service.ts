@@ -8,6 +8,7 @@ import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
 import { CallPcmMixer } from "./calls-mixer.ts";
+import { CallContextTracker, resolveCallIdentity, resolveCallParticipant } from "./calls-context.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
 import { callerChatSessionKey, resolveDialingSession, type CallParentSession } from "./calls-session.ts";
@@ -32,6 +33,7 @@ export type CallServiceDependencies = {
   summaries?: CallSummaryStore;
 };
 type Owned = { key: string; peer: string; groupId?: string; direction: "incoming" | "outgoing"; transcript: CallTranscript; connectedAt?: number; binding?: CallBinding; summarized?: boolean;
+  context: CallContextTracker; inviterId?: string; contextTimer?: ReturnType<typeof setTimeout>; contextReady?: boolean; nameRequests: Set<string>;
   inputTimer?: ReturnType<typeof setInterval>; invitationResults?: Extract<CallEvent, { type: "call.invitation_result" }>;
   callId?: string; parentSession?: CallParentSession; call?: CallView; claimed: boolean; submitted: boolean; abort: AbortController; retired: boolean; attaching: boolean; endStarted: boolean;
   ready: boolean; incomingReadinessAttempted: boolean; claiming: boolean; candidateRevision?: number; offered?: CallOffer; voice?: CallVoiceSession; media?: CallMediaPort; output?: CallPcmOutput; trace?: CallAudioTrace; timer?: ReturnType<typeof setTimeout>; endTimer?: ReturnType<typeof setTimeout>; voiceClosing?: Promise<void> };
@@ -204,7 +206,9 @@ export class NativeCallService {
             if (active.callId === event.call.callId && event.call.state !== "offered") { await this.retire(active); this.state = event.call.state === "ended" ? "available" : "busy"; }
             continue;
           }
+          if (active.call && event.call.revision < active.call.revision) continue;
           active.callId = event.call.callId; active.call = event.call;
+          active.context.applySnapshot(event.call); this.scheduleCallContext(active);
           if (event.call.state === "connected") active.connectedAt ??= Date.now();
           if (["ending", "ended", "uncertain"].includes(event.call.state)) {
             active.output?.close(); active.media?.stopAudio(); this.stopVoice(active);
@@ -222,6 +226,7 @@ export class NativeCallService {
           if (call?.callId === event.callId && event.revision >= call.revision) {
             call.revision = event.revision;
             call.participants = [...(call.participants ?? []).filter(member => member.participantId !== event.participant.participantId), event.participant];
+            this.active!.context.applyParticipant(event.revision, event.participant); this.scheduleCallContext(this.active!);
           }
         } else if (event.type === "call.invitation_result") {
           if (this.active?.callId === event.callId) this.active.invitationResults = event;
@@ -290,8 +295,10 @@ export class NativeCallService {
       if (active.offered) void this.claim(active, active.offered, started);
     } catch (error) { await this.claimFailed(active, error, stage, started); }
   }
-  private reserve(peer: string, direction: Owned["direction"], callId?: string, groupId?: string): Owned {
-    const active: Owned = { key: randomUUID(), peer, groupId, direction, transcript: new CallTranscript(), callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
+  private reserve(peer: string, direction: Owned["direction"], callId?: string, groupId?: string, inviterId?: string): Owned {
+    const context = new CallContextTracker({ direction, ...(groupId ? { conference: { groupId, name: groupId,
+      ...(inviterId ? { inviter: { contactId: inviterId, name: inviterId } } : {}) } } : { remote: { contactId: peer, name: peer } }) });
+    const active: Owned = { key: randomUUID(), peer, groupId, inviterId, context, nameRequests: new Set(), direction, transcript: new CallTranscript(), callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
     this.active = active; this.state = "preparing"; return active;
   }
   /** What a call starts with: a recap for the voice model (earlier call summaries and the
@@ -317,8 +324,18 @@ export class NativeCallService {
   }
   private async openVoice(active: Owned): Promise<void> {
     const runInBackgroundContext = this.dependencies.runInBackgroundContext;
-    const { recentContext, consultContext } = await bounded(this.callContext(active.peer), RECENT_CONTEXT_WAIT_MS)
-      .catch((): { recentContext?: string; consultContext?: string } => ({}));
+    const metadata = async () => {
+      const native = this.account.native;
+      if (!native) return;
+      const host = await (this.dependencies.host ?? ensureNativeHost)(native);
+      const identity = await resolveCallIdentity(host.client, native.accountId, active.peer, active.groupId, active.inviterId,
+        AbortSignal.any([active.abort.signal, AbortSignal.timeout(RECENT_CONTEXT_WAIT_MS)]));
+      if (this.current(active)) active.context.setIdentity(identity.name, identity.inviterName);
+    };
+    const [{ recentContext, consultContext }] = await Promise.all([
+      bounded(this.callContext(active.peer), RECENT_CONTEXT_WAIT_MS).catch((): { recentContext?: string; consultContext?: string } => ({})),
+      bounded(metadata(), RECENT_CONTEXT_WAIT_MS).catch(() => {}),
+    ]);
     if (!this.current(active)) throw Error("Calling preflight superseded");
     const open = () => this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
       clear: () => { if (this.current(active)) void active.output?.clear(); },
@@ -326,7 +343,7 @@ export class NativeCallService {
       failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); },
       // Closing can publish the last transcript; it counts until the summary starts.
       transcript: (role, text, final, snapshot) => { if (!active.summarized) active.transcript.add(role, text, final, snapshot); } },
-    { senderId: active.peer, signal: active.abort.signal,
+    { senderId: active.peer, signal: active.abort.signal, callContext: active.context.snapshot(),
       parentSession: active.groupId ? (this.groupPolicy(active.groupId)?.group.sessionKey ? { key: this.groupPolicy(active.groupId)!.group.sessionKey! } : undefined) : active.parentSession,
       ...(active.groupId ? { conference: { groupId: active.groupId } } : {}), recentContext, consultContext,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
@@ -414,7 +431,7 @@ export class NativeCallService {
     };
     assertAllowed();
     if (this.stopped || this.state !== "available" || this.active || this.busy || !this.prepared || !this.client) throw Error("Calling service is not available");
-    const active = this.reserve(groupId, invitation ? "incoming" : "outgoing", undefined, groupId);
+    const active = this.reserve(groupId, invitation ? "incoming" : "outgoing", undefined, groupId, invitation?.callerId);
     active.parentSession = access.parentSession;
     const aborted = () => { if (this.current(active) && !active.claimed) void this.fail(active, "conference-cancelled"); };
     access.signal?.addEventListener("abort", aborted, { once: true });
@@ -503,6 +520,7 @@ export class NativeCallService {
       active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active, "output"); }, trace,
         { continuous: this.prepared!.continuous });
       active.output.start();
+      active.contextReady = true; this.scheduleCallContext(active);
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
       const mixer = active.groupId ? new CallPcmMixer(this.format!) : undefined;
       const forward = (pcm: Buffer, timestampMs: number, consumedAt: number) => {
@@ -555,6 +573,29 @@ export class NativeCallService {
     } catch { if (this.current(active)) await this.fail(active, "media-attach"); }
     finally { active.attaching = false; }
   }
+  /** Directory lookups and coalesced model messages never block control/media.
+   * The first connected snapshot is the baseline, not a set of late joins. */
+  private scheduleCallContext(active: Owned): void {
+    if (!this.current(active) || active.endStarted || active.call?.state !== "connected") return;
+    const native = this.account.native;
+    if (active.groupId && native) for (const person of active.context.snapshot().participants) {
+      if (active.nameRequests.has(person.contactId)) continue;
+      active.nameRequests.add(person.contactId);
+      void bounded((this.dependencies.host ?? ensureNativeHost)(native).then(host =>
+        resolveCallParticipant(host.client, native.accountId, active.groupId!, person.contactId,
+          AbortSignal.any([active.abort.signal, AbortSignal.timeout(RECENT_CONTEXT_WAIT_MS)]))), RECENT_CONTEXT_WAIT_MS)
+        .then(person => { if (this.current(active)) active.context.name(person.contactId, person.name); }).catch(() => {});
+    }
+    if (!active.contextReady || active.contextTimer) return;
+    active.contextTimer = setTimeout(() => {
+      active.contextTimer = undefined;
+      if (!this.current(active) || active.endStarted || !active.output || !active.voice || active.call?.state !== "connected") return;
+      const update = active.context.takeChange();
+      if (update) try { active.voice.updateCallContext(update.snapshot, update.change); }
+      catch { this.warn("call context update unavailable; audio continues"); }
+    }, 250);
+    active.contextTimer.unref?.();
+  }
   async end(): Promise<void> {
     const active = this.active;
     if (!active?.claimed || !active.callId || !active.call || !this.client || active.endStarted) throw Error("No owned call can be ended");
@@ -588,6 +629,7 @@ export class NativeCallService {
     this.state = active.submitted || active.incomingReadinessAttempted ? "needs_review" : "unavailable"; await this.retire(active); this.stopCalling(`failed-${cause}`);
   }
   private stopVoice(active: Owned): void {
+    clearTimeout(active.contextTimer); active.contextTimer = undefined; active.contextReady = false;
     clearInterval(active.inputTimer); active.inputTimer = undefined;
     active.trace?.close();
     active.abort.abort();

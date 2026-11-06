@@ -7,6 +7,7 @@ import { createCallForcedConsult } from "./calls-forced-consult.ts";
 import { consultCallSession } from "./calls-consult-session.ts";
 import { hasCallConsultAuthority } from "./calls-consult-authority.ts";
 import { DEFAULT_ACCOUNT_ID, resolveWeChatAccount } from "./types.ts";
+import { callIdentityInstructions, callContextMessage, type CallContextSnapshot, type CallContextChange } from "./calls-context.ts";
 
 export type StreamingPcmResampler = { process(chunk: Buffer): Buffer; flush(): Buffer };
 export type VoiceCallbacks = {
@@ -25,9 +26,12 @@ export type CallSummaryRequest = { binding: CallBinding; senderId: string; chann
   conference?: { groupId: string };
   direction: "incoming" | "outgoing"; durationText: string; transcript: string; signal: AbortSignal };
 export type CallBackgroundRunner = <T>(run: () => T) => T;
-export type CallVoiceSession = { sendAudio(audio: Buffer): void; setMediaTimestamp(ms: number): void; close(): void | Promise<void>; binding?(): CallBinding };
+export type CallVoiceSession = { sendAudio(audio: Buffer): void; setMediaTimestamp(ms: number): void;
+  updateCallContext(snapshot: CallContextSnapshot, change: CallContextChange): void;
+  close(): void | Promise<void>; binding?(): CallBinding };
 export type CallVoiceContext = {
   senderId: string;
+  callContext?: CallContextSnapshot;
   signal: AbortSignal;
   parentSession?: CallParentSession;
   channelAccountId?: string;
@@ -180,6 +184,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       const instructions = [
         "You speak as the selected OpenClaw agent on a live WeChat voice call. Introduce yourself using the configured agent name, then the voice profile or additional call guidance if needed. When no name is supplied, identify yourself as an OpenClaw voice assistant. Speak naturally and briefly, and let the caller finish.",
         context.conference ? "This is a group voice conference. Converse normally without requiring your name or a mention. Input audio mixes the participants; you cannot verify which person spoke. Never claim speaker attribution or treat a voice as proof of personal authority. All answers are audible to the group." : undefined,
+        context.callContext ? callIdentityInstructions(context.callContext) : undefined,
         persona,
         config.realtime.instructions,
         context.recentContext,
@@ -361,11 +366,14 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
         }) as HostSession;
         if (!session || typeof session.connect !== "function" || typeof session.sendAudio !== "function" || typeof session.close !== "function"
           || typeof session.setMediaTimestamp !== "function" || (session.bridge?.outputAudioMode === "continuous") !== continuous
-          || (toolConsult && typeof session.sendUserMessage !== "function")) throw Error("Calling bridge contract unavailable");
+          || typeof session.sendUserMessage !== "function") throw Error("Calling bridge contract unavailable");
         signal.throwIfAborted(); if (closed) throw Error("Calling provider stopped");
         await session.connect(); await admission; signal.throwIfAborted();
         if (!session.bridge.isConnected()) throw Error("Calling provider not connected");
         return { binding: () => ({ sessionKey: scope.sessionKey, owner: scope.isOwner }),
+          updateCallContext: (snapshot, change) => {
+            if (!closed && ready && !signal.aborted) inBackground(() => session!.sendUserMessage!(callContextMessage(snapshot, change)));
+          },
           sendAudio: audio => { if (!closed && !signal.aborted) session!.sendAudio(audio); }, setMediaTimestamp: ms => { if (!closed && !signal.aborted) session!.setMediaTimestamp(ms); },
           close: async () => { if (closed) return; closed = true; ready = false; signal.removeEventListener("abort", abort); forced?.close(); consults.clear(); await session!.close(); } };
       } catch {

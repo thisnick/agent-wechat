@@ -145,6 +145,13 @@ speaker identity. Missing sources contribute silence; late audio is discarded
 rather than building a backlog. Existing interruption handling and output silence
 fill remain active.
 
+The voice agent receives the direct caller's identity or the conference invitation
+sender and current call roster. It greets after audio connects and can say hi or
+bye when people join or leave. Names come from cached contacts or group-visible
+member names, with account IDs as a fallback. Group-chat membership is not treated
+as attendance, and the inviter is not necessarily the room creator. Display names
+and roster changes grant no permissions and do not identify who is speaking.
+
 Consultation defaults to read-only and needs the same persistence opt-in as
 direct calls. Owner consultation requires all three settings:
 

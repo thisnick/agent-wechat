@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
-const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
+const sdk = await realpath(process.env.OPENCLAW_TEST_SDK_ROOT ?? join(root, 'packages/openclaw-extension/node_modules/openclaw'));
+assert.ok(['2026.10.9', '2026.10.10'].includes(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const temporary = await mkdtemp(join(tmpdir(), 'native-conference-model-'));
 const requests = [], streams = new Set(); let child, log = '';
@@ -84,7 +84,8 @@ try {
   assert.ok(result.calls[0].sessionKey.includes('wechat-conference:')); assert.equal(result.revoked, true); assert.equal(result.originalOwnersUnchanged, true); assert.equal(result.separateSessions, true);
   assert.equal(await readFile(configPath, 'utf8'), initial, 'the group grant changed the saved Gateway configuration');
   assert.ok(requests.length >= 6); assert.ok(requests.every(body => body.model === 'fixture-model'));
-  console.log('Pinned conference Gateway passed: actual group principal and owner tool, separate read-only session, tool restrictions, revocation, direct-owner regression, normal configured model routing, unchanged saved/global owner config. No external provider, login, WeChat send or deployment.');
+  assert.deepEqual(result.voiceContext, ['response', 'continuous'].map(mode => ({ mode, messages: 3, audioPreserved: true, interruptionPreserved: true })));
+  console.log('Pinned conference Gateway passed: caller/roster context and greetings in both voice modes, continued audio and interruption, actual group principal and owner tool, separate read-only session, tool restrictions, revocation, direct-owner regression, normal configured model routing, unchanged saved/global owner config. No external provider, login, WeChat send or deployment.');
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
   for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });

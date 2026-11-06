@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { consultCallSession } from '../../src/calls-consult-session.ts';
 import { callSessionKey } from '../../src/calls-session.ts';
+import { validateCallContextVoice } from './call-context-voice.ts';
 
 export default { ...base, register(api: any) {
   base.register(api);
@@ -31,6 +32,7 @@ export default { ...base, register(api: any) {
     const run = async () => {
       try {
         const cfg = api.runtime.config.current();
+        const voiceContext = await validateCallContextVoice(api.runtime, cfg);
         const originalOwners = JSON.stringify(cfg.commands?.ownerAllowFrom);
         const session = (owner: boolean) => callSessionKey('main', 'per-contact', groupId, owner, { accountId: 'default', nativeAccountId: 'a', groupId });
         const request = (owner: boolean, question: string, suffix = '', toolsAllow?: string[]) => consultCallSession({
@@ -50,7 +52,7 @@ export default { ...base, register(api: any) {
         });
         let revoked = false;
         try { await request(true, 'group-revoked-probe', ':revoked'); } catch { revoked = true; }
-        writeFileSync(join(directory, 'result.json'), JSON.stringify({ owner, readOnly, restricted, direct, revoked, calls, toolErrors, factories,
+        writeFileSync(join(directory, 'result.json'), JSON.stringify({ voiceContext, owner, readOnly, restricted, direct, revoked, calls, toolErrors, factories,
           originalOwnersUnchanged: originalOwners === JSON.stringify(api.runtime.config.current().commands?.ownerAllowFrom),
           separateSessions: session(true) !== session(false), groupId }));
       } catch (error) { writeFileSync(join(directory, 'result.json'), JSON.stringify({ error: String(error), factories, toolErrors, owners: api.runtime.config.current().commands?.ownerAllowFrom })); }

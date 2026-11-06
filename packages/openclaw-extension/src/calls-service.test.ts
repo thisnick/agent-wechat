@@ -68,15 +68,21 @@ class Control implements CallControlPort {
 function voiceFactory() {
   const state = { opens: 0, closes: 0, incoming: [] as Buffer[], timestamps: [] as number[],
     contexts: [] as Array<Parameters<PreparedCallVoice["open"]>[1]>,
+    updates: [] as Array<{ snapshot: import("./calls-context.ts").CallContextSnapshot; change: import("./calls-context.ts").CallContextChange }>,
     callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined,
     binding: { sessionKey: "agent:agent:wechat-call:peer", owner: false }, summaries: [] as CallSummaryRequest[], summaryText: undefined as string | undefined };
   const prepared: PreparedCallVoice = { sampleRate: 16000, continuous: false, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
-    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
+    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { updateCallContext: (snapshot, change) => state.updates.push(structuredClone({ snapshot, change })), sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
     async summarize(request) { state.summaries.push(request); return state.summaryText; } };
   return { state, prepared };
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(5); } assert.fail("Condition did not become true"); }
-async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration(), warn?: (line: string) => void) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, logAudioTrace, warn }); await service.start(); return { service, client, voice }; }
+const cachedHost = (async () => ({ client: {
+  contact: async () => ({ remark: "Known caller" }),
+  group: async () => ({ name: "Public test room", remark: "Private label" }),
+  groupMember: async (_account: string, _group: string, contactId: string) => ({ member: { username: contactId, roomDisplayName: `Room ${contactId}` } }),
+} })) as unknown as NonNullable<import("./calls-service.ts").CallServiceDependencies["host"]>;
+async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration(), warn?: (line: string) => void) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, host: cachedHost, logAudioTrace, warn }); await service.start(); return { service, client, voice }; }
 
 test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
@@ -732,7 +738,7 @@ function conferenceConfiguration(autoJoin = false) {
 async function conferenceFixture(autoJoin = false) {
   const cfg = conferenceConfiguration(autoJoin); const client = new ConferenceControl(); const voice = voiceFactory();
   const runtime = { config: { current: () => cfg } } as unknown as PluginRuntime;
-  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, runtime, { client, prepareVoice: async () => voice.prepared });
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, runtime, { client, prepareVoice: async () => voice.prepared, host: cachedHost });
   await service.start(); return { cfg, client, voice, service };
 }
 test('conference auto-join is off without an exact configured group and never answers its inviter as a direct peer', async () => {
@@ -808,4 +814,48 @@ test('conference inviter allowlist rejects others, accepts the listed inviter, a
     await until(() => next.voice.state.opens === 1); group.autoJoinAllowFrom = replacement; release();
     await until(() => next.voice.state.closes === 1); assert.equal(next.client.joins, 0); assert.equal(next.client.readied, 0); await next.service.stop();
   }
+});
+
+test("incoming and outgoing identities greet once only after connected media is ready", async t => {
+  for (const direction of ["incoming", "outgoing"] as const) {
+    const { service, client, voice } = await fixture(); t.after(() => service.stop());
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    client.attachMedia = async () => { client.attaches++; await gate; return client.media; };
+    if (direction === "incoming") client.eventsQueue.push({ type: "call.offered", offer });
+    else await service.dial("allowed-peer", { assertCurrent() {} });
+    await until(() => client.attaches === 1);
+    await delay(280); assert.equal(voice.state.updates.length, 0);
+    assert.equal(voice.state.contexts[0].callContext?.direction, direction);
+    assert.deepEqual(voice.state.contexts[0].callContext?.remote, { contactId: "allowed-peer", name: "Known caller" });
+    release(); await until(() => voice.state.updates.length === 1);
+    assert.deepEqual(voice.state.updates[0].change, { initial: true });
+    client.eventsQueue.push({ type: "call.state", call: { ...view(direction === "incoming" ? "offer" : "dial"), direction } });
+    await delay(280); assert.equal(voice.state.updates.length, 1);
+    assert.equal(client.clears, 0, "greetings never clear model output");
+  }
+});
+
+test("conference context keeps its inviter, coalesces joins/leaves and stops updates on hangup", async t => {
+  const { service, client, voice } = await conferenceFixture(true); t.after(() => service.stop());
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => voice.state.updates.length === 1);
+  assert.deepEqual(voice.state.contexts[0].callContext?.conference, { groupId: conferenceGroup, name: "Public test room", inviter: { contactId: "another-member", name: "Room another-member" } });
+  assert.deepEqual(voice.state.updates[0].snapshot.participants.map(p => p.name), ["Room contact-a", "Room contact-b"]);
+  const participant = (id: string, membership: "joined" | "left" | "invited" = "joined") => ({ participantId: id, contactId: `contact-${id}`, membership });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("c") });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("a", "left") });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("d", "invited") });
+  // A canceled join inside the same window produces no greeting or farewell.
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("e") });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 4, participant: participant("e", "left") });
+  await until(() => voice.state.updates.length === 2);
+  assert.deepEqual(voice.state.updates[1].change, { initial: false, joined: [{ contactId: "contact-c", name: "Room contact-c" }], left: [{ contactId: "contact-a", name: "Room contact-a" }] });
+  client.eventsQueue.push({ type: "call.state", call: client.conferenceView() }); // stale snapshot
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 5, participant: { ...participant("b"), microphoneEnabled: false } });
+  await delay(280); assert.equal(voice.state.updates.length, 2);
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 6, participant: participant("a") });
+  await delay(20); await service.end(); await delay(280);
+  assert.equal(voice.state.updates.length, 2);
+  assert.equal(client.clears, 0);
 });
