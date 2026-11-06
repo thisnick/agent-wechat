@@ -35,6 +35,7 @@ const moved = {
   'reference/rust-protocol': 'reference/rust-libraries#send-one-text-message',
   'reference/rust-profile': 'reference/rust-libraries#profile-writes',
   'reference/calls-architecture': 'how-it-works/rust-crates',
+  'reference/conference-calls': 'reference/calls#conference-calls',
 };
 
 export default defineConfig({
@@ -100,7 +101,6 @@ export default defineConfig({
           { label: 'Configuration', slug: 'reference/configuration' },
           { label: 'API tokens', slug: 'reference/tokens' },
           { label: 'Calling', slug: 'reference/calls' },
-          { label: 'Conference calls', slug: 'reference/conference-calls' },
           { label: 'Calls API', slug: 'reference/calls-api' },
           { label: 'Call media API', slug: 'reference/calls-media' },
           { label: 'Rust libraries', slug: 'reference/rust-libraries' },
