@@ -154,7 +154,7 @@ mod tests {
     fn staging_limit_does_not_expand_other_send_kinds() {
         assert_eq!(MAX_SOURCE_BYTES, 536_870_912);
         assert_eq!(MediaKind::File.max_source_bytes(), MAX_SOURCE_BYTES);
-        assert_eq!(MediaKind::Video.max_source_bytes(), 52_428_800);
+        assert_eq!(MediaKind::Video.max_source_bytes(), MAX_SOURCE_BYTES);
         for kind in [MediaKind::Image, MediaKind::Voice] {
             assert_eq!(kind.max_source_bytes(), 26_214_383);
             assert!(kind.max_source_bytes() < MAX_SOURCE_BYTES);

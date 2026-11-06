@@ -12,7 +12,7 @@ Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source
 | Send kind | Maximum source size |
 | --- | --- |
 | Ordinary file | 536,870,912 bytes |
-| Video source | 52,428,800 bytes (50 MiB) |
+| Video source | 536,870,912 bytes (512 MiB) |
 | Image or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
 | Sticker | Sending unavailable |
 
@@ -54,7 +54,7 @@ File attachments preserve source bytes. Image sends can resize/re-encode them. S
      "mediaSendMaxBytes": {
        "file": 536870912,
        "image": 26214383,
-       "video": 52428800,
+       "video": 536870912,
        "voice": 26214383
      }
    }
@@ -91,7 +91,7 @@ File attachments preserve source bytes. Image sends can resize/re-encode them. S
 
 ## Download files
 
-Ordinary-file downloads also support up to 512 MiB:
+Ordinary files and received videos download up to 512 MiB. Each download must match the size and MD5 in the message:
 
 ```bash
 wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
@@ -110,8 +110,10 @@ Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinar
 <Aside title="Good to know">
 - File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
 - See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.
+- Sending a large file or an original-quality video holds about twice the source size in the daemon's memory while it uploads.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
 - Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.
 - After a job stops during verification, `wx jobs retry JOB_ID --reuse-completed-upload` can reuse its saved object. This requires proof that submission never started; API clients use `POST /jobs/{id}/retry-completed-upload` with `reuseCompletedUpload: true`; the SDK accepts this option on `retryJob`.
 - Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
+- A received video download stops when WeChat returns bytes that differ from the message's size or MD5. For videos up to 25 MiB the job fails with `media_integrity_failed`, and its `result.cdnDownloadFailure` shows the advertised and delivered sizes and which checks matched. It never contains the file's bytes or hashes.
 </Aside>
