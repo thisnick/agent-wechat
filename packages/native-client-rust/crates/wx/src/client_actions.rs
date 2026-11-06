@@ -892,7 +892,6 @@ mod tests {
         for kind in [Some("image"), Some("voice"), Some("sticker"), None] {
             assert_eq!(media_output_limit(kind), 128 * 1024 * 1024);
         }
-        assert_eq!(wechat_core::MAX_VIDEO_SOURCE_BYTES, 52_428_800);
     }
 
     #[test]
@@ -1305,7 +1304,7 @@ mod tests {
     #[test]
     fn selected_payload_flag_controls_source_read_bound() {
         assert_eq!(send_kind_source_limit("file").unwrap(), 536_870_912);
-        assert_eq!(send_kind_source_limit("video").unwrap(), 52_428_800);
+        assert_eq!(send_kind_source_limit("video").unwrap(), 536_870_912);
         for kind in ["image", "voice"] {
             assert_eq!(send_kind_source_limit(kind).unwrap(), 26_214_383);
         }

@@ -2730,19 +2730,17 @@ mod tests {
         assert_eq!(error.to_string(), "Advertised media size mismatch");
     }
     #[test]
-    fn incoming_video_limit_is_separate_from_outgoing_source_limit() {
+    fn video_limits_admit_sizes_above_the_former_50_mib_bound() {
         assert_eq!(MAX_VIDEO_DOWNLOAD_BYTES, 536_870_912);
-        assert_eq!(wechat_media::MAX_VIDEO_SOURCE_BYTES, 52_428_800);
+        assert_eq!(wechat_media::MAX_VIDEO_SOURCE_BYTES, 536_870_912);
         assert_eq!(
             upload_plaintext_limit(MediaQuality::Video),
             wechat_media::MAX_VIDEO_SOURCE_BYTES
         );
+        // A small advertised video keeps its own bound on an unchecked reply.
         assert_eq!(MAX_SMALL_VIDEO_REPLY_BYTES, 52_428_800);
         let (mut descriptor, _, _) = download_fixture(16, MediaQuality::Video);
-        for size in [
-            wechat_media::MAX_VIDEO_SOURCE_BYTES + 1,
-            MAX_VIDEO_DOWNLOAD_BYTES,
-        ] {
+        for size in [MAX_SMALL_VIDEO_REPLY_BYTES + 1, MAX_VIDEO_DOWNLOAD_BYTES] {
             descriptor.expected_bytes = Some(size as u64);
             let mut requests = 0;
             let error = client()

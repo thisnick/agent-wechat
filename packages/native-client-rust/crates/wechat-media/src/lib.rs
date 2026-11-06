@@ -14,8 +14,10 @@ pub use wxgf::wxgf_preview;
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Native ordinary-file plaintext limit, shared by transport and local storage.
 pub const MAX_FILE_BYTES: usize = 512 * 1024 * 1024;
-/// Initial source/original-video limit; normal playback is prepared separately.
-pub const MAX_VIDEO_SOURCE_BYTES: usize = 50 * 1024 * 1024;
+/// Outgoing video source limit, shared by normal preparation and the unchanged
+/// original upload. It matches the ordinary-file limit; the prepared normal
+/// playback copy keeps its own smaller output limit.
+pub const MAX_VIDEO_SOURCE_BYTES: usize = MAX_FILE_BYTES;
 
 #[derive(Debug)]
 pub struct DecodedImage {

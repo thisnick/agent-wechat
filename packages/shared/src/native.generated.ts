@@ -1,7 +1,7 @@
 // Generated from wechat-api/src/contracts.rs. Do not edit.
 export const NATIVE_MAX_SOURCE_BYTES = 536870912 as const;
 export const NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const;
-export const NATIVE_MAX_VIDEO_SOURCE_BYTES = 52428800 as const;
+export const NATIVE_MAX_VIDEO_SOURCE_BYTES = 536870912 as const;
 export type CallCapabilities = { directAudio?: boolean, directVideo?: boolean, conferenceAudio?: boolean, conferenceVideo?: boolean, };
 export type CallAudioFormat = { sampleRate: number, channels: number, frameMs: number, };
 export type CallTarget = { "kind": "direct", contactId: string, } | { "kind": "conference", groupId: string, invitees: Array<string>, };

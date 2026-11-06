@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(body["textMentions"], true);
         assert_eq!(body["inlineTextMentions"], true);
         assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
-        assert_eq!(body["mediaSendMaxBytes"]["video"], 52_428_800);
+        assert_eq!(body["mediaSendMaxBytes"]["video"], 536_870_912);
         for kind in ["image", "voice"] {
             assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
         }

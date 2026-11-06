@@ -76,8 +76,8 @@ test('thread pinning preserves target, desired state, stable key and operation i
   await assert.rejects(uncertain.setThreadPinned('a','peer',true,'same-key'),/connection lost/);
   assert.equal(attempts,1);
 });
-test('video send quality and its separate 50 MiB source bound are exposed without changing other source limits', async () => {
-  assert.equal(NATIVE_MAX_VIDEO_SOURCE_BYTES, 50 * 1024 * 1024); assert.equal(NATIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024);
+test('video send quality and its 512 MiB source bound are exposed without changing other source limits', async () => {
+  assert.equal(NATIVE_MAX_VIDEO_SOURCE_BYTES, 512 * 1024 * 1024); assert.equal(NATIVE_MAX_SOURCE_BYTES, 512 * 1024 * 1024);
   assert.equal(NATIVE_MAX_ORDINARY_SOURCE_BYTES, 25 * 1024 * 1024 - 17);
   const seen = [];
   const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
