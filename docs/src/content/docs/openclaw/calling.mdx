@@ -1,11 +1,11 @@
 ---
 title: Set up calling
-description: Configure voice and video permissions, realtime speech, OpenAI credentials and agent consultation.
+description: Configure voice calling, conversation modes, credentials and agent consultation.
 ---
 
 Configure calling under `channels.agent-wechat.calls`. Voice and video each default
 to disabled. Voice supports direct calls and separately configured conferences.
-Both support [realtime speech or agent-and-TTS conversation](../call-conversation/).
+Both support [realtime speech or agent-and-TTS conversation](#models-and-behavior).
 
 ## Connect the daemon
 
@@ -26,7 +26,7 @@ Both support [realtime speech or agent-and-TTS conversation](../call-conversatio
 
 ## Configure speech and access
 
-Merge this example into your existing channel and agent configuration. Replace
+Merge this realtime example into your existing channel and agent configuration. Replace
 the example contact and owner IDs.
 Set `OPENAI_API_KEY` in the **Gateway process's environment**.
 The `wechat_call` tool is optional: the `tools.alsoAllow` entry below is required
@@ -194,7 +194,7 @@ grant are also required. Other invitations use `toolPolicy`. Leaving out
 trusts everyone in that call, including later joiners, and stays in effect if the
 inviter leaves. Permissions can decrease during a call; increases require a new
 call. Status reports the inviter and effective policy. Owner and read-only calls
-use separate sessions and recaps; old conference recaps without a known permission
+use separate sessions and recaps; old call recaps without a known permission
 level are not reused.
 
 ## Models and behavior
@@ -220,8 +220,8 @@ All paths below are relative to `calls.voice`.
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
 | `maxDurationSeconds` | 3,600 (one hour) by default; 30–3,600 seconds. The plugin hangs up when it is reached. The native daemon currently ends calls after 20 minutes. |
 
-The speech model handles conversation; the selected OpenClaw agent handles
-delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
+In `bidi` mode, the speech model handles conversation; the selected OpenClaw agent
+handles delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
 allowlists accept exact IDs, without `*`. Chat tool requesters must also be
 authorized owners in `outboundToolAllowFrom`; owner call consultations use their
 current call authority instead. Messaging permissions do not authorize calls.
@@ -238,6 +238,37 @@ provider's default, `gpt-realtime-2.1`.
 The speech model receives the selected agent's configured identity. When
 workspace context is enabled, the realtime provider also receives bounded
 excerpts of the two persona files. Keep those files suitable for this use.
+
+### Use your agent and TTS
+
+1. Configure an OpenClaw TTS provider in your normal Gateway settings.
+2. Merge these fields into your existing `calls.voice` configuration:
+
+   ```json
+   {
+     "enabled": true,
+     "mode": "agent",
+     "agentId": "main",
+     "allowConsultSessionPersistence": true,
+     "toolPolicy": "safe-read-only",
+     "transcription": {
+       "provider": "openai"
+     }
+   }
+   ```
+
+3. Keep your inbound, outbound and conference allowlists. Inspect `wechat_call`
+   status for `mode: "agent"` and the selected `agentId` before testing a call.
+
+`transcription.apiKey` accepts a key or SecretRef; omission
+uses the transcription provider's configured credentials. These credentials are
+separate from realtime voice credentials.
+
+In agent mode, `toolPolicy: "none"` permits conversation without tools in a
+separate session. Session persistence still requires opting in because agent
+mode creates OpenClaw sessions even when tools are disabled.
+
+### Consultation and sessions
 
 Calls placed with `wechat_call` use the requesting session as context when
 consultation is enabled and that session belongs to `calls.voice.agentId`. Set `consultation.inboundSessionKey` to do the same for
@@ -262,15 +293,20 @@ Consultations run like the agent's normal chat turns. They use its configured
 model, including CLI runtimes such as `claude-cli`, and its fallback models.
 
 :::note[Good to know]
+Mode changes apply to new calls after the channel reloads.
 Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
-cannot handle video or convert it to voice.
+cannot handle video or convert it to voice. Neither conversation mode enables
+promotion from a direct call to a conference.
 
 The bridge sends silence while it waits for the caller to speak. With a
 realtime model, if the caller interrupts a reply, the bridge clears queued audio
 and reports the estimated playback position to the speech model. GPT-Live models
 handle interruptions themselves. Either way, the voice agent can keep talking
 with the caller while the OpenClaw agent works on a consultation.
+In agent mode, nearby transcript fragments form one turn. Input keeps flowing
+during reasoning and TTS; interruption clears queued speech and discards late
+agent or TTS results without retrying an action.
 This adapter does not record calls. Consultations, and the transcript the agent
 summarizes after a call, persist in OpenClaw when opted in; the adapter keeps only
 short call summaries. Other provider adapters fail preflight without automatic
