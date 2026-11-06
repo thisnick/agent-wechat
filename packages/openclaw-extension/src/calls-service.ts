@@ -6,7 +6,7 @@ import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
 import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
-import { CallPcmOutput } from "./calls-audio.ts";
+import { CallPcmOutput, type CallAudioClearReason } from "./calls-audio.ts";
 import { CallPcmMixer } from "./calls-mixer.ts";
 import { conferenceCallPolicy, directCallPolicy, restrictCallPolicy, type CallToolPolicy, type CallPolicyReason } from "./calls-permissions.ts";
 import { CallContextTracker, resolveCallIdentity, resolveCallParticipant } from "./calls-context.ts";
@@ -372,7 +372,10 @@ export class NativeCallService {
       active.policyAtAdmission = reduced;
     }
     const open = () => this.prepared!.open({ audio: (audio, metadata) => { if (this.current(active)) active.output?.enqueue(audio, metadata); },
-      clear: () => { if (this.current(active)) void active.output?.clear(); },
+      clear: reason => {
+        const safeReason = ["barge-in", "output-budget", "continuity-reset", "consultation", "authority"].includes(reason ?? "") ? reason as CallAudioClearReason : "provider";
+        if (this.current(active)) void active.output?.clear(safeReason);
+      },
       playbackState: () => this.current(active) ? active.output?.playbackState() ?? [] : [],
       failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); },
       // Closing can publish the last transcript; it counts until the summary starts.
@@ -557,7 +560,9 @@ export class NativeCallService {
       if ((!active.groupId && tracks.receiveTracks.length !== 1) || JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format)
         || tracks.receiveTracks.some(track => JSON.stringify(track.format) !== JSON.stringify(this.format))) throw Error("Calling PCM changed");
       active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active, "output"); }, trace,
-        { continuous: this.prepared!.continuous });
+        { continuous: this.prepared!.continuous,
+          onResponseOverflow: () => { if (this.current(active) && !active.endStarted) active.voice?.interruptOutput(); },
+          diagnostic: line => this.info(`audio trace=${active.key.slice(0, 8)} ${line}`) });
       active.output.start();
       active.contextReady = true; this.scheduleCallContext(active);
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);

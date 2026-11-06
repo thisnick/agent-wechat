@@ -143,6 +143,7 @@ export async function prepareCallAgentProvider(config: ResolvedWeChatVoiceCallsC
           isConnected: () => !closed && connected && stt!.isConnected(),
           sendAudio: (audio: Buffer) => { if (!closed && connected) { gate.accept(readPcm16AudioStats(audio), { onTrigger: () => { interrupt(); return true; } }); stt!.sendAudio(convertPcmToMulaw8k(audio, 24000)); } },
           setMediaTimestamp() {}, acknowledgeMark() {}, submitToolResult() { throw Error("Agent voice bridge does not expose provider tools"); },
+          handleBargeIn() { utteranceOpen = false; interrupt(); },
           sendUserMessage: (text: string) => { if (!closed && text.trim()) { latestContext = text.slice(0, MAX_TURN_CHARS); if (pendingContext.length >= 4) pendingContext.shift(); pendingContext.push(latestContext); void flush(); } },
           triggerGreeting: (text = "Briefly greet the caller.") => { if (!closed) { if (pendingContext.length >= 4) pendingContext.shift(); pendingContext.push(text.slice(0, MAX_TURN_CHARS)); void flush(); } },
           close,

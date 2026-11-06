@@ -52,7 +52,7 @@ test('group consultation needs both exact grants, uses the group principal and i
   installCallConsultAuthority({ runtime, registerTrustedToolPolicy() {} } as unknown as OpenClawPluginApi);
   const prepared = await prepareOpenClawCallVoice(resolveWeChatCallsConfig({ voice })!.voice!, cfg, runtime, {
     voiceSdk: { ...sdk, resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: 'openai', createBridge() {} }, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true } }),
-      createRealtimeVoiceBridgeSession: (params: any) => { bridge = params; return { bridge: { isConnected: () => true, outputAudioMode: 'response' }, connect: async () => params.onReady(), sendAudio() {}, setMediaTimestamp() {}, close() {}, sendUserMessage: (text: string) => { spoken.push(text); }, submitToolResult: (_id: string, result: unknown) => { results.push(result); } }; },
+      createRealtimeVoiceBridgeSession: (params: any) => { bridge = params; return { bridge: { isConnected: () => true, outputAudioMode: 'response' }, connect: async () => params.onReady(), sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close() {}, sendUserMessage: (text: string) => { spoken.push(text); }, submitToolResult: (_id: string, result: unknown) => { results.push(result); } }; },
     }, audioSdk: { createStreamingPcmResampler() {} },
   });
   const open = () => prepared.open({ audio() {}, clear() { clears++; }, failed() { assert.fail('Unexpected provider failure'); } },
@@ -96,7 +96,7 @@ test('owner inviter policy binds to the invitation, rechecks revocation and cann
   installCallConsultAuthority({ runtime, registerTrustedToolPolicy(policy: any) { evaluate = policy.evaluate; } } as unknown as OpenClawPluginApi);
   const prepared = await prepareOpenClawCallVoice(resolveWeChatCallsConfig({ voice })!.voice!, cfg, runtime, {
     voiceSdk: { ...sdk, resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: 'openai', createBridge() {} }, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true } }),
-      createRealtimeVoiceBridgeSession: (params: any) => { bridge = params; return { bridge: { isConnected: () => true, outputAudioMode: 'response' }, connect: async () => params.onReady(), sendAudio() {}, setMediaTimestamp() {}, close() {}, sendUserMessage: (text: string) => spoken.push(text), submitToolResult() {} }; },
+      createRealtimeVoiceBridgeSession: (params: any) => { bridge = params; return { bridge: { isConnected: () => true, outputAudioMode: 'response' }, connect: async () => params.onReady(), sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close() {}, sendUserMessage: (text: string) => spoken.push(text), submitToolResult() {} }; },
     }, audioSdk: { createStreamingPcmResampler() {} },
   });
   const open = (inviterId?: string) => prepared.open({ audio() {}, clear() { clears++; }, failed() {} },

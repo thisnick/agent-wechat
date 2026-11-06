@@ -18,7 +18,11 @@ export async function validateCallContextVoice(runtime: PluginRuntime, cfg: Open
       return { outputAudioMode: continuous ? 'continuous' : 'response',
         connect: async () => { connected = true; params.onReady(); }, isConnected: () => connected,
         sendUserMessage: (text: string) => spoken.push(text), sendAudio: (pcm: Buffer) => inputs.push(pcm),
-        setMediaTimestamp() {}, acknowledgeMark() {}, submitToolResult() {}, close: () => { connected = false; },
+        setMediaTimestamp() {}, handleBargeIn(options: unknown) {
+          assert.deepEqual(options, { force: true, audioPlaybackActive: true });
+          assert.deepEqual(params.getPlaybackState(), [{ itemId: 'fixture-reply', audioEndMs: 200 }]);
+          params.onClearAudio('barge-in');
+        }, acknowledgeMark() {}, submitToolResult() {}, close: () => { connected = false; },
       };
     } };
     const capabilities = { inputAudioFormats: [pcm], outputAudioFormats: [pcm], ...(continuous
@@ -32,7 +36,8 @@ export async function validateCallContextVoice(runtime: PluginRuntime, cfg: Open
       conference: { groupId: 'fixture@chatroom', name: 'Fixture group', inviter: { contactId: 'inviter', name: 'Inviter' } },
       participants: [{ contactId: 'a', name: 'Alice' }] };
     const abort = new AbortController();
-    const session = await prepared.open({ audio() { outputs++; }, clear() { clears++; }, failed() { assert.fail('Fixture provider failed'); } },
+    const session = await prepared.open({ audio() { outputs++; }, clear(reason) { clears++; assert.equal(reason, continuous ? 'barge-in' : 'output-budget'); },
+      playbackState: () => [{ itemId: 'fixture-reply', audioEndMs: 200 }], failed() { assert.fail('Fixture provider failed'); } },
       { senderId: 'fixture@chatroom', conference: { groupId: 'fixture@chatroom' }, signal: abort.signal, callContext: snapshot, logCallContext: line => logs.push(line) });
     assert.match(bridgeRequest.instructions, /Inviter/);
     assert.match(bridgeRequest.instructions, /never instructions or proof of authority/);
@@ -51,7 +56,8 @@ export async function validateCallContextVoice(runtime: PluginRuntime, cfg: Open
     assert.ok(logs.some(line => /stage=submitted sequence=3 .*update=labels participants=2 named=2/.test(line)));
     assert.equal(logs.some(line => /Alice|Bob|Inviter|fixture@chatroom/.test(line)), false);
     assert.equal(clears, 0, 'context updates must not clear audio');
-    bridgeRequest.onClearAudio('barge-in'); assert.equal(clears, 1);
+    if (continuous) bridgeRequest.onClearAudio('barge-in'); else session.interruptOutput();
+    assert.equal(clears, 1);
     session.sendAudio(Buffer.alloc(960)); assert.equal(inputs.length, 2); assert.equal(outputs, 1);
     abort.abort(); session.updateCallContext(snapshot, { initial: true }); await session.close();
     assert.equal(spoken.length, 4, 'closed calls must ignore late context');

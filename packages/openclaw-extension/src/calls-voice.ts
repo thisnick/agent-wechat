@@ -15,7 +15,7 @@ import { callIdentityInstructions, callRosterInstructions, callContextMessage, t
 export type StreamingPcmResampler = { process(chunk: Buffer): Buffer; flush(): Buffer };
 export type VoiceCallbacks = {
   audio(audio: Buffer, metadata?: { itemId: string }): void;
-  clear(): void;
+  clear(reason?: string): void;
   playbackState?(): Array<{ itemId: string; audioEndMs: number }>;
   /** A fixed cause such as `provider-closed:<reason>` or `provider-error`. */
   failed(reason?: string): void;
@@ -30,6 +30,7 @@ export type CallSummaryRequest = { binding: CallBinding; senderId: string; chann
   direction: "incoming" | "outgoing"; durationText: string; transcript: string; signal: AbortSignal };
 export type CallBackgroundRunner = <T>(run: () => T) => T;
 export type CallVoiceSession = { sendAudio(audio: Buffer): void; setMediaTimestamp(ms: number): void;
+  interruptOutput(): void;
   updateCallContext(snapshot: CallContextSnapshot, change: CallContextChange): boolean | void;
   close(): void | Promise<void>; binding?(): CallBinding };
 export type CallVoiceContext = {
@@ -62,7 +63,7 @@ export type PreparedCallVoice = {
   /** After an answered call: the agent summarizes it in the call's session. Undefined when summaries are off. */
   summarize(request: CallSummaryRequest): Promise<string | undefined>;
 };
-type HostSession = Pick<CallVoiceSession, "sendAudio" | "setMediaTimestamp" | "close"> & { connect(): Promise<void>; submitToolResult(id: string, result: unknown): void | Promise<void>; sendUserMessage?(text: string): void; bridge: { outputAudioMode?: string; isConnected(): boolean } };
+type HostSession = Pick<CallVoiceSession, "sendAudio" | "setMediaTimestamp" | "close"> & { connect(): Promise<void>; handleBargeIn(options: { force: boolean; audioPlaybackActive: boolean }): void; submitToolResult(id: string, result: unknown): void | Promise<void>; sendUserMessage?(text: string): void; bridge: { outputAudioMode?: string; isConnected(): boolean } };
 type ProviderCapabilities = { inputAudioFormats?: Array<{ encoding: string; sampleRateHz: number; channels: number }>; outputAudioFormats?: Array<{ encoding: string; sampleRateHz: number; channels: number }>; supportsBargeIn?: boolean; handlesInputAudioBargeIn?: boolean; supportsToolCalls?: boolean; handlesAgentConsult?: boolean };
 const PCM = { encoding: "pcm16", sampleRateHz: 24000, channels: 1 };
 // Delegating models send the request with recent transcript, not only a question.
@@ -222,6 +223,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       let forced: ReturnType<typeof createCallForcedConsult> | undefined;
       let closed = false;
       let ready = false;
+      let budgetInterruption = false;
       let resolveReady!: () => void;
       let rejectReady!: (error: Error) => void;
       const admission = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
@@ -342,7 +344,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
         }, inBackground) : selected.provider, providerConfig: selected.providerConfig,
           capabilities, audioFormat: PCM, autoRespondToAudio: true, interruptResponseOnInputAudio: !continuous,
           instructions, tools: tools.slice(), triggerGreetingOnReady: false, markStrategy: "ignore",
-          audioSink: { isOpen: () => ready && !closed && !signal.aborted, sendAudio: callbacks.audio, clearAudio: callbacks.clear,
+          audioSink: { isOpen: () => ready && !closed && !signal.aborted, sendAudio: callbacks.audio,
+            clearAudio: (reason?: string) => callbacks.clear(budgetInterruption ? "output-budget" : reason),
             ...(continuous ? {} : { getPlaybackState: callbacks.playbackState }) },
           onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: (reason?: unknown) => fail(typeof reason === "string" && /^[a-z_-]{1,32}$/.test(reason) ? `provider-closed:${reason}` : "provider-closed"),
           onError: () => { try { context.warnProviderDiagnostic?.(); context.logAudioTrace?.("[wechat-call-audio] provider diagnostic; awaiting provider readiness or terminal close"); } catch {} },
@@ -411,7 +414,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
         }) as HostSession;
         if (!session || typeof session.connect !== "function" || typeof session.sendAudio !== "function" || typeof session.close !== "function"
           || typeof session.setMediaTimestamp !== "function" || (session.bridge?.outputAudioMode === "continuous") !== continuous
-          || typeof session.sendUserMessage !== "function") throw Error("Calling bridge contract unavailable");
+          || typeof session.sendUserMessage !== "function" || (!continuous && typeof session.handleBargeIn !== "function")) throw Error("Calling bridge contract unavailable");
         signal.throwIfAborted(); if (closed) throw Error("Calling provider stopped");
         await session.connect(); await admission; signal.throwIfAborted();
         if (!session.bridge.isConnected()) throw Error("Calling provider not connected");
@@ -430,6 +433,14 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
               inBackground(() => session!.sendUserMessage!(message));
               contextSequence++; contextDeferred = false; traceContext("submitted", snapshot, message, change); return true;
             } catch { traceContext("failed", snapshot, message, change); throw Error("Calling context submission failed"); }
+          },
+          interruptOutput: () => {
+            if (closed || !ready || signal.aborted || continuous) return;
+            inBackground(() => {
+              budgetInterruption = true;
+              try { session!.handleBargeIn({ force: true, audioPlaybackActive: true }); }
+              finally { budgetInterruption = false; }
+            });
           },
           sendAudio: audio => { if (!closed && !signal.aborted) session!.sendAudio(audio); }, setMediaTimestamp: ms => { if (!closed && !signal.aborted) session!.setMediaTimestamp(ms); },
           close: async () => { if (closed) return; closed = true; ready = false; signal.removeEventListener("abort", abort); providerAbort.abort(); forced?.close(); consults.clear(); await session!.close(); } };

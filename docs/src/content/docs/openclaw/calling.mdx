@@ -302,7 +302,10 @@ promotion from a direct call to a conference.
 The bridge sends silence while it waits for the caller to speak. With a
 realtime model, if the caller interrupts a reply, the bridge clears queued audio
 and reports the estimated playback position to the speech model. GPT-Live models
-handle interruptions themselves. Either way, the voice agent can keep talking
+handle interruptions themselves. Realtime can queue up to ten minutes of a reply;
+reaching that limit cancels the reply and reports its playback position instead
+of silently cutting its tail. Live keeps a three-second audio queue to limit delay.
+Either way, the voice agent can keep talking
 with the caller while the OpenClaw agent works on a consultation.
 In agent mode, nearby transcript fragments form one turn. Input keeps flowing
 during reasoning and TTS; interruption clears queued speech and discards late

@@ -72,7 +72,7 @@ function voiceFactory() {
     callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined,
     binding: { sessionKey: "agent:agent:wechat-call:peer", owner: false }, summaries: [] as CallSummaryRequest[], summaryText: undefined as string | undefined };
   const prepared: PreparedCallVoice = { sampleRate: 16000, continuous: false, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
-    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { updateCallContext: (snapshot, change) => { state.updates.push(structuredClone({ snapshot, change })); }, sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
+    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { interruptOutput: () => callbacks.clear("output-budget"), updateCallContext: (snapshot, change) => { state.updates.push(structuredClone({ snapshot, change })); }, sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
     async summarize(request) { state.summaries.push(request); return state.summaryText; } };
   return { state, prepared };
 }
@@ -673,40 +673,72 @@ test("a missing terminal reply reaches needs_review once and repeated ending can
   assert.equal(service.status().state, "needs_review"); assert.equal(service.status().owned, false);
   assert.equal(client.closed, true); assert.equal(client.media.closed, true); assert.equal(client.ends, 1);
 });
-test("the PCM budget truncates a reply without ending the call or stitching later chunks into it", async t => {
+test("response audio beyond eight seconds plays completely at the daemon clock", t => {
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const media = new Media(); const voice = voiceFactory(); let failures = 0;
-  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
-  output.enqueue(Buffer.alloc(640), undefined); output.enqueue(Buffer.alloc(640), { itemId: "late" }); assert.equal(failures, 1); assert.equal(media.sent.length, 0);
-  const malformed = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
-  malformed.enqueue(Buffer.alloc(64002), { itemId: "oversized-chunk" });
-  assert.equal(failures, 2);
+  const diagnostics: string[] = [];
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; }, undefined,
+    { diagnostic: line => diagnostics.push(line) });
+  t.after(() => { output.close(); t.mock.timers.reset(); });
+  // A legal provider burst, longer than the former eight-second budget.
+  for (let n = 1; n <= 9; n++) output.enqueue(Buffer.alloc(64000, n), { itemId: "long-reply" });
+  output.start();
+  for (let n = 0; n < 902; n++) { now += 20; t.mock.timers.tick(20); }
+  const received = media.sent.flatMap(chunk => [...chunk.samples]);
+  for (let n = 0; n < 9; n++) {
+    assert.deepEqual(received.slice(n * 32000, (n + 1) * 32000), Array(32000).fill((n + 1) * 257));
+  }
+  assert.ok(media.sent.every(chunk => chunk.samples.length <= 640));
+  assert.equal(failures, 0);
+  assert.match(diagnostics[0], /mode=response capacityMs=600000 capacityBytes=19200000/);
+});
 
-  let converted = 0;
-  voice.prepared.resampler = () => ({ process: value => { converted++; return value; }, flush: () => Buffer.alloc(0) });
+test("ten-minute response overflow interrupts the SDK, accounts for playback and fences stale chunks", async t => {
+  const media = new Media(); const voice = voiceFactory(); let failures = 0, interruptions = 0;
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  const lines: string[] = [];
+  const lines: string[] = [], diagnostics: string[] = [];
   const trace = new CallAudioTrace(line => lines.push(line), { daemonHz: 16000, realtimeHz: 16000 });
-  const bounded = new CallPcmOutput(media, format, voice.prepared, () => held, () => { failures++; }, trace);
-  t.after(() => { bounded.close(); trace.close(); });
-  const clearing = bounded.clear();
-  bounded.start();
-  for (const size of [64000, 64000, 64000, 63400]) bounded.enqueue(Buffer.alloc(size, 0x11), { itemId: "first" });
-  bounded.enqueue(Buffer.alloc(640, 0x22), { itemId: "first" });
-  assert.equal(media.sent.length, 0);
-  release(); await clearing;
-  assert.deepEqual(media.sent[0].samples, new Int16Array(640).fill(0x1111));
-  bounded.enqueue(Buffer.alloc(640), { itemId: "first" });
-  assert.equal(converted, 5);
-  bounded.enqueue(Buffer.alloc(640), { itemId: "next" });
-  assert.equal(converted, 6);
-  assert.equal(failures, 2);
-  bounded.close(); trace.close();
+  let playback: ReturnType<CallPcmOutput["playbackState"]> = [];
+  const output = new CallPcmOutput(media, format, voice.prepared, () => held, () => { failures++; }, trace, {
+    onResponseOverflow() { interruptions++; playback = output.playbackState(); void output.clear("output-budget"); },
+    diagnostic: line => diagnostics.push(line),
+  });
+  t.after(() => { output.close(); trace.close(); release(); });
+  for (let n = 0; n < 300; n++) output.enqueue(Buffer.alloc(64000, 0x11), { itemId: "private-old-item" });
+  output.enqueue(Buffer.alloc(640, 0x22), { itemId: "private-new-overflow-item" });
+  assert.equal(interruptions, 1);
+  assert.deepEqual(playback, [{ itemId: "private-old-item", audioEndMs: 0 }, { itemId: "private-new-overflow-item", audioEndMs: 0 }]);
+  output.start();
+  output.enqueue(Buffer.alloc(640, 0x33), { itemId: "private-old-item" });
+  output.enqueue(Buffer.alloc(640, 0x44), { itemId: "private-new-overflow-item" });
+  output.enqueue(Buffer.alloc(1280, 0x55), { itemId: "fresh-item" });
+  assert.equal(media.sent.length, 0, "wait for daemon clear before sending a fresh generation");
+  release(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(media.sent[0].samples, new Int16Array(640).fill(0x5555));
+  assert.equal(failures, 0);
+  output.close(); trace.close();
   const report = JSON.parse(lines[0].slice("[wechat-call-audio] plugin ".length));
-  assert.equal(report.counts.outputTruncatedItems, 1);
-  assert.equal(report.counts.outputOverflowSamples, 20);
-  assert.equal(report.counts.outputOverflowProviderSamples, 320);
-  assert.equal(report.measures.outputQueuedAudioMs.max, 8000);
+  assert.equal(report.counts.outputBudgetInterruptions, 1);
+  assert.equal(report.counts.outputStaleChunks, 2);
+  assert.equal(report.measures.outputQueuedAudioMs.max, 600000);
+  assert.match(diagnostics.join("\n"), /stage=buffer-limit reason=capacity queuedMs=600000/);
+  assert.match(diagnostics.join("\n"), /stage=clear reason=output-budget/);
+  assert.doesNotMatch(diagnostics.join("\n"), /private-/);
+});
+
+test("invalid chunks and an unavailable overflow interruption fail instead of silently truncating", () => {
+  const media = new Media(); const voice = voiceFactory(); let failures = 0;
+  for (const bad of [undefined, "oversized"]) {
+    const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
+    output.enqueue(Buffer.alloc(bad ? 64002 : 640), bad ? { itemId: bad } : undefined);
+    output.close();
+  }
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
+  for (let n = 0; n <= 300; n++) output.enqueue(Buffer.alloc(64000), { itemId: "overflow" });
+  assert.equal(failures, 3); assert.equal(media.sent.length, 0); output.close();
 });
 
 const conferenceGroup = 'synthetic-group@chatroom';
