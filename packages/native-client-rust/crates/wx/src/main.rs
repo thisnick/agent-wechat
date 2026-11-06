@@ -239,6 +239,8 @@ enum ServerCommand {
     },
     /// List saved servers and the current selection.
     List,
+    /// Remove a saved server from this CLI's configuration.
+    Remove { name: String },
     #[command(alias = "use")]
     /// Save the server to use for subsequent commands.
     Select { name: String },
@@ -1308,6 +1310,20 @@ async fn run(cli: Cli) -> Result<()> {
                 settings.settings.active_server = Some(name.clone());
                 settings.save()?;
                 return output.print(&json!({"server":name}));
+            }
+            ServerCommand::Remove { name } => {
+                if settings.settings.servers.remove(&name).is_none() {
+                    bail!("saved server not found");
+                }
+                if settings.settings.active_server.as_deref() == Some(&name) {
+                    settings.settings.active_server = None;
+                }
+                settings.save()?;
+                return output.print(&json!({
+                    "server": name,
+                    "state": "removed",
+                    "activeServer": settings.settings.active_server,
+                }));
             }
             ServerCommand::List => {
                 return output.print(

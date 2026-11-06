@@ -137,7 +137,11 @@ fn help_advertises_only_plural_groups_and_select() {
         (vec!["contacts"], vec!["lookup"], vec![]),
         (vec!["groups"], vec!["lookup"], vec![]),
         (vec!["config"], vec!["servers"], vec!["server"]),
-        (vec!["config", "servers"], vec!["select"], vec!["use"]),
+        (
+            vec!["config", "servers"],
+            vec!["remove", "select"],
+            vec!["use"],
+        ),
     ] {
         let error = command()
             .try_get_matches_from(["wx"].into_iter().chain(args).chain(["--help"]))

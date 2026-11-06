@@ -21,6 +21,7 @@ fn configure(command: Command, parents: &[&str]) -> Command {
         ["wx", "config"] => "Examples:\n  wx config client\n  wx config servers list\n\nUse wx config <COMMAND> --help for its arguments and options.",
         ["wx", "config", "servers"] => "Examples:\n  wx config servers add box --url https://wx.example.com --token-file /absolute/path/to/api-token\n  wx config servers list\n  wx config servers select box\n\n--server-name NAME or AGENT_WECHAT_SERVER overrides the saved server.\nUse wx config servers <COMMAND> --help for its arguments and options.",
         ["wx", "config", "servers", "select"] => "Example: wx config servers select box\n\nChoose a name from wx config servers list. This saves the server used by\nsubsequent commands; it does not start a daemon or sign in to WeChat.",
+        ["wx", "config", "servers", "remove"] => "Example: wx config servers remove box\n\nRemoves this CLI's saved server entry and clears the selection if it was active.\nToken files and local profiles are retained.",
         _ if command.has_subcommands() => "Run this command with a subcommand and --help to see its arguments and options.",
         ["wx", "profiles", ..] => "Uses stopped local files. Select them with wx profiles select NAME or --local-profile NAME.\nUse --source-stopped only after stopping the owner or making a consistent snapshot.",
         ["wx", "config", ..] => "CLI server choices are saved locally. Use --config FILE to choose another client configuration.",
