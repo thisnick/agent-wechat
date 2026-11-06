@@ -107,7 +107,8 @@ fn response(bytes: &[u8]) -> Result<MessageRecallReply> {
 
 impl NativeClient {
     /// Submit once without credential renewal, login fallback or automatic retry.
-    pub fn recall_message(
+    #[doc(hidden)]
+    pub(crate) fn recall_message_snapshot(
         &self,
         state: &mut AccountState,
         recall: &MessageRecall,

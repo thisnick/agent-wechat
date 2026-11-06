@@ -17,7 +17,6 @@ use wechat_protocol::{
         PreparedUpload, PreparedVideoUpload, StickerDescriptor, UploadedImage, UploadedMedia,
         UploadedVideo,
     },
-    NativeOptions,
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 #[path = "media_auto.rs"]
@@ -1433,7 +1432,9 @@ impl Core {
                 } else {
                     None
                 };
-                let cdn = self.upstream.media_transport_route(&mut state, route)?;
+                let cdn = self
+                    .account_upstream(account)?
+                    .media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
                 let unlocked = permit.is_some();
                 let fence = unlocked
@@ -1549,7 +1550,7 @@ impl Core {
                             .transpose()?;
                         let before = serde_json::to_vec(&state)?;
                         let reply = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                            self.upstream.download_voice(
+                            self.account_upstream(account)?.download_voice(
                                 &mut state,
                                 server_id,
                                 length,
@@ -1567,8 +1568,9 @@ impl Core {
                         let chunk = match reply {
                             Ok(chunk) => chunk,
                             Err(error) if !renewed && is_media_auth_rejected(&error) => {
-                                state =
-                                    self.upstream.renew_session(&state, "agent-wechat media")?;
+                                state = self
+                                    .account_upstream(account)?
+                                    .renew_session(&state, "agent-wechat media")?;
                                 self.save_state(account, &state)?;
                                 renewed = true;
                                 continue;
@@ -2530,7 +2532,6 @@ impl Core {
             // and upload path. Authenticate the source before any network I/O.
             let source_md5 = hex_string(&wechat_protocol::crypto::md5(&bytes));
             drop(bytes);
-            let native = self.upstream.native(NativeOptions::default())?;
             return self.perform_reused_file_send(
                 account,
                 id,
@@ -2538,9 +2539,11 @@ impl Core {
                 (&source, &source_md5),
                 |uploaded, state| {
                     let conf = if uploaded.descriptor.quality == MediaQuality::LargeFile {
-                        native.large_cdn_config(state, LargeCdnRoute::Download)?
+                        self.native_request(account, state, |request| {
+                            request.large_cdn_config(LargeCdnRoute::Download)
+                        })?
                     } else {
-                        native.cdn_config(state)?
+                        self.native_request(account, state, |request| request.cdn_config())?
                     };
                     self.save_state(account, state)?;
                     let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
@@ -2554,14 +2557,15 @@ impl Core {
                     Ok(downloaded.sha256)
                 },
                 |plan, state| {
-                    native.send_file_with_reservation(
-                        state,
-                        &plan.request.thread_id,
-                        &plan.client_id,
-                        plan.created_at,
-                        plan.uploaded_file.as_ref().unwrap(),
-                        plan.reservation.as_ref(),
-                    )
+                    self.native_request(account, state, |request| {
+                        request.send_file(
+                            &plan.request.thread_id,
+                            &plan.client_id,
+                            plan.created_at,
+                            plan.uploaded_file.as_ref().unwrap(),
+                            plan.reservation.as_ref(),
+                        )
+                    })
                 },
             );
         }
@@ -2632,7 +2636,7 @@ impl Core {
                 plan.voice[index].status = "submitting".into();
                 self.save_send_plan(account, id, &plan)?;
                 let part = &plan.voice[index];
-                let result = self.upstream.submit_media(
+                let result = self.account_upstream(account)?.submit_media(
                     &mut state,
                     MediaSubmission {
                         destination: &plan.request.thread_id,
@@ -2695,16 +2699,14 @@ impl Core {
         let modern_file = plan.request.kind == MediaKind::File && file_uses_multiphase(bytes.len());
         let upload_route = modern_file.then_some(LargeCdnRoute::Upload);
         let mut cdn = self
-            .upstream
+            .account_upstream(account)?
             .media_transport_route(&mut state, upload_route)?;
         self.save_state(account, &state)?;
         let destination = plan.request.thread_id.clone();
         let progress_id = plan.file_upload_progress_id.clone();
         if self.reserve_media_file_upload(account, id, &mut plan, bytes.len(), || {
-            self.upstream
-                .native(NativeOptions::default())?
-                .reserve_file_upload(
-                    &mut state,
+            self.native_request(account, &mut state, |request| {
+                request.reserve_file_upload(
                     &destination,
                     progress_id
                         .as_deref()
@@ -2713,6 +2715,7 @@ impl Core {
                     bytes.len(),
                     &hex_string(&wechat_protocol::crypto::md5(&bytes)),
                 )
+            })
         })? {
             self.save_state(account, &state)?;
         }
@@ -2869,7 +2872,9 @@ impl Core {
                         &raw_material.file_key,
                     )?;
                     let route = file_uses_multiphase(bytes.len()).then_some(LargeCdnRoute::Upload);
-                    let raw_cdn = self.upstream.media_transport_route(&mut state, route)?;
+                    let raw_cdn = self
+                        .account_upstream(account)?
+                        .media_transport_route(&mut state, route)?;
                     self.save_state(account, &state)?;
                     self.phase_media(account, id, "uploading")?;
                     let fence = self.media_authorization_fence(account)?;
@@ -2904,7 +2909,7 @@ impl Core {
             let download_route = (uploaded.descriptor.quality == MediaQuality::LargeFile)
                 .then_some(LargeCdnRoute::Download);
             cdn = self
-                .upstream
+                .account_upstream(account)?
                 .media_transport_route(&mut state, download_route)?;
             self.save_state(account, &state)?;
         }
@@ -2945,7 +2950,9 @@ impl Core {
                         .expected_bytes
                         .is_some_and(|length| length > 25 * 1024 * 1024))
                 .then_some(LargeCdnRoute::VideoDownload);
-                let download_cdn = self.upstream.media_transport_route(&mut state, route)?;
+                let download_cdn = self
+                    .account_upstream(account)?
+                    .media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
                 let fence = self.media_authorization_fence(account)?;
                 let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
@@ -2980,7 +2987,7 @@ impl Core {
             },
             _ => bail!("unsupported_media_send"),
         };
-        let result = self.upstream.submit_media(
+        let result = self.account_upstream(account)?.submit_media(
             &mut state,
             MediaSubmission {
                 destination: &plan.request.thread_id,

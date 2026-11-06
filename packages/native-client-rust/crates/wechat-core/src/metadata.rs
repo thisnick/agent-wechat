@@ -753,7 +753,9 @@ impl Core {
         let mut state = self.account_state(account)?;
         let capture =
             |state: &mut wechat_protocol::AccountState| -> Result<MetadataReply<ContactLookup>> {
-                let raw = self.upstream.lookup_contacts_raw(state, ids)?;
+                let raw = self
+                    .account_upstream(account)?
+                    .lookup_contacts_raw(state, ids)?;
                 // Persist the verified body before any schema/identity decoding. A
                 // decoder failure can be investigated offline without repeating RPC.
                 self.retain_contact_wire(account, ids, &raw)?;
@@ -765,7 +767,7 @@ impl Core {
             Ok(reply) => Ok(reply),
             Err(error) if auth_rejected(&error) => {
                 state = self
-                    .upstream
+                    .account_upstream(account)?
                     .renew_session(&state, "agent-wechat metadata")?;
                 capture(&mut state)
             }
@@ -843,7 +845,8 @@ impl Core {
                 let profile_revision = self.group_revision(account, &group_id)?;
                 let epoch = self.store.runtime(account, "logout-epoch")?;
                 let raw = self.group_read(account, epoch.as_deref(), |state| {
-                    self.upstream.group_detail_raw(state, &group_id)
+                    self.account_upstream(account)?
+                        .group_detail_raw(state, &group_id)
                 })?;
                 let id = self.stage_metadata_body(
                     account,
@@ -863,7 +866,7 @@ impl Core {
                 let mut state = self.account_state(account)?;
                 let profile_revision = self.group_revision(account, &group_id)?;
                 let reply = self
-                    .upstream
+                    .account_upstream(account)?
                     .lookup_room_receipt(&mut state, &group_id, version)?;
                 self.save_state(account, &state)?;
                 let complete = reply.value.full_member_ids.is_some();
@@ -981,10 +984,9 @@ impl Core {
                 pending
             } else {
                 let mut state = self.account_state(account)?;
-                let reply = self
-                    .upstream
-                    .native(NativeOptions::default())?
-                    .init_contacts_receipt(&mut state, sequences.0, sequences.1)?;
+                let reply = self.native_request(account, &mut state, |request| {
+                    request.init_contacts_receipt(sequences.0, sequences.1)
+                })?;
                 self.save_state(account, &state)?;
                 let id =
                     self.stage_metadata_body(account, ReceiptBody::ContactCatalog(reply.clone()))?;
@@ -1079,10 +1081,9 @@ impl Core {
             }
             self.metadata_check(account, operation, deadline)?;
             let mut state = self.account_state(account)?;
-            let page = self
-                .upstream
-                .native(NativeOptions::default())?
-                .group_inventory(&mut state, &cursor)?;
+            let page = self.native_request(account, &mut state, |request| {
+                request.group_inventory(&cursor)
+            })?;
             self.save_state(account, &state)?;
             let more = page.more;
             let wait = page.wait_seconds;

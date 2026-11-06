@@ -75,7 +75,8 @@ pub fn decode_group_inventory(raw: &[u8]) -> Result<GroupMetadataPage> {
     })
 }
 impl NativeClient {
-    pub fn group_inventory(
+    #[doc(hidden)]
+    pub(crate) fn group_inventory_snapshot(
         &self,
         state: &mut AccountState,
         cursor: &[u8],
@@ -97,7 +98,12 @@ impl NativeClient {
     /// Verified native business payload, retained before strict contact decoding.
     /// Callers must protect this account data at rest. The transport's global
     /// message bound applies; no identities or opaque fields are exposed in logs.
-    pub fn lookup_contacts_raw(&self, state: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+    #[doc(hidden)]
+    pub(crate) fn lookup_contacts_raw_snapshot(
+        &self,
+        state: &mut AccountState,
+        ids: &[String],
+    ) -> Result<Vec<u8>> {
         let request = wire::contact_request(state, ids)?;
         let raw =
             self.authenticated_rpc(state, 182, "/cgi-bin/micromsg-bin/getcontact", &request)?;
@@ -107,30 +113,33 @@ impl NativeClient {
         );
         Ok(raw)
     }
-    pub fn lookup_contacts_receipt(
+    #[doc(hidden)]
+    pub(crate) fn lookup_contacts_receipt_snapshot(
         &self,
         state: &mut AccountState,
         ids: &[String],
     ) -> Result<MetadataReply<ContactLookup>> {
-        let raw = self.lookup_contacts_raw(state, ids)?;
+        let raw = self.lookup_contacts_raw_snapshot(state, ids)?;
         Ok(MetadataReply {
             value: wire::decode_contacts(&raw, ids)?,
             raw,
         })
     }
-    pub fn lookup_room_receipt(
+    #[doc(hidden)]
+    pub(crate) fn lookup_room_receipt_snapshot(
         &self,
         state: &mut AccountState,
         id: &str,
         version: u32,
     ) -> Result<MetadataReply<RoomRoster>> {
-        let raw = self.lookup_room_raw(state, id, version)?;
+        let raw = self.lookup_room_raw_snapshot(state, id, version)?;
         Ok(MetadataReply {
             value: wire::decode_room(&raw, id)?,
             raw,
         })
     }
-    pub fn lookup_room_raw(
+    #[doc(hidden)]
+    pub(crate) fn lookup_room_raw_snapshot(
         &self,
         state: &mut AccountState,
         id: &str,
@@ -144,7 +153,8 @@ impl NativeClient {
             &request,
         )
     }
-    pub fn init_contacts_receipt(
+    #[doc(hidden)]
+    pub(crate) fn init_contacts_receipt_snapshot(
         &self,
         state: &mut AccountState,
         a: u32,

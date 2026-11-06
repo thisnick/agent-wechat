@@ -385,7 +385,7 @@ export class NativeCallService {
       if (active.endStarted) { media.stopAudio(); this.armTerminalWait(active); return; }
       if (!this.current(active)) { media.close(); return; }
       const tracks = media.tracks();
-      if (JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTrack.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
+      if (tracks.receiveTracks.length !== 1 || JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format) || JSON.stringify(tracks.receiveTracks[0]?.format) !== JSON.stringify(this.format)) throw Error("Calling PCM changed");
       active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active, "output"); }, trace,
         { continuous: this.prepared!.continuous });
       active.output.start();

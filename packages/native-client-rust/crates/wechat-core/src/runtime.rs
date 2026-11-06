@@ -25,6 +25,8 @@ mod identity;
 #[path = "official_profile.rs"]
 mod official_profile;
 pub use official_profile::{OfficialProfileRequest, OfficialProfileSelection};
+#[path = "native_account.rs"]
+mod native_account;
 #[path = "profile_network.rs"]
 mod profile_network;
 #[path = "push.rs"]
@@ -113,6 +115,7 @@ struct AccountCalls {
 #[doc(hidden)]
 pub struct CoreShared {
     account_calls: Mutex<AccountCalls>,
+    native_accounts: Mutex<BTreeMap<String, Option<wechat_protocol::NativeClient>>>,
 
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
@@ -341,6 +344,7 @@ impl Core {
             live_store: None,
             shared: Arc::new(CoreShared {
                 account_calls: Mutex::new(AccountCalls::default()),
+                native_accounts: Mutex::new(BTreeMap::new()),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
@@ -569,7 +573,10 @@ impl Core {
         if self.store.runtime(account, "logged-out")?.is_some() {
             bail!("auth_required");
         }
-        let state = self.state_unfenced(account)?;
+        let state = match self.native_account_snapshot(account)? {
+            Some(state) => state,
+            None => self.state_unfenced(account)?,
+        };
         self.check_state_profile(account, &state)?;
         Ok(state)
     }
@@ -579,6 +586,15 @@ impl Core {
     fn persist_state(&self, account: &str, state: &AccountState, accepted: bool) -> Result<()> {
         self.upstream.validate_state(state)?;
         self.check_state_profile(account, state)?;
+        if let Some(accepted) = accepted
+            .then(|| self.persisted_native_state(account, state))
+            .transpose()?
+            .flatten()
+        {
+            self.bind_call_authorization(account, &accepted)?;
+            let _ = self.project_saved_login(account, &accepted);
+            return Ok(());
+        }
         if let Ok(prior) = self.state_unfenced(account) {
             if prior.uin != state.uin || prior.own_username != state.own_username {
                 bail!("account_identity_mismatch");
@@ -683,6 +699,7 @@ impl Core {
         let record = self.store.account(account)?;
         let saved = self.account_state(account).is_ok();
         let auth = saved
+            && self.native_account_lease(account).is_ok()
             && self
                 .store
                 .runtime(account, "validated-generation")?
@@ -708,6 +725,7 @@ impl Core {
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
+        self.stop_native_account(account);
         self.fence_call_authority(account);
         self.store.clear_runtime(account, "validated-generation")?;
         if let Ok(map) = self.cancels.lock() {
@@ -907,6 +925,7 @@ impl Core {
         }
         let start = Instant::now();
         let account = op.account_id.clone();
+        self.reset_native_account(&account);
         let previous = self.state_unfenced(&account).ok();
         if let Some(state) = &previous {
             self.check_state_profile(&account, state)?;
@@ -919,7 +938,7 @@ impl Core {
             self.progress(&op, "resuming", json!({"method":"active"}))?;
             let mut state = saved.clone();
             let cursor = self.cursor(&account)?;
-            let upstream = self.upstream.clone();
+            let upstream = self.account_upstream(&account)?;
             let validated = blocking(move || {
                 let client = upstream;
                 match client.heartbeat(&mut state, &cursor) {
@@ -1220,7 +1239,7 @@ impl Core {
             let desired = core.store.runtime(&account, "desired")?;
             let mut state = core.session_state(&account, &fence)?;
             let cursor = core.cursor(&account)?;
-            let native = &core.upstream;
+            let native = core.account_upstream(&account)?;
             let batch = permit.transfer(&core, &account, || native.sync(&mut state, &cursor))?;
             core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
             core.store.put_runtime(
@@ -1245,10 +1264,9 @@ impl Core {
         let account = account.to_string();
         blocking(move || {
             let mut state = core.account_state(&account)?;
-            let contacts = core
-                .upstream
-                .native(NativeOptions::default())?
-                .lookup_contacts(&mut state, &ids)?;
+            let contacts = core.native_request(&account, &mut state, |request| {
+                request.lookup_contacts(&ids)
+            })?;
             core.save_state(&account, &state)?;
             let items: Vec<_> = contacts.contacts.iter().map(contact_lookup_item).collect();
             Ok(json!({"items": items, "results": contacts.results}))
@@ -1266,7 +1284,7 @@ impl Core {
         let core = self.clone();
         let account = account.to_string();
         let room = room.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let roster=core.upstream.native(NativeOptions::default())?.lookup_room(&mut state,&room,version)?;core.save_state(&account,&state)?;
+        blocking(move||{let mut state=core.account_state(&account)?;let roster=core.native_request(&account, &mut state, |request| request.lookup_room(&room,version))?;core.save_state(&account,&state)?;
             Ok(json!({"id":roster.room_id,"version":roster.version,"items":roster.members.into_iter().map(|m|json!({"id":m.username,"nickname":m.nickname,"roomDisplayName":m.room_display_name})).collect::<Vec<_>>(),"profileProjection":"pending"}))
         }).await
     }
@@ -1531,7 +1549,7 @@ impl Core {
                 .open_record(&account, "send-payload", &encrypted)?;
             let payload: SendPayload = serde_json::from_slice(&plain)?;
             let mut state = core.account_state(&account)?;
-            let native = &core.upstream;
+            let native = core.account_upstream(&account)?;
             if let Some(mentions) = &payload.mentions {
                 if let Err(error) = core.validate_mention_recipients(
                     &account,
@@ -2196,7 +2214,7 @@ impl Core {
                     .context("auth_required")?;
                 let mut state = core.session_state(&account, &fence)?;
                 let cursor = core.cursor(&account)?;
-                let native = &core.upstream;
+                let native = core.account_upstream(&account)?;
                 let beat =
                     permit.transfer(&core, &account, || native.heartbeat(&mut state, &cursor))?;
                 core.save_network_state(&account, &state, &expected, &fence, Some(b"connected"))?;
@@ -2262,7 +2280,12 @@ impl Core {
                 shutdowns.spawn(async move { service.shutdown().await });
             }
             while shutdowns.join_next().await.is_some() {}
+            core.stopping.store(true, Ordering::SeqCst);
+            let clients = core.native_clients();
             core.shutdown();
+            for client in clients {
+                let _ = client.shutdown().await;
+            }
         })
         .await
         .is_err()
@@ -2272,6 +2295,7 @@ impl Core {
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::SeqCst);
+        self.stop_native_accounts();
 
         self.fence_all_call_authorities();
         if let Ok(cancels) = self.cancels.lock() {
@@ -2768,6 +2792,7 @@ mod tests {
         store
             .mark_validated_if_active("one", &core.ownership_generation)
             .unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
         core.stopping.store(true, Ordering::SeqCst);
         let request = crate::ShareSendRequest::Share {
             thread_id: "peer".into(),
@@ -2912,6 +2937,7 @@ mod tests {
         store
             .mark_validated_if_active("one", &core.ownership_generation)
             .unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
         assert_eq!(core.account_status("one").unwrap()["connection"], "online");
         drop(core);
         drop(store);

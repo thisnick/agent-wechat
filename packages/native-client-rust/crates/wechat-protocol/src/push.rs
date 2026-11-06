@@ -95,7 +95,7 @@ impl Inbox {
     }
 }
 
-pub struct Connection {
+pub(crate) struct Connection {
     session: Session,
     timeout: Duration,
     sequence: u32,
@@ -140,6 +140,7 @@ impl Connection {
         cgi: u16,
         command: u32,
         plain: &[u8],
+        before_submit: impl FnOnce() -> Result<()>,
     ) -> Result<Vec<u8>> {
         self.keepalive()?;
         let sequence = self.sequence;
@@ -149,6 +150,7 @@ impl Connection {
             .filter(|next| *next != NOOP_SEQUENCE)
             .ok_or_else(|| anyhow::anyhow!("Longlink sequence exhausted"))?;
         let packet = AuthenticatedPacket::prepare(state, cgi, plain)?;
+        before_submit()?;
         self.session
             .send_application(command, sequence, &packet.packet)?;
         let deadline = Instant::now() + self.timeout;
@@ -176,24 +178,27 @@ impl Connection {
         anyhow::bail!("Native longlink response frame limit")
     }
     /// Also associates the authenticated account with this persistent socket.
-    pub fn heartbeat(
+    pub(crate) fn heartbeat_guarded(
         &mut self,
         state: &mut AccountState,
         cursor: &[u8],
+        before_submit: impl FnOnce() -> Result<()>,
     ) -> Result<wire::Heartbeat> {
         let request = wire::heartbeat_request(state, cursor)?;
-        wire::decode_heartbeat(&self.rpc(state, 518, 238, &request)?)
+        wire::decode_heartbeat(&self.rpc(state, 518, 238, &request, before_submit)?)
     }
-    pub fn sync(
+
+    pub(crate) fn sync_guarded(
         &mut self,
         state: &mut AccountState,
         cursor: &[u8],
         scene: u32,
+        before_submit: impl FnOnce() -> Result<()>,
     ) -> Result<wire::SyncBatch> {
         ensure!([1, 6, 7].contains(&scene), "Unsupported sync scene");
         let sent = if cursor.is_empty() { &[0][..] } else { cursor };
         let request = wire::sync_request(sent, &state.device.device_type, scene)?;
-        wire::decode_sync(&self.rpc(state, 138, 121, &request)?, cursor)
+        wire::decode_sync(&self.rpc(state, 138, 121, &request, before_submit)?, cursor)
     }
     /// Waiting owns no account mutation lock. The caller rechecks its credential
     /// and logout fences under that lock before acting on a notification.

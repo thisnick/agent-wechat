@@ -28,11 +28,17 @@ use wechat_core::call_types::{
 #[path = "calls_cli_audio.rs"]
 mod audio;
 
+#[path = "calls_cli_interaction.rs"]
+mod interaction;
+
+#[path = "calls_cli_receive.rs"]
+mod receive_audio;
+
 #[path = "calls_cli_levels.rs"]
 mod levels;
 
 type Socket = WebSocketStream<reqwest::Upgraded>;
-const SOCKET_LIMIT: usize = 64 * 1024;
+const SOCKET_LIMIT: usize = (64_usize * 1024).div_ceil(3) * 4 + 1024;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -61,6 +67,11 @@ pub(crate) enum CallsCommand {
         #[command(flatten)]
         audio: AudioOptions,
     },
+    /// Start or join a conference with local microphone, mixed playback and participant meters.
+    Conference {
+        #[command(subcommand)]
+        command: Option<ConferenceCommand>,
+    },
     /// Call one contact using this computer's microphone and speakers.
     Dial {
         contact: String,
@@ -70,6 +81,24 @@ pub(crate) enum CallsCommand {
     /// Answer the current offer using this computer's microphone and speakers.
     Answer {
         call_id: Option<String>,
+        #[command(flatten)]
+        audio: AudioOptions,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ConferenceCommand {
+    /// Start a group voice conference; use i inside the call for later invitations.
+    Start {
+        group: String,
+        #[arg(long = "invite", required = true)]
+        invitees: Vec<String>,
+        #[command(flatten)]
+        audio: AudioOptions,
+    },
+    /// Join a current invitation for this group; never creates a room.
+    Join {
+        group: String,
         #[command(flatten)]
         audio: AudioOptions,
     },
@@ -269,7 +298,31 @@ async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
     if text.len() > 16 * 1024 {
         bail!("call event exceeds the message limit");
     }
-    let event = serde_json::from_str(&text).context("invalid call event")?;
+    let value: serde_json::Value = serde_json::from_str(&text).context("invalid call event")?;
+    if value["type"] == "protocol.error" {
+        let CallEvent::ProtocolError {
+            client_versions,
+            server_versions,
+            code,
+        } = serde_json::from_value(value).context("invalid call protocol error")?
+        else {
+            bail!("invalid call protocol error");
+        };
+        bail!(
+            "call protocol negotiation failed: client versions {client_versions:?}, daemon versions {server_versions:?} ({})",
+            serde_json::to_value(code)?
+        );
+    }
+    if value["type"] == "hello"
+        && value["protocolVersion"].as_u64().unwrap_or(1)
+            != u64::from(wechat_core::call_types::CALL_PROTOCOL_VERSION)
+    {
+        bail!(
+            "unsupported call protocol version: client [2], daemon [{}]",
+            value["protocolVersion"].as_u64().unwrap_or(1)
+        );
+    }
+    let event = serde_json::from_value(value).context("invalid call event")?;
     if call_debug_enabled() {
         match event_json(&event) {
             Ok(line) => debug_call(label, format_args!("<- {line}")),
@@ -287,6 +340,9 @@ struct Control {
     client_id: String,
 
     capabilities: CallCapabilities,
+    conference_invitations: Vec<wechat_core::call_types::CallConferenceInvitation>,
+    invitation_results:
+        std::collections::VecDeque<(String, Vec<wechat_core::call_types::CallInvitationResult>)>,
 
     availability: CallsAvailability,
 
@@ -303,11 +359,19 @@ struct Control {
 impl Control {
     async fn connect(remote: &Remote) -> Result<(Self, CallEvent)> {
         let mut socket = open_socket(remote, "calls/socket").await?;
+        send_json(
+            &mut socket,
+            &wechat_core::call_types::CallClientHello::Hello {
+                supported_protocol_versions: vec![wechat_core::call_types::CALL_PROTOCOL_VERSION],
+            },
+        )
+        .await?;
         let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "control"))
             .await
             .context("call socket hello timed out")??;
         let CallEvent::Hello {
-            protocol_version: 1,
+            protocol_version: wechat_core::call_types::CALL_PROTOCOL_VERSION,
+            conference_invitations,
             client_id: _client_id,
             capabilities: _capabilities,
             availability: _availability,
@@ -315,6 +379,7 @@ impl Control {
             current_pending_offer: _current_pending_offer,
             current_call: _current_call,
             audio_format: _audio_format,
+            ..
         } = &event
         else {
             bail!("unsupported call socket hello");
@@ -328,6 +393,8 @@ impl Control {
                 client_id: _client_id.clone(),
 
                 capabilities: *_capabilities,
+                conference_invitations: conference_invitations.clone(),
+                invitation_results: Default::default(),
 
                 availability: *_availability,
 
@@ -351,6 +418,48 @@ impl Control {
 
     fn update(&mut self, event: &CallEvent) {
         match event {
+            CallEvent::InvitationResult {
+                call_id, results, ..
+            } => {
+                if self.invitation_results.len() < 128 {
+                    self.invitation_results
+                        .push_back((call_id.clone(), results.clone()));
+                }
+            }
+            CallEvent::ConferenceInvitations { invitations } => {
+                self.conference_invitations = invitations.clone()
+            }
+            CallEvent::ParticipantUpdated {
+                call_id,
+                revision,
+                participant,
+            } => {
+                if let Some(call) = self
+                    .call
+                    .as_mut()
+                    .filter(|call| call.call_id == *call_id && *revision >= call.revision)
+                {
+                    call.revision = *revision;
+                    call.participants
+                        .retain(|current| current.participant_id != participant.participant_id);
+                    call.participants.push(participant.clone());
+                }
+            }
+            CallEvent::TrackRemoved {
+                call_id,
+                track_id,
+                generation,
+                ..
+            } => {
+                let key = (call_id.clone(), *track_id);
+                if self
+                    .tracks
+                    .get(&key)
+                    .is_some_and(|track| track.generation <= *generation)
+                {
+                    self.tracks.remove(&key);
+                }
+            }
             CallEvent::Offered { offer } => self.offer = Some(offer.clone()),
             CallEvent::Pending { offer } => self.pending_offer = offer.clone(),
             CallEvent::TrackAdded { call_id, track }
@@ -364,7 +473,15 @@ impl Control {
                     self.tracks.insert(key, track.clone());
                 }
             }
-            CallEvent::State { call } => self.call = Some(call.clone()),
+            CallEvent::State { call } => {
+                if self
+                    .call
+                    .as_ref()
+                    .is_none_or(|old| old.call_id != call.call_id || old.revision <= call.revision)
+                {
+                    self.call = Some(call.clone());
+                }
+            }
             CallEvent::Control {
                 call_id,
                 participant_id,

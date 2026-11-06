@@ -6,11 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 use wechat_protocol::{
-    is_retryable_login_poll_error, AccountState, DeviceProfile, LoginStatus, NativeClient,
-    NativeOptions,
+    is_retryable_login_poll_error, DeviceProfile, LoginStatus, NativeClient, NativeOptions,
 };
 
-pub fn login() -> Result<(NativeClient, AccountState)> {
+pub fn login() -> Result<NativeClient> {
     let client = NativeClient::new(NativeOptions::default())?;
     let device = DeviceProfile::generate("UnifiedPCLinux x86_64".into())?;
     let qr_directory = wechat_platform::private_tempdir("wechat-protocol-example-")?;
@@ -32,7 +31,7 @@ pub fn login() -> Result<(NativeClient, AccountState)> {
             Ok(LoginStatus::Approved) => {
                 let state = client.complete_login(&mut attempt)?;
                 eprintln!("Login complete; credentials remain in memory.");
-                return Ok((client, state));
+                return NativeClient::from_account(state, NativeOptions::default());
             }
             Ok(LoginStatus::Pending | LoginStatus::Scanned) => {}
             Ok(status) => bail!("Login stopped: {status:?}"),

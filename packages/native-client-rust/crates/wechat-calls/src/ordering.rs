@@ -7,7 +7,7 @@
 use std::{error::Error, fmt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PrimaryAdmission {
+pub struct PrimaryAdmission {
     /// Leading primaries that are duplicate or older than the high-water mark.
     pub skip: usize,
     /// Missing primaries before the first newly admitted primary in this packet.
@@ -15,7 +15,7 @@ pub(super) struct PrimaryAdmission {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RtpOrderError {
+pub enum RtpOrderError {
     InvalidPrimaryCount,
     AmbiguousSequence,
 }
@@ -32,7 +32,7 @@ impl fmt::Display for RtpOrderError {
 impl Error for RtpOrderError {}
 
 #[derive(Default)]
-pub(super) struct RtpOrder {
+pub struct RtpOrder {
     // Retain the last admitted timestamp as metadata. Ordering does not infer a
     // fixed relationship between sequence distance and timestamp advancement.
     last: Option<(u16, u32)>,

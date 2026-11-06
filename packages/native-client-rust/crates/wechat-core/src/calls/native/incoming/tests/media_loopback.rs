@@ -3,16 +3,15 @@
 //! helpers and a synthetic envelope do not establish wire interoperability or a
 //! production-safe cryptographic lifetime.
 use super::*;
+use crate::calls::pcm_envelope::{self as frame, MediaFrame, MediaHeader};
 use openssl::{
     pkey::{Id, PKey},
     sign::Signer,
     symm::{encrypt, Cipher},
 };
 use std::net::Ipv4Addr;
-use wechat_calls::{
-    frame::{self, MediaFrame, MediaHeader},
-    tone::PulseTone,
-};
+use std::sync::mpsc::TryRecvError;
+use wechat_calls::tone::PulseTone;
 use wechat_protocol::calls::relay::{decrypt_checkin, encrypt_checkin, frame_outer, unframe_outer};
 
 const FRAMES: usize = 40;
@@ -637,11 +636,13 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                 .await?;
             let CallEvent::MediaReady {
                 send_track,
-                receive_track,
+                receive_tracks,
+                ..
             } = &media.ready
             else {
                 bail!("Synthetic missing tracks")
             };
+            let receive_track = &receive_tracks[0];
             ensure!(
                 send_track.format == audio_format
                     && receive_track.format == audio_format

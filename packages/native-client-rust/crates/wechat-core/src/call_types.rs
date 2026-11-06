@@ -2,9 +2,38 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub const CALL_PROTOCOL_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(tag = "type", deny_unknown_fields)]
+#[ts(tag = "type")]
+pub enum CallClientHello {
+    #[serde(rename = "call.hello")]
+    Hello {
+        #[serde(rename = "supportedProtocolVersions")]
+        supported_protocol_versions: Vec<u32>,
+    },
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CallProtocolErrorCode {
+    UnsupportedProtocolVersion,
+    InvalidProtocolVersion,
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallCapabilities {
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
+    pub conference_create: bool,
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
+    pub conference_invite: bool,
+    #[serde(default, skip_serializing_if = "capability_unavailable")]
+    #[ts(optional, as = "Option<_>")]
+    pub conference_join: bool,
     #[serde(default, skip_serializing_if = "capability_unavailable")]
     #[ts(optional, as = "Option<_>")]
     pub direct_audio: bool,
@@ -137,10 +166,47 @@ pub struct CallView {
     pub direction: CallDirection,
     pub state: CallState,
     pub owned_by_this_client: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub participants: Vec<CallParticipant>,
     // Latest reported remote controls, also available to a newly connected observer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<_>")]
     pub controls: Vec<CallParticipantControl>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallParticipant {
+    pub participant_id: String,
+    pub contact_id: String,
+    pub membership: CallMembership,
+    // Omitted until the server supplies this participant's microphone state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub microphone_enabled: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallMembership {
+    Joined,
+    Invited,
+    Left,
+    Unknown,
+}
+
+/// A fresh account-bound invitation locator. It carries no room credentials.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallConferenceInvitation {
+    pub invitation_id: String,
+    pub revision: u32,
+    pub group_id: String,
+    pub caller_id: String,
 }
 
 /// Application-level controls. Native protocol flags and opaque metadata stay
@@ -166,6 +232,8 @@ pub struct CallsAvailability {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallSnapshot {
+    #[serde(default)]
+    pub conference_invitations: Vec<CallConferenceInvitation>,
     pub capabilities: CallCapabilities,
     pub availability: CallsAvailability,
     pub current_offer: Option<CallOffer>,
@@ -180,6 +248,24 @@ pub struct CallSnapshot {
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallCommand {
+    #[serde(rename = "call.invite")]
+    Invite {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "contactIds")]
+        contact_ids: Vec<String>,
+    },
+    #[serde(rename = "call.join")]
+    Join {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "invitationId")]
+        invitation_id: String,
+        #[serde(rename = "invitationRevision")]
+        invitation_revision: u32,
+    },
     #[serde(rename = "call.ready")]
     Ready {
         #[serde(rename = "requestId")]
@@ -254,6 +340,8 @@ impl CallCommand {
     pub fn request_id(&self) -> &str {
         match self {
             Self::Ready { request_id, .. }
+            | Self::Invite { request_id, .. }
+            | Self::Join { request_id, .. }
             | Self::Dial { request_id, .. }
             | Self::Answer { request_id, .. }
             | Self::Reject { request_id, .. }
@@ -302,6 +390,29 @@ pub struct CallAudioTrack {
     pub generation: u32,
     pub direction: CallTrackDirection,
     pub format: CallAudioFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub participant_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallInvitationStatus {
+    Submitted,
+    Rejected,
+    Unknown,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallInvitationResult {
+    pub contact_id: String,
+    pub status: CallInvitationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service_code: Option<u32>,
+    pub verification_required: bool,
 }
 
 /// Successful owner results include a secret ownerToken. Do not log whole events.
@@ -309,8 +420,30 @@ pub struct CallAudioTrack {
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallEvent {
+    #[serde(rename = "call.invitation_result")]
+    InvitationResult {
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        results: Vec<CallInvitationResult>,
+    },
+    #[serde(rename = "protocol.error")]
+    ProtocolError {
+        code: CallProtocolErrorCode,
+        #[serde(rename = "clientVersions")]
+        client_versions: Vec<u32>,
+        #[serde(rename = "serverVersions")]
+        server_versions: Vec<u32>,
+    },
+    #[serde(rename = "conference.invitations")]
+    ConferenceInvitations {
+        invitations: Vec<CallConferenceInvitation>,
+    },
     #[serde(rename = "hello")]
     Hello {
+        #[serde(rename = "conferenceInvitations", default)]
+        conference_invitations: Vec<CallConferenceInvitation>,
         #[serde(rename = "protocolVersion")]
         protocol_version: u32,
         #[serde(rename = "clientId")]
@@ -343,6 +476,13 @@ pub enum CallEvent {
     Pending { offer: Option<CallPendingOffer> },
     #[serde(rename = "call.state")]
     State { call: CallView },
+    #[serde(rename = "participant.updated")]
+    ParticipantUpdated {
+        #[serde(rename = "callId")]
+        call_id: String,
+        revision: u32,
+        participant: CallParticipant,
+    },
     #[serde(rename = "call.control")]
     Control {
         #[serde(rename = "callId")]
@@ -365,30 +505,64 @@ pub enum CallEvent {
         call_id: String,
         track: CallAudioTrack,
     },
+    #[serde(rename = "track.removed")]
+    TrackRemoved {
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "trackId")]
+        track_id: u32,
+        generation: u32,
+        reason: String,
+    },
     #[serde(rename = "media.ready")]
     MediaReady {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u32,
         #[serde(rename = "sendTrack")]
         send_track: CallAudioTrack,
-        #[serde(rename = "receiveTrack")]
-        receive_track: CallAudioTrack,
+        #[serde(rename = "receiveTracks")]
+        receive_tracks: Vec<CallAudioTrack>,
     },
     #[serde(rename = "call.error")]
     Error { code: CallErrorCode },
 }
 
-/// JSON setup on the separately authenticated media socket. Binary messages
-/// contain only PCM samples; stream identity is established by these messages.
+/// JSON setup and base64 PCM on the separately authenticated media socket.
 #[derive(Serialize, Deserialize, TS)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallMediaCommand {
     #[serde(rename = "media.attach")]
     Attach {
+        #[serde(rename = "supportedProtocolVersions")]
+        supported_protocol_versions: Vec<u32>,
         #[serde(rename = "clientId")]
         client_id: String,
         #[serde(rename = "ownerToken")]
         owner_token: String,
     },
     #[serde(rename = "audio.start")]
-    AudioStart { generation: u32 },
+    AudioStart {
+        #[serde(rename = "trackId")]
+        track_id: u32,
+        generation: u32,
+    },
+    #[serde(rename = "audio.chunk")]
+    AudioChunk {
+        #[serde(rename = "trackId")]
+        track_id: u32,
+        generation: u32,
+        #[serde(rename = "pcmBase64")]
+        pcm_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        sequence: Option<u64>,
+        #[serde(
+            rename = "sampleOffset",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[ts(optional, type = "number")]
+        sample_offset: Option<u64>,
+    },
 }

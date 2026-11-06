@@ -2,7 +2,7 @@
 //! and retains the live carrier and grants the broker winner before `accept`.
 
 use super::*;
-use crate::calls::incoming::{CancelNotification, InviteNotification};
+use wechat_protocol::calls::incoming::{CancelNotification, InviteNotification};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncomingPhase {

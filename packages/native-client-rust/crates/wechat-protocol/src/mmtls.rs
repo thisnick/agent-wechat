@@ -1,6 +1,6 @@
 //! Fresh pinned MMTLS handshake and authenticated shortlink exchange.
 use crate::crypto::*;
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use openssl::{memcmp, nid::Nid};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -117,6 +117,15 @@ fn traffic(secret: &[u8], label: &str, transcript: &[u8]) -> Result<Traffic> {
     };
     b.zeroize();
     Ok(t)
+}
+fn handshake_secret(shared_x: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        shared_x.len() == 32,
+        "Invalid MMTLS P256 shared secret width"
+    );
+    // The P256 coordinate has a fixed width. A leading zero is part of the
+    // shared secret and must participate in the key schedule.
+    Ok(sha256(shared_x))
 }
 fn signed_payload(bytes: &[u8], kind: u8) -> Result<Vec<u8>> {
     let mut top = Cursor::new(bytes);
@@ -252,12 +261,12 @@ impl Session {
         let mut socket = socket.ok_or_else(|| anyhow::anyhow!("Native connection failed"))?;
         socket.set_write_timeout(Some(timeout))?;
         let keys = [
-            Ecdh::generate(Nid::X9_62_PRIME256V1)?,
-            Ecdh::generate(Nid::X9_62_PRIME256V1)?,
+            Ecdh::generate(Nid::X9_62_PRIME256V1).context("MMTLS key generation")?,
+            Ecdh::generate(Nid::X9_62_PRIME256V1).context("MMTLS key generation")?,
         ];
         let mut shares = vec![];
         for (i, k) in keys.iter().enumerate() {
-            let point = k.public()?;
+            let point = k.public().context("MMTLS public key encoding")?;
             shares.extend(section(
                 &[((i + 5) as u32).to_be_bytes().to_vec(), sized(&point)?].concat(),
             ));
@@ -273,7 +282,7 @@ impl Session {
                 VERSION.to_le_bytes().to_vec(),
                 vec![1],
                 0xc02bu16.to_be_bytes().to_vec(),
-                random::<32>()?.to_vec(),
+                random::<32>().context("MMTLS hello random")?.to_vec(),
                 crate::wire::unix_time()?.to_be_bytes().to_vec(),
                 section(&[vec![1], extension].concat()),
             ]
@@ -289,15 +298,18 @@ impl Session {
             .checked_sub(5)
             .ok_or_else(|| anyhow::anyhow!("Unoffered key"))? as usize;
         ensure!(index < 2, "Unoffered key");
-        let mut x = keys[index].derive(&server.point)?;
-        let first = x.iter().position(|v| *v != 0).unwrap_or(x.len() - 1);
-        let mut secret = sha256(&x[first..]);
+        let mut x = keys[index]
+            .derive(&server.point)
+            .context("MMTLS shared secret derivation")?;
+        let mut secret = handshake_secret(&x)?;
         x.zeroize();
         let mut transcript = [hello, server_record.body].concat();
-        let handshake = traffic(&secret, "handshake key expansion", &transcript)?;
+        let handshake = traffic(&secret, "handshake key expansion", &transcript)
+            .context("MMTLS handshake key derivation")?;
         let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
         ensure!(r.header[0] == 0x16, "Expected signature record");
-        let signature_body = open(&r, &handshake.server_key, &handshake.server_iv, 1)?;
+        let signature_body = open(&r, &handshake.server_key, &handshake.server_iv, 1)
+            .context("MMTLS signature record authentication")?;
         let signature = signed_payload(&signature_body, 0x0f)?;
         let pins: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/mmtls-public-keys.json"))?;
@@ -312,11 +324,13 @@ impl Session {
             pin["ecdsaPEM"].as_str().unwrap(),
             &sha256(&transcript),
             &signature,
-        )?;
+        )
+        .context("MMTLS signature verification")?;
         transcript.extend(signature_body);
         let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
         ensure!(r.header[0] == 0x16, "Expected ticket record");
-        let ticket_body = open(&r, &handshake.server_key, &handshake.server_iv, 2)?;
+        let ticket_body = open(&r, &handshake.server_key, &handshake.server_iv, 2)
+            .context("MMTLS ticket record authentication")?;
         let tickets = parse_tickets(&ticket_body)?;
         let access_psk = expand(
             &secret,
@@ -327,7 +341,8 @@ impl Session {
         let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
         ensure!(r.header[0] == 0x16, "Expected Finished");
         let finish = signed_payload(
-            &open(&r, &handshake.server_key, &handshake.server_iv, 3)?,
+            &open(&r, &handshake.server_key, &handshake.server_iv, 3)
+                .context("MMTLS finished record authentication")?,
             0x14,
         )?;
         let expected = hmac(
@@ -354,25 +369,27 @@ impl Session {
             &[b"expanded secret".as_slice(), &sha256(&transcript)].concat(),
             32,
         )?;
-        let application = traffic(&expanded, "application data key expansion", &transcript)?;
+        let application = traffic(&expanded, "application data key expansion", &transcript)
+            .context("MMTLS application key derivation")?;
         secret.zeroize();
         expanded.zeroize();
         let noop = pack_longlink(6, u32::MAX, &[])?;
-        socket.write_all(&seal(
-            0x17,
-            &noop,
-            &application.client_key,
-            &application.client_iv,
-            2,
-        )?)?;
+        socket.write_all(
+            &seal(
+                0x17,
+                &noop,
+                &application.client_key,
+                &application.client_iv,
+                2,
+            )
+            .context("MMTLS noop record sealing")?,
+        )?;
         let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
         ensure!(r.header[0] == 0x17, "Expected NOOP reply");
-        let p = unpack_longlink(&open(
-            &r,
-            &application.server_key,
-            &application.server_iv,
-            4,
-        )?)?;
+        let p = unpack_longlink(
+            &open(&r, &application.server_key, &application.server_iv, 4)
+                .context("MMTLS noop record authentication")?,
+        )?;
         ensure!(
             p.command == 0x3b9aca06 && p.sequence == u32::MAX && p.payload.is_empty(),
             "Unexpected NOOP reply"
@@ -932,6 +949,45 @@ fn decode_short_reply(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fresh_handshake_secret_requires_the_selected_p256_width() {
+        for wrong in [0, 28, 31, 33] {
+            assert!(handshake_secret(&vec![1; wrong]).is_err());
+        }
+        assert_eq!(handshake_secret(&[1; 32]).unwrap(), sha256(&[1; 32]));
+    }
+    #[test]
+    fn zero_prefixed_p256_secret_authenticates_an_independent_server_record() {
+        // Synthetic P256 private scalars 1 and 379. The shared coordinate and
+        // record were calculated independently using Python cryptography,
+        // hashlib and hmac. No account data or captured traffic is used.
+        let own = Ecdh::from_private(Nid::X9_62_PRIME256V1, &[1]).unwrap();
+        let peer = Ecdh::from_private(Nid::X9_62_PRIME256V1, &[1, 123]).unwrap();
+        let shared = own.derive(&peer.public().unwrap()).unwrap();
+        assert_eq!(
+            hex::encode(&shared),
+            "005543894af3d00ed7d740abdbd75c96b06877b787db5f70eea78b90a8d7c00a"
+        );
+        let keys = traffic(
+            &handshake_secret(&shared).unwrap(),
+            "handshake key expansion",
+            b"synthetic client hellosynthetic server hello",
+        )
+        .unwrap();
+        let wire = hex::decode("16f10400314bbd4e0fa2f28903e143496cf3f42dd756b3e792e8359afb180b5bfaff820fcb03742b63ba60e98e9e3ac32f99f851f031").unwrap();
+        let record = Record {
+            header: wire[..5].try_into().unwrap(),
+            body: wire[5..].to_vec(),
+        };
+        assert_eq!(
+            open(&record, &keys.server_key, &keys.server_iv, 1).unwrap(),
+            b"synthetic server signature record"
+        );
+        assert!(open(&record, &keys.server_key, &keys.server_iv, 2).is_err());
+        let mut tampered = record;
+        *tampered.body.last_mut().unwrap() ^= 1;
+        assert!(open(&tampered, &keys.server_key, &keys.server_iv, 1).is_err());
+    }
     #[test]
     fn exact_call_app_auth_route_does_not_admit_arbitrary_route_bytes() {
         assert!(validate_short_route("/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth").is_ok());

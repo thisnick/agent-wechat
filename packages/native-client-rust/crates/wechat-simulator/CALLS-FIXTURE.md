@@ -48,6 +48,9 @@ fixed error `code`. Lines are limited to 16 KiB. For example:
 
 | Operation | Behavior |
 | --- | --- |
+| `configure_conference` | Enables synthetic conference capabilities and a fixed current invitation while idle; disabled by default. |
+| `conference_sources` | Replaces the synthetic joined roster and receive-track list. Each source supplies `trackId`, `generation`, `contactId` and `microphoneEnabled`. |
+| `conference_audio` | Supplies one 320-sample frame on an announced `trackId`/`generation`, with `sequence`, shared `sampleOffset` and constant `value`. |
 | `offer` | Supplies a trusted, already-ACKed synthetic direct voice offer; returns `callId` and `revision`. |
 | `inject_audio` | Sends 1–4 generated 320-sample receive frames after a call connects. `value` is a signed 16-bit constant. |
 | `peer_microphone` | Supplies a verified synthetic microphone state with `muted: true` or `false`; exercises control events and current snapshots. |
@@ -60,7 +63,7 @@ fixed error `code`. Lines are limited to 16 KiB. For example:
 | `shutdown` | Ends the synthetic session and stops the listener. EOF also stops it. |
 
 Accepted dial/answer operations connect immediately. Accepted transmit PCM is
-echoed to the receive track, so a test can check the actual binary frame path.
+echoed to the receive track for direct calls, so a test can check the actual version-2 JSON/base64 audio path. Conference input is counted without being reflected into a receive source; explicit generated source frames supply conference playback.
 The fake backend reports terminal completion for reject, cancel, hangup, and
 stop. It performs no remote operation.
 

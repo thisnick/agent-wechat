@@ -4,7 +4,7 @@ description: Call snapshots and complete client/server JSON payload examples.
 ---
 
 Use the control WebSocket for call commands and events. Its winning owner can
-attach the separate [raw PCM media socket](../calls-media/).
+attach the separate [JSON PCM media socket](../calls-media/).
 [Rust crate architecture](../../how-it-works/rust-crates/) explains package responsibilities.
 
 ## Routes and snapshot
@@ -17,7 +17,7 @@ never put credentials in URLs.
 | --- | --- | --- |
 | GET | `/v1/accounts/{account}/calls/current` | JSON snapshot |
 | WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages |
-| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON setup and binary PCM |
+| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | Versioned JSON and base64 PCM |
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" \
@@ -47,18 +47,71 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 | Field | Meaning |
 | --- | --- |
 | `capabilities` | Available flags only; missing flags mean unavailable; `{}` means no calling |
+| `conferenceInvitations` | Fresh opaque invitation IDs/revisions, group and caller; no room credentials |
 | `currentPendingOffer` | Incoming candidate waiting for readiness or preparation; cannot be answered |
 | `currentOffer` | Actionable incoming offer; clears when claimed or ended |
 | `currentCall` | Active call metadata, including `kind`, `callType`, direction, state and reported participant `controls` |
 | `audioFormat` | Client/daemon PCM format, independent of the WeChat codec |
 
+Reported conference participants include `participantId`, `contactId` and
+`membership` (`joined`, `invited`, `left` or `unknown`). When the server supplies microphone state, `microphoneEnabled` is
+`true` or `false`; an omitted value means unknown. Muting a microphone does not
+remove the participant from the room.
+
 Same-account observers see call metadata without owner tokens or audio access.
 HTTP ownership is always false: ownership belongs to a control socket. Global
 `busy` also covers other accounts, whose call details stay hidden.
 
+## Conference commands
+
+Read the current `conferenceInvitations` list or watch `conference.invitations`.
+Join the selected invitation with its exact ID and revision:
+
+```json
+{"type":"call.join","requestId":"join-1","invitationId":"invitation-example","invitationRevision":1}
+```
+
+A stale, withdrawn or already used invitation is rejected. Joining never creates
+a replacement room. Where `conferenceCreate` is available, create a group call:
+
+```json
+{"type":"call.dial","requestId":"create-1","target":{"kind":"conference","groupId":"group@chatroom","invitees":["contact-a"]},"callType":"voice"}
+```
+
+Use `call.invite` with `callId` and `contactIds` for later invitations.
+`call.invitation_result` reports each submission separately; it does not mean
+the contact joined. `participant.updated` reports membership and microphone
+changes. `call.mute` changes our microphone; `call.hangup` leaves our membership.
+A leave remains valid across roster changes for the same owned call. Repeating
+it while it is ending does not submit another leave operation. A confirmed
+prior removal completes locally; an unconfirmed result stays uncertain.
+Check the reported capabilities before submitting commands. Direct-to-conference
+promotion is unavailable in this version.
+
+## Protocol version
+
+Within five seconds of opening the control socket, announce supported versions:
+
+```json
+{"type": "call.hello", "supportedProtocolVersions": [2]}
+```
+
+Wait for the server's `hello` and check `protocolVersion` before sending commands.
+The daemon supports version 2 only. An omitted announcement means version 1;
+there is no compatibility fallback. A mismatch returns this before closing with
+WebSocket code 1002:
+
+```json
+{"type":"protocol.error","code":"unsupported_protocol_version","clientVersions":[1],"serverVersions":[2]}
+```
+
+Empty, null, duplicate or malformed version lists return
+`invalid_protocol_version`. The CLI and OpenClaw plugin announce version 2 and
+reject an unsupported server. Media attachment negotiates independently.
+
 ## Client messages
 
-Send these JSON text messages on the **control** socket. Every command has a
+Send these JSON text messages on the **control** socket. After the version announcement, every command has a
 `requestId`; reuse it only for an identical command. Use the latest received
 revision for answer/reject/cancel/hangup. Example revisions below are illustrative.
 
@@ -229,7 +282,7 @@ The first event includes the connection's `clientId` and a current snapshot:
 ```json
 {
   "type": "hello",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "clientId": "example-client",
   "capabilities": {
     "directAudio": true

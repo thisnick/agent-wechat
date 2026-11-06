@@ -100,6 +100,7 @@ export default defineConfig({
           { label: 'Configuration', slug: 'reference/configuration' },
           { label: 'API tokens', slug: 'reference/tokens' },
           { label: 'Calling', slug: 'reference/calls' },
+          { label: 'Conference calls', slug: 'reference/conference-calls' },
           { label: 'Calls API', slug: 'reference/calls-api' },
           { label: 'Call media API', slug: 'reference/calls-media' },
           { label: 'Rust libraries', slug: 'reference/rust-libraries' },

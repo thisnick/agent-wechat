@@ -8,6 +8,8 @@ struct Attempt {
     reply: oneshot::Sender<Result<BackendOutcome>>,
 }
 struct FakeBackend {
+    conference_enabled: AtomicBool,
+    invited: Arc<Mutex<Vec<Vec<String>>>>,
     authorities: Arc<Mutex<BTreeMap<String, AccountAuthority>>>,
     attempts: mpsc::UnboundedSender<Attempt>,
     sinks: Mutex<BTreeMap<String, BackendSink>>,
@@ -27,6 +29,8 @@ impl FakeBackend {
             .collect();
         (
             Arc::new(Self {
+                conference_enabled: AtomicBool::new(false),
+                invited: Arc::new(Mutex::new(Vec::new())),
                 authorities: Arc::new(Mutex::new(authorities)),
                 attempts,
                 sinks: Mutex::new(BTreeMap::new()),
@@ -42,12 +46,44 @@ impl FakeBackend {
     }
 }
 impl CallBackend for FakeBackend {
+    fn invite(
+        &self,
+        request: BackendInviteRequest,
+    ) -> BackendFuture<Result<Vec<CallInvitationResult>>> {
+        let enabled = self.conference_enabled.load(Ordering::Acquire);
+        let invited = self.invited.clone();
+        Box::pin(async move {
+            if !enabled {
+                return Err(error(CallErrorCode::Unsupported));
+            }
+            invited.lock().unwrap().push(request.contacts.clone());
+            Ok(request
+                .contacts
+                .into_iter()
+                .map(|contact_id| {
+                    let rejected = contact_id == "blocked";
+                    CallInvitationResult {
+                        contact_id,
+                        status: if rejected {
+                            CallInvitationStatus::Rejected
+                        } else {
+                            CallInvitationStatus::Submitted
+                        },
+                        service_code: Some(if rejected { 5 } else { 0 }),
+                        verification_required: false,
+                    }
+                })
+                .collect())
+        })
+    }
     fn authority(&self, account: &str) -> Option<AccountAuthority> {
         self.authorities.lock().unwrap().get(account).cloned()
     }
     fn capabilities(&self, account: &str) -> CallCapabilities {
         CallCapabilities {
             direct_audio: self.authority(account).is_some(),
+            conference_create: self.conference_enabled.load(Ordering::Acquire),
+            conference_invite: self.conference_enabled.load(Ordering::Acquire),
             ..CallCapabilities::default()
         }
     }
@@ -516,9 +552,9 @@ async fn slow_owner_control_reader_is_disconnected_and_queued_media_is_not_autho
     }
     assert!(service.validate_control(&owner.client_id).await.is_err());
     assert!(service.validate_media(&media.id).await.is_err());
-    // The receiver can still hold a frame after its sender was dropped. The API
-    // must apply validate_media before writing this frame to the old socket.
-    assert!(media.frames.recv().await.is_some());
+    // Revoking the owner closes the queue immediately. No retained frame may
+    // escape on the old attachment, even before its API writer revalidates.
+    assert!(media.frames.recv().await.is_none());
     assert!(sink.audio(&[0; 320]).await.is_err());
 
     service.disconnect(&owner.client_id).await;
@@ -862,4 +898,309 @@ async fn explicit_reject_guard_is_pending_ticket_bound_and_stops_on_owner_loss_o
             .unwrap_or_else(|_| panic!("new reject receiver"));
         state(&mut next, CallState::Ended).await;
     }
+}
+
+#[tokio::test]
+async fn track_controls_precede_pcm_and_retired_generations_cannot_return() {
+    let (backend, mut attempts) = FakeBackend::new();
+    let service = Arc::new(CallService::new(backend));
+    let mut owner = ready(&service, "a", "owner").await;
+    let (sink, call, token) = connected_call(&service, &mut attempts, &mut owner).await;
+    let mut media = service
+        .attach_media("a", "owner", &call, &owner.client_id, &token)
+        .await
+        .unwrap();
+    let track = |generation| CallAudioTrack {
+        id: 3,
+        generation,
+        direction: CallTrackDirection::Receive,
+        format: CallAudioFormat::default(),
+        participant_id: Some("participant-a".into()),
+    };
+    sink.receive_tracks(vec![track(1)]).await.unwrap();
+    sink.track_audio(
+        MediaHeader {
+            track_id: 3,
+            generation: 1,
+            sequence: 0,
+            timestamp_micros: 100_000,
+        },
+        &[123; 320],
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        media.frames.recv_delivery().await.unwrap(),
+        MediaDelivery::Control(CallEvent::TrackRemoved { track_id: 2, .. })
+    ));
+    assert!(matches!(
+        media.frames.recv_delivery().await.unwrap(),
+        MediaDelivery::Control(CallEvent::TrackAdded {
+            track: CallAudioTrack {
+                id: 3,
+                generation: 1,
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(matches!(
+        media.frames.recv_delivery().await.unwrap(),
+        MediaDelivery::Audio(_)
+    ));
+    sink.track_audio(
+        MediaHeader {
+            track_id: 3,
+            generation: 1,
+            sequence: 1,
+            timestamp_micros: 120_000,
+        },
+        &[456; 320],
+    )
+    .await
+    .unwrap();
+    sink.receive_tracks(vec![]).await.unwrap();
+    assert_eq!(media.frames.pending_frames(), 0);
+    assert!(matches!(
+        media.frames.recv_delivery().await.unwrap(),
+        MediaDelivery::Control(CallEvent::TrackRemoved {
+            track_id: 3,
+            generation: 1,
+            ..
+        })
+    ));
+    assert!(sink.receive_tracks(vec![track(1)]).await.is_err());
+    assert!(sink
+        .track_audio(
+            MediaHeader {
+                track_id: 3,
+                generation: 1,
+                sequence: 2,
+                timestamp_micros: 140_000
+            },
+            &[789; 320]
+        )
+        .await
+        .is_err());
+    service.validate_media(&media.id).await.unwrap();
+    sink.receive_tracks(vec![track(2)]).await.unwrap();
+    assert!(matches!(
+        media.frames.recv_delivery().await.unwrap(),
+        MediaDelivery::Control(CallEvent::TrackAdded {
+            track: CallAudioTrack {
+                id: 3,
+                generation: 2,
+                ..
+            },
+            ..
+        })
+    ));
+    service.validate_control(&owner.client_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn participant_microphone_and_departure_are_separate_ordered_updates() {
+    let (backend, mut attempts) = FakeBackend::new();
+    let service = Arc::new(CallService::new(backend));
+    let mut owner = ready(&service, "a", "owner").await;
+    let (sink, _, _) = connected_call(&service, &mut attempts, &mut owner).await;
+    let participant = |microphone_enabled| CallParticipant {
+        participant_id: "participant-a".into(),
+        contact_id: "contact-a".into(),
+        membership: CallMembership::Joined,
+        microphone_enabled,
+    };
+    sink.participants(vec![participant(None)]).await.unwrap();
+    sink.participants(vec![participant(Some(false))])
+        .await
+        .unwrap();
+    sink.participants(vec![]).await.unwrap();
+    let mut updates = Vec::new();
+    while let Ok(event) = owner.events.try_recv() {
+        if let CallEvent::ParticipantUpdated {
+            revision,
+            participant,
+            ..
+        } = event
+        {
+            updates.push((revision, participant));
+        }
+    }
+    assert_eq!(updates.len(), 3);
+    assert!(updates.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(updates[1].1.membership, CallMembership::Joined);
+    assert_eq!(updates[1].1.microphone_enabled, Some(false));
+    assert_eq!(updates[2].1.membership, CallMembership::Left);
+    assert_eq!(updates[2].1.microphone_enabled, None);
+}
+
+#[tokio::test]
+async fn leave_survives_roster_revisions_and_repeated_requests_submit_only_once() {
+    for racing_roster in [false, true] {
+        let (backend, mut attempts) = FakeBackend::new();
+        let service = Arc::new(CallService::new(backend));
+        let mut owner = ready(&service, "a", "owner").await;
+        let (sink, call, _) = connected_call(&service, &mut attempts, &mut owner).await;
+        let observed = service
+            .current("a", "owner")
+            .await
+            .unwrap()
+            .current_call
+            .unwrap();
+        sink.participants(vec![CallParticipant {
+            participant_id: "p-a".into(),
+            contact_id: "contact-a".into(),
+            membership: CallMembership::Joined,
+            microphone_enabled: Some(false),
+        }])
+        .await
+        .unwrap();
+        sink.participants(vec![]).await.unwrap();
+        let newer = service
+            .current("a", "owner")
+            .await
+            .unwrap()
+            .current_call
+            .unwrap();
+        assert!(newer.revision > observed.revision);
+        service
+            .command(
+                &owner.client_id,
+                CallCommand::Hangup {
+                    request_id: "leave".into(),
+                    call_id: call.clone(),
+                    expected_revision: if racing_roster {
+                        observed.revision
+                    } else {
+                        newer.revision
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result(&mut owner, "leave").await.0,
+            CallCommandStatus::Accepted
+        );
+        let stopping = next_attempt(&mut attempts).await;
+        assert_eq!(stopping.request.ticket.operation(), Operation::Hangup);
+        let ending = service
+            .current("a", "owner")
+            .await
+            .unwrap()
+            .current_call
+            .unwrap();
+        assert!(ending.revision > newer.revision);
+        service
+            .command(
+                &owner.client_id,
+                CallCommand::Hangup {
+                    request_id: "leave-again".into(),
+                    call_id: call,
+                    expected_revision: observed.revision,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result(&mut owner, "leave-again").await.0,
+            CallCommandStatus::Accepted
+        );
+        assert!(matches!(
+            attempts.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        stopping
+            .reply
+            .send(Ok(BackendOutcome::Ended))
+            .unwrap_or_else(|_| panic!("active stopping operation"));
+        state(&mut owner, CallState::Ended).await;
+    }
+}
+
+#[tokio::test]
+async fn conference_creation_and_later_invitation_keep_admission_outcomes_separate_from_membership()
+{
+    let (backend, mut attempts) = FakeBackend::new();
+    backend.conference_enabled.store(true, Ordering::Release);
+    let service = Arc::new(CallService::new(backend.clone()));
+    let mut owner = ready(&service, "a", "owner").await;
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Dial {
+                request_id: "create".into(),
+                target: CallTarget::Conference {
+                    group_id: "test@chatroom".into(),
+                    invitees: vec!["contact-a".into()],
+                },
+                call_type: CallType::Voice,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, call, _, _) = result(&mut owner, "create").await;
+    let call = call.unwrap();
+    let attempt = next_attempt(&mut attempts).await;
+    assert_eq!(attempt.request.peer_id, "test@chatroom");
+    assert_eq!(
+        attempt.request.conference_invitees,
+        Some(vec!["contact-a".into()])
+    );
+    assert!(attempt.request.conference_invitation.is_none());
+    attempt
+        .reply
+        .send(Ok(BackendOutcome::Connected))
+        .unwrap_or_else(|_| panic!("active create"));
+    state(&mut owner, CallState::Connected).await;
+    let invite = CallCommand::Invite {
+        request_id: "invite".into(),
+        call_id: call.clone(),
+        contact_ids: vec!["contact-b".into(), "blocked".into()],
+    };
+    service
+        .command(&owner.client_id, invite.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut owner, "invite").await.0,
+        CallCommandStatus::Accepted
+    );
+    let results = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let event = owner
+                .events
+                .recv()
+                .await
+                .expect("invitation owner remains connected");
+            if let CallEvent::InvitationResult {
+                request_id,
+                results,
+                ..
+            } = event
+            {
+                if request_id == "invite" {
+                    break results;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(results[0].status, CallInvitationStatus::Submitted);
+    assert_eq!(results[1].status, CallInvitationStatus::Rejected);
+    assert!(service
+        .current("a", "owner")
+        .await
+        .unwrap()
+        .current_call
+        .unwrap()
+        .participants
+        .is_empty());
+    service.command(&owner.client_id, invite).await.unwrap();
+    assert_eq!(
+        result(&mut owner, "invite").await.0,
+        CallCommandStatus::Replayed
+    );
+    assert_eq!(backend.invited.lock().unwrap().len(), 1);
 }

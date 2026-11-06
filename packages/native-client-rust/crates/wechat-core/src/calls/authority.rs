@@ -64,6 +64,7 @@ impl Default for Entry {
 #[derive(Clone)]
 pub struct CallAuthorityLease {
     authority: AccountAuthority,
+    native: Option<wechat_protocol::AccountLease>,
     generation: Arc<Generation>,
     epoch: u64,
     digest: [u8; 32],
@@ -75,6 +76,10 @@ impl CallAuthorityLease {
     pub fn current(&self) -> bool {
         self.generation.active.load(Ordering::Acquire)
             && self.generation.epoch.load(Ordering::Acquire) == self.epoch
+            && self
+                .native
+                .as_ref()
+                .is_none_or(wechat_protocol::AccountLease::current)
     }
     /// Admit one synchronous physical submission while excluding revocation.
     /// The callback must not await or acquire Core/service locks. This cannot
@@ -100,7 +105,9 @@ impl Core {
             bail!("auth_required");
         }
         let state = self.account_state(account)?;
-        self.lease_for_call_state(account, &state)
+        let mut lease = self.lease_for_call_state(account, &state)?;
+        lease.native = self.native_account_lease(account)?;
+        Ok(lease)
     }
     pub(crate) fn lease_for_call_state(
         &self,
@@ -137,11 +144,13 @@ impl Core {
                 generation,
             },
             generation: e.generation.clone(),
+            native: None,
             epoch,
             digest,
         })
     }
     pub(crate) fn fence_call_authority(&self, account: &str) {
+        self.stop_native_account(account);
         if let Ok(mut map) = self.call_epochs.lock() {
             let entry = map.entry(account.into()).or_default();
             entry.generation.fence();
@@ -182,6 +191,9 @@ impl Core {
         account: &str,
         state: &AccountState,
     ) -> Result<()> {
+        // Only the accepted-login path reopens Core's account admission. Old
+        // NativeClient handles stay stopped; cookie writes never enter here.
+        self.reset_native_account(account);
         {
             let mut map = self
                 .call_epochs
@@ -259,6 +271,7 @@ mod tests {
             submission: Mutex::new(()),
         });
         let lease = CallAuthorityLease {
+            native: None,
             authority: AccountAuthority {
                 account_id: "a".into(),
                 generation: "one".into(),

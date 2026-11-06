@@ -2749,6 +2749,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "base64 0.22.1",
  "futures-util",
  "http-body-util",
  "libc",
@@ -2785,7 +2786,11 @@ dependencies = [
 name = "wechat-calls"
 version = "1.5.1"
 dependencies = [
+ "anyhow",
  "opusic-c",
+ "serde",
+ "wechat-protocol",
+ "zeroize",
 ]
 
 [[package]]
@@ -2896,6 +2901,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "wechat-media",
  "wechat-platform",
  "zeroize",

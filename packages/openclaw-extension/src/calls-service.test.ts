@@ -37,7 +37,7 @@ function configuration() {
 class Media implements CallMediaPort {
   input = new Queue<NativeCallMediaFrame>(); sent: Array<{ generation: number; samples: Int16Array }> = []; generation = 1; closed = false; stopped = false;
   observePcm?: NativeCallPcmObserver;
-  tracks() { return { sendTrack: { id: 1, generation: this.generation, direction: "send" as const, format }, receiveTrack: { id: 2, generation: 1, direction: "receive" as const, format } }; }
+  tracks() { return { sendTrack: { id: 1, generation: this.generation, direction: "send" as const, format }, receiveTracks: [{ id: 2, generation: 1, direction: "receive" as const, format }] }; }
   frames() { return this.input; }
   sendPcm(samples: Int16Array, generation: number) { if (this.closed || this.stopped) throw Error("Closed"); this.sent.push({ generation, samples: samples.slice() }); }
   stopAudio() { this.stopped = true; this.input.values = []; }
@@ -48,7 +48,7 @@ class Control implements CallControlPort {
   offerOnReady = true;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
-  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
+  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, conferenceInvitations: [], protocolVersion: 2, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
   events() { return this.eventsQueue; }
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);
@@ -459,7 +459,7 @@ test("audio trace aggregates each boundary and a discarded PCM chunk still advan
   await until(() => client.media.observePcm !== undefined);
   const receivedAtMs = performance.now();
   client.media.observePcm!({ receivedAtMs, samples: 320, queueDepth: 16, droppedSamples: 320 });
-  client.media.input.push({ payload: new Uint8Array(640), receivedAtMs, sampleOffset: 320 });
+  client.media.input.push({ trackId: 2, generation: 1, payload: new Uint8Array(640), receivedAtMs, sampleOffset: 320 });
   const reply = Buffer.alloc(640, 1);
   voice.state.callbacks!.audio(reply, { itemId: "private-response-item" });
   await until(() => voice.state.incoming.length === 1 && client.media.sent.some(frame => frame.samples.includes(257)));

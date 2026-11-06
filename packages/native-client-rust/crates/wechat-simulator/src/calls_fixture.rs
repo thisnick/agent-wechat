@@ -16,12 +16,16 @@ use tokio::{
     sync::{oneshot, watch},
 };
 use wechat_core::{
-    call_types::{CallCapabilities, CallErrorCode},
+    call_types::{
+        CallAudioFormat, CallAudioTrack, CallCapabilities, CallConferenceInvitation, CallErrorCode,
+        CallInvitationResult, CallInvitationStatus, CallMembership, CallParticipant,
+        CallTrackDirection,
+    },
     calls::{
         ownership::{AccountAuthority, CallIdentity, Operation},
         service::{
-            BackendAudioRequest, BackendOutcome, BackendRequest, BackendSink, CallBackend,
-            CallServiceError,
+            BackendAudioRequest, BackendInviteRequest, BackendOutcome, BackendRequest, BackendSink,
+            CallBackend, CallServiceError,
         },
     },
     upstream::{Upstream, UpstreamKind},
@@ -61,12 +65,15 @@ struct Stats {
     clear_completed: u64,
     stop: u64,
     active: bool,
+    invitations: u64,
 }
 struct Active {
     identity: CallIdentity,
     sink: BackendSink,
+    conference: bool,
 }
 struct BackendState {
+    conference: bool,
     stats: Stats,
     active: Option<Active>,
 }
@@ -81,6 +88,7 @@ impl Backend {
         let (hold_end, _) = watch::channel(false);
         Self {
             state: Arc::new(Mutex::new(BackendState {
+                conference: false,
                 stats: Stats::default(),
                 active: None,
             })),
@@ -143,8 +151,47 @@ impl CallBackend for Backend {
     fn capabilities(&self, account: &str) -> CallCapabilities {
         CallCapabilities {
             direct_audio: account == ACCOUNT,
+            conference_create: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
+            conference_join: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
+            conference_invite: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
+            conference_audio: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
             ..Default::default()
         }
+    }
+    fn conference_invitations(
+        &self,
+        authority: &AccountAuthority,
+    ) -> Vec<CallConferenceInvitation> {
+        if authority.account_id == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference) {
+            vec![CallConferenceInvitation {
+                invitation_id: "synthetic-invitation".into(),
+                revision: 1,
+                group_id: "synthetic-group@chatroom".into(),
+                caller_id: "synthetic-caller".into(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+    fn invite(&self, request: BackendInviteRequest) -> BackendFuture<Vec<CallInvitationResult>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state
+                .lock()
+                .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
+            ensure_fixture_owner(&state, &request.identity)?;
+            state.stats.invitations += request.contacts.len() as u64;
+            Ok(request
+                .contacts
+                .into_iter()
+                .map(|contact_id| CallInvitationResult {
+                    contact_id,
+                    status: CallInvitationStatus::Submitted,
+                    service_code: Some(0),
+                    verification_required: false,
+                })
+                .collect())
+        })
     }
     fn submit(&self, request: BackendRequest, sink: BackendSink) -> BackendFuture<BackendOutcome> {
         let state = self.state.clone();
@@ -172,6 +219,7 @@ impl CallBackend for Backend {
                 if starting {
                     state.active = Some(Active {
                         identity: request.ticket.identity(),
+                        conference: request.peer_id.ends_with("@chatroom"),
                         sink,
                     });
                     return Ok(BackendOutcome::Connected);
@@ -202,7 +250,7 @@ impl CallBackend for Backend {
             if !request.is_current() {
                 return Err(CallServiceError(CallErrorCode::Stale));
             }
-            let sink = {
+            let (sink, conference) = {
                 let mut state = state
                     .lock()
                     .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
@@ -212,6 +260,7 @@ impl CallBackend for Backend {
                     .filter(|active| active.identity == request.identity)
                     .ok_or(CallServiceError(CallErrorCode::Stale))?;
                 let sink = active.sink.clone();
+                let conference = active.conference;
                 state.stats.audio_frames = state.stats.audio_frames.saturating_add(1);
                 state.stats.audio_samples = state
                     .stats
@@ -227,9 +276,13 @@ impl CallBackend for Backend {
                     .map(|sample| u32::from(sample.unsigned_abs()))
                     .max()
                     .unwrap_or(0);
-                sink
+                (sink, conference)
             };
-            sink.audio(&request.samples).await
+            if conference {
+                Ok(())
+            } else {
+                sink.audio(&request.samples).await
+            }
         })
     }
     fn clear_audio(&self, _: CallIdentity, _: u32) -> BackendFuture<()> {
@@ -273,6 +326,27 @@ impl CallBackend for Backend {
     }
 }
 
+fn ensure_fixture_owner(state: &BackendState, identity: &CallIdentity) -> BackendResult<()> {
+    if state
+        .active
+        .as_ref()
+        .is_some_and(|active| active.conference && active.identity == *identity)
+    {
+        Ok(())
+    } else {
+        Err(CallServiceError(CallErrorCode::NotOwner))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConferenceSource {
+    track_id: u32,
+    generation: u32,
+    contact_id: String,
+    microphone_enabled: Option<bool>,
+}
+
 #[derive(Deserialize)]
 struct Request {
     id: String,
@@ -282,6 +356,21 @@ struct Request {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
+    ConfigureConference {
+        enabled: bool,
+    },
+    ConferenceSources {
+        sources: Vec<ConferenceSource>,
+    },
+    ConferenceAudio {
+        #[serde(rename = "trackId")]
+        track_id: u32,
+        generation: u32,
+        sequence: u64,
+        #[serde(rename = "sampleOffset")]
+        sample_offset: u64,
+        value: i16,
+    },
     Offer {
         #[serde(rename = "callerId")]
         caller_id: String,
@@ -347,6 +436,82 @@ async fn control(
     command: Command,
 ) -> Result<Value, &'static str> {
     match command {
+        Command::ConfigureConference { enabled } => {
+            let mut state = backend.state.lock().map_err(|_| "fixture_closed")?;
+            if state.active.is_some() {
+                return Err("fixture_busy");
+            }
+            state.conference = enabled;
+            Ok(json!({"enabled":enabled}))
+        }
+        Command::ConferenceSources { sources } => {
+            if sources.len() > 32
+                || sources.iter().any(|s| {
+                    s.track_id < 3
+                        || s.generation == 0
+                        || s.contact_id.len() > 100
+                        || s.contact_id.chars().any(char::is_control)
+                })
+            {
+                return Err("invalid_sources");
+            }
+            let sink = backend.active_sink().map_err(|e| e.code())?;
+            sink.participants(
+                sources
+                    .iter()
+                    .map(|source| CallParticipant {
+                        participant_id: format!("participant-{}", source.track_id),
+                        contact_id: source.contact_id.clone(),
+                        membership: CallMembership::Joined,
+                        microphone_enabled: source.microphone_enabled,
+                    })
+                    .collect(),
+            )
+            .await
+            .map_err(|e| e.code())?;
+            sink.receive_tracks(
+                sources
+                    .iter()
+                    .map(|source| CallAudioTrack {
+                        id: source.track_id,
+                        generation: source.generation,
+                        direction: CallTrackDirection::Receive,
+                        format: CallAudioFormat::default(),
+                        participant_id: Some(format!("participant-{}", source.track_id)),
+                    })
+                    .collect(),
+            )
+            .await
+            .map_err(|e| e.code())?;
+            Ok(json!({"sources":sources.len()}))
+        }
+        Command::ConferenceAudio {
+            track_id,
+            generation,
+            sequence,
+            sample_offset,
+            value,
+        } => {
+            let micros = sample_offset
+                .checked_mul(1_000_000)
+                .ok_or("clock_overflow")?
+                / 16000;
+            backend
+                .active_sink()
+                .map_err(|e| e.code())?
+                .track_audio(
+                    wechat_core::calls::pcm_envelope::MediaHeader {
+                        track_id,
+                        generation,
+                        sequence,
+                        timestamp_micros: micros,
+                    },
+                    &[value; 320],
+                )
+                .await
+                .map_err(|e| e.code())?;
+            Ok(json!({"delivered":true}))
+        }
         Command::Offer { caller_id } => {
             if caller_id.is_empty()
                 || caller_id.len() > 200

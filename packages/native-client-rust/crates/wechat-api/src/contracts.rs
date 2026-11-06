@@ -423,6 +423,13 @@ pub struct NativeAccountRemoval {
 
 pub fn typescript() -> String {
     let declarations = [
+        wechat_core::call_types::CallClientHello::decl(),
+        wechat_core::call_types::CallParticipant::decl(),
+        wechat_core::call_types::CallMembership::decl(),
+        wechat_core::call_types::CallConferenceInvitation::decl(),
+        wechat_core::call_types::CallInvitationResult::decl(),
+        wechat_core::call_types::CallInvitationStatus::decl(),
+        wechat_core::call_types::CallProtocolErrorCode::decl(),
         wechat_core::call_types::CallCapabilities::decl(),
         wechat_core::call_types::CallAudioFormat::decl(),
         wechat_core::call_types::CallTarget::decl(),

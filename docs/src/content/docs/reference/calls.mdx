@@ -5,9 +5,9 @@ description: Call availability, client ownership and CLI/OpenClaw participation.
 
 Check calling availability with `wx calls status`, then use the CLI, OpenClaw or
 the [control](../calls-api/) and [media](../calls-media/) APIs.
-The current backend handles direct voice calls; video and conference capabilities
-remain off. Call metadata separates `kind` (`direct`/`conference`) from
-`callType` (`voice`/`video`).
+Direct and conference voice use the same control and media APIs. Check the
+daemon's advertised capabilities before participating. Video and direct-call
+promotion are unavailable.
 
 ## Check availability
 
@@ -24,24 +24,10 @@ Normal source and release builds include calling and local audio support;
 A headless daemon does not open a microphone or speaker. Runtime account
 permissions and advertised capabilities determine whether a client may participate.
 
-## API connections
-
-Use the [Calls API reference](../calls-api/) for routes, complete command/event
-payloads, incoming-call examples and ownership rules. The separate
-[media reference](../calls-media/) specifies attachment, JSON stream setup and raw PCM chunks.
-
-A control connection observes calls without answering them. The first successful
-answer owns an incoming call; an outgoing call belongs to its initiator.
-Other authorized clients see same-account call metadata, including
-`callType: "voice"`, but receive no audio and cannot start another call while busy.
-All call routes require the `calls` token scope and authorization headers.
-
-Keep control connected through termination. Reconnecting does not reclaim ownership. An accepted end command starts cleanup,
-so wait for `ended`. An `uncertain` outcome needs inspection before another call.
-
-The server checks connection heartbeat and call activity. Outgoing pickup and
-fresh authenticated peer-packet timeouts are both one minute. See the API
-reference for connection timeouts and media rules.
+Use the [Calls API](../calls-api/) and [media reference](../calls-media/) for
+authentication, ownership, protocol versions and PCM payloads. Keep the owning
+client connected until cleanup finishes. An uncertain end needs inspection
+before another call.
 
 ## CLI and OpenClaw
 
@@ -63,20 +49,28 @@ Without those options, the OS defaults are used. Linux accepts PulseAudio or
 PipeWire-Pulse names; Windows accepts endpoint IDs. On macOS, select the defaults
 in System Settings; custom endpoint IDs are not supported by the current adapter.
 
-Interactive calls show the keyboard controls above the audio meters.
+Interactive calls show the controls and meters below. Press Enter after a key;
+Ctrl-C leaves the call and waits briefly for cleanup.
 
 ```text
-m + Enter  Mute/unmute    h + Enter  Hang up
-Ctrl-C     End call       ? + Enter  Show keys
+m  Microphone    s  Speaker    i  Invite
+p  Participants  d  Devices    l/h  Leave    ?  Help
 Mic [#######...] -18dB  Speaker [########..] -10dB
+Alice [######....] -24dB joined mic on
+Bob   [..........] -60dB joined mic off
 >
 ```
 
 The bars rise with louder audio and fall toward silence. `0 dB` is digital full
 scale; `!` marks a recent peak near clipping. A muted microphone shows no outgoing
 signal. The speaker meter measures audio sent to playback, not the hardware
-volume setting or sound in the room. Meters stay out of JSON, redirected output and terminals
-too narrow to show both levels on one line.
+volume setting or sound in the room. Each receive participant has a separate
+level before playback mixing. A quiet meter does not imply mute or departure.
+Unattributed sources are labeled by track. Meters stay out of JSON and redirected
+output.
+
+See [Conference calls](../conference-calls/) for start/join, invitations,
+participant levels and in-call device controls.
 
 Run `WX_CALL_DEBUG=1 wx calls monitor` to print a timestamped trace to stderr
 while using the call controls. It shows incoming call events with the media
@@ -87,6 +81,8 @@ Configure independent voice/video permissions, realtime speech models, OpenAI
 credentials and consultation in [Set up calling](/openclaw/calling/).
 
 :::note[Good to know]
+This build limits native calls to 20 minutes; longer calls still need validation.
+
 The legacy WeChat relay can reuse an audio nonce across senders. The daemon
 continues the call for compatibility, which weakens audio confidentiality and
 integrity.

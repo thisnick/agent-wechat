@@ -1,8 +1,10 @@
 # wechat-protocol
 
-Blocking native protocol library for the Linux 4.1.13.26 profile. This is Rust
+Native protocol library for the Linux 4.1.13.26 profile. This is Rust
 protocol code using OpenSSL primitives; it does not execute Node or load an
-official WeChat executable/library. Async callers must use a blocking worker.
+official WeChat executable/library. Account-owned requests use async methods
+backed by blocking transport workers. Login bootstrap
+and remaining low-level operations require a blocking worker in async applications.
 
 ## Start with NativeClient
 
@@ -13,16 +15,27 @@ The crate-level Functions list mainly contains helper functions.
 | Task | API |
 | --- | --- |
 | Login | `start_qr_login`, `poll_login`, `complete_login` |
-| Receive | `sync`, `sync_scene`, `heartbeat`, `push_connection` |
+| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection_blocking` |
 | Send | `send_text`, `send_share`, `send_quote`, `send_file`, `send_image`, `send_video`, `send_voice` |
 | Contacts | `lookup_contacts`, `lookup_room`, `init_contacts` |
 | Lower-level operations | `wire`, `media`, group request builders and response decoders |
 
-`AccountState` holds the accepted credentials and is passed mutably because
-responses can update credentials and routing. The daemon's native upstream
-adapter calls these APIs; it adds account coordination, recovery and profile
-writeback above them. Some operations use a request builder, a client RPC method
-and a decoder instead of one convenience method.
+After login, move the accepted `AccountState` into
+`NativeClient::from_account(state, options)`. Cloned handles share that account
+owner. Async sync, text and call requests take temporary request snapshots and
+adopt accepted cookie updates without holding a state lock over network waits.
+Explicit renewal fences older credential generations. `shutdown().await` stops
+new submissions and waits for workers; `quiesce_and_export().await` moves the
+updated secret state out once for handoff. Exporting a persistence snapshot alone
+does not transfer ownership. Ordinary operations no longer accept a separate
+mutable `AccountState`. The daemon shares this same owner and stores accepted
+updates through its encrypted persistence callback.
+
+Embedders that already use blocking workers can use `request_blocking` for one
+scoped operation, or `open_push_connection_blocking` for persistent notifications.
+Both share the same credentials, shutdown and response-ordering checks as async
+methods. `account_lease()` supplies a credential-free generation check for media
+workers; it does not replace a request's final submission guard.
 
 From a repository checkout, run one of these examples:
 

@@ -189,7 +189,9 @@ impl Core {
                     blocking(move || {
                         let _guard = guard;
                         worker.execute_group(&account, &operation, |state, rpc| {
-                            worker.upstream.group_mutation_raw(state, rpc)
+                            worker
+                                .account_upstream(&account)?
+                                .group_mutation_raw(state, rpc)
                         })?;
                         Ok(())
                     })

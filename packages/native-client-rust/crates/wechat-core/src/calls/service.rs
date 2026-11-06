@@ -4,6 +4,7 @@
 use super::ownership::{
     self, AccountAuthority, CallIdentity, Decision, Operation, Ownership, Phase, Ticket,
 };
+use super::pcm_envelope::{self as frame, MediaFrame, MediaHeader, MediaStream};
 use crate::call_types::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -16,12 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{broadcast, mpsc};
-use wechat_calls::{
-    audio::AudioFormat,
-    frame::{self, MediaFrame, MediaHeader, MediaStream},
-};
+use wechat_calls::audio::AudioFormat;
 #[path = "service/ingress.rs"]
 mod ingress;
+#[path = "service/output.rs"]
+mod output;
 
 type BackendFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 #[derive(Clone, Copy, Debug)]
@@ -87,45 +87,11 @@ pub struct ReceivedCallAudio {
     pub producer_gap: Option<Duration>,
 }
 
-/// A single attachment keeps the newest waiting frames during a slow read.
-/// Loss is distinct from receiver closure, which still revokes ownership.
-pub struct MediaReceiveQueue(broadcast::Receiver<ReceivedCallAudio>);
-impl MediaReceiveQueue {
-    pub async fn recv(&mut self) -> Option<Vec<u8>> {
-        loop {
-            match self.recv_frame().await {
-                Ok(frame) => return Some(frame.bytes),
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
-        }
-    }
+#[path = "service/media_queue.rs"]
+mod media_queue;
+use media_queue::MediaQueue;
+pub use media_queue::{MediaDelivery, MediaReceiveQueue};
 
-    pub fn try_recv(&mut self) -> std::result::Result<Vec<u8>, mpsc::error::TryRecvError> {
-        loop {
-            match self.0.try_recv() {
-                Ok(frame) => return Ok(frame.bytes),
-                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    return Err(mpsc::error::TryRecvError::Disconnected);
-                }
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    return Err(mpsc::error::TryRecvError::Empty);
-                }
-            }
-        }
-    }
-
-    pub fn pending_frames(&self) -> usize {
-        self.0.len().min(MEDIA_RECEIVE_CAPACITY)
-    }
-
-    pub async fn recv_frame(
-        &mut self,
-    ) -> std::result::Result<ReceivedCallAudio, broadcast::error::RecvError> {
-        self.0.recv().await
-    }
-}
 #[derive(Clone, Copy)]
 pub enum BackendOutcome {
     Admitted,
@@ -135,9 +101,18 @@ pub enum BackendOutcome {
 }
 #[derive(Clone)]
 pub struct BackendRequest {
+    pub request_id: String,
     pub ticket: Ticket,
     pub peer_id: String,
     pub call_type: CallType,
+    pub conference_invitees: Option<Vec<String>>,
+    pub conference_invitation: Option<CallConferenceInvitation>,
+}
+
+pub struct BackendInviteRequest {
+    pub identity: CallIdentity,
+    pub request_id: String,
+    pub contacts: Vec<String>,
 }
 /// Owned audio admitted for one call generation. The backend must fence delayed
 /// submissions against its latest generation and accepted account authority.
@@ -160,8 +135,31 @@ impl BackendAudioRequest {
 /// Implementations must persist each remote mutation before submission and check
 /// current account/logout generations. No backend is implicitly enabled by a socket.
 pub trait CallBackend: Send + Sync {
+    fn conference_invitations(
+        &self,
+        _authority: &AccountAuthority,
+    ) -> Vec<CallConferenceInvitation> {
+        vec![]
+    }
+    fn set_muted(&self, _identity: CallIdentity, _muted: bool) -> BackendFuture<Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn invite(
+        &self,
+        _request: BackendInviteRequest,
+    ) -> BackendFuture<Result<Vec<CallInvitationResult>>> {
+        Box::pin(async { Err(error(CallErrorCode::Unsupported)) })
+    }
     fn authority(&self, account: &str) -> Option<AccountAuthority>;
     fn capabilities(&self, account: &str) -> CallCapabilities;
+    /// Retain a fresh group invitation or withdraw its pending entry context.
+    /// This callback performs no network or profile operation.
+    fn observe_conference(
+        &self,
+        _note: Arc<super::notifications::IncomingNotification>,
+        _ttl: Duration,
+    ) {
+    }
     /// This only admits an actor's supported identity/scope; it performs no I/O.
     fn incoming_supported(&self, _authority: &AccountAuthority, _caller: &str) -> bool {
         false
@@ -215,6 +213,100 @@ pub struct BackendSink {
     ticket: Ticket,
 }
 impl BackendSink {
+    pub async fn invitation_result(
+        &self,
+        request_id: String,
+        results: Vec<CallInvitationResult>,
+    ) -> Result<()> {
+        let service = self
+            .service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?;
+        service.invitation_result(&self.ticket.identity(), request_id, results)
+    }
+    pub async fn receive_tracks(&self, tracks: Vec<CallAudioTrack>) -> Result<()> {
+        self.service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?
+            .receive_tracks(&self.ticket, tracks)
+    }
+    pub async fn track_audio(&self, header: MediaHeader, samples: &[i16]) -> Result<()> {
+        self.service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?
+            .received_track_audio(&self.ticket.identity(), header, samples)
+    }
+    pub async fn participants(&self, participants: Vec<CallParticipant>) -> Result<()> {
+        let service = self
+            .service
+            .upgrade()
+            .ok_or_else(|| error(CallErrorCode::Closed))?;
+        let mut state = service.lock()?;
+        if !service.ticket_current(&state, &self.ticket) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let call = state
+            .call
+            .as_mut()
+            .filter(|call| call.identity == self.ticket.identity())
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        if participants.len() > 128
+            || participants
+                .iter()
+                .map(|p| &p.participant_id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != participants.len()
+        {
+            return Err(error(CallErrorCode::InvalidRequest));
+        }
+        if call.participants != participants {
+            let revision = call
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| error(CallErrorCode::Capacity))?;
+            let mut updates = participants
+                .iter()
+                .filter(|member| !call.participants.contains(member))
+                .cloned()
+                .collect::<Vec<_>>();
+            for previous in &call.participants {
+                if !participants
+                    .iter()
+                    .any(|member| member.participant_id == previous.participant_id)
+                {
+                    let mut left = previous.clone();
+                    left.membership = CallMembership::Left;
+                    left.microphone_enabled = None;
+                    updates.push(left);
+                }
+            }
+            call.participants = participants;
+            call.revision = revision;
+            let call_id = call.identity.call_id().to_owned();
+            let authority = call.authority.clone();
+            let clients = state
+                .clients
+                .iter()
+                .filter(|(_, peer)| peer.authority == authority)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for participant in updates {
+                let event = CallEvent::ParticipantUpdated {
+                    call_id: call_id.clone(),
+                    revision,
+                    participant,
+                };
+                for client in &clients {
+                    if CallService::emit(&mut state, client, event.clone()).is_err() {
+                        service.drop_client(&mut state, client);
+                    }
+                }
+            }
+            service.broadcast(&mut state);
+        }
+        Ok(())
+    }
     /// Admission for delayed nonterminal work, including initial preparation.
     /// This reads broker state; do not call it inside a UDP submission gate.
     pub fn is_current(&self) -> bool {
@@ -370,6 +462,7 @@ impl BackendSink {
     }
 }
 struct Peer {
+    conference_invitations: Vec<CallConferenceInvitation>,
     account: String,
     authority: AccountAuthority,
     principal: String,
@@ -381,6 +474,8 @@ struct LiveCall {
     identity: CallIdentity,
     authority: AccountAuthority,
     peer: String,
+    conference_invitees: Option<Vec<String>>,
+    participants: Vec<CallParticipant>,
     call_type: CallType,
     direction: CallDirection,
     owner: Option<String>,
@@ -389,6 +484,8 @@ struct LiveCall {
     revision: u32,
     send_generation: u32,
     receive_generation: u32,
+    receive_tracks: BTreeMap<u32, CallAudioTrack>,
+    track_generations: BTreeMap<u32, u32>,
     audio_lease: Arc<AtomicU32>,
     offer_until: Option<u64>,
     stop_requested: bool,
@@ -403,8 +500,14 @@ struct MediaPeer {
     client: String,
     identity: CallIdentity,
     stream: MediaStream,
-    frames: broadcast::Sender<ReceivedCallAudio>,
+    output: wechat_calls::pcm_output::PcmOutput,
+    frames: Arc<MediaQueue>,
     last_enqueued_at: Option<Instant>,
+}
+impl Drop for MediaPeer {
+    fn drop(&mut self) {
+        self.frames.close();
+    }
 }
 #[derive(Default)]
 struct State {
@@ -426,6 +529,8 @@ struct CommandReceipt {
 }
 #[derive(Default)]
 struct Prepared {
+    muted: Option<(CallIdentity, bool)>,
+    invite: Option<BackendInviteRequest>,
     submit: Option<BackendRequest>,
     clear: Option<(CallIdentity, u32)>,
     wake_incoming: bool,
@@ -443,6 +548,16 @@ pub struct CallService {
     incoming_receiver: Mutex<Option<ingress::IncomingReceivers>>,
 }
 impl CallService {
+    pub(crate) fn observe_conference(
+        &self,
+        note: Arc<super::notifications::IncomingNotification>,
+        ttl: Duration,
+    ) {
+        self.backend.observe_conference(note, ttl);
+        if let Ok(mut state) = self.lock() {
+            self.broadcast(&mut state);
+        }
+    }
     /// Stop admission, then give the existing native actor one opportunity to
     /// finish its known call. This never reconstructs or resends an operation.
     pub async fn shutdown(&self) {
@@ -809,6 +924,9 @@ impl CallService {
     }
     fn snapshot(&self, s: &State, account: &str, client: Option<&str>) -> CallSnapshot {
         let mut snap = CallSnapshot {
+            conference_invitations: self
+                .backend
+                .conference_invitations(&self.authority(account)),
             capabilities: self.backend.capabilities(account),
             availability: CallsAvailability {
                 busy: s.call.is_some() || !s.recovered_unknown.is_empty(),
@@ -853,11 +971,17 @@ impl CallService {
         CallView {
             call_id: c.identity.call_id().into(),
             revision: c.revision,
-            kind: CallKind::Direct,
+            kind: if c.peer.ends_with("@chatroom") {
+                CallKind::Conference
+            } else {
+                CallKind::Direct
+            },
             call_type: c.call_type,
             direction: c.direction,
             state: c.state,
             owned_by_this_client: owned,
+            group_id: c.peer.ends_with("@chatroom").then(|| c.peer.clone()),
+            participants: c.participants.clone(),
             controls: c.controls.clone(),
         }
     }
@@ -883,8 +1007,10 @@ impl CallService {
         s.ownership
             .connect(&client_id, authority.clone(), principal)?;
         let snap = self.snapshot(&s, account, Some(&client_id));
+        let conference_invitations = snap.conference_invitations.clone();
         tx.try_send(CallEvent::Hello {
-            protocol_version: 1,
+            conference_invitations: snap.conference_invitations,
+            protocol_version: CALL_PROTOCOL_VERSION,
             client_id: client_id.clone(),
             capabilities: snap.capabilities,
             availability: snap.availability,
@@ -903,6 +1029,7 @@ impl CallService {
         s.clients.insert(
             client_id.clone(),
             Peer {
+                conference_invitations,
                 account: account.into(),
                 authority,
                 principal: principal.into(),
@@ -924,11 +1051,18 @@ impl CallService {
     }
     fn broadcast(&self, s: &mut State) {
         let mut failed = Vec::new();
+        let mut invitations = Vec::new();
         for (id, peer) in &s.clients {
             let snap = self.snapshot(s, &peer.account, Some(id));
             let mut events = vec![CallEvent::Availability {
                 availability: snap.availability,
             }];
+            if peer.conference_invitations != snap.conference_invitations {
+                events.push(CallEvent::ConferenceInvitations {
+                    invitations: snap.conference_invitations.clone(),
+                });
+                invitations.push((id.clone(), snap.conference_invitations));
+            }
             if let Some(offer) = snap.current_offer {
                 events.push(CallEvent::Offered { offer });
             }
@@ -940,6 +1074,11 @@ impl CallService {
             }
             if events.into_iter().any(|e| peer.events.try_send(e).is_err()) {
                 failed.push(id.clone());
+            }
+        }
+        for (id, invitations) in invitations {
+            if let Some(peer) = s.clients.get_mut(&id) {
+                peer.conference_invitations = invitations;
             }
         }
         for id in failed {
@@ -982,15 +1121,19 @@ impl CallService {
             identity: identity.clone(),
             authority,
             peer: caller,
+            conference_invitees: None,
             call_type: CallType::Voice,
             direction: CallDirection::Incoming,
             owner: None,
             token: None,
             state: CallState::Offered,
+            participants: vec![],
             controls: vec![],
             revision: 1,
             send_generation: 1,
             receive_generation: 1,
+            receive_tracks: BTreeMap::new(),
+            track_generations: BTreeMap::new(),
             audio_lease: Arc::new(AtomicU32::new(1)),
             offer_until: Some(
                 now.saturating_add(
@@ -1030,6 +1173,31 @@ impl CallService {
         }
         Ok(())
     }
+    // Presentation revisions also include roster/microphone changes. Translate
+    // under the same lock into the broker's separate command revision.
+    fn action_revision(
+        s: &State,
+        client: &str,
+        call_id: &str,
+        expected: u32,
+        exact: bool,
+    ) -> Result<u64> {
+        let call = s
+            .call
+            .as_ref()
+            .filter(|call| call.identity.call_id() == call_id)
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        if expected == 0 || expected > call.revision || (exact && expected != call.revision) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        s.ownership
+            .snapshot(client)?
+            .current
+            .filter(|view| view.call_id == call_id)
+            .map(|view| view.revision)
+            .ok_or_else(|| error(CallErrorCode::Stale))
+    }
+
     /// Keep an acknowledged actor available for its already accepted Reject.
     /// This permits waiting for delivery, never another poll or mutation.
     pub(crate) fn pending_incoming_reject(
@@ -1152,6 +1320,7 @@ impl CallService {
                 generation,
                 direction: CallTrackDirection::Send,
                 format: Self::format(),
+                participant_id: None,
             },
         };
         if Self::emit(s, client, event).is_err() {
@@ -1209,6 +1378,40 @@ impl CallService {
                 let _ = service.outcome(&ticket, outcome);
             });
         }
+        if let Some(request) = dispatch.invite {
+            let service = self.clone();
+            let backend = self.backend.clone();
+            tokio::spawn(async move {
+                let identity = request.identity.clone();
+                let request_id = request.request_id.clone();
+                let contacts = request.contacts.clone();
+                match backend.invite(request).await {
+                    Ok(results) => {
+                        let _ = service.invitation_result(&identity, request_id, results);
+                    }
+                    Err(error) => {
+                        let unknown = matches!(error.0, CallErrorCode::OutcomeUnknown);
+                        let results = contacts
+                            .into_iter()
+                            .map(|contact_id| CallInvitationResult {
+                                contact_id,
+                                status: if unknown {
+                                    CallInvitationStatus::Uncertain
+                                } else {
+                                    CallInvitationStatus::Rejected
+                                },
+                                service_code: None,
+                                verification_required: false,
+                            })
+                            .collect();
+                        let _ = service.invitation_result(&identity, request_id, results);
+                        if unknown {
+                            service.mark_uncertain(&identity);
+                        }
+                    }
+                }
+            });
+        }
         if let Some((identity, generation)) = dispatch.clear {
             if !matches!(
                 tokio::time::timeout(
@@ -1221,6 +1424,17 @@ impl CallService {
                 self.mark_uncertain(&identity);
                 return Err(error(CallErrorCode::OutcomeUnknown));
             }
+        }
+        if let Some((identity, muted)) = dispatch.muted {
+            let service = self.clone();
+            let backend = self.backend.clone();
+            tokio::spawn(async move {
+                if let Err(failure) = backend.set_muted(identity.clone(), muted).await {
+                    if matches!(failure.0, CallErrorCode::OutcomeUnknown) {
+                        service.mark_uncertain(&identity);
+                    }
+                }
+            });
         }
         Ok(())
     }
@@ -1273,6 +1487,39 @@ impl CallService {
         if s.receipts.len() >= 256 {
             return Err(error(CallErrorCode::Capacity));
         }
+        let mut conference_invitation = None;
+        let (command, joining) = match command {
+            CallCommand::Join {
+                request_id,
+                invitation_id,
+                invitation_revision,
+            } => {
+                let peer = &s.clients[client];
+                let invitation = self
+                    .backend
+                    .conference_invitations(&peer.authority)
+                    .into_iter()
+                    .find(|entry| {
+                        entry.invitation_id == invitation_id
+                            && entry.revision == invitation_revision
+                    })
+                    .ok_or_else(|| error(CallErrorCode::OfferExpired))?;
+                let group_id = invitation.group_id.clone();
+                conference_invitation = Some(invitation);
+                (
+                    CallCommand::Dial {
+                        request_id,
+                        target: CallTarget::Conference {
+                            group_id,
+                            invitees: vec![],
+                        },
+                        call_type: CallType::Voice,
+                    },
+                    true,
+                )
+            }
+            other => (other, false),
+        };
         let claims_owner = matches!(
             command,
             CallCommand::Dial { .. } | CallCommand::Answer { .. }
@@ -1288,6 +1535,42 @@ impl CallService {
         let mut prepared = Prepared::default();
         let mut result_identity = None;
         let decision = match command {
+            CallCommand::Invite {
+                call_id,
+                contact_ids,
+                ..
+            } => {
+                Self::owner(&s, client, &call_id)?;
+                let call = s.call.as_ref().expect("owner call");
+                if !call.peer.ends_with("@chatroom")
+                    || call.state != CallState::Connected
+                    || !self
+                        .backend
+                        .capabilities(&call.authority.account_id)
+                        .conference_invite
+                {
+                    return Err(error(CallErrorCode::Unsupported));
+                }
+                if contact_ids.is_empty()
+                    || contact_ids.len() > 100
+                    || contact_ids.iter().any(|id| {
+                        id.is_empty()
+                            || id.len() > 128
+                            || id.ends_with("@chatroom")
+                            || id.chars().any(char::is_control)
+                    })
+                {
+                    return Err(error(CallErrorCode::InvalidRequest));
+                }
+                result_identity = Some(call.identity.clone());
+                prepared.invite = Some(BackendInviteRequest {
+                    identity: call.identity.clone(),
+                    request_id: request_id.clone(),
+                    contacts: contact_ids,
+                });
+                None
+            }
+            CallCommand::Join { .. } => return Err(error(CallErrorCode::InvalidRequest)),
             CallCommand::Ready {
                 ready,
                 format,
@@ -1312,13 +1595,46 @@ impl CallService {
                 target, call_type, ..
             } => {
                 let p = &s.clients[client];
-                if !self.backend.capabilities(&p.account).direct_audio
-                    || call_type != CallType::Voice
+                let capabilities = self.backend.capabilities(&p.account);
+                if !(if joining {
+                    capabilities.conference_join
+                } else {
+                    match &target {
+                        CallTarget::Direct { .. } => capabilities.direct_audio,
+                        CallTarget::Conference { .. } => capabilities.conference_create,
+                    }
+                }) || call_type != CallType::Voice
                 {
                     return Err(error(CallErrorCode::Unsupported));
                 }
-                let CallTarget::Direct { contact_id } = target else {
-                    return Err(error(CallErrorCode::Unsupported));
+                let mut conference_invitees = None;
+                let contact_id = match target {
+                    CallTarget::Direct { contact_id }
+                        if !joining && !contact_id.ends_with("@chatroom") =>
+                    {
+                        contact_id
+                    }
+                    CallTarget::Conference { group_id, invitees }
+                        if joining && invitees.is_empty() && group_id.ends_with("@chatroom") =>
+                    {
+                        group_id
+                    }
+                    CallTarget::Conference { group_id, invitees }
+                        if !joining
+                            && group_id.ends_with("@chatroom")
+                            && !invitees.is_empty()
+                            && invitees.len() <= 100
+                            && invitees.iter().all(|id| {
+                                !id.is_empty()
+                                    && id.len() <= 128
+                                    && !id.ends_with("@chatroom")
+                                    && !id.chars().any(char::is_control)
+                            }) =>
+                    {
+                        conference_invitees = Some(invitees);
+                        group_id
+                    }
+                    _ => return Err(error(CallErrorCode::Unsupported)),
                 };
                 if contact_id.is_empty()
                     || contact_id.len() > 200
@@ -1341,6 +1657,7 @@ impl CallService {
                         identity: ticket.identity(),
                         authority: ticket.authority().clone(),
                         peer: contact_id,
+                        conference_invitees,
                         call_type,
                         direction: CallDirection::Outgoing,
                         owner: Some(client.into()),
@@ -1350,10 +1667,13 @@ impl CallService {
                             uuid::Uuid::new_v4().simple()
                         )),
                         state: CallState::Dialing,
+                        participants: vec![],
                         controls: vec![],
                         revision: 1,
                         send_generation: 1,
                         receive_generation: 1,
+                        receive_tracks: BTreeMap::new(),
+                        track_generations: BTreeMap::new(),
                         audio_lease: Arc::new(AtomicU32::new(1)),
                         offer_until: None,
                         stop_requested: false,
@@ -1384,11 +1704,13 @@ impl CallService {
                 }) {
                     return Err(error(CallErrorCode::AlreadyClaimed));
                 }
+                let revision =
+                    Self::action_revision(&s, client, &call_id, expected_revision, true)?;
                 Some(s.ownership.act(
                     client,
                     &request_id,
                     &call_id,
-                    u64::from(expected_revision),
+                    revision,
                     Operation::Answer,
                     self.now(),
                 )?)
@@ -1399,11 +1721,13 @@ impl CallService {
                 ..
             } => {
                 self.require_incoming_offer(&s, &call_id)?;
+                let revision =
+                    Self::action_revision(&s, client, &call_id, expected_revision, true)?;
                 Some(s.ownership.act(
                     client,
                     &request_id,
                     &call_id,
-                    u64::from(expected_revision),
+                    revision,
                     Operation::Reject,
                     self.now(),
                 )?)
@@ -1423,11 +1747,13 @@ impl CallService {
                     result_identity = s.call.as_ref().map(|call| call.identity.clone());
                     None
                 } else {
+                    let revision =
+                        Self::action_revision(&s, client, &call_id, expected_revision, true)?;
                     Some(s.ownership.act(
                         client,
                         &request_id,
                         &call_id,
-                        u64::from(expected_revision),
+                        revision,
                         Operation::Cancel,
                         self.now(),
                     )?)
@@ -1438,11 +1764,21 @@ impl CallService {
                 expected_revision,
                 ..
             } => {
-                if self.cancel_pending_start(
+                Self::owner(&s, client, &call_id)?;
+                let revision =
+                    Self::action_revision(&s, client, &call_id, expected_revision, false)?;
+                let current_revision = s.call.as_ref().expect("owner call").revision;
+                if s.call
+                    .as_ref()
+                    .is_some_and(|call| call.state == CallState::Ending && !call.revoked)
+                {
+                    result_identity = s.call.as_ref().map(|call| call.identity.clone());
+                    None
+                } else if self.cancel_pending_start(
                     &mut s,
                     client,
                     &call_id,
-                    expected_revision,
+                    current_revision,
                     Operation::Hangup,
                 )? {
                     result_identity = s.call.as_ref().map(|call| call.identity.clone());
@@ -1452,7 +1788,7 @@ impl CallService {
                         client,
                         &request_id,
                         &call_id,
-                        u64::from(expected_revision),
+                        revision,
                         Operation::Hangup,
                         self.now(),
                     )?)
@@ -1464,6 +1800,7 @@ impl CallService {
                     let (identity, generation) = self.interrupt_audio(&mut s, client, &call_id)?;
                     s.call.as_mut().expect("owner call").muted = muted;
                     prepared.clear = Some((identity.clone(), generation));
+                    prepared.muted = Some((identity.clone(), muted));
                     result_identity = Some(identity);
                 }
                 None
@@ -1489,11 +1826,18 @@ impl CallService {
                             uuid::Uuid::new_v4().simple()
                         ));
                     }
-                    c.state = match t.operation() {
+                    let next_state = match t.operation() {
                         Operation::Dial => CallState::Dialing,
                         Operation::Answer => CallState::Connecting,
                         _ => CallState::Ending,
                     };
+                    if c.state != next_state {
+                        c.revision = c
+                            .revision
+                            .checked_add(1)
+                            .ok_or_else(|| error(CallErrorCode::Capacity))?;
+                    }
+                    c.state = next_state;
                     if matches!(
                         t.operation(),
                         Operation::Cancel | Operation::Reject | Operation::Hangup
@@ -1502,9 +1846,12 @@ impl CallService {
                     }
                     c.offer_until = None;
                     prepared.submit = Some(BackendRequest {
+                        request_id: request_id.clone(),
                         ticket: t.clone(),
                         peer_id: c.peer.clone(),
                         call_type: c.call_type,
+                        conference_invitees: c.conference_invitees.clone(),
+                        conference_invitation: conference_invitation.clone(),
                     });
                     t
                 }
@@ -1514,16 +1861,6 @@ impl CallService {
                 }
             };
             result_identity = Some(ticket.identity());
-            if s.call
-                .as_ref()
-                .is_some_and(|c| c.identity == ticket.identity())
-            {
-                if let Some(view) = s.ownership.snapshot(client)?.current {
-                    let revision =
-                        u32::try_from(view.revision).map_err(|_| error(CallErrorCode::Capacity))?;
-                    s.call.as_mut().expect("call").revision = revision;
-                }
-            }
         }
         if result_identity.is_none() {
             result_identity = s
@@ -1597,12 +1934,24 @@ impl CallService {
         }
         s.ownership.result(ticket, phase)?;
         if let Some(c) = s.call.as_mut().filter(|c| c.identity == ticket.identity()) {
+            if matches!(outcome, BackendOutcome::Connected) && !c.peer.ends_with("@chatroom") {
+                c.receive_tracks.insert(
+                    2,
+                    CallAudioTrack {
+                        id: 2,
+                        generation: c.receive_generation,
+                        direction: CallTrackDirection::Receive,
+                        format: Self::format(),
+                        participant_id: None,
+                    },
+                );
+            }
             if matches!(outcome, BackendOutcome::Ended | BackendOutcome::Uncertain) {
                 c.audio_lease.store(0, Ordering::Release);
             }
             c.state = match outcome {
                 BackendOutcome::Admitted => {
-                    if ticket.operation() == Operation::Dial {
+                    if ticket.operation() == Operation::Dial && !c.peer.ends_with("@chatroom") {
                         CallState::Ringing
                     } else {
                         CallState::Connecting
@@ -1683,6 +2032,19 @@ impl CallService {
             .filter(|c| c.identity == ticket.identity())
             .ok_or_else(|| error(CallErrorCode::Stale))?;
         c.state = CallState::Connected;
+        if !c.peer.ends_with("@chatroom") {
+            c.receive_tracks.insert(
+                2,
+                CallAudioTrack {
+                    id: 2,
+                    generation: c.receive_generation,
+                    direction: CallTrackDirection::Receive,
+                    format: Self::format(),
+                    participant_id: None,
+                },
+            );
+        }
+
         c.revision = c
             .revision
             .checked_add(1)
@@ -1842,8 +2204,8 @@ impl CallService {
         }
         let identity = c.identity.clone();
         let generation = c.send_generation;
-        let receive_generation = c.receive_generation;
-        let (tx, frames) = broadcast::channel(MEDIA_RECEIVE_CAPACITY);
+        let receive_tracks = c.receive_tracks.values().cloned().collect::<Vec<_>>();
+        let frames = MediaQueue::new(&receive_tracks)?;
         let id = uuid::Uuid::new_v4().to_string();
         s.media.insert(
             id.clone(),
@@ -1852,26 +2214,29 @@ impl CallService {
                 identity,
                 stream: MediaStream::new(1, generation)
                     .map_err(|_| error(CallErrorCode::InvalidRequest))?,
-                frames: tx,
+                output: wechat_calls::pcm_output::PcmOutput::new(
+                    Self::media_format(),
+                    Self::format().sample_rate as usize * 8,
+                )
+                .map_err(|_| error(CallErrorCode::InvalidRequest))?,
+                frames: frames.clone(),
                 last_enqueued_at: None,
             },
         );
+        self.start_output(id.clone());
         Ok(MediaConnection {
             id,
             frames: MediaReceiveQueue(frames),
             ready: CallEvent::MediaReady {
+                protocol_version: CALL_PROTOCOL_VERSION,
                 send_track: CallAudioTrack {
                     id: 1,
                     generation,
                     direction: CallTrackDirection::Send,
                     format: Self::format(),
+                    participant_id: None,
                 },
-                receive_track: CallAudioTrack {
-                    id: 2,
-                    generation: receive_generation,
-                    direction: CallTrackDirection::Receive,
-                    format: Self::format(),
-                },
+                receive_tracks,
             },
         })
     }
@@ -1946,6 +2311,184 @@ impl CallService {
     }
     fn received_audio(&self, identity: &CallIdentity, samples: &[i16]) -> Result<()> {
         let mut s = self.lock()?;
+        let call = s
+            .call
+            .as_mut()
+            .filter(|call| &call.identity == identity)
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        let header = MediaHeader {
+            track_id: 2,
+            generation: call.receive_generation,
+            sequence: call.sequence,
+            timestamp_micros: call
+                .sample_clock
+                .checked_mul(1_000_000)
+                .ok_or_else(|| error(CallErrorCode::Capacity))?
+                / 16000,
+        };
+        call.sequence = call
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| error(CallErrorCode::Capacity))?;
+        call.sample_clock = call
+            .sample_clock
+            .checked_add(samples.len() as u64)
+            .ok_or_else(|| error(CallErrorCode::Capacity))?;
+        self.received_track_audio_locked(&mut s, identity, header, samples)
+    }
+
+    fn receive_tracks(&self, ticket: &Ticket, tracks: Vec<CallAudioTrack>) -> Result<()> {
+        if tracks.len() > 128 {
+            return Err(error(CallErrorCode::Capacity));
+        }
+        let mut next = BTreeMap::new();
+        for track in tracks {
+            if track.id < 2
+                || track.generation == 0
+                || track.direction != CallTrackDirection::Receive
+                || track.format != Self::format()
+                || next.insert(track.id, track).is_some()
+            {
+                return Err(error(CallErrorCode::InvalidRequest));
+            }
+        }
+        let mut state = self.lock()?;
+        if !self.ticket_current(&state, ticket) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        let call = state
+            .call
+            .as_mut()
+            .filter(|call| call.identity == ticket.identity())
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        for (id, track) in &next {
+            if call.receive_tracks.get(id) != Some(track)
+                && call
+                    .track_generations
+                    .get(id)
+                    .is_some_and(|old| track.generation <= *old)
+            {
+                return Err(error(CallErrorCode::Stale));
+            }
+        }
+        if call.track_generations.len()
+            + next
+                .keys()
+                .filter(|id| !call.track_generations.contains_key(id))
+                .count()
+            > 1024
+        {
+            return Err(error(CallErrorCode::Capacity));
+        }
+        let mut events = Vec::new();
+        for (id, old) in &call.receive_tracks {
+            if let Some(new) = next.get(id) {
+                if new != old && new.generation <= old.generation {
+                    return Err(error(CallErrorCode::Stale));
+                }
+            }
+            if next.get(id) != Some(old) {
+                events.push(CallEvent::TrackRemoved {
+                    call_id: call.identity.call_id().to_owned(),
+                    track_id: *id,
+                    generation: old.generation,
+                    reason: "source_unavailable".into(),
+                });
+            }
+        }
+        for (id, track) in &next {
+            if call.receive_tracks.get(id) != Some(track) {
+                events.push(CallEvent::TrackAdded {
+                    call_id: call.identity.call_id().to_owned(),
+                    track: track.clone(),
+                });
+            }
+        }
+        for track in call.receive_tracks.values() {
+            call.track_generations.insert(track.id, track.generation);
+        }
+        for track in next.values() {
+            call.track_generations.insert(track.id, track.generation);
+        }
+        call.receive_tracks = next;
+        let identity = call.identity.clone();
+        let authority = call.authority.clone();
+        let mut failed = BTreeSet::new();
+        for event in events {
+            for media in state
+                .media
+                .values()
+                .filter(|media| media.identity == identity)
+            {
+                if media.frames.control(event.clone()).is_err() {
+                    failed.insert(media.client.clone());
+                }
+            }
+            let clients = state
+                .clients
+                .iter()
+                .filter(|(_, peer)| peer.authority == authority)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for client in clients {
+                if Self::emit(&mut state, &client, event.clone()).is_err() {
+                    failed.insert(client);
+                }
+            }
+        }
+        for client in failed {
+            self.drop_client(&mut state, &client);
+        }
+        Ok(())
+    }
+
+    fn invitation_result(
+        &self,
+        identity: &CallIdentity,
+        request_id: String,
+        results: Vec<CallInvitationResult>,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let call = state
+            .call
+            .as_ref()
+            .filter(|call| &call.identity == identity && !call.revoked)
+            .ok_or_else(|| error(CallErrorCode::Stale))?;
+        let owner = call
+            .owner
+            .clone()
+            .ok_or_else(|| error(CallErrorCode::NotOwner))?;
+        if self.backend.authority(&call.authority.account_id).as_ref() != Some(&call.authority) {
+            return Err(error(CallErrorCode::Stale));
+        }
+        Self::emit(
+            &mut state,
+            &owner,
+            CallEvent::InvitationResult {
+                call_id: identity.call_id().to_owned(),
+                request_id,
+                results,
+            },
+        )
+    }
+
+    fn received_track_audio(
+        &self,
+        identity: &CallIdentity,
+        header: MediaHeader,
+        samples: &[i16],
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        self.received_track_audio_locked(&mut state, identity, header, samples)
+    }
+
+    fn received_track_audio_locked(
+        &self,
+        s: &mut State,
+        identity: &CallIdentity,
+        header: MediaHeader,
+        samples: &[i16],
+    ) -> Result<()> {
         let allowed = s.call.as_ref().is_some_and(|c| {
             &c.identity == identity
                 && c.state == CallState::Connected
@@ -1965,26 +2508,14 @@ impl CallService {
             .as_mut()
             .filter(|c| &c.identity == identity && c.state == CallState::Connected)
             .ok_or_else(|| error(CallErrorCode::Stale))?;
-        let header = MediaHeader {
-            track_id: 2,
-            generation: c.receive_generation,
-            sequence: c.sequence,
-            timestamp_micros: c
-                .sample_clock
-                .checked_mul(1_000_000)
-                .ok_or_else(|| error(CallErrorCode::Capacity))?
-                / 16000,
-        };
+        if c.receive_tracks
+            .get(&header.track_id)
+            .is_none_or(|track| track.generation != header.generation)
+        {
+            return Err(error(CallErrorCode::Stale));
+        }
         let bytes = frame::encode_pcm(header, Self::media_format(), samples)
             .map_err(|_| error(CallErrorCode::InvalidRequest))?;
-        c.sequence = c
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| error(CallErrorCode::Capacity))?;
-        c.sample_clock = c
-            .sample_clock
-            .checked_add(samples.len() as u64)
-            .ok_or_else(|| error(CallErrorCode::Capacity))?;
         let enqueued_at = Instant::now();
         let mut failed = Vec::new();
         for (id, m) in s.media.iter_mut().filter(|(_, m)| &m.identity == identity) {
@@ -1993,11 +2524,15 @@ impl CallService {
                 .replace(enqueued_at)
                 .map(|previous| enqueued_at.duration_since(previous));
             if m.frames
-                .send(ReceivedCallAudio {
-                    bytes: bytes.clone(),
-                    enqueued_at,
-                    producer_gap,
-                })
+                .audio(
+                    header.track_id,
+                    header.generation,
+                    ReceivedCallAudio {
+                        bytes: bytes.clone(),
+                        enqueued_at,
+                        producer_gap,
+                    },
+                )
                 .is_err()
             {
                 failed.push(id.clone());
@@ -2005,7 +2540,7 @@ impl CallService {
         }
         for id in failed {
             if let Some(client) = s.media.get(&id).map(|m| m.client.clone()) {
-                self.drop_client(&mut s, &client);
+                self.drop_client(s, &client);
             }
         }
         Ok(())

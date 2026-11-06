@@ -138,7 +138,7 @@ impl Fixture {
             server,
         }
     }
-    async fn socket(&self, path: &str, token: &str) -> Socket {
+    async fn raw_socket(&self, path: &str, token: &str) -> Socket {
         let mut request = format!("ws://{}{path}", self.address)
             .into_client_request()
             .unwrap();
@@ -147,6 +147,17 @@ impl Fixture {
             format!("Bearer {token}").parse().unwrap(),
         );
         connect_async(request).await.unwrap().0
+    }
+    async fn socket(&self, path: &str, token: &str) -> Socket {
+        let mut socket = self.raw_socket(path, token).await;
+        if path.ends_with("/calls/socket") {
+            command(
+                &mut socket,
+                json!({"type":"call.hello","supportedProtocolVersions":[2]}),
+            )
+            .await;
+        }
+        socket
     }
     fn grant(&self, token: &str, scopes: &[&str], accounts: &[&str]) -> AccessToken {
         use sha2::{Digest, Sha256};
@@ -200,6 +211,74 @@ async fn ready(socket: &mut Socket, id: &str) {
     assert_eq!(event["status"], "accepted");
 }
 
+fn audio_chunk(bytes: &[u8], generation: u32) -> ClientMessage {
+    ClientMessage::Text(json!({"type":"audio.chunk","trackId":1,"generation":generation,"pcmBase64":BASE64.encode(bytes)}).to_string().into())
+}
+fn pcm_chunk(message: ClientMessage) -> Option<Vec<u8>> {
+    let ClientMessage::Text(text) = message else {
+        return None;
+    };
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["type"], "audio.chunk");
+    assert_eq!(value["trackId"], 2);
+    Some(BASE64.decode(value["pcmBase64"].as_str().unwrap()).unwrap())
+}
+
+#[tokio::test]
+async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() {
+    let f = Fixture::new(true).await;
+    for (message, code, versions) in [
+        (
+            json!({"type":"call.ready","requestId":"old","ready":true}),
+            "unsupported_protocol_version",
+            json!([1]),
+        ),
+        (
+            json!({"type":"call.hello","supportedProtocolVersions":[1,3]}),
+            "unsupported_protocol_version",
+            json!([1, 3]),
+        ),
+        (
+            json!({"type":"call.hello","supportedProtocolVersions":[]}),
+            "invalid_protocol_version",
+            json!([]),
+        ),
+        (
+            json!({"type":"call.hello","supportedProtocolVersions":null}),
+            "invalid_protocol_version",
+            json!([]),
+        ),
+        (
+            json!({"type":"call.hello","supportedProtocolVersions":[2,2]}),
+            "invalid_protocol_version",
+            json!([]),
+        ),
+    ] {
+        let mut socket = f.raw_socket("/v1/accounts/one/calls/socket", OWNER).await;
+        command(&mut socket, message).await;
+        let error = json_event(&mut socket).await;
+        assert_eq!(error["type"], "protocol.error");
+        assert_eq!(error["code"], code);
+        assert_eq!(error["clientVersions"], versions);
+        assert_eq!(error["serverVersions"], json!([2]));
+        assert!(
+            matches!(socket.next().await.unwrap().unwrap(), ClientMessage::Close(Some(frame)) if u16::from(frame.code) == 1002)
+        );
+    }
+    assert_eq!(f.backend.submits.load(Ordering::SeqCst), 0);
+    let mut socket = f.raw_socket("/v1/accounts/one/calls/socket", OWNER).await;
+    socket
+        .send(ClientMessage::Ping(vec![1].into()))
+        .await
+        .unwrap();
+    command(
+        &mut socket,
+        json!({"type":"call.hello","supportedProtocolVersions":[3,2]}),
+    )
+    .await;
+    assert_eq!(json_event(&mut socket).await["protocolVersion"], 2);
+}
+
 #[tokio::test]
 async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
     let f = Fixture::new(false).await;
@@ -251,6 +330,11 @@ async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
         .headers_mut()
         .insert(header::ORIGIN, origin.parse().unwrap());
     let (mut socket, _) = connect_async(request.clone()).await.unwrap();
+    command(
+        &mut socket,
+        json!({"type":"call.hello","supportedProtocolVersions":[2]}),
+    )
+    .await;
     let hello = json_event(&mut socket).await;
     assert_eq!(hello["capabilities"], json!({}));
     assert_eq!(hello["currentOffer"], Value::Null);
@@ -421,7 +505,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         .await;
     command(
         &mut wrong,
-        json!({"type":"media.attach","clientId":client_one,"ownerToken":"0".repeat(64)}),
+        json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":"0".repeat(64)}),
     )
     .await;
     assert_eq!(json_event(&mut wrong).await["code"], "not_owner");
@@ -436,7 +520,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         let mut foreign = f.socket(path, bearer).await;
         command(
             &mut foreign,
-            json!({"type":"media.attach","clientId":client_one,"ownerToken":owner_token}),
+            json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":owner_token}),
         )
         .await;
         assert_eq!(json_event(&mut foreign).await["code"], "forbidden");
@@ -444,7 +528,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     let mut malformed = f
         .socket("/v1/accounts/one/calls/incoming-fixture/media", calls_token)
         .await;
-    command(&mut malformed, json!({"type":"media.attach","clientId":client_one,"ownerToken":owner_token,"unexpected":true})).await;
+    command(&mut malformed, json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":owner_token,"unexpected":true})).await;
     assert!(matches!(
         timeout(Duration::from_secs(1), malformed.next())
             .await
@@ -456,7 +540,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         .await;
     command(
         &mut media,
-        json!({"type":"media.attach","clientId":client_one,"ownerToken":owner_token}),
+        json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":owner_token}),
     )
     .await;
     let ack = json_event(&mut media).await;
@@ -468,14 +552,15 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         .iter()
         .flat_map(|sample| sample.to_le_bytes())
         .collect();
-    command(&mut media, json!({"type":"audio.start","generation":1})).await;
+    command(
+        &mut media,
+        json!({"type":"audio.start","trackId":1,"generation":1}),
+    )
+    .await;
     // Application chunks need not match codec frame boundaries. The daemon
-    // joins partial chunks and clocks complete frames, with raw PCM on RX too.
+    // joins partial chunks and clocks complete frames, with JSON PCM on RX too.
     for chunk in [&bytes[..6], &bytes[6..]] {
-        media
-            .send(ClientMessage::Binary(chunk.to_vec().into()))
-            .await
-            .unwrap();
+        media.send(audio_chunk(chunk, 1)).await.unwrap();
     }
     loop {
         let response = timeout(Duration::from_secs(3), media.next())
@@ -483,8 +568,8 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
             .unwrap()
             .unwrap()
             .unwrap();
-        if let ClientMessage::Binary(response) = response {
-            assert_eq!(response.as_ref(), bytes.as_slice());
+        if let Some(response) = pcm_chunk(response) {
+            assert_eq!(response.as_slice(), bytes.as_slice());
             break;
         }
     }
@@ -532,38 +617,6 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
 
 #[tokio::test]
 async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owner() {
-    // The same stream contract covers partial samples, queue admission and a
-    // clear which overtakes queued PCM. No per-chunk client header is accepted.
-    let mut queue = PcmInput {
-        format: AudioFormat::new(16_000, 1, 20).unwrap(),
-        track: 1,
-        generation: None,
-        pending: VecDeque::new(),
-        sequence: 0,
-        timestamp: 0,
-    };
-    assert!(queue.push(&[0, 0], 1).is_err());
-    assert!(queue.start(2, 1).is_err());
-    queue.start(1, 1).unwrap();
-    assert!(queue.push(&[0], 1).is_err());
-    assert!(queue.push(&[], 1).is_err());
-    assert!(queue.push(&vec![0; MEDIA_LIMIT + 2], 1).is_err());
-    for _ in 0..4 {
-        queue.push(&vec![0; 64_000], 1).unwrap();
-    }
-    assert!(queue.push(&[0, 0], 1).is_err());
-    assert!(queue.next_frame(2).unwrap().is_none());
-    assert!(queue.pending.is_empty());
-    queue.start(2, 2).unwrap();
-    queue.push(&[1, 0], 2).unwrap();
-    assert!(queue.next_frame(2).unwrap().is_none());
-    queue.push(&vec![0; 638], 2).unwrap();
-    let bytes = queue.next_frame(2).unwrap().unwrap();
-    let frame = MediaFrame::decode(&bytes, queue.format).unwrap();
-    assert_eq!(frame.header.generation, 2);
-    assert_eq!(frame.header.sequence, 0);
-    assert_eq!(frame.samples().next(), Some(1));
-    assert!(queue.start(1, 2).is_err());
     let f = Fixture::new(true).await;
     let mut control = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
     let hello = json_event(&mut control).await;
@@ -581,7 +634,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     let mut media = f
         .socket(&format!("/v1/accounts/one/calls/{call_id}/media"), OWNER)
         .await;
-    command(&mut media,json!({"type":"media.attach","clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
+    command(&mut media,json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
     assert_eq!(json_event(&mut media).await["type"], "media.ready");
     let frame = || {
         [432i16; 320]
@@ -589,13 +642,14 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
             .flat_map(i16::to_le_bytes)
             .collect::<Vec<_>>()
     };
-    command(&mut media, json!({"type":"audio.start","generation":1})).await;
+    command(
+        &mut media,
+        json!({"type":"audio.start","trackId":1,"generation":1}),
+    )
+    .await;
     let (release_audio, audio_gate) = tokio::sync::oneshot::channel();
     *f.backend.held_audio.lock().unwrap() = Some(audio_gate);
-    media
-        .send(ClientMessage::Binary(frame().into()))
-        .await
-        .unwrap();
+    media.send(audio_chunk(&frame(), 1)).await.unwrap();
     timeout(Duration::from_secs(2), f.backend.audio_started.notified())
         .await
         .unwrap();
@@ -605,7 +659,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     peer.audio(&[321; 320]).await.unwrap();
     timeout(Duration::from_secs(2), async {
         while let Some(message) = media.next().await {
-            if let ClientMessage::Binary(bytes) = message.unwrap() {
+            if let Some(bytes) = pcm_chunk(message.unwrap()) {
                 assert_eq!(bytes.len(), 640);
                 assert!(bytes
                     .chunks_exact(2)
@@ -633,10 +687,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
         .await
         .is_err());
     release_audio.send(()).unwrap();
-    media
-        .send(ClientMessage::Binary(frame().into()))
-        .await
-        .unwrap();
+    media.send(audio_chunk(&frame(), 1)).await.unwrap();
     release_clear.send(()).unwrap();
     let mut result = None;
     let mut track = None;
@@ -650,19 +701,20 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     }
     assert_eq!(result.unwrap()["status"], "accepted");
     assert_eq!(track.unwrap()["track"]["generation"], 2);
-    command(&mut media, json!({"type":"audio.start","generation":2})).await;
-    media
-        .send(ClientMessage::Binary(frame().into()))
-        .await
-        .unwrap();
+    command(
+        &mut media,
+        json!({"type":"audio.start","trackId":1,"generation":2}),
+    )
+    .await;
+    media.send(audio_chunk(&frame(), 2)).await.unwrap();
     loop {
         let response = timeout(Duration::from_secs(2), media.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        if let ClientMessage::Binary(bytes) = response {
-            assert_eq!(bytes.as_ref(), frame().as_slice());
+        if let Some(bytes) = pcm_chunk(response) {
+            assert_eq!(bytes.as_slice(), frame().as_slice());
             break;
         }
     }
@@ -732,4 +784,100 @@ async fn active_outgoing_call_does_not_block_another_accounts_incoming_call() {
     let denied = until(&mut competitor, |v| v["code"] == "busy").await;
     assert_eq!(denied["ownerToken"], Value::Null);
     assert_eq!(f.backend.submits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn json_pcm_limits_tracks_and_generations_are_checked_before_audio_admission() {
+    let oversized = BASE64.encode(vec![0; MEDIA_LIMIT + 2]);
+    for (start, chunk, accepted) in [
+        (true, ClientMessage::Binary(vec![0, 0].into()), false),
+        (
+            true,
+            ClientMessage::Text(
+                json!({"type":"audio.chunk","trackId":1,"generation":1,"pcmBase64":"!!!!"})
+                    .to_string()
+                    .into(),
+            ),
+            false,
+        ),
+        (
+            true,
+            ClientMessage::Text(
+                json!({"type":"audio.chunk","trackId":1,"generation":1,"pcmBase64":oversized})
+                    .to_string()
+                    .into(),
+            ),
+            false,
+        ),
+        (
+            true,
+            ClientMessage::Text(
+                json!({"type":"audio.chunk","trackId":2,"generation":1,"pcmBase64":"AAA="})
+                    .to_string()
+                    .into(),
+            ),
+            false,
+        ),
+        (
+            true,
+            ClientMessage::Text(
+                json!({"type":"audio.chunk","trackId":1,"generation":2,"pcmBase64":"AAA="})
+                    .to_string()
+                    .into(),
+            ),
+            false,
+        ),
+        (false, audio_chunk(&[0, 0], 1), false),
+        (true, audio_chunk(&vec![0; MEDIA_LIMIT], 1), true),
+    ] {
+        let f = Fixture::new(true).await;
+        let mut control = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
+        let hello = json_event(&mut control).await;
+        ready(&mut control, "ready").await;
+        command(&mut control, json!({"type":"call.dial","requestId":"dial","target":{"kind":"direct","contactId":"synthetic-peer"},"callType":"voice"})).await;
+        let owner = until(&mut control, |event| {
+            event["type"] == "command.result" && event["requestId"] == "dial"
+        })
+        .await;
+        assert_eq!(owner["status"], "accepted");
+        until(&mut control, |event| {
+            event["type"] == "call.state" && event["call"]["state"] == "connected"
+        })
+        .await;
+        let path = format!(
+            "/v1/accounts/one/calls/{}/media",
+            owner["callId"].as_str().unwrap()
+        );
+        let mut media = f.socket(&path, OWNER).await;
+        command(&mut media, json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
+        assert_eq!(json_event(&mut media).await["type"], "media.ready");
+        if start {
+            command(
+                &mut media,
+                json!({"type":"audio.start","trackId":1,"generation":1}),
+            )
+            .await;
+        }
+        media.send(chunk).await.unwrap();
+        let outcome = timeout(Duration::from_secs(2), async {
+            loop {
+                match media.next().await {
+                    Some(Ok(ClientMessage::Ping(_) | ClientMessage::Pong(_))) => continue,
+                    other => break other,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if accepted {
+            assert_eq!(pcm_chunk(outcome.unwrap().unwrap()).unwrap(), vec![0; 640]);
+            assert!(f.backend.received.load(Ordering::SeqCst) > 0);
+        } else {
+            assert!(matches!(
+                outcome,
+                None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_)))
+            ));
+            assert_eq!(f.backend.received.load(Ordering::SeqCst), 0);
+        }
+    }
 }

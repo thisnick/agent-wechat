@@ -2,11 +2,20 @@
 //! A verified host transport may return either owned ordinary key mode. This
 //! does not change request selection or authorize Ax/app/media key substitution.
 
-use super::host_policy::CallHostRoute;
 use crate::{business, crypto, AccountState, MAX_MESSAGE_BYTES};
 use openssl::symm::Mode;
-use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
+
+/// A pre-answer LiveSync was superseded locally. The transport may have sent
+/// it, but its reply must never update the room cursor or account state.
+#[derive(Debug)]
+pub struct CallLiveSyncInterrupted;
+impl std::fmt::Display for CallLiveSyncInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Incoming LiveSync was interrupted for Answer")
+    }
+}
+impl std::error::Error for CallLiveSyncInterrupted {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallHostStage {
@@ -35,6 +44,7 @@ pub struct CallHostRpcError {
     pub stage: CallHostStage,
     pub code: &'static str,
     pub value: Option<i64>,
+    pub crypto_step: Option<&'static str>,
 }
 impl std::fmt::Display for CallHostRpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,13 +52,21 @@ impl std::fmt::Display for CallHostRpcError {
         if let Some(value) = self.value {
             write!(f, " ({value})")?;
         }
+        if let Some(step) = self.crypto_step {
+            write!(f, " [{step}]")?;
+        }
         Ok(())
     }
 }
 impl std::error::Error for CallHostRpcError {}
 impl CallHostRpcError {
     pub(crate) fn new(stage: CallHostStage, code: &'static str, value: Option<i64>) -> Self {
-        Self { stage, code, value }
+        Self {
+            stage,
+            code,
+            value,
+            crypto_step: None,
+        }
     }
     /// False only when the call request is known not to have been submitted.
     /// Exchange/decode failures remain uncertain, including connection timeouts.
@@ -58,6 +76,23 @@ impl CallHostRpcError {
     }
     pub(crate) fn from_cause(stage: CallHostStage, cause: &anyhow::Error) -> Self {
         let mut result = Self::new(stage, "rejected", None);
+        result.crypto_step = cause.chain().find_map(|error| {
+            Some(match error.to_string().as_str() {
+                "MMTLS key generation" => "key_generation",
+                "MMTLS public key encoding" => "public_key_encoding",
+                "MMTLS hello random" => "hello_random",
+                "MMTLS shared secret derivation" => "shared_secret_derivation",
+                "MMTLS handshake key derivation" => "handshake_key_derivation",
+                "MMTLS signature record authentication" => "signature_record_authentication",
+                "MMTLS signature verification" => "signature_verification",
+                "MMTLS ticket record authentication" => "ticket_record_authentication",
+                "MMTLS finished record authentication" => "finished_record_authentication",
+                "MMTLS application key derivation" => "application_key_derivation",
+                "MMTLS noop record sealing" => "noop_record_sealing",
+                "MMTLS noop record authentication" => "noop_record_authentication",
+                _ => return None,
+            })
+        });
         if cause.is::<crate::mmtls::UnsupportedNativeRoute>() {
             result.code = "unsupported_route";
         } else if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
@@ -98,29 +133,6 @@ impl CallHostRpcError {
     }
 }
 
-pub(crate) fn connect_call_session<T>(
-    route: CallHostRoute,
-    timeout: Duration,
-    mut connect: impl FnMut(Duration) -> anyhow::Result<T>,
-) -> Result<T, CallHostRpcError> {
-    let started = Instant::now();
-    let diagnose = |error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error);
-    let first = connect(timeout).map_err(diagnose);
-    // A fresh, fully verified handshake can recover call authentication before
-    // any business request has been prepared or handed to the transport.
-    if route == CallHostRoute::AppAuth
-        && first
-            .as_ref()
-            .is_err_and(|error| error.code == "openssl_crypto")
-    {
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if !remaining.is_zero() {
-            return connect(remaining).map_err(diagnose);
-        }
-    }
-    first
-}
-
 // Only exact messages emitted by the maintained session/framing/crypto checks
 // are admitted. Formatting unknown errors is transient; none of that text is
 // returned or persisted. Context strings and payload-bearing suffixes cannot
@@ -141,6 +153,7 @@ fn known_transport_literal(message: &str) -> Option<(&'static str, Option<i64>)>
         "Unoffered key" => "unoffered_key",
         "Duplicate extension" => "duplicate_extension",
         "Invalid ECDH point" => "ecdh_point",
+        "Invalid MMTLS P256 shared secret width" => "shared_secret_width",
         "Missing ECDH selection" => "missing_ecdh_selection",
         "Missing certificate selection" => "missing_certificate_selection",
         "Expected signature record" => "expected_signature_record",
@@ -402,45 +415,17 @@ mod tests {
     }
 
     #[test]
-    fn call_auth_retries_a_crypto_handshake_once_with_the_remaining_budget() {
-        let timeout = Duration::from_secs(30);
-        let mut attempts = Vec::new();
-        let session = connect_call_session(CallHostRoute::AppAuth, timeout, |remaining| {
-            attempts.push(remaining);
-            if attempts.len() == 1 {
-                return Err(openssl::error::ErrorStack::get().into());
-            }
-            Ok("fresh session")
-        });
-        assert_eq!(session.unwrap(), "fresh session");
-        assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0], timeout);
-        assert!(!attempts[1].is_zero() && attempts[1] <= timeout);
-    }
-
-    #[test]
-    fn call_handshake_retry_is_limited_to_call_auth_crypto_failures() {
-        let timeout = Duration::from_secs(30);
-        for (route, budget, crypto_failure, expected_attempts) in [
-            (CallHostRoute::AppAuth, timeout, true, 2),
-            (CallHostRoute::LiveSync, timeout, true, 1),
-            (CallHostRoute::AppAuth, timeout, false, 1),
-            (CallHostRoute::AppAuth, Duration::ZERO, true, 1),
-        ] {
-            let mut attempts = 0;
-            let error = connect_call_session::<()>(route, budget, |_| {
-                attempts += 1;
-                if crypto_failure {
-                    return Err(openssl::error::ErrorStack::get().into());
-                }
-                Err(anyhow::anyhow!(
-                    "Pinned server signature verification failed"
-                ))
-            })
-            .unwrap_err();
-            assert_eq!(attempts, expected_attempts);
-            assert_eq!(error.stage, CallHostStage::Handshake);
-            assert!(!error.may_have_submitted());
-        }
+    fn crypto_diagnostics_preserve_only_fixed_phase_labels() {
+        let cause = anyhow::Error::new(openssl::error::ErrorStack::get())
+            .context("MMTLS signature record authentication")
+            .context("synthetic private response and credentials");
+        let diagnostic = CallHostRpcError::from_cause(CallHostStage::Handshake, &cause);
+        assert_eq!(diagnostic.code, "openssl_crypto");
+        assert_eq!(
+            diagnostic.crypto_step,
+            Some("signature_record_authentication")
+        );
+        assert!(!diagnostic.to_string().contains("private"));
+        assert!(!diagnostic.may_have_submitted());
     }
 }

@@ -1176,6 +1176,22 @@ async fn run(cli: Cli) -> Result<()> {
         println!();
         return Ok(());
     }
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Conference { command: None })
+        }
+    ) {
+        let mut command = cli_help::command();
+        command.build();
+        command
+            .find_subcommand_mut("calls")
+            .and_then(|calls| calls.find_subcommand_mut("conference"))
+            .context("missing conference command")?
+            .print_help()?;
+        println!();
+        return Ok(());
+    }
     if matches!(cli.command, Command::Licenses) {
         return output.print(
             &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),

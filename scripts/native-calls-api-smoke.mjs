@@ -119,9 +119,9 @@ try {
   const webSocketFactory = (url, options) => {
     const socket = rawWebSocketFactory(url, options), send = socket.send.bind(socket);
     socket.send = value => {
-      if (holdNativePcm && typeof value !== "string") {
-        holdNativePcm = false; const bytes = Buffer.from(value);
-        heldNativePcm = () => send(bytes); return;
+      if (holdNativePcm && typeof value === "string" && JSON.parse(value).type === "audio.chunk") {
+        holdNativePcm = false;
+        heldNativePcm = () => send(value); return;
       }
       send(value);
     };
@@ -211,7 +211,7 @@ try {
   if (cli === "status-and-passive-monitor") await until("CLI peer control event", () => monitorEvents.some(event => event.type === "call.control"));
   await assert.rejects(loser.dial(randomUUID(), "synthetic-peer"), error => error instanceof NativeCallError && error.code === "busy");
   const loserHello = loserEvents.events.find(event => event.type === "hello");
-  const mismatched = new NativeCallMediaClient(options, offer.callId, { type: "media.attach", clientId: loserHello.clientId, ownerToken: winnerResult.ownerToken });
+  const mismatched = new NativeCallMediaClient(options, offer.callId, { type: "media.attach", supportedProtocolVersions: [2], clientId: loserHello.clientId, ownerToken: winnerResult.ownerToken });
   await assert.rejects(mismatched.connect()); mismatched.close();
   const media = await winner.attachMedia(offer.callId), received = [];
   let mediaClosing = false;
@@ -223,7 +223,7 @@ try {
   await control("inject_audio", { value: -1700, frames: 1 });
   await until("independent Rust RX PCM", () => received.length === 2); assert.deepEqual(Buffer.from(received[1].payload), pcm(-1700));
   await winner.clearAudio(randomUUID(), offer.callId); const nextTrack = media.tracks().sendTrack;
-  assert.equal(nextTrack.generation, track.generation + 1); assert.equal(media.tracks().receiveTrack.generation, 1);
+  assert.equal(nextTrack.generation, track.generation + 1); assert.equal(media.tracks().receiveTracks[0].generation, 1);
   assert.throws(() => media.sendPcm(samples(first), track.generation));
   track = nextTrack;
   media.sendPcm(samples(pcm(1800)), track.generation);
@@ -250,9 +250,9 @@ try {
   const pluginSocketFactory = (url, options) => {
     const socket = webSocketFactory(url, options), send = socket.send.bind(socket);
     socket.send = value => {
-      if (holdNextPcm && typeof value !== "string") {
-        holdNextPcm = false; const frame = Buffer.from(value);
-        heldPcm = () => send(frame);
+      if (holdNextPcm && typeof value === "string" && JSON.parse(value).type === "audio.chunk") {
+        holdNextPcm = false;
+        heldPcm = () => send(value);
       } else send(value);
     };
     return socket;
@@ -295,7 +295,7 @@ try {
   const afterClear = (await control("stats")).stats;
   assert.equal(afterClear.audioFrames, beforeClear.audioFrames + 1); assert.equal(afterClear.lastTxGeneration, 2); assert.equal(afterClear.lastTxPeak, 3100);
   await control("hold_clear", { enabled: false });
-  assert.equal(pluginMedia.tracks().receiveTrack.generation, 1);
+  assert.equal(pluginMedia.tracks().receiveTracks[0].generation, 1);
   // Playout now sends paced silence between replies, so frame counts keep
   // growing while the call is active. Check the stale chunk itself instead.
   callbacks.audio(pcm(2300), { itemId: "interrupted" }); await delay(60);

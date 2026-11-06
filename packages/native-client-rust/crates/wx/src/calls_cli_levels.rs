@@ -1,5 +1,10 @@
 //! Signal-only terminal meters. No audio, device volume or call state is retained.
-use std::io::{self, IsTerminal, Write};
+use std::{
+    collections::BTreeMap,
+    io::{self, IsTerminal, Write},
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use wechat_core::call_types::{CallMembership, CallView};
 
 const FLOOR_DB: f64 = -60.0;
 
@@ -66,13 +71,36 @@ impl Level {
     }
 }
 
+struct ParticipantLevel {
+    level: Level,
+    label: String,
+    membership: CallMembership,
+    microphone: Option<bool>,
+}
+
+pub(super) fn clean_label(text: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut used = 0;
+    for c in text.chars().filter(|c| !c.is_control()) {
+        let n = c.width().unwrap_or(0);
+        if used + n > width {
+            break;
+        }
+        used += n;
+        result.push(c);
+    }
+    result
+}
+
 pub(super) struct CallLevels {
     mic: Level,
     speaker: Level,
     muted: bool,
     enabled: bool,
     drawn: bool,
-    drawn_len: usize,
+    drawn_rows: usize,
+    participants: BTreeMap<String, ParticipantLevel>,
+    speaker_enabled: bool,
     #[cfg(windows)]
     console_mode: Option<u32>,
 }
@@ -105,7 +133,9 @@ impl CallLevels {
             muted: false,
             enabled,
             drawn: false,
-            drawn_len: 0,
+            drawn_rows: 0,
+            participants: BTreeMap::new(),
+            speaker_enabled: true,
             #[cfg(windows)]
             console_mode: None,
         }
@@ -130,36 +160,140 @@ impl CallLevels {
     }
     fn line(&self) -> String {
         format!(
-            "Mic{} {} Speaker {}",
+            "Mic{} {} Speaker{} {}",
             if self.muted { "(muted)" } else { "" },
             self.mic.text(),
+            if self.speaker_enabled { "" } else { "(off)" },
             self.speaker.text()
         )
+    }
+    pub(super) fn roster(&mut self, call: &CallView) {
+        for participant in &call.participants {
+            let row = self
+                .participants
+                .entry(participant.participant_id.clone())
+                .or_insert_with(|| ParticipantLevel {
+                    level: Level::default(),
+                    label: String::new(),
+                    membership: CallMembership::Unknown,
+                    microphone: None,
+                });
+            row.label = clean_label(&participant.contact_id, 64);
+            row.membership = participant.membership;
+            row.microphone = participant.microphone_enabled;
+            if participant.membership == CallMembership::Left
+                || participant.microphone_enabled == Some(false)
+            {
+                row.level = Level::default();
+            }
+        }
+    }
+    pub(super) fn participant_audio(
+        &mut self,
+        track: u32,
+        participant: Option<&str>,
+        samples: &[i16],
+    ) {
+        let id = participant
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("track-{track}"));
+        if self.participants.len() >= 128 && !self.participants.contains_key(&id) {
+            return;
+        }
+        let row = self
+            .participants
+            .entry(id.clone())
+            .or_insert_with(|| ParticipantLevel {
+                level: Level::default(),
+                label: if participant.is_some() {
+                    clean_label(&id, 64)
+                } else {
+                    format!("Unattributed track {track}")
+                },
+                membership: CallMembership::Unknown,
+                microphone: None,
+            });
+        if row.microphone != Some(false) && row.membership != CallMembership::Left {
+            row.level
+                .observe(samples.iter().map(|s| f64::from(*s) / 32768.0));
+        }
+    }
+    pub(super) fn playback_enabled(&mut self, enabled: bool) {
+        self.speaker_enabled = enabled;
+        if !enabled {
+            self.clear_speaker();
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self::with_terminal(false)
+    }
+    #[cfg(test)]
+    pub(super) fn participant_level(&self, id: &str) -> f64 {
+        self.participants.get(id).unwrap().level.db
+    }
+    fn lines(&self, width: usize, rows: usize) -> Vec<String> {
+        let mut lines = vec![clean_label(&self.line(), width.saturating_sub(1))];
+        let limit = rows.saturating_sub(5).max(1);
+        for row in self.participants.values().take(limit) {
+            let membership = match row.membership {
+                CallMembership::Joined => "joined",
+                CallMembership::Invited => "invited",
+                CallMembership::Left => "left",
+                CallMembership::Unknown => "unknown",
+            };
+            let mic = match row.microphone {
+                Some(true) => "mic on",
+                Some(false) => "mic off",
+                None => "mic unknown",
+            };
+            let tail = format!(" {} {membership} {mic}", row.level.text());
+            let label = clean_label(&row.label, width.saturating_sub(tail.width() + 2));
+            lines.push(clean_label(
+                &format!("{label}{tail}"),
+                width.saturating_sub(1),
+            ));
+        }
+        if self.participants.len() > limit {
+            lines.push(format!(
+                "+{} participants; p shows the full roster",
+                self.participants.len() - limit
+            ));
+        }
+        lines
     }
     pub(super) fn refresh(&mut self) {
         self.mic.advance();
         self.speaker.advance();
+        for row in self.participants.values_mut() {
+            row.level.advance();
+        }
         if !self.enabled {
             return;
         }
-        let line = self.line();
-        let columns = terminal_columns();
-        if !fits_width(&line, columns) {
+        let Some(columns) = terminal_columns().filter(|width| *width >= 32) else {
             self.clear();
             return;
-        }
-        if self.drawn && columns.is_some_and(|width| self.drawn_len >= width) {
+        };
+        let lines = self.lines(columns, terminal_rows());
+        if self.drawn && self.drawn_rows != lines.len() {
             self.clear();
         }
         let mut out = io::stderr().lock();
         let result = if self.drawn {
-            // Keep the cursor and any typed command on its separate input line.
-            write!(out, "\x1b7\x1b[1A\r\x1b[2K{line}\x1b8")
+            let mut redraw = format!("\x1b7\x1b[{}A\r", lines.len());
+            for line in &lines {
+                redraw.push_str("\x1b[2K");
+                redraw.push_str(line);
+                redraw.push('\n');
+            }
+            redraw.push_str("\x1b8");
+            write!(out, "{redraw}")
         } else {
             self.drawn = true;
-            write!(out, "{line}\n> ")
+            write!(out, "{}\n> ", lines.join("\n"))
         };
-        self.drawn_len = line.len();
+        self.drawn_rows = lines.len();
         if result.and_then(|_| out.flush()).is_err() {
             self.enabled = false;
         }
@@ -167,7 +301,7 @@ impl CallLevels {
     /// The terminal echoed Enter, moving below the command prompt.
     pub(super) fn input_received(&mut self) {
         if self.enabled && self.drawn {
-            let rows = self.rows() + 1;
+            let rows = self.drawn_rows + 1;
             let _ = write!(io::stderr(), "\x1b[{rows}A\r\x1b[J");
             self.drawn = false;
         }
@@ -178,15 +312,10 @@ impl CallLevels {
     }
     fn clear(&mut self) {
         if self.enabled && self.drawn {
-            let rows = self.rows();
+            let rows = self.drawn_rows;
             let _ = write!(io::stderr(), "\r\x1b[2K\x1b[{rows}A\r\x1b[J");
             self.drawn = false;
         }
-    }
-    fn rows(&self) -> usize {
-        self.drawn_len
-            .div_ceil(terminal_columns().unwrap_or(self.drawn_len + 1).max(1))
-            .max(1)
     }
 }
 impl Drop for CallLevels {
@@ -203,8 +332,33 @@ fn terminal_enabled(input: bool, output: bool, term: Option<&str>) -> bool {
     input && output && term != Some("dumb")
 }
 
+#[cfg(test)]
 fn fits_width(line: &str, columns: Option<usize>) -> bool {
     columns.is_some_and(|width| line.len() < width)
+}
+
+#[cfg(unix)]
+fn terminal_rows() -> usize {
+    use std::os::fd::AsRawFd;
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+    if unsafe {
+        libc::ioctl(
+            io::stderr().as_raw_fd(),
+            libc::TIOCGWINSZ,
+            size.as_mut_ptr(),
+        )
+    } == 0
+    {
+        let rows = unsafe { size.assume_init() }.ws_row;
+        if rows > 0 {
+            return usize::from(rows);
+        }
+    }
+    24
+}
+#[cfg(not(unix))]
+fn terminal_rows() -> usize {
+    24
 }
 
 #[cfg(unix)]
@@ -315,5 +469,57 @@ mod tests {
         assert!(!fits_width(&meter.line(), Some(32)));
         assert!(!fits_width(&meter.line(), Some(meter.line().len())));
         assert!(!fits_width(&meter.line(), None));
+    }
+}
+
+#[cfg(test)]
+mod participant_tests {
+    use super::*;
+    use wechat_core::call_types::{CallDirection, CallKind, CallParticipant, CallState, CallType};
+    #[test]
+    fn participant_meters_keep_mute_membership_and_signal_separate() {
+        let mut levels = CallLevels::for_test();
+        let mut call = CallView {
+            call_id: "test".into(),
+            revision: 1,
+            kind: CallKind::Conference,
+            call_type: CallType::Voice,
+            direction: CallDirection::Incoming,
+            state: CallState::Connected,
+            owned_by_this_client: true,
+            group_id: Some("group".into()),
+            controls: vec![],
+            participants: vec![CallParticipant {
+                participant_id: "person".into(),
+                contact_id: "Alice\x1b[31m".into(),
+                membership: CallMembership::Joined,
+                microphone_enabled: Some(true),
+            }],
+        };
+        levels.roster(&call);
+        levels.participant_audio(7, Some("person"), &[16000; 320]);
+        levels.refresh();
+        assert!(levels.participant_level("person") > -10.0);
+        call.participants[0].microphone_enabled = Some(false);
+        levels.roster(&call);
+        levels.participant_audio(7, Some("person"), &[16000; 320]);
+        levels.refresh();
+        assert_eq!(levels.participant_level("person"), FLOOR_DB);
+        assert!(levels.lines(80, 24)[1].contains("mic off"));
+        assert!(!levels.lines(80, 24)[1].contains('\x1b'));
+        assert_eq!(
+            levels.participants["person"].membership,
+            CallMembership::Joined
+        );
+        call.participants[0].microphone_enabled = None;
+        levels.roster(&call);
+        assert!(levels.lines(80, 24)[1].contains("mic unknown"));
+        levels.playback_enabled(false);
+        levels.participant_audio(7, Some("person"), &[16000; 320]);
+        levels.refresh();
+        assert!(levels.participant_level("person") > -10.0);
+        assert!(levels.line().contains("Speaker(off)"));
+        assert_eq!(clean_label("你好 Alice", 5), "你好 ");
+        assert!(levels.lines(32, 10).iter().all(|line| line.width() < 32));
     }
 }
