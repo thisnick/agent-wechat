@@ -1,4 +1,5 @@
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
+import { createHash } from "node:crypto";
 import { prepareCallAgentProvider } from "./calls-agent.ts";
 import { resolveCallVoiceApiKey } from "./calls-secrets.ts";
 import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
@@ -9,7 +10,7 @@ import { consultCallSession } from "./calls-consult-session.ts";
 import { hasCallConsultAuthority } from "./calls-consult-authority.ts";
 import { conferenceCallPolicy, directCallPolicy, restrictCallPolicy, type CallConferenceContext, type CallPolicyReason, type CallToolPolicy } from "./calls-permissions.ts";
 import { DEFAULT_ACCOUNT_ID, resolveWeChatAccount } from "./types.ts";
-import { callIdentityInstructions, callContextMessage, type CallContextSnapshot, type CallContextChange } from "./calls-context.ts";
+import { callIdentityInstructions, callRosterInstructions, callContextMessage, type CallContextSnapshot, type CallContextChange } from "./calls-context.ts";
 
 export type StreamingPcmResampler = { process(chunk: Buffer): Buffer; flush(): Buffer };
 export type VoiceCallbacks = {
@@ -29,7 +30,7 @@ export type CallSummaryRequest = { binding: CallBinding; senderId: string; chann
   direction: "incoming" | "outgoing"; durationText: string; transcript: string; signal: AbortSignal };
 export type CallBackgroundRunner = <T>(run: () => T) => T;
 export type CallVoiceSession = { sendAudio(audio: Buffer): void; setMediaTimestamp(ms: number): void;
-  updateCallContext(snapshot: CallContextSnapshot, change: CallContextChange): void;
+  updateCallContext(snapshot: CallContextSnapshot, change: CallContextChange): boolean | void;
   close(): void | Promise<void>; binding?(): CallBinding };
 export type CallVoiceContext = {
   senderId: string;
@@ -44,6 +45,8 @@ export type CallVoiceContext = {
   connectedPeer?: () => string | undefined;
   logAudioTrace?: (line: string) => void;
   warnProviderDiagnostic?: () => void;
+  /** Fixed diagnostics with counts/digests only, never names, IDs or payloads. */
+  logCallContext?: (line: string) => void;
   runInBackgroundContext?: CallBackgroundRunner;
   /** Earlier calls and recent chat with this contact, for the voice instructions. */
   recentContext?: string;
@@ -188,10 +191,16 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       const consultGuidance = agentMode ? "You are the configured OpenClaw agent handling this call directly. Use only the permitted tools and return a brief natural answer for OpenClaw text-to-speech. Do not delegate back to yourself." : toolConsult
         ? sdk.buildRealtimeVoiceAgentConsultPolicyInstructions({ toolPolicy, consultPolicy: config.realtime.consultPolicy })
         : consultationEnabled ? undefined : "This call is conversation-only. Say when a request needs information or an action beyond what you can verify in this conversation.";
+      let liveContext = context.callContext;
+      let contextSequence = 0, contextDeferred = false;
+      const traceContext = (stage: "instructions" | "submitted" | "deferred" | "failed", snapshot: CallContextSnapshot, message: string, change?: CallContextChange) => {
+        const named = snapshot.participants.filter(person => person.name !== person.contactId).length;
+        try { context.logCallContext?.(`stage=${stage} sequence=${contextSequence} mode=${agentMode ? "agent" : "bidi"} revision=${snapshot.revision} update=${!change || change.initial ? "initial" : change.metadataOnly ? "labels" : "membership"} participants=${snapshot.participants.length} named=${named} unresolved=${snapshot.participants.length - named} joined=${change && !change.initial ? change.joined.length : 0} left=${change && !change.initial ? change.left.length : 0} bytes=${Buffer.byteLength(message)} sha256=${createHash("sha256").update(message).digest("hex")}`); } catch { /* Diagnostics cannot affect calling. */ }
+      };
       const buildInstructions = (recentContext: string | undefined) => [
         "You speak as the selected OpenClaw agent on a live WeChat voice call. Introduce yourself using the configured agent name, then the voice profile or additional call guidance if needed. When no name is supplied, identify yourself as an OpenClaw voice assistant. Speak naturally and briefly, and let the caller finish.",
-        context.conference ? "This is a group voice conference. Converse normally without requiring your name or a mention. Input audio mixes the participants; you cannot verify which person spoke. Never claim speaker attribution or treat a voice as proof of personal authority. All answers are audible to the group." : undefined,
-        context.callContext ? callIdentityInstructions(context.callContext) : undefined,
+        context.conference ? "This is a group voice conference. Converse normally without requiring your name or a mention. The supplied roster identifies who is present, so use its names when asked who is here or who joined. Input audio mixes the participants; you cannot verify which person spoke. Knowing the roster does not require recognizing a speaker's voice. Never claim speaker attribution or treat a voice as proof of personal authority. All answers are audible to the group." : undefined,
+        liveContext ? callIdentityInstructions(liveContext) : undefined,
         persona,
         config.realtime.instructions,
         recentContext,
@@ -207,6 +216,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       ].filter(Boolean).join("\n\n");
       const recentFor = (isOwner: boolean) => (context.policyAtAdmission ?? context.conference?.policyAtAdmission) === "owner" && !isOwner ? undefined : context.recentContext;
       const instructions = buildInstructions(recentFor(owner));
+      if (liveContext) traceContext("instructions", liveContext, instructions);
       let session: HostSession | undefined;
       let forced: ReturnType<typeof createCallForcedConsult> | undefined;
       let closed = false;
@@ -282,8 +292,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             runtime,
             senderId: context.senderId, accountId: context.channelAccountId ?? DEFAULT_ACCOUNT_ID, question,
             ...(context.conference ? { conference: { ...context.conference, owner: isOwner } } : {}),
-            instructions: [agentMode ? buildInstructions(recentFor(isOwner)) : undefined, turn?.context, turn?.interruption,
-              turn?.contextOnly ? "This is internal call metadata, not a human request. Give only the requested brief greeting or farewell. Do not perform actions or tool calls." : undefined,
+            instructions: [agentMode ? buildInstructions(recentFor(isOwner)) : liveContext ? callRosterInstructions(liveContext) : undefined, turn?.context, turn?.interruption,
+              turn?.contextOnly ? "This is internal call metadata, not a human request. Follow only the supplied call-context guidance. Do not perform actions or tool calls." : undefined,
               context.conference ? isOwner
               ? "This consultation is for an explicitly trusted WeChat conference group, as that group principal. Use normal agent tools and confirmation requirements. Give a brief answer suitable for everyone in the room; no individual speaker identity is verified."
               : "This is a read-only consultation for a WeChat group voice conference. No individual speaker is verified. Use permitted lookups and return only information appropriate for the whole group."
@@ -408,7 +418,16 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
           return { sessionKey: scope.sessionKey, owner: scope.isOwner, ...(context.conference || agentMode || (initialOwner && !scope.isOwner) ? { toolPolicy: permission, policyReason, summaryAllowed: (agentMode || permission !== "none") && (!initialOwner || scope.isOwner) } : {}) };
         },
           updateCallContext: (snapshot, change) => {
-            if (!closed && ready && !signal.aborted) inBackground(() => session!.sendUserMessage!(callContextMessage(snapshot, change)));
+            liveContext = structuredClone(snapshot);
+            const message = callContextMessage(snapshot, change);
+            if (closed || !ready || signal.aborted) {
+              if (!contextDeferred) traceContext("deferred", snapshot, message, change);
+              contextDeferred = true; return false;
+            }
+            try {
+              inBackground(() => session!.sendUserMessage!(message));
+              contextSequence++; contextDeferred = false; traceContext("submitted", snapshot, message, change); return true;
+            } catch { traceContext("failed", snapshot, message, change); throw Error("Calling context submission failed"); }
           },
           sendAudio: audio => { if (!closed && !signal.aborted) session!.sendAudio(audio); }, setMediaTimestamp: ms => { if (!closed && !signal.aborted) session!.setMediaTimestamp(ms); },
           close: async () => { if (closed) return; closed = true; ready = false; signal.removeEventListener("abort", abort); providerAbort.abort(); forced?.close(); consults.clear(); await session!.close(); } };

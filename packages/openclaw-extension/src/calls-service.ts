@@ -211,6 +211,7 @@ export class NativeCallService {
           if (active.call && event.call.revision < active.call.revision) continue;
           active.callId = event.call.callId; active.call = event.call;
           active.context.applySnapshot(event.call); this.scheduleCallContext(active);
+          if (active.groupId) this.info(`context trace=${active.key.slice(0, 8)} stage=observed source=snapshot revision=${event.call.revision} participants=${active.context.snapshot().participants.length}`);
           if (event.call.state === "connected") active.connectedAt ??= Date.now();
           if (["ending", "ended", "uncertain"].includes(event.call.state)) {
             active.output?.close(); active.media?.stopAudio(); this.stopVoice(active);
@@ -229,6 +230,7 @@ export class NativeCallService {
             call.revision = event.revision;
             call.participants = [...(call.participants ?? []).filter(member => member.participantId !== event.participant.participantId), event.participant];
             this.active!.context.applyParticipant(event.revision, event.participant); this.scheduleCallContext(this.active!);
+            this.info(`context trace=${this.active!.key.slice(0, 8)} stage=observed source=participant revision=${event.revision} membership=${event.participant.membership} participants=${this.active!.context.snapshot().participants.length}`);
           }
         } else if (event.type === "call.invitation_result") {
           if (this.active?.callId === event.callId) this.active.invitationResults = event;
@@ -342,7 +344,7 @@ export class NativeCallService {
       const host = await (this.dependencies.host ?? ensureNativeHost)(native);
       const identity = await resolveCallIdentity(host.client, native.accountId, active.peer, active.groupId, active.inviterId,
         AbortSignal.any([active.abort.signal, AbortSignal.timeout(RECENT_CONTEXT_WAIT_MS)]));
-      if (this.current(active)) active.context.setIdentity(identity.name, identity.inviterName);
+      if (this.current(active)) { active.context.setIdentity(identity.name, identity.inviterName); this.scheduleCallContext(active); }
     };
     let [{ recentContext, consultContext }] = await Promise.all([
       bounded(this.callContext(active.peer, active.policyAtAdmission), RECENT_CONTEXT_WAIT_MS).catch((): { recentContext?: string; consultContext?: string } => ({})),
@@ -367,6 +369,7 @@ export class NativeCallService {
       ...(active.groupId ? { conference: { groupId: active.groupId, inviterId: active.inviterId, policyAtAdmission: active.policyAtAdmission } } : {}), recentContext, consultContext,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
       warnProviderDiagnostic: () => this.warn("voice provider reported a diagnostic; waiting for recovery or terminal closure"),
+      logCallContext: line => this.info(`context trace=${active.key.slice(0, 8)} ${line}`),
       connectedPeer: () => this.current(active) && (!active.groupId || this.groupPolicy(active.groupId)) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
         && active.output && !active.endStarted ? active.peer : undefined });
     const opening = runInBackgroundContext ? runInBackgroundContext(open) : open();
@@ -604,18 +607,26 @@ export class NativeCallService {
     if (active.groupId && native) for (const person of active.context.snapshot().participants) {
       if (active.nameRequests.has(person.contactId)) continue;
       active.nameRequests.add(person.contactId);
+      const lookup = active.nameRequests.size, started = performance.now();
       void bounded((this.dependencies.host ?? ensureNativeHost)(native).then(host =>
         resolveCallParticipant(host.client, native.accountId, active.groupId!, person.contactId,
           AbortSignal.any([active.abort.signal, AbortSignal.timeout(RECENT_CONTEXT_WAIT_MS)]))), RECENT_CONTEXT_WAIT_MS)
-        .then(person => { if (this.current(active)) active.context.name(person.contactId, person.name); }).catch(() => {});
+        .then(person => {
+          if (!this.current(active)) return;
+          active.context.name(person.contactId, person.name);
+          this.info(`context trace=${active.key.slice(0, 8)} stage=lookup lookup=${lookup} named=${person.name !== person.contactId} ms=${Math.round(performance.now() - started)}`);
+          this.scheduleCallContext(active);
+        }).catch(() => { if (this.current(active)) this.info(`context trace=${active.key.slice(0, 8)} stage=lookup lookup=${lookup} status=unavailable ms=${Math.round(performance.now() - started)}`); });
     }
     if (!active.contextReady || active.contextTimer) return;
     active.contextTimer = setTimeout(() => {
       active.contextTimer = undefined;
       if (!this.current(active) || active.endStarted || !active.output || !active.voice || active.call?.state !== "connected") return;
-      const update = active.context.takeChange();
-      if (update) try { active.voice.updateCallContext(update.snapshot, update.change); }
-      catch { this.warn("call context update unavailable; audio continues"); }
+      const update = active.context.peekChange();
+      if (update) try {
+        if (active.voice.updateCallContext(update.snapshot, update.change) === false) this.scheduleCallContext(active);
+        else active.context.markSent(update.snapshot);
+      } catch { this.warn("call context update unavailable; audio continues"); this.scheduleCallContext(active); }
     }, 250);
     active.contextTimer.unref?.();
   }

@@ -72,7 +72,7 @@ function voiceFactory() {
     callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined,
     binding: { sessionKey: "agent:agent:wechat-call:peer", owner: false }, summaries: [] as CallSummaryRequest[], summaryText: undefined as string | undefined };
   const prepared: PreparedCallVoice = { sampleRate: 16000, continuous: false, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
-    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { updateCallContext: (snapshot, change) => state.updates.push(structuredClone({ snapshot, change })), sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
+    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { updateCallContext: (snapshot, change) => { state.updates.push(structuredClone({ snapshot, change })); }, sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
     async summarize(request) { state.summaries.push(request); return state.summaryText; } };
   return { state, prepared };
 }
@@ -858,6 +858,40 @@ test("conference context keeps its inviter, coalesces joins/leaves and stops upd
   await delay(20); await service.end(); await delay(280);
   assert.equal(voice.state.updates.length, 2);
   assert.equal(client.clears, 0);
+});
+
+test("delayed conference names reschedule context and deferred provider submission retains the update", async t => {
+  const cfg = conferenceConfiguration(true), client = new ConferenceControl(), voice = voiceFactory();
+  const lines: string[] = []; let release!: () => void, admit = true;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const host = (async () => ({ client: {
+    group: async () => ({ name: "Test room" }),
+    groupMember: async (_account: string, _group: string, who: string) => {
+      if (who.startsWith("contact-")) await pending;
+      return { member: { username: who, displayName: `Name ${who}` } };
+    },
+  } })) as unknown as NonNullable<import("./calls-service.ts").CallServiceDependencies["host"]>;
+  const open = voice.prepared.open;
+  voice.prepared.open = async (...args) => {
+    const session = await open(...args), send = session.updateCallContext;
+    session.updateCallContext = (snapshot, change) => {
+      if (!admit) return false;
+      send(snapshot, change); return true;
+    };
+    return session;
+  };
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, { config: { current: () => cfg } } as unknown as PluginRuntime,
+    { client, prepareVoice: async () => voice.prepared, host, info: line => lines.push(line) });
+  await service.start(); t.after(() => service.stop());
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => voice.state.updates.length === 1);
+  assert.deepEqual(voice.state.updates[0].snapshot.participants.map(p => p.name), ["contact-a", "contact-b"]);
+  admit = false; release(); await delay(300); assert.equal(voice.state.updates.length, 1);
+  admit = true; await until(() => voice.state.updates.length === 2);
+  assert.deepEqual(voice.state.updates[1].change, { initial: false, joined: [], left: [], metadataOnly: true });
+  assert.deepEqual(voice.state.updates[1].snapshot.participants.map(p => p.name), ["Name contact-a", "Name contact-b"]);
+  assert.ok(lines.some(line => /stage=lookup lookup=\d+ named=true ms=\d+/.test(line)));
+  assert.equal(lines.some(line => /contact-a|contact-b|Name |another-member|Test room/.test(line)), false, "default diagnostics never contain names or contact IDs");
 });
 
 test("manual conference admission fences a changed inviter even at the same invitation revision", async t => {

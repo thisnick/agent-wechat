@@ -29,17 +29,22 @@ test("recoverable provider errors preserve audio; continuity reset cancels old c
     inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true,
   } }) }, audioSdk });
   const session = await prepared.open({ audio() {}, clear() { clears++; }, failed() { failures++; } }, { senderId: "peer", signal: new AbortController().signal });
+  assert.equal(session.updateCallContext({ direction: "incoming", revision: 3, remote: { contactId: "peer", name: "Resolved caller name" }, participants: [] },
+    { initial: false, joined: [], left: [], metadataOnly: true }), true);
+  const before = spoken.length;
   request.onError(Error("Recoverable diagnostic")); session.sendAudio(Buffer.alloc(960));
   assert.equal(input, 1); assert.equal(failures, 0);
   hold = new Promise(resolve => { release = resolve; });
   request.onToolCall({ name: sdk.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId: "old", args: { question: "Old request" } });
   await until(() => dispatches.length === 1);
+  assert.match(dispatches[0].ctx.BodyForAgent, /Resolved caller name/);
   request.onEvent({ direction: "client", type: "session.continuity.reset" });
   assert.equal(dispatches[0].replyOptions.abortSignal.aborted, true); assert.equal(clears, 1);
   request.onReady(); release(); hold = undefined; await delay(40);
-  assert.equal(spoken.length, 0, "old results and error replies cannot enter the replacement provider session");
+  assert.equal(spoken.length, before, "old results and error replies cannot enter the replacement provider session");
   request.onToolCall({ name: sdk.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId: "new", args: { question: "Fresh request" } });
-  await until(() => spoken.length === 1); assert.equal(dispatches.length, 2);
+  await until(() => spoken.length === before + 1); assert.equal(dispatches.length, 2);
+  assert.match(dispatches[1].ctx.BodyForAgent, /Resolved caller name/);
   request.onClose("error"); assert.equal(failures, 1);
   await session.close();
 });

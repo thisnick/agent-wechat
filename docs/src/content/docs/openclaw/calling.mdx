@@ -152,6 +152,11 @@ bye when people join or leave. Names come from cached contacts or group-visible
 member names, with account IDs as a fallback. Group-chat membership is not treated
 as attendance, and the inviter is not necessarily the room creator. Display names
 and roster changes grant no permissions and do not identify who is speaking.
+Names that arrive later refresh the roster without announcing another arrival.
+The agent can use that roster to say who is present, even though mixed audio
+does not tell it who spoke. Gateway `context` logs show observed updates, name
+lookup results and voice-bridge submissions using counts and message digests;
+they omit names, IDs and message contents. Submission is not a model receipt.
 
 Consultation defaults to read-only and needs the same persistence opt-in as
 direct calls. Owner consultation requires all three settings:
