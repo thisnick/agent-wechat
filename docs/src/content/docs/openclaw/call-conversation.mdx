@@ -1,0 +1,83 @@
+---
+title: Choose how calls converse
+description: Use a realtime speech model or send each spoken turn through your OpenClaw agent and text-to-speech.
+---
+
+Set `channels.agent-wechat.calls.voice.mode` to choose a conversation pipeline.
+The setting applies to both direct calls and conferences. Existing configurations
+use `bidi` when the setting is omitted.
+
+| Mode | How it answers | Speech output |
+| --- | --- | --- |
+| `bidi` | A realtime speech model answers and consults the configured OpenClaw agent when needed. | Realtime or Live model audio. |
+| `agent` | Speech is transcribed and each turn goes through the configured OpenClaw agent. | Your existing OpenClaw TTS provider. |
+
+## Use a realtime speech model
+
+1. Keep your [calling permissions](../calling/) and set:
+
+   ```json
+   {
+     "mode": "bidi",
+     "agentId": "main",
+     "realtime": {
+       "provider": "openai",
+       "model": "gpt-live-1"
+     }
+   }
+   ```
+
+2. Configure the realtime provider's credentials as described in [calling setup](../calling/).
+3. Inspect `wechat_call` status. It reports `mode: "bidi"` and `agentId: "main"`.
+
+`gpt-realtime-2.1` uses turn-based responses; `gpt-live-1` uses continuous speech.
+Both use the same call permissions, caller context and conference mixer.
+
+## Use your agent and TTS
+
+1. Configure an OpenClaw TTS provider in your normal Gateway settings.
+2. Merge these fields into your existing `calls.voice` configuration:
+
+   ```json
+   {
+     "enabled": true,
+     "mode": "agent",
+     "agentId": "main",
+     "allowConsultSessionPersistence": true,
+     "toolPolicy": "safe-read-only",
+     "transcription": {
+       "provider": "openai"
+     }
+   }
+   ```
+
+3. Keep the existing inbound, outbound and conference allowlists. Inspect status
+   for `mode: "agent"` and the selected `agentId` before testing a call.
+
+The agent uses its existing model routing, including configured CLI-backed models.
+`transcription.model` and `transcription.language` optionally select the registered
+transcription provider's model and language. `transcription.apiKey` accepts a key
+or OpenClaw SecretRef; omission uses that provider's configured credentials.
+Realtime voice credentials and transcription credentials are separate.
+
+Incoming speech stays open during reasoning and playback. Nearby transcript
+fragments form one turn. Interrupting cancels the old turn and clears queued
+speech; late agent or TTS results are discarded without retrying an action.
+
+## Permissions and context
+
+`agentId` selects the OpenClaw agent for both modes. Caller identity, invitation
+sender and current participants remain available. Conferencing mixes receive
+tracks before transcription; mixed speech does not verify who spoke.
+
+The same [inviter-based tool policies](../calling/#conference-calls) apply in
+either mode. In agent mode, `toolPolicy: "none"` permits conversation with no
+tools and uses a separate session. Session persistence remains an opt-in because
+agent mode creates OpenClaw sessions even when tools are disabled.
+Direct-call and conference recaps are separated by permission level. Existing
+recaps without a known permission level are preserved but are not reused.
+
+<aside>
+**Good to know:** Mode changes apply to new calls after the channel reloads.
+Neither mode enables video or promotes a direct call into a conference.
+</aside>

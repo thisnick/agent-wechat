@@ -5,6 +5,7 @@ description: Configure voice and video permissions, realtime speech, OpenAI cred
 
 Configure calling under `channels.agent-wechat.calls`. Voice and video each default
 to disabled. Voice supports direct calls and separately configured conferences.
+Both support [realtime speech or agent-and-TTS conversation](../call-conversation/).
 
 ## Connect the daemon
 
@@ -194,7 +195,9 @@ All paths below are relative to `calls.voice`.
 
 | Setting | Behavior / default |
 | --- | --- |
-| `realtime.provider` | Required; `openai` is the supported adapter. |
+| `mode` | `bidi` (default) for Realtime/Live speech, or `agent` for transcription, normal agent turns and OpenClaw TTS. Applies to direct calls and conferences. |
+| `transcription` | Agent-mode provider, optional model/language and optional API-key SecretRef. |
+| `realtime.provider` | Required in `bidi` mode; `openai` is the supported adapter. |
 | `realtime.model`, `realtime.voice` | Optional speech model/voice overrides; otherwise provider defaults. |
 | `realtime.instructions` | Optional conversation guidance, up to 4,000 characters. |
 | `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include excerpts from the selected agent's `IDENTITY.md` and `SOUL.md`. |

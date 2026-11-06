@@ -7,9 +7,11 @@ import { callSessionKey } from '../../src/calls-session.ts';
 import { validateCallContextVoice } from './call-context-voice.ts';
 import { resolveWeChatCallsConfig } from '../../src/calls-config.ts';
 import { conferenceCallPolicy } from '../../src/calls-permissions.ts';
+import { registerCallAgentFixture } from './call-agent-runtime.ts';
 
 export default { ...base, register(api: any) {
   base.register(api);
+  const validateAgentCalls = registerCallAgentFixture(api);
   const directory = process.env.NATIVE_CONFERENCE_FIXTURE_DIR;
   if (!directory) throw Error('Conference fixture needs isolated storage');
   const groupId = 'synthetic-group@chatroom';
@@ -35,6 +37,7 @@ export default { ...base, register(api: any) {
       try {
         const cfg = api.runtime.config.current();
         const voiceContext = await validateCallContextVoice(api.runtime, cfg);
+        const agentCalls = await validateAgentCalls(cfg);
         const originalOwners = JSON.stringify(cfg.commands?.ownerAllowFrom);
         const voice = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: 'main', toolPolicy: 'owner', allowConsultSessionPersistence: true,
           realtime: { provider: 'openai' }, conferences: { groups: { [groupId]: { toolPolicy: 'safe-read-only', ownerInviterToolPolicy: 'owner' } } } } })!.voice!;
@@ -60,7 +63,7 @@ export default { ...base, register(api: any) {
         });
         let revoked = false;
         try { await request('synthetic-human-owner', 'group-revoked-probe', ':revoked'); } catch { revoked = true; }
-        writeFileSync(join(directory, 'result.json'), JSON.stringify({ voiceContext, owner, readOnly, restricted, direct, revoked, calls, toolErrors, factories,
+        writeFileSync(join(directory, 'result.json'), JSON.stringify({ agentCalls, voiceContext, owner, readOnly, restricted, direct, revoked, calls, toolErrors, factories,
           originalOwnersUnchanged: originalOwners === JSON.stringify(api.runtime.config.current().commands?.ownerAllowFrom),
           separateSessions: session(true) !== session(false), groupId }));
       } catch (error) { writeFileSync(join(directory, 'result.json'), JSON.stringify({ error: String(error), factories, toolErrors, owners: api.runtime.config.current().commands?.ownerAllowFrom })); }

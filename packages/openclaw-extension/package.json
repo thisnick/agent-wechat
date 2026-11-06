@@ -225,6 +225,41 @@
                       "default": false,
                       "description": "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining."
                     },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "bidi",
+                        "agent"
+                      ],
+                      "default": "bidi",
+                      "description": "bidi uses a realtime voice model (including Live); agent transcribes speech, runs the configured OpenClaw agent and speaks through OpenClaw TTS. Applies to direct calls and conferences."
+                    },
+                    "transcription": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "default": "openai",
+                          "description": "Registered realtime transcription provider for agent mode."
+                        },
+                        "model": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "language": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "apiKey": {
+                          "description": "Optional OpenClaw SecretRef or API-key string for the transcription provider. Omitted uses provider configuration."
+                        }
+                      }
+                    },
                     "inboundPolicy": {
                       "type": "string",
                       "enum": [
@@ -307,12 +342,6 @@
                                 "default": "safe-read-only",
                                 "description": "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only."
                               },
-                              "sessionKey": {
-                                "type": "string",
-                                "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
-                                "maxLength": 1024,
-                                "description": "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority."
-                              },
                               "ownerInviterToolPolicy": {
                                 "type": "string",
                                 "enum": [
@@ -321,6 +350,12 @@
                                   "owner"
                                 ],
                                 "description": "Optional policy for calls whose authenticated inviter exactly matches an agent-wechat:CONTACT_ID owner grant. Otherwise toolPolicy applies. Owner also requires voice.toolPolicy=owner and an exact group owner grant. Applies to the whole call, including later participants; permissions can decrease but cannot increase during a call."
+                              },
+                              "sessionKey": {
+                                "type": "string",
+                                "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
+                                "maxLength": 1024,
+                                "description": "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority."
                               }
                             }
                           }

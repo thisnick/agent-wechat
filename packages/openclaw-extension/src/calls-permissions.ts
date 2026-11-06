@@ -9,6 +9,10 @@ export function isExactCallOwner(id: string | undefined, entries: unknown): bool
   return !!id && !/[\s:*\u0000-\u001f\u007f]/.test(id) && !id.endsWith("@chatroom")
     && Array.isArray(entries) && entries.includes(`agent-wechat:${id}`);
 }
+export function directCallPolicy(voice: ResolvedWeChatVoiceCallsConfig, peer: string, ownerAllowFrom: unknown): CallToolPolicy {
+  if (!voice.allowConsultSessionPersistence || voice.toolPolicy === "none") return "none";
+  return voice.toolPolicy === "owner" && isExactCallOwner(peer, ownerAllowFrom) ? "owner" : "safe-read-only";
+}
 
 /** The invitation selects policy; tools still run as the actual group principal.
  * A human owner match alone never supplies the host's group owner grant. */

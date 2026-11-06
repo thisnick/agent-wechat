@@ -58,15 +58,15 @@ export class CallSummaryStore {
   private readonly file: string;
   constructor(file: string) { this.file = file; }
 
-  async recent(accountId: string, contactId: string, conferencePolicy?: CallToolPolicy): Promise<CallSummary[]> {
-    return (await this.read())[key(accountId, contactId, conferencePolicy)] ?? [];
+  async recent(accountId: string, contactId: string, policy?: CallToolPolicy): Promise<CallSummary[]> {
+    return (await this.read())[key(accountId, contactId, policy)] ?? [];
   }
 
-  record(accountId: string, contactId: string, summary: CallSummary, conferencePolicy?: CallToolPolicy): Promise<void> {
+  record(accountId: string, contactId: string, summary: CallSummary, policy?: CallToolPolicy): Promise<void> {
     // One writer at a time: each write starts from the previous one's result.
     const next = this.writing.then(async () => {
       const all = await this.read();
-      const id = key(accountId, contactId, conferencePolicy);
+      const id = key(accountId, contactId, policy);
       all[id] = [{ ...summary, summary: clip(summary.summary, MAX_SUMMARY_CHARS) }, ...(all[id] ?? [])].slice(0, SUMMARIES_PER_CONTACT);
       const kept = Object.entries(all).sort(([, a], [, b]) => (b[0]?.endedAt ?? 0) - (a[0]?.endedAt ?? 0)).slice(0, MAX_CONTACTS);
       await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
@@ -91,10 +91,10 @@ export class CallSummaryStore {
   }
 }
 
-// Untagged legacy conference summaries have unknown authority and are not
-// read by policy-scoped calls. Direct-contact memory retains its existing key.
-const key = (accountId: string, contactId: string, conferencePolicy?: CallToolPolicy) => conferencePolicy
-  ? JSON.stringify([accountId, contactId, conferencePolicy]) : `${accountId}/${contactId}`;
+// Untagged legacy call summaries have unknown authority and are not
+// read by policy-scoped calls. Their original stored keys remain untouched.
+const key = (accountId: string, contactId: string, policy?: CallToolPolicy) => policy
+  ? JSON.stringify([accountId, contactId, policy]) : `${accountId}/${contactId}`;
 const isSummary = (item: unknown): item is CallSummary => {
   const value = item as Partial<CallSummary> | null;
   return !!value && typeof value.summary === "string" && Number.isFinite(value.endedAt) && Number.isFinite(value.seconds)

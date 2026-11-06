@@ -13,6 +13,8 @@ export type ResolvedWeChatConferenceGroupConfig = { autoJoin: boolean; autoJoinA
 /** Calling permissions and providers are configured independently for each type. */
 export type WeChatVoiceCallsConfig = {
   enabled?: boolean;
+  mode?: "bidi" | "agent";
+  transcription?: { provider?: string; model?: string; language?: string; apiKey?: unknown };
   inboundPolicy?: "disabled" | "allowlist";
   inboundAllowFrom?: string[];
   outboundPolicy?: "disabled" | "allowlist";
@@ -42,7 +44,8 @@ export type WeChatVoiceCallsConfig = {
   maxDurationSeconds?: number;
 };
 export type WeChatCallsConfig = { voice?: WeChatVoiceCallsConfig; video?: { enabled?: boolean } };
-export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfig, "realtime" | "consultation" | "conferences">> & {
+export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfig, "realtime" | "consultation" | "conferences" | "transcription">> & {
+  transcription: { provider: string; model?: string; language?: string };
   conferences: { groups: Record<string, ResolvedWeChatConferenceGroupConfig> };
   realtime: { provider: string; model?: string; voice?: string; instructions?: string; agentContext: { enabled: boolean };
     recentContext: { enabled: boolean; maxMessages: number };
@@ -77,11 +80,17 @@ function conferenceGroups(value: WeChatVoiceCallsConfig["conferences"], toolPoli
 }
 function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatVoiceCallsConfig | undefined {
   if (!value || value.enabled !== true) return undefined;
-  const realtime = value.realtime;
+  const mode = value.mode ?? "bidi";
+  const realtime = value.realtime ?? (mode === "agent" ? { provider: "openai" } : undefined);
+  const transcription = value.transcription ?? {};
   const agentContext = realtime?.agentContext;
   const recentContext = realtime?.recentContext;
   const consultation = value.consultation ?? {};
-  if (!object(realtime) || !identifier(realtime.provider) || !identifier(value.agentId)
+  if (!["bidi", "agent"].includes(mode) || !object(transcription)
+    || Object.keys(transcription).some(key => !["provider", "model", "language", "apiKey"].includes(key))
+    || [transcription.provider, transcription.model, transcription.language].some(item => item !== undefined && !identifier(item))
+    || (mode === "agent" && value.allowConsultSessionPersistence !== true)
+    || !object(realtime) || !identifier(realtime.provider ?? (mode === "agent" ? "openai" : undefined)) || !identifier(value.agentId)
     || ![undefined, "disabled", "allowlist"].includes(value.inboundPolicy)
     || ![undefined, "disabled", "allowlist"].includes(value.outboundPolicy)
     || ![undefined, "none", "safe-read-only", "owner"].includes(value.toolPolicy)
@@ -105,9 +114,9 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw Error("Invalid calling consultation timeout");
   if ((value.toolPolicy === "safe-read-only" || value.toolPolicy === "owner") && value.allowConsultSessionPersistence !== true) throw Error("Calling consultation requires opting in to host session persistence");
   const toolPolicy = value.toolPolicy ?? (value.allowConsultSessionPersistence === true ? "safe-read-only" : "none");
-  return bindCallVoiceSecret({ enabled: true, inboundPolicy: value.inboundPolicy ?? "disabled", inboundAllowFrom: names(value.inboundAllowFrom),
+  return bindCallVoiceSecret({ enabled: true, mode, transcription: { provider: transcription.provider ?? "openai", model: transcription.model, language: transcription.language }, inboundPolicy: value.inboundPolicy ?? "disabled", inboundAllowFrom: names(value.inboundAllowFrom),
     outboundPolicy: value.outboundPolicy ?? "disabled", outboundAllowTo: names(value.outboundAllowTo), outboundToolAllowFrom: names(value.outboundToolAllowFrom),
-    agentId: value.agentId, realtime: { provider: realtime.provider, model: realtime.model, voice: realtime.voice, instructions: realtime.instructions,
+    agentId: value.agentId, realtime: { provider: realtime.provider ?? "openai", model: realtime.model, voice: realtime.voice, instructions: realtime.instructions,
       agentContext: { enabled: agentContext?.enabled === true },
       recentContext: { enabled: recentContext?.enabled === true, maxMessages: recentContext?.maxMessages ?? 10 }, consultPolicy: realtime.consultPolicy ?? "auto",
       consultThinkingLevel: realtime.consultThinkingLevel, consultFastMode: realtime.consultFastMode },
@@ -115,7 +124,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
     allowConsultSessionPersistence: value.allowConsultSessionPersistence === true,
     consultation: { timeoutMs, inboundSessionKey: consultation.inboundSessionKey, summary: consultation.summary ?? true,
       recentMessages: consultation.recentMessages ?? 10 },
-    sessionScope: value.sessionScope ?? "per-contact", maxDurationSeconds }, realtime.providers?.openai?.apiKey);
+    sessionScope: value.sessionScope ?? "per-contact", maxDurationSeconds }, realtime.providers?.openai?.apiKey, transcription.apiKey);
 }
 export function resolveWeChatCallsConfig(value: WeChatCallsConfig | undefined): ResolvedWeChatCallsConfig | undefined {
   if (!value) return undefined;
@@ -133,6 +142,12 @@ export const callsConfigSchema = {
   properties: {
     voice: { type: "object", additionalProperties: false, properties: {
       enabled: { type: "boolean", default: false, description: "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining." },
+      mode: { type: "string", enum: ["bidi", "agent"], default: "bidi", description: "bidi uses a realtime voice model (including Live); agent transcribes speech, runs the configured OpenClaw agent and speaks through OpenClaw TTS. Applies to direct calls and conferences." },
+      transcription: { type: "object", additionalProperties: false, properties: {
+        provider: { ...nameSchema, default: "openai", description: "Registered realtime transcription provider for agent mode." },
+        model: nameSchema, language: nameSchema,
+        apiKey: { description: "Optional OpenClaw SecretRef or API-key string for the transcription provider. Omitted uses provider configuration." },
+      } },
       inboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, inboundAllowFrom: allowlistSchema,
       outboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, outboundAllowTo: allowlistSchema, outboundToolAllowFrom: allowlistSchema,
       conferences: { type: "object", additionalProperties: false, properties: {

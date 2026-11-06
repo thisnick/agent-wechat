@@ -8,7 +8,7 @@ import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput } from "./calls-audio.ts";
 import { CallPcmMixer } from "./calls-mixer.ts";
-import { conferenceCallPolicy, restrictCallPolicy, type CallToolPolicy, type CallPolicyReason } from "./calls-permissions.ts";
+import { conferenceCallPolicy, directCallPolicy, restrictCallPolicy, type CallToolPolicy, type CallPolicyReason } from "./calls-permissions.ts";
 import { CallContextTracker, resolveCallIdentity, resolveCallParticipant } from "./calls-context.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
@@ -92,10 +92,10 @@ export class NativeCallService {
     if (process.env.WX_CALL_AUDIO_TRACE === "1") this.logAudioTrace = dependencies.logAudioTrace ?? (line => console.info(line));
     if (!this.config && account.calls?.video.enabled) this.state = "unavailable";
   }
-  status(): { inviterId?: string; toolPolicy?: CallToolPolicy; toolPolicyReason?: CallPolicyReason; state: string; owned: boolean; callId?: string; groupId?: string; participants?: CallView["participants"]; conferenceInvitations?: CallConferenceInvitation[]; invitationResults?: Extract<CallEvent, { type: "call.invitation_result" }>["results"] } {
+  status(): { mode?: "bidi" | "agent"; agentId?: string; inviterId?: string; toolPolicy?: CallToolPolicy; toolPolicyReason?: CallPolicyReason; state: string; owned: boolean; callId?: string; groupId?: string; participants?: CallView["participants"]; conferenceInvitations?: CallConferenceInvitation[]; invitationResults?: Extract<CallEvent, { type: "call.invitation_result" }>["results"] } {
     const active = this.active;
     const binding = active?.voice?.binding?.() ?? active?.binding;
-    return { state: this.state, owned: active?.claimed === true, ...(active?.claimed && active.callId ? { callId: active.callId } : {}),
+    return { state: this.state, owned: active?.claimed === true, ...(this.config ? { mode: this.config.mode, agentId: this.config.agentId } : {}), ...(active?.claimed && active.callId ? { callId: active.callId } : {}),
       ...(Object.keys(this.config?.conferences.groups ?? {}).length ? { conferenceInvitations: this.invitations.filter(item => !!this.groupPolicy(item.groupId)).map(item => ({ ...item })) } : {}),
       ...(active?.groupId ? { groupId: active.groupId, inviterId: active.inviterId, toolPolicy: binding?.toolPolicy ?? active.policyAtAdmission, toolPolicyReason: binding?.policyReason ?? active.policyReason, participants: structuredClone(active.call?.participants ?? []),
         ...(active.invitationResults ? { invitationResults: structuredClone(active.invitationResults.results) } : {}) } : {}) };
@@ -301,19 +301,29 @@ export class NativeCallService {
     const context = new CallContextTracker({ direction, ...(groupId ? { conference: { groupId, name: groupId,
       ...(inviterId ? { inviter: { contactId: inviterId, name: inviterId } } : {}) } } : { remote: { contactId: peer, name: peer } }) });
     const active: Owned = { key: randomUUID(), peer, groupId, inviterId, context, nameRequests: new Set(), direction, transcript: new CallTranscript(), callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
+    if (!groupId) active.policyAtAdmission = this.directPolicy(peer);
     this.active = active; this.state = "preparing"; return active;
+  }
+  private directPolicy(peer: string): CallToolPolicy {
+    try {
+      const cfg = (this.runtime.config?.current?.() ?? this.cfg) as OpenClawConfig;
+      const account = resolveWeChatAccount(cfg as unknown as Record<string, unknown>, this.account.accountId), voice = account?.calls?.voice;
+      if (!account?.enabled || !voice || voice.agentId !== this.config?.agentId || !account.native || !this.account.native
+        || nativeConfigurationKey(account.native) !== nativeConfigurationKey(this.account.native)) return "none";
+      return directCallPolicy(voice, peer, cfg.commands?.ownerAllowFrom);
+    } catch { return "none"; }
   }
   /** What a call starts with: a recap for the voice model (earlier call summaries and the
    * latest chat messages) and the latest chat messages for the agent's first consultation.
    * One history read serves both; it never delays a call long. */
-  private async callContext(peer: string, conferencePolicy?: CallToolPolicy): Promise<{ recentContext?: string; consultContext?: string }> {
+  private async callContext(peer: string, policy?: CallToolPolicy): Promise<{ recentContext?: string; consultContext?: string }> {
     const voice = this.config!.realtime.recentContext;
     const consulting = this.config!.toolPolicy !== "none" ? this.config!.consultation.recentMessages : 0;
     const limit = Math.max(voice.enabled ? voice.maxMessages : 0, consulting);
     const native = this.account.native;
     if (!voice.enabled && !limit) return {};
     const [summaries, messages] = await Promise.all([
-      voice.enabled ? this.summaries?.recent(this.account.accountId, peer, conferencePolicy).catch(() => []) ?? [] : [],
+      voice.enabled ? this.summaries?.recent(this.account.accountId, peer, policy).catch(() => []) ?? [] : [],
       native && limit ? (this.dependencies.host ?? ensureNativeHost)(native)
         .then(host => host.client.messages(native.accountId, peer, { limit }))
         .then(page => page.items.filter((item): item is NativeMessage => !isNativeTombstone(item) && item.threadId === peer))
@@ -339,9 +349,9 @@ export class NativeCallService {
       bounded(metadata(), RECENT_CONTEXT_WAIT_MS).catch(() => {}),
     ]);
     if (!this.current(active)) throw Error("Calling preflight superseded");
-    if (active.groupId) {
-      const current = this.groupPolicy(active.groupId);
-      const fresh = current ? conferenceCallPolicy(current.voice, current.group, { groupId: active.groupId, inviterId: active.inviterId }, current.ownerAllowFrom).toolPolicy : "none";
+    {
+      const current = active.groupId ? this.groupPolicy(active.groupId) : undefined;
+      const fresh = active.groupId ? current ? conferenceCallPolicy(current.voice, current.group, { groupId: active.groupId, inviterId: active.inviterId }, current.ownerAllowFrom).toolPolicy : "none" : this.directPolicy(active.peer);
       const reduced = restrictCallPolicy(active.policyAtAdmission ?? "none", fresh);
       if (reduced !== active.policyAtAdmission) { recentContext = undefined; consultContext = undefined; active.policyReason = "permission_reduced"; }
       active.policyAtAdmission = reduced;
@@ -352,10 +362,11 @@ export class NativeCallService {
       failed: reason => { if (this.current(active)) void this.fail(active, reason ?? "provider"); },
       // Closing can publish the last transcript; it counts until the summary starts.
       transcript: (role, text, final, snapshot) => { if (!active.summarized) active.transcript.add(role, text, final, snapshot); } },
-    { senderId: active.peer, signal: active.abort.signal, callContext: active.context.snapshot(),
+    { senderId: active.peer, policyAtAdmission: active.policyAtAdmission, signal: active.abort.signal, callContext: active.context.snapshot(),
       parentSession: active.groupId ? (this.groupPolicy(active.groupId)?.group.sessionKey ? { key: this.groupPolicy(active.groupId)!.group.sessionKey! } : undefined) : active.parentSession,
       ...(active.groupId ? { conference: { groupId: active.groupId, inviterId: active.inviterId, policyAtAdmission: active.policyAtAdmission } } : {}), recentContext, consultContext,
       channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
+      warnProviderDiagnostic: () => this.warn("voice provider reported a diagnostic; waiting for recovery or terminal closure"),
       connectedPeer: () => this.current(active) && (!active.groupId || this.groupPolicy(active.groupId)) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
         && active.output && !active.endStarted ? active.peer : undefined });
     const opening = runInBackgroundContext ? runInBackgroundContext(open) : open();
@@ -685,7 +696,7 @@ export class NativeCallService {
       nativeAccountId: this.account.native?.accountId, direction: active.direction, durationText: formatDuration(seconds),
       transcript: formatCallTranscript(active.transcript.entries, active.connectedAt!), signal: this.lifetime.signal });
     if (!summary || this.lifetime.signal.aborted) return;
-    await this.summaries?.record(this.account.accountId, active.peer, { endedAt, seconds, direction: active.direction, summary }, active.groupId ? active.binding!.toolPolicy ?? (active.binding!.owner ? "owner" : "safe-read-only") : undefined);
+    await this.summaries?.record(this.account.accountId, active.peer, { endedAt, seconds, direction: active.direction, summary }, active.binding!.toolPolicy ?? (active.binding!.owner ? "owner" : active.policyAtAdmission ?? "safe-read-only"));
     this.info(`call summary saved: seconds=${seconds} chars=${summary.length}`);
     const system = (this.runtime as { system?: CallSystemEvents }).system;
     if (typeof system?.enqueueSystemEvent !== "function") return;

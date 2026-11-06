@@ -81,6 +81,7 @@ export default defineConfig({
             { label: 'Quick setup', slug: 'openclaw/setup' },
             { label: 'Managed or external', slug: 'openclaw/modes' },
             { label: 'Calling', slug: 'openclaw/calling' },
+            { label: 'Call conversation modes', slug: 'openclaw/call-conversation' },
             { label: 'Remember earlier calls', slug: 'openclaw/call-memory' },
             { label: 'Who the bot answers', slug: 'openclaw/access' },
             { label: 'Agent tools', slug: 'openclaw/tools' },

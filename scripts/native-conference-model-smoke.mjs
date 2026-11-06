@@ -43,7 +43,7 @@ const upstream = createServer(async (req, res) => {
         log += `\nUnexpected model tool names: ${JSON.stringify(names)}`;
         return json({ choices: [{ message: { role: 'assistant', content: 'Fixture owner tool missing' }, finish_reason: 'stop' }] });
       }
-      if (current.includes('group-read-only-probe') || current.includes('group-restricted-probe')) assert.ok(!names.includes('conference_owner_probe'), 'restricted group received the owner-only fixture tool');
+      if (current.includes('group-read-only-probe') || current.includes('group-restricted-probe') || current.includes('agent-conference-read-only-probe')) assert.ok(!names.includes('conference_owner_probe'), 'restricted group received the owner-only fixture tool');
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: 'synthetic-probe-call', type: 'function', function: { name: 'conference_owner_probe', arguments: '{}' } }] }
         : { role: 'assistant', content: 'Local conference fixture reply' };
@@ -59,6 +59,8 @@ try {
   const fixtureManifestPath = join(temporary, 'plugin/openclaw.plugin.json');
   const fixtureManifest = JSON.parse(await readFile(fixtureManifestPath, 'utf8'));
   fixtureManifest.contracts.tools.push('conference_owner_probe');
+  fixtureManifest.contracts.speechProviders = ['fixture-speech'];
+  fixtureManifest.contracts.realtimeTranscriptionProviders = ['fixture-stt'];
   fixtureManifest.toolMetadata.conference_owner_probe = { optional: true };
   await writeFile(fixtureManifestPath, JSON.stringify(fixtureManifest));
   await stagePluginRuntimeDependencies(root, join(temporary, 'plugin'));
@@ -70,7 +72,11 @@ try {
     models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
     agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } } },
     plugins: { allow: ['agent-wechat'], load: { paths: [join(temporary, 'plugin')] }, entries: { 'agent-wechat': { enabled: true, config: { backend: 'native', native: { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${nativePort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy: 'never' } } } } },
-    channels: { 'agent-wechat': { enabled: true, dmPolicy: 'disabled', groupPolicy: 'disabled' } }, logging: { file: join(temporary, 'gateway.log') } };
+    tts: { provider: 'fixture-speech', providers: { 'fixture-speech': {} } },
+    channels: { 'agent-wechat': { enabled: true, dmPolicy: 'disabled', groupPolicy: 'disabled', calls: { voice: {
+      enabled: true, mode: 'agent', agentId: 'main', transcription: { provider: 'fixture-stt' }, toolPolicy: 'owner', allowConsultSessionPersistence: true,
+      conferences: { groups: { 'synthetic-group@chatroom': { toolPolicy: 'safe-read-only', ownerInviterToolPolicy: 'owner' } } },
+    } } } }, logging: { file: join(temporary, 'gateway.log') } };
   const configPath = join(temporary, 'config.json'), initial = JSON.stringify(config); await writeFile(configPath, initial, { mode: 0o600 });
   const env = { AGENT_WECHAT_TOKEN: token, PATH: process.env.PATH, HOME: temporary, TMPDIR: temporary, OPENCLAW_STATE_DIR: join(temporary, 'state'), OPENCLAW_CONFIG_PATH: configPath, NATIVE_CONFERENCE_FIXTURE_DIR: temporary, NO_COLOR: '1' };
   child = spawn(process.execPath, [join(sdk, 'openclaw.mjs'), 'gateway', 'run'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -85,7 +91,8 @@ try {
   assert.equal(await readFile(configPath, 'utf8'), initial, 'the group grant changed the saved Gateway configuration');
   assert.ok(requests.length >= 6); assert.ok(requests.every(body => body.model === 'fixture-model'));
   assert.deepEqual(result.voiceContext, ['response', 'continuous'].map(mode => ({ mode, messages: 3, audioPreserved: true, interruptionPreserved: true })));
-  console.log('Pinned conference Gateway passed: owner-inviter policy and other-inviter read-only tools, caller/roster context and greetings in both voice modes, continued audio and interruption, actual group principal and owner tool, separate read-only session, tool restrictions, revocation, direct-owner regression, normal configured model routing, unchanged saved/global owner config. No external provider, login, WeChat send or deployment.');
+  assert.deepEqual(result.agentCalls, ['direct', 'conference-owner', 'conference-read-only'].map(kind => ({ kind, owner: kind !== 'conference-read-only', audio: true, transcript: true })));
+  console.log('Pinned conference Gateway passed: agent/TTS direct and owner/read-only conference pipelines, owner-inviter policy and other-inviter read-only tools, caller/roster context and greetings in both voice modes, continued audio and interruption, actual group principal and owner tool, separate read-only session, tool restrictions, revocation, direct-owner regression, normal configured model routing, unchanged saved/global owner config. No external provider, login, WeChat send or deployment.');
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
   for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });
