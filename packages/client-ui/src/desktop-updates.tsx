@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { desktopInvoke } from "./desktop.ts";
+import { t, useLocale } from "./i18n.ts";
 type UpdateSettings = {
   currentVersion: string;
   automatic: boolean;
@@ -13,6 +14,7 @@ type UpdateSettings = {
   };
 };
 export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
+  useLocale();
   const [settings, setSettings] = useState<UpdateSettings | null>(null);
   const [error, setError] = useState("");
   const [dismissed, setDismissed] = useState("");
@@ -34,9 +36,9 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
   const available = status.phase === "available";
   const description =
     status.phase === "checking"
-      ? "Checking…"
+      ? t("Checking…", "正在检查…")
       : status.phase === "downloading"
-      ? `Downloading${
+      ? `${t("Downloading", "正在下载")}${
           status.total
             ? ` · ${Math.min(
                 100,
@@ -45,18 +47,22 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
             : "…"
         }`
       : status.phase === "installing"
-      ? "Installing…"
+      ? t("Installing…", "正在安装…")
       : available
-      ? `Version ${status.version} is ready`
+      ? t(`Version ${status.version} is ready`, `版本 ${status.version} 已就绪`)
       : status.phase === "current"
-      ? "You’re up to date"
-      : `Version ${settings.currentVersion}`;
+      ? t("You’re up to date", "已是最新版本")
+      : t(`Version ${settings.currentVersion}`, `版本 ${settings.currentVersion}`);
   async function action(command: string, args?: Record<string, unknown>) {
     setError("");
     try {
       await desktopInvoke(command, args);
     } catch (e) {
-      setError(typeof e === "string" ? e : "Could not complete the update.");
+      setError(
+        typeof e === "string"
+          ? e
+          : t("Could not complete the update.", "无法完成更新。"),
+      );
     }
     await refresh().catch(() => {});
   }
@@ -68,41 +74,50 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
     )
       return null;
     return (
-      <aside className="desktop-update-notice" aria-label="App update">
+      <aside
+        className="desktop-update-notice"
+        aria-label={t("App update", "应用更新")}
+      >
         <span>{description}</span>
         <button className="secondary" disabled={busy} onClick={install}>
-          {busy ? "Updating…" : "Install and restart"}
+          {busy ? t("Updating…", "正在更新…") : t("Install and restart", "安装并重启")}
         </button>
         {available && (
           <button
             className="text-button"
-            aria-label="Dismiss update notice"
+            aria-label={t("Dismiss update notice", "忽略更新提示")}
             onClick={() => setDismissed(status.version || "")}
           >
-            Later
+            {t("Later", "稍后")}
           </button>
         )}
-        <small>The local hub will restart.</small>
+        <small>{t("The local hub will restart.", "本地 Hub 将重启。")}</small>
         {error && <small role="alert">{error}</small>}
       </aside>
     );
   }
   return (
-    <section className="desktop-update-settings" aria-label="App updates">
+    <section
+      className="desktop-update-settings"
+      aria-label={t("App updates", "应用更新")}
+    >
       <div className="setting">
         <span>
-          App updates<small>{description}</small>
+          {t("App updates", "应用更新")}
+          <small>{description}</small>
         </span>
         <button
           className="secondary"
           disabled={busy}
           onClick={() => void action("updates_check")}
         >
-          Check for updates
+          {t("Check for updates", "检查更新")}
         </button>
       </div>
       <div className="setting">
-        <label htmlFor="automatic-updates">Check automatically</label>
+        <label htmlFor="automatic-updates">
+          {t("Check automatically", "自动检查更新")}
+        </label>
         <input
           id="automatic-updates"
           type="checkbox"
@@ -119,7 +134,9 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
         />
       </div>
       <div className="setting">
-        <label htmlFor="prerelease-updates">Include prereleases</label>
+        <label htmlFor="prerelease-updates">
+          {t("Include prereleases", "包含预发布版本")}
+        </label>
         <input
           id="prerelease-updates"
           type="checkbox"
@@ -139,17 +156,20 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
         <div className="setting">
           <span>
             <small>
-              The app and local hub will restart. Profiles stay on this device.
+              {t(
+                "The app and local hub will restart. Profiles stay on this device.",
+                "应用和本地 Hub 将重启，本地配置保留在此设备上。",
+              )}
             </small>
           </span>
           <button className="secondary" onClick={install}>
-            Install and restart
+            {t("Install and restart", "安装并重启")}
           </button>
         </div>
       )}
       {status.phase === "downloading" && (
         <progress
-          aria-label="Update download"
+          aria-label={t("Update download", "更新下载")}
           value={status.total ? status.downloaded : undefined}
           max={status.total || undefined}
         />

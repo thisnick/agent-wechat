@@ -1,5 +1,7 @@
 # OpenClaw WeChat channel
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 The plugin uses the standalone native daemon. External mode connects by endpoint/token to an independently operated daemon, including a native server container; the Gateway needs neither `wx` nor Docker tools. Managed mode starts an owned local daemon and requires a separately installed `wx`. Plugin installation/startup never downloads or repairs a binary. Old container API configurations require explicit migration.
 
 Once published, install the native beta with `openclaw plugins install @agent-wechat/agent-wechat@beta` or pin its exact version. The stable `latest` channel continues to select the old container plugin during the beta series.

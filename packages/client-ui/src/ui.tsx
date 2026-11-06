@@ -12,6 +12,7 @@ import {
   AtSign,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { t, useLocale } from "./i18n.ts";
 const icons: Record<string, string> = {
   chat: "M21 11.5a8.4 8.4 0 0 1-9 8.5 10 10 0 0 1-4-.8L3 21l1.6-4.5A8.3 8.3 0 0 1 3 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5ZM8 11h.01M12 11h.01M16 11h.01",
   people:
@@ -186,7 +187,7 @@ function AppIllustration() {
           AW
         </text>
         <text x="53" y="52" fill="#e6e7e1" fontSize="10" fontWeight="550">
-          Chats
+          {t("Chats", "聊天")}
         </text>
         <path d="M145 45v9m-4-4h8" stroke="#a3a5a0" />
         <path d="M164 31v251" stroke="#ffffff0c" />
@@ -293,6 +294,7 @@ function AppIllustration() {
   );
 }
 export function Story() {
+  useLocale();
   return (
     <aside className="onboarding-story">
       <a
@@ -308,19 +310,24 @@ export function Story() {
       </a>
       <div className="story-content">
         <p className="product-description">
-          Chat, share files and manage your WeChat accounts alongside your AI
-          agents.
+          {t(
+            "Chat, share files and manage your WeChat accounts alongside your AI agents.",
+            "与你的 AI 智能体一起聊天、分享文件并管理微信账号。",
+          )}
         </p>
         <div className="illustration-viewport">
           <AppIllustration />
         </div>
       </div>
-      <nav className="project-links" aria-label="Project links">
+      <nav
+        className="project-links"
+        aria-label={t("Project links", "项目链接")}
+      >
         {[
           ["GitHub", "https://github.com/thisnick/agent-wechat"],
-          ["Docs", "https://thisnick.github.io/agent-wechat/"],
+          [t("Docs", "文档"), "https://thisnick.github.io/agent-wechat/"],
         ].map(([label, url]) => (
-          <a key={label} href={url} target="_blank" rel="noreferrer">
+          <a key={url} href={url} target="_blank" rel="noreferrer">
             {label}
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M5 11 11 5M5 5h6v6" />
@@ -338,21 +345,35 @@ export function Welcome({
   children: ReactNode;
   simulator: boolean;
 }) {
+  const [locale, setLocale] = useLocale();
   return (
     <main className="onboarding-shell">
       <Story />
       <section className="onboarding-main">
         <header className="onboarding-top">
-          {simulator && <span className="demo-tag">Simulator</span>}
+          {simulator && (
+            <span className="demo-tag">{t("Simulator", "模拟器")}</span>
+          )}
         </header>
         <div className="onboarding-center">{children}</div>
         <footer className="onboarding-footer">
           <span className="connection-location">
             <i />
             {simulator
-              ? "agent-wechat hub: this device · synthetic accounts"
+              ? t(
+                  "agent-wechat hub: this device · synthetic accounts",
+                  "agent-wechat hub：当前设备 · 模拟账号",
+                )
               : "agent-wechat hub"}
           </span>
+          <button
+            type="button"
+            className="locale-switch"
+            aria-label={t("Language", "语言")}
+            onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}
+          >
+            {locale === "zh-CN" ? "English" : "简体中文"}
+          </button>
         </footer>
       </section>
     </main>

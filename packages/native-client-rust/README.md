@@ -1,5 +1,7 @@
 # Standalone native client
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 This Rust workspace implements the native `wx` executable, reusable protocol/profile libraries and an authenticated multi-account daemon. It neither loads nor launches an official WeChat executable. Docker is optional as a compiler or deployment wrapper.
 
 The supported development and release baseline is Linux x64 and ARM64, glibc 2.36+, Rust 1.93.1. Compatibility has been investigated against a specific official Linux profile family; unknown official layouts need separate validation. CI runs synthetic protocol/profile/runtime checks on both CPU architectures; the controlled live account/profile validation was on x64.

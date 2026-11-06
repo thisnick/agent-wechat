@@ -1,5 +1,7 @@
 # Agent WeChat
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 **An open source WeChat client for people and AI agents.**
 
 Use an alternative WeChat desktop client, work from the terminal, or connect your

@@ -17,6 +17,7 @@ export type DesktopSettings = {
   notificationsEnabled: boolean;
   notificationSoundEnabled: boolean;
   notificationStatus: string;
+  language?: string | null;
 };
 export async function desktopConnect(
   session: DesktopSession,

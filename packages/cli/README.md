@@ -1,5 +1,7 @@
 # @agent-wechat/cli
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 `wx` is the native Rust client and foreground daemon. The npm package installs a matching release executable; it does not implement the native protocol in JavaScript. Linux x64/ARM64 with glibc 2.36+ is validated. The release matrix also builds macOS ARM64 and native Windows x64/ARM64 candidates; native-machine account acceptance is pending. musl remains unsupported. Official-app profile takeover is Linux-only. Clients on other systems can use the HTTP API of a supported Linux daemon. `wx --json version` and `/v1/status` expose the runtime and account capabilities; unsupported official schemas fail explicitly.
 
 ## Installation

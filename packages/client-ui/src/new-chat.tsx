@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Connection } from "./connection.ts";
 import { HubAvatar } from "./avatars.tsx";
+import { t, useLocale } from "./i18n.ts";
 import { Button } from "./ui.tsx";
 import { groupEnded } from "./group-creation.ts";
 import { GroupResult } from "./group-settings.tsx";
@@ -17,6 +18,7 @@ export function NewChat({
   close: () => void;
   open: (id: string) => void;
 }) {
+  useLocale();
   const session = connection.session;
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
   const creation = connection.groupCreation(account);
@@ -103,24 +105,28 @@ export function NewChat({
         className="modal new-chat"
         role="dialog"
         aria-modal="true"
-        aria-label="New chat"
+        aria-label={t("New chat", "发起聊天")}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-head">
-          <h2>New chat</h2>
-          <Button icon="close" label="Close new chat" onClick={close} />
+          <h2>{t("New chat", "发起聊天")}</h2>
+          <Button
+            icon="close"
+            label={t("Close new chat", "关闭发起聊天")}
+            onClick={close}
+          />
         </div>
         <div
           className="new-chat-tabs"
           role="tablist"
-          aria-label="Conversation type"
+          aria-label={t("Conversation type", "会话类型")}
         >
           <button
             role="tab"
             aria-selected={!group}
             onClick={() => setGroup(false)}
           >
-            Direct message
+            {t("Direct message", "私聊")}
           </button>
           <button
             role="tab"
@@ -128,18 +134,26 @@ export function NewChat({
             disabled={!canCreate}
             onClick={() => setGroup(true)}
           >
-            New group
+            {t("New group", "新建群聊")}
           </button>
         </div>
         {!canCreate && (
           <p className="field-help">
-            Group creation is not available on this agent-wechat hub yet.
+            {t(
+              "Group creation is not available on this agent-wechat hub yet.",
+              "此 agent-wechat Hub 暂不支持创建群聊。",
+            )}
           </p>
         )}
         {group && result.receipt ? (
           <div className="group-result">
-            <h3>{receiptInput?.name || "New group"}</h3>
-            <p>{receiptInput?.members.length} contacts selected</p>
+            <h3>{receiptInput?.name || t("New group", "新建群聊")}</h3>
+            <p>
+              {t(
+                `${receiptInput?.members.length} contacts selected`,
+                `已选择 ${receiptInput?.members.length} 位联系人`,
+              )}
+            </p>
             <GroupResult model={creation} />
             {roomId ? (
               <button
@@ -148,10 +162,10 @@ export function NewChat({
                 onClick={() => void openCreated()}
               >
                 {opening
-                  ? "Opening…"
+                  ? t("Opening…", "正在打开…")
                   : operation?.state === "succeeded"
-                    ? "Open group"
-                    : "Inspect group"}
+                    ? t("Open group", "打开群聊")
+                    : t("Inspect group", "查看群聊")}
               </button>
             ) : (
               <button
@@ -159,7 +173,7 @@ export function NewChat({
                 disabled={result.busy}
                 onClick={() => void creation.check()}
               >
-                Check status
+                {t("Check status", "检查状态")}
               </button>
             )}
             {operation && !groupEnded(operation) && (
@@ -168,14 +182,14 @@ export function NewChat({
                 disabled={result.busy}
                 onClick={() => void creation.cancel()}
               >
-                Cancel if not started
+                {t("Cancel if not started", "若未开始则取消")}
               </button>
             )}
             {(result.receipt.notAdmitted ||
               operation?.state === "failed" ||
               operation?.state === "cancelled") && (
               <button className="text-button" onClick={() => creation.clear()}>
-                Start again
+                {t("Start again", "重新开始")}
               </button>
             )}
             {(result.error || error) && (
@@ -188,21 +202,21 @@ export function NewChat({
           <>
             {group && (
               <label className="group-name" htmlFor="new-group-name">
-                Group name (optional)
+                {t("Group name (optional)", "群名称（可选）")}
                 <input
                   id="new-group-name"
                   maxLength={80}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
-                  placeholder="Name this group"
+                  placeholder={t("Name this group", "输入群名称")}
                 />
               </label>
             )}
             <label className="search">
               <input
                 autoFocus
-                aria-label="Find contacts"
-                placeholder="Find contacts"
+                aria-label={t("Find contacts", "查找联系人")}
+                placeholder={t("Find contacts", "查找联系人")}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
@@ -220,7 +234,10 @@ export function NewChat({
                     <span>{contact.displayName || contact.id}</span>
                     <input
                       type="checkbox"
-                      aria-label={`Select ${contact.displayName || contact.id}`}
+                      aria-label={t(
+                        `Select ${contact.displayName || contact.id}`,
+                        `选择 ${contact.displayName || contact.id}`,
+                      )}
                       checked={selected.includes(contact.id)}
                       disabled={
                         !selected.includes(contact.id) && selected.length >= 40
@@ -251,13 +268,18 @@ export function NewChat({
                 ),
               )}
               {!visible.length && (
-                <p className="no-results">No contacts found.</p>
+                <p className="no-results">
+                  {t("No contacts found.", "未找到联系人。")}
+                </p>
               )}
             </div>
             {group && (
               <div className="new-chat-footer">
                 <small>
-                  {selected.length} selected · Choose at least 2 contacts
+                  {t(
+                    `${selected.length} selected · Choose at least 2 contacts`,
+                    `已选 ${selected.length} 人 · 请至少选择 2 位联系人`,
+                  )}
                 </small>
                 <button
                   className="primary"
@@ -266,7 +288,7 @@ export function NewChat({
                     void creation.create({ name, members: selected })
                   }
                 >
-                  Create group
+                  {t("Create group", "创建群聊")}
                 </button>
               </div>
             )}
@@ -274,8 +296,10 @@ export function NewChat({
         )}
         {group && connection.simulator && (
           <p className="field-help">
-            Creates a group in the simulator. No real WeChat invitations are
-            sent.
+            {t(
+              "Creates a group in the simulator. No real WeChat invitations are sent.",
+              "在模拟器中创建群聊，不会发送真实的微信群邀请。",
+            )}
           </p>
         )}
       </section>

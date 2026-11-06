@@ -6,6 +6,7 @@ import {
 } from "@agent-wechat/shared";
 import { pause, readableError } from "./session.ts";
 import { validateAttachmentSource } from "./composer-attachments.ts";
+import { t } from "./i18n.ts";
 
 export type PendingMedia = {
   key: string;
@@ -60,7 +61,10 @@ export class MediaOutbox {
         ? {
             ...item,
             stage: "failed",
-            error: "Upload interrupted. Choose the file again.",
+            error: t(
+              "Upload interrupted. Choose the file again.",
+              "上传已中断，请重新选择文件。",
+            ),
           }
         : item,
     );
@@ -172,9 +176,15 @@ export class MediaOutbox {
       uncertain: job.state === "needs_review",
       error: job.state === "failed"
         ? job.reason === "image_decode_limit"
-          ? "Image is too large to process. Resize it or send it as a file."
+          ? t(
+              "Image is too large to process. Resize it or send it as a file.",
+              "图片尺寸过大，无法处理。请缩小图片尺寸或作为文件发送。",
+            )
           : job.reason === "image_decode_failed"
-            ? "Couldn't read this image. Try exporting it as JPEG or PNG."
+            ? t(
+                "Couldn't read this image. Try exporting it as JPEG or PNG.",
+                "无法读取此图片，请尝试导出为 JPEG 或 PNG 格式。",
+              )
             : undefined
         : undefined,
     });

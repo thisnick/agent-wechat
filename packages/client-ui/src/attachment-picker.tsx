@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Connection } from "./connection.ts";
 import type { AttachmentDraft } from "./attachment-drafts.ts";
+import { t, useLocale } from "./i18n.ts";
 import { Button, Icon } from "./ui.tsx";
 import {
   bindComposerAttachments,
@@ -28,12 +29,18 @@ export function AttachmentPicker({
   composerRef: RefObject<HTMLDivElement | null>;
   focusMessage: () => void;
 }) {
+  useLocale();
   const input = useRef<HTMLInputElement>(null);
   const [error, setError] = useState(""),
     [dragging, setDragging] = useState(false);
   function choose(files: File[]) {
     if (!enabled || !threadId) {
-      setError("Attachments aren't available in this conversation right now.");
+      setError(
+        t(
+          "Attachments aren't available in this conversation right now.",
+          "当前会话暂无法发送附件。",
+        ),
+      );
       return;
     }
     try {
@@ -50,7 +57,10 @@ export function AttachmentPicker({
       setError(
         error instanceof Error
           ? error.message
-          : "Couldn't select these files. Choose them again.",
+          : t(
+              "Couldn't select these files. Choose them again.",
+              "无法选择这些文件，请重新选择。",
+            ),
       );
     }
   }
@@ -76,7 +86,7 @@ export function AttachmentPicker({
     <>
       <Button
         icon="attach"
-        label="Attach file"
+        label={t("Attach file", "添加附件")}
         disabled={!enabled || !threadId}
         onClick={() => input.current?.click()}
       />
@@ -85,7 +95,7 @@ export function AttachmentPicker({
         className="attachment-input"
         type="file"
         multiple
-        aria-label="Choose attachment"
+        aria-label={t("Choose attachment", "选择附件")}
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           event.target.value = "";
@@ -94,7 +104,7 @@ export function AttachmentPicker({
       />
       {dragging && (
         <span className="composer-drop-hint" role="status">
-          <Icon name="attach" /> Drop to attach
+          <Icon name="attach" /> {t("Drop to attach", "拖放以添加附件")}
         </span>
       )}
       {error && (
@@ -115,13 +125,19 @@ export function AttachmentTray({
   remove: (id: string) => void;
   quality: (original: boolean) => void;
 }) {
+  useLocale();
   if (!draft.files.length) return null;
   return (
-    <section className="composer-attachments" aria-label="Staged attachments">
+    <section
+      className="composer-attachments"
+      aria-label={t("Staged attachments", "待发送附件")}
+    >
       <div className="composer-attachments-head">
         <span>
-          {draft.files.length}{" "}
-          {draft.files.length === 1 ? "attachment" : "attachments"}
+          {t(
+            `${draft.files.length} ${draft.files.length === 1 ? "attachment" : "attachments"}`,
+            `${draft.files.length} 个附件`,
+          )}
         </span>
       </div>
       <ul className="composer-attachment-list">
@@ -130,7 +146,7 @@ export function AttachmentTray({
             <AttachmentPreview item={item} />
             <Button
               icon="close"
-              label={`Remove ${item.file.name}`}
+              label={t(`Remove ${item.file.name}`, `移除 ${item.file.name}`)}
               disabled={!!draft.submission}
               onClick={() => remove(item.id)}
             />
@@ -146,10 +162,15 @@ export function AttachmentTray({
               disabled={!!draft.submission}
               onChange={(event) => quality(event.target.checked)}
             />
-            Original media quality
+            {t("Original media quality", "原画质发送")}
           </label>
-          <ComposerHelp label="About original media quality">
-            Include the unchanged video file alongside the playback copy.
+          <ComposerHelp
+            label={t("About original media quality", "关于原画质发送")}
+          >
+            {t(
+              "Include the unchanged video file alongside the playback copy.",
+              "随播放副本一起附上未经压缩的原始视频文件。",
+            )}
           </ComposerHelp>
         </div>
       )}
@@ -161,6 +182,7 @@ function AttachmentPreview({
 }: {
   item: ReviewedAttachment;
 }) {
+  useLocale();
   const [url, setUrl] = useState(""),
     [previewFailed, setPreviewFailed] = useState(false);
   useEffect(() => {
@@ -180,7 +202,7 @@ function AttachmentPreview({
         <img
           className="attachment-review-preview"
           src={url}
-          alt="Staged image"
+          alt={t("Staged image", "待发送图片")}
         />
       )}
       {url && kind === "video" && !previewFailed && (
@@ -189,12 +211,14 @@ function AttachmentPreview({
           src={url}
           muted
           preload="metadata"
-          aria-label="Staged video"
+          aria-label={t("Staged video", "待发送视频")}
           onError={() => setPreviewFailed(true)}
         />
       )}
       {kind === "video" && previewFailed && (
-        <p className="field-help">Video preview unavailable.</p>
+        <p className="field-help">
+          {t("Video preview unavailable.", "视频预览不可用。")}
+        </p>
       )}
       <div className="attachment-file">
         <Icon
@@ -203,8 +227,12 @@ function AttachmentPreview({
         <span>
           <strong>{file.name}</strong>
           <small>
-            {kind === "file" ? "File" : kind === "image" ? "Image" : "Video"} ·{" "}
-            {size}
+            {kind === "file"
+              ? t("File", "文件")
+              : kind === "image"
+                ? t("Image", "图片")
+                : t("Video", "视频")}{" "}
+            · {size}
           </small>
         </span>
       </div>

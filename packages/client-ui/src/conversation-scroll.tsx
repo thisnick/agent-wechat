@@ -6,6 +6,7 @@ import {
   useMessageScrollerScrollable,
 } from "@shadcn/react/message-scroller";
 import type { BrowserCache } from "./browser-cache.ts";
+import { t, useLocale } from "./i18n.ts";
 import { Icon } from "./ui.tsx";
 import { ScrollToQuotedMessage } from "./conversation-navigation.tsx";
 import {
@@ -30,10 +31,15 @@ export function ConversationScroll({
   position?: { cache: BrowserCache; account: string; thread: string };
 }) {
   const showedHistory = useRef(false);
+  useLocale();
   showedHistory.current ||= history.hasMore;
   if (searching)
     return (
-      <div className="messages" role="region" aria-label="Search results">
+      <div
+        className="messages"
+        role="region"
+        aria-label={t("Search results", "搜索结果")}
+      >
         {children}
       </div>
     );
@@ -152,13 +158,15 @@ function ConversationViewport({
             onClick={() => load(false)}
           >
             {!history.hasMore
-              ? "Beginning of conversation"
+              ? t("Beginning of conversation", "已到达会话开头")
               : history.loading
-              ? "Loading older messages…"
-              : "Load older messages"}
+              ? t("Loading older messages…", "正在加载更早的消息…")
+              : t("Load older messages", "加载更早的消息")}
           </button>
         ) : history.loading ? (
-          <p className="date-label">Loading messages…</p>
+          <p className="date-label">
+            {t("Loading messages…", "正在加载消息…")}
+          </p>
         ) : null}
         {/* A prepended page must not remove a date prefix from an existing message row. */}
         {leading}
@@ -166,9 +174,9 @@ function ConversationViewport({
       </MessageScroller.Viewport>
       <MessageScroller.Button
         className="jump-to-latest"
-        aria-label="Jump to latest message"
+        aria-label={t("Jump to latest message", "跳转到最新消息")}
       >
-        <Icon name="down" /> Latest messages
+        <Icon name="down" /> {t("Latest messages", "最新消息")}
       </MessageScroller.Button>
     </MessageScroller.Root>
   );

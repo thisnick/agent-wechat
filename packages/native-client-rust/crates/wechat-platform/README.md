@@ -1,5 +1,7 @@
 # wechat-platform
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Platform support used by `wechat-protocol`, `wechat-profile` and `wechat-media`:
 private files and temporary directories, process identity and local networking.
 Most applications should depend on the protocol or profile library instead.

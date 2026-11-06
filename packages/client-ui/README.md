@@ -1,5 +1,7 @@
 # Connected browser preview
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 `pnpm client:dev` starts the shared React client, its own real Rust hub and the
 local synthetic upstream. No production endpoint, CLI configuration or official
 profile is read. This is a development preview, not a packaged desktop client.
