@@ -221,7 +221,12 @@ pub(crate) fn open_prepared<T>(
     let saved = original.join("database.sqlite");
     family.copy_to(path, &saved)?;
     let copied = Family::read(&saved)?;
-    let retain_unverified = wal::validate(&copied)?;
+    let retain_unverified = wal::validate(&copied).map_err(|error| {
+        anyhow::anyhow!(
+            "cannot open {}: {error}. Stop the daemon and back up this file with its -wal and -shm files before changing them; see https://thisnick.github.io/agent-wechat/reference/troubleshooting/#starting-the-daemon",
+            path.display()
+        )
+    })?;
     let probe = validation.join("database.sqlite");
     copied.copy_to(&saved, &probe)?;
     wechat_platform::sync_dir(scratch.path())?;

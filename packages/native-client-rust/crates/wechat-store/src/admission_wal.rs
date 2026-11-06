@@ -38,6 +38,12 @@ struct Published {
     page_size: u32,
     big: bool,
 }
+impl Published {
+    /// Whether this index was written for the log generation with this header.
+    fn describes(&self, page: u32, big: bool, salt: &[u8]) -> bool {
+        self.page_size == page && self.big == big && self.salt == salt
+    }
+}
 fn index(member: &Member) -> Result<Option<Published>> {
     ensure!(
         member.length >= 32768 && member.length.is_multiple_of(32768),
@@ -68,7 +74,8 @@ fn index(member: &Member) -> Result<Option<Published>> {
 }
 
 /// True requests a durable recovery family for unverified rollback recovery or
-/// an uninitialized shared index. No source SQLite connection has opened yet.
+/// a shared index that cannot vouch for the log. No source SQLite connection
+/// has opened yet.
 pub(super) fn validate(family: &Family) -> Result<bool> {
     let mut retain = false;
     if let Some(journal) = family.0.get("-journal").filter(|m| m.length > 0) {
@@ -84,7 +91,7 @@ pub(super) fn validate(family: &Family) -> Result<bool> {
         retain = true;
     }
     let shm = family.0.get("-shm").filter(|m| m.length > 0);
-    let published = shm.map(index).transpose()?.flatten();
+    let mut published = shm.map(index).transpose()?.flatten();
     if shm.is_some() && published.is_none() {
         retain = true;
     }
@@ -118,6 +125,23 @@ pub(super) fn validate(family: &Family) -> Result<bool> {
     );
     let size = u64::from(page) + 24;
     let physical = (wal.length - 32) / size;
+    // SQLite never syncs the shared index and rebuilds it from the log when the
+    // first connection opens. After a crash the saved index can belong to
+    // another log generation, or publish no frames while the log has some.
+    // Neither says which commits the log must hold, so verify the log alone
+    // and keep the pre-open family. A restart publishes the next generation's
+    // salts in the index before writing that generation's log header, so only
+    // an index one generation ahead can be newer than this log. Frames it
+    // published are commits missing from the log.
+    if let Some(index) = published.take_if(|index| {
+        !index.describes(page, big, &header[16..24]) || (index.frame == 0 && physical > 0)
+    }) {
+        ensure!(
+            index.frame == 0 || be(&index.salt) != be(&header[16..]).wrapping_add(1),
+            "database WAL index has commits from a newer log generation; existing files preserved"
+        );
+        retain = true;
+    }
     let bound = published
         .as_ref()
         .map_or(physical, |index| u64::from(index.frame));
@@ -125,24 +149,34 @@ pub(super) fn validate(family: &Family) -> Result<bool> {
         bound <= physical,
         "database WAL index exceeds log; existing files preserved"
     );
-    if let Some(index) = &published {
-        ensure!(
-            index.page_size == page && index.big == big && index.salt == header[16..24],
-            "database WAL index generation mismatch; existing files preserved"
-        );
-    } else {
+    if published.is_none() {
         ensure!(
             (wal.length - 32) % size == 0,
             "incomplete database WAL without published index; existing files preserved"
         );
     }
+    // A restart rewrites the log from frame 1 without truncating it, so frames
+    // of earlier generations can follow this one, and SQLite's recovery stops
+    // at the first frame with other salts. Without a published index, accept
+    // that end only if no later frame carries this generation's salts.
     let mut commit = None;
+    let (mut frames, mut ended) = (0u64, false);
     for number in 1..=bound {
         let frame = bytes(wal, 32 + (number - 1) * size, size as usize)?;
+        let ours = frame[8..16] == header[16..24];
+        if published.is_none() && (ended || !ours) {
+            ensure!(
+                !ours,
+                "invalid database WAL frame identity; existing files preserved"
+            );
+            ended = true;
+            continue;
+        }
         ensure!(
-            frame[8..16] == header[16..24] && be(&frame) > 0,
+            ours && be(&frame) > 0,
             "invalid database WAL frame identity; existing files preserved"
         );
+        frames += 1;
         sum = checksum(&frame[..8], big, sum);
         sum = checksum(&frame[24..], big, sum);
         ensure!(
@@ -154,24 +188,17 @@ pub(super) fn validate(family: &Family) -> Result<bool> {
             commit = Some((number, pages, sum));
         }
     }
-    if let Some(index) = published {
-        if index.frame > 0 {
-            ensure!(
-                commit == Some((u64::from(index.frame), index.pages, index.checksum)),
-                "database WAL published frame is not a verified commit; existing files preserved"
-            );
-        } else {
-            // A zero published cursor cannot silently discard a committed log.
-            ensure!(
-                physical == 0,
-                "database WAL has frames beyond an empty index; existing files preserved"
-            );
-        }
-    } else if physical > 0 {
-        ensure!(
-            commit.is_some(),
+    match published {
+        Some(index) if index.frame > 0 => ensure!(
+            commit == Some((u64::from(index.frame), index.pages, index.checksum)),
+            "database WAL published frame is not a verified commit; existing files preserved"
+        ),
+        // An index that published no frames was kept only for an empty log.
+        Some(_) => {}
+        None => ensure!(
+            frames == 0 || commit.is_some(),
             "database WAL has no verified commit; existing files preserved"
-        );
+        ),
     }
     Ok(retain)
 }
