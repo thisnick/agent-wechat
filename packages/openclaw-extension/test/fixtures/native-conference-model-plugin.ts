@@ -8,9 +8,19 @@ import { validateCallContextVoice } from './call-context-voice.ts';
 import { resolveWeChatCallsConfig } from '../../src/calls-config.ts';
 import { conferenceCallPolicy } from '../../src/calls-permissions.ts';
 import { registerCallAgentFixture } from './call-agent-runtime.ts';
+import { registerNativeCallTool } from '../../src/calls-tool.ts';
+import { NativeCallService } from '../../src/calls-service.ts';
+import { resolveWeChatAccount } from '../../src/types.ts';
 
 export default { ...base, register(api: any) {
-  base.register(api);
+  // Keep the real tool factory, using an account-free owned-call control port.
+  // The normal plugin service still registers and validates independently.
+  base.register({ ...api, registerTool(factory: any, options: any) {
+    if (options?.names?.includes('wechat_call')) return;
+    api.registerTool(factory, options);
+  } });
+  let callService: NativeCallService | undefined;
+  registerNativeCallTool(api, () => callService);
   const validateAgentCalls = registerCallAgentFixture(api);
   const directory = process.env.NATIVE_CONFERENCE_FIXTURE_DIR;
   if (!directory) throw Error('Conference fixture needs isolated storage');
@@ -18,6 +28,7 @@ export default { ...base, register(api: any) {
   const calls: Array<{ senderId?: string; owner?: boolean; sessionKey?: string }> = [];
   const toolErrors: string[] = [];
   const factories: unknown[] = [];
+  const callControls: string[] = [];
   for (const name of ['before_tool_call', 'after_tool_call']) api.on(name, (event: any, context: any) => appendFileSync(join(directory, 'tool-events.jsonl'), JSON.stringify({ name, toolName: event.toolName, error: event.error, runId: context.runId, sessionKey: context.sessionKey }) + '\n'));
   api.registerToolMetadata({ toolName: 'conference_owner_probe', risk: 'low', description: 'Read-only isolated test fixture value.' });
   api.registerTool({ contextVersion: 2, create(context: any) {
@@ -43,6 +54,15 @@ export default { ...base, register(api: any) {
           realtime: { provider: 'openai' }, conferences: { groups: { [groupId]: { toolPolicy: 'safe-read-only', ownerInviterToolPolicy: 'owner' } } } } })!.voice!;
         const voicePath: string = 'openclaw/plugin-sdk/realtime-voice'; const sdk = await import(voicePath);
         const session = (owner: boolean) => callSessionKey('main', 'per-contact', groupId, owner, { accountId: 'default', nativeAccountId: 'a', groupId });
+        callService = new NativeCallService(resolveWeChatAccount(cfg)!, cfg, api.runtime);
+        // Synthetic state only: execute the production hang-up path against a
+        // local control port, never a WeChat account or external daemon.
+        Object.assign(callService, { active: { key: 'fixture-call', peer: groupId, groupId, callId: 'fixture-call', claimed: true, retired: false, endStarted: false,
+          abort: new AbortController(), call: { state: 'connected', revision: 1 },
+          voice: { binding: () => ({ owner: true, sessionKey: session(true) + ':control' }), close() {} },
+        }, client: { end: async (action: string, _requestId: string, callId: string) => {
+          if (callId !== 'fixture-call') throw Error('Unexpected fixture call'); callControls.push(action);
+        } } });
         const request = (inviterId: string, question: string, suffix = '', toolsAllow?: string[]) => {
           const policy = conferenceCallPolicy(voice, voice.conferences.groups[groupId], { groupId, inviterId }, cfg.commands?.ownerAllowFrom);
           const owner = policy.toolPolicy === 'owner';
@@ -61,9 +81,10 @@ export default { ...base, register(api: any) {
           question: 'direct-owner-probe', instructions: 'Use the isolated fixture tool once, then answer briefly.',
           signal: AbortSignal.timeout(20000), assertCurrent() {}, onRunStarted() {},
         });
+        await request('synthetic-human-owner', 'group-owner-hangup-probe', ':control');
         let revoked = false;
         try { await request('synthetic-human-owner', 'group-revoked-probe', ':revoked'); } catch { revoked = true; }
-        writeFileSync(join(directory, 'result.json'), JSON.stringify({ agentCalls, voiceContext, owner, readOnly, restricted, direct, revoked, calls, toolErrors, factories,
+        writeFileSync(join(directory, 'result.json'), JSON.stringify({ callControls, agentCalls, voiceContext, owner, readOnly, restricted, direct, revoked, calls, toolErrors, factories,
           originalOwnersUnchanged: originalOwners === JSON.stringify(api.runtime.config.current().commands?.ownerAllowFrom),
           separateSessions: session(true) !== session(false), groupId }));
       } catch (error) { writeFileSync(join(directory, 'result.json'), JSON.stringify({ error: String(error), factories, toolErrors, owners: api.runtime.config.current().commands?.ownerAllowFrom })); }

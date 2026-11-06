@@ -903,3 +903,45 @@ test("manual conference admission fences a changed inviter even at the same invi
   client.eventsQueue.push({ type: "conference.invitations", invitations: [{ ...conferenceInvitation, callerId: "changed-inviter" }] });
   await delay(5); release(); await assert.rejects(joining, /not admitted/); assert.equal(client.joins, 0);
 });
+
+test("owner consultation controls its conference without a chat-requester grant and cannot affect a later call", async t => {
+  const { cfg, service, client, voice } = await conferenceFixture(true); t.after(() => service.stop());
+  voice.state.binding = { sessionKey: "agent:voice-agent:wechat-conference:synthetic:owner", owner: true };
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => client.attaches === 1);
+  const context: OpenClawPluginToolContext<2> = { config: cfg as any, agentId: "voice-agent", agentAccountId: "default",
+    requesterSenderId: conferenceGroup, senderIsOwner: true, sessionKey: voice.state.binding.sessionKey, assertInvocationCurrent() {} };
+  let create!: (context: OpenClawPluginToolContext<2>) => Array<{ execute(id: string, args: unknown): Promise<unknown> }>;
+  registerNativeCallTool({ registerTool(factory: any) { create = factory.create; } } as unknown as OpenClawPluginApi, () => service);
+  const [tool] = create(context);
+  assert.equal(cfg.channels["agent-wechat"].calls.voice.outboundToolAllowFrom.includes(conferenceGroup), false);
+  await tool.execute("status", { action: "status" });
+  await assert.rejects(tool.execute("invite", { action: "invite", contactIds: ["unlisted"] }), /admitted|destination|permitted/);
+  assert.equal(client.invited.length, 0, "destination allowlists remain in force");
+  voice.state.binding.owner = false;
+  await assert.rejects(tool.execute("revoked", { action: "hangup" }), /consultation/); assert.equal(client.ends, 0);
+  voice.state.binding.owner = true;
+  const [foreign] = create({ ...context, requesterSenderId: "foreign" });
+  await assert.rejects(foreign.execute("foreign", { action: "hangup" }), /consultation/);
+  const [nonOwner] = create({ ...context, senderIsOwner: false });
+  await assert.rejects(nonOwner.execute("non-owner", { action: "hangup" }), /not permitted/);
+  const [wrongAccount] = create({ ...context, agentAccountId: "another-account" });
+  await assert.rejects(wrongAccount.execute("wrong-account", { action: "hangup" }), /consultation/);
+  await tool.execute("end", { action: "hangup" }); assert.equal(client.ends, 1);
+  client.eventsQueue.push({ type: "call.state", call: { ...client.conferenceView(), revision: 9, state: "ended" } });
+  await until(() => service.status().state === "available"); client.media = new Media();
+  await service.startConference(conferenceGroup, ["allowed-peer"], { assertCurrent() {} }); await until(() => client.attaches === 2);
+  await assert.rejects(tool.execute("stale", { action: "hangup" }), /consultation/);
+  assert.equal(client.ends, 1, "an old invocation cannot hang up the next call even with the same session and synthetic call ID");
+});
+
+test("a direct owner consultation can hang up without an outbound chat-requester grant", async t => {
+  const { service, client, voice } = await fixture(); t.after(() => service.stop());
+  voice.state.binding = { owner: true, sessionKey: "agent:voice-agent:wechat-call:allowed-peer" };
+  client.eventsQueue.push({ type: "call.offered", offer }); await until(() => client.attaches === 1);
+  const cfg = configuration(); let tool!: { execute(id: string, input: unknown): Promise<unknown> };
+  const context = { config: cfg as any, agentId: "voice-agent", requesterSenderId: "allowed-peer", senderIsOwner: true,
+    sessionKey: voice.state.binding.sessionKey, assertInvocationCurrent() {} };
+  registerNativeCallTool({ registerTool(factory: any) { [tool] = factory.create(context); } } as unknown as OpenClawPluginApi, () => service);
+  await tool.execute("end", { action: "hangup" }); assert.equal(client.ends, 1);
+});

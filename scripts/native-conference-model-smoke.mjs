@@ -34,18 +34,24 @@ const upstream = createServer(async (req, res) => {
       const text = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text ?? '').join('\n') : '';
       const current = body.messages.filter(message => message.role === 'user').map(message => text(message.content)).join('\n');
       const ownerQuestion = /Conference question:\s*group-owner-probe\b|Caller question:\s*direct-owner-probe\b/.test(current);
+      const hangupQuestion = /Conference question:\s*group-owner-hangup-probe\b/.test(current);
       const revokedQuestion = /Conference question:\s*group-revoked-probe\b/.test(current);
       const names = (body.tools ?? []).map(tool => tool.function?.name);
       const toolReply = body.messages.some(message => message.role === 'tool');
       if (revokedQuestion) { await writeFile(join(temporary, 'revoked'), 'revoked'); await sleep(150); }
-      const tool = !toolReply && (ownerQuestion || revokedQuestion);
-      if (tool && !revokedQuestion && !names.includes('conference_owner_probe')) {
+      const tool = !toolReply && (ownerQuestion || revokedQuestion || hangupQuestion);
+      const toolName = hangupQuestion ? 'wechat_call' : 'conference_owner_probe';
+      if (tool && !revokedQuestion && !names.includes(toolName)) {
         log += `\nUnexpected model tool names: ${JSON.stringify(names)}`;
         return json({ choices: [{ message: { role: 'assistant', content: 'Fixture owner tool missing' }, finish_reason: 'stop' }] });
       }
-      if (current.includes('group-read-only-probe') || current.includes('group-restricted-probe') || current.includes('agent-conference-read-only-probe')) assert.ok(!names.includes('conference_owner_probe'), 'restricted group received the owner-only fixture tool');
+      if (hangupQuestion && !toolReply) assert.ok(names.includes('wechat_call'), 'owner call-control tool was not advertised to the model');
+      if (current.includes('group-read-only-probe') || current.includes('group-restricted-probe') || current.includes('agent-conference-read-only-probe')) {
+        assert.ok(!names.includes('conference_owner_probe'), 'restricted group received the owner-only fixture tool');
+        assert.ok(!names.includes('wechat_call'), 'restricted group received call-control tools');
+      }
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: 'synthetic-probe-call', type: 'function', function: { name: 'conference_owner_probe', arguments: '{}' } }] }
+      const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: 'synthetic-probe-call', type: 'function', function: { name: toolName, arguments: hangupQuestion ? '{"action":"hangup"}' : '{}' } }] }
         : { role: 'assistant', content: 'Local conference fixture reply' };
       const chunk = (delta, finish_reason) => `data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'fixture-model', choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
       res.write(chunk(delta, null)); res.write(chunk({}, tool ? 'tool_calls' : 'stop')); res.end('data: [DONE]\n\n'); return;
@@ -68,9 +74,9 @@ try {
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const nativePort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false },
-    commands: { ownerAllowFrom: ['agent-wechat:synthetic-human-owner', 'agent-wechat:synthetic-group@chatroom'] }, tools: { toolSearch: false, codeMode: false, allow: ['conference_owner_probe', 'read'] },
-    models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
-    agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } } },
+    commands: { ownerAllowFrom: ['agent-wechat:synthetic-human-owner', 'agent-wechat:synthetic-group@chatroom'] }, tools: { toolSearch: false, codeMode: false, profile: 'coding', alsoAllow: ['conference_owner_probe'] },
+    models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 262144, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
+    agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } }, entries: { main: { tools: { alsoAllow: ['conference_owner_probe', 'wechat_call'] } } } },
     plugins: { allow: ['agent-wechat'], load: { paths: [join(temporary, 'plugin')] }, entries: { 'agent-wechat': { enabled: true, config: { backend: 'native', native: { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${nativePort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy: 'never' } } } } },
     tts: { provider: 'fixture-speech', providers: { 'fixture-speech': {} } },
     channels: { 'agent-wechat': { enabled: true, dmPolicy: 'disabled', groupPolicy: 'disabled', calls: { voice: {
@@ -87,12 +93,13 @@ try {
   assert.ok(result, `Conference Gateway deadline: ${log}`); assert.equal(result.error, undefined, `${JSON.stringify(result)}; requests=${requests.length}; events=${toolEvents}; ${log}`);
   assert.equal(result.calls.length, 2, JSON.stringify({ result, modelTools: requests.map(body => (body.tools ?? []).map(tool => tool.function?.name)), toolReplies: requests.flatMap(body => body.messages.filter(message => message.role === 'tool')), log: log.slice(-2500) })); assert.equal(result.calls[0].senderId, result.groupId); assert.equal(result.calls[0].owner, true);
   assert.equal(result.calls[1].senderId, 'synthetic-human-owner'); assert.equal(result.calls[1].owner, true);
+  assert.deepEqual(result.callControls, ['call.hangup'], 'the owner consultation did not reach the call-control port');
   assert.ok(result.calls[0].sessionKey.includes('wechat-conference:')); assert.equal(result.revoked, true); assert.equal(result.originalOwnersUnchanged, true); assert.equal(result.separateSessions, true);
   assert.equal(await readFile(configPath, 'utf8'), initial, 'the group grant changed the saved Gateway configuration');
   assert.ok(requests.length >= 6); assert.ok(requests.every(body => body.model === 'fixture-model'));
   assert.deepEqual(result.voiceContext, ['response', 'continuous'].map(mode => ({ mode, messages: 4, audioPreserved: true, interruptionPreserved: true })));
   assert.deepEqual(result.agentCalls, ['direct', 'conference-owner', 'conference-read-only'].map(kind => ({ kind, owner: kind !== 'conference-read-only', audio: true, transcript: true })));
-  console.log('Pinned conference Gateway passed: agent/TTS direct and owner/read-only conference pipelines, owner-inviter policy and other-inviter read-only tools, caller/roster context and greetings in both voice modes, continued audio and interruption, actual group principal and owner tool, separate read-only session, tool restrictions, revocation, direct-owner regression, normal configured model routing, unchanged saved/global owner config. No external provider, login, WeChat send or deployment.');
+  console.log('Pinned conference Gateway passed: per-agent optional calling-tool grant, owner consultation reaches local hangup control, read-only tool rejection, agent/TTS direct and owner/read-only conference pipelines, caller/roster context, audio and interruption, group principal, revocation, normal configured model routing and unchanged saved/global owner config. No external provider, login, WeChat send or deployment.');
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
   for (const stream of streams) stream.end(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); await rm(temporary, { recursive: true, force: true });

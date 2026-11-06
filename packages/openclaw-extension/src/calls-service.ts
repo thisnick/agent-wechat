@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
+import type { OpenClawConfig, OpenClawPluginToolContext, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { isNativeTombstone, NativeCallError, type NativeMessage, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type CallConferenceInvitation, type NativeCallMediaClient, type NativeCallsClient, type NativeCallPcmObserver, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
@@ -99,6 +99,19 @@ export class NativeCallService {
       ...(Object.keys(this.config?.conferences.groups ?? {}).length ? { conferenceInvitations: this.invitations.filter(item => !!this.groupPolicy(item.groupId)).map(item => ({ ...item })) } : {}),
       ...(active?.groupId ? { groupId: active.groupId, inviterId: active.inviterId, toolPolicy: binding?.toolPolicy ?? active.policyAtAdmission, toolPolicyReason: binding?.policyReason ?? active.policyReason, participants: structuredClone(active.call?.participants ?? []),
         ...(active.invitationResults ? { invitationResults: structuredClone(active.invitationResults.results) } : {}) } : {}) };
+  }
+  /** Bind the host's trusted tool context to this exact active call. Ordinary
+   * chat invocations keep their separate outbound requester policy. */
+  bindOwnerConsultationTool(context: OpenClawPluginToolContext): (() => void) | undefined {
+    if (!context.sessionKey || !/:wechat-(?:call|conference):/.test(context.sessionKey)) return;
+    const active = this.active;
+    return () => {
+      const binding = active?.voice?.binding?.();
+      if (!active || !this.current(active) || !active.claimed || active.endStarted || active.call?.state !== "connected"
+        || context.agentId !== this.config?.agentId || context.requesterSenderId !== active.peer
+        || (context.agentAccountId !== undefined && context.agentAccountId !== this.account.accountId)
+        || binding?.owner !== true || binding.sessionKey !== context.sessionKey) throw Error("Calling owner consultation is no longer current");
+    };
   }
   async start(): Promise<void> {
     if (!this.config || !this.account.enabled || this.stopped || this.state !== "disabled") return;
@@ -634,11 +647,13 @@ export class NativeCallService {
     const active = this.active;
     if (!active?.claimed || !active.callId || !active.call || !this.client || active.endStarted) throw Error("No owned call can be ended");
     if (!["dialing", "ringing", "connecting", "connected"].includes(active.call.state)) throw Error("Call cannot be ended in this state");
+    this.info(`control trace=${active.key.slice(0, 8)} action=hangup stage=requested kind=${active.groupId ? "conference" : "direct"}`);
     active.endStarted = true; active.output?.close(); active.media?.stopAudio(); this.stopVoice(active); this.armTerminalWait(active);
     // Closing media revokes the daemon owner. Acceptance and Ending can precede
     // the upstream terminal reply, so retain its connection until terminal state.
     try {
       await this.client.end(["dialing", "ringing"].includes(active.call.state) ? "call.cancel" : "call.hangup", randomUUID(), active.callId, active.call.revision);
+      this.info(`control trace=${active.key.slice(0, 8)} action=hangup stage=submitted`);
       // Acceptance is not a terminal result. Keep the owner until server state arrives.
     } catch (error) { this.state = "needs_review"; this.stopCalling(`end-outcome-unknown${codeOf(error)}`); await this.retire(active); throw Error("Call end outcome needs review"); }
   }

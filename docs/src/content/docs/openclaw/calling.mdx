@@ -29,6 +29,9 @@ Both support [realtime speech or agent-and-TTS conversation](../call-conversatio
 Merge this example into your existing channel and agent configuration. Replace
 the example contact and owner IDs.
 Set `OPENAI_API_KEY` in the **Gateway process's environment**.
+The `wechat_call` tool is optional: the `tools.alsoAllow` entry below is required
+for agent call control, even when voice answering already works. Preserve your
+other tool entries. See [Agent tools](../tools/#calling) for a global grant example.
 
 ```json
 {
@@ -219,8 +222,9 @@ All paths below are relative to `calls.voice`.
 
 The speech model handles conversation; the selected OpenClaw agent handles
 delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
-allowlists accept exact IDs, without `*`. Tool callers must also be authorized
-owners in `outboundToolAllowFrom`. Messaging permissions do not authorize calls.
+allowlists accept exact IDs, without `*`. Chat tool requesters must also be
+authorized owners in `outboundToolAllowFrom`; owner call consultations use their
+current call authority instead. Messaging permissions do not authorize calls.
 
 Set `realtime.model` to one of these OpenAI models. Omit it to use the
 provider's default, `gpt-realtime-2.1`.
@@ -247,6 +251,12 @@ with the agent's normal tool policy. An owner can use a bound session with the
 same WeChat peer and channel account. Other allowed participants get read-only
 consultation in a separate session. Add inbound callers to `inboundAllowFrom`
 separately.
+
+Owner-authorized call consultations may use `wechat_call` without the extra
+chat-requester allowlist. The grant is tied to the current call and is revoked
+when that call ends or loses owner consultation. Read-only consultations cannot
+control calls. Configured destinations/groups and normal host restrictions
+still apply. A conference hang-up removes only the agent.
 
 Consultations run like the agent's normal chat turns. They use its configured
 model, including CLI runtimes such as `claude-cli`, and its fallback models.

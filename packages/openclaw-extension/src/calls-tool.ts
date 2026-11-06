@@ -11,9 +11,11 @@ export function registerNativeCallTool(api: OpenClawPluginApi, service: () => Na
     if (!account?.enabled || !account.calls?.voice || !account.native) return [];
     const configurationKey = nativeConfigurationKey(account.native);
     const callConfiguration = callsConfigurationKey(account.calls);
-    const check = () => assertCallingToolAccess(context, configurationKey, callConfiguration);
+    const capturedService = service();
+    const consultation = capturedService?.bindOwnerConsultationTool(context);
+    const check = () => assertCallingToolAccess(context, configurationKey, callConfiguration, consultation);
     return [{ name: "wechat_call", label: "WeChat Call", catalogMode: "direct-only" as const,
-      description: "Check voice-call status, dial an authorized contact, start or join a configured voice conference, invite allowed contacts to its owned conference, or hang up. Join requires a current invitation and never creates a room. Conference invitations do not promote a direct call. Never retry an uncertain operation without the user's request. Calls require their own allowlists and provider readiness; this tool grants no caller owner privileges.",
+      description: "Check voice-call status, dial an authorized contact, start or join a configured voice conference, invite allowed contacts to its owned conference, or hang up. Use action hangup when asked to leave the current call; in a conference it removes only this agent, leaving the room open for others. Owner-authorized call consultations can control their call without the separate chat-requester allowlist. Destination and group allowlists, host tool policy and approvals still apply. Join requires a current invitation and never creates a room. Invitations do not promote a direct call. Never retry an uncertain operation without the user's request. Do not claim an action was attempted before executing it.",
       parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
         action: { type: "string", enum: ["status", "dial", "conference_start", "conference_join", "invite", "hangup"] }, contactId: { type: "string", minLength: 1, maxLength: 200 },
         groupId: { type: "string", minLength: 1, maxLength: 200 },
@@ -30,6 +32,7 @@ export function registerNativeCallTool(api: OpenClawPluginApi, service: () => Na
           || (["conference_start", "invite"].includes(String(value.action)) ? !contacts : value.contactIds !== undefined)) throw Error("Invalid calling arguments");
         signal?.throwIfAborted(); check();
         const current = service(); if (!current) throw Error("Calling service unavailable");
+        if (consultation && current !== capturedService) throw Error("Calling consultation service changed");
         const access = { signal, assertCurrent: check, parentSession: context.sessionKey ? { key: context.sessionKey, expectedSessionId: context.sessionId } : undefined };
         const result = value.action === "status" ? current.status() : value.action === "dial" ? await current.dial(value.contactId as string, access)
           : value.action === "conference_start" ? await current.startConference(value.groupId as string, value.contactIds as string[], access)
@@ -40,11 +43,14 @@ export function registerNativeCallTool(api: OpenClawPluginApi, service: () => Na
   } }, { names: ["wechat_call"], optional: true });
 }
 
-export function assertCallingToolAccess(context: OpenClawPluginToolContext, configurationKey: string, callConfiguration: string): void {
+export function assertCallingToolAccess(context: OpenClawPluginToolContext, configurationKey: string, callConfiguration: string, consultation?: () => void): void {
   if (!context.assertInvocationCurrent) throw Error("Calling tool invocation authority unavailable");
   context.assertInvocationCurrent();
   const cfg = context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
   const current = cfg && resolveWeChatAccount(cfg as unknown as Record<string, unknown>);
   if (!current?.enabled || !current.native || !current.calls?.voice || nativeConfigurationKey(current.native) !== configurationKey || callsConfigurationKey(current.calls) !== callConfiguration
-    || context.senderIsOwner !== true || !context.requesterSenderId || !current.calls.voice.outboundToolAllowFrom.includes(context.requesterSenderId)) throw Error("Calling tool is not permitted for this requester");
+    || context.senderIsOwner !== true || !context.requesterSenderId) throw Error("Calling tool is not permitted for this requester");
+  if (consultation) consultation();
+  else if (context.sessionKey && /:wechat-(?:call|conference):/.test(context.sessionKey)) throw Error("Calling consultation authority unavailable");
+  else if (!current.calls.voice.outboundToolAllowFrom.includes(context.requesterSenderId)) throw Error("Calling tool is not permitted for this requester");
 }
