@@ -245,10 +245,19 @@ try:
     until(lambda: not stats()['active'])
     monitor = Client(['calls', 'monitor'])
     monitor.expect('Waiting for calls.')
-    request('offer', callerId='synthetic-direct')
-    monitor.expect('Incoming voice call')
-    monitor.send('a')
+    monitor.expect('Conference invitation')
+    monitor.send('j 1')
     monitor.expect('Connected.')
+    mark = len(monitor.output())
+    monitor.send('l')
+    monitor.expect('Waiting for calls.', mark)
+    until(lambda: not stats()['active'])
+    assert monitor.process.poll() is None, 'conference_leave_exited_monitor'
+    request('offer', callerId='synthetic-direct')
+    monitor.expect('Incoming voice call', mark)
+    mark = len(monitor.output())
+    monitor.send('a')
+    monitor.expect('Connected.', mark)
     before = stats()['audioFrames']
     until(lambda: stats()['audioFrames'] > before + 10)
     mark = len(monitor.output())
@@ -260,7 +269,7 @@ try:
     final = stats()
     request('shutdown')
     fixture.wait(timeout=8)
-    proof = {'passed': True, 'actual_cli_binary': True, 'actual_rust_api': True, 'pulse_null_devices': True, 'wechat_connection': False, 'mixed_3000_sample_count': near, 'participant_meters': ['Alice', 'Bob'], 'outgoing_conference': True, 'current_invitation_join': True, 'late_invite': True, 'mic_mute_unmute': True, 'speaker_toggle': True, 'contact_picker_media_progress': True, 'device_change_media_progress': True, 'remote_mute': True, 'track_leave_rejoin': True, 'monitor_direct_call_and_return': True, 'stats': final}
+    proof = {'passed': True, 'actual_cli_binary': True, 'actual_rust_api': True, 'pulse_null_devices': True, 'wechat_connection': False, 'mixed_3000_sample_count': near, 'participant_meters': ['Alice', 'Bob'], 'outgoing_conference': True, 'current_invitation_join': True, 'late_invite': True, 'mic_mute_unmute': True, 'speaker_toggle': True, 'contact_picker_media_progress': True, 'device_change_media_progress': True, 'remote_mute': True, 'track_leave_rejoin': True, 'monitor_conference_leave_and_direct_answer': True, 'monitor_direct_call_and_return': True, 'stats': final}
     (out / 'result.json').write_text(json.dumps(proof, indent=2) + '\n')
     print(json.dumps(proof))
 except BaseException as error:

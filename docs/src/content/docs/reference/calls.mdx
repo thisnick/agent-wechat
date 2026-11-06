@@ -20,7 +20,7 @@ and speakers. OpenClaw setup is in [Set up calling](/openclaw/calling/).
 | Command | Behavior |
 | --- | --- |
 | `wx calls monitor --json` | Observe events without opening audio devices |
-| `wx calls monitor` | Show “Waiting for calls. Ctrl-C exits.”; open audio when you accept |
+| `wx calls monitor` | Wait for invitations; open audio when you accept |
 | `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
 | `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
 
@@ -60,11 +60,14 @@ PipeWire-Pulse names; Windows accepts endpoint IDs. On macOS, select defaults in
 System Settings; custom endpoint IDs are unsupported.
 
 Interactive calls show the controls and meters below. Press Enter after a key;
-Ctrl-C leaves the call and waits briefly for cleanup.
+`l` or `h` leaves the call and returns to watching in `monitor`. Ctrl-C leaves
+and exits the command after a short cleanup wait.
 
 ```text
-m  Microphone    s  Speaker    i  Invite
-p  Participants  d  Devices    l/h  Leave    ?  Help
+m + Enter    Microphone          s + Enter    Speaker
+i + Enter    Invite              p + Enter    Participants
+d + Enter    Devices             ? + Enter    Help
+l/h + Enter  Leave call          Ctrl-C       Leave and exit
 Mic [#######...] -18dB  Speaker [########..] -10dB
 Alice [######....] -24dB joined mic on
 Bob   [..........] -60dB joined mic off

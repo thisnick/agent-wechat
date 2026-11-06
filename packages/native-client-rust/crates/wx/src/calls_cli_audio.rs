@@ -23,9 +23,12 @@ use wechat_core::call_types::{
 };
 
 type Input = Lines<BufReader<Stdin>>;
-const CALL_KEYS: &str = "m + Enter  Microphone   s + Enter  Speaker   i + Enter  Invite\n\
-                        p + Enter  Participants d + Enter  Devices   l/h + Enter  Leave\n\
-                        Ctrl-C     Leave        ? + Enter  Help";
+const CALL_KEYS: &str = "m + Enter    Microphone          s + Enter    Speaker\n\
+                        i + Enter    Invite              p + Enter    Participants\n\
+                        d + Enter    Devices             ? + Enter    Help\n\
+                        l/h + Enter  Leave call          Ctrl-C       Leave and exit";
+const MONITOR_WAITING: &str =
+    "Waiting for calls. Leave a call with l/h + Enter to keep monitoring; Ctrl-C exits.";
 
 pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
     if json {
@@ -179,7 +182,7 @@ async fn monitor(
     // Readiness declares this interactive client's ability to prepare devices;
     // it does not open or continuously capture its microphone while waiting.
     ready(control, true).await?;
-    eprintln!("Waiting for calls. Ctrl-C exits.");
+    eprintln!("{MONITOR_WAITING}");
     let mut shown = None;
     let mut dismissed = None;
     let mut renew_after_terminal = false;
@@ -225,7 +228,7 @@ async fn monitor(
                         if !control.capabilities.conference_join || !control.capabilities.conference_audio {eprintln!("Conference joining/audio unavailable.");continue;}
                         if let Err(error)=participate(remote,control,options,Participation::ConferenceJoin(invitation),input,cancellation).await {eprintln!("{error}");}
                         if cancellation.is_cancelled(){return Ok(());}
-                        restore_monitor_readiness(control).await?;shown_invitations.clear();eprintln!("Waiting for calls. Ctrl-C exits.");
+                        restore_monitor_readiness(control).await?;shown_invitations.clear();eprintln!("{MONITOR_WAITING}");
                     }else{eprintln!("No matching current conference invitation.");}
                     continue;
                 }
@@ -242,7 +245,7 @@ async fn monitor(
                         if cancellation.is_cancelled() {return Ok(());}
                         if completed {restore_monitor_readiness(control).await?;renew_after_terminal=false;}
                         shown=None;
-                        eprintln!("Waiting for calls. Ctrl-C exits.");
+                        eprintln!("{MONITOR_WAITING}");
                     }
                     "d" | "dismiss" => { dismissed=Some((offer.call_id,offer.revision)); }
                     "r" | "reject" => {
