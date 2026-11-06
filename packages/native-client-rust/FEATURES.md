@@ -16,7 +16,7 @@ from fixture tests. Capability responses must reflect these limits.
 | Required initial capability | Implementation | Validation / remaining work |
 | --- | --- | --- |
 | Independent protocol, profile, store, core and optional HTTP crates | Implemented | Library consumers and offline synthetic fixtures |
-| Versioned configuration, XDG paths, protected registry/sidecars | Implemented | Precedence and unsupported-version tests; damaged database, WAL/SHM, rollback recovery and failed-migration fixtures preserve existing families |
+| Versioned configuration, XDG paths, protected registry/sidecars | Implemented | Precedence and unsupported-version tests; damaged database, WAL/SHM, rollback recovery and failed-migration fixtures preserve existing families. A WAL index from another log generation, or one that published no frames, is rebuilt by SQLite after the log alone verifies and a recovery family is kept; an index whose published commits are missing from the log is refused |
 | Separate server configuration and endpoint-scoped client defaults | Implemented | Actual CLI scoped endpoint/default smoke and ambiguity fixtures |
 | Canonical daemon account aliases | Implemented | Actual daemon creation, rename, default selection and ambiguous selection checks |
 | Simultaneous independent account actors | Implemented | Synthetic isolation passes. Only one isolated test account is available; live multi-account validation is explicitly unverified and deferred by the operator |

@@ -15,6 +15,13 @@ Start with `wx accounts status`. It shows whether you're logged in (`authenticat
 
 **Old `serverUrl` or `backend` settings are rejected.** You're using a 0.x configuration. See [Migrate from the old container](/setup/migrate/).
 
+**"cannot open … database WAL …; existing files preserved".** One of the daemon's own databases doesn't match its log (the `-wal` file beside it). This usually follows a sudden stop of the computer, VM or WSL. The daemon repairs the common case itself and keeps a copy of the files in a `.sqlite-recovery-…` folder beside the database. If it still refuses to start:
+
+1. Stop the daemon.
+2. Copy the database named in the message, with its `-wal` and `-shm` files, somewhere safe.
+3. If the message says `commits from a newer log generation`, `index exceeds log` or `published frame is not a verified commit`, the log is missing the latest changes. To start without them, move the `-shm` file out of the folder and start the daemon. It checks the log again before using it.
+4. For any other message, the log itself is damaged. Restore the data directory from a backup, or [open an issue](https://github.com/thisnick/agent-wechat/issues) with the message.
+
 ## Login
 
 **"Account mismatch" or a database won't unlock.** You logged in with a different WeChat account from the one the profile belongs to. Log in with the profile's own account. A new QR code won't get around this.
