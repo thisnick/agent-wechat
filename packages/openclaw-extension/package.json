@@ -287,6 +287,16 @@
                                 "default": false,
                                 "description": "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation."
                               },
+                              "autoJoinAllowFrom": {
+                                "type": "array",
+                                "maxItems": 128,
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "description": "Optional exact conference inviter IDs. When present, only invitations from these contacts can auto-join; an empty list disables auto-join. The configured group is still required."
+                              },
                               "toolPolicy": {
                                 "type": "string",
                                 "enum": [

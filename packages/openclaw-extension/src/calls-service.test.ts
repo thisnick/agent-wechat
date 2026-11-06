@@ -790,3 +790,22 @@ test('conference start and later invitations recheck destination allowlists and 
   assert.equal(service.status().invitationResults?.[0].status, 'submitted');
   assert.deepEqual(client.invited, [['allowed-peer'], ['allowed-peer']]); await service.stop();
 });
+
+
+test('conference inviter allowlist rejects others, accepts the listed inviter, and fences revocation before submission', async () => {
+  const first = await conferenceFixture(true);
+  (first.cfg.channels['agent-wechat'].calls.voice as any).conferences.groups[conferenceGroup].autoJoinAllowFrom = ['trusted-inviter'];
+  first.client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+  await delay(30); assert.equal(first.client.joins, 0); assert.equal(first.voice.state.opens, 0);
+  first.client.eventsQueue.push({ type: 'conference.invitations', invitations: [{ ...conferenceInvitation, callerId: 'trusted-inviter' }] });
+  await until(() => first.client.attaches === 1); assert.equal(first.client.joins, 1); await first.service.stop();
+  for (const replacement of [[], ['different-inviter']]) {
+    const next = await conferenceFixture(true);
+    const group = (next.cfg.channels['agent-wechat'].calls.voice as any).conferences.groups[conferenceGroup];
+    group.autoJoinAllowFrom = [conferenceInvitation.callerId];
+    let release!: () => void; next.voice.state.opening = new Promise(resolve => { release = resolve; });
+    next.client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+    await until(() => next.voice.state.opens === 1); group.autoJoinAllowFrom = replacement; release();
+    await until(() => next.voice.state.closes === 1); assert.equal(next.client.joins, 0); assert.equal(next.client.readied, 0); await next.service.stop();
+  }
+});

@@ -374,15 +374,20 @@ export class NativeCallService {
       return group ? { voice, group } : undefined;
     } catch { return; }
   }
+  private allowedAutoJoin(invitation: CallConferenceInvitation): boolean {
+    const group = this.groupPolicy(invitation.groupId)?.group;
+    return !!group?.autoJoin && (group.autoJoinAllowFrom === undefined || group.autoJoinAllowFrom.includes(invitation.callerId));
+  }
   private autoJoinConference(): void {
     if (this.stopped || this.state !== "available" || this.active || this.busy || !this.capabilities.conferenceJoin || !this.capabilities.conferenceAudio || !this.client?.joinConference) return;
-    const invitation = this.invitations.find(item => this.groupPolicy(item.groupId)?.group.autoJoin
+    const invitation = this.invitations.find(item => this.allowedAutoJoin(item)
       && !this.seen.has(`conference:${item.invitationId}:${item.revision}`));
     if (!invitation) return;
     if (this.seen.size >= 128) this.seen.delete(this.seen.values().next().value!);
     this.seen.add(`conference:${invitation.invitationId}:${invitation.revision}`);
     void this.conference(invitation.groupId, { assertCurrent: () => {
-      if (!this.groupPolicy(invitation.groupId)?.group.autoJoin) throw Error("Conference auto-join permission changed");
+      const current = this.invitations.find(item => item.invitationId === invitation.invitationId && item.revision === invitation.revision);
+      if (!current || current.callerId !== invitation.callerId || !this.allowedAutoJoin(current)) throw Error("Conference auto-join permission changed");
     } }, invitation).catch(() => this.warn("conference invitation was not joined; no automatic resubmission"));
   }
   async startConference(groupId: string, invitees: string[], access: CallAccess): Promise<{ callId: string }> {

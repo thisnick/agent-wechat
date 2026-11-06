@@ -7,8 +7,8 @@ type ConsultPolicy = (typeof consultPolicies)[number];
 type ConsultThinkingLevel = (typeof consultThinkingLevels)[number];
 export const callSessionScopes = ["per-contact", "per-call"] as const;
 export type CallSessionScope = (typeof callSessionScopes)[number];
-export type WeChatConferenceGroupConfig = { autoJoin?: boolean; toolPolicy?: "none" | "safe-read-only" | "owner"; sessionKey?: string };
-export type ResolvedWeChatConferenceGroupConfig = { autoJoin: boolean; toolPolicy: "none" | "safe-read-only" | "owner"; sessionKey?: string };
+export type WeChatConferenceGroupConfig = { autoJoin?: boolean; autoJoinAllowFrom?: string[]; toolPolicy?: "none" | "safe-read-only" | "owner"; sessionKey?: string };
+export type ResolvedWeChatConferenceGroupConfig = { autoJoin: boolean; autoJoinAllowFrom?: string[]; toolPolicy: "none" | "safe-read-only" | "owner"; sessionKey?: string };
 
 /** Calling permissions and providers are configured independently for each type. */
 export type WeChatVoiceCallsConfig = {
@@ -64,12 +64,12 @@ function conferenceGroups(value: WeChatVoiceCallsConfig["conferences"], toolPoli
   if (entries.length > 128) throw Error("Too many conference groups");
   const groups = Object.create(null) as Record<string, ResolvedWeChatConferenceGroupConfig>;
   for (const [id, group] of entries) {
-    if (!identifier(id) || !id.endsWith("@chatroom") || !object(group) || Object.keys(group).some(key => !["autoJoin", "toolPolicy", "sessionKey"].includes(key))
+    if (!identifier(id) || !id.endsWith("@chatroom") || !object(group) || Object.keys(group).some(key => !["autoJoin", "autoJoinAllowFrom", "toolPolicy", "sessionKey"].includes(key))
       || (group.autoJoin !== undefined && typeof group.autoJoin !== "boolean")
       || ![undefined, "none", "safe-read-only", "owner"].includes(group.toolPolicy)
       || (group.toolPolicy === "owner" && toolPolicy !== "owner")
       || (group.sessionKey !== undefined && !isCallSessionKey(group.sessionKey))) throw Error("Invalid conference group policy");
-    groups[id] = { autoJoin: group.autoJoin === true, toolPolicy: toolPolicy === "none" ? "none" : group.toolPolicy ?? "safe-read-only", sessionKey: group.sessionKey };
+    groups[id] = { autoJoin: group.autoJoin === true, ...(group.autoJoinAllowFrom !== undefined ? { autoJoinAllowFrom: names(group.autoJoinAllowFrom) } : {}), toolPolicy: toolPolicy === "none" ? "none" : group.toolPolicy ?? "safe-read-only", sessionKey: group.sessionKey };
   }
   return groups;
 }
@@ -137,6 +137,7 @@ export const callsConfigSchema = {
         groups: { type: "object", maxProperties: 128, propertyNames: { type: "string", pattern: "^.+@chatroom$", maxLength: 200 }, additionalProperties: {
           type: "object", additionalProperties: false, properties: {
             autoJoin: { type: "boolean", default: false, description: "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation." },
+            autoJoinAllowFrom: { ...allowlistSchema, description: "Optional exact conference inviter IDs. When present, only invitations from these contacts can auto-join; an empty list disables auto-join. The configured group is still required." },
             toolPolicy: { type: "string", enum: ["none", "safe-read-only", "owner"], default: "safe-read-only", description: "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only." },
             sessionKey: { type: "string", pattern: CALL_SESSION_KEY_PATTERN, maxLength: MAX_CALL_SESSION_KEY_LENGTH, description: "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority." },
           },

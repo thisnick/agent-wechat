@@ -110,6 +110,7 @@ Add exact group IDs under `calls.voice.conferences.groups`:
     "groups": {
       "test-group@chatroom": {
         "autoJoin": true,
+        "autoJoinAllowFrom": ["trusted-inviter"],
         "toolPolicy": "safe-read-only"
       }
     }
@@ -119,7 +120,10 @@ Add exact group IDs under `calls.voice.conferences.groups`:
 
 An empty map enables no conference automation or conference tool destinations.
 `autoJoin` defaults to `false`; when enabled, the plugin prepares speech before
-joining a current invitation. Direct-call allowlists remain separate.
+joining a current invitation. Optional `autoJoinAllowFrom` restricts auto-join to
+the listed inviter IDs; an empty list disables it. Without that field, all
+current invitations for this configured group are eligible. The inviter is
+rechecked before joining. Direct-call allowlists remain separate.
 
 The optional `wechat_call` tool supports these additional actions:
 
