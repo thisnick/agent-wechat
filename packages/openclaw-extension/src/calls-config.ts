@@ -53,6 +53,11 @@ export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfi
   consultation: { timeoutMs: number; inboundSessionKey?: string; summary: boolean; recentMessages: number };
 };
 export type ResolvedWeChatCallsConfig = { voice?: ResolvedWeChatVoiceCallsConfig; video: { enabled: boolean } };
+/** Use the same exact-rule precedence for call admission and consultation. */
+export function resolveConferenceGroupConfig(voice: ResolvedWeChatVoiceCallsConfig, groupId: string): ResolvedWeChatConferenceGroupConfig | undefined {
+  if (groupId === "*" || !groupId.endsWith("@chatroom")) return;
+  return Object.hasOwn(voice.conferences.groups, groupId) ? voice.conferences.groups[groupId] : voice.conferences.groups["*"];
+}
 const identifier = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 function names(value: unknown, allowWildcard = false): string[] {

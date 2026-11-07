@@ -2,7 +2,7 @@ import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { createHash } from "node:crypto";
 import { prepareCallAgentProvider } from "./calls-agent.ts";
 import { resolveCallVoiceApiKey } from "./calls-secrets.ts";
-import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
+import { resolveConferenceGroupConfig, type ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { resolveCallVoiceContext } from "./calls-voice-context.ts";
 import { callSessionExists, callSessionKey, canonicalCallSessionKey, currentCallParentKey, resolveCallParentSession, type CallParentSession } from "./calls-session.ts";
 import { createCallForcedConsult } from "./calls-forced-consult.ts";
@@ -84,7 +84,7 @@ function currentOwnerAccess(runtime: PluginRuntime, agentId: string, peer: CallV
     const allowed = account?.enabled === true && voice?.agentId === agentId && voice.allowConsultSessionPersistence
       && (voice.mode === "agent" || voice.toolPolicy !== "none") && (peer.nativeAccountId === undefined || account.native?.accountId === peer.nativeAccountId);
     if (peer.conference) {
-      const group = voice && Object.hasOwn(voice.conferences.groups, peer.conference.groupId) ? voice.conferences.groups[peer.conference.groupId] : undefined;
+      const group = voice && resolveConferenceGroupConfig(voice, peer.conference.groupId);
       const policy = voice && group && allowed ? conferenceCallPolicy(voice, group, peer.conference, cfg.commands?.ownerAllowFrom)
         : { toolPolicy: "none" as const, reason: "group_default" as const };
       return { cfg, allowed: policy.toolPolicy !== "none" || (voice?.mode === "agent" && !!group && allowed), owner: policy.toolPolicy === "owner", ...policy };

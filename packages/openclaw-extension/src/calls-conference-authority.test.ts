@@ -45,6 +45,48 @@ test('conference consultation rechecks authority before tools, denies retired ru
   stop(); assert.equal(evaluate(event, context).block, true);
   assert.equal(evaluate({ ...event, runId: 'unrelated' }, { ...context, runId: 'unrelated' }), undefined);
 });
+test('Live conference consultation uses the wildcard rule and stops after an exact policy revocation', async () => {
+  const path: string = 'openclaw/plugin-sdk/realtime-voice'; const sdk = await import(path);
+  const groups: Record<string, { autoJoin?: boolean; autoJoinAllowFrom?: string[]; toolPolicy: 'safe-read-only' | 'none' }> = {
+    '*': { autoJoin: true, autoJoinAllowFrom: ['trusted-inviter'], toolPolicy: 'safe-read-only' },
+  };
+  const voice = { enabled: true, agentId: 'main', toolPolicy: 'owner' as const, allowConsultSessionPersistence: true,
+    realtime: { provider: 'openai', providers: { openai: { apiKey: 'synthetic-openai-key' } } }, conferences: { groups } };
+  const cfg = { commands: { ownerAllowFrom: ['agent-wechat:trusted-inviter'] }, channels: { 'agent-wechat': { enabled: true,
+    native: { mode: 'external', accountId: 'a', endpoint: 'http://127.0.0.1:6174', token: 'synthetic-token-'.repeat(4), consumerStateDir: '/synthetic/consumer' }, calls: { voice } } } };
+  let bridge: any; const dispatches: any[] = [];
+  const runtime = { config: { current: () => cfg }, channel: { reply: {
+    finalizeInboundContext: (ctx: any) => ctx,
+    dispatchReplyWithBufferedBlockDispatcher: async (params: any) => {
+      dispatches.push(params); params.replyOptions.onAgentRunStart();
+      await params.dispatcherOptions.deliver({ text: 'synthetic wildcard answer' }, { kind: 'final' });
+      params.replyOptions.onAgentRunTerminalOutcome('completed');
+    },
+  } }, agent: { session: { resolveStorePath: () => '/synthetic/store', getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
+  installCallConsultAuthority({ runtime, registerTrustedToolPolicy() {} } as unknown as OpenClawPluginApi);
+  const prepared = await prepareOpenClawCallVoice(resolveWeChatCallsConfig({ voice })!.voice!, cfg, runtime, {
+    voiceSdk: { ...sdk, resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: 'openai', createBridge() {} }, providerConfig: {}, capabilities: {
+      inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: false, handlesInputAudioBargeIn: true, handlesAgentConsult: true,
+    } }), createRealtimeVoiceBridgeSession: (params: any) => {
+      bridge = params; return { bridge: { isConnected: () => true, outputAudioMode: 'continuous' }, connect: async () => params.onReady(),
+        sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close() {}, sendUserMessage() {}, submitToolResult() {} };
+    } }, audioSdk: { createStreamingPcmResampler() {} },
+  });
+  const session = await prepared.open({ audio() {}, clear() {}, failed() { assert.fail('Unexpected provider failure'); } },
+    { senderId: groupId, conference: { groupId, inviterId: 'trusted-inviter' }, channelAccountId: 'default', nativeAccountId: 'a',
+      policyAtAdmission: 'safe-read-only', signal: new AbortController().signal, connectedPeer: () => groupId });
+  try {
+    assert.equal(session.binding?.().toolPolicy, 'safe-read-only');
+    assert.deepEqual(await bridge.runAgentConsult({ prompt: 'Look up a synthetic value' }), { text: 'synthetic wildcard answer' });
+    assert.equal(dispatches.length, 1); assert.equal(dispatches[0].ctx.SenderId, groupId);
+    assert.equal(dispatches[0].ctx.SessionKey, callSessionKey('main', 'per-contact', groupId, false, { accountId: 'default', nativeAccountId: 'a', groupId }));
+    assert.ok(dispatches[0].replyOptions.toolsAllow.includes('read'));
+    assert.equal(session.binding?.().owner, false, 'a trusted inviter alone does not grant the group owner tools');
+    groups[groupId] = { toolPolicy: 'none' };
+    await assert.rejects(bridge.runAgentConsult({ prompt: 'This must not run' }), /not admitted/);
+    assert.equal(dispatches.length, 1);
+  } finally { await session.close(); }
+});
 test('group consultation needs both exact grants, uses the group principal and isolates a revoked owner result', async () => {
   const path: string = 'openclaw/plugin-sdk/realtime-voice'; const sdk = await import(path);
   const voice = { enabled: true, agentId: 'main', toolPolicy: 'owner' as const, allowConsultSessionPersistence: true,

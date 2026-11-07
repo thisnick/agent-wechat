@@ -16,6 +16,9 @@
       "wechat_group_info",
       "wechat_login",
       "wechat_call"
+    ],
+    "trustedToolPolicies": [
+      "wechat-conference-consultation"
     ]
   },
   "toolMetadata": {

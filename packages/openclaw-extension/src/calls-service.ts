@@ -4,7 +4,7 @@ import type { OpenClawConfig, OpenClawPluginToolContext, PluginRuntime } from "o
 import { isNativeTombstone, NativeCallError, type NativeMessage, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type CallConferenceInvitation, type NativeCallMediaClient, type NativeCallsClient, type NativeCallPcmObserver, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
-import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
+import { resolveConferenceGroupConfig, type ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput, type CallAudioClearReason } from "./calls-audio.ts";
 import { CallPcmMixer } from "./calls-mixer.ts";
@@ -434,7 +434,7 @@ export class NativeCallService {
       const voice = account?.calls?.voice;
       if (!account?.enabled || !voice || voice.agentId !== this.config?.agentId || !account.native || !this.account.native
         || nativeConfigurationKey(account.native) !== nativeConfigurationKey(this.account.native)) return;
-      const group = Object.hasOwn(voice.conferences.groups, groupId) ? voice.conferences.groups[groupId] : voice.conferences.groups["*"];
+      const group = resolveConferenceGroupConfig(voice, groupId);
       return group ? { voice, group, ownerAllowFrom: (cfg as OpenClawConfig).commands?.ownerAllowFrom } : undefined;
     } catch { return; }
   }

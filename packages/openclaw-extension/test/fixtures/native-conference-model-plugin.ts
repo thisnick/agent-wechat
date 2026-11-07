@@ -25,6 +25,7 @@ export default { ...base, register(api: any) {
   const directory = process.env.NATIVE_CONFERENCE_FIXTURE_DIR;
   if (!directory) throw Error('Conference fixture needs isolated storage');
   const groupId = 'synthetic-group@chatroom';
+  const conferenceRule = process.env.NATIVE_CONFERENCE_WILDCARD === '1' ? '*' : groupId;
   const calls: Array<{ senderId?: string; owner?: boolean; sessionKey?: string }> = [];
   const toolErrors: string[] = [];
   const factories: unknown[] = [];
@@ -51,7 +52,7 @@ export default { ...base, register(api: any) {
         const agentCalls = await validateAgentCalls(cfg);
         const originalOwners = JSON.stringify(cfg.commands?.ownerAllowFrom);
         const voice = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: 'main', toolPolicy: 'owner', allowConsultSessionPersistence: true,
-          realtime: { provider: 'openai' }, conferences: { groups: { [groupId]: { toolPolicy: 'safe-read-only', ownerInviterToolPolicy: 'owner' } } } } })!.voice!;
+          realtime: { provider: 'openai' }, conferences: { groups: { [conferenceRule]: { toolPolicy: 'safe-read-only', ownerInviterToolPolicy: 'owner' } } } } })!.voice!;
         const voicePath: string = 'openclaw/plugin-sdk/realtime-voice'; const sdk = await import(voicePath);
         const session = (owner: boolean) => callSessionKey('main', 'per-contact', groupId, owner, { accountId: 'default', nativeAccountId: 'a', groupId });
         callService = new NativeCallService(resolveWeChatAccount(cfg)!, cfg, api.runtime);
@@ -64,7 +65,7 @@ export default { ...base, register(api: any) {
           if (callId !== 'fixture-call') throw Error('Unexpected fixture call'); callControls.push(action);
         } } });
         const request = (inviterId: string, question: string, suffix = '', toolsAllow?: string[]) => {
-          const policy = conferenceCallPolicy(voice, voice.conferences.groups[groupId], { groupId, inviterId }, cfg.commands?.ownerAllowFrom);
+          const policy = conferenceCallPolicy(voice, voice.conferences.groups[conferenceRule], { groupId, inviterId }, cfg.commands?.ownerAllowFrom);
           const owner = policy.toolPolicy === 'owner';
           return consultCallSession({
           cfg, reply: api.runtime.channel.reply, runtime: api.runtime, sessionKey: session(owner) + suffix,

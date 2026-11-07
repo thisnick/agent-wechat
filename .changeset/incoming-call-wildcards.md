@@ -11,3 +11,7 @@ Keep outbound destinations, tool requesters and owner consultation grants under
 the existing exact authorization checks. Recheck wildcard rules and current
 invitation identity before joining, and retain actual group identities for
 conversation context and separate consultation sessions.
+
+Use the same group rule for call admission and consultation so a wildcard call
+can consult the configured agent. Declare the conference tool-policy hook in
+the plugin manifest for supported Gateway versions.
