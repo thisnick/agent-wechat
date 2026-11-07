@@ -189,7 +189,7 @@ native limit: ordinary files have a 512 MiB ceiling (536,870,912 bytes);
 video sources allow 512 MiB (live-validated through 50 MiB); images and voice retain 26,214,383 bytes. Native File Transfer PDFs passed
 acceptance, recipient opening and cold byte verification at 32 MiB and 50 MiB.
 Full-client 512 MiB send validation remains pending. The 50 MiB file also passed
-real OpenClaw storage; see the [native capability checklist](../native-client-rust/FEATURES.md).
+real OpenClaw storage.
 Raising `mediaMaxMb` cannot extend the kind-specific limit. Kind selection occurs
 before staging, using the local extension or HTTP content type. Ordinary audio
 is a file unless `audioAsVoice` selects voice.
@@ -207,8 +207,7 @@ video attachment, the regular message tool accepts
 unchanged source too; `"normal"` selects playback only. Set `mediaMaxMb` to allow
 the source size. `forceDocument` (or host alias `asDocument`) sends the media as
 an ordinary file and cannot be combined with video quality. Video jobs poll the
-same job for up to an hour. See the native capability checklist for separate
-server, recipient and local-writeback validation.
+same job for up to an hour.
 
 
 ## Optional Gateway facade

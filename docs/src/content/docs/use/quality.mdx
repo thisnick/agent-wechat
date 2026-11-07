@@ -103,5 +103,5 @@ Set `mediaMaxMb` to allow the source size. Use `asDocument: true` without `video
 - Download policy controls automatic caching; manual requests remain available. See [Settings](/use/settings/).
 - Keep job IDs after timeouts. Reusing a send key with different quality conflicts; see [Sends and recovery](/how-it-works/sends/).
 - The playback copy must fit in 25 MiB, so a video with audio can be at most about 29 minutes long, whatever its source size. Preparation stops with `media_encoder_timeout` after 5 minutes, which a large source can reach on slow hardware.
-- Server acceptance, recipient playback and source-byte equality are separate checks. See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md).
+- Server acceptance, recipient playback and source-byte equality are separate checks.
 </Aside>

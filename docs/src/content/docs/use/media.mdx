@@ -109,7 +109,6 @@ Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinar
 
 <Aside title="Good to know">
 - File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
-- See the [capability checklist](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) for tested platforms, destinations and remaining limits.
 - Sending a large file or an original-quality video holds about twice the source size in the daemon's memory while it uploads.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
 - Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.

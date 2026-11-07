@@ -104,13 +104,11 @@ See [CLI examples](https://thisnick.github.io/agent-wechat/use/cli/),
 | Desktop | Conversation search, media views, quote navigation, mention picker, native file saving, tray behavior, and notifications. See platform acceptance status above. |
 | Automation | Use the `wx` CLI or authenticated HTTP API; follow replayable events and inspect send/download jobs. |
 
-Outgoing quoted replies and link-card sends are implemented but still await live
-recipient validation. Media availability depends on the received source, supported
-formats, and size limits. Search covers stored history, not all remote history.
+Media availability depends on the received source, supported formats, and size
+limits. Search covers stored history, not all remote history.
 See [message types](https://thisnick.github.io/agent-wechat/how-it-works/message-types/),
-[media](https://thisnick.github.io/agent-wechat/use/media/),
-[groups](https://thisnick.github.io/agent-wechat/use/groups/), and the
-[implementation and validation checklist](packages/native-client-rust/FEATURES.md).
+[media](https://thisnick.github.io/agent-wechat/use/media/), and
+[groups](https://thisnick.github.io/agent-wechat/use/groups/).
 
 ## Use your existing official profile
 
@@ -159,7 +157,7 @@ DMs and groups are disabled until configured. Replies use the connected account.
 | Access policies | Separate DM/group policies, sender allowlists, and per-group overrides. |
 | Current-chat tools | `wechat_history`, `wechat_search`, `wechat_message`, and `wechat_media` for stored history and verified attachment retrieval. |
 | Optional archive access | `wechat_archive_*` tools can list/search/read all chats in the configured account when granted by agent tool policy. |
-| Message actions | `wechat_recall`; quoted replies through `message.replyTo` and link cards through `wechat_send_share` have the live-validation limits noted above. |
+| Message actions | `wechat_recall`, quoted replies through `message.replyTo`, and link cards through `wechat_send_share`. |
 | Login assistance | `wechat_login` can inspect status, show a login QR, wait for approval, disconnect, log out, or explicitly forget local authentication. |
 | Group information | `wechat_group_info` provides owner/admin-authorized cached group/member reads. Group mutation tools are not exposed. |
 | Read behavior | Mark chats read after inbound handling, after confirmed model dispatch, or never. This acts on the whole chat through its read boundary. |
