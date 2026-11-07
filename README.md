@@ -107,9 +107,8 @@ See [CLI examples](https://thisnick.github.io/agent-wechat/use/cli/),
 Media availability depends on the received source, supported formats, and size
 limits. Search covers stored history, not all remote history.
 See [message types](https://thisnick.github.io/agent-wechat/how-it-works/message-types/),
-[media](https://thisnick.github.io/agent-wechat/use/media/),
-[groups](https://thisnick.github.io/agent-wechat/use/groups/), and the
-[implementation and validation checklist](packages/native-client-rust/FEATURES.md).
+[media](https://thisnick.github.io/agent-wechat/use/media/), and
+[groups](https://thisnick.github.io/agent-wechat/use/groups/).
 
 ## Use your existing official profile
 

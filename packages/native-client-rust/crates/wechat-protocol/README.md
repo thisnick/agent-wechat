@@ -117,7 +117,6 @@ rejected rather than guessed. The path has synthetic schema/transfer tests and
 an isolated native 32 MiB File Transfer PDF accepted with exact readback,
 recipient opening and complete local writeback. Cold CLI/SDK byte and range
 checks passed; recipient-exported SHA-256 remains unavailable.
-See [FEATURES.md](../../FEATURES.md) for the current validation record.
 
 ## Call codecs
 

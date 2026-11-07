@@ -244,8 +244,7 @@ retain completed note IDs and must not automatically resend.
 Ordinary file sources have an initial 32 MiB cap (33,554,432 bytes). Image, video
 and voice sources retain the 25 MiB minus 17 byte cap (26,214,383 bytes), below the
 separate 128 MiB cached HTTP bound. A 32 MiB File Transfer PDF passed native
-acceptance, recipient opening and cold byte verification; see
-[FEATURES.md](FEATURES.md) for the tested scope and remaining limits.
+acceptance, recipient opening and cold byte verification.
 `account capabilities` reports `mediaUploadMaxBytes` for staging and a
 `mediaSendMaxBytes` map for each supported send kind. Uploading a source does not
 make it eligible for every kind.

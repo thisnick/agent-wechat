@@ -21,7 +21,7 @@ The initial scope is taking over an existing stopped official profile and contin
 | Clients | Account-scoped API, authenticated resource cursors, replay/SSE, generated Rust→TS contracts, native CLI/SDK | CLI lifecycle and transport fixtures exercise real binaries without account credentials. Tombstones preserve deleted view positions. |
 | OpenClaw | Managed/external native hosting, durable custody, admitted text/media, native sends and optional Gateway facade | Actual pinned Gateway/local-model tests verify correlated text, image bytes and file/video/voice references in direct and group turns. Explicit host permission is required; omitted, unsupported or ambiguous inputs remain unread. |
 
-[FEATURES.md](FEATURES.md) separates required implementation, focused tests and remaining live validation. [CLI.md](CLI.md) covers configuration, background ownership, login, offline profiles, media, receipts and exit codes. Unknown commands remain encrypted in sidecars until a supported official projection succeeds. An accepted sync checkpoint does not imply that every official file has caught up.
+[CLI.md](CLI.md) covers configuration, background ownership, login, offline profiles, media, receipts and exit codes. Unknown commands remain encrypted in sidecars until a supported official projection succeeds. An accepted sync checkpoint does not imply that every official file has caught up.
 
 ## Build and verify
 

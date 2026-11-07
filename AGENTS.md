@@ -34,14 +34,14 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Write plain sentences for a reader who hasn't seen the code. Avoid "explicit", "bounded", "durable", "custody", "projection" and similar internal terms unless the page defines them.
 - Prefer a table, diagram (a `mermaid` code block, rendered at build time) or example over a paragraph.
 - Keep task pages short, roughly 600 words; split a page that grows past that.
-- Internal test evidence, CI scripts and release mechanics belong in `FEATURES.md`, `RELEASING.md`, `PLATFORM-ACCEPTANCE.md` or `deploy/native/README.md`, not in the `docs/` site.
+- Internal test evidence, CI scripts and release mechanics belong in `RELEASING.md`, `PLATFORM-ACCEPTANCE.md` or `deploy/native/README.md`, not in the `docs/` site.
 - Moving or renaming a page needs an entry in `moved` in `docs/astro.config.mjs` so old links keep working.
 
 ## Runtime boundaries
 
 ### Standalone native backend
 
-Read `packages/native-client-rust/FEATURES.md` before claiming native compatibility. Native tests and live server acceptance do not establish official-client rendering or recipient playback. Keep account/profile identity admission, per-account mutation guards, accepted credential generations, logout fences and durable projection journals intact. Retain unknown sync commands rather than advancing the official projected cursor past them. Local repair uses already owned bytes and receipts; it must never resend or start a transfer. Profile handoff requires exclusive ownership and complete projection checks, or an explicit incomplete-copy request with reported gaps. Preserve unknown official files and never delete FTS databases as a general repair.
+Native tests and live server acceptance do not establish official-client rendering or recipient playback. Keep account/profile identity admission, per-account mutation guards, accepted credential generations, logout fences and durable projection journals intact. Retain unknown sync commands rather than advancing the official projected cursor past them. Local repair uses already owned bytes and receipts; it must never resend or start a transfer. Profile handoff requires exclusive ownership and complete projection checks, or an explicit incomplete-copy request with reported gaps. Preserve unknown official files and never delete FTS databases as a general repair.
 
 ### Local data and media
 
