@@ -19,8 +19,8 @@ default = []
 experimental-calls = []
 
 [dependencies]
-wechat-media = { path = "../wechat-media", version = "=1.5.1" }
-wechat-platform = { path = "../wechat-platform", version = "=1.5.1" }
+wechat-media = { path = "../wechat-media", version = "=2.0.0-beta.0" }
+wechat-platform = { path = "../wechat-platform", version = "=2.0.0-beta.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

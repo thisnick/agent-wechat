@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/agent-wechat",
-  "version": "1.5.1",
+  "version": "2.0.0-beta.0",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -27,7 +27,7 @@
     "channel": {
       "id": "agent-wechat",
       "label": "WeChat",
-      "selectionLabel": "WeChat (\u5fae\u4fe1)",
+      "selectionLabel": "WeChat (微信)",
       "order": 80
     },
     "install": {
