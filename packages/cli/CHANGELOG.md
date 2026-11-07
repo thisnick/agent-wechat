@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 2.0.0-beta.1
+
+### Patch Changes
+
+- [#406](https://github.com/thisnick/agent-wechat/pull/406) [`f4f6b0b`](https://github.com/thisnick/agent-wechat/commit/f4f6b0b8fa87ce10047afc9968d26cf30f211b76) Thanks [@thisnick](https://github.com/thisnick)! - Move the shared per-account call admission state machine into wechat-calls.
+  The daemon uses the same implementation and retains its account permissions,
+  operation journals, stale-attempt checks and uncertain-outcome handling.
+
 ## 2.0.0-beta.0
 
 ### Major Changes
