@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(process.env.OPENCLAW_TEST_SDK_ROOT ?? join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.ok(['2026.10.9', '2026.10.10'].includes(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version));
+assert.ok(['2026.10.9', '2026.10.10', '2026.11.1'].includes(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const temporary = await mkdtemp(join(tmpdir(), 'native-conference-model-'));
 const requests = [], streams = new Set(); let child, log = '';

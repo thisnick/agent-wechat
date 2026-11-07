@@ -16,7 +16,12 @@ export async function validateCallContextVoice(runtime: PluginRuntime, cfg: Open
     const provider = { id: 'openai', createBridge(params: any) {
       bridgeRequest = params; let connected = false;
       return { outputAudioMode: continuous ? 'continuous' : 'response',
-        connect: async () => { connected = true; params.onReady(); }, isConnected: () => connected,
+        connect: async () => {
+          // Exercise the same structured-clone boundary as a provider's media
+          // Worker, using the real Gateway's lifecycle-wrapped request.
+          assert.deepEqual(structuredClone(params.audioFormat), pcm);
+          connected = true; params.onReady();
+        }, isConnected: () => connected,
         sendUserMessage: (text: string) => spoken.push(text), sendAudio: (pcm: Buffer) => inputs.push(pcm),
         setMediaTimestamp() {}, handleBargeIn(options: unknown) {
           assert.deepEqual(options, { force: true, audioPlaybackActive: true });
