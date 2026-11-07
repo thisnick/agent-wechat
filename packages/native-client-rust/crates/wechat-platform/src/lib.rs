@@ -512,3 +512,7 @@ mod tests {
             .is_err());
     }
 }
+
+pub fn platform_name() -> &'static str {
+    std::env::consts::OS
+}

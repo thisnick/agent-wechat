@@ -18,6 +18,7 @@ fn wechat_platform::is_link | fn(metadata: &std::fs::Metadata) -> bool | Include
 fn wechat_platform::local_ipv4_addresses | fn() -> std::io::error::Result<alloc::vec::Vec<core::net::ip_addr::Ipv4Addr>> | MISSING DOC
 fn wechat_platform::owned_path | fn(path: &std::path::Path) -> std::io::error::Result<bool> | MISSING DOC
 fn wechat_platform::path_bytes | fn(path: &std::path::Path) -> alloc::vec::Vec<u8> | MISSING DOC
+fn wechat_platform::platform_name | fn() -> &'static str | MISSING DOC
 fn wechat_platform::private_dir | fn(path: &std::path::Path) -> std::io::error::Result<()> | MISSING DOC
 fn wechat_platform::private_file | fn(file: &std::fs::File) -> std::io::error::Result<bool> | MISSING DOC
 fn wechat_platform::private_path | fn(path: &std::path::Path) -> std::io::error::Result<bool> | MISSING DOC

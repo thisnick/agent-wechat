@@ -223,7 +223,7 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
   ];
   return [
     tool(names[0], "history", "Read the current WeChat conversation's locally stored messages, newest first, beyond the recent inbound buffer. Follow nextCursor for older history; no remote history backfill or read marking.", { ...pageSchema }),
-    tool(names[1], "search", "Search the current WeChat conversation's locally stored message text by case-insensitive substring, beyond buffered messages. Follow nextCursor with the same query in this conversation.", { query: querySchema, ...pageSchema }, ["query"]),
+    tool(names[1], "search", "Search the current WeChat conversation's locally stored message text by case-insensitive substring, beyond buffered messages. Follow nextCursor with the same query in this conversation.", { query: querySchema, sender: { type: "string", maxLength: 256 }, ...pageSchema }, ["query"]),
     tool(names[2], "message", "Look up a stored message by its exact opaque message ID in the current WeChat conversation. Media is described without downloading it; use wechat_media to retrieve its attachment. Long text is bounded.", { messageId: messageIdSchema }, ["messageId"]),
     tool(names[3], "media", "Retrieve a message attachment or quoted text/image/link from the current WeChat conversation. Use the parent quote message ID for quotes. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.", mediaSchema, ["messageId"]),
   ];

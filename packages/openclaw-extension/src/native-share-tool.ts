@@ -49,7 +49,7 @@ export function createNativeShareTools(context: OpenClawPluginToolContext, depen
     description: "Send a URL share card to the current WeChat conversation, with an explicit title, URL, optional description and public thumbnail URL. Does not fetch or summarize the linked page. Use one idempotencyKey per intended share and reuse it after timeouts; never retry an uncertain send with a new key. Returns a durable send ID and state. Accepted means server acceptance; recipient rendering requires verification.",
     parameters: { type: "object", additionalProperties: false, required: ["title", "url", "idempotencyKey"], properties: {
       title: { type: "string", minLength: 1, maxLength: 16384, description: "Card title shown in the chat." }, url: { type: "string", minLength: 1, maxLength: 8192, description: "Link the card opens." },
-      description: { type: "string", maxLength: 16384, description: "Optional summary shown under the title." }, thumbnailUrl: { type: "string", minLength: 1, maxLength: 8192, description: "Public HTTP(S) image URL advertised as the card thumbnail; no upload or page scraping." },
+      thumbnailUrl: { type: "string", minLength: 1, maxLength: 8192, description: "Public HTTP(S) image URL advertised as the card thumbnail; no upload or page scraping." },
       idempotencyKey: { type: "string", minLength: 1, maxLength: 200, description: "Stable unique key for this logical share. Reuse the same key and identical fields when inspecting/retrying this request." },
     } } as ChannelAgentTool["parameters"],
     execute: async (_callId, input: unknown, signal?: AbortSignal) => {

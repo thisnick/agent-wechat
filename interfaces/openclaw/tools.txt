@@ -29,7 +29,7 @@ tool wechat_call.groupId | string, min length 1, max length 200 | Group of the c
 tool wechat_group_info | enabled by default | Read cached group information and one page of members for the configured WeChat account. Available only to the trusted OpenClaw owner. Does not create groups, invite people or change settings. Cached member absence does not prove non-membership.
 tool wechat_group_info.cursor | string, max length 8192 | Opaque nextCursor from the previous wechat_group_info result; do not invent one.
 tool wechat_group_info.groupId | string, required, min length 10, max length 256 | Exact ordinary group username ending in @chatroom.
-tool wechat_group_info.limit | integer, min 1, max 100 | Maximum number of members on this page.
+tool wechat_group_info.limit | integer, min 1, max 50 | Maximum number of members on this page.
 tool wechat_group_info.username | string, min length 1, max length 256 | Optionally inspect one exact member instead of listing a page.
 tool wechat_history | enabled by default | Read the current WeChat conversation's locally stored messages, newest first, beyond the recent inbound buffer. Follow nextCursor for older history; no remote history backfill or read marking.
 tool wechat_history.cursor | string, max length 8192 | Opaque nextCursor from the same tool and query; do not invent one.
@@ -52,8 +52,8 @@ tool wechat_search | enabled by default | Search the current WeChat conversation
 tool wechat_search.cursor | string, max length 8192 | Opaque nextCursor from the same tool and query; do not invent one.
 tool wechat_search.limit | integer, min 1, max 50, default 20 | Maximum number of results on this page.
 tool wechat_search.query | string, required, min length 1, max length 256 | Case-insensitive text to find in message text.
+tool wechat_search.sender | string, max length 256 | MISSING DESCRIPTION
 tool wechat_send_share | enabled by default | Send a URL share card to the current WeChat conversation, with an explicit title, URL, optional description and public thumbnail URL. Does not fetch or summarize the linked page. Use one idempotencyKey per intended share and reuse it after timeouts; never retry an uncertain send with a new key. Returns a durable send ID and state. Accepted means server acceptance; recipient rendering requires verification.
-tool wechat_send_share.description | string, max length 16384 | Optional summary shown under the title.
 tool wechat_send_share.idempotencyKey | string, required, min length 1, max length 200 | Stable unique key for this logical share. Reuse the same key and identical fields when inspecting/retrying this request.
 tool wechat_send_share.thumbnailUrl | string, min length 1, max length 8192 | Public HTTP(S) image URL advertised as the card thumbnail; no upload or page scraping.
 tool wechat_send_share.title | string, required, min length 1, max length 16384 | Card title shown in the chat.

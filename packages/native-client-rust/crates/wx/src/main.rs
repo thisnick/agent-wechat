@@ -493,9 +493,6 @@ enum ChatCommand {
     Find {
         /// Name or ID text to search for.
         query: String,
-        /// Only find chats of this kind: direct, group or system.
-        #[arg(long)]
-        kind: Option<String>,
     },
     /// Mark the whole chat read using its current read-state version.
     Read {
@@ -902,7 +899,7 @@ struct MessageSendArgs {
     #[arg(long)]
     detach: bool,
     /// Seconds to wait for the send to finish (up to 3600 for attachments, 900 otherwise).
-    #[arg(long, default_value_t = 30, conflicts_with = "detach")]
+    #[arg(long, default_value_t = 60, conflicts_with = "detach")]
     wait: u64,
 }
 #[derive(Subcommand)]
@@ -1978,15 +1975,9 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?
             }
             ChatCommand::Get { id } => r.get(&r.path(&format!("threads/{}", encode(&id)))?).await?,
-            ChatCommand::Find {
-                query: search,
-                kind,
-            } => {
-                r.get(&query(
-                    r.path("threads")?,
-                    &[("query", Some(search)), ("kind", kind)],
-                ))
-                .await?
+            ChatCommand::Find { query: search } => {
+                r.get(&query(r.path("threads")?, &[("query", Some(search))]))
+                    .await?
             }
             ChatCommand::Read {
                 id,

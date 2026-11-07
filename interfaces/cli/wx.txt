@@ -107,7 +107,6 @@ wx calls monitor --output-device | takes <OUTPUT_DEVICE> | Local backend sink na
 wx calls status | - | Read the daemon's current call state and exit
 wx chats | - | Find chats and change their read state and settings
 wx chats find | - | Find chats matching a name or ID
-wx chats find --kind | takes <KIND> | Only find chats of this kind: direct, group or system
 wx chats find <QUERY> | position 1, required | Name or ID text to search for
 wx chats get | - | Show one chat and its current read-state version
 wx chats get <ID> | position 1, required | Chat ID from wx chats list
@@ -362,7 +361,7 @@ wx messages send --title | takes <TITLE> | Title shown on the shared link card
 wx messages send --video | takes <VIDEO> | Send this MP4 video file
 wx messages send --video-quality | takes <VIDEO_QUALITY>, values normal|original | Prepare normal playback, or include the unchanged original video too
 wx messages send --voice | takes <VOICE> | Send this audio file as a voice message
-wx messages send --wait | takes <WAIT>, default 30 | Seconds to wait for the send to finish (up to 3600 for attachments, 900 otherwise)
+wx messages send --wait | takes <WAIT>, default 60 | Seconds to wait for the send to finish (up to 3600 for attachments, 900 otherwise)
 wx messages send <THREAD> | position 1, required | Chat ID to send to, from wx chats list
 wx messages send-status | - | Show an outgoing send by ID
 wx messages send-status <ID> | position 1, required | Send ID printed by wx messages send
