@@ -104,9 +104,14 @@ Restart the Gateway after saving the configuration. An enabled, prepared voice
 service reports `available` when the daemon is free; provider or capability
 failure reports `unavailable` and leaves calls unanswered.
 
+For incoming direct voice calls, `inboundAllowFrom: ["*"]` accepts any caller
+when `inboundPolicy` is `"allowlist"`. Use contact IDs to restrict callers.
+An empty list accepts none. This setting does not grant owner tools.
+
 ## Conference calls
 
-Add exact group IDs under `calls.voice.conferences.groups`:
+Add group IDs under `calls.voice.conferences.groups`. Use `"*"` as a fallback
+for other groups:
 
 ```json
 {
@@ -116,18 +121,43 @@ Add exact group IDs under `calls.voice.conferences.groups`:
         "autoJoin": true,
         "autoJoinAllowFrom": ["trusted-inviter"],
         "toolPolicy": "safe-read-only"
+      },
+      "*": {
+        "autoJoin": true,
+        "autoJoinAllowFrom": ["trusted-inviter"],
+        "toolPolicy": "safe-read-only"
+      },
+      "quiet-group@chatroom": {
+        "autoJoin": false
       }
     }
   }
 }
 ```
 
+An exact group rule replaces the wildcard rule, including `autoJoin: false`;
+the rules are not merged. The example accepts `trusted-inviter` across groups,
+except `quiet-group@chatroom`.
+
 An empty map enables no conference automation or conference tool destinations.
 `autoJoin` defaults to `false`; when enabled, the plugin prepares speech before
-joining a current invitation. Optional `autoJoinAllowFrom` restricts auto-join to
-the listed inviter IDs; an empty list disables it. Without that field, all
-current invitations for this configured group are eligible. The inviter is
-rechecked before joining. Direct-call allowlists remain separate.
+joining a current invitation. `autoJoinAllowFrom` lists eligible inviters:
+
+| Value | Eligible invitations |
+| --- | --- |
+| `["trusted-inviter"]` | Only that contact. |
+| `["*"]` | Any inviter. |
+| `[]` | None. |
+| Omitted | Any inviter for an exact group rule; invalid for wildcard auto-join. |
+
+The inviter and current rule are rechecked before joining. Direct-call allowlists
+remain separate. Wildcards do not apply to outbound contact lists, tool requesters
+or owner grants; each group still needs its own exact owner grant for owner
+consultation.
+
+These conference rules are separate from normal group-chat access. The chat
+wildcard is `channels.agent-wechat.groups["*"]`; configuring either wildcard does
+not enable the other. See [Who the bot answers](../access/) for chat replies.
 
 The optional `wechat_call` tool supports these additional actions:
 
@@ -202,6 +232,10 @@ inviter leaves. Permissions can decrease during a call; increases require a new
 call. Status reports the inviter and effective policy. Owner and read-only calls
 use separate sessions and recaps; old call recaps without a known permission
 level are not reused.
+
+Conferences started by the bot use the group's `toolPolicy`. The
+`ownerInviterToolPolicy` override applies only to incoming invitations; the
+requesting agent session's owner permissions do not transfer into a new call.
 
 ## Models and behavior
 

@@ -4,7 +4,7 @@ import type { OpenClawConfig, OpenClawPluginToolContext, PluginRuntime } from "o
 import { isNativeTombstone, NativeCallError, type NativeMessage, type CallAudioFormat, type CallEvent, type CallOffer, type CallPendingOffer, type CallView, type CallConferenceInvitation, type NativeCallMediaClient, type NativeCallsClient, type NativeCallPcmObserver, type NativeCallWebSocketFactory } from "@agent-wechat/shared";
 import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount, type ResolvedWeChatAccount } from "./types.ts";
-import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
+import { resolveConferenceGroupConfig, type ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput, type CallAudioClearReason } from "./calls-audio.ts";
 import { CallPcmMixer } from "./calls-mixer.ts";
@@ -277,7 +277,7 @@ export class NativeCallService {
     void this.prepareIncoming(active);
   }
   private allowedIncoming(offer: Pick<CallOffer, "kind" | "callType" | "callerId">): boolean {
-    return !!this.config && this.config.inboundPolicy === "allowlist" && this.config.inboundAllowFrom.includes(offer.callerId)
+    return !!this.config && this.config.inboundPolicy === "allowlist" && (this.config.inboundAllowFrom.includes("*") || this.config.inboundAllowFrom.includes(offer.callerId))
       && offer.kind === "direct" && offer.callType === "voice";
   }
   private pending(offer: CallPendingOffer): void {
@@ -428,18 +428,19 @@ export class NativeCallService {
   }
   private groupPolicy(groupId: string) {
     try {
+      if (groupId === "*" || !groupId.endsWith("@chatroom")) return;
       const cfg = this.runtime.config?.current?.() ?? this.cfg;
       const account = resolveWeChatAccount(cfg as Record<string, unknown>, this.account.accountId);
       const voice = account?.calls?.voice;
       if (!account?.enabled || !voice || voice.agentId !== this.config?.agentId || !account.native || !this.account.native
         || nativeConfigurationKey(account.native) !== nativeConfigurationKey(this.account.native)) return;
-      const group = Object.hasOwn(voice.conferences.groups, groupId) ? voice.conferences.groups[groupId] : undefined;
+      const group = resolveConferenceGroupConfig(voice, groupId);
       return group ? { voice, group, ownerAllowFrom: (cfg as OpenClawConfig).commands?.ownerAllowFrom } : undefined;
     } catch { return; }
   }
   private allowedAutoJoin(invitation: CallConferenceInvitation): boolean {
     const group = this.groupPolicy(invitation.groupId)?.group;
-    return !!group?.autoJoin && (group.autoJoinAllowFrom === undefined || group.autoJoinAllowFrom.includes(invitation.callerId));
+    return !!group?.autoJoin && (group.autoJoinAllowFrom === undefined || group.autoJoinAllowFrom.includes("*") || group.autoJoinAllowFrom.includes(invitation.callerId));
   }
   private autoJoinConference(): void {
     if (this.stopped || this.state !== "available" || this.active || this.busy || !this.capabilities.conferenceJoin || !this.capabilities.conferenceAudio || !this.client?.joinConference) return;
