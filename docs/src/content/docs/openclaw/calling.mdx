@@ -155,6 +155,10 @@ remain separate. Wildcards do not apply to outbound contact lists, tool requeste
 or owner grants; each group still needs its own exact owner grant for owner
 consultation.
 
+These conference rules are separate from normal group-chat access. The chat
+wildcard is `channels.agent-wechat.groups["*"]`; configuring either wildcard does
+not enable the other. See [Who the bot answers](../access/) for chat replies.
+
 The optional `wechat_call` tool supports these additional actions:
 
 | Action | Arguments |
