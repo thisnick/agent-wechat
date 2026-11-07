@@ -1,6 +1,6 @@
 [package]
 name = "wechat-protocol"
-version.workspace = true
+version = "2.0.0-beta.1"
 edition.workspace = true
 license-file = "LICENSE"
 publish = ["crates-io"]

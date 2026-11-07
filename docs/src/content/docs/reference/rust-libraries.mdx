@@ -18,7 +18,7 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
 
 ## Add dependencies
 
-1. Choose the same native release version for all libraries. Replace `VERSION`
+1. Choose the same published Rust library version for all libraries. Replace `VERSION`
    below with that version. `wechat-calls` and the account-owning client API first
    ship in the conference release; they are absent from older releases.
 
@@ -28,6 +28,10 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
 
 2. Build with Rust 1.93.1+, a C compiler, Make and Perl. Cargo resolves supporting
    crates automatically. Native Opus also needs CMake and a C++ compiler.
+
+Rust libraries are versioned together, independently of the CLI, daemon and
+OpenClaw plugin. Choose a version listed on crates.io; application version numbers
+do not select library versions.
 
 ## Read a stopped profile
 
@@ -96,7 +100,7 @@ before advancing it.
 
 ## Use calling media
 
-Add `wechat-calls` at the matching native version. It opens no devices or Tokio
+Add `wechat-calls` at the same Rust library version. It opens no devices or Tokio
 runtime. See its [crate guide](https://docs.rs/crate/wechat-calls/latest) for examples.
 
 | Features | Use |

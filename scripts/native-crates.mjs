@@ -6,7 +6,7 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readReleasePolicy, readReleaseVersion } from './native-release-policy.mjs';
+import { crateReleaseTag, readCratePolicy, readCrateVersion } from './native-crates-version.mjs';
 
 // Dependency order also applies when an existing crate and a new name use different credentials.
 export const crateNames = ['wechat-platform', 'wechat-media', 'wechat-protocol', 'wechat-profile', 'wechat-calls'];
@@ -17,7 +17,7 @@ const selections = names => names.flatMap(name => ['-p', name]);
 export function releaseVersionInput(command, version) {
   if (!version && ['plan', 'publish'].includes(command)) throw new Error('Registry publication requires an explicit RELEASE_VERSION');
   // GitHub sets a missing workflow_call input to an empty string on pull_request.
-  // Local/PR validation uses the committed CLI version; publication stays explicit.
+  // Local/PR validation uses the committed library version; publication stays explicit.
   return version || undefined;
 }
 
@@ -31,7 +31,9 @@ export async function syncCrateVersions(root, version) {
   for (const name of crateNames) {
     const path = join(root, 'packages/native-client-rust/crates', name, 'Cargo.toml');
     const old = await readFile(path, 'utf8');
-    const updated = old.replace(/^(wechat-[\w-]+)\s*=\s*\{[^\n]*\}/gm,
+    if (!/^(?:version\.workspace = true|version = "[^"]+")$/m.test(old)) throw new Error(`Missing package version: ${name}`);
+    const versioned = old.replace(/^(?:version\.workspace = true|version = "[^"]+")$/m, `version = "${version}"`);
+    const updated = versioned.replace(/^(wechat-[\w-]+)\s*=\s*\{[^\n]*\}/gm,
       (line, dependency) => {
         if (!/\bpath\s*=/.test(line)) return line;
         if (!crateNames.includes(dependency)) throw new Error(`Unpublished library dependency: ${dependency}`);
@@ -74,11 +76,11 @@ async function request(url, fetchImpl, token) {
   return response;
 }
 
-export async function verifyReleaseSource({ version, sourceCommit, prerelease, fetchImpl = fetch, token }) {
+export async function verifyReleaseSource({ version, sourceCommit, fetchImpl = fetch, token }) {
   if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? '')) throw new Error('A full release source commit is required');
   const base = `https://api.github.com/repos/${repository}`;
-  let response = await request(`${base}/git/ref/tags/v${version}`, fetchImpl, token);
-  if (response.status !== 200) throw new Error('Crates wait for the matching published native release');
+  let response = await request(`${base}/git/ref/tags/${crateReleaseTag(version)}`, fetchImpl, token);
+  if (response.status !== 200) throw new Error('Crates require the matching library release tag');
   let object = (await response.json()).object;
   for (let depth = 0; object?.type === 'tag' && depth < 5; depth++) {
     if (!/^[a-f0-9]{40}$/.test(object.sha ?? '')) throw new Error('Invalid release tag');
@@ -87,12 +89,6 @@ export async function verifyReleaseSource({ version, sourceCommit, prerelease, f
     object = (await response.json()).object;
   }
   if (object?.type !== 'commit' || object.sha !== sourceCommit) throw new Error('Release tag differs from crate source');
-  response = await request(`${base}/releases/tags/v${version}`, fetchImpl, token);
-  if (response.status !== 200) throw new Error('Native release is missing');
-  const release = await response.json();
-  if (release.tag_name !== `v${version}` || release.draft !== false || release.prerelease !== prerelease) {
-    throw new Error('Native release version/channel mismatch');
-  }
 }
 
 async function archiveSource(bytes, name, version) {
@@ -164,10 +160,9 @@ export function publishPending(plan, { env, runCargo }) {
 
 export async function main(command, { root = process.cwd(), allowDirty = false } = {}) {
   const options = { root, version: releaseVersionInput(command, process.env.RELEASE_VERSION) };
-  // A PR may stage entry/exit from beta before Changesets cuts the next version.
-  // Only actual publication requires a completed channel transition.
+  // Public libraries use the committed library version, independently of app channels.
   const policy = ['plan', 'publish'].includes(command)
-    ? await readReleasePolicy(options) : { version: await readReleaseVersion(options) };
+    ? await readCratePolicy(options) : { version: await readCrateVersion(options) };
   const cargo = (args, env = {}) => execFileSync('cargo', [...args, '--manifest-path', join(root, workspace)],
     { cwd: root, stdio: 'inherit', env: { ...process.env, ...env } });
   const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--locked', '--format-version', '1',

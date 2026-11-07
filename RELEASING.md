@@ -27,7 +27,7 @@ pnpm changeset
    entries for that exact version. Empty fixed-group entries are omitted; a
    desktop-only release can leave both npm package entries empty.
 
-4. Merge the Version Packages PR. GitHub automatically starts
+4. Merge the Version Packages PR. Application version changes automatically start
    **Prepare native release assets** (`native-release.yml`) for that exact commit.
    The automatic run requires a merged PR from this repository's
    `changeset-release/main` branch. It builds and tests the configured targets, verifies
@@ -44,14 +44,16 @@ pnpm changeset
    them into the versioned multi-architecture tag. Stable versions also update
    `latest`.
 
-6. The same native release run packages and publishes the five Rust libraries,
-   after the runtime image succeeds and the `native-release` environment permits
-   publication. Each crate uses the native version and exact release source.
-   Cargo publishes dependencies before their consumers. The other workspace
-   crates and desktop package keep `publish = false`.
+6. When the Version Packages PR changes `@agent-wechat/rust-crates`, the same
+   `native-release.yml` workflow independently tests, packages and publishes the
+   five Rust libraries under the protected `native-release` environment. All five
+   use the library package version and exact version-PR source, with dependencies
+   published before consumers. Library-only releases skip application assets,
+   images and npm. Application-only releases skip Rust publication. Unpublished
+   workspace crates retain the application version and `publish = false`.
 
 7. The same run automatically starts **Publish npm packages** once native
-   assets, the multi-architecture image and all five Rust libraries succeed.
+   assets and the multi-architecture image succeed. Rust publication is independent.
    The job verifies the native assets, embeds their manifest in the CLI package
    and publishes both npm packages with provenance. Prereleases use their
    Changesets channel (such as `beta`). Stable releases use `latest`.
@@ -69,6 +71,22 @@ or feature semantics to these libraries merely because the daemon needs them.
 Use the repository's protocol-evidence and official-state rules when behavior
 changes; incomplete analysis is not a reason to invent replacement behavior.
 
+The private Changesets package `@agent-wechat/rust-crates` owns the version and
+changelog for all five published crates. It is outside the application fixed
+version group and is never published to npm. Add it to a changeset for a library
+change; also select affected application packages when their behavior changes.
+Use patch/minor/major according to the public Rust API change. Run
+`pnpm version-packages` to update public manifests, exact internal dependencies
+and Cargo lockfiles. See [the package guide](packages/rust-crates/README.md).
+
+A merged version PR that changes this package starts library checks and archive
+verification even when the CLI version is unchanged. Publication uses an
+immutable `crates-vVERSION` tag at that merge commit. Once all five registry
+versions pass source/checksum verification, the workflow publishes the library
+changelog as a separate GitHub release; it never replaces the latest app release.
+The existing `native-release.yml` caller and `native-release` environment retain
+the configured crates.io trusted-publisher identity.
+
 For each release affecting the public libraries:
 
 - Review public functions, types, fields, error variants, feature flags and
@@ -80,8 +98,8 @@ For each release affecting the public libraries:
   and assess new native build/runtime requirements and licenses. Do not upgrade
   unrelated dependencies just to cut a release.
 - Keep the five public crates' versions and internal dependency requirements
-  synchronized through `pnpm version-packages`. A public library may not depend
-  on an unpublished workspace crate. Required support crates remain published
+  synchronized to `@agent-wechat/rust-crates` through `pnpm version-packages`.
+  A public library may not depend on an unpublished workspace crate. Required support crates remain published
   even when users normally depend only on protocol/profile/calls.
 - Run the pinned formatter, warning-denying Clippy, relevant library tests and
   public examples. `node scripts/native-crates.mjs package` builds the actual
@@ -113,17 +131,19 @@ Then revoke the bootstrap token and remove the environment secret. Later
 releases use the official Rust trusted-publishing action and its temporary token.
 
 PRs build packages without credentials or registry writes. Publication requires
-the exact native release tag, clean source checkout, matching channel and the
-protected environment. Do not manually publish an old binary version from newer
-source. The first crate version is the next release containing this change.
+the exact library release tag, clean source checkout, matching channel and the
+protected environment. Do not publish an existing library version from newer
+source.
 
 For a failed or uncertain upload, inspect crates.io before retrying the failed
-native release job at the same commit. The job verifies existing versions against
-the exact validated archive checksums and Git source, then publishes only missing
+Rust publication job at the same commit. For manual library recovery, dispatch
+`native-release.yml` on `main` with `crate_version=VERSION`,
+`confirm_publish=true`, and the app `version` left empty. The job verifies
+existing versions against the exact validated archive checksums and Git source, then publishes only missing
 versions. A different existing source/checksum, registry outage or yanked version
 stops recovery. Never overwrite, delete or bump another version to hide a partial
-publication. The npm completion handoff waits for the native run, including this
-crate job, to succeed.
+publication. Library failures and recovery do not republish or block application
+packages.
 
 ## Switch to a prerelease channel
 
@@ -136,8 +156,8 @@ pnpm changeset pre enter beta
 Changesets reports `Entered pre mode with tag beta` and creates
 `.changeset/pre.json`. Merge that file before merging the Version Packages PR.
 The release action updates that PR with versions such as `1.3.0-beta.0` and
-synchronizes the CLI, Rust and desktop versions. Entering prerelease mode alone
-does not change package versions or publish anything.
+synchronizes each release group. Entering prerelease mode alone does not change
+package versions or publish anything.
 
 Review the regenerated Version Packages PR before merging it. Beta releases use
 npm's `beta` tag, a versioned runtime image tag and a GitHub prerelease. They do
@@ -147,8 +167,8 @@ not move the stable npm or runtime image `latest` tags.
 
 Run `pnpm changeset pre exit` and merge the generated `.changeset/pre.json`
 change. The next Version Packages PR removes the prerelease suffixes, updates
-the changelogs and synchronizes the CLI, Rust and desktop versions. Review that
-PR before merging it to publish the stable release. Stable builds use npm's
+the changelogs and synchronizes each release group. Review that PR before
+merging it to publish the stable release. Stable builds use npm's
 `latest` tag, the runtime image's `latest` tag and a regular GitHub Release.
 
 ## Upgrade compatibility

@@ -113,6 +113,8 @@ importers:
         specifier: ^5.4.5
         version: 5.9.3
 
+  packages/rust-crates: {}
+
   packages/shared:
     devDependencies:
       typescript:

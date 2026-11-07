@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { appendFile, readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseRepository } from '../packages/cli/scripts/native-runtime.mjs';
 import { nativeReleaseReadiness } from './native-release-orchestration.mjs';
@@ -19,20 +20,33 @@ export async function isVersionPackageMerge({ sourceCommit, token = process.env.
     && pr.head?.ref === 'changeset-release/main' && pr.head?.repo?.full_name === releaseRepository);
 }
 
-export async function nativeReleaseTrigger({ eventName, event, sourceCommit, root, token, fetchImpl = fetch }) {
+export function previousPackageVersion(event, directory) {
+  if (!/^[a-f0-9]{40}$/.test(event.before ?? '')) throw new Error('Previous push commit is required');
+  // checkout fetch-depth: 2 includes previous main for a version-PR merge.
+  const old = execFileSync('git', ['show', `${event.before}:${directory}/package.json`],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return JSON.parse(old).version;
+}
+
+export async function nativeReleaseTrigger({ eventName, event, sourceCommit, previousVersion, root, token, fetchImpl = fetch }) {
   if (eventName === 'workflow_dispatch') {
-    if (event.ref !== 'refs/heads/main' || ![true, 'true'].includes(event.inputs?.confirm_publish)) return { publish: false };
+    if (event.ref !== 'refs/heads/main' || ![true, 'true'].includes(event.inputs?.confirm_publish) || !event.inputs?.version) return { publish: false };
     return { publish: true, version: event.inputs.version };
   }
   if (eventName !== 'push' || event.ref !== 'refs/heads/main') return { publish: false };
   if (!await isVersionPackageMerge({ sourceCommit, token, fetchImpl })) return { publish: false };
+  previousVersion = typeof previousVersion === 'function' ? await previousVersion() : previousVersion;
+  if (previousVersion === undefined) throw new Error('Previous application version is required');
+  const { version } = JSON.parse(await readFile(join(root ?? resolve('packages/cli'), 'package.json'), 'utf8'));
+  if (version === previousVersion) return { publish: false, version };
   const state = await nativeReleaseReadiness({ root, token, fetchImpl });
   return { publish: state.state === 'missing', version: state.version };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, 'utf8'));
-  const result = await nativeReleaseTrigger({ eventName: process.env.GITHUB_EVENT_NAME, event: { ...event, ref: process.env.GITHUB_REF }, sourceCommit: process.env.GITHUB_SHA });
+  const result = await nativeReleaseTrigger({ eventName: process.env.GITHUB_EVENT_NAME, event: { ...event, ref: process.env.GITHUB_REF }, sourceCommit: process.env.GITHUB_SHA,
+    previousVersion: () => previousPackageVersion(event, 'packages/cli') });
   if (result.publish && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(result.version ?? '')) throw new Error('Invalid release version');
   await appendFile(process.env.GITHUB_OUTPUT, `publish=${result.publish}\nversion=${result.version ?? ''}\n`);
   console.log(JSON.stringify(result));

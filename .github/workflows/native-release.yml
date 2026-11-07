@@ -2,15 +2,19 @@ name: Prepare native release assets
 on:
   push:
     branches: [main]
-    paths: [packages/cli/package.json]
+    paths: [packages/cli/package.json, packages/rust-crates/package.json]
   workflow_dispatch:
     inputs:
       version:
-        description: Exact @agent-wechat/cli version already committed on main
-        required: true
+        description: Exact app version on main; leave empty for a library-only recovery
+        required: false
+        type: string
+      crate_version:
+        description: Exact @agent-wechat/rust-crates version on main; leave empty for app-only recovery
+        required: false
         type: string
       confirm_publish:
-        description: Publish tested native release assets (does not deploy or publish npm)
+        description: Publish the selected application and/or Rust library release (does not deploy)
         required: true
         default: false
         type: boolean
@@ -27,11 +31,19 @@ jobs:
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
       version: ${{ steps.plan.outputs.version }}
+      crate_publish: ${{ steps.crates.outputs.crate_publish }}
+      crate_version: ${{ steps.crates.outputs.crate_version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
+      - id: crates
+        run: node scripts/native-crates-release.mjs trigger
+        env:
+          GH_TOKEN: ${{ github.token }}
       - id: plan
         run: node scripts/native-release-trigger.mjs
         env:
@@ -118,7 +130,7 @@ jobs:
     secrets: inherit
   checks:
     needs: plan
-    if: needs.plan.outputs.publish == 'true'
+    if: needs.plan.outputs.publish == 'true' || needs.plan.outputs.crate_publish == 'true'
     uses: ./.github/workflows/native-client.yml
     with:
       simulator_checks: false
@@ -199,19 +211,19 @@ jobs:
       confirm_publish: true
 
   crates:
-    needs: [plan, image]
-    if: needs.plan.outputs.publish == 'true'
+    needs: [plan, checks]
+    if: needs.plan.outputs.crate_publish == 'true'
     permissions:
-      contents: read
+      contents: write
       id-token: write
     uses: ./.github/workflows/rust-crates.yml
     with:
-      version: ${{ needs.plan.outputs.version }}
+      version: ${{ needs.plan.outputs.crate_version }}
     secrets: inherit
 
   npm:
     name: Publish npm packages
-    needs: [plan, prepare, image, crates]
+    needs: [plan, prepare, image]
     if: github.event_name == 'push' && needs.plan.outputs.publish == 'true'
     permissions:
       contents: read
