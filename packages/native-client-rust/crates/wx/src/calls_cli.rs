@@ -74,12 +74,14 @@ pub(crate) enum CallsCommand {
     },
     /// Call one contact using this computer's microphone and speakers.
     Dial {
+        /// Contact ID to call, from wx contacts list.
         contact: String,
         #[command(flatten)]
         audio: AudioOptions,
     },
     /// Answer the current offer using this computer's microphone and speakers.
     Answer {
+        /// Incoming call ID to answer; omit to answer the current offer.
         call_id: Option<String>,
         #[command(flatten)]
         audio: AudioOptions,
@@ -90,7 +92,9 @@ pub(crate) enum CallsCommand {
 pub(crate) enum ConferenceCommand {
     /// Start a group voice conference; use i inside the call for later invitations.
     Start {
+        /// Group ID, ending in @chatroom, to start the conference in.
         group: String,
+        /// Contact ID to invite; repeat for several.
         #[arg(long = "invite", required = true)]
         invitees: Vec<String>,
         #[command(flatten)]
@@ -98,6 +102,7 @@ pub(crate) enum ConferenceCommand {
     },
     /// Join a current invitation for this group; never creates a room.
     Join {
+        /// Group ID, ending in @chatroom, that has a current conference invitation.
         group: String,
         #[command(flatten)]
         audio: AudioOptions,

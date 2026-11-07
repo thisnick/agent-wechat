@@ -12,10 +12,11 @@ import { resolveWeChatAccount } from "./types.ts";
 import { nativeRecallInfo } from "./native-recall-state.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 
-const pageSchema = { limit: { type: "integer", minimum: 1, maximum: 50, default: 20 }, cursor: { type: "string", maxLength: 8192, description: "Opaque nextCursor from the same tool and query; do not invent one." } };
+const pageSchema = { limit: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Maximum number of results on this page." }, cursor: { type: "string", maxLength: 8192, description: "Opaque nextCursor from the same tool and query; do not invent one." } };
 const names = ["wechat_history", "wechat_search", "wechat_message", "wechat_media"];
 const archiveNames = ["wechat_archive_threads", "wechat_archive_search", "wechat_archive_history", "wechat_archive_message", "wechat_archive_media"];
-const messageIdSchema = { type: "string", minLength: 1, maxLength: 4096 };
+const messageIdSchema = { type: "string", minLength: 1, maxLength: 4096, description: "Exact opaque message ID from an earlier result." };
+const threadIdSchema = { type: "string", minLength: 1, maxLength: 4096, description: "Exact thread ID from wechat_archive_threads." };
 const qualities = ["best", "original", "standard", "thumbnail", "normal", "encoded"] as const;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Expected tool arguments");
@@ -206,16 +207,17 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },
   });
-  const querySchema = { type: "string", minLength: 1, maxLength: 256 };
+  const querySchema = { type: "string", minLength: 1, maxLength: 256, description: "Case-insensitive text to find in message text." };
+  const threadQuerySchema = { ...querySchema, description: "Case-insensitive text to match against thread IDs and display names." };
   const mediaSchema = {
     messageId: messageIdSchema,
     download: { type: "boolean", default: true, description: "Set false to use cached media only without requesting a WeChat transfer." },
     quality: { type: "string", enum: qualities, default: "best", description: "best uses the best cached image, normal video or decoded voice. Explicit variants are strict and may be unavailable." },
   };
   if (archive) return [
-    tool(archiveNames[0], "threads", "List or find locally stored threads across the configured WeChat account. Optional case-insensitive query matches thread IDs and display names. Includes groups and peers, with opaque pagination; no read marking.", { query: querySchema, ...pageSchema }),
-    tool(archiveNames[1], "search", "Search locally stored messages across every thread in the configured WeChat account, including other senders. Optional threadId narrows the search. Follow nextCursor with the same query and thread selection; no remote backfill or read marking.", { query: querySchema, threadId: messageIdSchema, ...pageSchema }, ["query"]),
-    tool(archiveNames[2], "history", "Read the locally stored history of any thread in the configured WeChat account, newest first, without sender filtering or read marking. Use wechat_archive_threads to find thread IDs.", { threadId: messageIdSchema, ...pageSchema }, ["threadId"]),
+    tool(archiveNames[0], "threads", "List or find locally stored threads across the configured WeChat account. Optional case-insensitive query matches thread IDs and display names. Includes groups and peers, with opaque pagination; no read marking.", { query: threadQuerySchema, ...pageSchema }),
+    tool(archiveNames[1], "search", "Search locally stored messages across every thread in the configured WeChat account, including other senders. Optional threadId narrows the search. Follow nextCursor with the same query and thread selection; no remote backfill or read marking.", { query: querySchema, threadId: threadIdSchema, ...pageSchema }, ["query"]),
+    tool(archiveNames[2], "history", "Read the locally stored history of any thread in the configured WeChat account, newest first, without sender filtering or read marking. Use wechat_archive_threads to find thread IDs.", { threadId: threadIdSchema, ...pageSchema }, ["threadId"]),
     tool(archiveNames[3], "message", "Look up a stored message in any thread of the configured WeChat account by its exact opaque message ID. Use wechat_archive_media to retrieve its attachment.", { messageId: messageIdSchema }, ["messageId"]),
     tool(archiveNames[4], "media", "Retrieve an attachment or quoted text/image/link from any thread in the configured WeChat account by its message ID. Use the parent quote message ID for quotes. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.", mediaSchema, ["messageId"]),
   ];
