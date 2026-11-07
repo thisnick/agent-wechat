@@ -11,4 +11,6 @@ CallClient/CallHandle service; native workers retain their 20-minute safety limi
 Keep optional internal dependencies synchronized when cutting versions. Use OIDC
 for existing crates and the protected bootstrap token only for new crate names;
 verify exact archive/source identity before resuming partial publications. npm
-publication waits for all five crates.
+publication waits for all five crates. Retain the Opus, opusic-c and local audio
+adapter licenses in the notices shipped with CLI packages, native executables
+and runtime images.
