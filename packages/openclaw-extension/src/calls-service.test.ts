@@ -802,13 +802,19 @@ test('conference auto-join is off without an exact configured group and never an
   assert.equal(manual.voice.state.contexts[0].senderId, conferenceGroup);
   assert.deepEqual(manual.voice.state.contexts[0].conference, { groupId: conferenceGroup, inviterId: conferenceInvitation.callerId, policyAtAdmission: "none" }); await manual.service.stop();
 });
-test('an admitted conference mixes simultaneous tracks once, updates mute and source lifecycle, and leaves without dismissing the room', async () => {
+test('an admitted conference mixes simultaneous tracks once, updates mute and source lifecycle, and leaves without dismissing the room', async t => {
+  let now = 100;
+  t.mock.method(performance, 'now', () => now);
   const { service, client, voice } = await conferenceFixture(true);
+  t.after(() => service.stop());
   client.media.receiveTracks = [7, 8].map((id, index) => ({ id, generation: 1, direction: 'receive', participantId: index ? 'b' : 'a', format }));
   client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] }); await until(() => client.attaches === 1);
   const pcm = (value: number) => { const bytes = Buffer.alloc(640); for (let i = 0; i < 320; i++) bytes.writeInt16LE(value, i * 2); return bytes; };
   client.media.input.push({ trackId: 7, generation: 1, sampleOffset: 0, sequence: 0, payload: pcm(1000) });
   client.media.input.push({ trackId: 8, generation: 1, sampleOffset: 0, sequence: 0, payload: pcm(2000) });
+  // Consume both sources before advancing to the first presentation slot. A
+  // loaded CI worker can otherwise skip this 20ms slot, as playback should.
+  await delay(0); now += 40;
   await until(() => voice.state.incoming.some(bytes => bytes.readInt16LE(0) === 3000));
   assert.equal(voice.state.incoming.filter(bytes => bytes.readInt16LE(0) === 3000).length, 1);
   client.eventsQueue.push({ type: 'participant.updated', callId: 'conference', revision: 3, participant: { participantId: 'b', contactId: 'contact-b', membership: 'joined', microphoneEnabled: false } });
