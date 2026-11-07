@@ -20,7 +20,7 @@ export type WeChatVoiceCallsConfig = {
   outboundPolicy?: "disabled" | "allowlist";
   outboundAllowTo?: string[];
   outboundToolAllowFrom?: string[];
-  /** Exact group IDs. An empty map enables neither conference tools nor auto-join. */
+  /** Exact group IDs override the optional "*" rule. An empty map disables conferences. */
   conferences?: { groups?: Record<string, WeChatConferenceGroupConfig> };
   agentId?: string;
   realtime?: {
@@ -55,9 +55,9 @@ export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfi
 export type ResolvedWeChatCallsConfig = { voice?: ResolvedWeChatVoiceCallsConfig; video: { enabled: boolean } };
 const identifier = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
-function names(value: unknown): string[] {
+function names(value: unknown, allowWildcard = false): string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 128 || value.some(name => !identifier(name) || name === "*")) throw Error("Invalid calling allowlist");
+  if (!Array.isArray(value) || value.length > 128 || value.some(name => !identifier(name) || (!allowWildcard && name === "*"))) throw Error("Invalid calling allowlist");
   return [...new Set(value)];
 }
 function conferenceGroups(value: WeChatVoiceCallsConfig["conferences"], toolPolicy: ResolvedWeChatVoiceCallsConfig["toolPolicy"]): Record<string, ResolvedWeChatConferenceGroupConfig> {
@@ -67,13 +67,14 @@ function conferenceGroups(value: WeChatVoiceCallsConfig["conferences"], toolPoli
   if (entries.length > 128) throw Error("Too many conference groups");
   const groups = Object.create(null) as Record<string, ResolvedWeChatConferenceGroupConfig>;
   for (const [id, group] of entries) {
-    if (!identifier(id) || !id.endsWith("@chatroom") || !object(group) || Object.keys(group).some(key => !["autoJoin", "autoJoinAllowFrom", "toolPolicy", "ownerInviterToolPolicy", "sessionKey"].includes(key))
+    if (!identifier(id) || (id !== "*" && !id.endsWith("@chatroom")) || !object(group) || Object.keys(group).some(key => !["autoJoin", "autoJoinAllowFrom", "toolPolicy", "ownerInviterToolPolicy", "sessionKey"].includes(key))
       || (group.autoJoin !== undefined && typeof group.autoJoin !== "boolean")
+      || (id === "*" && group.autoJoin === true && group.autoJoinAllowFrom === undefined)
       || ![undefined, "none", "safe-read-only", "owner"].includes(group.toolPolicy)
       || ![undefined, "none", "safe-read-only", "owner"].includes(group.ownerInviterToolPolicy)
       || ((group.toolPolicy === "owner" || group.ownerInviterToolPolicy === "owner") && toolPolicy !== "owner")
       || (group.sessionKey !== undefined && !isCallSessionKey(group.sessionKey))) throw Error("Invalid conference group policy");
-    groups[id] = { autoJoin: group.autoJoin === true, ...(group.autoJoinAllowFrom !== undefined ? { autoJoinAllowFrom: names(group.autoJoinAllowFrom) } : {}), toolPolicy: toolPolicy === "none" ? "none" : group.toolPolicy ?? "safe-read-only",
+    groups[id] = { autoJoin: group.autoJoin === true, ...(group.autoJoinAllowFrom !== undefined ? { autoJoinAllowFrom: names(group.autoJoinAllowFrom, true) } : {}), toolPolicy: toolPolicy === "none" ? "none" : group.toolPolicy ?? "safe-read-only",
       ...(group.ownerInviterToolPolicy !== undefined ? { ownerInviterToolPolicy: group.ownerInviterToolPolicy } : {}), sessionKey: group.sessionKey };
   }
   return groups;
@@ -114,7 +115,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) throw Error("Invalid calling consultation timeout");
   if ((value.toolPolicy === "safe-read-only" || value.toolPolicy === "owner") && value.allowConsultSessionPersistence !== true) throw Error("Calling consultation requires opting in to host session persistence");
   const toolPolicy = value.toolPolicy ?? (value.allowConsultSessionPersistence === true ? "safe-read-only" : "none");
-  return bindCallVoiceSecret({ enabled: true, mode, transcription: { provider: transcription.provider ?? "openai", model: transcription.model, language: transcription.language }, inboundPolicy: value.inboundPolicy ?? "disabled", inboundAllowFrom: names(value.inboundAllowFrom),
+  return bindCallVoiceSecret({ enabled: true, mode, transcription: { provider: transcription.provider ?? "openai", model: transcription.model, language: transcription.language }, inboundPolicy: value.inboundPolicy ?? "disabled", inboundAllowFrom: names(value.inboundAllowFrom, true),
     outboundPolicy: value.outboundPolicy ?? "disabled", outboundAllowTo: names(value.outboundAllowTo), outboundToolAllowFrom: names(value.outboundToolAllowFrom),
     agentId: value.agentId, realtime: { provider: realtime.provider ?? "openai", model: realtime.model, voice: realtime.voice, instructions: realtime.instructions,
       agentContext: { enabled: agentContext?.enabled === true },
@@ -141,20 +142,22 @@ export const callsConfigSchema = {
   description: "Independent voice and video permissions. Voice includes direct calls and separately configured conferences; both default off.",
   properties: {
     voice: { type: "object", additionalProperties: false, properties: {
-      enabled: { type: "boolean", default: false, description: "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining." },
+      enabled: { type: "boolean", default: false, description: "Enable voice calling. Conferences require an exact group rule or an explicit wildcard group rule. Disabled voice calls are ignored without answering or declining." },
       mode: { type: "string", enum: ["bidi", "agent"], default: "bidi", description: "bidi uses a realtime voice model (including Live); agent transcribes speech, runs the configured OpenClaw agent and speaks through OpenClaw TTS. Applies to direct calls and conferences." },
       transcription: { type: "object", additionalProperties: false, properties: {
         provider: { ...nameSchema, default: "openai", description: "Registered realtime transcription provider for agent mode." },
         model: nameSchema, language: nameSchema,
         apiKey: { description: "Optional OpenClaw SecretRef or API-key string for the transcription provider. Omitted uses provider configuration." },
       } },
-      inboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, inboundAllowFrom: allowlistSchema,
+      inboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, inboundAllowFrom: { ...allowlistSchema, description: "Direct-call caller IDs; an explicit '*' accepts any incoming caller. Admission does not grant owner consultation." },
       outboundPolicy: { type: "string", enum: ["disabled", "allowlist"] }, outboundAllowTo: allowlistSchema, outboundToolAllowFrom: allowlistSchema,
       conferences: { type: "object", additionalProperties: false, properties: {
-        groups: { type: "object", maxProperties: 128, propertyNames: { type: "string", pattern: "^.+@chatroom$", maxLength: 200 }, additionalProperties: {
+        groups: { type: "object", maxProperties: 128, propertyNames: { type: "string", pattern: "^(?:\\*|.+@chatroom)$", maxLength: 200 },
+          description: "Exact group IDs or '*'. An exact rule overrides the wildcard, including autoJoin=false. Wildcard auto-join requires autoJoinAllowFrom; use ['*'] to accept any inviter.",
+          allOf: [{ if: { required: ["*"], properties: { "*": { required: ["autoJoin"], properties: { autoJoin: { const: true } } } } }, then: { properties: { "*": { required: ["autoJoinAllowFrom"] } } } }], additionalProperties: {
           type: "object", additionalProperties: false, properties: {
-            autoJoin: { type: "boolean", default: false, description: "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation." },
-            autoJoinAllowFrom: { ...allowlistSchema, description: "Optional exact conference inviter IDs. When present, only invitations from these contacts can auto-join; an empty list disables auto-join. The configured group is still required." },
+            autoJoin: { type: "boolean", default: false, description: "Join current authenticated invitations matching this group rule after voice preflight. No configured groups means no conference automation." },
+            autoJoinAllowFrom: { ...allowlistSchema, description: "Conference inviter IDs; '*' accepts any inviter and an empty list disables auto-join. Required for wildcard-group auto-join. An exact group may omit this field to accept any inviter. The current inviter is rechecked before joining." },
             toolPolicy: { type: "string", enum: ["none", "safe-read-only", "owner"], default: "safe-read-only", description: "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only." },
             ownerInviterToolPolicy: { type: "string", enum: ["none", "safe-read-only", "owner"], description: "Optional policy for calls whose authenticated inviter exactly matches an agent-wechat:CONTACT_ID owner grant. Otherwise toolPolicy applies. Owner also requires voice.toolPolicy=owner and an exact group owner grant. Applies to the whole call, including later participants; permissions can decrease but cannot increase during a call." },
             sessionKey: { type: "string", pattern: CALL_SESSION_KEY_PATTERN, maxLength: MAX_CALL_SESSION_KEY_LENGTH, description: "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority." },

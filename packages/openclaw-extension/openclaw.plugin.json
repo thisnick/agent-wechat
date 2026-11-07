@@ -166,7 +166,7 @@
               "enabled": {
                 "type": "boolean",
                 "default": false,
-                "description": "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining."
+                "description": "Enable voice calling. Conferences require an exact group rule or an explicit wildcard group rule. Disabled voice calls are ignored without answering or declining."
               },
               "mode": {
                 "type": "string",
@@ -217,7 +217,8 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 200
-                }
+                },
+                "description": "Direct-call caller IDs; an explicit '*' accepts any incoming caller. Admission does not grant owner consultation."
               },
               "outboundPolicy": {
                 "type": "string",
@@ -253,9 +254,40 @@
                     "maxProperties": 128,
                     "propertyNames": {
                       "type": "string",
-                      "pattern": "^.+@chatroom$",
+                      "pattern": "^(?:\\*|.+@chatroom)$",
                       "maxLength": 200
                     },
+                    "description": "Exact group IDs or '*'. An exact rule overrides the wildcard, including autoJoin=false. Wildcard auto-join requires autoJoinAllowFrom; use ['*'] to accept any inviter.",
+                    "allOf": [
+                      {
+                        "if": {
+                          "required": [
+                            "*"
+                          ],
+                          "properties": {
+                            "*": {
+                              "required": [
+                                "autoJoin"
+                              ],
+                              "properties": {
+                                "autoJoin": {
+                                  "const": true
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "then": {
+                          "properties": {
+                            "*": {
+                              "required": [
+                                "autoJoinAllowFrom"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    ],
                     "additionalProperties": {
                       "type": "object",
                       "additionalProperties": false,
@@ -263,7 +295,7 @@
                         "autoJoin": {
                           "type": "boolean",
                           "default": false,
-                          "description": "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation."
+                          "description": "Join current authenticated invitations matching this group rule after voice preflight. No configured groups means no conference automation."
                         },
                         "autoJoinAllowFrom": {
                           "type": "array",
@@ -273,7 +305,7 @@
                             "minLength": 1,
                             "maxLength": 200
                           },
-                          "description": "Optional exact conference inviter IDs. When present, only invitations from these contacts can auto-join; an empty list disables auto-join. The configured group is still required."
+                          "description": "Conference inviter IDs; '*' accepts any inviter and an empty list disables auto-join. Required for wildcard-group auto-join. An exact group may omit this field to accept any inviter. The current inviter is rechecked before joining."
                         },
                         "toolPolicy": {
                           "type": "string",
@@ -678,7 +710,7 @@
                   "enabled": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Enable voice calling. Conferences also require an exact configured group. Disabled voice calls are ignored without answering or declining."
+                    "description": "Enable voice calling. Conferences require an exact group rule or an explicit wildcard group rule. Disabled voice calls are ignored without answering or declining."
                   },
                   "mode": {
                     "type": "string",
@@ -729,7 +761,8 @@
                       "type": "string",
                       "minLength": 1,
                       "maxLength": 200
-                    }
+                    },
+                    "description": "Direct-call caller IDs; an explicit '*' accepts any incoming caller. Admission does not grant owner consultation."
                   },
                   "outboundPolicy": {
                     "type": "string",
@@ -765,9 +798,40 @@
                         "maxProperties": 128,
                         "propertyNames": {
                           "type": "string",
-                          "pattern": "^.+@chatroom$",
+                          "pattern": "^(?:\\*|.+@chatroom)$",
                           "maxLength": 200
                         },
+                        "description": "Exact group IDs or '*'. An exact rule overrides the wildcard, including autoJoin=false. Wildcard auto-join requires autoJoinAllowFrom; use ['*'] to accept any inviter.",
+                        "allOf": [
+                          {
+                            "if": {
+                              "required": [
+                                "*"
+                              ],
+                              "properties": {
+                                "*": {
+                                  "required": [
+                                    "autoJoin"
+                                  ],
+                                  "properties": {
+                                    "autoJoin": {
+                                      "const": true
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "then": {
+                              "properties": {
+                                "*": {
+                                  "required": [
+                                    "autoJoinAllowFrom"
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        ],
                         "additionalProperties": {
                           "type": "object",
                           "additionalProperties": false,
@@ -775,7 +839,7 @@
                             "autoJoin": {
                               "type": "boolean",
                               "default": false,
-                              "description": "Join current authenticated invitations for this exact group after voice preflight. No configured groups means no conference automation."
+                              "description": "Join current authenticated invitations matching this group rule after voice preflight. No configured groups means no conference automation."
                             },
                             "autoJoinAllowFrom": {
                               "type": "array",
@@ -785,7 +849,7 @@
                                 "minLength": 1,
                                 "maxLength": 200
                               },
-                              "description": "Optional exact conference inviter IDs. When present, only invitations from these contacts can auto-join; an empty list disables auto-join. The configured group is still required."
+                              "description": "Conference inviter IDs; '*' accepts any inviter and an empty list disables auto-join. Required for wildcard-group auto-join. An exact group may omit this field to accept any inviter. The current inviter is rechecked before joining."
                             },
                             "toolPolicy": {
                               "type": "string",

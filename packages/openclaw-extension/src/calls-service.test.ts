@@ -88,7 +88,8 @@ async function fixture(logAudioTrace?: (line: string) => void, cfg = configurati
 test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
   assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true } }), /configuration/);
-  assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", inboundAllowFrom: ["*"] } }), /allowlist/);
+  assert.deepEqual(resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", inboundAllowFrom: ["*"] } })!.voice!.inboundAllowFrom, ["*"]);
+  for (const field of ["outboundAllowTo", "outboundToolAllowFrom"]) assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", [field]: ["*"] } }), /allowlist/);
   assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", toolPolicy: "safe-read-only" } }), /persistence/);
   assert.throws(() => resolveWeChatCallsConfig({ voice: { enabled: true, realtime: { provider: "p" }, agentId: "a", toolPolicy: "owner" } }), /persistence/);
   const consultation = { enabled: true, realtime: { provider: "p" }, agentId: "a" };
@@ -133,6 +134,21 @@ test("provider and daemon capability failures never advertise readiness or claim
   const unsupported = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared });
   await unsupported.start(); assert.equal(client.readied, 0); assert.equal(voice.state.opens, 0); assert.equal(client.closed, true); await unsupported.stop();
 });
+test("an explicit incoming caller wildcard accepts direct voice without opening video or outbound access", async () => {
+  const cfg = configuration(); cfg.channels["agent-wechat"].calls.voice.inboundAllowFrom = ["*"];
+  const { service, client, voice } = await fixture(undefined, cfg);
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callerId: "unlisted", callType: "video" } });
+  await delay(10); assert.equal(client.answers, 0); assert.equal(voice.state.opens, 0);
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callerId: "unlisted" } });
+  await until(() => client.attaches === 1); assert.equal(client.answers, 1);
+  await assert.rejects(service.dial("unlisted", { assertCurrent() {} }), /permitted/);
+  await service.stop();
+  cfg.channels["agent-wechat"].calls.voice.inboundPolicy = "disabled";
+  const disabled = await fixture(undefined, cfg);
+  disabled.client.eventsQueue.push({ type: "call.offered", offer });
+  await delay(20); assert.equal(disabled.client.answers, 0); await disabled.service.stop();
+});
+
 test("inbound policy ignores unlisted callers and video; allowed voice preflights before its single claim", async () => {
   const { service, client, voice } = await fixture();
   client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callerId: "unlisted" } });
@@ -830,6 +846,45 @@ test('conference start and later invitations recheck destination allowlists and 
   assert.deepEqual(client.invited, [['allowed-peer'], ['allowed-peer']]); await service.stop();
 });
 
+
+test('wildcard conference groups admit a listed inviter, keep the real room identity and reject other inviters', async () => {
+  const { service, client, voice, cfg } = await conferenceFixture();
+  (cfg.channels['agent-wechat'].calls.voice as any).conferences.groups = { '*': { autoJoin: true, autoJoinAllowFrom: ['trusted-inviter'] } };
+  client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+  await delay(20); assert.equal(client.joins, 0); assert.equal(voice.state.opens, 0);
+  client.eventsQueue.push({ type: 'conference.invitations', invitations: [{ ...conferenceInvitation, callerId: 'trusted-inviter' }] });
+  await until(() => client.attaches === 1); assert.equal(client.joins, 1);
+  assert.equal(voice.state.contexts[0].senderId, conferenceGroup);
+  assert.equal(voice.state.contexts[0].conference?.groupId, conferenceGroup);
+  assert.equal(service.status().groupId, conferenceGroup); await service.stop();
+});
+
+test('exact conference rules override wildcard auto-join and a wildcard cannot be a room target', async () => {
+  const { service, client, voice, cfg } = await conferenceFixture();
+  (cfg.channels['agent-wechat'].calls.voice as any).conferences.groups = {
+    '*': { autoJoin: true, autoJoinAllowFrom: ['*'] }, [conferenceGroup]: { autoJoin: false },
+  };
+  client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+  await delay(20); assert.equal(client.joins, 0); assert.equal(voice.state.opens, 0);
+  await assert.rejects(service.startConference('*', ['allowed-peer'], { assertCurrent() {} }), /not permitted/);
+  assert.equal(client.creates, 0);
+  delete (cfg.channels['agent-wechat'].calls.voice as any).conferences.groups[conferenceGroup];
+  client.eventsQueue.push({ type: 'conference.invitations', invitations: [{ ...conferenceInvitation, revision: 2 }] });
+  await until(() => client.attaches === 1); assert.equal(client.joins, 1); await service.stop();
+});
+
+test('wildcard conference policy revocation during preparation submits no join', async () => {
+  for (const replacement of [{}, { '*': { autoJoin: true, autoJoinAllowFrom: [] } },
+    { '*': { autoJoin: true, autoJoinAllowFrom: ['*'] }, [conferenceGroup]: { autoJoin: false } }]) {
+    const { service, client, voice, cfg } = await conferenceFixture();
+    (cfg.channels['agent-wechat'].calls.voice as any).conferences.groups = { '*': { autoJoin: true, autoJoinAllowFrom: ['*'] } };
+    let release!: () => void; voice.state.opening = new Promise(resolve => { release = resolve; });
+    client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+    await until(() => voice.state.opens === 1);
+    (cfg.channels['agent-wechat'].calls.voice as any).conferences.groups = replacement; release();
+    await until(() => voice.state.closes === 1); assert.equal(client.joins, 0); assert.equal(client.readied, 0); await service.stop();
+  }
+});
 
 test('conference inviter allowlist rejects others, accepts the listed inviter, and fences revocation before submission', async () => {
   const first = await conferenceFixture(true);

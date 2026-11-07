@@ -22,6 +22,18 @@ test('conference configuration is exact, defaults to read-only and requires the 
   assert.notEqual(callSessionKey('main', 'per-contact', groupId, true, { accountId: 'a', groupId }), callSessionKey('main', 'per-contact', groupId, false, { accountId: 'a', groupId }));
   assert.notEqual(callSessionKey('main', 'per-contact', groupId, false, { accountId: 'a', groupId }), callSessionKey('main', 'per-contact', groupId, false, { accountId: 'b', groupId }));
 });
+test('wildcard conference rules require an explicit inviter filter for auto-join and retain owner opt-ins', () => {
+  const voice = { enabled: true, agentId: 'main', realtime: { provider: 'openai' }, allowConsultSessionPersistence: true };
+  for (const inviter of ['trusted-inviter', '*']) {
+    const resolved = resolveWeChatCallsConfig({ voice: { ...voice, conferences: { groups: { '*': { autoJoin: true, autoJoinAllowFrom: [inviter] } } } } })!.voice!;
+    assert.equal(resolved.conferences.groups['*'].autoJoin, true);
+    assert.deepEqual(resolved.conferences.groups['*'].autoJoinAllowFrom, [inviter]);
+    assert.equal(resolved.conferences.groups['*'].toolPolicy, 'safe-read-only');
+  }
+  assert.throws(() => resolveWeChatCallsConfig({ voice: { ...voice, conferences: { groups: { 'not-a-room': { autoJoin: true } } } } }), /conference/);
+  assert.throws(() => resolveWeChatCallsConfig({ voice: { ...voice, conferences: { groups: { '*': { autoJoin: true, autoJoinAllowFrom: ['*'], ownerInviterToolPolicy: 'owner' } } } } }), /conference/);
+});
+
 test('conference consultation rechecks authority before tools, denies retired runs and never returns a broad allow', () => {
   const runtime = {} as PluginRuntime; let evaluate: any; let current = true; let aborted = false;
   installCallConsultAuthority({ runtime, registerTrustedToolPolicy: (policy: any) => { evaluate = policy.evaluate; } } as OpenClawPluginApi);
