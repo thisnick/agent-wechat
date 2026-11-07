@@ -70,7 +70,10 @@ decoding them. Neither example accesses accounts, devices or the network.
 
 `wechat-calls` depends on `wechat-protocol`; protocol does not depend on calls.
 `conference_media` decodes admitted conference sources; `conference_send` handles
-one paced uplink. The `session` and `native_media` modules are lower-level host
+one paced uplink. The `admission` module provides the same per-account
+controller/attempt ownership state machine used by Core; it performs no I/O and
+holds no account credentials. Core retains daemon permissions and journals.
+The `admission`, `session` and `native_media` modules are lower-level host
 integration APIs hidden from generated docs while the public account-bound
 `CallClient`/`CallHandle` facade is unfinished. There is no `client.calls()` API
 in this release. Embedding those modules requires account ownership, permission

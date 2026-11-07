@@ -40,6 +40,10 @@ pub mod playout;
 pub mod tone;
 pub mod track_queue;
 
+#[cfg(all(feature = "native-runtime", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub mod admission;
+
 #[cfg(all(feature = "native-opus", not(target_arch = "wasm32")))]
 pub mod opus;
 
