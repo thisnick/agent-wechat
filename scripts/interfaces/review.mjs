@@ -20,6 +20,8 @@ export function surface(file) {
   if (file.startsWith('interfaces/crates/')) return { kind: 'crate', title: `Rust crate ${file.slice('interfaces/crates/'.length, -4)}`, packages: ['@agent-wechat/rust-crates'] };
   if (file === 'interfaces/openclaw/tools.txt') return { kind: 'schema', title: 'OpenClaw tools', packages: ['@agent-wechat/agent-wechat'] };
   if (file === 'interfaces/openclaw/config.txt') return { kind: 'schema', title: 'OpenClaw configuration', packages: ['@agent-wechat/agent-wechat'] };
+  if (file === 'interfaces/storage/account.txt') return { kind: 'sql', title: 'Account store schema', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/storage/registry.txt') return { kind: 'sql', title: 'Registry schema', packages: ['@agent-wechat/cli'] };
   return { kind: 'other', title: file, packages: [] };
 }
 
@@ -95,6 +97,26 @@ export function attributeBreaks(kind, before, after) {
   return reasons;
 }
 
+/** Reasons a change to the daemon's own SQL schema needs care (sql listings). */
+export function sqlBreaks(item, before, after) {
+  if (item === 'schema version') {
+    return Number(after) > Number(before)
+      ? [`schema version raised from ${before} to ${after}: older wx releases refuse a store at this version, so downgrading stops working`]
+      : [`schema version changed from ${before} to ${after}`];
+  }
+  if (item.startsWith('migration ')) return ['existing migration edited: stores that already applied it never get the change'];
+  if (!/^table [^ .]+\.[^ ]+$/.test(item)) return [];
+  const old = before.split(', ');
+  const now = after.split(', ');
+  const reasons = [];
+  if (old[0] !== now[0]) reasons.push(`column type changed from ${old[0]} to ${now[0]}`);
+  if (!old.includes('not null') && now.includes('not null')) reasons.push('column is now NOT NULL');
+  const value = (list, name) => list.find(t => t.startsWith(`${name} `));
+  if (value(old, 'default') && value(old, 'default') !== value(now, 'default')) reasons.push(`column ${value(old, 'default')} changed to ${value(now, 'default') ?? 'no default'}`);
+  if (value(old, 'primary key') !== value(now, 'primary key')) reasons.push('primary key changed');
+  return reasons;
+}
+
 /** Classifies the changes between two parsed listings of one interface. */
 export function compareListing(kind, base, head) {
   const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], docChanges: 0 };
@@ -107,6 +129,11 @@ export function compareListing(kind, base, head) {
       const parent = parentOf(kind, item);
       if (base && parent && base.has(parent) && tokens(row.attributes).includes('required')) {
         result.breaking.push({ item, reason: kind === 'cli' ? 'new required argument on an existing command' : 'new required field' });
+      }
+      if (base && kind === 'sql' && /^table [^ .]+\.[^ ]+$/.test(item)) {
+        const table = item.slice(0, item.indexOf('.'));
+        const parts = row.attributes.split(', ');
+        if (base.has(table) && parts.includes('not null') && !parts.some(t => t.startsWith('default '))) result.breaking.push({ item, reason: 'new NOT NULL column without a default on an existing table' });
       }
       if (base && kind === 'crate') {
         const [what, path] = item.split(' ');
@@ -126,6 +153,7 @@ export function compareListing(kind, base, head) {
     const reasons = [];
     if (old.attributes !== row.attributes) {
       if (kind === 'crate') reasons.push('signature changed');
+      else if (kind === 'sql') reasons.push(...sqlBreaks(item, old.attributes, row.attributes));
       else reasons.push(...attributeBreaks(kind, old.attributes, row.attributes));
     }
     if (old.doc !== row.doc) result.docChanges += 1;
@@ -138,7 +166,14 @@ export function compareListing(kind, base, head) {
     result.removed.push(item);
     const row = base.get(item);
     // Removing a hidden alias still breaks scripts that use it, so every removal counts.
-    result.breaking.push({ item, reason: tokens(row.attributes).some(t => t.endsWith('alias')) ? 'alias removed' : 'removed' });
+    result.breaking.push({ item, reason: tokens(row.attributes).some(t => t.endsWith('alias')) ? 'alias removed'
+      : kind === 'sql' && item.startsWith('migration ') ? 'existing migration removed' : 'removed' });
+  }
+  if (kind === 'sql' && base) {
+    const schemaChanged = [...result.added, ...result.removed, ...result.changed].some(item => item !== 'schema version' && !item.startsWith('migration '));
+    if (schemaChanged && base.get('schema version')?.attributes === head.get('schema version')?.attributes) {
+      result.breaking.push({ item: 'schema version', reason: 'schema changed without a new schema version: existing stores keep the old schema' });
+    }
   }
   return result;
 }
@@ -177,6 +212,13 @@ export function overview(kind, head) {
     const counts = new Map();
     for (const item of items) { const what = item.split(' ')[0]; counts.set(what, (counts.get(what) ?? 0) + 1); }
     return `Items by kind: ${[...counts].sort((a, b) => b[1] - a[1]).map(([what, n]) => `${what} ${n}`).join(', ')}.`;
+  }
+  if (kind === 'sql') {
+    const tables = items.filter(item => /^table [^ .]+$/.test(item)).length;
+    const columns = items.filter(item => /^table [^ .]+\.[^ ]+$/.test(item)).length;
+    const indexes = items.filter(item => item.startsWith('index ')).length;
+    const migrations = items.filter(item => item.startsWith('migration ')).length;
+    return `Schema version ${head.get('schema version')?.attributes ?? '?'}: ${tables} tables, ${columns} columns, ${indexes} indexes, ${migrations} migration files.`;
   }
   if (kind === 'schema') {
     const tools = items.filter(item => /^tool [^.]+$/.test(item));
@@ -235,7 +277,8 @@ export function renderComment({ reports, changesets, baseline }) {
     const { result, surface: s, file, head, base } = report;
     if (report.baseline) {
       const undocumented = [...head.values()].filter(row => isMissing(row.doc)).length;
-      lines.push(`### ${s.title}`, `New listing ${code(file)}: ${head.size} items${undocumented ? `, ${undocumented} without documentation yet` : ', all documented'}. ${overview(s.kind, head)}`.trim(), '');
+      const docs = s.kind === 'sql' ? '' : undocumented ? `, ${undocumented} without documentation yet` : ', all documented';
+      lines.push(`### ${s.title}`, `New listing ${code(file)}: ${head.size} items${docs}. ${overview(s.kind, head)}`.trim(), '');
       continue;
     }
     lines.push(`### ${s.title}`, `${result.added.length} added, ${result.changed.length} changed${result.docChanges ? ` (${result.docChanges} with new documentation)` : ''}, ${result.removed.length} removed in ${code(file)}.`, '');

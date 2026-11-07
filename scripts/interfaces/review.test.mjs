@@ -161,3 +161,33 @@ test('approval follows the label and resets when the listings change afterwards'
   assert.equal(reset.action, 'reset');
   assert.equal(decide({ changed: true, labeled: true, currentTree: 'bbb' }).action, 'reset');
 });
+
+test('SQL schema listings flag migrations, version bumps and risky column changes', () => {
+  const before = [
+    'schema version | 12 | -',
+    'migration account/V012__calls.sql | sha256 aaaa | -',
+    'table calls | CREATE TABLE calls(id TEXT PRIMARY KEY,state TEXT) | -',
+    'table calls.id | TEXT, primary key 1 | -',
+    'table calls.state | TEXT | -',
+    'table calls.retries | INTEGER, not null, default 0 | -',
+  ];
+  const migrated = compare('sql', before, [
+    'schema version | 13 | -',
+    'migration account/V012__calls.sql | sha256 bbbb | -',
+    'migration account/V013__more.sql | sha256 cccc | -',
+    'table calls | CREATE TABLE calls(id TEXT PRIMARY KEY,state TEXT NOT NULL, owner TEXT NOT NULL) | -',
+    'table calls.id | TEXT, primary key 1 | -',
+    'table calls.state | TEXT, not null | -',
+    'table calls.owner | TEXT, not null | -',
+  ]);
+  assert.deepEqual(reasons(migrated).sort(), [
+    'migration account/V012__calls.sql: existing migration edited: stores that already applied it never get the change',
+    'schema version: schema version raised from 12 to 13: older wx releases refuse a store at this version, so downgrading stops working',
+    'table calls.owner: new NOT NULL column without a default on an existing table',
+    'table calls.retries: removed',
+    'table calls.state: column is now NOT NULL',
+  ]);
+  const unversioned = compare('sql', before, [...before, 'index calls_state | CREATE INDEX calls_state ON calls(state) | -']);
+  assert.deepEqual(reasons(unversioned), ['schema version: schema changed without a new schema version: existing stores keep the old schema']);
+  assert.deepEqual(unversioned.missingDocs, []);
+});

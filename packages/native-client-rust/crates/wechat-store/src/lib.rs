@@ -15,6 +15,8 @@ mod outgoing_recall;
 mod pagination;
 mod read_snapshot;
 mod recalls;
+#[cfg(test)]
+mod schema_interface_tests;
 mod settings;
 pub mod vault;
 use anyhow::{bail, Context, Result};
