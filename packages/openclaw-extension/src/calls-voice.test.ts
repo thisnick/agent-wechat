@@ -31,6 +31,48 @@ function fakeReply(answer: (dispatch: FakeDispatch) => Promise<string | { text: 
 }
 const READ_ONLY_TOOLS = ["read", "web_search", "web_fetch", "x_search", "memory_search", "memory_get"];
 
+test("provider Workers receive cloneable audio format while owned config and callbacks retain identity", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";
+  const [sdk, audioSdk] = await Promise.all([import(voicePath), import(audioPath)]);
+  let wrappedFormat: unknown, wrappedConfig: unknown, wrappedAudio: unknown;
+  let request: any, input = 0, output = 0, closed = 0;
+  const provider = { id: "openai", createBridge(value: any) {
+    request = value;
+    assert.notEqual(value.audioFormat, wrappedFormat);
+    assert.equal(value.cfg, wrappedConfig, "Do not unwrap or copy the host's configuration view");
+    assert.equal(value.onAudio, wrappedAudio, "Keep the SDK's owned callback");
+    let connected = false;
+    return { outputAudioMode: "continuous", connect: async () => {
+      assert.deepEqual(structuredClone({ audioFormat: value.audioFormat }), { audioFormat: pcm });
+      connected = true; value.onReady();
+    }, isConnected: () => connected, sendAudio() { input++; }, sendUserMessage() {}, setMediaTimestamp() {},
+    acknowledgeMark() {}, submitToolResult() {}, close() { closed++; connected = false; } };
+  } };
+  const prepared = await prepareOpenClawCallVoice(config(), {}, {} as PluginRuntime, {
+    voiceSdk: { ...sdk,
+      resolveConfiguredRealtimeVoiceProvider: () => ({ provider, providerConfig: {}, capabilities: {
+        inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: false, handlesInputAudioBargeIn: true, handlesAgentConsult: true,
+      } }),
+      createRealtimeVoiceBridgeSession(params: any) {
+        const adapted = params.provider;
+        return sdk.createRealtimeVoiceBridgeSession({ ...params, provider: { ...adapted, createBridge(value: any) {
+          wrappedFormat = new Proxy(value.audioFormat, {});
+          wrappedConfig = new Proxy(value.cfg, {});
+          wrappedAudio = value.onAudio;
+          assert.throws(() => structuredClone(wrappedFormat), { name: "DataCloneError" });
+          return adapted.createBridge({ ...value, cfg: wrappedConfig, audioFormat: wrappedFormat });
+        } } });
+      },
+    }, audioSdk,
+  });
+  const session = await prepared.open({ audio() { output++; }, clear() {}, failed() { assert.fail("Unexpected provider failure"); } },
+    { senderId: "synthetic-peer", signal: new AbortController().signal });
+  session.sendAudio(Buffer.alloc(960)); request.onAudio(Buffer.alloc(960));
+  assert.equal(input, 1); assert.equal(output, 1);
+  await session.close(); assert.equal(closed, 1);
+});
+
 test("calling schemas agree across runtime and installed plugin manifests", async () => {
   const manifest = JSON.parse(await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
