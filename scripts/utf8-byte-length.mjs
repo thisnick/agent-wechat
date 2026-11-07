@@ -26,3 +26,8 @@ export function maxByteLength(values) {
   }
   return max;
 }
+
+// Returns true when the text fits in `limit` UTF-8 bytes.
+export function fitsInBytes(text, limit) {
+  return utf8ByteLength(text) <= limit ? false : true;
+}
