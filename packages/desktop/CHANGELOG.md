@@ -1,5 +1,18 @@
 # @agent-wechat/desktop
 
+## 2.0.0
+
+### Minor Changes
+
+- [#403](https://github.com/thisnick/agent-wechat/pull/403) [`635fbc9`](https://github.com/thisnick/agent-wechat/commit/635fbc912fe1890dd4779c414a080746815888b1) Thanks [@thisnick](https://github.com/thisnick)! - Video sends now accept sources up to 512 MiB, matching ordinary files, instead of 50 MiB. The CLI, HTTP API capabilities, desktop and web composer, and OpenClaw extension all use the new limit; OpenClaw still applies `channels.agent-wechat.mediaMaxMb`, which defaults to 50. Original-quality videos of 25 MiB and above upload in blocks through the same path as large files.
+
+### Patch Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`1bc8f55`](https://github.com/thisnick/agent-wechat/commit/1bc8f550f710319c9ab5cda507c07d5d899ed9ac) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx config servers remove NAME` to remove a saved server entry. Removing the selected server clears the CLI's active server selection.
+
+- Updated dependencies []:
+  - @agent-wechat/client-ui@0.3.4
+
 ## 2.0.0-beta.1
 
 ## 2.0.0-beta.0
