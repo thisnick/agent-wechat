@@ -5,7 +5,7 @@
  * protocol actions. There are no device or codec dependencies. */
 import { validateNativeBaseUrl } from "./native-client.ts";
 import type { CallAudioFormat, CallAudioTrack, CallCommand, CallEvent, CallMediaCommand, CallSnapshot, CallReadyScope } from "./native.generated.js";
-export type { CallAudioFormat, CallAudioTrack, CallCommand, CallControl, CallParticipantControl, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope, CallConferenceInvitation, CallParticipant, CallInvitationResult } from "./native.generated.js";
+export type { CallAudioFormat, CallAudioTrack, CallCommand, CallControl, CallParticipantControl, CallEvent, CallSnapshot, CallPendingOffer, CallReadyScope, CallConferenceInvitation, CallParticipant, CallParticipantStatus, CallParticipantStatusKind, CallInvitationResult } from "./native.generated.js";
 
 export const NATIVE_CALL_MAX_FRAME_BYTES = 64 * 1024;
 export const NATIVE_CALL_PROTOCOL_VERSION = 2;
@@ -140,10 +140,16 @@ function participantControlValue(value: unknown): boolean {
 function invitationValue(value: unknown): boolean {
   return object(value) && idValue(value.invitationId) && uint32(value.revision) && value.revision > 0 && idValue(value.groupId) && idValue(value.callerId);
 }
+function participantStatusValue(value: unknown): boolean {
+  if (!object(value) || !uint32(value.code)) return false;
+  const kinds = ["undefined", "joined", "invited", "acknowledged", "left", "cancelled", "busy", "rejected", "no_response"];
+  return value.kind === (kinds[Number(value.code)] ?? "unknown");
+}
 function participantValue(value: unknown): boolean {
   return object(value) && idValue(value.participantId) && idValue(value.contactId)
     && ["joined", "invited", "left", "unknown"].includes(String(value.membership))
-    && (value.microphoneEnabled === undefined || typeof value.microphoneEnabled === "boolean");
+    && (value.microphoneEnabled === undefined || typeof value.microphoneEnabled === "boolean")
+    && (value.status === undefined || participantStatusValue(value.status));
 }
 function callValue(value: unknown): boolean {
   return object(value) && idValue(value.callId) && uint32(value.revision)

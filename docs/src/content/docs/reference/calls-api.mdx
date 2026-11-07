@@ -68,6 +68,28 @@ Reported conference participants include `participantId`, `contactId` and
 `true` or `false`; an omitted value means unknown. Muting a microphone does not
 remove the participant from the room.
 
+`status`, when present, adds `{code, kind}` to both snapshots and
+`participant.updated` events. It describes signaling progress independently of
+membership:
+
+| `code` | `kind` | Membership meaning |
+| --- | --- | --- |
+| 0 | `undefined` | Unknown |
+| 1 | `joined` | Joined |
+| 2 | `invited` | Invited, not joined |
+| 3 | `acknowledged` | Invited, not joined |
+| 4 | `left` | Left |
+| 5 | `cancelled` | Cancellation outcome |
+| 6 | `busy` | Busy outcome |
+| 7 | `rejected` | Rejection outcome |
+| 8 | `no_response` | Unanswered outcome |
+| Other | `unknown` | Retain `code`; no inferred join or departure |
+
+Cancellation, busy, rejection and no response do not by themselves establish a
+previous participant's departure. Microphone state remains independent.
+For example, an acknowledged invitation has `membership: "invited"` and
+`status: {"code": 3, "kind": "acknowledged"}`.
+
 Same-account observers see call metadata without owner tokens or audio access.
 HTTP ownership is always false: ownership belongs to a control socket.
 `busy` is scoped to this account, including any unresolved call outcome that
@@ -552,7 +574,8 @@ same-account clients, followed by the updated call snapshot:
   "participant": {
     "participantId": "member-5",
     "contactId": "contact-b",
-    "membership": "left"
+    "membership": "left",
+    "status": {"code": 4, "kind": "left"}
   }
 }
 ```

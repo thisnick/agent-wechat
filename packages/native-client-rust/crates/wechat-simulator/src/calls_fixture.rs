@@ -463,6 +463,7 @@ async fn control(
                         participant_id: format!("participant-{}", source.track_id),
                         contact_id: source.contact_id.clone(),
                         membership: CallMembership::Joined,
+                        status: None,
                         microphone_enabled: source.microphone_enabled,
                     })
                     .collect(),

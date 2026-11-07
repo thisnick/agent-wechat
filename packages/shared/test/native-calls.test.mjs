@@ -343,3 +343,34 @@ test('received audio preserves its independent sequence and shared presentation 
     const { value } = await frames.next(); assert.equal(value.sequence, 91); assert.equal(value.sampleOffset, 32000); assert.deepEqual([...value.payload], [1, 0, 2, 0]);
   } finally { owner.close(); }
 });
+
+
+test('participant signaling statuses survive control snapshots and updates without becoming membership', async () => {
+  const server = new MockCallServer();
+  server.currentCall = {callId:'conference',revision:1,kind:'conference',callType:'voice',direction:'incoming',state:'connected',ownedByThisClient:false,
+    participants:[{participantId:'p',contactId:'contact',membership:'invited',status:{code:3,kind:'acknowledged'}}]};
+  const owner = client(server);
+  try {
+    const hello = await owner.connect();
+    assert.deepEqual(hello.currentCall.participants[0].status, {code:3,kind:'acknowledged'});
+    const events = owner.events()[Symbol.asyncIterator]();
+    let revision = 1;
+    for (const [code,kind] of [[0,'undefined'],[1,'joined'],[2,'invited'],[3,'acknowledged'],[4,'left'],[5,'cancelled'],[6,'busy'],[7,'rejected'],[8,'no_response'],[9,'unknown'],[10,'unknown'],[4294967295,'unknown']]) {
+      const update = {type:'participant.updated',callId:'conference',revision:++revision,participant:{participantId:'p',contactId:'contact',membership:code===1?'joined':code===4?'left':code===2||code===3?'invited':'unknown',status:{code,kind}}};
+      server.controls[0].receive(update);
+      let event; do { event=(await events.next()).value; } while (event.type!=='participant.updated');
+      assert.deepEqual(event,update);
+    }
+  } finally { owner.close(); }
+});
+
+
+test('invalid or contradictory participant status objects fail admission', async () => {
+  for (const status of [null, {code:-1,kind:'unknown'}, {code:4294967296,kind:'unknown'}, {code:4,kind:'joined'}, {code:9,kind:'join_failed'}]) {
+    const server = new MockCallServer();
+    server.currentCall = {callId:'conference',revision:1,kind:'conference',callType:'voice',direction:'incoming',state:'connected',ownedByThisClient:false,
+      participants:[{participantId:'p',contactId:'contact',membership:'unknown',status}]};
+    const owner = client(server);
+    try { await assert.rejects(owner.connect(), error => error.code==='invalid_event'); } finally { owner.close(); }
+  }
+});

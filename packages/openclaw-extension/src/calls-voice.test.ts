@@ -99,6 +99,60 @@ test("installed host bridge and streaming resampler work with an account-free fa
   pieces.push(stream.flush()); assert.deepEqual(Buffer.concat(pieces), expected); assert.equal(expected.length, 4800);
 });
 
+test("a delayed consultation acknowledges quietly through the public SDK and delivers one result without blocking input", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";
+  const [sdk, audioSdk] = await Promise.all([import(voicePath), import(audioPath)]);
+  let bridgeArgs: any, connected = false, inputs = 0, automaticReplies = 0;
+  const spoken: string[] = [], acknowledgments: Array<{ id: string; result: any; options: any }> = [];
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const { dispatches, reply } = fakeReply(async ({ replyOptions }) => {
+    replyOptions.onAgentRunStart(); await held; return "Verified lookup result";
+  });
+  const provider = { id: "openai", createBridge(request: any) { return {
+    outputAudioMode: "response", supportsToolResultSuppression: true,
+    connect: async () => { connected = true; request.onReady(); }, isConnected: () => connected,
+    sendUserMessage: (text: string) => spoken.push(text), sendAudio: () => { inputs++; },
+    setMediaTimestamp() {}, handleBargeIn() {}, acknowledgeMark() {},
+    submitToolResult(id: string, result: unknown, options: unknown) {
+      acknowledgments.push({ id, result, options });
+      if (!(options as any)?.suppressResponse) automaticReplies++;
+    },
+    close: () => { connected = false; },
+  }; } };
+  const runtime = { channel: { reply } } as unknown as PluginRuntime;
+  const prepared = await prepareOpenClawCallVoice(config(true), {}, runtime, {
+    voiceSdk: { ...sdk, createRealtimeVoiceBridgeSession(params: any) { bridgeArgs = params; return sdk.createRealtimeVoiceBridgeSession(params); },
+      resolveConfiguredRealtimeVoiceProvider: () => ({ provider, providerConfig: {}, capabilities: {
+        inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true,
+      } }) }, audioSdk,
+  });
+  const session = await prepared.open(callbacks, { senderId: "peer", signal: new AbortController().signal });
+  try {
+    assert.match(bridgeArgs.instructions, /acknowledge it once/);
+    assert.match(bridgeArgs.instructions, /stay quiet unless the caller asks for its status/);
+    const event = { callId: "lookup", name: "openclaw_agent_consult", args: { question: "Check a fact" } };
+    await bridgeArgs.onToolCall(event);
+    for (let i = 0; i < 100 && !dispatches.length; i++) await delay(5);
+    assert.equal(dispatches.length, 1);
+    assert.equal(acknowledgments.length, 1);
+    assert.equal(acknowledgments[0].result.status, "working");
+    assert.deepEqual(acknowledgments[0].options, { suppressResponse: true });
+    assert.equal(automaticReplies, 0); assert.equal(spoken.length, 0);
+    session.sendAudio(Buffer.alloc(960)); session.sendAudio(Buffer.alloc(960));
+    bridgeArgs.onTranscript("user", "Are you still checking?", true);
+    await bridgeArgs.onToolCall(event);
+    assert.equal(inputs, 2); assert.equal(dispatches.length, 1);
+    assert.equal(acknowledgments.length, 1); assert.equal(spoken.length, 0);
+    release();
+    for (let i = 0; i < 100 && !spoken.length; i++) await delay(5);
+    assert.equal(spoken.length, 1); assert.match(spoken[0], /Verified lookup result/);
+    assert.doesNotMatch(spoken[0], /synthetic tool progress/);
+    assert.equal(automaticReplies, 0);
+  } finally { release(); await session.close(); }
+});
+
 test("a continuous model streams without the consult tool and delegates through the agent's normal route", async () => {
   const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
   const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";

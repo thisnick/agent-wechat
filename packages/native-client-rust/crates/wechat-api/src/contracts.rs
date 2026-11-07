@@ -426,6 +426,8 @@ pub fn typescript() -> String {
         wechat_core::call_types::CallClientHello::decl(),
         wechat_core::call_types::CallParticipant::decl(),
         wechat_core::call_types::CallMembership::decl(),
+        wechat_core::call_types::CallParticipantStatus::decl(),
+        wechat_core::call_types::CallParticipantStatusKind::decl(),
         wechat_core::call_types::CallConferenceInvitation::decl(),
         wechat_core::call_types::CallInvitationResult::decl(),
         wechat_core::call_types::CallInvitationStatus::decl(),

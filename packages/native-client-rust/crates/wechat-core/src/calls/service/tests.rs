@@ -1008,13 +1008,20 @@ async fn participant_microphone_and_departure_are_separate_ordered_updates() {
         participant_id: "participant-a".into(),
         contact_id: "contact-a".into(),
         membership: CallMembership::Joined,
+        status: None,
         microphone_enabled,
     };
     sink.participants(vec![participant(None)]).await.unwrap();
     sink.participants(vec![participant(Some(false))])
         .await
         .unwrap();
-    sink.participants(vec![]).await.unwrap();
+    let mut departed = participant(None);
+    departed.membership = CallMembership::Left;
+    sink.participants(vec![departed.clone()]).await.unwrap();
+    sink.participants(vec![departed]).await.unwrap();
+    sink.participants(vec![participant(Some(true))])
+        .await
+        .unwrap();
     let mut updates = Vec::new();
     while let Ok(event) = owner.events.try_recv() {
         if let CallEvent::ParticipantUpdated {
@@ -1026,12 +1033,17 @@ async fn participant_microphone_and_departure_are_separate_ordered_updates() {
             updates.push((revision, participant));
         }
     }
-    assert_eq!(updates.len(), 3);
+    assert_eq!(updates.len(), 4);
     assert!(updates.windows(2).all(|pair| pair[0].0 < pair[1].0));
     assert_eq!(updates[1].1.membership, CallMembership::Joined);
     assert_eq!(updates[1].1.microphone_enabled, Some(false));
     assert_eq!(updates[2].1.membership, CallMembership::Left);
     assert_eq!(updates[2].1.microphone_enabled, None);
+    assert_eq!(updates[3].1.membership, CallMembership::Joined);
+    assert_eq!(updates[3].1.microphone_enabled, Some(true));
+    let departed = serde_json::to_value(&updates[2].1).unwrap();
+    assert_eq!(departed["membership"], "left");
+    assert!(departed.get("microphoneEnabled").is_none());
 }
 
 #[tokio::test]
@@ -1051,6 +1063,7 @@ async fn leave_survives_roster_revisions_and_repeated_requests_submit_only_once(
             participant_id: "p-a".into(),
             contact_id: "contact-a".into(),
             membership: CallMembership::Joined,
+            status: None,
             microphone_enabled: Some(false),
         }])
         .await

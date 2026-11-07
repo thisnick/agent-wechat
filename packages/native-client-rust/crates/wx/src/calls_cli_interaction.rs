@@ -293,6 +293,7 @@ mod tests {
                 participant_id: "person".into(),
                 contact_id: "already-here".into(),
                 membership: wechat_core::call_types::CallMembership::Joined,
+                status: None,
                 microphone_enabled: Some(true),
             }],
         };

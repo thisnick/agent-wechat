@@ -306,7 +306,9 @@ handle interruptions themselves. Realtime can queue up to ten minutes of a reply
 reaching that limit cancels the reply and reports its playback position instead
 of silently cutting its tail. Live keeps a three-second audio queue to limit delay.
 Either way, the voice agent can keep talking
-with the caller while the OpenClaw agent works on a consultation.
+with the caller while the OpenClaw agent works on a consultation. It acknowledges
+a lookup once, waits quietly for the result, and can answer a status question
+while the lookup runs.
 In agent mode, nearby transcript fragments form one turn. Input keeps flowing
 during reasoning and TTS; interruption clears queued speech and discards late
 agent or TTS results without retrying an action.

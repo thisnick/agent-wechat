@@ -225,23 +225,9 @@ fn publish_roster(
     };
     if changed {
         if let ControlAdmission::Owner(sink) = &transport.admission {
-            transport.runtime.block_on(
-                sink.participants(
-                    members
-                        .into_iter()
-                        .map(|member| CallParticipant {
-                            participant_id: format!("member-{}", member.member_id),
-                            contact_id: member.username,
-                            membership: if member.status == 1 {
-                                crate::call_types::CallMembership::Joined
-                            } else {
-                                crate::call_types::CallMembership::Unknown
-                            },
-                            microphone_enabled: member.microphone_enabled,
-                        })
-                        .collect(),
-                ),
-            )?;
+            transport
+                .runtime
+                .block_on(sink.participants(members.into_iter().map(participant).collect()))?;
         }
     }
     Ok(())
@@ -290,6 +276,59 @@ fn observe(
 mod tests {
     use super::*;
     use wechat_calls::session::ConferenceMember;
+
+    #[test]
+    fn explicit_exit_is_a_departure_without_confusing_invitation_or_microphone_state() {
+        use crate::call_types::CallMembership;
+        let mut remote = member(3, "remote");
+        remote.microphone_enabled = Some(false);
+        assert_eq!(
+            participant(remote.clone()).membership,
+            CallMembership::Joined
+        );
+        assert_eq!(participant(remote.clone()).microphone_enabled, Some(false));
+        remote.status = 4;
+        let departed = participant(remote.clone());
+        assert_eq!(departed.membership, CallMembership::Left);
+        assert_eq!(departed.microphone_enabled, None);
+        assert_eq!(departed.participant_id, "member-3");
+        assert_eq!(departed.contact_id, "remote");
+        use crate::call_types::CallParticipantStatusKind as Kind;
+        for (code, kind) in [
+            (0, Kind::Undefined),
+            (1, Kind::Joined),
+            (2, Kind::Invited),
+            (3, Kind::Acknowledged),
+            (4, Kind::Left),
+            (5, Kind::Cancelled),
+            (6, Kind::Busy),
+            (7, Kind::Rejected),
+            (8, Kind::NoResponse),
+            (9, Kind::Unknown),
+            (10, Kind::Unknown),
+            (u32::MAX, Kind::Unknown),
+        ] {
+            remote.status = code;
+            let observed = participant(remote.clone());
+            assert_eq!(observed.status.unwrap().code, code);
+            assert_eq!(observed.status.unwrap().kind, kind);
+            if code == 2 || code == 3 {
+                assert_eq!(observed.membership, CallMembership::Invited);
+            }
+        }
+        remote.status = 1;
+        assert_eq!(
+            participant(remote.clone()).membership,
+            CallMembership::Joined
+        );
+        for status in [0, 5, 6, 7, 8, 9, 10, u32::MAX] {
+            remote.status = status;
+            assert_eq!(
+                participant(remote.clone()).membership,
+                CallMembership::Unknown
+            );
+        }
+    }
 
     #[test]
     fn admitted_channel_health_updates_preserve_the_running_media_format() {

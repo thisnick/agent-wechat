@@ -184,6 +184,9 @@ pub struct CallParticipant {
     pub participant_id: String,
     pub contact_id: String,
     pub membership: CallMembership,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<CallParticipantStatus>,
     // Omitted until the server supplies this participant's microphone state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -196,6 +199,28 @@ pub enum CallMembership {
     Joined,
     Invited,
     Left,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallParticipantStatus {
+    pub code: u32,
+    pub kind: CallParticipantStatusKind,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallParticipantStatusKind {
+    Undefined,
+    Joined,
+    Invited,
+    Acknowledged,
+    Left,
+    Cancelled,
+    Busy,
+    Rejected,
+    NoResponse,
     Unknown,
 }
 

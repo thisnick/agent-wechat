@@ -27,6 +27,24 @@ test("baseline, snapshot replay and equal-revision deltas announce each real tra
   assert.deepEqual(context.takeChange()?.change, { initial: false, joined: [{ contactId: "contact-a", name: "contact-a" }], left: [{ contactId: "contact-c", name: "contact-c" }] });
 });
 
+test("explicit departures and rejoining update the model roster once despite stale and duplicate events", () => {
+  const context = tracker(); context.applySnapshot(view(1, [participant("a"), participant("b")]));
+  context.name("contact-b", "Bob"); context.takeChange();
+  context.applyParticipant(2, { ...participant("b"), microphoneEnabled: false });
+  assert.equal(context.takeChange(), undefined);
+  context.applyParticipant(3, participant("b", "left"));
+  const departure = context.takeChange()!;
+  assert.deepEqual(departure.change, { initial: false, joined: [], left: [{ contactId: "contact-b", name: "Bob" }] });
+  assert.match(callContextMessage(departure.snapshot, departure.change), /bye/);
+  assert.deepEqual(departure.snapshot.participants.map(p => p.contactId), ["contact-a"]);
+  context.applyParticipant(3, participant("b", "left"));
+  context.applySnapshot(view(3, [participant("a"), participant("b", "left")]));
+  context.applyParticipant(2, participant("b"));
+  assert.equal(context.takeChange(), undefined);
+  context.applyParticipant(4, participant("b"));
+  assert.deepEqual(context.takeChange()?.change, { initial: false, joined: [{ contactId: "contact-b", name: "Bob" }], left: [] });
+});
+
 test("invitations, unknown membership, mute/name changes and canceled transitions do not greet", () => {
   const context = tracker(); context.applySnapshot(view(1, [participant("a"), participant("b", "invited")])); context.takeChange();
   context.applyParticipant(2, { ...participant("a"), microphoneEnabled: false });
@@ -37,6 +55,17 @@ test("invitations, unknown membership, mute/name changes and canceled transition
   assert.deepEqual(context.takeChange()?.change, { initial: false, joined: [], left: [], metadataOnly: true });
   context.applySnapshot(view(6, []));
   assert.deepEqual(context.takeChange()?.change, { initial: false, joined: [], left: [{ contactId: "contact-a", name: "Alice" }] });
+});
+
+test("signaling outcomes are retained without treating them as room departures", () => {
+  const context = tracker(); context.applySnapshot(view(1, [participant("a")])); context.takeChange();
+  for (const [index, kind] of ["invited", "acknowledged", "cancelled", "busy", "rejected", "no_response", "unknown"].entries()) {
+    context.applyParticipant(index + 2, { ...participant("a", "unknown"), status: { code: index + 2, kind: kind as any } });
+    assert.equal(context.takeChange(), undefined);
+    assert.equal(context.snapshot().participants.length, 1);
+  }
+  context.applyParticipant(10, { ...participant("a", "left"), status: { code: 4, kind: "left" } });
+  assert.equal((context.takeChange()!.change as any).left.length, 1);
 });
 
 test("late names and inviter labels produce metadata refreshes without inventing joins", () => {

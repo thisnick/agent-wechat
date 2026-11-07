@@ -277,6 +277,7 @@ impl BackendSink {
                 {
                     let mut left = previous.clone();
                     left.membership = CallMembership::Left;
+                    left.status = None;
                     left.microphone_enabled = None;
                     updates.push(left);
                 }

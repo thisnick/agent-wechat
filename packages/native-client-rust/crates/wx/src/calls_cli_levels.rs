@@ -4,7 +4,9 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use wechat_core::call_types::{CallMembership, CallView};
+use wechat_core::call_types::{
+    CallMembership, CallParticipantStatus, CallParticipantStatusKind, CallView,
+};
 
 const FLOOR_DB: f64 = -60.0;
 
@@ -75,6 +77,7 @@ struct ParticipantLevel {
     level: Level,
     label: String,
     membership: CallMembership,
+    status: Option<CallParticipantStatus>,
     microphone: Option<bool>,
 }
 
@@ -176,10 +179,12 @@ impl CallLevels {
                     level: Level::default(),
                     label: String::new(),
                     membership: CallMembership::Unknown,
+                    status: None,
                     microphone: None,
                 });
             row.label = clean_label(&participant.contact_id, 64);
             row.membership = participant.membership;
+            row.status = participant.status;
             row.microphone = participant.microphone_enabled;
             if participant.membership == CallMembership::Left
                 || participant.microphone_enabled == Some(false)
@@ -211,6 +216,7 @@ impl CallLevels {
                     format!("Unattributed track {track}")
                 },
                 membership: CallMembership::Unknown,
+                status: None,
                 microphone: None,
             });
         if row.microphone != Some(false) && row.membership != CallMembership::Left {
@@ -242,12 +248,27 @@ impl CallLevels {
                 CallMembership::Left => "left",
                 CallMembership::Unknown => "unknown",
             };
+            let status = match row.status {
+                Some(status) => match status.kind {
+                    CallParticipantStatusKind::Undefined => "undefined".to_owned(),
+                    CallParticipantStatusKind::Joined => "joined".to_owned(),
+                    CallParticipantStatusKind::Invited => "invited".to_owned(),
+                    CallParticipantStatusKind::Acknowledged => "acknowledged".to_owned(),
+                    CallParticipantStatusKind::Left => "left".to_owned(),
+                    CallParticipantStatusKind::Cancelled => "cancelled".to_owned(),
+                    CallParticipantStatusKind::Busy => "busy".to_owned(),
+                    CallParticipantStatusKind::Rejected => "rejected".to_owned(),
+                    CallParticipantStatusKind::NoResponse => "no response".to_owned(),
+                    CallParticipantStatusKind::Unknown => format!("unknown ({})", status.code),
+                },
+                None => membership.to_owned(),
+            };
             let mic = match row.microphone {
                 Some(true) => "mic on",
                 Some(false) => "mic off",
                 None => "mic unknown",
             };
-            let tail = format!(" {} {membership} {mic}", row.level.text());
+            let tail = format!(" {} {status} {mic}", row.level.text());
             let label = clean_label(&row.label, width.saturating_sub(tail.width() + 2));
             lines.push(clean_label(
                 &format!("{label}{tail}"),
@@ -477,6 +498,40 @@ mod participant_tests {
     use super::*;
     use wechat_core::call_types::{CallDirection, CallKind, CallParticipant, CallState, CallType};
     #[test]
+    fn roster_displays_signaling_outcomes_without_inventing_membership() {
+        let mut levels = CallLevels::for_test();
+        levels.participants.insert(
+            "pending".into(),
+            ParticipantLevel {
+                level: Level::default(),
+                label: "Contact".into(),
+                membership: CallMembership::Invited,
+                status: Some(CallParticipantStatus {
+                    code: 3,
+                    kind: CallParticipantStatusKind::Acknowledged,
+                }),
+                microphone: None,
+            },
+        );
+        assert!(levels.lines(120, 24)[1].contains("acknowledged"));
+        for (code, kind, label) in [
+            (5, CallParticipantStatusKind::Cancelled, "cancelled"),
+            (6, CallParticipantStatusKind::Busy, "busy"),
+            (7, CallParticipantStatusKind::Rejected, "rejected"),
+            (8, CallParticipantStatusKind::NoResponse, "no response"),
+            (10, CallParticipantStatusKind::Unknown, "unknown (10)"),
+        ] {
+            levels.participants.get_mut("pending").unwrap().status =
+                Some(CallParticipantStatus { code, kind });
+            assert!(levels.lines(120, 24)[1].contains(label));
+            assert_eq!(
+                levels.participants["pending"].membership,
+                CallMembership::Invited
+            );
+        }
+    }
+
+    #[test]
     fn participant_meters_keep_mute_membership_and_signal_separate() {
         let mut levels = CallLevels::for_test();
         let mut call = CallView {
@@ -493,6 +548,7 @@ mod participant_tests {
                 participant_id: "person".into(),
                 contact_id: "Alice\x1b[31m".into(),
                 membership: CallMembership::Joined,
+                status: None,
                 microphone_enabled: Some(true),
             }],
         };
