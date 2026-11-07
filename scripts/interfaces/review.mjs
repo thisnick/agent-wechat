@@ -238,7 +238,7 @@ export function renderComment({ reports, changesets, baseline }) {
       lines.push(`### ${s.title}`, `New listing ${code(file)}: ${head.size} items${undocumented ? `, ${undocumented} without documentation yet` : ', all documented'}. ${overview(s.kind, head)}`.trim(), '');
       continue;
     }
-    lines.push(`### ${s.title}`, `${result.added.length} added, ${result.changed.length} changed${result.docChanges ? ` (${result.docChanges} documentation only or with docs)` : ''}, ${result.removed.length} removed in ${code(file)}.`, '');
+    lines.push(`### ${s.title}`, `${result.added.length} added, ${result.changed.length} changed${result.docChanges ? ` (${result.docChanges} with new documentation)` : ''}, ${result.removed.length} removed in ${code(file)}.`, '');
     const diff = [];
     for (const item of [...result.removed, ...result.changed, ...result.added].sort()) {
       if (base?.has(item)) diff.push(`- ${base.get(item).line}`);
