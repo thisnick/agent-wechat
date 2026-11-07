@@ -383,7 +383,7 @@ export class NativeCallService {
     { senderId: active.peer, policyAtAdmission: active.policyAtAdmission, signal: active.abort.signal, callContext: active.context.snapshot(),
       parentSession: active.groupId ? (this.groupPolicy(active.groupId)?.group.sessionKey ? { key: this.groupPolicy(active.groupId)!.group.sessionKey! } : undefined) : active.parentSession,
       ...(active.groupId ? { conference: { groupId: active.groupId, inviterId: active.inviterId, policyAtAdmission: active.policyAtAdmission } } : {}), recentContext, consultContext,
-      channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, logVoiceEvent: line => this.info(`voice trace=${active.key.slice(0, 8)} ${line}`), runInBackgroundContext,
+      channelAccountId: this.account.accountId, nativeAccountId: this.account.native?.accountId, logAudioTrace: this.logAudioTrace, runInBackgroundContext,
       warnProviderDiagnostic: () => this.warn("voice provider reported a diagnostic; waiting for recovery or terminal closure"),
       logCallContext: line => this.info(`context trace=${active.key.slice(0, 8)} ${line}`),
       connectedPeer: () => this.current(active) && (!active.groupId || this.groupPolicy(active.groupId)) && active.claimed && active.call?.state === "connected" && active.call.callId === active.callId
@@ -567,8 +567,6 @@ export class NativeCallService {
       active.contextReady = true; this.scheduleCallContext(active);
       const resampler = this.prepared!.resampler(this.format!.sampleRate, this.prepared!.sampleRate);
       const mixer = active.groupId ? new CallPcmMixer(this.format!) : undefined;
-      const inputHealth = { forwardedFrames: 0, forwardedNonzeroFrames: 0, forwardedSamples: 0 };
-      let inputHealthReportedAt = performance.now();
       const forward = (pcm: Buffer, timestampMs: number, consumedAt: number) => {
         const audio = resampler.process(pcm);
         const forwardAt = trace ? performance.now() : 0;
@@ -578,8 +576,6 @@ export class NativeCallService {
         active.voice!.setMediaTimestamp(timestampMs);
         if (!this.current(active) || active.endStarted) return;
         active.voice!.sendAudio(audio);
-        inputHealth.forwardedFrames++; inputHealth.forwardedSamples += audio.length / 2;
-        for (let at = 0; at + 1 < audio.length; at += 2) if (Math.abs(audio.readInt16LE(at)) > 8) { inputHealth.forwardedNonzeroFrames++; break; }
         trace?.add("realtimeInputChunks"); trace?.add("realtimeInputSamples", audio.length / 2);
         trace?.gap("realtimeInputGapMs", forwardAt); trace?.measure("realtimeForwardMs", performance.now() - forwardAt);
       };
@@ -592,10 +588,6 @@ export class NativeCallService {
             mixer.synchronize(media.tracks(), active.call?.participants);
             const rendered = mixer.render(performance.now());
             if (rendered) forward(rendered.pcm, rendered.sampleOffset * 1000 / this.format!.sampleRate, trace ? performance.now() : 0);
-            if (performance.now() - inputHealthReportedAt >= 10_000) {
-              inputHealthReportedAt = performance.now();
-              this.info(`input trace=${active.key.slice(0, 8)} ${JSON.stringify({ ...mixer.diagnostics(), ...inputHealth })}`);
-            }
           } catch { void this.fail(active, "conference-input"); }
         }, 20);
         active.inputTimer.unref();

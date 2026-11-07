@@ -54,66 +54,6 @@ pub struct ConferenceMediaReport {
     pub transmit: tone::ToneReport,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConferenceMediaInputDiagnostics {
-    pub elapsed_ms: u64,
-    pub datagrams: u64,
-    pub authenticated_packets: u64,
-    pub decoded_frames: u64,
-    pub nonzero_frames: u64,
-    pub delivered_frames: u64,
-    pub invalid_packets: u64,
-    pub ordering_drops: u64,
-    pub sources: usize,
-    pub active_sources: usize,
-    pub muted_sources: usize,
-    pub finished: bool,
-    pub failure: Option<&'static str>,
-}
-
-fn input_diagnostics(
-    started: Instant,
-    report: &ConferenceMediaReport,
-    receivers: &BTreeMap<u16, BoundConferenceReceiver>,
-    delivered_frames: u64,
-    finished: bool,
-) -> ConferenceMediaInputDiagnostics {
-    ConferenceMediaInputDiagnostics {
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        datagrams: report.datagrams,
-        authenticated_packets: receivers
-            .values()
-            .map(|r| r.receiver.report.authenticated_packets)
-            .sum(),
-        decoded_frames: receivers
-            .values()
-            .map(|r| r.receiver.report.decoded_frames)
-            .sum(),
-        nonzero_frames: receivers
-            .values()
-            .map(|r| r.receiver.report.nonzero_frames)
-            .sum(),
-        delivered_frames,
-        invalid_packets: receivers
-            .values()
-            .map(|r| r.receiver.report.invalid_packets)
-            .sum(),
-        ordering_drops: receivers
-            .values()
-            .map(|r| r.receiver.report.ordering_drops)
-            .sum(),
-        sources: receivers.len(),
-        active_sources: receivers.values().filter(|r| r.active).count(),
-        muted_sources: receivers
-            .values()
-            .filter(|r| r.active && r.microphone_enabled == Some(false))
-            .count(),
-        finished,
-        failure: report.failure,
-    }
-}
-
 pub struct ConferenceRoster {
     pub revision: u64,
     pub members: Vec<ConferenceMember>,
@@ -132,7 +72,6 @@ pub struct ConferenceReceiveTrack {
 }
 
 pub trait ConferenceMediaHost: DirectMediaHost {
-    fn input_diagnostics(&self, _diagnostics: ConferenceMediaInputDiagnostics) {}
     fn receive_tracks(&self, tracks: Vec<ConferenceReceiveTrack>) -> Result<()>;
     fn receive_track_pcm(&self, member: u16, generation: u32, frame: DecodedAudio) -> Result<()>;
     fn submit_generation(
@@ -170,8 +109,6 @@ pub fn run_conference_media<H: ConferenceMediaHost>(
     let mut source_permits = Vec::<H::Frame>::new();
     let mut output_generation = host.generation();
     let mut seen_remote = false;
-    let mut delivered_frames = 0;
-    let mut last_diagnostics = started;
     let mut receivers = BTreeMap::<u16, BoundConferenceReceiver>::new();
     let mut unattributed = BTreeMap::<u16, Receiver>::new();
     let result = (|| -> Result<()> {
@@ -383,7 +320,6 @@ pub fn run_conference_media<H: ConferenceMediaHost>(
                             if audio.is_some() {
                                 for frame in frames {
                                     host.receive_track_pcm(member, bound.generation, frame)?;
-                                    delivered_frames += 1;
                                 }
                             }
                         } else {
@@ -402,16 +338,6 @@ pub fn run_conference_media<H: ConferenceMediaHost>(
                     Err(error) => return Err(error.into()),
                 }
             }
-            if last_diagnostics.elapsed() >= Duration::from_secs(10) {
-                host.input_diagnostics(input_diagnostics(
-                    started,
-                    &report,
-                    &receivers,
-                    delivered_frames,
-                    false,
-                ));
-                last_diagnostics = Instant::now();
-            }
             if idle {
                 thread::sleep(Duration::from_millis(5));
             }
@@ -421,13 +347,6 @@ pub fn run_conference_media<H: ConferenceMediaHost>(
     if result.is_err() {
         report.failure = Some(stage);
     }
-    host.input_diagnostics(input_diagnostics(
-        started,
-        &report,
-        &receivers,
-        delivered_frames,
-        true,
-    ));
     let mut signal_sources = BTreeMap::<u16, usize>::new();
     for (member, mut bound) in receivers {
         bound.receiver.close();
