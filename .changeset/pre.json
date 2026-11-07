@@ -9,5 +9,23 @@
     "@agent-wechat/agent-wechat": "1.5.1",
     "@agent-wechat/shared": "1.1.1"
   },
-  "changesets": []
+  "changesets": [
+    "account-owned-calling-runtime",
+    "call-conversation-modes",
+    "call-identity-greetings",
+    "call-profile-participant-identity",
+    "call-roster-name-updates",
+    "conference-cli-participant-levels",
+    "conference-departure-quiet-consultation",
+    "conference-inviter-permissions",
+    "incoming-video-download-limits",
+    "json-call-protocol-v2",
+    "openclaw-conference-voice",
+    "owner-consultation-call-control",
+    "publish-wechat-calls",
+    "raise-video-send-limit",
+    "realtime-response-buffer",
+    "remove-saved-server",
+    "stale-wal-index-startup"
+  ]
 }

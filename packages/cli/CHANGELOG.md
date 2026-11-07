@@ -1,5 +1,80 @@
 # @agent-wechat/cli
 
+## 2.0.0-beta.0
+
+### Major Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`e4efdf3`](https://github.com/thisnick/agent-wechat/commit/e4efdf3e00757571c7d7f07718e71679688c25d2) Thanks [@thisnick](https://github.com/thisnick)! - Make the Rust client own its account through `NativeClient::from_account`.
+  Cloned client handles share accepted credentials, and async sync, heartbeat,
+  text and call requests use temporary snapshots without locking across network
+  waits. Explicit renewal fences prior credential generations; shutdown and
+  one-time state handoff prevent late replies from restoring stopped credentials.
+
+  Add shared-clock PCM mixing with per-track queue budgets, microphone controls,
+  generation fencing, silence for missing sources and frame peak limiting.
+  The daemon uses the same account owner for ordinary requests, notification
+  polling and call signaling, while preserving encrypted journals and verified
+  receipts across credential-storage failures. Conference runtime and live
+  acceptance remain in progress.
+
+  Move direct/incoming/conference session state machines into `wechat-calls`,
+  with `native-runtime` as its default feature and a portable no-default build.
+  Keep the daemon's private PCM envelope in Core. Add guarded conference creation,
+  additional invitations, partial receipts and creator cancellation/leave state;
+  these paths still require the isolated API/CLI acceptance milestone.
+
+  Keep leave requests valid across conference roster updates and avoid duplicate exit requests after confirmed termination.
+
+  Accept the creator's supported voice channel configuration without cancelling pending invitations when its channel health settings differ from a joiner's.
+
+  Allow a verified empty SQLite WAL and rebuilt empty index during sidecar startup, retaining a recovery copy and validating the database before opening it.
+
+  Keep legacy conference audio receivers running through authenticated nonce reuse, matching direct-call compatibility. Count reuse by packet family while retaining sender authentication, replay filtering and outgoing counter limits.
+
+  Extract direct and conference media loops, relay setup, participant source tracking and interruption handoff gates into `wechat-calls`; retain daemon authorization, event conversion and encrypted journals in Core.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`e4efdf3`](https://github.com/thisnick/agent-wechat/commit/e4efdf3e00757571c7d7f07718e71679688c25d2) Thanks [@thisnick](https://github.com/thisnick)! - Move call WebSockets to protocol version 2. Clients announce supported versions
+  before issuing commands or attaching media; omitted versions mean version 1 and
+  are rejected. Audio now uses JSON messages containing a track ID, generation and
+  base64 PCM, and media setup returns a receive-track array. Upgrade daemon, CLI
+  and OpenClaw plugin together. Raw binary call media is no longer accepted.
+
+  Conference participant snapshots report microphone state when supplied by the
+  server, keeping mute state separate from room membership.
+
+  Fix intermittent secure-channel setup failures caused by truncating a
+  zero-prefixed shared secret. Authentication and call polling use the corrected
+  calculation without the previous handshake-retry workaround.
+
+### Minor Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`e4efdf3`](https://github.com/thisnick/agent-wechat/commit/e4efdf3e00757571c7d7f07718e71679688c25d2) Thanks [@thisnick](https://github.com/thisnick)! - Add interactive conference start/join, dynamic receive tracks and timed mixed playback. Show an incoming audio meter for each verified participant while retaining microphone and speaker meters. Add speaker controls, in-call contact invitations, participant details and device selection without waiting for dialogs or command replies in the audio loop.
+
+- [#403](https://github.com/thisnick/agent-wechat/pull/403) [`635fbc9`](https://github.com/thisnick/agent-wechat/commit/635fbc912fe1890dd4779c414a080746815888b1) Thanks [@thisnick](https://github.com/thisnick)! - Video sends now accept sources up to 512 MiB, matching ordinary files, instead of 50 MiB. The CLI, HTTP API capabilities, desktop and web composer, and OpenClaw extension all use the new limit; OpenClaw still applies `channels.agent-wechat.mediaMaxMb`, which defaults to 50. Original-quality videos of 25 MiB and above upload in blocks through the same path as large files.
+
+### Patch Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`3aa61ba`](https://github.com/thisnick/agent-wechat/commit/3aa61bac037a0fdb3e4a8998437b45146ee11fdc) Thanks [@thisnick](https://github.com/thisnick)! - Report confirmed conference departures through participant updates and call rosters. Expose known participant signaling statuses and preserve unrecognized numeric codes in snapshots, events, SDK types and CLI displays. Keep microphone changes and invitation outcomes separate from membership. Acknowledge a voice consultation once, then wait for the result without triggering repeated progress speech; callers can still ask for status while the lookup runs.
+
+- [#403](https://github.com/thisnick/agent-wechat/pull/403) [`635fbc9`](https://github.com/thisnick/agent-wechat/commit/635fbc912fe1890dd4779c414a080746815888b1) Thanks [@thisnick](https://github.com/thisnick)! - Received videos now download up to 512 MiB, matching the automatic-download setting, instead of stopping at 50 MiB. `wx messages media --output` saves videos up to the same size. Downloads whose bytes don't match the message's advertised size now fail as `media_integrity_failed`, as checksum mismatches already did, instead of `media_processing_failed`. For a received video up to 25 MiB, the job also records which sizes and checks differed.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`8ca3bdf`](https://github.com/thisnick/agent-wechat/commit/8ca3bdfe2db721a0e1871cb4119c2714a893c4c1) Thanks [@thisnick](https://github.com/thisnick)! - Publish `wechat-calls` as the fifth coordinated Rust crate, after its protocol
+  dependency. Include portable PCM/mixing and native Opus examples, feature and
+  integration documentation, MIT/codec licenses and package checks. The current
+  lower-level session/media APIs do not yet provide a high-level account-bound
+  CallClient/CallHandle service; native workers retain their 20-minute safety limit.
+
+  Keep optional internal dependencies synchronized when cutting versions. Use OIDC
+  for existing crates and the protected bootstrap token only for new crate names;
+  verify exact archive/source identity before resuming partial publications. npm
+  publication waits for all five crates. Retain the Opus, opusic-c and local audio
+  adapter licenses in the notices shipped with CLI packages, native executables
+  and runtime images.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`1bc8f55`](https://github.com/thisnick/agent-wechat/commit/1bc8f550f710319c9ab5cda507c07d5d899ed9ac) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx config servers remove NAME` to remove a saved server entry. Removing the selected server clears the CLI's active server selection.
+
+- [#402](https://github.com/thisnick/agent-wechat/pull/402) [`4e1f6a3`](https://github.com/thisnick/agent-wechat/commit/4e1f6a327d041000e04b7516bff3d43d0a58b9cd) Thanks [@thisnick](https://github.com/thisnick)! - The daemon starts again after a sudden stop of the computer, VM or WSL leaves an out-of-date `-shm` index beside one of its databases. It checks the log by itself, keeps a copy of the original files in a `.sqlite-recovery-…` folder and lets SQLite rebuild the index. If the index records changes that the log is missing, it still refuses to start. The error now names the database and links to recovery steps.
+
 ## 1.5.1
 
 ### Patch Changes

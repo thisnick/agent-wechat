@@ -1,5 +1,46 @@
 # @agent-wechat/wechat
 
+## 2.0.0-beta.0
+
+### Major Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`e4efdf3`](https://github.com/thisnick/agent-wechat/commit/e4efdf3e00757571c7d7f07718e71679688c25d2) Thanks [@thisnick](https://github.com/thisnick)! - Move call WebSockets to protocol version 2. Clients announce supported versions
+  before issuing commands or attaching media; omitted versions mean version 1 and
+  are rejected. Audio now uses JSON messages containing a track ID, generation and
+  base64 PCM, and media setup returns a receive-track array. Upgrade daemon, CLI
+  and OpenClaw plugin together. Raw binary call media is no longer accepted.
+
+  Conference participant snapshots report microphone state when supplied by the
+  server, keeping mute state separate from room membership.
+
+  Fix intermittent secure-channel setup failures caused by truncating a
+  zero-prefixed shared secret. Authentication and call polling use the corrected
+  calculation without the previous handshake-retry workaround.
+
+### Minor Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`85d0bd8`](https://github.com/thisnick/agent-wechat/commit/85d0bd8bee0fada1d77d1bb7242079f33dfc0334) Thanks [@thisnick](https://github.com/thisnick)! - Add shared direct-call and conference conversation modes using public OpenClaw speech interfaces. Keep the existing realtime/Live pipeline as the default, and add transcription through the configured agent and OpenClaw TTS. Preserve caller/roster context, inviter permissions, separate consultation sessions, paced audio and interruption accounting. Fence stale provider-session results during recovery and keep recoverable provider diagnostics from ending a healthy call.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`a3b12f0`](https://github.com/thisnick/agent-wechat/commit/a3b12f087be4b28444aac3de0b63ad5263b1d13e) Thanks [@thisnick](https://github.com/thisnick)! - Add configured voice conferences to the OpenClaw channel and `wechat_call` tool, with timed multi-track mixing, per-group auto-join permissions and optional inviter allowlists, account/group consultation sessions, and revocation checks. Keep conference consultation read-only unless both the group policy and OpenClaw's owner allowlist grant the group principal owner access.
+
+- [#403](https://github.com/thisnick/agent-wechat/pull/403) [`635fbc9`](https://github.com/thisnick/agent-wechat/commit/635fbc912fe1890dd4779c414a080746815888b1) Thanks [@thisnick](https://github.com/thisnick)! - Video sends now accept sources up to 512 MiB, matching ordinary files, instead of 50 MiB. The CLI, HTTP API capabilities, desktop and web composer, and OpenClaw extension all use the new limit; OpenClaw still applies `channels.agent-wechat.mediaMaxMb`, which defaults to 50. Original-quality videos of 25 MiB and above upload in blocks through the same path as large files.
+
+### Patch Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`3145d7a`](https://github.com/thisnick/agent-wechat/commit/3145d7ab59ade6fbd8e779371950e8ab3a24fe19) Thanks [@thisnick](https://github.com/thisnick)! - Give the voice agent direct caller identity, conference invitation sender and current call participants. Greet once after media connects and announce later joins and departures using the existing OpenClaw voice SDK. Conference names use group-visible labels; display names do not grant permissions or identify speakers.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`c016df9`](https://github.com/thisnick/agent-wechat/commit/c016df91eeadcfb18cad5bc5db8b4afe908d2d76) Thanks [@thisnick](https://github.com/thisnick)! - Use OpenClaw's shared voice profile context, including USER.md, for direct and conference calls. Give the voice model the connected contact, exact configured owner relationship and sole remote conference participant when attendance is known, without changing permissions. Keep recent call summaries and chat context, and avoid repeated voice-recognition disclaimers or duplicate profile injection in agent/TTS mode.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`d95b6bd`](https://github.com/thisnick/agent-wechat/commit/d95b6bd236c26a30c5ad602a56b135354a8cdc91) Thanks [@thisnick](https://github.com/thisnick)! - Refresh call context when participant names resolve after the initial roster. Keep deferred updates pending, distinguish roster knowledge from speaker recognition, include current roster metadata in consultations, and log context submissions and name-lookup counts without names or identifiers.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`3aa61ba`](https://github.com/thisnick/agent-wechat/commit/3aa61bac037a0fdb3e4a8998437b45146ee11fdc) Thanks [@thisnick](https://github.com/thisnick)! - Report confirmed conference departures through participant updates and call rosters. Expose known participant signaling statuses and preserve unrecognized numeric codes in snapshots, events, SDK types and CLI displays. Keep microphone changes and invitation outcomes separate from membership. Acknowledge a voice consultation once, then wait for the result without triggering repeated progress speech; callers can still ask for status while the lookup runs.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`8cea3a6`](https://github.com/thisnick/agent-wechat/commit/8cea3a6ef2010b12ea7e4b782533770b928e70fb) Thanks [@thisnick](https://github.com/thisnick)! - Allow a configured conference to use a different consultation policy when its authenticated inviter is an OpenClaw owner. Preserve the group as the principal, recheck grants before tools, prevent permission increases during a call, and separate conference recaps by permission level.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`e2b857e`](https://github.com/thisnick/agent-wechat/commit/e2b857e75acb4448c8986c8c18bccb63a98a90d4) Thanks [@thisnick](https://github.com/thisnick)! - Allow owner-authorized voice consultations to use the calling tool without the separate chat-requester allowlist. Bind access to the current call, keep destination and group allowlists and host tool policy, reject stale or read-only consultations, and log actual hang-up requests and submissions.
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`9a23935`](https://github.com/thisnick/agent-wechat/commit/9a239353c6445e2bdeae0bb861170b85186c248e) Thanks [@thisnick](https://github.com/thisnick)! - Keep up to ten minutes of generated Realtime speech instead of silently cutting replies after eight seconds. Cancel and report playback position if the response budget is exhausted. Retain the three-second Live queue and add buffer/clear diagnostics without recording audio.
+
 ## 1.5.1
 
 ## 1.5.0
