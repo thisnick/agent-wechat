@@ -59,7 +59,7 @@ try:
     readable, _, _ = select.select([observer.stdout], [], [], 15)
     assert readable, "shipped image did not expose the call control socket"
     hello = json.loads(observer.stdout.readline())
-    assert hello["type"] == "hello" and hello["protocolVersion"] == 1 and hello["capabilities"] == {}
+    assert hello["type"] == "hello" and hello["protocolVersion"] == 2 and hello["capabilities"] == {}
     subprocess.run(["docker", "stop", "--time", "10", name], check=True, stdout=subprocess.DEVNULL)
     process.wait(timeout=15)
     assert process.returncode == 0, "native image did not stop gracefully"

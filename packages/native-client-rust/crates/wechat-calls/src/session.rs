@@ -2,7 +2,9 @@
 //! Account ownership, journal persistence, logout fences, cancellation and timeout
 //! supervision belong to the caller. These methods never retry an RPC.
 
-use super::{
+use anyhow::{bail, ensure, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
+use wechat_protocol::calls::{
     app_frame::{self, AppFrameParameters},
     app_session::{AppAuthority, AppSession, PendingAppAuth},
     host_policy::CallHostRoute,
@@ -10,13 +12,19 @@ use super::{
     relay::SelectedRelay,
     signaling::{CallOperation, CommonRequest, CommonResponse},
 };
-use crate::{
+use wechat_protocol::{
     protobuf::{self as p, Field, Value},
-    wire, AccountState, NativeClient,
+    wire, AccountState,
 };
-use anyhow::{bail, ensure, Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
+
+mod parameters;
+pub use parameters::independent_voice_parameters;
+
+mod conference;
+pub use conference::{
+    ConferenceCreateTarget, ConferenceMember, ConferenceSession, ConferenceTarget,
+};
 
 /// A host RPC boundary for signaling. Implementations must authenticate transport
 /// replies, update accepted host cookies and perform exactly one submission.
@@ -33,36 +41,10 @@ pub trait PersonalTransport {
 /// submission layer. An already-recorded prepared intent is preserved. Only
 /// this proven pre-submission case may use this marker;
 /// timeouts, server replies and other ambiguous outcomes must use other errors.
-#[derive(Debug)]
-pub struct CallRpcNotSubmitted;
-impl std::fmt::Display for CallRpcNotSubmitted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Call control request was not submitted")
-    }
-}
-impl std::error::Error for CallRpcNotSubmitted {}
+pub use wechat_protocol::NativeRequestNotSubmitted as CallRpcNotSubmitted;
 
-/// A pre-answer LiveSync was superseded locally. The transport may have sent
-/// it, but its reply must never update the room cursor or account state.
-#[derive(Debug)]
-pub struct CallLiveSyncInterrupted;
-impl std::fmt::Display for CallLiveSyncInterrupted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Incoming LiveSync was interrupted for Answer")
-    }
-}
-impl std::error::Error for CallLiveSyncInterrupted {}
+pub use wechat_protocol::calls::host_transport::CallLiveSyncInterrupted;
 
-impl PersonalTransport for NativeClient {
-    fn call_rpc(
-        &self,
-        state: &mut AccountState,
-        route: CallHostRoute,
-        request: &[u8],
-    ) -> Result<Vec<u8>> {
-        self.experimental_call_rpc(state, route, request)
-    }
-}
 /// The room/control exchange is understood, but its selected media profile is
 /// outside this implementation. This is distinct from an ambiguous RPC outcome;
 /// the owner can end the known call once using its current control phase.
@@ -77,9 +59,9 @@ impl std::error::Error for UnsupportedCallMedia {}
 
 mod incoming;
 mod termination;
-pub use super::personal::RemoteExitReason;
 pub use incoming::{IncomingPhase, NativeIncomingSession};
 pub use termination::{LocalStopReason, RemoteTermination};
+pub use wechat_protocol::calls::personal::RemoteExitReason;
 
 type AvSnapshot = BTreeMap<u16, (u32, Option<Vec<u8>>)>;
 
@@ -102,6 +84,12 @@ pub struct VoiceParameters {
     pub app_config_version: u32,
 }
 impl VoiceParameters {
+    /// Replace only request advertisements, never negotiated peer capabilities.
+    pub fn apply_offer(&mut self, offer: &wechat_protocol::calls::voice_offer::VoiceOffer) {
+        self.sdk = offer.sdk_info().to_vec();
+        self.engine_capability = offer.engine_advertisement().to_vec();
+        self.channel_capability = offer.advertised_channel_identity().to_vec();
+    }
     pub fn inputs(&self) -> VoiceInputs<'_> {
         VoiceInputs {
             sdk: &self.sdk,
@@ -194,6 +182,7 @@ pub struct NegotiatedMedia {
 /// context, or retries an uncertain action. Callers persist state.cookie changes
 /// even when subsequent app parsing fails.
 pub struct NativePersonalSession {
+    ignored_controls: u64,
     app: AppSession,
     authority: AppAuthority,
     own_username: String,
@@ -226,6 +215,7 @@ impl NativePersonalSession {
         let reply = client.call_rpc(state, CallHostRoute::AppAuth, &request)?;
         let app = pending.complete(&reply, authority)?;
         Ok(Self {
+            ignored_controls: 0,
             app,
             authority,
             own_username: state.own_username.clone(),
@@ -236,6 +226,9 @@ impl NativePersonalSession {
             host_tasks: BTreeSet::from([host_task]),
             sdk_tasks: BTreeSet::new(),
         })
+    }
+    pub fn ignored_control_count(&self) -> u64 {
+        self.ignored_controls
     }
     pub fn phase(&self) -> PersonalPhase {
         self.phase
@@ -558,10 +551,9 @@ impl NativePersonalSession {
             tasks.host,
         )?;
         let response = personal::LiveSyncResponse::decode(&body)?;
-        ensure!(
-            response.unknown_fields.is_empty(),
-            "Unknown caller sync response field"
-        );
+        self.ignored_controls = self
+            .ignored_controls
+            .saturating_add(response.unknown_fields.len() as u64);
         let control = self
             .control
             .as_ref()
@@ -584,18 +576,19 @@ impl NativePersonalSession {
         let mut terminal = None;
         let mut next = self.active.as_ref().expect("active room").clone();
         'notifications: for item in response.items {
-            ensure!(
-                item.kind == 1 && item.unknown_fields.is_empty(),
-                "Unsupported caller sync item"
-            );
+            self.ignored_controls = self
+                .ignored_controls
+                .saturating_add(item.unknown_fields.len() as u64);
+            if item.kind != 1 {
+                self.ignored_controls = self.ignored_controls.saturating_add(1);
+                continue;
+            }
             let message = fields(&item.body)?;
-            only(&message, &[1, 2])?;
-            ensure!(
-                number(&message, 1, None)? == 10002,
-                "Unsupported caller sync command"
-            );
+            if number(&message, 1, None)? != 10002 {
+                self.ignored_controls = self.ignored_controls.saturating_add(1);
+                continue;
+            }
             let notify = fields(data(&message, 2)?)?;
-            only(&notify, &[1, 2, 3, 4, 5])?;
             ensure!(
                 number(&notify, 3, None)? == next.identity.room
                     && matches_room_key(&notify, 4, next.identity.room_key)?,
@@ -603,7 +596,6 @@ impl NativePersonalSession {
             );
             for raw in repeated(&notify, 5, 64)? {
                 let item = fields(raw)?;
-                only(&item, &[1, 2])?;
                 let kind = number(&item, 1, None)?;
                 let bytes = data(&item, 2)?;
                 match kind {
@@ -718,7 +710,9 @@ impl NativePersonalSession {
                         // the message without changing its admitted relay.
                         validate_callee_relay_info(bytes)?;
                     }
-                    _ => bail!("Unsupported caller notification kind"),
+                    _ => {
+                        self.ignored_controls = self.ignored_controls.saturating_add(1);
+                    }
                 }
             }
         }
@@ -1075,7 +1069,7 @@ fn common(state: &AccountState, host_task: u32, body: &[u8]) -> Result<Vec<u8>> 
 }
 fn fields(raw: &[u8]) -> Result<Vec<Field>> {
     ensure!(raw.len() <= 64 * 1024, "Personal signaling body too large");
-    super::signaling::decode_fields(raw)
+    wechat_protocol::calls::signaling::decode_fields(raw)
 }
 fn data(values: &[Field], n: u32) -> Result<&[u8]> {
     p::optional_data(values, n)?.ok_or_else(|| anyhow::anyhow!("Missing personal bytes field {n}"))
@@ -1400,6 +1394,9 @@ mod tests {
         assert!(number(&base, 6, None)? > 0);
         let body = fields(request.body.as_deref().context("Missing host body")?)?;
         match route {
+            CallHostRoute::ConferenceJoin | CallHostRoute::ConferenceAddMembers => {
+                bail!("Unexpected conference operation in personal session")
+            }
             CallHostRoute::AppAuth => {
                 let device = data(&fields(data(&body, 1)?)?, 1)?.to_vec();
                 assert_eq!(device.len(), 32);
@@ -1498,7 +1495,7 @@ mod tests {
     pub(super) fn state() -> AccountState {
         AccountState {
             schema: 1,
-            device: crate::DeviceProfile {
+            device: wechat_protocol::DeviceProfile {
                 device_id: vec![b'x'; 16],
                 device_type: "Linux".to_owned(),
                 client_version: -227271398,
@@ -1512,7 +1509,7 @@ mod tests {
             auto_auth_key: vec![],
             key_info: vec![],
             database_password: vec![],
-            auth_snapshot: crate::AuthSnapshot::default(),
+            auth_snapshot: wechat_protocol::AuthSnapshot::default(),
             long_host: "localhost".to_owned(),
             short_host: "localhost".to_owned(),
         }
@@ -1533,7 +1530,8 @@ mod tests {
     }
     pub(super) fn parameters() -> VoiceParameters {
         let offer =
-            super::super::voice_offer::VoiceOffer::from_owned_random(0x01000000, [5; 32]).unwrap();
+            wechat_protocol::calls::voice_offer::VoiceOffer::from_owned_random(0x01000000, [5; 32])
+                .unwrap();
         VoiceParameters {
             sdk: p::message(&[p::uint(1, 0x050000cb), p::bytes(2, b"test")]).unwrap(),
             group: p::message(&[
@@ -1931,7 +1929,7 @@ mod tests {
         assert!(p::optional(&common, 1).unwrap().is_none());
     }
     #[test]
-    fn later_unknown_sync_item_prevents_cookie_and_partial_member_install() {
+    fn unknown_control_does_not_interrupt_known_membership_or_cookie_updates() {
         let transport = FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
             (CallHostRoute::AppAuth, auth_reply()),
             (CallHostRoute::Invite, invite_reply()),
@@ -1957,26 +1955,22 @@ mod tests {
                 TaskIds { sdk: 1, host: 2 },
             )
             .unwrap();
-        assert!(session
-            .poll(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 2, host: 3 }
-            )
-            .is_err());
-        assert_eq!(session.phase(), PersonalPhase::Uncertain);
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert_eq!(session.phase(), PersonalPhase::Joined);
+        assert_eq!(session.ignored_control_count(), 1);
         let active = session.active.as_ref().unwrap();
-        assert_eq!(active.cookies, b"old");
-        assert_eq!(active.members["peer"].status, 2);
-        assert!(session
-            .poll(
-                &transport,
-                &mut state,
-                authority(),
-                TaskIds { sdk: 3, host: 4 }
-            )
-            .is_err());
+        assert_eq!(active.cookies, b"new");
+        assert_eq!(active.members["peer"].status, 1);
     }
 
     #[test]

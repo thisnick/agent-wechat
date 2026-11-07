@@ -7,61 +7,73 @@ use super::{
     authority::CallAuthorityLease,
     ownership::{AccountAuthority, CallIdentity, Operation},
     service::{
-        BackendAudioRequest, BackendOutcome, BackendRequest, BackendSink, CallBackend,
-        CallServiceError,
+        BackendAudioRequest, BackendInviteRequest, BackendOutcome, BackendRequest, BackendSink,
+        CallBackend, CallServiceError,
     },
 };
 use crate::{
-    call_types::{CallAudioFormat, CallCapabilities, CallErrorCode},
+    call_types::{
+        CallAudioFormat, CallCapabilities, CallConferenceInvitation, CallErrorCode,
+        CallInvitationResult,
+    },
     runtime::authorization,
     Core,
 };
 use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     future::Future,
-    net::{SocketAddr, SocketAddrV4, UdpSocket},
+    net::{SocketAddrV4, UdpSocket},
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
+        mpsc::{self, Receiver, SyncSender},
         Arc, Mutex, Weak,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{oneshot, Notify};
-use wechat_calls::{
-    audio::{AudioDecoder, AudioEncoder, AudioFormat},
-    opus::{OpusDecoder, OpusEncoder},
-    playout::FramePacer,
+use wechat_calls::session::{
+    CallLiveSyncInterrupted, CallRpcNotSubmitted, NativePersonalSession, PersonalPhase,
+    PersonalTransport, SyncProgress, TaskIds, UnsupportedCallMedia, VoiceParameters,
 };
 use wechat_protocol::{
     calls::{
         app_session::AppAuthority,
-        audio_packet::{self, Live96, MediaContext, MediaEpoch, TransmitScope},
-        client::{
-            CallLiveSyncInterrupted, CallRpcNotSubmitted, NativePersonalSession, PersonalPhase,
-            PersonalTransport, SyncProgress, TaskIds, UnsupportedCallMedia, VoiceParameters,
-        },
+        audio_packet::MediaEpoch,
         host_policy::{
             is_reject_request, is_teardown_request, selected_policy, CallHostPolicy, CallHostRoute,
         },
-        relay::{RelayEpoch, RelayProgress, RoomInputs, TwoRttRelay},
         voice_offer::VoiceOffer,
     },
-    crypto, protobuf as p, AccountState,
+    crypto, AccountState,
 };
+
+#[cfg(test)]
+use std::net::SocketAddr;
+#[cfg(test)]
+use wechat_calls::{
+    audio::{AudioDecoder, AudioEncoder, AudioFormat},
+    opus::{OpusDecoder, OpusEncoder},
+};
+#[cfg(test)]
+use wechat_protocol::calls::audio_packet::{self, Live96, MediaContext, TransmitScope};
+#[cfg(test)]
+use wechat_protocol::protobuf as p;
 
 #[cfg(not(test))]
 use wechat_protocol::NativeOptions;
 
+mod conference;
 mod incoming;
-mod rtp_order;
+mod media;
+use media::run as run_media;
+use wechat_calls::native_media::SubmissionGate as SendAdmission;
 mod transport_state;
 #[cfg(test)]
 mod transport_tests;
-use rtp_order::RtpOrder;
 use transport_state::CallNetworkState;
 
 type BackendFuture<T> =
@@ -69,6 +81,8 @@ type BackendFuture<T> =
 
 #[derive(Clone)]
 struct NativeCallConfig {
+    conference_join_profile: bool,
+    conference_probe_mode: conference::ProbeMode,
     ring_timeout: Duration,
     peer_idle_timeout: Duration,
     max_duration: Duration,
@@ -76,6 +90,14 @@ struct NativeCallConfig {
 impl Default for NativeCallConfig {
     fn default() -> Self {
         Self {
+            conference_join_profile: true,
+            conference_probe_mode: match std::env::var("WX_CALL_CONFERENCE_SPIKE").as_deref() {
+                Ok("duplex-tone") => conference::ProbeMode::DuplexTone,
+                Ok("multi-receive") => conference::ProbeMode::MultiReceive,
+                Ok("receive-audio") => conference::ProbeMode::Receive,
+                Ok("join-profile") => conference::ProbeMode::Profile,
+                _ => conference::ProbeMode::Application,
+            },
             ring_timeout: Duration::from_secs(60),
             peer_idle_timeout: Duration::from_secs(60),
             // The supported media counter must not roll over without rekeying.
@@ -84,53 +106,7 @@ impl Default for NativeCallConfig {
     }
 }
 
-/// Independent Linux SDK metadata for the selected direct voice subset. It
-/// advertises our supported codec/layout, not another client's copied identity.
-/// Only returned current capabilities determine whether media may start.
-pub fn independent_voice_parameters() -> Result<VoiceParameters> {
-    let major = env!("CARGO_PKG_VERSION_MAJOR").parse::<u8>()?;
-    let minor = env!("CARGO_PKG_VERSION_MINOR").parse::<u8>()?;
-    let patch = env!("CARGO_PKG_VERSION_PATCH").parse::<u8>()?;
-    let version = i32::from_be_bytes([major, minor, patch, 0]);
-    let offer = VoiceOffer::from_owned_random(version, crypto::random::<32>()?)?;
-    let sdk = offer.sdk_info().to_vec();
-    let group = p::message(&[
-        p::bytes(1, b"wechat"),
-        p::uint(2, 0),
-        p::bytes(3, b"voip-2p"),
-        p::bytes(4, &[]),
-        p::uint(5, 1),
-        p::bytes(6, &[]),
-        p::uint(7, 0),
-    ])?;
-    let device = p::message(&[
-        p::bytes(1, b"agent-wechat"),
-        p::bytes(2, b"native"),
-        p::bytes(3, env!("CARGO_PKG_VERSION").as_bytes()),
-        p::bytes(4, &[]),
-        p::bytes(5, b"agent-wechat"),
-        p::uint(
-            7,
-            std::thread::available_parallelism().map_or(1, usize::from) as u64,
-        ),
-        p::uint(8, 0),
-        p::bytes(9, std::env::consts::ARCH.as_bytes()),
-    ])?;
-    Ok(VoiceParameters {
-        sdk,
-        group,
-        device,
-        engine_capability: offer.engine_advertisement().to_vec(),
-        channel_capability: offer.advertised_channel_identity().to_vec(),
-        network_type: 0,
-        sim_type: 0,
-        video_length: 0,
-        video_ratio: 0,
-        nics: vec![],
-        cloud_device_id: b"Ldeviceid".to_vec(),
-        app_config_version: 1,
-    })
-}
+pub use wechat_calls::session::independent_voice_parameters;
 
 pub struct NativeCallBackend {
     inner: Arc<Inner>,
@@ -139,6 +115,7 @@ struct Inner {
     core: Weak<Core>,
     config: NativeCallConfig,
     active: Mutex<Option<Arc<Worker>>>,
+    conferences: Mutex<BTreeMap<(String, String), Arc<conference::Pending>>>,
     #[cfg(test)]
     test_io: Option<Arc<dyn TestCallIo>>,
 }
@@ -146,6 +123,7 @@ struct Worker {
     identity: CallIdentity,
     peer_id: String,
     lease: CallAuthorityLease,
+    account_lease: std::sync::OnceLock<wechat_protocol::AccountLease>,
     stop: AtomicBool,
     media_stop: AtomicBool,
     locally_closed: AtomicBool,
@@ -154,6 +132,9 @@ struct Worker {
     metrics: MediaMetrics,
     mutations_submitted: AtomicBool,
     incoming: Option<Arc<incoming::Mailbox>>,
+    conference: Option<Arc<conference::Pending>>,
+    conference_start: Option<Vec<String>>,
+    conference_commands: Mutex<std::collections::VecDeque<conference::Command>>,
     audio: SyncSender<QueuedAudio>,
     done: Mutex<Option<BackendOutcome>>,
     notify: Notify,
@@ -163,6 +144,14 @@ struct QueuedAudio {
     queued: Instant,
 }
 impl Worker {
+    fn has_commands(&self) -> bool {
+        self.conference_commands
+            .lock()
+            .is_ok_and(|commands| !commands.is_empty())
+    }
+    fn is_conference(&self) -> bool {
+        self.conference.is_some() || self.conference_start.is_some()
+    }
     fn reusable(&self) -> bool {
         self.done.lock().is_ok_and(|done| {
             done.is_some_and(|outcome| {
@@ -172,10 +161,24 @@ impl Worker {
         })
     }
 
+    fn authorized(&self) -> bool {
+        self.lease.current()
+            && self
+                .account_lease
+                .get()
+                .is_none_or(wechat_protocol::AccountLease::current)
+    }
     fn current(&self) -> bool {
-        self.lease.current() && !self.media_stop.load(Ordering::Acquire)
+        self.authorized() && !self.media_stop.load(Ordering::Acquire)
     }
     fn finish(&self, outcome: BackendOutcome) {
+        if let Ok(mut commands) = self.conference_commands.lock() {
+            for command in commands.drain(..) {
+                let _ = command
+                    .reply
+                    .send(Err(service_error(CallErrorCode::Closed)));
+            }
+        }
         if let Ok(mut done) = self.done.lock() {
             *done = Some(outcome);
         }
@@ -202,6 +205,7 @@ impl NativeCallBackend {
                 core,
                 config: NativeCallConfig::default(),
                 active: Mutex::new(None),
+                conferences: Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 test_io: None,
             }),
@@ -209,6 +213,79 @@ impl NativeCallBackend {
     }
 }
 impl CallBackend for NativeCallBackend {
+    fn conference_invitations(
+        &self,
+        authority: &AccountAuthority,
+    ) -> Vec<CallConferenceInvitation> {
+        conference::invitations(&self.inner, authority)
+    }
+    fn invite(&self, request: BackendInviteRequest) -> BackendFuture<Vec<CallInvitationResult>> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = active(&inner, &request.identity)?;
+            if !worker.is_conference() || !worker.current() || worker.stop.load(Ordering::Acquire) {
+                return Err(service_error(CallErrorCode::Stale));
+            }
+            let (reply, received) = oneshot::channel();
+            {
+                let mut commands = worker
+                    .conference_commands
+                    .lock()
+                    .map_err(|_| service_error(CallErrorCode::Closed))?;
+                if commands.len() >= 16 {
+                    return Err(service_error(CallErrorCode::Capacity));
+                }
+                commands.push_back(conference::Command {
+                    action: conference::CommandAction::Invite(request.contacts),
+                    reply,
+                });
+            }
+            match received
+                .await
+                .map_err(|_| service_error(CallErrorCode::Closed))??
+            {
+                conference::CommandResult::Invitations(results) => Ok(results),
+                conference::CommandResult::Muted => {
+                    Err(service_error(CallErrorCode::InvalidRequest))
+                }
+            }
+        })
+    }
+    fn set_muted(&self, identity: CallIdentity, muted: bool) -> BackendFuture<()> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = active(&inner, &identity)?;
+            if !worker.current() || worker.stop.load(Ordering::Acquire) {
+                return Err(service_error(CallErrorCode::Stale));
+            }
+            if !worker.is_conference() {
+                return Ok(());
+            }
+            let (reply, received) = oneshot::channel();
+            {
+                let mut commands = worker
+                    .conference_commands
+                    .lock()
+                    .map_err(|_| service_error(CallErrorCode::Closed))?;
+                if commands.len() >= 16 {
+                    return Err(service_error(CallErrorCode::Capacity));
+                }
+                commands.push_back(conference::Command {
+                    action: conference::CommandAction::Mute(muted),
+                    reply,
+                });
+            }
+            match received
+                .await
+                .map_err(|_| service_error(CallErrorCode::Closed))??
+            {
+                conference::CommandResult::Muted => Ok(()),
+                conference::CommandResult::Invitations(_) => {
+                    Err(service_error(CallErrorCode::InvalidRequest))
+                }
+            }
+        })
+    }
     fn authority(&self, account: &str) -> Option<AccountAuthority> {
         let core = self.inner.core.upgrade()?;
         let lease = core.cached_call_authority(account)?;
@@ -217,8 +294,26 @@ impl CallBackend for NativeCallBackend {
     fn capabilities(&self, account: &str) -> CallCapabilities {
         CallCapabilities {
             direct_audio: self.authority(account).is_some(),
+            conference_join: self.inner.config.conference_join_profile
+                && self.authority(account).is_some(),
+            conference_create: self.inner.config.conference_probe_mode
+                == conference::ProbeMode::Application
+                && self.authority(account).is_some(),
+            conference_audio: self.inner.config.conference_probe_mode
+                == conference::ProbeMode::Application
+                && self.authority(account).is_some(),
+            conference_invite: self.inner.config.conference_probe_mode
+                == conference::ProbeMode::Application
+                && self.authority(account).is_some(),
             ..CallCapabilities::default()
         }
+    }
+    fn observe_conference(
+        &self,
+        note: Arc<super::notifications::IncomingNotification>,
+        ttl: Duration,
+    ) {
+        conference::observe(&self.inner, note, ttl);
     }
     fn incoming_supported(&self, authority: &AccountAuthority, caller: &str) -> bool {
         incoming::supported(&self.inner, authority, caller)
@@ -268,11 +363,27 @@ impl CallBackend for NativeCallBackend {
             if !sink.is_current() || lease.authority() != request.ticket.authority() {
                 return Ok(BackendOutcome::Ended);
             }
+            let conference = if request.peer_id.ends_with("@chatroom")
+                && request.conference_invitees.is_none()
+            {
+                let Some(expected) = request.conference_invitation.as_ref() else {
+                    return Ok(BackendOutcome::Ended);
+                };
+                let Some(pending) =
+                    conference::claim(&inner, &request.peer_id, lease.authority(), expected)
+                else {
+                    return Ok(BackendOutcome::Ended);
+                };
+                Some(pending)
+            } else {
+                None
+            };
             let (audio, rx) = mpsc::sync_channel(32);
             let worker = Arc::new(Worker {
                 identity: request.ticket.identity(),
                 peer_id: request.peer_id.clone(),
                 lease,
+                account_lease: std::sync::OnceLock::new(),
                 stop: AtomicBool::new(false),
                 media_stop: AtomicBool::new(false),
                 locally_closed: AtomicBool::new(false),
@@ -281,6 +392,9 @@ impl CallBackend for NativeCallBackend {
                 metrics: MediaMetrics::default(),
                 mutations_submitted: AtomicBool::new(false),
                 incoming: None,
+                conference,
+                conference_start: request.conference_invitees.clone(),
+                conference_commands: Mutex::new(std::collections::VecDeque::new()),
                 audio,
                 done: Mutex::new(None),
                 notify: Notify::new(),
@@ -318,6 +432,9 @@ impl CallBackend for NativeCallBackend {
                     let terminal = result.is_ok() || no_mutation;
                     if result.is_err() {
                         if let Some(core) = actor_inner.core.upgrade() {
+                            if let Err(error) = &result {
+                                conference::record_failure(&core, &actor_worker, error);
+                            }
                             let _ = if no_mutation {
                                 core.store.close_call_locally(
                                     &actor_worker.lease.authority().account_id,
@@ -521,6 +638,26 @@ impl FencedTransport {
     fn pre_answer_poll(&self, route: CallHostRoute) -> bool {
         route == CallHostRoute::LiveSync && matches!(self.admission, ControlAdmission::Incoming(_))
     }
+    fn wait_for_conference_sync<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.runtime.block_on(async {
+            tokio::pin!(exchange);
+            let mut stop_check = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                tokio::select! {
+                    biased;
+                    reply = &mut exchange => return reply,
+                    _ = stop_check.tick() => {
+                        if !self.worker.current() || self.worker.stop.load(Ordering::Acquire) || self.worker.has_commands() {
+                            return Err(CallLiveSyncInterrupted.into());
+                        }
+                    }
+                }
+            }
+        })
+    }
     fn wait_for_incoming_sync<T>(
         &self,
         exchange: impl std::future::Future<Output = Result<T>>,
@@ -553,7 +690,7 @@ impl FencedTransport {
         if rejecting {
             return self.admission.terminal_current();
         }
-        self.admission.nonterminal_current() && self.worker.lease.current()
+        self.admission.nonterminal_current() && self.worker.authorized()
     }
 }
 impl FencedTransport {
@@ -589,7 +726,7 @@ impl FencedTransport {
                     error.downcast_ref::<wechat_protocol::calls::host_transport::CallHostRpcError>()
                 {
                     let diagnostic = serde_json::to_vec(
-                        &serde_json::json!({"cgi":route.command(),"stage":error.stage.as_str(),"code":error.code,"value":error.value,"mayHaveSubmitted":handed_off || error.may_have_submitted()}),
+                        &serde_json::json!({"cgi":route.command(),"stage":error.stage.as_str(),"code":error.code,"value":error.value,"cryptoStep":error.crypto_step,"mayHaveSubmitted":handed_off || error.may_have_submitted()}),
                     )?;
                     core.store.put_runtime(
                         &self.account,
@@ -599,6 +736,17 @@ impl FencedTransport {
                 }
                 if local_stop {
                     core.store.finish_call_action_not_submitted(
+                        &self.account,
+                        &self.call_id,
+                        action,
+                    )?;
+                    return Ok(());
+                }
+                if route == CallHostRoute::LiveSync {
+                    // Missing a read-only poll reply cannot revoke the known
+                    // room's separately fenced cleanup. Retain its uncertainty
+                    // without acknowledging it or granting a retry.
+                    core.store.finish_interrupted_live_sync(
                         &self.account,
                         &self.call_id,
                         action,
@@ -626,7 +774,16 @@ impl PersonalTransport for FencedTransport {
     ) -> Result<Vec<u8>> {
         let core = self.core.upgrade().context("Call core closed")?;
         let guard = self.runtime.block_on(core.lock_account(&self.account))?;
-        if !self.lease.current() || core.stopping.load(Ordering::Acquire) {
+        if !self.worker.authorized() || core.stopping.load(Ordering::Acquire) {
+            return Err(CallRpcNotSubmitted.into());
+        }
+        if route == CallHostRoute::ConferenceJoin
+            && !self
+                .worker
+                .conference
+                .as_ref()
+                .is_some_and(|pending| pending.current())
+        {
             return Err(CallRpcNotSubmitted.into());
         }
         let teardown = is_teardown_request(route, request)?;
@@ -647,10 +804,17 @@ impl PersonalTransport for FencedTransport {
             "Selected call host route unsupported"
         );
         #[cfg(not(test))]
-        let native = core.upstream.native(NativeOptions {
-            timeout: self.timeout,
-            ..NativeOptions::default()
-        })?;
+        let native = core.native_account(
+            &self.account,
+            NativeOptions {
+                timeout: self.timeout,
+                ..NativeOptions::default()
+            },
+        )?;
+        #[cfg(not(test))]
+        if self.worker.account_lease.get().is_none() {
+            let _ = self.worker.account_lease.set(native.account_lease()?);
+        }
         if !self.admits(teardown, rejecting) {
             return Err(CallRpcNotSubmitted.into());
         }
@@ -679,10 +843,19 @@ impl PersonalTransport for FencedTransport {
         drop(guard);
         let handed_off = AtomicBool::new(false);
         let handoff = || {
-            if !self.lease.current() || core.stopping.load(Ordering::Acquire) {
+            if !self.worker.authorized() || core.stopping.load(Ordering::Acquire) {
                 return Err(CallRpcNotSubmitted.into());
             }
             if !self.admits(teardown, rejecting) {
+                return Err(CallRpcNotSubmitted.into());
+            }
+            if route == CallHostRoute::ConferenceJoin
+                && !self
+                    .worker
+                    .conference
+                    .as_ref()
+                    .is_some_and(|pending| pending.current())
+            {
                 return Err(CallRpcNotSubmitted.into());
             }
             handed_off.store(true, Ordering::Release);
@@ -710,21 +883,43 @@ impl PersonalTransport for FencedTransport {
                 })
         };
         #[cfg(not(test))]
-        let result = if self.pre_answer_poll(route) {
-            native.experimental_call_live_sync_guarded(
-                &mut exchanged,
-                request,
-                handoff,
-                |exchange| self.wait_for_incoming_sync(exchange),
-            )
-        } else {
-            native.experimental_call_rpc_guarded(&mut exchanged, route, request, handoff)
-        };
+        let reply_retained = AtomicBool::new(false);
+        #[cfg(not(test))]
+        let result = native.request_blocking(|operation| {
+            let retain = |reply: &[u8]| {
+                self.retain_host_result(&core, &action, route, &Ok(reply.to_vec()), true)?;
+                reply_retained.store(true, Ordering::Release);
+                Ok(())
+            };
+            if self.pre_answer_poll(route) {
+                operation.call_live_sync(
+                    request,
+                    self.timeout,
+                    handoff,
+                    |exchange| self.wait_for_incoming_sync(exchange),
+                    retain,
+                )
+            } else if route == CallHostRoute::LiveSync && self.worker.is_conference() {
+                operation.call_live_sync(
+                    request,
+                    Duration::from_secs(60),
+                    handoff,
+                    |exchange| self.wait_for_conference_sync(exchange),
+                    retain,
+                )
+            } else {
+                operation.call_rpc(route, request, handoff, retain)
+            }
+        });
+        #[cfg(not(test))]
+        if let Ok(accepted) = native.export_account_state() {
+            exchanged = accepted;
+        }
         // Retain the response before trying to reacquire: a poisoned/closed
         // writer must not discard an authenticated reply. These are operational
         // sealed receipts, never account/profile state or mutation permission.
         let handed_off = handed_off.load(Ordering::Acquire);
-        if self.pre_answer_poll(route)
+        if route == CallHostRoute::LiveSync
             && handed_off
             && result
                 .as_ref()
@@ -734,7 +929,14 @@ impl PersonalTransport for FencedTransport {
                 .finish_interrupted_live_sync(&self.account, &self.call_id, &action)?;
             return result;
         }
+        #[cfg(test)]
         let retained = self.retain_host_result(&core, &action, route, &result, handed_off);
+        #[cfg(not(test))]
+        let retained = if reply_retained.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            self.retain_host_result(&core, &action, route, &result, handed_off)
+        };
         let reacquired = self.runtime.block_on(core.lock_account(&self.account));
         retained?;
         let _guard = reacquired?;
@@ -780,7 +982,7 @@ fn begin_operational_call(
     let account = &worker.lease.authority().account_id;
     let call_id = worker.identity.call_id();
     let _guard = runtime.block_on(core.lock_account(account))?;
-    ensure!(worker.lease.current(), "Call authority revoked");
+    ensure!(worker.authorized(), "Call authority revoked");
     ensure!(
         core.store
             .begin_call(account, call_id, &worker.lease.authority().generation)?,
@@ -827,7 +1029,22 @@ fn run_control(
     let voice_offer =
         VoiceOffer::from_owned_random(state.device.client_version, crypto::random::<32>()?)?;
     let mut parameters = independent_voice_parameters()?;
-    voice_offer.apply_to(&mut parameters);
+    parameters.apply_offer(&voice_offer);
+    if worker.is_conference() {
+        return conference::run(
+            &transport,
+            state,
+            auth,
+            parameters,
+            tasks,
+            conference::RunInput {
+                admitted,
+                probe: inner.config.conference_probe_mode,
+                audio,
+                request_id: request.request_id,
+            },
+        );
+    }
     let mut session = NativePersonalSession::authenticate(
         &transport,
         &mut state,
@@ -836,7 +1053,7 @@ fn run_control(
         crypto::random::<32>()?,
         parameters,
     )?;
-    if worker.stop.load(Ordering::Acquire) || !worker.lease.current() {
+    if worker.stop.load(Ordering::Acquire) || !worker.authorized() {
         core.store.finish_call(account, call_id, true)?;
         let _ = admitted.send(Ok(BackendOutcome::Ended));
         return Ok(());
@@ -869,7 +1086,7 @@ fn run_control(
     let _ = admitted.send(Ok(BackendOutcome::Admitted));
     let ringing_end = Instant::now() + inner.config.ring_timeout;
     while !worker.stop.load(Ordering::Acquire) {
-        ensure!(worker.lease.current(), "Call authority revoked");
+        ensure!(worker.authorized(), "Call authority revoked");
         match session.media_ready(&state, auth) {
             Ok(true) => break,
             Ok(false) => {}
@@ -879,7 +1096,7 @@ fn run_control(
             }
             Err(error) => return Err(error),
         }
-        if Instant::now() >= ringing_end || !worker.lease.current() {
+        if Instant::now() >= ringing_end || !worker.authorized() {
             worker.stop.store(true, Ordering::Release);
             break;
         }
@@ -946,8 +1163,8 @@ fn run_control(
             && !worker.media_stop.load(Ordering::Acquire)
             && Instant::now() < deadline
         {
-            ensure!(worker.lease.current(), "Call authority revoked");
-            if !worker.lease.current() {
+            ensure!(worker.authorized(), "Call authority revoked");
+            if !worker.authorized() {
                 worker.stop.store(true, Ordering::Release);
                 break;
             }
@@ -1019,7 +1236,7 @@ fn run_control(
             }))?,
         );
     }
-    ensure!(worker.lease.current(), "Call authority revoked before Exit");
+    ensure!(worker.authorized(), "Call authority revoked before Exit");
     let ended = match session.phase() {
         PersonalPhase::Finished => Ok(()),
         PersonalPhase::TerminalPending => {
@@ -1032,325 +1249,6 @@ fn run_control(
     ended
 }
 
-fn run_media(
-    config: &NativeCallConfig,
-    worker: &Arc<Worker>,
-    media: wechat_protocol::calls::client::NegotiatedMedia,
-    audio: Receiver<QueuedAudio>,
-    sink: &BackendSink,
-    runtime: &tokio::runtime::Handle,
-) -> Result<()> {
-    let started = Instant::now();
-    ensure!(
-        matches!(media.frames_per_packet, 1 | 2),
-        "Unsupported call packet grouping"
-    );
-    let clock = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let epoch = MediaEpoch {
-        account_generation: nonzero64(worker.lease.authority().generation.as_bytes()),
-        logout_epoch: 0,
-        call_generation: nonzero64(worker.identity.call_id().as_bytes()),
-        key_generation: 1,
-    };
-    let relay_epoch = RelayEpoch {
-        account_generation: epoch.account_generation,
-        logout_epoch: 0,
-        call_generation: epoch.call_generation,
-        key_generation: epoch.key_generation,
-        socket_generation: 1,
-        attempt_id: 1,
-    };
-    let selected = media.relay;
-    let endpoint = selected.endpoint;
-    let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))?;
-    // Physical sends are nonblocking while account/clear submission gates are
-    // held. Waiting for input happens only outside those gates.
-    socket.set_nonblocking(true)?;
-    let room = RoomInputs::initial(&selected, 0, clock() as u32, clock() as u32);
-    let mut checkin = TwoRttRelay::new(room, selected.room_key, endpoint, relay_epoch, 15_000)?;
-    let random = crypto::random::<10>()?;
-    let packet = checkin.prepare_initial(
-        relay_epoch,
-        clock(),
-        &random[..checkin.random_bytes_needed()?],
-    )?;
-    send_datagram(&socket, endpoint, &packet, worker, &[])?;
-    // One extra byte distinguishes a maximum-size datagram from truncation.
-    let mut buffer = [0u8; 8198];
-    while !checkin.is_ready() {
-        ensure!(
-            worker.current() && !worker.stop.load(Ordering::Acquire),
-            "Call stopped during relay setup"
-        );
-        ensure!(clock() < 15_000, "Call relay deadline exceeded");
-        match socket.recv_from(&mut buffer) {
-            Ok((n, SocketAddr::V4(source)))
-                if source == endpoint && n <= 8197 && buffer[..n].first() == Some(&0xd5) =>
-            {
-                match checkin.receive(&buffer[..n], source, relay_epoch, clock())? {
-                    RelayProgress::FirstCheckin => {
-                        let header = clock() as u32;
-                        let body = clock() as u32;
-                        let random = crypto::random::<10>()?;
-                        let n = checkin.continuation_random_bytes_needed(header, body)?;
-                        let continuation = checkin.prepare_continuation(
-                            relay_epoch,
-                            clock(),
-                            header,
-                            body,
-                            &random[..n],
-                        )?;
-                        send_datagram(&socket, endpoint, &continuation, worker, &[])?;
-                    }
-                    RelayProgress::Ready
-                    | RelayProgress::Opaque
-                    | RelayProgress::DuplicateCheckin => {}
-                }
-            }
-            Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let mut channel = Live96::new(
-        *selected.media_key,
-        selected.room_key,
-        MediaContext {
-            room_id: selected.room_id,
-            own_member: selected.own_member,
-            peer_member: media.peer_member,
-            connection_id: selected.connection_id,
-        },
-        epoch,
-    )?;
-    channel.authorize_transmit(
-        epoch,
-        TransmitScope::LegacyRelayAudio {
-            key_generation: epoch.key_generation,
-        },
-    )?;
-    let format = AudioFormat::new(16000, 1, 20)?;
-    let mut decoder = OpusDecoder::new(format)?;
-    let mut encoder = OpusEncoder::new(format, 20_000)?;
-    ensure!(
-        worker.current() && !worker.stop.load(Ordering::Acquire),
-        "Call stopped before transport admission"
-    );
-    // Current joined peer AV + selected codec were admitted by take_media;
-    // Ready establishes this transport. Peer speech is not a prerequisite for
-    // transmitting; actual decoded/heard audio remains a separate observation.
-    runtime
-        .block_on(sink.connected())
-        .map_err(|_| anyhow::anyhow!("Call owner unavailable"))?;
-    let mut encoder_generation = worker.generation.load(Ordering::Acquire);
-    let mut pacer = FramePacer::new(format, started.elapsed());
-    let mut pending: Option<(Vec<u8>, QueuedAudio)> = None;
-    let mut rtp_sequence = 0u32;
-    let mut rtp_timestamp = 0u64;
-    let mut rx_order = RtpOrder::new();
-    let mut last_peer_activity = Instant::now();
-    let media_result = (|| -> Result<()> {
-        while worker.current() && !worker.stop.load(Ordering::Acquire) {
-            ensure!(
-                last_peer_activity.elapsed() < config.peer_idle_timeout,
-                "Call peer activity timed out"
-            );
-            match socket.recv_from(&mut buffer) {
-                Ok((n, SocketAddr::V4(source))) if source == endpoint && n <= 8197 => {
-                    if buffer[..n].first() == Some(&0x96) {
-                        let opened = match channel.open(epoch, &buffer[..n]) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if e.to_string().contains("nonce")
-                                    || e.to_string().contains("generation")
-                                {
-                                    return Err(e);
-                                }
-                                None
-                            }
-                        };
-                        if let Some(opened) = opened {
-                            // Only a fresh, authenticated packet from the selected
-                            // peer renews liveness. Relay traffic and bad/replayed
-                            // packets do not establish that the peer is still here.
-                            last_peer_activity = Instant::now();
-                            if opened.packed_kind == 0x70 {
-                                if let Some(reply) =
-                                    channel.reply_to_probe(epoch, clock(), &opened)?
-                                {
-                                    send_datagram(&socket, endpoint, &reply, worker, &[])?;
-                                }
-                            } else if let Ok(primary) =
-                                audio_packet::parse_ordinary95(opened.payload())
-                            {
-                                let admission = match rx_order.admit(
-                                    primary.last_sequence,
-                                    primary.last_timestamp,
-                                    primary.primaries.len(),
-                                ) {
-                                    Ok(admission) => Some(admission),
-                                    Err(_) => {
-                                        worker
-                                            .metrics
-                                            .rx_invalid_order
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        None
-                                    }
-                                };
-                                if let Some(admission) = admission {
-                                    worker
-                                        .metrics
-                                        .rx_skipped_frames
-                                        .fetch_add(admission.skip as u64, Ordering::Relaxed);
-                                    worker
-                                        .metrics
-                                        .rx_gaps
-                                        .fetch_add(u64::from(admission.gap), Ordering::Relaxed);
-                                    for packet in primary.primaries.into_iter().skip(admission.skip)
-                                    {
-                                        ensure!(
-                                            worker.current(),
-                                            "Call authority revoked before decode"
-                                        );
-                                        let pcm = decoder.decode(packet)?;
-                                        ensure!(
-                                            worker.current(),
-                                            "Call authority revoked before audio delivery"
-                                        );
-                                        runtime.block_on(sink.audio(&pcm)).map_err(|_| {
-                                            anyhow::anyhow!("Call audio receiver unavailable")
-                                        })?;
-                                        worker
-                                            .metrics
-                                            .rx_delivered_frames
-                                            .fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(e) => return Err(e.into()),
-            }
-            synchronize_encoder_generation(
-                &mut encoder,
-                &mut encoder_generation,
-                &mut pending,
-                worker.generation.load(Ordering::Acquire),
-            )?;
-            if pending
-                .as_ref()
-                .is_some_and(|(_, item)| !audio_current(worker, item))
-            {
-                pending = None;
-                worker
-                    .metrics
-                    .tx_stale_frames
-                    .fetch_add(1, Ordering::Relaxed);
-                encoder.reset()?;
-            }
-            if !pacer.poll(started.elapsed())? {
-                continue;
-            }
-            let item = loop {
-                match audio.try_recv() {
-                    Ok(item) if audio_current(worker, &item) => break Some(item),
-                    Ok(_) => {
-                        worker
-                            .metrics
-                            .tx_stale_frames
-                            .fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    Err(TryRecvError::Empty) => break None,
-                    Err(TryRecvError::Disconnected) => break None,
-                }
-            };
-            if let Some(item) = item {
-                ensure!(
-                    rtp_sequence <= u32::from(u16::MAX) && rtp_timestamp <= u64::from(u32::MAX),
-                    "Call RTP sequence exhausted"
-                );
-                synchronize_encoder_generation(
-                    &mut encoder,
-                    &mut encoder_generation,
-                    &mut pending,
-                    item.request.generation,
-                )?;
-                let encoded = encoder.encode(&item.request.samples)?;
-                let sequence = rtp_sequence as u16;
-                let timestamp = rtp_timestamp as u32;
-                rtp_sequence += 1;
-                rtp_timestamp += 320;
-                if !audio_current(worker, &item) {
-                    worker
-                        .metrics
-                        .tx_stale_frames
-                        .fetch_add(1 + u64::from(pending.is_some()), Ordering::Relaxed);
-                    pending = None;
-                    encoder.reset()?;
-                    continue;
-                }
-                if media.frames_per_packet == 1 {
-                    let conf = audio_packet::ordinary95_single(0, sequence, timestamp, &encoded)?;
-                    let datagram = channel.seal_audio(epoch, clock(), &conf)?;
-                    if !send_datagram(&socket, endpoint, &datagram, worker, &[&item])? {
-                        encoder.reset()?;
-                    }
-                } else if let Some((first, first_item)) = pending.take() {
-                    if audio_current(worker, &first_item) && audio_current(worker, &item) {
-                        let conf = audio_packet::ordinary95_pair(
-                            0, sequence, timestamp, &first, &encoded,
-                        )?;
-                        let datagram = channel.seal_audio(epoch, clock(), &conf)?;
-                        if !send_datagram(
-                            &socket,
-                            endpoint,
-                            &datagram,
-                            worker,
-                            &[&first_item, &item],
-                        )? {
-                            encoder.reset()?;
-                        }
-                    } else {
-                        worker
-                            .metrics
-                            .tx_stale_frames
-                            .fetch_add(2, Ordering::Relaxed);
-                        encoder.reset()?;
-                    }
-                } else {
-                    pending = Some((encoded, item));
-                }
-            } else {
-                worker
-                    .metrics
-                    .tx_input_underruns
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        Ok(())
-    })();
-    channel.close();
-    worker.media_stop.store(true, Ordering::Release);
-    media_result
-}
 fn audio_current(worker: &Worker, item: &QueuedAudio) -> bool {
     worker.current()
         && item.request.is_current()
@@ -1372,55 +1270,22 @@ struct MediaMetrics {
     tx_input_underruns: AtomicU64,
 }
 
-/// Clear's acknowledgment and physical UDP handoff share this gate. A business
-/// HTTP handoff uses a separate account action guard and is never retracted here.
-#[derive(Default)]
-struct SendAdmission {
-    gate: Mutex<()>,
-}
-impl SendAdmission {
-    fn advance(&self, generation: &AtomicU32, next: u32) -> Result<()> {
-        let _guard = self
-            .gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Call submission gate unavailable"))?;
-        generation.fetch_max(next, Ordering::AcqRel);
-        Ok(())
-    }
-    fn submit<T>(
-        &self,
-        allowed: impl FnOnce() -> Result<bool>,
-        write: impl FnOnce() -> Result<T>,
-    ) -> Result<Option<T>> {
-        let _guard = self
-            .gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Call submission gate unavailable"))?;
-        if !allowed()? {
-            return Ok(None);
-        }
-        write().map(Some)
-    }
-}
-fn synchronize_encoder_generation<T>(
-    encoder: &mut impl AudioEncoder,
-    current: &mut u32,
-    pending: &mut Option<T>,
-    next: u32,
-) -> Result<()> {
-    if *current != next {
-        *pending = None;
-        encoder.reset()?;
-        *current = next;
-    }
-    Ok(())
-}
 fn send_datagram(
     socket: &UdpSocket,
     endpoint: SocketAddrV4,
     packet: &[u8],
     worker: &Worker,
     audio: &[&QueuedAudio],
+) -> Result<bool> {
+    send_datagram_generation(socket, endpoint, packet, worker, audio, None)
+}
+fn send_datagram_generation(
+    socket: &UdpSocket,
+    endpoint: SocketAddrV4,
+    packet: &[u8],
+    worker: &Worker,
+    audio: &[&QueuedAudio],
+    generation: Option<u32>,
 ) -> Result<bool> {
     // No Core/service locks, filesystem work, codec work or waits inside this
     // callback. Revocation waits for an already-entered nonblocking handoff.
@@ -1432,7 +1297,10 @@ fn send_datagram(
                     worker.current() && !worker.stop.load(Ordering::Acquire),
                     "Call authority revoked before send"
                 );
-                Ok(audio.iter().all(|item| audio_current(worker, item)))
+                Ok(
+                    generation.is_none_or(|next| worker.generation.load(Ordering::Acquire) == next)
+                        && audio.iter().all(|item| audio_current(worker, item)),
+                )
             },
             || {
                 worker
@@ -1442,13 +1310,16 @@ fn send_datagram(
                             worker.current() && !worker.stop.load(Ordering::Acquire),
                             "Call authority revoked before send"
                         );
-                        if !audio.iter().all(|item| audio_current(worker, item)) {
+                        if generation
+                            .is_some_and(|next| worker.generation.load(Ordering::Acquire) != next)
+                            || !audio.iter().all(|item| audio_current(worker, item))
+                        {
                             return Ok(false);
                         }
                         let written = match socket.send_to(packet, endpoint) {
                             Ok(written) => written,
                             Err(error)
-                                if !audio.is_empty()
+                                if (!audio.is_empty() || generation.is_some())
                                     && error.kind() == std::io::ErrorKind::WouldBlock =>
                             {
                                 worker
@@ -1491,76 +1362,4 @@ fn unix_ms() -> Result<u64> {
     Ok(u64::try_from(
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
     )?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn clearing_generation_discards_pending_and_resets_encoder_lookahead() {
-        let format = AudioFormat::new(16000, 1, 20).unwrap();
-        let mut encoder = OpusEncoder::new(format, 20_000).unwrap();
-        let mut impulse = vec![0; 320];
-        impulse[..160].fill(12_000);
-        let old = encoder.encode(&impulse).unwrap();
-        let mut pending = Some(old);
-        let mut generation = 1;
-        synchronize_encoder_generation(&mut encoder, &mut generation, &mut pending, 2).unwrap();
-        assert_eq!(generation, 2);
-        assert!(pending.is_none());
-        let reset_zeros = encoder.encode(&[0; 320]).unwrap();
-        let mut fresh = OpusEncoder::new(format, 20_000).unwrap();
-        assert_eq!(reset_zeros, fresh.encode(&[0; 320]).unwrap());
-        // Same-generation encoding keeps its ordinary stream state.
-        pending = Some(vec![1]);
-        synchronize_encoder_generation(&mut encoder, &mut generation, &mut pending, 2).unwrap();
-        assert!(pending.is_some());
-    }
-    #[test]
-    fn clear_ack_waits_for_entered_handoff_and_later_old_frames_never_submit() {
-        let admission = Arc::new(SendAdmission::default());
-        let generation = Arc::new(AtomicU32::new(1));
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let writer_admission = admission.clone();
-        let writer_generation = generation.clone();
-        let writer = thread::spawn(move || {
-            writer_admission
-                .submit(
-                    || Ok(writer_generation.load(Ordering::Acquire) == 1),
-                    || {
-                        entered_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        Ok(())
-                    },
-                )
-                .unwrap()
-        });
-        entered_rx.recv().unwrap();
-        let (clear_started_tx, clear_started_rx) = std::sync::mpsc::channel();
-        let (acked_tx, acked_rx) = std::sync::mpsc::channel();
-        let clear_admission = admission.clone();
-        let clear_generation = generation.clone();
-        let clear = thread::spawn(move || {
-            clear_started_tx.send(()).unwrap();
-            clear_admission.advance(&clear_generation, 2).unwrap();
-            acked_tx.send(()).unwrap();
-        });
-        clear_started_rx.recv().unwrap();
-        assert!(matches!(
-            acked_rx.recv_timeout(Duration::from_millis(20)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        release_tx.send(()).unwrap();
-        assert!(writer.join().unwrap().is_some());
-        acked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        clear.join().unwrap();
-        assert!(admission
-            .submit(
-                || Ok(generation.load(Ordering::Acquire) == 1),
-                || -> Result<()> { panic!("stale audio submitted") }
-            )
-            .unwrap()
-            .is_none());
-    }
 }

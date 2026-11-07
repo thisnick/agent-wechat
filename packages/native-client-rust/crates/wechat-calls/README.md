@@ -1,40 +1,88 @@
 # wechat-calls
 
-Portable call-media interfaces, PCM frame queues, pacing and generated test audio.
-The crate is initially unpublished. Its primitives do not establish a live call.
+Use `wechat-calls` for voice-session and media building blocks without the HTTP
+daemon, local audio devices or OpenClaw. It includes the native direct/conference
+session machinery used by the daemon, optional Opus, and portable PCM utilities.
+All five public WeChat crates follow the same native release version; pin that
+version when combining them.
 
-Native builds include the Opus codec. Hosts supply authenticated
-packets, clocks and PCM; device access, account credentials and networking belong
-in adapters. Raw-packet VOIP encoding/decoding uses
-`opusic-c` and its bundled libopus. Device callbacks must hand samples to a worker
-rather than invoking codec or network operations directly.
+## Choose a feature set
 
-`AudioQueue` uses a fixed frame capacity and fences interrupted output with a
-new generation. Incoming playout may drop old queued frames; outgoing production
-reports backpressure. `FramePacer` avoids catch-up bursts after a scheduling stall.
-These are local scheduling tools, not a complete jitter buffer or congestion
-controller. The host chooses loss-concealment policy and negotiates codec settings.
+| Cargo configuration | Available modules | Build requirements |
+| --- | --- | --- |
+| Default (`native-runtime`) | PCM utilities, Opus, native session/media implementation and `wechat-protocol` | Rust 1.93.1+, C/C++ compiler, CMake, Make and Perl |
+| `default-features = false, features = ["native-opus"]` | PCM utilities and Opus, without protocol/account dependencies | Rust 1.93.1+, C/C++ compiler and CMake |
+| `default-features = false` | PCM formats, queues, ordering, pacing, tones and mixing | Rust 1.93.1+; also builds for `wasm32-unknown-unknown` |
 
-`PulseTone` produces synthetic PCM without accessing devices or the network.
-Playing it to a real participant requires a separately authorized call.
+Native features are unavailable on WebAssembly. No feature opens a microphone or
+speaker, loads PulseAudio, or creates a Tokio runtime. Applications supply their
+execution, clocks and device adapters. The native media implementation can start
+workers when the embedding host requests it.
 
-The native codec contains third-party C code under libopus's BSD license and
-patent grant. Preserve its license notices when distributing native artifacts.
-See [NOTICE.md](NOTICE.md), the retained license files, and
-<https://opus-codec.org/license/>. The
-portable crate code is MIT-licensed under the repository license.
+## Mix PCM tracks
 
-The internal daemon PCM envelope codec uses a 36-byte `WXCM` version 1 header with big-endian
-track/generation/sequence/timestamp/length fields and little-endian signed PCM.
-`MediaFrame::decode` borrows its payload, validates complete frame extent and the
-negotiated PCM frame length, and allocates nothing. `MediaStream` separately
-rejects wrong tracks, stale generations and replayed/out-of-order frames. This is
-an internal representation only. API sockets exchange raw PCM samples and JSON
-stream metadata; the daemon constructs these envelopes and handles pacing. This
-is also separate from the remote WeChat wire format.
+`AudioFrame` owns interleaved signed 16-bit samples. Its `timestamp` is a sample
+position per channel on the shared presentation clock; `generation` fences
+replaced audio, and `sequence` orders frames within a source. Announce tracks
+before submitting frames. Render each due slot after the application's chosen
+alignment delay; missing/muted sources contribute silence and late frames do
+not accumulate a catch-up backlog. Do not submit your own uplink to the mixer.
 
-Run the generated-audio check without devices or network access:
+```rust
+use wechat_calls::{audio::{AudioFormat, AudioFrame}, mixer::PcmMixer};
+
+let format = AudioFormat::new(16000, 1, 20)?;
+let mut mixer = PcmMixer::new(format, 2, 3, 0)?;
+mixer.add_track(7, 1)?;
+mixer.push(7, AudioFrame {
+    generation: 1,
+    sequence: 0,
+    timestamp: 0,
+    samples: vec![1000; format.samples_per_frame()],
+})?;
+let mixed = mixer.render(0)?;
+assert_eq!(mixed.samples.len(), 320);
+# Ok::<(), wechat_calls::audio::MediaError>(())
+```
+
+`AudioQueue` fences interrupted output with a new generation. `PcmOutput` admits
+variable-size PCM chunks with backpressure and produces frames. `FramePacer`
+avoids bursts after a scheduling stall. These are scheduling tools, not a full
+jitter buffer or congestion controller. Clearing application audio never
+licenses resetting a transport counter or reusing a key.
+
+## Check examples offline
+
+From a source checkout:
 
 ```sh
-cargo run -p wechat-calls --example tone_roundtrip
+cargo run -p wechat-calls --no-default-features --example portable_mix
+# tracks=2 samples=320 first_sample=3000
+cargo run -p wechat-calls --no-default-features --features native-opus --example tone_roundtrip
+# frames=50 packet_bytes=... decoded_samples=16000
 ```
+
+`OpusEncoder` and `OpusDecoder` implement `AudioEncoder` and `AudioDecoder` for
+one configured frame per raw Opus packet. Authenticate/admit packets before
+decoding them. Neither example accesses accounts, devices or the network.
+
+## Native calling integration
+
+`wechat-calls` depends on `wechat-protocol`; protocol does not depend on calls.
+`conference_media` decodes admitted conference sources; `conference_send` handles
+one paced uplink. The `session` and `native_media` modules are lower-level host
+integration APIs hidden from generated docs while the public account-bound
+`CallClient`/`CallHandle` facade is unfinished. There is no `client.calls()` API
+in this release. Embedding those modules requires account ownership, permission
+checks, request journals, cancellation, event delivery and uncertainty handling.
+Do not retry signaling that may already have reached the server.
+
+For an application that needs complete dial/join/invite/leave operations today,
+use the daemon's [Calls API](https://thisnick.github.io/agent-wechat/reference/calls-api/).
+Its JSON-v2/base64 PCM contract is separate from this crate's typed frames and
+WeChat media packets. Native workers currently stop at 20 minutes; key renewal,
+long-call acceptance, video and direct-to-conference promotion are not provided.
+
+Our code is MIT-licensed; see [LICENSE](LICENSE). Native Opus distributions must
+also retain [NOTICE.md](NOTICE.md), [LICENSE-OPUS](LICENSE-OPUS) and
+[LICENSE-OPUSIC](LICENSE-OPUSIC).

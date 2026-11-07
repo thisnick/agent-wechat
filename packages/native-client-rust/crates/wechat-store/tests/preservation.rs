@@ -158,6 +158,64 @@ fn companion(path: &Path, suffix: &str, bytes: &[u8]) {
         .unwrap();
     file.write_all(bytes).unwrap();
 }
+
+#[test]
+fn empty_wal_with_sqlite_rebuilt_index_preserves_committed_main_state() {
+    for incomplete_tail in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let store = Store::open(&root).unwrap();
+        store.create_account("one").unwrap();
+        store.put_runtime("one", "preserved", b"base").unwrap();
+        let path = root.join("accounts/one/agent/control.sqlite");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL; INSERT INTO runtime VALUES('committed',x'01');")
+            .unwrap();
+        let header = fs::read(path.with_file_name("control.sqlite-wal")).unwrap()[..32].to_vec();
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(db);
+        // A valid WAL header without frames contains no committed page data.
+        // Let SQLite itself rebuild its empty shared index, rather than
+        // fabricating that index or its checksum in this fixture.
+        companion(&path, "-wal", &header);
+        let reader = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT value FROM runtime WHERE key='preserved'", [], |r| r
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"base"
+        );
+        drop(reader);
+        if incomplete_tail {
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .append(true)
+                .open(path.with_file_name("control.sqlite-wal"))
+                .unwrap()
+                .write_all(b"Incomplete frame")
+                .unwrap();
+        }
+        let before = family(&path);
+        assert_eq!(&before["-shm"][16..20], &[0; 4]);
+        if incomplete_tail {
+            assert!(store.runtime("one", "preserved").is_err());
+            assert!(family(&path) == before);
+        } else {
+            assert_eq!(store.runtime("one", "preserved").unwrap().unwrap(), b"base");
+            assert_eq!(store.runtime("one", "committed").unwrap().unwrap(), [1]);
+            let backups = recovery_directories(&path);
+            assert_eq!(backups.len(), 1);
+            assert!(family(&backups[0].join("database.sqlite")) == before);
+        }
+    }
+}
+
 fn recovery_directories(path: &Path) -> Vec<std::path::PathBuf> {
     fs::read_dir(path.parent().unwrap())
         .unwrap()

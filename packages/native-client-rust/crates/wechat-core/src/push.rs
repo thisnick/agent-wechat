@@ -43,6 +43,10 @@ impl Core {
     ) -> Result<()> {
         self.push_state(account, fence)?;
         self.check_state_profile(account, state)?;
+        if let Some(accepted) = self.persisted_native_state(account, state)? {
+            let _ = self.project_saved_login(account, &accepted);
+            return Ok(());
+        }
         let sealed = self
             .vault
             .seal(account, "account-state", &serde_json::to_vec(state)?)?;
@@ -121,7 +125,7 @@ impl Core {
                 .context("auth_required")?;
             let cursor = core.cursor(&owned)?;
             let (connection, heartbeat) = permit.transfer(&core, &owned, || {
-                let mut connection = core.upstream.push_connection(&state)?;
+                let mut connection = core.account_upstream(&owned)?.push_connection(&state)?;
                 let heartbeat = connection.heartbeat(&mut state, &cursor)?;
                 Ok((connection, heartbeat))
             })?;

@@ -4,7 +4,7 @@ description: Call snapshots and complete client/server JSON payload examples.
 ---
 
 Use the control WebSocket for call commands and events. Its winning owner can
-attach the separate [raw PCM media socket](../calls-media/).
+attach the separate [JSON PCM media socket](../calls-media/).
 [Rust crate architecture](../../how-it-works/rust-crates/) explains package responsibilities.
 
 ## Routes and snapshot
@@ -17,7 +17,7 @@ never put credentials in URLs.
 | --- | --- | --- |
 | GET | `/v1/accounts/{account}/calls/current` | JSON snapshot |
 | WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages |
-| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON setup and binary PCM |
+| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | Versioned JSON and base64 PCM |
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" \
@@ -26,8 +26,18 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 ```json
 {
+  "conferenceInvitations": [{
+    "invitationId": "invitation-example",
+    "revision": 1,
+    "groupId": "group@chatroom",
+    "callerId": "contact-a"
+  }],
   "capabilities": {
-    "directAudio": true
+    "directAudio": true,
+    "conferenceCreate": true,
+    "conferenceJoin": true,
+    "conferenceInvite": true,
+    "conferenceAudio": true
   },
   "availability": {
     "busy": false,
@@ -47,18 +57,126 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 | Field | Meaning |
 | --- | --- |
 | `capabilities` | Available flags only; missing flags mean unavailable; `{}` means no calling |
+| `conferenceInvitations` | Fresh opaque invitation IDs/revisions, group and caller; no room credentials |
 | `currentPendingOffer` | Incoming candidate waiting for readiness or preparation; cannot be answered |
 | `currentOffer` | Actionable incoming offer; clears when claimed or ended |
-| `currentCall` | Active call metadata, including `kind`, `callType`, direction, state and reported participant `controls` |
+| `currentCall` | Active call metadata, including kind, type, state, conference roster or reported direct-call controls |
 | `audioFormat` | Client/daemon PCM format, independent of the WeChat codec |
 
+Reported conference participants include `participantId`, `contactId` and
+`membership` (`joined`, `invited`, `left` or `unknown`). When the server supplies microphone state, `microphoneEnabled` is
+`true` or `false`; an omitted value means unknown. Muting a microphone does not
+remove the participant from the room.
+
+`status`, when present, adds `{code, kind}` to both snapshots and
+`participant.updated` events. It describes signaling progress independently of
+membership:
+
+| `code` | `kind` | Membership meaning |
+| --- | --- | --- |
+| 0 | `undefined` | Unknown |
+| 1 | `joined` | Joined |
+| 2 | `invited` | Invited, not joined |
+| 3 | `acknowledged` | Invited, not joined |
+| 4 | `left` | Left |
+| 5 | `cancelled` | Cancellation outcome |
+| 6 | `busy` | Busy outcome |
+| 7 | `rejected` | Rejection outcome |
+| 8 | `no_response` | Unanswered outcome |
+| Other | `unknown` | Retain `code`; no inferred join or departure |
+
+Cancellation, busy, rejection and no response do not by themselves establish a
+previous participant's departure. Microphone state remains independent.
+For example, an acknowledged invitation has `membership: "invited"` and
+`status: {"code": 3, "kind": "acknowledged"}`.
+
 Same-account observers see call metadata without owner tokens or audio access.
-HTTP ownership is always false: ownership belongs to a control socket. Global
-`busy` also covers other accounts, whose call details stay hidden.
+HTTP ownership is always false: ownership belongs to a control socket.
+`busy` is scoped to this account, including any unresolved call outcome that
+blocks a new call. Each account has its own call controller.
+
+## Conference commands
+
+1. Check `conferenceCreate`, `conferenceJoin`, `conferenceInvite` and
+   `conferenceAudio` for the operation you need. Advertise outgoing
+   [readiness](#readiness) before creating or joining.
+2. To create a call, supply the group ID and between 1 and 100 contact IDs:
+
+   ```json
+   {
+     "type": "call.dial",
+     "requestId": "create-1",
+     "target": {
+       "kind": "conference",
+       "groupId": "group@chatroom",
+       "invitees": ["contact-a", "contact-b"]
+     },
+     "callType": "voice"
+   }
+   ```
+
+   To join an existing call instead, select an entry from `conferenceInvitations`
+   and send its exact ID and revision:
+
+   ```json
+   {
+     "type": "call.join",
+     "requestId": "join-1",
+     "invitationId": "invitation-example",
+     "invitationRevision": 1
+   }
+   ```
+
+   A stale, withdrawn or already used invitation is rejected with `offer_expired`.
+   Joining never creates a replacement room. Conference invitations use
+   `call.join`, rather than the direct-call `call.answer` command.
+3. Keep the owning socket open. Creation and joining return a `command.result`
+   with the call ID and owner token; wait for `call.state` to become `connected`.
+   To invite more contacts after connection, send:
+
+   ```json
+   {
+     "type": "call.invite",
+     "requestId": "invite-1",
+     "callId": "example-conference",
+     "contactIds": ["contact-c", "contact-d"]
+   }
+   ```
+
+`call.invitation_result` reports each initial or later invitation separately;
+it does not mean the contact joined. `participant.updated` reports membership
+and microphone changes. `call.mute` changes our microphone; `call.hangup` leaves
+our membership without ending the other participants' call.
+A leave remains valid across roster changes for the same owned call. Repeating
+it while it is ending does not submit another leave operation. A confirmed
+prior removal completes locally; an unconfirmed result stays uncertain.
+Check the reported capabilities before submitting commands. Direct-to-conference
+promotion is unavailable in this version.
+
+## Protocol version
+
+Within five seconds of opening the control socket, announce supported versions:
+
+```json
+{"type": "call.hello", "supportedProtocolVersions": [2]}
+```
+
+Wait for the server's `hello` and check `protocolVersion` before sending commands.
+The daemon supports version 2 only. An omitted announcement means version 1;
+there is no compatibility fallback. A mismatch returns this before closing with
+WebSocket code 1002:
+
+```json
+{"type":"protocol.error","code":"unsupported_protocol_version","clientVersions":[1],"serverVersions":[2]}
+```
+
+Empty, null, duplicate or malformed version lists return
+`invalid_protocol_version`. The CLI and OpenClaw plugin announce version 2 and
+reject an unsupported server. Media attachment negotiates independently.
 
 ## Client messages
 
-Send these JSON text messages on the **control** socket. Every command has a
+Send these JSON text messages on the **control** socket. After the version announcement, every command has a
 `requestId`; reuse it only for an identical command. Use the latest received
 revision for answer/reject/cancel/hangup. Example revisions below are illustrative.
 
@@ -197,8 +315,10 @@ after answering/connecting:
 
 Mute outgoing audio; send `muted: false` to unmute. Clear queued outgoing audio
 when interrupting a response; see [stream generations](../calls-media/#mute-and-interrupt).
-`call.mute` silences this client's outgoing stream in the daemon. It does not
-send a remote microphone-control request or change the peer's microphone.
+`call.mute` silences this client's outgoing stream in the daemon. For a conference,
+it also requests our room microphone state. It does not control another
+participant's microphone. A mute change clears queued audio and advances the
+send generation, just as `call.clear_audio` does.
 
 ```json
 {
@@ -229,10 +349,20 @@ The first event includes the connection's `clientId` and a current snapshot:
 ```json
 {
   "type": "hello",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "clientId": "example-client",
+  "conferenceInvitations": [{
+    "invitationId": "invitation-example",
+    "revision": 1,
+    "groupId": "group@chatroom",
+    "callerId": "contact-a"
+  }],
   "capabilities": {
-    "directAudio": true
+    "directAudio": true,
+    "conferenceCreate": true,
+    "conferenceJoin": true,
+    "conferenceInvite": true,
+    "conferenceAudio": true
   },
   "availability": {
     "busy": false,
@@ -248,6 +378,58 @@ The first event includes the connection's `clientId` and a current snapshot:
   }
 }
 ```
+
+### Conference invitations and results
+
+`conference.invitations` replaces the current invitation list. An empty array
+clears it; invitation IDs are account-specific and contain no room credentials.
+
+```json
+{
+  "type": "conference.invitations",
+  "invitations": [{
+    "invitationId": "invitation-example",
+    "revision": 1,
+    "groupId": "group@chatroom",
+    "callerId": "contact-a"
+  }]
+}
+```
+
+The owner receives per-contact results linked to the create or invite command's
+`requestId`. For example, the later `invite-1` command can produce:
+
+```json
+{
+  "type": "call.invitation_result",
+  "callId": "example-conference",
+  "requestId": "invite-1",
+  "results": [
+    {
+      "contactId": "contact-c",
+      "status": "submitted",
+      "serviceCode": 0,
+      "verificationRequired": false
+    },
+    {
+      "contactId": "contact-d",
+      "status": "unknown",
+      "verificationRequired": false
+    }
+  ]
+}
+```
+
+| Status | Meaning |
+| --- | --- |
+| `submitted` | The service accepted the invitation submission |
+| `rejected` | The submission was rejected |
+| `unknown` | No per-contact service result was supplied |
+| `uncertain` | The operation may have reached the service; do not retry automatically |
+
+`serviceCode` is omitted when unavailable. `verificationRequired: true` reports
+that the service requested verification; the event does not contain a verification
+URL or complete that step. Invitation results are separate from room membership.
 
 ### Command results
 
@@ -272,6 +454,20 @@ A successful claim includes a secret token for media attachment:
   "requestId": "dial-1",
   "status": "accepted",
   "callId": "example-call",
+  "ownerToken": "<secret owner token>",
+  "code": null
+}
+```
+
+Conference creation and joining claim ownership in the same way. A successful
+`join-1` response is:
+
+```json
+{
+  "type": "command.result",
+  "requestId": "join-1",
+  "status": "accepted",
+  "callId": "example-conference",
   "ownerToken": "<secret owner token>",
   "code": null
 }
@@ -344,6 +540,52 @@ An actionable offer can be answered or rejected using its revision:
 
 ### State and availability
 
+Conference state includes a group and the latest roster. Here `contact-a` has no
+reported microphone state; `contact-b` is still joined with its microphone off:
+
+```json
+{
+  "type": "call.state",
+  "call": {
+    "callId": "example-conference",
+    "revision": 5,
+    "kind": "conference",
+    "callType": "voice",
+    "direction": "outgoing",
+    "state": "connected",
+    "ownedByThisClient": true,
+    "groupId": "group@chatroom",
+    "participants": [
+      {"participantId": "member-4", "contactId": "contact-a", "membership": "joined"},
+      {"participantId": "member-5", "contactId": "contact-b", "membership": "joined", "microphoneEnabled": false}
+    ]
+  }
+}
+```
+
+Roster changes advance the call revision and emit `participant.updated` to
+same-account clients, followed by the updated call snapshot:
+
+```json
+{
+  "type": "participant.updated",
+  "callId": "example-conference",
+  "revision": 6,
+  "participant": {
+    "participantId": "member-5",
+    "contactId": "contact-b",
+    "membership": "left",
+    "status": {"code": 4, "kind": "left"}
+  }
+}
+```
+
+Use the reported `participantId` for track associations; do not assume it is a
+contact ID. A removed participant can emit `membership: "left"` while disappearing
+from the snapshot's current roster.
+
+A direct call continues to use this shape:
+
 ```json
 {
   "type": "call.state",
@@ -415,8 +657,8 @@ its network receipts are retained even when the local session closes.
 
 ### Participant control events
 
-`call.control` reports a participant's control state. The current control kind is
-`microphone`; `muted: true` means muted, and `false` means unmuted. `participantId`
+For direct calls, `call.control` reports a participant's control state. The current
+control kind is `microphone`; `muted: true` means muted, and `false` means unmuted. `participantId`
 is the contact ID used by the direct-call target or incoming offer.
 
 ```json
@@ -449,10 +691,12 @@ The latest known values also appear in `currentCall.controls` in HTTP snapshots,
 `hello` and `call.state`. An omitted `controls` means no state has been reported.
 Control updates do not change the call-state revision or PCM format, end the call,
 or interrupt audio in the other direction.
+Conference microphone changes appear in `participants` and `participant.updated`;
+an omitted `microphoneEnabled` is unknown, not `false`.
 
 ### Audio generation and errors
 
-After successful `call.clear_audio`, the send track advances:
+After successful `call.clear_audio` or a mute change, the send track advances:
 
 ```json
 {
@@ -470,6 +714,9 @@ After successful `call.clear_audio`, the send track advances:
   }
 }
 ```
+
+Receive-track `track.added` and `track.removed` examples and their ordering with
+audio are in the [media reference](../calls-media/#receive-tracks-and-timing).
 
 A socket-level failure uses `call.error`:
 
@@ -493,7 +740,8 @@ audio does not count as a lost control connection.
 
 On daemon restart, previous calls are locally ended and `currentCall` is empty.
 Old requests are never replayed. A normal shutdown first attempts call cleanup;
-unconfirmed network outcomes remain recorded separately from local call state. `kind` is `direct` or `conference`;
-`callType` is `voice` or `video`. Only direct voice is currently implemented.
-Conference targets and video calls return `unsupported` with this backend.
+unconfirmed network outcomes remain recorded separately from local call state.
+`kind` is `direct` or `conference`; this backend implements voice calls when the
+corresponding capabilities are present. Video and direct-to-conference promotion
+are unavailable. Native calls currently have a 20-minute safety limit.
 :::

@@ -78,7 +78,8 @@ fn response(bytes: &[u8]) -> Result<SessionReadReply> {
 impl NativeClient {
     /// Submit once, with no renewal, retry, or login fallback. A caller must
     /// retain the boundary and request identity before invoking this method.
-    pub fn notify_read_session(
+    #[doc(hidden)]
+    pub(crate) fn notify_read_session_snapshot(
         &self,
         state: &mut AccountState,
         notification: &SessionReadNotification,

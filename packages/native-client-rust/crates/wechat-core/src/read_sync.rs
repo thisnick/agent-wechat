@@ -161,7 +161,7 @@ impl Core {
                 through,
                 epoch,
                 local,
-                |state, request| core.upstream.notify_read(state, request),
+                |state, request| core.account_upstream(&account)?.notify_read(state, request),
             )
         })
         .await

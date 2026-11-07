@@ -21,9 +21,33 @@ For example, asked "what was that address Sam sent?", the agent can call `wechat
 ## Calling
 
 The optional `wechat_call` tool checks status, places an allowed direct voice
-call, or ends the call this plugin owns. It requires separate calling permissions
+call, starts or joins a configured voice conference, invites allowed contacts,
+or ends the call this plugin owns. It requires separate calling permissions
 and an authorized owner; messaging permission alone does not grant it.
 See [Set up calling](../calling/) for the tool grant, credentials and model setup.
+
+Voice calling and agent tool access are separate settings. Add `wechat_call` to
+the selected agent's `tools.alsoAllow`, or to the global `tools.alsoAllow` when
+all agents should receive it. Keep any existing entries:
+
+```json
+{
+  "tools": {
+    "alsoAllow": ["wechat_login", "wechat_call"]
+  }
+}
+```
+
+An agent-level `alsoAllow` replaces the inherited global list. When adding an
+agent override, copy any global entries that agent should keep.
+
+Restart or reload the Gateway after changing the configuration. An
+owner-authorized call consultation can then use call control without the
+separate `outboundToolAllowFrom` check used for chat requests. Read-only calls
+cannot use it. Destination/group allowlists, host tool restrictions and approvals
+still apply. In a conference, owner-inviter permission applies to the whole call;
+mixed audio does not establish which participant made a request. Hang-up leaves
+the agent's membership while the other participants can continue.
 
 ## Choose a message destination
 

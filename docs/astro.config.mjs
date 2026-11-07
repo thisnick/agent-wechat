@@ -35,6 +35,8 @@ const moved = {
   'reference/rust-protocol': 'reference/rust-libraries#send-one-text-message',
   'reference/rust-profile': 'reference/rust-libraries#profile-writes',
   'reference/calls-architecture': 'how-it-works/rust-crates',
+  'reference/conference-calls': 'reference/calls#conference-calls',
+  'openclaw/call-conversation': 'openclaw/calling#models-and-behavior',
 };
 
 export default defineConfig({

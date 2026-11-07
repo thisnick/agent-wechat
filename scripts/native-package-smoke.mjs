@@ -32,6 +32,12 @@ try {
   // Relative paths work with both that tar and Windows' built-in bsdtar.
   await exec('tar', ['-xzf', packed.filename, '-C', 'unpacked'], { cwd: temporary });
   const root = join(unpacked, 'package');
+  const notices = await readFile(join(root, 'THIRD_PARTY_NOTICES.txt'), 'utf8');
+  assert.equal(notices, await readFile(join(source, 'THIRD_PARTY_NOTICES.txt'), 'utf8'));
+  for (const license of ['wechat-calls/LICENSE-OPUS', 'wechat-calls/LICENSE-OPUSIC', 'wechat-audio/LICENSE.sys-voice']) {
+    const retained = await readFile(resolve('packages/native-client-rust/crates', license), 'utf8');
+    assert.ok(notices.replace(/\r\n/g, '\n').includes(retained.replace(/\r\n/g, '\n').trim()), `Missing native calling notice: ${license}`);
+  }
   const launcher = join(root, 'scripts/native-launcher.mjs');
   await assert.rejects(exec(process.execPath, [launcher, '--json', 'version']), /not installed/);
   await exec(process.execPath, [join(root, 'scripts/native-install.mjs')], {

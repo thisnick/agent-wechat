@@ -85,6 +85,7 @@ struct Host {
     submitted: AtomicU32,
     cookies: Mutex<Vec<Vec<u8>>>,
     invalid_unsent_marker: AtomicBool,
+    fail_live_sync: AtomicBool,
 }
 impl Host {
     fn new(hold: Hold) -> Arc<Self> {
@@ -97,6 +98,7 @@ impl Host {
             submitted: AtomicU32::new(0),
             cookies: Mutex::new(vec![]),
             invalid_unsent_marker: AtomicBool::new(false),
+            fail_live_sync: AtomicBool::new(false),
         })
     }
     fn release(&self) {
@@ -144,7 +146,88 @@ impl TestCallIo for Host {
         if self.invalid_unsent_marker.load(Ordering::Acquire) {
             return Err(CallRpcNotSubmitted.into());
         }
+        if route == CallHostRoute::LiveSync && self.fail_live_sync.load(Ordering::Acquire) {
+            return Err(wechat_protocol::calls::host_transport::CallHostRpcError {
+                stage: wechat_protocol::calls::host_transport::CallHostStage::Exchange,
+                code: "timeout",
+                value: None,
+                crypto_step: None,
+            }
+            .into());
+        }
         Ok(reply(route))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unconfirmed_read_only_sync_retains_receipt_without_blocking_known_room_cleanup() {
+    let f = Fixture::new(Hold::AfterHandoff).await;
+    f.host.fail_live_sync.store(true, Ordering::Release);
+    f.host.release();
+    let (_, result) = f.start(CallHostRoute::LiveSync, 1).await.unwrap();
+    assert!(result.is_err());
+    let records = f.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, "needs_review");
+    assert!(records[0].encrypted_request.is_some());
+    assert!(records[0].encrypted_reply.is_none());
+    assert!(!f
+        .core
+        .store
+        .begin_call_action(
+            "one",
+            &f.transport.call_id,
+            "1",
+            9262,
+            &records[0].request_digest,
+            records[0].encrypted_request.as_deref().unwrap()
+        )
+        .unwrap());
+    // Only the journal admission is exercised here. Actual cleanup still
+    // requires the existing account, room, owner and terminal-request fences.
+    let sealed = f
+        .core
+        .vault
+        .seal("one", "synthetic-cleanup", &[8, 0])
+        .unwrap();
+    assert!(f
+        .core
+        .store
+        .begin_call_action(
+            "one",
+            &f.transport.call_id,
+            "cleanup",
+            11421,
+            &"b".repeat(64),
+            &sealed
+        )
+        .unwrap());
+    assert!(!f
+        .core
+        .store
+        .begin_call("one", "unrelated", "generation")
+        .unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conference_poll_wait_stops_when_media_or_owner_stops() {
+    for media_finished in [true, false] {
+        let f = Fixture::new(Hold::BeforeHandoff).await;
+        let transport = f.transport.clone();
+        let waiting = tokio::task::spawn_blocking(move || {
+            transport.wait_for_conference_sync::<Vec<u8>>(std::future::pending())
+        });
+        if media_finished {
+            f.transport.worker.media_stop.store(true, Ordering::Release);
+        } else {
+            f.transport.worker.stop.store(true, Ordering::Release);
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().is::<CallLiveSyncInterrupted>());
+        assert!(f.records().is_empty());
     }
 }
 fn reply(route: CallHostRoute) -> Vec<u8> {
@@ -251,6 +334,7 @@ impl Fixture {
             identity: request.identity.clone(),
             peer_id: request.notification.caller_username.clone(),
             lease: lease.clone(),
+            account_lease: std::sync::OnceLock::new(),
             stop: AtomicBool::new(false),
             media_stop: AtomicBool::new(false),
             locally_closed: AtomicBool::new(false),
@@ -260,6 +344,9 @@ impl Fixture {
 
             mutations_submitted: AtomicBool::new(false),
             incoming: None,
+            conference: None,
+            conference_start: None,
+            conference_commands: Mutex::new(std::collections::VecDeque::new()),
             audio,
             done: Mutex::new(None),
             notify: Notify::new(),

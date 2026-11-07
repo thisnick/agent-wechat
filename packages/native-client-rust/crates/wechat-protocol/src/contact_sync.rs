@@ -106,7 +106,8 @@ pub fn decode(input: &[u8]) -> Result<ContactSyncBatch> {
 }
 
 impl NativeClient {
-    pub fn contact_sync(
+    #[doc(hidden)]
+    pub(crate) fn contact_sync_snapshot(
         &self,
         state: &mut AccountState,
         cursor: &[u8],

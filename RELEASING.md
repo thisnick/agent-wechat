@@ -8,8 +8,8 @@ The native/npm release process publishes these artifacts:
 1. npm CLI package: `@agent-wechat/cli`
 2. npm OpenClaw extension: `@agent-wechat/agent-wechat`
 3. Native executables and a checksum manifest on the matching GitHub release
-4. Rust libraries on crates.io: `wechat-protocol`, `wechat-profile` and their
-   required `wechat-media` and `wechat-platform` dependencies
+4. Rust libraries on crates.io: `wechat-protocol`, `wechat-profile`, `wechat-calls`
+   and their required `wechat-media` and `wechat-platform` dependencies
 
 ## Prepare A Release
 
@@ -44,14 +44,14 @@ pnpm changeset
    them into the versioned multi-architecture tag. Stable versions also update
    `latest`.
 
-6. The same native release run packages and publishes the four Rust libraries,
+6. The same native release run packages and publishes the five Rust libraries,
    after the runtime image succeeds and the `native-release` environment permits
    publication. Each crate uses the native version and exact release source.
    Cargo publishes dependencies before their consumers. The other workspace
    crates and desktop package keep `publish = false`.
 
 7. The same run automatically starts **Publish npm packages** once native
-   assets, the multi-architecture image and all four Rust libraries succeed.
+   assets, the multi-architecture image and all five Rust libraries succeed.
    The job verifies the native assets, embeds their manifest in the CLI package
    and publishes both npm packages with provenance. Prereleases use their
    Changesets channel (such as `beta`). Stable releases use `latest`.
@@ -59,7 +59,10 @@ pnpm changeset
 ## Rust library release contract
 
 `wechat-protocol` and `wechat-profile` implement verified WeChat protocol and
-official-profile behavior. Preserve that boundary: daemon scheduling,
+official-profile behavior. `wechat-calls` supplies voice-session/media building
+blocks and depends on protocol. Its lower-level host integration remains
+separate from the unfinished account-bound calling facade. Preserve that
+boundary: daemon scheduling,
 authorization policy, event delivery, sidecar coordination and OpenClaw features
 belong in the higher layers. Do not add alternative settled storage, retention
 or feature semantics to these libraries merely because the daemon needs them.
@@ -76,24 +79,31 @@ For each release affecting the public libraries:
   fit the library's job, avoid leaking daemon internals through public types,
   and assess new native build/runtime requirements and licenses. Do not upgrade
   unrelated dependencies just to cut a release.
-- Keep the four public crates' versions and internal dependency requirements
+- Keep the five public crates' versions and internal dependency requirements
   synchronized through `pnpm version-packages`. A public library may not depend
   on an unpublished workspace crate. Required support crates remain published
-  even when users normally depend only on protocol/profile.
+  even when users normally depend only on protocol/profile/calls.
 - Run the pinned formatter, warning-denying Clippy, relevant library tests and
   public examples. `node scripts/native-crates.mjs package` builds the actual
-  four source archives, including their packaged native sources and licenses;
+  five source archives, including their packaged native sources and licenses;
   a workspace build alone is insufficient. Keep the reference page and crate
   documentation aligned with the shipped API and supported profile layouts.
+- For `wechat-calls`, run default, no-default and codec-only tests and examples,
+  portable WASM compilation and doc tests. Verify that its archive contains the
+  MIT license and all Opus notices. It must not acquire device/Core dependencies
+  or require PulseAudio for startup. Publishing the crate does not claim the
+  unfinished account-bound facade or remove the native worker's 20-minute limit.
 
 ### One-time crates.io setup
 
 The names must be owned by this project's maintainer. crates.io currently
-requires an API token for a crate's first publication. Before the first release,
-create a short-lived token with only the permissions required to publish these
-four crates and store it as `CRATES_IO_BOOTSTRAP_TOKEN` in GitHub's protected
-`native-release` environment. Never commit or print it. The workflow uses this
-token only while at least one of the four crate names has not been created.
+requires an API token for a crate's first publication. For the new
+`wechat-calls` name, create a short-lived token with permission to create/publish
+that crate and store it as `CRATES_IO_BOOTSTRAP_TOKEN` in GitHub's protected
+`native-release` environment. Never commit or print it. Existing crates use the
+OIDC trusted-publishing token; only new names use the bootstrap token. Both
+credentials are checked before the first upload, and dependencies publish first.
+A new name cannot use trusted publishing until its first version exists.
 
 After the first publication, configure each crate's Settings → Trusted
 Publishing with repository owner `thisnick`, repository `agent-wechat`, workflow

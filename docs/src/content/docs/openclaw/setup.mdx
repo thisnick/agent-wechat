@@ -61,6 +61,10 @@ You need a daemon that is running and logged in. If you haven't set one up, see 
 
 Next: decide [who the bot answers](/openclaw/access/), including groups, which [tools](/openclaw/tools/) it gets, and whether to enable [calling](/openclaw/calling/).
 
+Optional tools need their own OpenClaw grant. For example, enabling voice does
+not add `wechat_call` to the agent's tools; add it to `tools.alsoAllow` as shown
+in [Agent tools](/openclaw/tools/#calling).
+
 <Aside title="Good to know">
 - **Everything is off by default.** With no `dmPolicy` or `groupPolicy`, the agent answers nobody.
 - **The agent replies as you.** Replies go out from your WeChat account, and OpenClaw marks the chat read once it has handled the message. See [read receipts](/openclaw/read-receipts/).

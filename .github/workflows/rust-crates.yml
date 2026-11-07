@@ -44,14 +44,18 @@ jobs:
           key: rust-library-packages
       - name: Check publication boundaries and package recovery
         run: node --test scripts/native-crates.test.mjs
-      - name: Build all four distributable source packages
+      - name: Build all five distributable source packages
         run: node scripts/native-crates.mjs package
         env:
           RELEASE_VERSION: ${{ inputs.version }}
       - name: Build public examples from the libraries
         run: |
-          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile
-          cargo test --doc --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile
+          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile -p wechat-calls
+          cargo test --doc --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile -p wechat-calls
+          cargo run --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --example portable_mix
+          cargo run --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --features native-opus --example tone_roundtrip
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --features native-opus
       - uses: actions/upload-artifact@v7
         with:
           name: rust-library-packages
@@ -92,7 +96,7 @@ jobs:
           CRATE_ARCHIVE_DIR: ${{ runner.temp }}/rust-library-packages
           CRATES_IO_BOOTSTRAP_AVAILABLE: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN != '' }}
       - name: Authenticate with crates.io trusted publishing
-        if: steps.plan.outputs.pending == 'true' && steps.plan.outputs.bootstrap == 'false'
+        if: steps.plan.outputs.trusted == 'true'
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: Publish and verify native libraries
@@ -101,4 +105,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           CRATE_ARCHIVE_DIR: ${{ runner.temp }}/rust-library-packages
-          CARGO_REGISTRY_TOKEN: ${{ steps.plan.outputs.bootstrap == 'true' && secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}

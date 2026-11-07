@@ -248,10 +248,14 @@ Use `tokens create NAME --accounts ACCOUNT --scopes read` to issue a restricted 
 
 The supported existing-profile workflow has explicit compatibility limits. It is not ready to replace arbitrary production official profiles. No deployment, release publication or production profile handoff is part of the validation performed here.
 
-`wechat-protocol` and `wechat-profile` are the public library entry points.
-Their supporting `wechat-media` and `wechat-platform` crates are also configured
-for crates.io publication. All four use the native release version; the other
-workspace crates remain unpublished. Registry publication starts with the next
-release containing this change. Tagged Git/path dependencies remain usable.
+`wechat-protocol`, `wechat-profile` and `wechat-calls` are public library entry
+points. Their supporting `wechat-media` and `wechat-platform` crates are also
+configured for crates.io publication. All five use the native release version;
+the other workspace crates remain unpublished. `wechat-calls` provides portable
+PCM/Opus and native session/media building blocks; its high-level account-bound
+calling facade is not yet available. See its [README](crates/wechat-calls/README.md)
+for feature selection, offline examples and integration limits. Registry
+publication starts with the release containing this change. Tagged Git/path
+dependencies remain usable.
 See the [Rust libraries reference](https://thisnick.github.io/agent-wechat/reference/rust-libraries/)
 for installation, examples and compatibility, and `RELEASING.md` for publication.

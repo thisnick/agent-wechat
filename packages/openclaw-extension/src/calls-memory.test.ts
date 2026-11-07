@@ -93,3 +93,25 @@ test("chat lines show a reply's text and a link's title, never an app message's 
     "- (1 min ago) Caller: [forwarded chat]", "- (1 min ago) You: Pong, I'm here.", "- (1 min ago) Caller: [link] A story", "- (1 min ago) You: [shared item]",
   ].join("\n"));
 });
+
+test("conference recaps separate owner, read-only and unclassified legacy memory", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "wechat-conference-memory-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CallSummaryStore(join(directory, "memory.json"));
+  const entry = { endedAt: 1, seconds: 2, direction: "incoming" as const, summary: "Owner-only recap" };
+  await store.record("a", "group@chatroom", entry, "owner");
+  await store.record("a", "group@chatroom", { ...entry, summary: "Legacy unknown authority" });
+  assert.deepEqual(await store.recent("a", "group@chatroom", "safe-read-only"), []);
+  await store.record("a", "group@chatroom", { ...entry, summary: "Read-only recap" }, "safe-read-only");
+  assert.deepEqual((await store.recent("a", "group@chatroom", "owner")).map(x => x.summary), ["Owner-only recap"]);
+  assert.deepEqual((await store.recent("a", "group@chatroom", "safe-read-only")).map(x => x.summary), ["Read-only recap"]);
+});
+
+test("direct-call authority scopes do not reuse owner or unclassified legacy recaps", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "wechat-direct-memory-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CallSummaryStore(join(directory, "memory.json"));
+  const entry = { endedAt: 1, seconds: 2, direction: "incoming" as const, summary: "Private owner recap" };
+  await store.record("a", "peer", entry, "owner"); await store.record("a", "peer", entry);
+  assert.deepEqual(await store.recent("a", "peer", "safe-read-only"), []);
+  assert.deepEqual(await store.recent("a", "peer", "none"), []);
+  assert.equal((await store.recent("a", "peer", "owner"))[0].summary, entry.summary);
+});

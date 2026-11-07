@@ -79,6 +79,18 @@ async fn websocket_upgrade_requires_accept_key_and_rejects_unrequested_extension
     server.abort();
 }
 
+pub(super) async fn assert_client_hello(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) {
+    let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+        panic!("expected client hello")
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+        serde_json::json!({"type":"call.hello","supportedProtocolVersions":[2]})
+    );
+}
+
 pub(super) fn remote(address: std::net::SocketAddr) -> Remote {
     Remote {
         http: reqwest::Client::builder()
@@ -93,7 +105,8 @@ pub(super) fn remote(address: std::net::SocketAddr) -> Remote {
 
 pub(super) fn hello() -> CallEvent {
     CallEvent::Hello {
-        protocol_version: 1,
+        conference_invitations: vec![],
+        protocol_version: 2,
         client_id: "fixture-client".into(),
         capabilities: CallCapabilities::default(),
         availability: CallsAvailability {
@@ -142,6 +155,7 @@ async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
         )
         .await
         .unwrap();
+        assert_client_hello(&mut socket).await;
         socket
             .send(Message::Text(
                 serde_json::to_string(&hello()).unwrap().into(),
@@ -187,6 +201,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut control = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_client_hello(&mut control).await;
         let mut initial = hello();
         if let CallEvent::Hello { capabilities, .. } = &mut initial {
             capabilities.direct_audio = true;
@@ -242,18 +257,21 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         assert_eq!(attach["clientId"], "fixture-client");
         assert_eq!(attach["ownerToken"], "synthetic-owner-proof");
         let ready = CallEvent::MediaReady {
+            protocol_version: 2,
             send_track: CallAudioTrack {
                 id: 1,
                 generation: 3,
                 direction: CallTrackDirection::Send,
+                participant_id: None,
                 format: CallAudioFormat::default(),
             },
-            receive_track: CallAudioTrack {
+            receive_tracks: vec![CallAudioTrack {
                 id: 2,
                 generation: 1,
                 direction: CallTrackDirection::Receive,
                 format: CallAudioFormat::default(),
-            },
+                participant_id: None,
+            }],
         };
         media
             .send(Message::Text(serde_json::to_string(&ready).unwrap().into()))
@@ -264,11 +282,18 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&start).unwrap(),
-            serde_json::json!({"type":"audio.start","generation":3})
+            serde_json::json!({"type":"audio.start","trackId":1,"generation":3})
         );
-        let Message::Binary(bytes) = media.next().await.unwrap().unwrap() else {
-            panic!("expected raw PCM");
+        let Message::Text(chunk) = media.next().await.unwrap().unwrap() else {
+            panic!("expected JSON PCM")
         };
+        let value: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+        assert_eq!(value["type"], "audio.chunk");
+        assert_eq!(value["trackId"], 1);
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value["pcmBase64"].as_str().unwrap())
+            .unwrap();
         assert_eq!(
             bytes.to_vec(),
             [123i16; 320]
@@ -287,6 +312,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
                 id: 1,
                 generation: 4,
                 direction: CallTrackDirection::Send,
+                participant_id: None,
                 format: CallAudioFormat::default(),
             },
         };
@@ -314,12 +340,18 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&start).unwrap(),
-            serde_json::json!({"type":"audio.start","generation":4})
+            serde_json::json!({"type":"audio.start","trackId":1,"generation":4})
         );
-        let Message::Binary(bytes) = media.next().await.unwrap().unwrap() else {
-            panic!("expected raw PCM");
+        let Message::Text(chunk) = media.next().await.unwrap().unwrap() else {
+            panic!("expected JSON PCM")
         };
-        assert_eq!(bytes.as_ref(), &[0; 640]);
+        let value: serde_json::Value = serde_json::from_str(&chunk).unwrap();
+        assert_eq!(value["type"], "audio.chunk");
+        assert_eq!(value["generation"], 4);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value["pcmBase64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(bytes, vec![0; 640]);
         use wechat_core::call_types::{CallDirection, CallKind, CallState, CallView};
         let view = CallView {
             call_id: "owned-call".into(),
@@ -328,6 +360,8 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
             call_type: wechat_core::call_types::CallType::Voice,
             direction: CallDirection::Outgoing,
             state: CallState::Connected,
+            group_id: None,
+            participants: vec![],
             owned_by_this_client: true,
             controls: vec![],
         };
@@ -462,6 +496,7 @@ async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_client_hello(&mut socket).await;
         socket
             .send(Message::Text(
                 serde_json::to_string(&hello()).unwrap().into(),
@@ -504,6 +539,7 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_client_hello(&mut socket).await;
         let first = CallOffer {
             call_id: "offer-a".into(),
             revision: 3,
@@ -595,6 +631,7 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_client_hello(&mut socket).await;
         socket
             .send(Message::Text(
                 serde_json::to_string(&hello()).unwrap().into(),
@@ -627,6 +664,8 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
             call_type: wechat_core::call_types::CallType::Voice,
             direction: CallDirection::Outgoing,
             state: CallState::Dialing,
+            group_id: None,
+            participants: vec![],
             owned_by_this_client: true,
             controls: vec![],
         };
@@ -699,4 +738,51 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
         .unwrap();
     control.close().await;
     server.await.unwrap();
+}
+
+#[test]
+fn conference_commands_parse_without_losing_repeated_invitees_or_device_selection() {
+    let cli = super::super::Cli::try_parse_from([
+        "wx",
+        "calls",
+        "conference",
+        "start",
+        "group-test",
+        "--invite",
+        "contact-a",
+        "--invite",
+        "contact-b",
+        "--input-device",
+        "input-id",
+    ])
+    .unwrap();
+    let super::super::Command::Calls {
+        command:
+            Some(CallsCommand::Conference {
+                command:
+                    Some(ConferenceCommand::Start {
+                        group,
+                        invitees,
+                        audio,
+                    }),
+            }),
+    } = cli.command
+    else {
+        panic!("wrong conference command")
+    };
+    assert_eq!(group, "group-test");
+    assert_eq!(invitees, vec!["contact-a", "contact-b"]);
+    assert_eq!(audio.input_device.as_deref(), Some("input-id"));
+    assert!(super::super::Cli::try_parse_from([
+        "wx",
+        "calls",
+        "conference",
+        "start",
+        "group-test"
+    ])
+    .is_err());
+    assert!(
+        super::super::Cli::try_parse_from(["wx", "calls", "conference", "join", "group-test"])
+            .is_ok()
+    );
 }

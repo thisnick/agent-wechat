@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpenClawPluginApi, OpenClawPluginToolContext, PluginRuntime } from "openclaw/plugin-sdk/core";
-import { NativeCallError, type NativeMessage, type CallEvent, type CallOffer, type CallReadyScope, type CallView, type NativeCallMediaFrame, type NativeCallPcmObserver } from "@agent-wechat/shared";
+import { NativeCallError, type NativeMessage, type CallEvent, type CallOffer, type CallReadyScope, type CallView, type CallAudioTrack, type CallConferenceInvitation, type NativeCallMediaFrame, type NativeCallPcmObserver } from "@agent-wechat/shared";
 import { resolveWeChatAccount } from "./types.ts";
 import { NativeCallService, type CallControlPort, type CallMediaPort } from "./calls-service.ts";
 import { type CallSummaryRequest, type PreparedCallVoice, type VoiceCallbacks } from "./calls-voice.ts";
@@ -37,7 +37,8 @@ function configuration() {
 class Media implements CallMediaPort {
   input = new Queue<NativeCallMediaFrame>(); sent: Array<{ generation: number; samples: Int16Array }> = []; generation = 1; closed = false; stopped = false;
   observePcm?: NativeCallPcmObserver;
-  tracks() { return { sendTrack: { id: 1, generation: this.generation, direction: "send" as const, format }, receiveTrack: { id: 2, generation: 1, direction: "receive" as const, format } }; }
+  receiveTracks: CallAudioTrack[] = [{ id: 2, generation: 1, direction: "receive", format }];
+  tracks() { return { sendTrack: { id: 1, generation: this.generation, direction: "send" as const, format }, receiveTracks: structuredClone(this.receiveTracks) }; }
   frames() { return this.input; }
   sendPcm(samples: Int16Array, generation: number) { if (this.closed || this.stopped) throw Error("Closed"); this.sent.push({ generation, samples: samples.slice() }); }
   stopAudio() { this.stopped = true; this.input.values = []; }
@@ -46,9 +47,10 @@ class Media implements CallMediaPort {
 class Control implements CallControlPort {
   eventsQueue = new Queue<CallEvent>(); media = new Media(); directAudio = true; closed = false; connects = 0; readied = 0; answers = 0; dials = 0; ends = 0; attaches = 0; clears = 0;
   offerOnReady = true;
+  conferenceCapabilities = false;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
-  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, protocolVersion: 1, clientId: "client", capabilities: this.directAudio ? capabilities : {}, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
+  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, conferenceInvitations: [], protocolVersion: 2, clientId: "client", capabilities: { ...(this.directAudio ? capabilities : {}), ...(this.conferenceCapabilities ? { conferenceCreate: true, conferenceJoin: true, conferenceInvite: true, conferenceAudio: true } : {}) }, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
   events() { return this.eventsQueue; }
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);
@@ -66,15 +68,22 @@ class Control implements CallControlPort {
 function voiceFactory() {
   const state = { opens: 0, closes: 0, incoming: [] as Buffer[], timestamps: [] as number[],
     contexts: [] as Array<Parameters<PreparedCallVoice["open"]>[1]>,
+    updates: [] as Array<{ snapshot: import("./calls-context.ts").CallContextSnapshot; change: import("./calls-context.ts").CallContextChange }>,
     callbacks: undefined as VoiceCallbacks | undefined, opening: undefined as Promise<void> | undefined,
     binding: { sessionKey: "agent:agent:wechat-call:peer", owner: false }, summaries: [] as CallSummaryRequest[], summaryText: undefined as string | undefined };
   const prepared: PreparedCallVoice = { sampleRate: 16000, continuous: false, resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
-    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
+    async open(callbacks, context) { state.opens++; state.contexts.push(context); state.callbacks = callbacks; await state.opening; return { interruptOutput: () => callbacks.clear("output-budget"), updateCallContext: (snapshot, change) => { state.updates.push(structuredClone({ snapshot, change })); }, sendAudio: value => state.incoming.push(value), setMediaTimestamp: ms => state.timestamps.push(ms), close() { state.closes++; }, binding: () => state.binding }; },
     async summarize(request) { state.summaries.push(request); return state.summaryText; } };
   return { state, prepared };
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(5); } assert.fail("Condition did not become true"); }
-async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration(), warn?: (line: string) => void) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, logAudioTrace, warn }); await service.start(); return { service, client, voice }; }
+const cachedHost = (async () => ({ client: {
+  account: async () => ({ id: "a", ownUsername: "contact-self" }),
+  contact: async () => ({ remark: "Known caller" }),
+  group: async () => ({ name: "Public test room", remark: "Private label" }),
+  groupMember: async (_account: string, _group: string, contactId: string) => ({ member: { username: contactId, roomDisplayName: `Room ${contactId}` } }),
+} })) as unknown as NonNullable<import("./calls-service.ts").CallServiceDependencies["host"]>;
+async function fixture(logAudioTrace?: (line: string) => void, cfg = configuration(), warn?: (line: string) => void) { const client = new Control(); const voice = voiceFactory(); const account = resolveWeChatAccount(cfg as any)!; const service = new NativeCallService(account, cfg, {} as PluginRuntime, { client, prepareVoice: async () => voice.prepared, host: cachedHost, logAudioTrace, warn }); await service.start(); return { service, client, voice }; }
 
 test("calling stays disabled independently of open messaging and requires its own complete configuration", async () => {
   assert.equal(resolveWeChatCallsConfig(undefined), undefined);
@@ -459,7 +468,7 @@ test("audio trace aggregates each boundary and a discarded PCM chunk still advan
   await until(() => client.media.observePcm !== undefined);
   const receivedAtMs = performance.now();
   client.media.observePcm!({ receivedAtMs, samples: 320, queueDepth: 16, droppedSamples: 320 });
-  client.media.input.push({ payload: new Uint8Array(640), receivedAtMs, sampleOffset: 320 });
+  client.media.input.push({ trackId: 2, generation: 1, payload: new Uint8Array(640), receivedAtMs, sampleOffset: 320 });
   const reply = Buffer.alloc(640, 1);
   voice.state.callbacks!.audio(reply, { itemId: "private-response-item" });
   await until(() => voice.state.incoming.length === 1 && client.media.sent.some(frame => frame.samples.includes(257)));
@@ -665,38 +674,319 @@ test("a missing terminal reply reaches needs_review once and repeated ending can
   assert.equal(service.status().state, "needs_review"); assert.equal(service.status().owned, false);
   assert.equal(client.closed, true); assert.equal(client.media.closed, true); assert.equal(client.ends, 1);
 });
-test("the PCM budget truncates a reply without ending the call or stitching later chunks into it", async t => {
+test("response audio beyond eight seconds plays completely at the daemon clock", t => {
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const media = new Media(); const voice = voiceFactory(); let failures = 0;
-  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
-  output.enqueue(Buffer.alloc(640), undefined); output.enqueue(Buffer.alloc(640), { itemId: "late" }); assert.equal(failures, 1); assert.equal(media.sent.length, 0);
-  const malformed = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
-  malformed.enqueue(Buffer.alloc(64002), { itemId: "oversized-chunk" });
-  assert.equal(failures, 2);
+  const diagnostics: string[] = [];
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; }, undefined,
+    { diagnostic: line => diagnostics.push(line) });
+  t.after(() => { output.close(); t.mock.timers.reset(); });
+  // A legal provider burst, longer than the former eight-second budget.
+  for (let n = 1; n <= 9; n++) output.enqueue(Buffer.alloc(64000, n), { itemId: "long-reply" });
+  output.start();
+  for (let n = 0; n < 902; n++) { now += 20; t.mock.timers.tick(20); }
+  const received = media.sent.flatMap(chunk => [...chunk.samples]);
+  for (let n = 0; n < 9; n++) {
+    assert.deepEqual(received.slice(n * 32000, (n + 1) * 32000), Array(32000).fill((n + 1) * 257));
+  }
+  assert.ok(media.sent.every(chunk => chunk.samples.length <= 640));
+  assert.equal(failures, 0);
+  assert.match(diagnostics[0], /mode=response capacityMs=600000 capacityBytes=19200000/);
+});
 
-  let converted = 0;
-  voice.prepared.resampler = () => ({ process: value => { converted++; return value; }, flush: () => Buffer.alloc(0) });
+test("ten-minute response overflow interrupts the SDK, accounts for playback and fences stale chunks", async t => {
+  const media = new Media(); const voice = voiceFactory(); let failures = 0, interruptions = 0;
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  const lines: string[] = [];
+  const lines: string[] = [], diagnostics: string[] = [];
   const trace = new CallAudioTrace(line => lines.push(line), { daemonHz: 16000, realtimeHz: 16000 });
-  const bounded = new CallPcmOutput(media, format, voice.prepared, () => held, () => { failures++; }, trace);
-  t.after(() => { bounded.close(); trace.close(); });
-  const clearing = bounded.clear();
-  bounded.start();
-  for (const size of [64000, 64000, 64000, 63400]) bounded.enqueue(Buffer.alloc(size, 0x11), { itemId: "first" });
-  bounded.enqueue(Buffer.alloc(640, 0x22), { itemId: "first" });
-  assert.equal(media.sent.length, 0);
-  release(); await clearing;
-  assert.deepEqual(media.sent[0].samples, new Int16Array(640).fill(0x1111));
-  bounded.enqueue(Buffer.alloc(640), { itemId: "first" });
-  assert.equal(converted, 5);
-  bounded.enqueue(Buffer.alloc(640), { itemId: "next" });
-  assert.equal(converted, 6);
-  assert.equal(failures, 2);
-  bounded.close(); trace.close();
+  let playback: ReturnType<CallPcmOutput["playbackState"]> = [];
+  const output = new CallPcmOutput(media, format, voice.prepared, () => held, () => { failures++; }, trace, {
+    onResponseOverflow() { interruptions++; playback = output.playbackState(); void output.clear("output-budget"); },
+    diagnostic: line => diagnostics.push(line),
+  });
+  t.after(() => { output.close(); trace.close(); release(); });
+  for (let n = 0; n < 300; n++) output.enqueue(Buffer.alloc(64000, 0x11), { itemId: "private-old-item" });
+  output.enqueue(Buffer.alloc(640, 0x22), { itemId: "private-new-overflow-item" });
+  assert.equal(interruptions, 1);
+  assert.deepEqual(playback, [{ itemId: "private-old-item", audioEndMs: 0 }, { itemId: "private-new-overflow-item", audioEndMs: 0 }]);
+  output.start();
+  output.enqueue(Buffer.alloc(640, 0x33), { itemId: "private-old-item" });
+  output.enqueue(Buffer.alloc(640, 0x44), { itemId: "private-new-overflow-item" });
+  output.enqueue(Buffer.alloc(1280, 0x55), { itemId: "fresh-item" });
+  assert.equal(media.sent.length, 0, "wait for daemon clear before sending a fresh generation");
+  release(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(media.sent[0].samples, new Int16Array(640).fill(0x5555));
+  assert.equal(failures, 0);
+  output.close(); trace.close();
   const report = JSON.parse(lines[0].slice("[wechat-call-audio] plugin ".length));
-  assert.equal(report.counts.outputTruncatedItems, 1);
-  assert.equal(report.counts.outputOverflowSamples, 20);
-  assert.equal(report.counts.outputOverflowProviderSamples, 320);
-  assert.equal(report.measures.outputQueuedAudioMs.max, 8000);
+  assert.equal(report.counts.outputBudgetInterruptions, 1);
+  assert.equal(report.counts.outputStaleChunks, 2);
+  assert.equal(report.measures.outputQueuedAudioMs.max, 600000);
+  assert.match(diagnostics.join("\n"), /stage=buffer-limit reason=capacity queuedMs=600000/);
+  assert.match(diagnostics.join("\n"), /stage=clear reason=output-budget/);
+  assert.doesNotMatch(diagnostics.join("\n"), /private-/);
+});
+
+test("invalid chunks and an unavailable overflow interruption fail instead of silently truncating", () => {
+  const media = new Media(); const voice = voiceFactory(); let failures = 0;
+  for (const bad of [undefined, "oversized"]) {
+    const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
+    output.enqueue(Buffer.alloc(bad ? 64002 : 640), bad ? { itemId: bad } : undefined);
+    output.close();
+  }
+  const output = new CallPcmOutput(media, format, voice.prepared, async () => {}, () => { failures++; });
+  for (let n = 0; n <= 300; n++) output.enqueue(Buffer.alloc(64000), { itemId: "overflow" });
+  assert.equal(failures, 3); assert.equal(media.sent.length, 0); output.close();
+});
+
+const conferenceGroup = 'synthetic-group@chatroom';
+const conferenceInvitation: CallConferenceInvitation = { invitationId: 'synthetic-invitation', revision: 1, groupId: conferenceGroup, callerId: 'another-member' };
+class ConferenceControl extends Control {
+  joins = 0; creates = 0; invited: string[][] = []; joinedRevision?: number;
+  constructor() { super(); this.conferenceCapabilities = true; }
+  conferenceView(callId = 'conference'): CallView { return { ...view(callId), kind: 'conference', groupId: conferenceGroup, participants: [
+    { participantId: 'a', contactId: 'contact-a', membership: 'joined', microphoneEnabled: true },
+    { participantId: 'b', contactId: 'contact-b', membership: 'joined', microphoneEnabled: true },
+  ] }; }
+  async joinConference(_requestId: string, invitationId: string, revision: number) {
+    assert.equal(invitationId, conferenceInvitation.invitationId); this.joins++; this.joinedRevision = revision;
+    this.eventsQueue.push({ type: 'call.state', call: this.conferenceView() }); return accepted('conference', 'private-conference-lease');
+  }
+  async startConference(_requestId: string, groupId: string, invitees: string[]) {
+    assert.equal(groupId, conferenceGroup); this.creates++; this.invited.push([...invitees]);
+    this.eventsQueue.push({ type: 'call.state', call: { ...this.conferenceView(), direction: 'outgoing' } }); return accepted('conference', 'private-conference-lease');
+  }
+  async invite(requestId: string, callId: string, contacts: string[]) {
+    this.invited.push([...contacts]); this.eventsQueue.push({ type: 'call.invitation_result', requestId, callId, results: contacts.map(contactId => ({ contactId, status: 'submitted', verificationRequired: false })) }); return accepted();
+  }
+}
+function conferenceConfiguration(autoJoin = false) {
+  const cfg = configuration();
+  Object.assign(cfg.channels['agent-wechat'].calls.voice, { conferences: { groups: { [conferenceGroup]: { autoJoin } } } });
+  return cfg;
+}
+async function conferenceFixture(autoJoin = false) {
+  const cfg = conferenceConfiguration(autoJoin); const client = new ConferenceControl(); const voice = voiceFactory();
+  const runtime = { config: { current: () => cfg } } as unknown as PluginRuntime;
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, runtime, { client, prepareVoice: async () => voice.prepared, host: cachedHost });
+  await service.start(); return { cfg, client, voice, service };
+}
+test('conference auto-join is off without an exact configured group and never answers its inviter as a direct peer', async () => {
+  const { service, client, voice } = await fixture();
+  client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+  await delay(10); assert.equal(client.readied, 0); assert.equal(voice.state.opens, 0); assert.equal(client.answers, 0); await service.stop();
+  const manual = await conferenceFixture();
+  manual.client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+  await delay(10); assert.equal(manual.client.joins, 0);
+  await manual.service.joinConference(conferenceGroup, { assertCurrent() {} }); await until(() => manual.client.attaches === 1);
+  assert.equal(manual.client.joins, 1); assert.equal(manual.client.answers, 0);
+  assert.equal(manual.voice.state.contexts[0].senderId, conferenceGroup);
+  assert.deepEqual(manual.voice.state.contexts[0].conference, { groupId: conferenceGroup, inviterId: conferenceInvitation.callerId, policyAtAdmission: "none" }); await manual.service.stop();
+});
+test('an admitted conference mixes simultaneous tracks once, updates mute and source lifecycle, and leaves without dismissing the room', async () => {
+  const { service, client, voice } = await conferenceFixture(true);
+  client.media.receiveTracks = [7, 8].map((id, index) => ({ id, generation: 1, direction: 'receive', participantId: index ? 'b' : 'a', format }));
+  client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] }); await until(() => client.attaches === 1);
+  const pcm = (value: number) => { const bytes = Buffer.alloc(640); for (let i = 0; i < 320; i++) bytes.writeInt16LE(value, i * 2); return bytes; };
+  client.media.input.push({ trackId: 7, generation: 1, sampleOffset: 0, sequence: 0, payload: pcm(1000) });
+  client.media.input.push({ trackId: 8, generation: 1, sampleOffset: 0, sequence: 0, payload: pcm(2000) });
+  await until(() => voice.state.incoming.some(bytes => bytes.readInt16LE(0) === 3000));
+  assert.equal(voice.state.incoming.filter(bytes => bytes.readInt16LE(0) === 3000).length, 1);
+  client.eventsQueue.push({ type: 'participant.updated', callId: 'conference', revision: 3, participant: { participantId: 'b', contactId: 'contact-b', membership: 'joined', microphoneEnabled: false } });
+  await until(() => service.status().participants?.find(member => member.participantId === 'b')?.microphoneEnabled === false);
+  assert.ok(client.media.sent.length > 0, 'room uplink must run even while the voice model is silent');
+  const started = voice.state.incoming.length;
+  await service.end(); assert.equal(client.ends, 1); assert.equal(client.media.closed, false);
+  client.eventsQueue.push({ type: 'call.state', call: { ...client.conferenceView(), revision: 4, state: 'ended' } });
+  client.eventsQueue.push({ type: 'calls.availability', availability: { busy: false, ownedByThisClient: false } });
+  await until(() => client.media.closed); await delay(40); assert.equal(voice.state.incoming.length, started);
+  assert.equal(client.joins, 1, 'the old invitation must not auto-join again after leave'); await service.stop();
+});
+test('withdrawn conference invitations and revoked group policy during voice preparation submit no join', async () => {
+  for (const revoke of [false, true]) {
+    const { service, client, voice, cfg } = await conferenceFixture(true);
+    let release!: () => void; voice.state.opening = new Promise(resolve => { release = resolve; });
+    client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] }); await until(() => voice.state.opens === 1);
+    if (revoke) (cfg.channels['agent-wechat'].calls.voice as any).conferences.groups = {};
+    else client.eventsQueue.push({ type: 'conference.invitations', invitations: [] });
+    await delay(5); release(); await until(() => voice.state.closes === 1);
+    assert.equal(client.joins, 0); assert.equal(client.creates, 0); assert.equal(client.readied, 0); await service.stop();
+  }
+});
+test('conference start and later invitations recheck destination allowlists and do not inherit a private dialing-session context', async () => {
+  const { service, client, voice } = await conferenceFixture();
+  let checks = 0; const access = { assertCurrent() { checks++; }, parentSession: { key: 'agent:voice-agent:private-owner-dm' } };
+  await assert.rejects(service.startConference(conferenceGroup, ['unlisted'], access), /permitted/);
+  assert.equal(client.creates, 0);
+  await service.startConference(conferenceGroup, ['allowed-peer'], access); await until(() => client.attaches === 1);
+  assert.equal(voice.state.contexts[0].parentSession, undefined);
+  assert.ok(checks >= 4); assert.equal(client.creates, 1);
+  await assert.rejects(service.invite(['unlisted'], access), /permitted/);
+  await service.invite(['allowed-peer'], access); await until(() => !!service.status().invitationResults);
+  assert.equal(service.status().invitationResults?.[0].status, 'submitted');
+  assert.deepEqual(client.invited, [['allowed-peer'], ['allowed-peer']]); await service.stop();
+});
+
+
+test('conference inviter allowlist rejects others, accepts the listed inviter, and fences revocation before submission', async () => {
+  const first = await conferenceFixture(true);
+  (first.cfg.channels['agent-wechat'].calls.voice as any).conferences.groups[conferenceGroup].autoJoinAllowFrom = ['trusted-inviter'];
+  first.client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+  await delay(30); assert.equal(first.client.joins, 0); assert.equal(first.voice.state.opens, 0);
+  first.client.eventsQueue.push({ type: 'conference.invitations', invitations: [{ ...conferenceInvitation, callerId: 'trusted-inviter' }] });
+  await until(() => first.client.attaches === 1); assert.equal(first.client.joins, 1); await first.service.stop();
+  for (const replacement of [[], ['different-inviter']]) {
+    const next = await conferenceFixture(true);
+    const group = (next.cfg.channels['agent-wechat'].calls.voice as any).conferences.groups[conferenceGroup];
+    group.autoJoinAllowFrom = [conferenceInvitation.callerId];
+    let release!: () => void; next.voice.state.opening = new Promise(resolve => { release = resolve; });
+    next.client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] });
+    await until(() => next.voice.state.opens === 1); group.autoJoinAllowFrom = replacement; release();
+    await until(() => next.voice.state.closes === 1); assert.equal(next.client.joins, 0); assert.equal(next.client.readied, 0); await next.service.stop();
+  }
+});
+
+test("incoming and outgoing identities greet once only after connected media is ready", async t => {
+  for (const direction of ["incoming", "outgoing"] as const) {
+    const { service, client, voice } = await fixture(); t.after(() => service.stop());
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    client.attachMedia = async () => { client.attaches++; await gate; return client.media; };
+    if (direction === "incoming") client.eventsQueue.push({ type: "call.offered", offer });
+    else await service.dial("allowed-peer", { assertCurrent() {} });
+    await until(() => client.attaches === 1);
+    await delay(280); assert.equal(voice.state.updates.length, 0);
+    assert.equal(voice.state.contexts[0].callContext?.direction, direction);
+    assert.equal(voice.state.contexts[0].callContext?.selfContactId, "contact-self");
+    assert.equal(voice.state.contexts[0].callContext?.conversationPartner?.contactId, "allowed-peer");
+    assert.deepEqual(voice.state.contexts[0].callContext?.remote, { contactId: "allowed-peer", name: "Known caller" });
+    release(); await until(() => voice.state.updates.length === 1);
+    assert.deepEqual(voice.state.updates[0].change, { initial: true });
+    client.eventsQueue.push({ type: "call.state", call: { ...view(direction === "incoming" ? "offer" : "dial"), direction } });
+    await delay(280); assert.equal(voice.state.updates.length, 1);
+    assert.equal(client.clears, 0, "greetings never clear model output");
+  }
+});
+
+test("conference context keeps its inviter, coalesces joins/leaves and stops updates on hangup", async t => {
+  const { service, client, voice } = await conferenceFixture(true); t.after(() => service.stop());
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => voice.state.updates.length === 1);
+  assert.deepEqual(voice.state.contexts[0].callContext?.conference, { groupId: conferenceGroup, name: "Public test room", inviter: { contactId: "another-member", name: "Room another-member" } });
+  assert.deepEqual(voice.state.updates[0].snapshot.participants.map(p => p.name), ["Room contact-a", "Room contact-b"]);
+  const participant = (id: string, membership: "joined" | "left" | "invited" = "joined") => ({ participantId: id, contactId: `contact-${id}`, membership });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("c") });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("a", "left") });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("d", "invited") });
+  // A canceled join inside the same window produces no greeting or farewell.
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 3, participant: participant("e") });
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 4, participant: participant("e", "left") });
+  await until(() => voice.state.updates.length === 2);
+  assert.deepEqual(voice.state.updates[1].change, { initial: false, joined: [{ contactId: "contact-c", name: "Room contact-c" }], left: [{ contactId: "contact-a", name: "Room contact-a" }] });
+  client.eventsQueue.push({ type: "call.state", call: client.conferenceView() }); // stale snapshot
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 5, participant: { ...participant("b"), microphoneEnabled: false } });
+  await delay(280); assert.equal(voice.state.updates.length, 2);
+  client.eventsQueue.push({ type: "participant.updated", callId: "conference", revision: 6, participant: participant("a") });
+  await delay(20); await service.end(); await delay(280);
+  assert.equal(voice.state.updates.length, 2);
+  assert.equal(client.clears, 0);
+});
+
+test("delayed conference names reschedule context and deferred provider submission retains the update", async t => {
+  const cfg = conferenceConfiguration(true), client = new ConferenceControl(), voice = voiceFactory();
+  const lines: string[] = []; let release!: () => void, admit = true;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const host = (async () => ({ client: {
+    group: async () => ({ name: "Test room" }),
+    groupMember: async (_account: string, _group: string, who: string) => {
+      if (who.startsWith("contact-")) await pending;
+      return { member: { username: who, displayName: `Name ${who}` } };
+    },
+  } })) as unknown as NonNullable<import("./calls-service.ts").CallServiceDependencies["host"]>;
+  const open = voice.prepared.open;
+  voice.prepared.open = async (...args) => {
+    const session = await open(...args), send = session.updateCallContext;
+    session.updateCallContext = (snapshot, change) => {
+      if (!admit) return false;
+      send(snapshot, change); return true;
+    };
+    return session;
+  };
+  const service = new NativeCallService(resolveWeChatAccount(cfg as any)!, cfg, { config: { current: () => cfg } } as unknown as PluginRuntime,
+    { client, prepareVoice: async () => voice.prepared, host, info: line => lines.push(line) });
+  await service.start(); t.after(() => service.stop());
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => voice.state.updates.length === 1);
+  assert.deepEqual(voice.state.updates[0].snapshot.participants.map(p => p.name), ["contact-a", "contact-b"]);
+  admit = false; release(); await delay(300); assert.equal(voice.state.updates.length, 1);
+  admit = true; await until(() => voice.state.updates.length === 2);
+  assert.deepEqual(voice.state.updates[1].change, { initial: false, joined: [], left: [], metadataOnly: true });
+  assert.deepEqual(voice.state.updates[1].snapshot.participants.map(p => p.name), ["Name contact-a", "Name contact-b"]);
+  assert.ok(lines.some(line => /stage=lookup lookup=\d+ named=true ms=\d+/.test(line)));
+  assert.equal(lines.some(line => /contact-a|contact-b|Name |another-member|Test room/.test(line)), false, "default diagnostics never contain names or contact IDs");
+});
+
+test("manual conference admission fences a changed inviter even at the same invitation revision", async t => {
+  const { service, client, voice } = await conferenceFixture(); t.after(() => service.stop());
+  let release!: () => void; voice.state.opening = new Promise(resolve => { release = resolve; });
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] }); await delay(5);
+  const joining = service.joinConference(conferenceGroup, { assertCurrent() {} });
+  await until(() => voice.state.opens === 1);
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [{ ...conferenceInvitation, callerId: "changed-inviter" }] });
+  await delay(5); release(); await assert.rejects(joining, /not admitted/); assert.equal(client.joins, 0);
+});
+
+test("owner consultation controls its conference without a chat-requester grant and cannot affect a later call", async t => {
+  const { cfg, service, client, voice } = await conferenceFixture(true); t.after(() => service.stop());
+  voice.state.binding = { sessionKey: "agent:voice-agent:wechat-conference:synthetic:owner", owner: true };
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => client.attaches === 1);
+  const context: OpenClawPluginToolContext<2> = { config: cfg as any, agentId: "voice-agent", agentAccountId: "default",
+    requesterSenderId: conferenceGroup, senderIsOwner: true, sessionKey: voice.state.binding.sessionKey, assertInvocationCurrent() {} };
+  let create!: (context: OpenClawPluginToolContext<2>) => Array<{ execute(id: string, args: unknown): Promise<unknown> }>;
+  registerNativeCallTool({ registerTool(factory: any) { create = factory.create; } } as unknown as OpenClawPluginApi, () => service);
+  const [tool] = create(context);
+  assert.equal(cfg.channels["agent-wechat"].calls.voice.outboundToolAllowFrom.includes(conferenceGroup), false);
+  await tool.execute("status", { action: "status" });
+  await assert.rejects(tool.execute("invite", { action: "invite", contactIds: ["unlisted"] }), /admitted|destination|permitted/);
+  assert.equal(client.invited.length, 0, "destination allowlists remain in force");
+  voice.state.binding.owner = false;
+  await assert.rejects(tool.execute("revoked", { action: "hangup" }), /consultation/); assert.equal(client.ends, 0);
+  voice.state.binding.owner = true;
+  const [foreign] = create({ ...context, requesterSenderId: "foreign" });
+  await assert.rejects(foreign.execute("foreign", { action: "hangup" }), /consultation/);
+  const [nonOwner] = create({ ...context, senderIsOwner: false });
+  await assert.rejects(nonOwner.execute("non-owner", { action: "hangup" }), /not permitted/);
+  const [wrongAccount] = create({ ...context, agentAccountId: "another-account" });
+  await assert.rejects(wrongAccount.execute("wrong-account", { action: "hangup" }), /consultation/);
+  await tool.execute("end", { action: "hangup" }); assert.equal(client.ends, 1);
+  client.eventsQueue.push({ type: "call.state", call: { ...client.conferenceView(), revision: 9, state: "ended" } });
+  await until(() => service.status().state === "available"); client.media = new Media();
+  await service.startConference(conferenceGroup, ["allowed-peer"], { assertCurrent() {} }); await until(() => client.attaches === 2);
+  await assert.rejects(tool.execute("stale", { action: "hangup" }), /consultation/);
+  assert.equal(client.ends, 1, "an old invocation cannot hang up the next call even with the same session and synthetic call ID");
+});
+
+test("a direct owner consultation can hang up without an outbound chat-requester grant", async t => {
+  const { service, client, voice } = await fixture(); t.after(() => service.stop());
+  voice.state.binding = { owner: true, sessionKey: "agent:voice-agent:wechat-call:allowed-peer" };
+  client.eventsQueue.push({ type: "call.offered", offer }); await until(() => client.attaches === 1);
+  const cfg = configuration(); let tool!: { execute(id: string, input: unknown): Promise<unknown> };
+  const context = { config: cfg as any, agentId: "voice-agent", requesterSenderId: "allowed-peer", senderIsOwner: true,
+    sessionKey: voice.state.binding.sessionKey, assertInvocationCurrent() {} };
+  registerNativeCallTool({ registerTool(factory: any) { [tool] = factory.create(context); } } as unknown as OpenClawPluginApi, () => service);
+  await tool.execute("end", { action: "hangup" }); assert.equal(client.ends, 1);
+});
+
+
+test("call metadata resolves our own account and exact owner matches without changing the tool policy", async t => {
+  const cfg = configuration(); (cfg as any).commands = { ownerAllowFrom: ["agent-wechat:allowed-peer", "agent-wechat:*"] };
+  const { service, client, voice } = await fixture(undefined, cfg); t.after(() => service.stop());
+  client.eventsQueue.push({ type: "call.offered", offer }); await until(() => client.attaches === 1);
+  assert.equal(voice.state.contexts[0].callContext?.remote?.configuredOwner, true);
+  assert.equal(voice.state.contexts[0].callContext?.selfContactId, "contact-self");
+  assert.equal(voice.state.contexts[0].policyAtAdmission, "none", "relationship metadata does not grant tools");
 });

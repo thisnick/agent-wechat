@@ -2,7 +2,6 @@
 //! A fresh offer advertises only the supported Opus17 bit. The server's selected
 //! codec number, packet format and channel flags require separate admission.
 
-use super::client::VoiceParameters;
 use crate::{crypto, protobuf as p};
 use anyhow::Result;
 use zeroize::Zeroizing;
@@ -68,13 +67,6 @@ impl VoiceOffer {
     }
     pub fn internal_channel_identity(&self) -> &[u8; 12] {
         &self.channel_internal
-    }
-    /// Replace only request-side fields. Negotiated response buffers must never
-    /// be fed back through these fields as the next call's advertised support.
-    pub fn apply_to(&self, parameters: &mut VoiceParameters) {
-        parameters.sdk = self.sdk.clone();
-        parameters.engine_capability = self.engine.clone();
-        parameters.channel_capability = self.channel_advertised.to_vec();
     }
 }
 

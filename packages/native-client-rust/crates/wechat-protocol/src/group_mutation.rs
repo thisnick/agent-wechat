@@ -548,7 +548,8 @@ pub fn decode_group_mutation(
     Ok(out)
 }
 impl NativeClient {
-    pub fn group_mutation_raw(
+    #[doc(hidden)]
+    pub(crate) fn group_mutation_raw_snapshot(
         &self,
         state: &mut AccountState,
         request: &GroupRpc,

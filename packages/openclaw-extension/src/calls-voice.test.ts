@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { link, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -51,9 +51,15 @@ test("installed host bridge and streaming resampler work with an account-free fa
   let providerRequest: any; let bridgeParams: any; const input: Buffer[] = []; let closed = 0; let connected = false;
   const fake = { id: "openai", createBridge(request: any) { providerRequest = request; return {
     connect: async () => { connected = true; request.onReady(); }, isConnected: () => connected, outputAudioMode: "response",
-    sendAudio: (value: Buffer) => input.push(value), setMediaTimestamp() {}, acknowledgeMark() {}, submitToolResult() {},
+    sendUserMessage: (text: string) => spoken.push(text),
+    sendAudio: (value: Buffer) => input.push(value), setMediaTimestamp() {}, handleBargeIn(options: unknown) {
+      assert.deepEqual(options, { force: true, audioPlaybackActive: true });
+      assert.deepEqual(request.getPlaybackState(), [{ itemId: "item", audioEndMs: 240 }]);
+      request.onClearAudio("barge-in");
+    }, acknowledgeMark() {}, submitToolResult() {},
     close: () => { closed++; connected = false; },
   }; } };
+  const spoken: string[] = [];
   let resolved = 0; let selection: any;
   const customized = resolveWeChatCallsConfig({ voice: { enabled: true, agentId: "agent", realtime: {
     provider: "openai", model: "synthetic-realtime", voice: "synthetic-voice", instructions: "Use short sentences.", consultPolicy: "always",
@@ -72,7 +78,7 @@ test("installed host bridge and streaming resampler work with an account-free fa
   assert.equal(selection.providerConfigs.openai.apiKey, "synthetic-openai-secret");
   assert.equal(JSON.stringify(customized).includes("synthetic-openai-secret"), false);
   assert.equal(resolved, 1); let heard = 0; let clears = 0;
-  const session = await prepared.open({ audio: (_value, metadata) => { heard++; assert.equal(metadata?.itemId, "item"); }, clear: () => { clears++; }, failed() { assert.fail("Unexpected provider failure"); } }, { senderId: "synthetic-peer", signal: new AbortController().signal });
+  const session = await prepared.open({ audio: (_value, metadata) => { heard++; assert.equal(metadata?.itemId, "item"); }, clear: reason => { clears++; assert.equal(reason, "output-budget"); }, playbackState: () => [{ itemId: "item", audioEndMs: 240 }], failed() { assert.fail("Unexpected provider failure"); } }, { senderId: "synthetic-peer", signal: new AbortController().signal });
   assert.equal(providerRequest.instructions, bridgeParams.instructions);
   assert.equal(providerRequest.agentId, "agent");
   assert.match(bridgeParams.instructions, /Synthetic selected/);
@@ -82,7 +88,7 @@ test("installed host bridge and streaming resampler work with an account-free fa
   assert.match(bridgeParams.instructions, /conversation-only/);
   assert.doesNotMatch(bridgeParams.instructions, /Synthetic default|openclaw_agent_consult|synthetic-openai-secret/);
   session.sendAudio(Buffer.alloc(960)); assert.equal(input.length, 1);
-  providerRequest.onAudio(Buffer.alloc(960), { itemId: "item" }); providerRequest.onClearAudio("barge-in"); assert.equal(heard, 1); assert.equal(clears, 1);
+  providerRequest.onAudio(Buffer.alloc(960), { itemId: "item" }); session.interruptOutput(); assert.equal(heard, 1); assert.equal(clears, 1);
   assert.deepEqual(providerRequest.tools, []); assert.equal(providerRequest.runAgentConsult, undefined); assert.equal(typeof bridgeParams.onTranscript, "function");
   providerRequest.onTranscript("user", "Synthetic discarded transcript", true);
   await session.close(); providerRequest.onAudio(Buffer.alloc(960), { itemId: "late" }); assert.equal(heard, 1); assert.equal(closed, 1);
@@ -91,6 +97,60 @@ test("installed host bridge and streaming resampler work with an account-free fa
   const stream = prepared.resampler(16000, 24000); const pieces: Buffer[] = [];
   for (let i = 0; i < generated.length; i += 83) pieces.push(stream.process(generated.subarray(i, i + 83)));
   pieces.push(stream.flush()); assert.deepEqual(Buffer.concat(pieces), expected); assert.equal(expected.length, 4800);
+});
+
+test("a delayed consultation acknowledges quietly through the public SDK and delivers one result without blocking input", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";
+  const [sdk, audioSdk] = await Promise.all([import(voicePath), import(audioPath)]);
+  let bridgeArgs: any, connected = false, inputs = 0, automaticReplies = 0;
+  const spoken: string[] = [], acknowledgments: Array<{ id: string; result: any; options: any }> = [];
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const { dispatches, reply } = fakeReply(async ({ replyOptions }) => {
+    replyOptions.onAgentRunStart(); await held; return "Verified lookup result";
+  });
+  const provider = { id: "openai", createBridge(request: any) { return {
+    outputAudioMode: "response", supportsToolResultSuppression: true,
+    connect: async () => { connected = true; request.onReady(); }, isConnected: () => connected,
+    sendUserMessage: (text: string) => spoken.push(text), sendAudio: () => { inputs++; },
+    setMediaTimestamp() {}, handleBargeIn() {}, acknowledgeMark() {},
+    submitToolResult(id: string, result: unknown, options: unknown) {
+      acknowledgments.push({ id, result, options });
+      if (!(options as any)?.suppressResponse) automaticReplies++;
+    },
+    close: () => { connected = false; },
+  }; } };
+  const runtime = { channel: { reply } } as unknown as PluginRuntime;
+  const prepared = await prepareOpenClawCallVoice(config(true), {}, runtime, {
+    voiceSdk: { ...sdk, createRealtimeVoiceBridgeSession(params: any) { bridgeArgs = params; return sdk.createRealtimeVoiceBridgeSession(params); },
+      resolveConfiguredRealtimeVoiceProvider: () => ({ provider, providerConfig: {}, capabilities: {
+        inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true,
+      } }) }, audioSdk,
+  });
+  const session = await prepared.open(callbacks, { senderId: "peer", signal: new AbortController().signal });
+  try {
+    assert.match(bridgeArgs.instructions, /acknowledge it once/);
+    assert.match(bridgeArgs.instructions, /stay quiet unless the caller asks for its status/);
+    const event = { callId: "lookup", name: "openclaw_agent_consult", args: { question: "Check a fact" } };
+    await bridgeArgs.onToolCall(event);
+    for (let i = 0; i < 100 && !dispatches.length; i++) await delay(5);
+    assert.equal(dispatches.length, 1);
+    assert.equal(acknowledgments.length, 1);
+    assert.equal(acknowledgments[0].result.status, "working");
+    assert.deepEqual(acknowledgments[0].options, { suppressResponse: true });
+    assert.equal(automaticReplies, 0); assert.equal(spoken.length, 0);
+    session.sendAudio(Buffer.alloc(960)); session.sendAudio(Buffer.alloc(960));
+    bridgeArgs.onTranscript("user", "Are you still checking?", true);
+    await bridgeArgs.onToolCall(event);
+    assert.equal(inputs, 2); assert.equal(dispatches.length, 1);
+    assert.equal(acknowledgments.length, 1); assert.equal(spoken.length, 0);
+    release();
+    for (let i = 0; i < 100 && !spoken.length; i++) await delay(5);
+    assert.equal(spoken.length, 1); assert.match(spoken[0], /Verified lookup result/);
+    assert.doesNotMatch(spoken[0], /synthetic tool progress/);
+    assert.equal(automaticReplies, 0);
+  } finally { release(); await session.close(); }
 });
 
 test("a continuous model streams without the consult tool and delegates through the agent's normal route", async () => {
@@ -102,7 +162,7 @@ test("a continuous model streams without the consult tool and delegates through 
   let request: any; let selection: any; let outputAudioMode = "continuous";
   const fake = { id: "openai", createBridge(params: any) { request = params; let connected = false; return {
     connect: async () => { connected = true; params.onReady(); }, isConnected: () => connected, outputAudioMode, pacesInputAudio: true,
-    sendAudio() {}, setMediaTimestamp() {}, close: () => { connected = false; },
+    sendUserMessage() {}, sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close: () => { connected = false; },
   }; } };
   const { dispatches, reply } = fakeReply(async ({ replyOptions }) => { replyOptions.onAgentRunStart(); return "Synthetic delegated result"; });
   const runtime = { channel: { reply }, agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
@@ -145,19 +205,18 @@ test("a continuous model streams without the consult tool and delegates through 
   await assert.rejects(prepared.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal }), /provider unavailable/);
 });
 
-test("opted-in default-agent voice profile uses only bounded identity and persona files", async t => {
+test("shared host voice profile supplies identity, user grounding and persona without agent instructions", async t => {
   const dir = await mkdtemp(join(tmpdir(), "wechat-call-voice-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const workspace = join(dir, "workspace");
   await mkdir(workspace);
   const identity = join(workspace, "IDENTITY.md");
-  const privateFile = join(dir, "unrelated.md");
   await Promise.all([
     writeFile(identity, "- Name: Synthetic Main Voice"),
     writeFile(join(workspace, "SOUL.md"), "Speak with quiet curiosity.\n" + "x".repeat(8000)),
-    writeFile(join(workspace, "USER.md"), "private-user-sentinel"),
+    writeFile(join(workspace, "USER.md"), "The configured user is Synthetic Owner. Address them as Synthetic Nick."),
     writeFile(join(workspace, "AGENTS.md"), "private-workspace-sentinel"),
-    writeFile(privateFile, "private-hardlink-sentinel"),
+    writeFile(join(workspace, "MEMORY.md"), "private-memory-sentinel"),
   ]);
   const voice = { enabled: true, agentId: "main", realtime: { provider: "openai" } };
   const base = resolveWeChatCallsConfig({ voice })!.voice!;
@@ -172,7 +231,7 @@ test("opted-in default-agent voice profile uses only bounded identity and person
     createRealtimeVoiceBridgeSession(args: any) {
       instructions = args.instructions;
       return { bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(),
-        sendAudio() {}, setMediaTimestamp() {}, close() {} };
+        sendUserMessage() {}, sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close() {} };
     },
     resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai", createBridge() {} }, providerConfig: {},
       capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true } }),
@@ -180,7 +239,7 @@ test("opted-in default-agent voice profile uses only bounded identity and person
     resolveRealtimeVoiceAgentConsultToolsAllow: () => [],
   };
   // Legacy main resolves the host default workspace without an agents.list entry.
-  const cfg = { agents: { defaults: { workspace } } };
+  const cfg = { plugins: { slots: { memory: "none" } }, agents: { defaults: { workspace } } };
   const prepare = (value: typeof base) => prepareOpenClawCallVoice(value, cfg, {} as PluginRuntime,
     { voiceSdk, audioSdk: { createStreamingPcmResampler() {} } });
   async function prompt(prepared: Awaited<ReturnType<typeof prepare>>) {
@@ -191,14 +250,15 @@ test("opted-in default-agent voice profile uses only bounded identity and person
   assert.doesNotMatch(await prompt(await prepare(base)), /Synthetic Main Voice|quiet curiosity/);
   const prepared = await prepare(optedIn);
   const profile = await prompt(prepared);
-  assert.match(profile, /IDENTITY\.md\):\n- Name: Synthetic Main Voice/);
-  assert.match(profile, /SOUL\.md\):\nSpeak with quiet curiosity/);
-  assert.match(profile, /\[truncated\]/);
-  assert.ok(profile.length < 7200);
-  assert.doesNotMatch(profile, /USER\.md|AGENTS\.md|private-/);
-  await unlink(identity);
-  await link(privateFile, identity);
-  assert.doesNotMatch(await prompt(prepared), /private-hardlink-sentinel|Synthetic Main Voice/);
+  assert.match(profile, /### IDENTITY\.md\n- Name: Synthetic Main Voice/);
+  assert.match(profile, /### SOUL\.md\nSpeak with quiet curiosity/);
+  assert.match(profile, /### USER\.md\nThe configured user is Synthetic Owner/);
+  assert.match(profile, /many sessions at once/);
+  assert.match(profile, /truncat/i);
+  assert.ok(profile.length < 8500);
+  assert.doesNotMatch(profile, /AGENTS\.md|MEMORY\.md|private-/);
+  await writeFile(join(workspace, "USER.md"), "Updated user grounding");
+  assert.match(await prompt(prepared), /Updated user grounding/);
 });
 
 test("missing SDK and incompatible provider capabilities fail before creating a bridge", async () => {
@@ -228,7 +288,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   const voiceContext = { senderId: "synthetic-peer", signal: new AbortController().signal, runInBackgroundContext };
   const sdk = { ...host,
     createRealtimeVoiceBridgeSession(args: any) { bridgeArgs = args; return {
-      bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(), sendAudio() {}, setMediaTimestamp() {},
+      bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(), sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {},
       close() { closed++; }, submitToolResult: (_id: string, value: unknown) => { results.push(value); },
       sendUserMessage(text: string) { spoken.push(text); },
     }; },
@@ -398,7 +458,7 @@ test("owner consultation is scoped to the connected WeChat peer and drops privil
   const sdk = { ...host,
     createRealtimeVoiceBridgeSession(args: any) { bridgeArgs = args; return {
       bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(),
-      sendAudio() {}, setMediaTimestamp() {}, close() {},
+      sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close() {},
       submitToolResult(_id: string, result: unknown) { results.push(result); },
       sendUserMessage(text: string) { spoken.push(text); },
     }; },
@@ -547,7 +607,7 @@ test("per-contact calls share one session per contact, seed it once, and summari
   let bridgeArgs: any; let spoken = 0;
   const sdk = { ...host,
     createRealtimeVoiceBridgeSession(args: any) { bridgeArgs = args; return {
-      bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(), sendAudio() {}, setMediaTimestamp() {},
+      bridge: { isConnected: () => true, outputAudioMode: "response" }, connect: async () => args.onReady(), sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {},
       close() {}, submitToolResult() {}, sendUserMessage() { spoken++; },
     }; },
     resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai", createBridge() {} }, providerConfig: {}, capabilities: { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true } }),

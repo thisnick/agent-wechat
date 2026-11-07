@@ -2,7 +2,8 @@
 //!
 //! Most server operations are **methods on [`NativeClient`]**, rather than free
 //! functions in this crate's Functions list. [`AccountState`] holds accepted
-//! credentials; it is secret, mutable state, not an API access token.
+//! credentials; transfer it once into [`NativeClient::from_account`]. Account
+//! operations then share that owner. It is secret data, not an API access token.
 //!
 //! | Task | Start here |
 //! | --- | --- |
@@ -21,11 +22,10 @@
 //! guarantee against duplicate sends.
 //!
 //! ```no_run
-//! use wechat_protocol::{wire, AccountState, NativeClient, TextSendResult};
+//! use wechat_protocol::{wire, NativeClient, TextSendOptions, TextSendResult};
 //!
-//! fn send_once(
+//! async fn send_once(
 //!     client: &NativeClient,
-//!     state: &mut AccountState,
 //!     recipient: &str,
 //!     text: &str,
 //!     task_id: &str,
@@ -33,7 +33,11 @@
 //! ) -> anyhow::Result<TextSendResult> {
 //!     let client_id = wire::client_message_id(task_id.as_bytes());
 //!     anyhow::ensure!(client_id != 0, "Choose another task ID");
-//!     client.send_text(state, recipient, text, created_at, client_id)
+//!     client.send_text(recipient, text, TextSendOptions {
+//!         created_at,
+//!         client_message_id: client_id,
+//!         source: None,
+//!     }).await
 //! }
 //! ```
 //!
@@ -50,7 +54,9 @@
 //!
 //! This library does not launch or load the official client. Peer responses pass
 //! pinned MMTLS signature and record authentication before business decode.
-//! Network methods block; async applications must use a blocking worker.
+//! Account-owned requests run blocking transport work on Tokio's blocking pool.
+//! Login bootstrap and remaining low-level operations
+//! are blocking and require a blocking worker in async applications.
 pub mod business;
 
 pub mod calls;

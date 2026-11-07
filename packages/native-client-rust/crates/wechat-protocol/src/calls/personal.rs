@@ -17,6 +17,7 @@ const MAX_MEMBERS: usize = 16;
 pub enum HostOperation {
     RingingAck,
     Invite,
+    ConferenceAddMembers,
     Cancel,
     LiveSync,
 }
@@ -26,6 +27,7 @@ impl HostOperation {
         match self {
             Self::RingingAck => 8069,
             Self::Invite => 10342,
+            Self::ConferenceAddMembers => 10857,
             Self::Cancel => 9332,
             Self::LiveSync => 9262,
         }
@@ -35,6 +37,7 @@ impl HostOperation {
         match self {
             Self::RingingAck => "/cgi-bin/micromsg-bin/voipilinkack",
             Self::Invite => "/cgi-bin/micromsg-bin/voipilinkinvite",
+            Self::ConferenceAddMembers => "/cgi-bin/micromsg-bin/voipilinkaddmember",
             Self::Cancel => "/cgi-bin/micromsg-bin/voipilinkcancel",
             Self::LiveSync => "/cgi-bin/micromsg-bin/voipilinklivesync",
         }
@@ -46,7 +49,7 @@ impl HostOperation {
 pub struct HostRequest {
     pub operation: HostOperation,
     pub sdk_task: u32,
-    body: Vec<u8>,
+    pub(super) body: Vec<u8>,
     pub longpoll_seconds: Option<u32>,
 }
 
@@ -88,6 +91,10 @@ impl VoiceInputs<'_> {
     }
 
     fn checked(&self) -> Result<(u32, Vec<u8>, Vec<u8>)> {
+        self.checked_context(b"voip-2p")
+    }
+
+    fn checked_context(&self, sub_app: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>)> {
         ensure!(
             self.network_type < 8 && self.nics.len() <= 8,
             "Unsupported voice input configuration"
@@ -103,7 +110,7 @@ impl VoiceInputs<'_> {
         );
         required_u64(&group, 2)?;
         ensure!(
-            required_bytes(&group, 3)? == b"voip-2p",
+            required_bytes(&group, 3)? == sub_app,
             "Unsupported call target kind"
         );
         text(required_bytes(&group, 4)?, 1024, false)?;
@@ -139,13 +146,38 @@ impl VoiceInputs<'_> {
 
     fn client_info(&self) -> Result<Vec<u8>> {
         let (version, owner_version, _) = self.checked()?;
+        self.encode_client_info(version, &owner_version)
+    }
+
+    pub(super) fn conference_client_info(&self, group_id: &str) -> Result<Vec<u8>> {
+        let (version, owner_version, owner_group) = self.checked_context(b"voip-mt")?;
+        let group = fields(self.group)?;
+        ensure!(
+            required_u32(&group, 5)? == 1
+                && required_bytes(&group, 4)?.is_empty()
+                && owner_group == group_id.as_bytes(),
+            "Conference creation context mismatch"
+        );
+        self.encode_client_info(version, &owner_version)
+    }
+
+    pub(super) fn validate_conference_context(&self) -> Result<()> {
+        self.checked_context(b"voip-mt")?;
+        ensure!(
+            required_u32(&fields(self.group)?, 5)? == 1,
+            "Unsupported conference mode"
+        );
+        Ok(())
+    }
+
+    fn encode_client_info(&self, version: u32, owner_version: &[u8]) -> Result<Vec<u8>> {
         let capabilities = message(&[
             p::bytes(1, self.engine_capability),
             p::bytes(2, self.channel_capability),
         ])?;
         let mut values = vec![
             p::uint(1, u64::from(version)),
-            p::bytes(2, &owner_version),
+            p::bytes(2, owner_version),
             p::uint(3, u64::from(self.network_type)),
             p::uint(4, 1),
             p::bytes(5, &capabilities),

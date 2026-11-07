@@ -17,6 +17,7 @@ const HEADER: usize = 19;
 const MAX_PACKET: usize = 1519;
 const MAX_CONF: usize = 1024;
 const WINDOW: u16 = 64;
+const MAX_NONCE_VARIANTS: usize = 8;
 // Leave 60,000 sequences for the current 20-minute limit at 50 audio packets/sec.
 const MAX_LEGACY_AUDIO_START: u16 = u16::MAX - 59_999;
 
@@ -45,9 +46,20 @@ pub struct MediaContext {
     pub connection_id: u16,
 }
 
+/// An untrusted routing hint for selecting a roster-bound receiver. The chosen
+/// receiver must still authenticate the packet and check its protected member.
+pub fn unverified_live96_member(packet: &[u8]) -> Result<u16> {
+    ensure!(
+        (38..=MAX_PACKET).contains(&packet.len()) && packet[..2] == [0x96, 19],
+        "Unsupported Live96 packet shape"
+    );
+    Ok(u16::from_le_bytes(packet[10..12].try_into()?))
+}
+
 /// The owner must establish a fresh media generation before authorizing sends.
 /// The legacy relay scope trades cross-direction audio nonce uniqueness for
-/// interoperability with peers that share media key material.
+/// interoperability with peers that share media key material. It also permits
+/// authenticated receive nonce reuse, with bounded ciphertext replay filtering.
 pub enum TransmitScope {
     VerifiedGeneration {
         key_generation: u64,
@@ -87,13 +99,16 @@ pub struct Live96 {
     context: MediaContext,
     epoch: MediaEpoch,
     tx_scope: Option<TransmitScope>,
+    receive_only: bool,
     first_tx_audio: u16,
     next_audio: u32,
     next_control: u32,
     clear_sequence: u32,
     rx_highest: BTreeMap<u8, u16>,
     rx_seen: BTreeMap<u8, Box<[u64; 1024]>>,
-    rx: BTreeMap<[u8; 8], [u8; 32]>,
+    rx: BTreeMap<[u8; 8], Vec<[u8; 32]>>,
+    legacy_receive_nonce_reuse: bool,
+    receive_nonce_reuses: BTreeMap<u8, u64>,
     audio_overlaps: u64,
     closed: bool,
 }
@@ -104,9 +119,48 @@ impl Live96 {
         context: MediaContext,
         epoch: MediaEpoch,
     ) -> Result<Self> {
+        Self::create(key, nonce_base, context, epoch, false)
+    }
+
+    /// Receive-only room inspection can include relayed self-member packets.
+    /// The caller still checks socket source and roster membership before any
+    /// audio delivery. This instance can never acquire transmit permission.
+    pub fn new_receive_only(
+        key: [u8; 32],
+        nonce_base: u64,
+        context: MediaContext,
+        epoch: MediaEpoch,
+    ) -> Result<Self> {
+        Self::create(key, nonce_base, context, epoch, true)
+    }
+
+    /// Legacy relay reception tolerates authenticated nonce reuse without
+    /// resetting counters or granting transmit permission. Exact ciphertext
+    /// replays are filtered within the receive window; excess variants for one
+    /// nonce are dropped rather than closing the receiver.
+    pub fn new_legacy_receive_only(
+        key: [u8; 32],
+        nonce_base: u64,
+        context: MediaContext,
+        epoch: MediaEpoch,
+    ) -> Result<Self> {
+        let mut channel = Self::create(key, nonce_base, context, epoch, true)?;
+        channel.legacy_receive_nonce_reuse = true;
+        Ok(channel)
+    }
+
+    fn create(
+        key: [u8; 32],
+        nonce_base: u64,
+        context: MediaContext,
+        epoch: MediaEpoch,
+        receive_only: bool,
+    ) -> Result<Self> {
         epoch.validate()?;
         ensure!(
-            context.room_id != 0 && nonce_base != 0 && context.own_member != context.peer_member,
+            context.room_id != 0
+                && nonce_base != 0
+                && (receive_only || context.own_member != context.peer_member),
             "Invalid media room/member context"
         );
         Ok(Self {
@@ -115,6 +169,7 @@ impl Live96 {
             context,
             epoch,
             tx_scope: None,
+            receive_only,
             first_tx_audio: 0,
             next_audio: 0,
             next_control: 0,
@@ -122,6 +177,8 @@ impl Live96 {
             rx_highest: BTreeMap::new(),
             rx_seen: BTreeMap::new(),
             rx: BTreeMap::new(),
+            legacy_receive_nonce_reuse: false,
+            receive_nonce_reuses: BTreeMap::new(),
             audio_overlaps: 0,
             closed: false,
         })
@@ -135,6 +192,7 @@ impl Live96 {
     }
     pub fn authorize_transmit(&mut self, current: MediaEpoch, scope: TransmitScope) -> Result<()> {
         self.check(current)?;
+        ensure!(!self.receive_only, "Receive-only media cannot transmit");
         ensure!(
             self.tx_scope.is_none(),
             "Media transmit scope already installed"
@@ -157,6 +215,7 @@ impl Live96 {
         if matches!(scope, TransmitScope::LegacyRelayAudio { .. }) {
             self.first_tx_audio = self.legacy_audio_start()?;
             self.next_audio = u32::from(self.first_tx_audio);
+            self.legacy_receive_nonce_reuse = true;
         }
         self.tx_scope = Some(scope);
         Ok(())
@@ -220,6 +279,9 @@ impl Live96 {
     pub fn known_audio_overlaps(&self) -> u64 {
         self.audio_overlaps
     }
+    pub fn received_nonce_reuses(&self) -> &BTreeMap<u8, u64> {
+        &self.receive_nonce_reuses
+    }
     pub fn seal_audio(
         &mut self,
         current: MediaEpoch,
@@ -278,13 +340,10 @@ impl Live96 {
     }
     pub fn open(&mut self, current: MediaEpoch, packet: &[u8]) -> Result<Option<OpenedPayload>> {
         self.check(current)?;
-        ensure!(
-            (38..=MAX_PACKET).contains(&packet.len()) && packet[..2] == [0x96, 19],
-            "Unsupported Live96 packet shape"
-        );
+        let member = unverified_live96_member(packet)?;
         ensure!(
             u64::from_le_bytes(packet[2..10].try_into()?) == self.context.room_id
-                && u16::from_le_bytes(packet[10..12].try_into()?) == self.context.peer_member,
+                && member == self.context.peer_member,
             "Media room/member mismatch"
         );
         let kind = packet[14];
@@ -295,13 +354,26 @@ impl Live96 {
         let sequence = u16::from_le_bytes(packet[15..17].try_into()?);
         let nonce = self.nonce(kind, sequence);
         let clear = open_original(&self.key, nonce, &packet[HEADER..])?;
+        ensure!(
+            clear.len() > 2
+                && clear.len() <= 1484
+                && u16::from_le_bytes(clear[..2].try_into()?) == self.context.peer_member,
+            "Protected media member mismatch or extent"
+        );
         let digest: [u8; 32] = openssl::sha::sha256(&packet[HEADER..]);
         if let Some(previous) = self.rx.get(&nonce) {
-            if *previous != digest {
+            if previous.contains(&digest) {
+                return Ok(None);
+            }
+            if !self.legacy_receive_nonce_reuse {
                 self.close();
                 bail!("Authenticated media nonce conflict");
             }
-            return Ok(None);
+            let count = self.receive_nonce_reuses.entry(kind).or_default();
+            *count = count.saturating_add(1);
+            if previous.len() >= MAX_NONCE_VARIANTS {
+                return Ok(None);
+            }
         }
         let own_next = if kind == 0x10 {
             self.next_audio
@@ -313,7 +385,7 @@ impl Live96 {
         if u32::from(sequence) < own_next && (kind != 0x10 || sequence >= self.first_tx_audio) {
             self.diagnostic_audio_overlap(kind)?;
         }
-        // Retire every authenticated nonce before payload/member classification.
+        // Retire every authenticated, sender-bound nonce before payload classification.
         // Fixed 65536-bit ledgers preserve known cross-direction overlap checks
         // after ciphertext digests leave the smaller reordering window.
         let seen = self
@@ -338,13 +410,7 @@ impl Live96 {
             let s = combined as u16;
             k != kind || s >= minimum
         });
-        self.rx.insert(nonce, digest);
-        ensure!(
-            clear.len() > 2
-                && clear.len() <= 1484
-                && u16::from_le_bytes(clear[..2].try_into()?) == self.context.peer_member,
-            "Protected media member mismatch or extent"
-        );
+        self.rx.entry(nonce).or_default().push(digest);
         // RX connection ID is not assumed equal to the local TX connection ID.
         Ok(Some(OpenedPayload {
             packed_kind: kind,
@@ -405,6 +471,43 @@ impl Live96 {
         self.rx_highest.clear();
         self.rx_seen.clear();
     }
+}
+
+/// Member metadata accompanying one nested audio payload. The member list does
+/// not establish independent PCM tracks or prove that every listed member spoke.
+pub struct AggregateAudio<'a> {
+    pub members: Vec<(u16, u8)>,
+    pub nested_kind: u8,
+    pub nested_payload: &'a [u8],
+}
+
+/// Header marker for classifying an ordinary audio variant. This does not
+/// validate its codec body or grant decoder admission.
+pub fn ordinary_audio_marker(payload: &[u8]) -> Option<[u8; 2]> {
+    (payload.len() >= 6 && payload[0] == 1).then(|| [payload[4], payload[5]])
+}
+
+pub fn parse_aggregate_audio(payload: &[u8]) -> Result<AggregateAudio<'_>> {
+    ensure!(
+        payload.len() >= 3 && payload.len() <= 1482 && payload[0] == 0x65,
+        "Invalid aggregate audio extent"
+    );
+    let count = usize::from(payload[1]);
+    ensure!(count <= 128, "Too many aggregate audio members");
+    let end = 2 + 3 * count;
+    ensure!(
+        end + 1 < payload.len() && matches!(payload[end], 1 | 19),
+        "Truncated or unsupported aggregate audio"
+    );
+    let members = payload[2..end]
+        .chunks_exact(3)
+        .map(|entry| (u16::from_le_bytes([entry[0], entry[1]]), entry[2]))
+        .collect();
+    Ok(AggregateAudio {
+        members,
+        nested_kind: payload[end],
+        nested_payload: &payload[end + 1..],
+    })
 }
 
 /// Configured ordinary95/74 N1 sender for format106.
@@ -552,6 +655,44 @@ fn open_original(key: &[u8; 32], nonce: [u8; 8], sealed: &[u8]) -> Result<Zeroiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn aggregate_keeps_member_metadata_separate_from_single_nested_payload() {
+        let bytes = [0x65, 2, 0x34, 0x12, 7, 0x78, 0x56, 9, 1, 0xaa];
+        let aggregate = parse_aggregate_audio(&bytes).unwrap();
+        assert_eq!(aggregate.members, [(0x1234, 7), (0x5678, 9)]);
+        assert_eq!(aggregate.nested_kind, 1);
+        assert_eq!(aggregate.nested_payload, [0xaa]);
+        for length in 0..bytes.len() {
+            assert!(parse_aggregate_audio(&bytes[..length]).is_err());
+        }
+        assert!(parse_aggregate_audio(&[0x65, 0, 2, 1]).is_err());
+    }
+
+    #[test]
+    fn receive_only_context_observes_protected_self_member_without_transmit_permission() {
+        let mut receive = Live96::new_receive_only(
+            [7; 32],
+            11,
+            MediaContext {
+                own_member: 1,
+                peer_member: 1,
+                ..context()
+            },
+            epoch(),
+        )
+        .unwrap();
+        let raw = ordinary95_single(0, 0, 0, &[1]).unwrap();
+        let mut sending = peer();
+        let packet = sending.seal_audio(epoch(), 1, &raw).unwrap();
+        assert!(receive.open(epoch(), &packet).unwrap().is_some());
+        assert!(receive
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 }
+            )
+            .is_err());
+        assert!(receive.seal_audio(epoch(), 1, &raw).is_err());
+    }
     fn epoch() -> MediaEpoch {
         MediaEpoch {
             account_generation: 1,
@@ -635,9 +776,92 @@ mod tests {
             conflicting_peer.next_audio = u32::from(local.first_tx_audio);
             let different = ordinary95_pair(0, 1, 320, &[3], &[4]).unwrap();
             let conflict = conflicting_peer.seal_audio(epoch(), 0, &different).unwrap();
-            assert!(local.open(epoch(), &conflict).is_err());
-            assert!(local.seal_audio(epoch(), 0, &raw).is_err());
+            assert_eq!(
+                local.open(epoch(), &conflict).unwrap().unwrap().payload(),
+                different
+            );
+            assert!(local.open(epoch(), &conflict).unwrap().is_none());
+            assert!(local.open(epoch(), &inbound).unwrap().is_none());
+            assert_eq!(local.received_nonce_reuses().get(&0x10), Some(&1));
+            assert!(local.seal_audio(epoch(), 0, &raw).is_ok());
         }
+    }
+
+    #[test]
+    fn legacy_receive_reuse_filters_all_retained_variants_without_closing() {
+        for kind in [0x10, 0x70] {
+            let mut receive =
+                Live96::new_legacy_receive_only([7; 32], 11, context(), epoch()).unwrap();
+            let mut packets = Vec::new();
+            for variant in 0..=MAX_NONCE_VARIANTS {
+                let packet = peer().seal(epoch(), 0, kind, &[8, variant as u8]).unwrap();
+                let opened = receive.open(epoch(), &packet).unwrap();
+                assert_eq!(opened.is_some(), variant < MAX_NONCE_VARIANTS);
+                packets.push(packet);
+            }
+            for packet in &packets {
+                assert!(receive.open(epoch(), packet).unwrap().is_none());
+            }
+            assert_eq!(receive.rx.len(), 1);
+            assert_eq!(
+                receive.rx.values().next().unwrap().len(),
+                MAX_NONCE_VARIANTS
+            );
+            let mut sending = peer();
+            sending.seal(epoch(), 0, kind, &[8, 0]).unwrap();
+            let next = sending.seal(epoch(), 0, kind, &[8, 1]).unwrap();
+            assert!(receive.open(epoch(), &next).unwrap().is_some());
+            assert!(receive
+                .authorize_transmit(
+                    epoch(),
+                    TransmitScope::LegacyRelayAudio { key_generation: 1 }
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn strict_receive_conflicting_ciphertext_still_closes() {
+        let first = peer().seal(epoch(), 0, 0x70, &[8, 1]).unwrap();
+        let different = peer().seal(epoch(), 0, 0x70, &[8, 2]).unwrap();
+        let mut receive = receiver();
+        receive.open(epoch(), &first).unwrap();
+        assert!(receive.open(epoch(), &different).is_err());
+        assert!(receive.open(epoch(), &first).is_err());
+    }
+
+    #[test]
+    fn forged_clear_sender_cannot_poison_a_legacy_receivers_nonce_ledger() {
+        let mut receive = Live96::new_legacy_receive_only([7; 32], 11, context(), epoch()).unwrap();
+        let mut sending = peer();
+        let first = sending.seal(epoch(), 0, 0x70, &[8, 1]).unwrap();
+        receive.open(epoch(), &first).unwrap();
+        let mut wrong = Live96::new(
+            [7; 32],
+            11,
+            MediaContext {
+                own_member: 2,
+                ..context()
+            },
+            epoch(),
+        )
+        .unwrap();
+        wrong
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::VerifiedGeneration { key_generation: 1 },
+            )
+            .unwrap();
+        let mut forged = wrong.seal(epoch(), 0, 0x70, &[8, 2]).unwrap();
+        forged[10..12].copy_from_slice(&context().peer_member.to_le_bytes());
+        assert_eq!(
+            receive.open(epoch(), &forged).err().unwrap().to_string(),
+            "Protected media member mismatch or extent"
+        );
+        assert!(receive.received_nonce_reuses().is_empty());
+        assert!(receive.open(epoch(), &first).unwrap().is_none());
+        let next = sending.seal(epoch(), 0, 0x70, &[8, 3]).unwrap();
+        assert!(receive.open(epoch(), &next).unwrap().is_some());
     }
 
     #[test]

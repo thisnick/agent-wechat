@@ -14,6 +14,7 @@ import { registerNativeGroupTools } from "./src/native-group-tool.js";
 import { registerNativeLoginTool } from "./src/native-login.js";
 import { NativeCallService } from "./src/calls-service.js";
 import { registerNativeCallTool } from "./src/calls-tool.js";
+import { installCallConsultAuthority } from "./src/calls-consult-authority.js";
 
 const plugin: {
   id: string;
@@ -37,6 +38,7 @@ const plugin: {
     registerNativeLoginTool(api);
     let calls: NativeCallService | undefined;
     registerNativeCallTool(api, () => calls);
+    installCallConsultAuthority(api);
     const stopFacade = selected?.native ? registerNativeFacade(api, selected.native) : () => {};
     const stopPreparedBoundary = selected?.native?.readPolicy && selected.native.readPolicy !== "on_inbound"
       ? registerNativePreparedBoundary(api) : () => {};

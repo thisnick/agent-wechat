@@ -11,6 +11,6 @@ maintained codec dependencies; no library from the official client is loaded.
   Douman copyright notice.
 
 Distributions containing the optional native codec must reproduce these notices
-with the applicable binary artifacts. Distributions of the default portable
-crate do not include the native codec. The repository's MIT license applies to
-our media interfaces and adapters.
+with the applicable binary artifacts. Builds with no default features
+do not include the native codec. Default builds enable the native codec.
+The repository's MIT license applies to our media interfaces and adapters.

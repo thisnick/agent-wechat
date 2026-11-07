@@ -6,7 +6,7 @@
 //! the payload and allocates nothing. Authentication and socket ownership remain
 //! the daemon's responsibility before constructing a media message.
 
-use crate::audio::{AudioFormat, MediaError};
+use wechat_calls::audio::{AudioFormat, MediaError};
 
 pub const HEADER_BYTES: usize = 36;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;

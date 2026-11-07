@@ -175,7 +175,7 @@ impl Core {
                     job.contact_revision = self.group_revision(account, &job.group)?;
                     job.contact_raw =
                         Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.upstream
+                            self.account_upstream(account)?
                                 .lookup_contacts_raw(state, std::slice::from_ref(&job.group))
                         })?);
                     self.save_incoming_group(account, &key, &job)?;
@@ -186,7 +186,8 @@ impl Core {
                     }
                     job.roster_raw =
                         Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.upstream.lookup_room_raw(state, &job.group, 0)
+                            self.account_upstream(account)?
+                                .lookup_room_raw(state, &job.group, 0)
                         })?);
                     self.save_incoming_group(account, &key, &job)?;
                 }
@@ -196,7 +197,8 @@ impl Core {
                     }
                     job.detail_raw =
                         Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.upstream.group_detail_raw(state, &job.group)
+                            self.account_upstream(account)?
+                                .group_detail_raw(state, &job.group)
                         })?);
                     self.save_incoming_group(account, &key, &job)?;
                 }

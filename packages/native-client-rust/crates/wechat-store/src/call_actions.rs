@@ -72,7 +72,10 @@ impl Store {
             || encrypted_request[0] != 1
             || request_digest.len() != 64
             || !request_digest.bytes().all(|b| b.is_ascii_hexdigit())
-            || !matches!(route, 7994 | 8069 | 11421 | 10342 | 9332 | 9262)
+            || !matches!(
+                route,
+                7994 | 8069 | 11421 | 10342 | 9332 | 9262 | 14754 | 10857
+            )
         {
             bail!("invalid_call_action");
         }
@@ -136,8 +139,9 @@ impl Store {
             Ok(())
         })
     }
-    /// Preserve a superseded read-only LiveSync outcome without marking the
-    /// session uncertain. This does not acknowledge receipt or allow replay.
+    /// Preserve an interrupted or failed read-only LiveSync without marking the
+    /// whole session uncertain. Its action stays unconfirmed; this neither
+    /// acknowledges receipt nor permits replay or bypasses cleanup admission.
     pub fn finish_interrupted_live_sync(
         &self,
         account: &str,
@@ -250,6 +254,35 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uncertain_additional_invitation_preserves_its_exact_intent_without_reclaiming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("data")).unwrap();
+        store.create_account("a").unwrap();
+        let vault = crate::vault::Vault::open(&tmp.path().join("secrets/key"), true).unwrap();
+        let original = vault
+            .seal("a", "call-request:c:add", b"synthetic addition")
+            .unwrap();
+        store.begin_call("a", "c", "generation").unwrap();
+        assert!(store
+            .begin_call_action("a", "c", "add", 10857, &"a".repeat(64), &original)
+            .unwrap());
+        store
+            .finish_call_action("a", "c", "add", "needs_review", None)
+            .unwrap();
+        let replacement = vault
+            .seal("a", "call-request:c:add", b"different addition")
+            .unwrap();
+        let blocked = store
+            .begin_call_action("a", "c", "add", 10857, &"a".repeat(64), &replacement)
+            .unwrap_err();
+        assert_eq!(blocked.to_string(), "call_needs_review");
+        assert!(!store.begin_call("a", "another", "generation").unwrap());
+        let records = store.call_action_records("a", "c").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, "needs_review");
+        assert_eq!(records[0].encrypted_request, Some(original));
+    }
     #[test]
     fn exact_request_is_sealed_before_claim_and_preserved_on_duplicate() {
         let tmp = tempfile::tempdir().unwrap();

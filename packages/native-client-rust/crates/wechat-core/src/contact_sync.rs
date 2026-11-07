@@ -80,7 +80,7 @@ impl Core {
                 let expected = core.store.runtime(&owned, "account-state")?.context("auth_required")?;
                 let cursor = core.contact_cursor(&owned)?;
                 let sync_cursor = core.cursor(&owned)?;
-                let batch = permit.transfer(&core, &owned, || core.upstream.contact_sync(&mut state, &cursor, &sync_cursor, page != 0))?;
+                let batch = permit.transfer(&core, &owned, || core.account_upstream(&owned)?.contact_sync(&mut state, &cursor, &sync_cursor, page != 0))?;
                 core.save_push_state(&owned, &state, &expected, &active)?;
                 let more = batch.continuation.iter().any(|value| *value != 0);
                 let stalled = more && batch.cursor == cursor;

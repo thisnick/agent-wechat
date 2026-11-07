@@ -10,8 +10,10 @@ fn result(remote: &str, reason: &str, retained: bool, code: Option<i32>) -> Valu
 impl Core {
     pub async fn logout(self: &Arc<Self>, account: &str, key: &str) -> Result<Operation> {
         let upstream = self.upstream.clone();
-        self.begin_logout_operation(account, key, false, move |state| upstream.logout(state))
-            .await
+        self.begin_logout_operation_mode(account, key, false, true, move |state| {
+            upstream.logout(state)
+        })
+        .await
     }
     /// Explicit local forgetting does not submit a remote logout or delete history.
     pub async fn forget_credentials(
@@ -29,6 +31,20 @@ impl Core {
         account: &str,
         key: &str,
         forget: bool,
+        remote: F,
+    ) -> Result<Operation>
+    where
+        F: FnOnce(&mut AccountState) -> Result<(bool, i32)> + Send + 'static,
+    {
+        self.begin_logout_operation_mode(account, key, forget, false, remote)
+            .await
+    }
+    async fn begin_logout_operation_mode<F>(
+        self: &Arc<Self>,
+        account: &str,
+        key: &str,
+        forget: bool,
+        native: bool,
         remote: F,
     ) -> Result<Operation>
     where
@@ -56,7 +72,7 @@ impl Core {
         };
         let active_key = format!("logout-active:{account}");
         let cancel = Arc::new(AtomicBool::new(false));
-        let operation = {
+        let (operation, terminal) = {
             let mut cancels = self
                 .cancels
                 .lock()
@@ -69,6 +85,17 @@ impl Core {
                 return Ok(prior);
             }
 
+            // Reservation occurs after completed-idempotency replay, but before
+            // the local fence. Submission happens only after its SQL commit.
+            let terminal =
+                if native && self.upstream.uses_account_owner() && was_authenticated && !forget {
+                    Some(
+                        self.native_account(account, NativeOptions::default())?
+                            .prepare_logout()?,
+                    )
+                } else {
+                    None
+                };
             self.fence_call_authority(account);
             let (op, created) = self
                 .store
@@ -81,14 +108,21 @@ impl Core {
             }
             cancels.insert(active_key.clone(), cancel.clone());
             cancels.insert(op.id.clone(), cancel.clone());
-            op
+            (op, terminal)
         };
         let core = self.clone();
         let worker = operation.clone();
         tokio::spawn(async move {
             let _guard = gate.lock().await;
             let outcome = core
-                .run_logout(worker.clone(), forget, was_authenticated, cancel, remote)
+                .run_logout(
+                    worker.clone(),
+                    forget,
+                    was_authenticated,
+                    cancel,
+                    terminal,
+                    remote,
+                )
                 .await;
             if outcome.is_err() {
                 let mut failed = worker.clone();
@@ -110,6 +144,7 @@ impl Core {
         forget: bool,
         authenticated: bool,
         cancel: Arc<AtomicBool>,
+        terminal: Option<wechat_protocol::PendingLogout>,
         remote: F,
     ) -> Result<()>
     where
@@ -129,14 +164,39 @@ impl Core {
             self.store.advance_logout(&op)?;
             let core = self.clone();
             let account = op.account_id.clone();
-            match blocking(move || {
-                let mut state = core.state_unfenced(&account)?;
-                remote(&mut state)
-            })
-            .await
-            {
+            let outcome = if let Some(terminal) = terminal {
+                let epoch = core.store.runtime(&account, "logout-epoch")?;
+                let id = op.id.clone();
+                terminal
+                    .submit_guarded(move || {
+                        anyhow::ensure!(
+                            !cancel.load(Ordering::Acquire),
+                            "logout cancelled before submission"
+                        );
+                        anyhow::ensure!(
+                            core.store.runtime(&account, "logout-epoch")? == epoch
+                                && core.store.runtime(&account, "logout-pending")?.as_deref()
+                                    == Some(id.as_bytes())
+                                && core.store.runtime(&account, "logged-out")?.is_some(),
+                            "logout superseded before submission"
+                        );
+                        Ok(())
+                    })
+                    .await
+                    .map(|reply| (reply.accepted, reply.service_code))
+            } else {
+                blocking(move || {
+                    let mut state = core.state_unfenced(&account)?;
+                    remote(&mut state)
+                })
+                .await
+            };
+            match outcome {
                 Ok((true, code)) => ("confirmed", "server_accepted", true, Some(code)),
                 Ok((false, code)) => ("failed", "server_rejected", true, Some(code)),
+                Err(error) if error.is::<wechat_protocol::NativeRequestNotSubmitted>() => {
+                    ("not_attempted", "stopped_before_submission", true, None)
+                }
                 Err(_) => ("unknown", "response_not_verified", true, None),
             }
         };

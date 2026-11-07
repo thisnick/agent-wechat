@@ -283,3 +283,187 @@ mod tests {
         ));
     }
 }
+
+/// Room-entry context carried by a group invitation. It is pending call data,
+/// not a joined roster or account authority. The embedding actor binds it to
+/// the authenticated message envelope and a current account generation.
+#[derive(Clone)]
+pub struct ConferenceJoinContext {
+    pub group_id: String,
+    pub context_id: String,
+    pub room_id: u64,
+    pub room_key: u64,
+    pub own_member: u16,
+    pub caller_username: String,
+    pub callee_username: String,
+}
+
+impl NotificationCarrier {
+    pub fn conference_join_context(&self) -> Result<ConferenceJoinContext> {
+        ensure!(
+            self.kind == CarrierKind::Invite,
+            "Conference entry needs an invitation"
+        );
+        ensure!(
+            self.fields
+                .iter()
+                .all(|field| (1..=10).contains(&field.number)),
+            "Unsupported conference carrier fields"
+        );
+        let conference = self.conference_notification()?;
+        ensure!(
+            conference.unknown_fields.is_empty(),
+            "Unsupported conference envelope fields"
+        );
+        let NotificationPayload::Invite(invite) = conference.payload()? else {
+            bail!("Conference invitation missing");
+        };
+        ensure!(
+            invite.unknown_fields.is_empty()
+                && invite.room_type == Some(1)
+                && invite.app_id.as_deref() == Some("wechat")
+                && invite.sub_app_id.as_deref() == Some("voip-mt"),
+            "Unsupported conference invitation"
+        );
+        let group_id =
+            optional_string(&self.fields, 1)?.context("Conference chat identity missing")?;
+        let context_id =
+            optional_string(&self.fields, 3)?.context("Conference entry context missing")?;
+        ensure!(
+            group_id.ends_with("@chatroom")
+                && group_id.len() <= 128
+                && !group_id.chars().any(char::is_control)
+                && invite.wechat_group_id.as_deref() == Some(group_id.as_str()),
+            "Conference chat identities disagree"
+        );
+        ensure!(
+            !context_id.is_empty()
+                && context_id.len() <= 1024
+                && !context_id.chars().any(char::is_control),
+            "Invalid conference entry context"
+        );
+        let room_id = invite
+            .room_id
+            .filter(|id| *id != 0)
+            .context("Conference room missing")?;
+        let room_key = invite
+            .room_key
+            .filter(|key| *key != 0)
+            .context("Conference room key missing")?;
+        ensure!(
+            optional_u64(&self.fields, 2)? == Some(room_id),
+            "Conference room identities disagree"
+        );
+        for identity in [&invite.caller_openid, &invite.callee_openid] {
+            ensure!(
+                identity.as_deref().is_some_and(|value| !value.is_empty()
+                    && value.len() <= 128
+                    && !value.chars().any(char::is_control)),
+                "Conference invitation participant binding missing"
+            );
+        }
+        ensure!(
+            optional_string(&self.fields, 4)? == invite.caller_openid
+                && optional_string(&self.fields, 5)? == invite.callee_openid,
+            "Conference invitation bindings disagree"
+        );
+        let caller_username = invite
+            .caller_username
+            .context("Conference caller missing")?;
+        let callee_username = invite
+            .callee_username
+            .context("Conference recipient missing")?;
+        ensure!(
+            optional_string(&self.fields, 8)?.as_deref() == Some(caller_username.as_str()),
+            "Conference caller identities disagree"
+        );
+        for identity in [&caller_username, &callee_username] {
+            ensure!(
+                !identity.is_empty()
+                    && identity.len() <= 128
+                    && !identity.ends_with("@chatroom")
+                    && !identity.chars().any(char::is_control),
+                "Invalid conference participant"
+            );
+        }
+        optional_u64(&self.fields, 9)?;
+        optional_u32(&self.fields, 10)?;
+        Ok(ConferenceJoinContext {
+            group_id,
+            context_id,
+            room_id,
+            room_key,
+            own_member: u16::try_from(invite.member_id.context("Conference member missing")?)?,
+            caller_username,
+            callee_username,
+        })
+    }
+}
+
+#[cfg(test)]
+mod conference_context_tests {
+    use super::*;
+
+    fn carrier(chat: &str, room: u64, context: &str, caller: &str) -> NotificationCarrier {
+        let inner = p::message(&[
+            p::uint(1, 42),
+            p::uint(2, 43),
+            p::uint(3, 2),
+            p::uint(4, 1),
+            p::bytes(5, b"caller-open"),
+            p::bytes(6, b"callee-open"),
+            p::bytes(7, b"caller"),
+            p::bytes(8, b"callee"),
+            p::bytes(10, b"wechat"),
+            p::bytes(11, b"voip-mt"),
+            p::bytes(13, b"test@chatroom"),
+        ])
+        .unwrap();
+        let envelope = p::message(&[p::uint(1, 2), p::bytes(2, &inner)]).unwrap();
+        NotificationCarrier::decode(
+            CarrierKind::Invite,
+            &p::message(&[
+                p::bytes(1, chat.as_bytes()),
+                p::uint(2, room),
+                p::bytes(3, context.as_bytes()),
+                p::bytes(4, b"caller-open"),
+                p::bytes(5, b"callee-open"),
+                p::bytes(6, &envelope),
+                p::bytes(8, caller.as_bytes()),
+                p::uint(9, 123),
+                p::uint(10, 0),
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn group_context_binds_each_distinct_invitation_identity() {
+        let source = carrier("test@chatroom", 42, "opaque-test-context", "caller");
+        let context = source.conference_join_context().unwrap();
+        assert_eq!(context.group_id, "test@chatroom");
+        assert_eq!(context.context_id, "opaque-test-context");
+        assert_eq!(
+            (context.room_id, context.room_key, context.own_member),
+            (42, 43, 2)
+        );
+        assert_eq!(
+            (
+                context.caller_username.as_str(),
+                context.callee_username.as_str()
+            ),
+            ("caller", "callee")
+        );
+    }
+    #[test]
+    fn mixed_or_missing_group_context_never_admits_entry() {
+        for source in [
+            carrier("different@chatroom", 42, "opaque-test-context", "caller"),
+            carrier("test@chatroom", 44, "opaque-test-context", "caller"),
+            carrier("test@chatroom", 42, "", "caller"),
+            carrier("test@chatroom", 42, "opaque-test-context", "other-caller"),
+        ] {
+            assert!(source.conference_join_context().is_err());
+        }
+    }
+}
