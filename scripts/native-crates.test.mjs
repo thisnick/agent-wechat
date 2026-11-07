@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { crateNames, isReleaseContext, publicationPlan, releaseVersionInput, syncCrateVersions, validateCrates, verifyReleaseSource } from './native-crates.mjs';
+import { crateNames, isReleaseContext, publicationBatches, publicationPlan, publishPending, releaseVersionInput, syncCrateVersions, validateCrates, verifyReleaseSource } from './native-crates.mjs';
 import { readReleasePolicy, readReleaseVersion } from './native-release-policy.mjs';
 
 const version = '1.4.0-beta.2';
@@ -75,7 +75,7 @@ test('only selected libraries publish, with aligned versions and registry depend
   const badVersion = metadata(); badVersion.packages[0].version = '1.2.0';
   assert.throws(() => validateCrates(badVersion, version), /version or registry/);
   const leaked = metadata(); leaked.packages.at(-1).publish = null;
-  assert.throws(() => validateCrates(leaked, version), /Only the four/);
+  assert.throws(() => validateCrates(leaked, version), /Only the five/);
   const leakedDependency = metadata(); leakedDependency.packages[1].dependencies[0].name = 'wechat-core';
   assert.throws(() => validateCrates(leakedDependency, version), /dependency must be published/);
   const looseDependency = metadata(); looseDependency.packages[1].dependencies[0].req = version;
@@ -88,13 +88,16 @@ test('version cutting updates internal public dependencies for beta and stable r
   for (const name of crateNames) {
     const directory = join(root, 'packages/native-client-rust/crates', name);
     await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, 'Cargo.toml'), '[dependencies]\nwechat-platform = { path = "../wechat-platform", version = "=1.0.0" }\nopenssl = "0.10"\n');
+    await writeFile(join(directory, 'Cargo.toml'), '[dependencies]\nwechat-platform = { path = "../wechat-platform", version = "=1.0.0" }\nopenssl = "0.10"\n[target.\'cfg(not(target_arch = "wasm32"))\'.dependencies]\nwechat-protocol = { path = "../wechat-protocol", version = "=1.0.0", optional = true, features = ["experimental-calls"] }\n');
   }
   for (const next of [version, '2.0.0']) {
     await syncCrateVersions(root, next);
-    const text = await readFile(join(root, 'packages/native-client-rust/crates/wechat-profile/Cargo.toml'), 'utf8');
-    assert.ok(text.includes(`version = "=${next}"`));
-    assert.ok(text.includes('openssl = "0.10"'));
+    for (const name of crateNames) {
+      const text = await readFile(join(root, 'packages/native-client-rust/crates', name, 'Cargo.toml'), 'utf8');
+      assert.ok(text.includes(`wechat-platform = { path = "../wechat-platform", version = "=${next}" }`));
+      assert.ok(text.includes(`wechat-protocol = { path = "../wechat-protocol", version = "=${next}", optional = true, features = ["experimental-calls"] }`));
+      assert.ok(text.includes('openssl = "0.10"'));
+    }
   }
 });
 
@@ -119,6 +122,39 @@ test('a partial publication resumes only missing versions and does not require b
   } });
   assert.deepEqual(plan.pending, ['wechat-profile']);
   assert.equal(plan.bootstrap, false);
+});
+
+test('the fifth crate uses bootstrap after the existing dependencies use OIDC', async () => {
+  const plan = await publicationPlan({ version, sourceCommit, checksums, fetchImpl: async url => {
+    if (url.includes('wechat-calls')) return missing();
+    return url.endsWith(version) ? missing()
+      : Response.json({ crate: { repository: 'https://github.com/thisnick/agent-wechat' } });
+  } });
+  assert.deepEqual(plan.newCrates, ['wechat-calls']);
+  assert.deepEqual(publicationBatches(plan), [
+    { credential: 'CARGO_REGISTRY_TOKEN', names: crateNames.slice(0, -1) },
+    { credential: 'CRATES_IO_BOOTSTRAP_TOKEN', names: ['wechat-calls'] },
+  ]);
+  const writes = [];
+  const env = { CARGO_REGISTRY_TOKEN: 'synthetic-oidc', CRATES_IO_BOOTSTRAP_TOKEN: 'synthetic-bootstrap' };
+  publishPending(plan, { env, runCargo: (args, credentials) => writes.push({ args, credentials }) });
+  assert.deepEqual(writes.map(write => write.args.filter((_, i, args) => args[i - 1] === '-p')), [crateNames.slice(0, -1), ['wechat-calls']]);
+  assert.deepEqual(writes.map(write => write.credentials.CARGO_REGISTRY_TOKEN), ['synthetic-oidc', 'synthetic-bootstrap']);
+  for (const credential of Object.keys(env)) {
+    assert.throws(() => publishPending(plan, { env: { ...env, [credential]: '' }, runCargo: () => assert.fail('must not publish before all credentials exist') }), /Missing publishing credential/);
+  }
+  let submissions = 0;
+  assert.throws(() => publishPending(plan, { env, runCargo: () => { submissions++; throw new Error('uncertain upload'); } }), /uncertain upload/);
+  assert.equal(submissions, 1);
+  // A rerun verifies the four existing versions, then resumes only the still-new name.
+  const retry = await publicationPlan({ version, sourceCommit, checksums, readSource, fetchImpl: async url => url.includes('wechat-calls') ? missing() : registry(url) });
+  assert.deepEqual(publicationBatches(retry), [{ credential: 'CRATES_IO_BOOTSTRAP_TOKEN', names: ['wechat-calls'] }]);
+  assert.deepEqual(publicationBatches({ pending: [], newCrates: [] }), []);
+});
+
+test('credential batches retain dependency order even across alternating new names', () => {
+  const plan = { pending: crateNames, newCrates: ['wechat-platform', 'wechat-calls'] };
+  assert.deepEqual(publicationBatches(plan).flatMap(batch => batch.names), crateNames);
 });
 
 test('reruns verify checksum, exact packaged bytes and source before skipping published versions', async () => {

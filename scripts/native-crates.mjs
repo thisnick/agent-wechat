@@ -8,7 +8,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readReleasePolicy, readReleaseVersion } from './native-release-policy.mjs';
 
-export const crateNames = ['wechat-platform', 'wechat-media', 'wechat-protocol', 'wechat-profile'];
+// Dependency order also applies when an existing crate and a new name use different credentials.
+export const crateNames = ['wechat-platform', 'wechat-media', 'wechat-protocol', 'wechat-profile', 'wechat-calls'];
 export const repository = 'thisnick/agent-wechat';
 const workspace = 'packages/native-client-rust/Cargo.toml';
 const selections = names => names.flatMap(name => ['-p', name]);
@@ -30,10 +31,12 @@ export async function syncCrateVersions(root, version) {
   for (const name of crateNames) {
     const path = join(root, 'packages/native-client-rust/crates', name, 'Cargo.toml');
     const old = await readFile(path, 'utf8');
-    const updated = old.replace(/^(wechat-[\w-]+) = \{ path = "\.\.\/[^"\n]+", version = "[^"]+" \}$/gm,
+    const updated = old.replace(/^(wechat-[\w-]+)\s*=\s*\{[^\n]*\}/gm,
       (line, dependency) => {
+        if (!/\bpath\s*=/.test(line)) return line;
         if (!crateNames.includes(dependency)) throw new Error(`Unpublished library dependency: ${dependency}`);
-        return line.replace(/version = "[^"]+"/, `version = "=${version}"`);
+        if (!/\bversion\s*=\s*"[^"]+"/.test(line)) throw new Error(`Missing registry version: ${dependency}`);
+        return line.replace(/\bversion\s*=\s*"[^"]+"/, `version = "=${version}"`);
       });
     if (old !== updated) await writeFile(path, updated);
   }
@@ -43,7 +46,7 @@ export function validateCrates(metadata, version) {
   const members = metadata.packages.filter(pkg => metadata.workspace_members.includes(pkg.id));
   const published = members.filter(pkg => pkg.publish === null || pkg.publish.length > 0);
   if (published.length !== crateNames.length || published.some(pkg => !crateNames.includes(pkg.name))) {
-    throw new Error('Only the four selected native libraries may be published');
+    throw new Error('Only the five selected native libraries may be published');
   }
   for (const name of crateNames) {
     const pkg = members.find(pkg => pkg.name === name);
@@ -136,14 +139,37 @@ export async function publicationPlan({ version, sourceCommit, checksums, fetchI
   return { version, sourceCommit, pending, newCrates, bootstrap: newCrates.length > 0 };
 }
 
+export function publicationBatches(plan) {
+  // Keep Cargo's dependency order and never use the bootstrap token for an existing name.
+  const batches = [];
+  for (const name of plan.pending) {
+    const credential = plan.newCrates.includes(name) ? 'CRATES_IO_BOOTSTRAP_TOKEN' : 'CARGO_REGISTRY_TOKEN';
+    if (batches.at(-1)?.credential === credential) batches.at(-1).names.push(name);
+    else batches.push({ credential, names: [name] });
+  }
+  return batches;
+}
+
+export function publishPending(plan, { env, runCargo }) {
+  const batches = publicationBatches(plan);
+  // Validate every credential before the first possible registry write.
+  for (const { credential } of batches) {
+    if (!env[credential]) throw new Error(`Missing publishing credential: ${credential}`);
+  }
+  for (const { credential, names } of batches) {
+    runCargo(['publish', '--registry', 'crates-io', '--locked', ...selections(names)],
+      { CARGO_REGISTRY_TOKEN: env[credential] });
+  }
+}
+
 export async function main(command, { root = process.cwd(), allowDirty = false } = {}) {
   const options = { root, version: releaseVersionInput(command, process.env.RELEASE_VERSION) };
   // A PR may stage entry/exit from beta before Changesets cuts the next version.
   // Only actual publication requires a completed channel transition.
   const policy = ['plan', 'publish'].includes(command)
     ? await readReleasePolicy(options) : { version: await readReleaseVersion(options) };
-  const cargo = args => execFileSync('cargo', [...args, '--manifest-path', join(root, workspace)],
-    { cwd: root, stdio: 'inherit' });
+  const cargo = (args, env = {}) => execFileSync('cargo', [...args, '--manifest-path', join(root, workspace)],
+    { cwd: root, stdio: 'inherit', env: { ...process.env, ...env } });
   const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--locked', '--format-version', '1',
     '--manifest-path', join(root, workspace)], { cwd: root, encoding: 'utf8' }));
   validateCrates(metadata, policy.version);
@@ -151,6 +177,13 @@ export async function main(command, { root = process.cwd(), allowDirty = false }
   if (command === 'package') {
     // Cargo's multi-package mode verifies interdependent archives before their first publication.
     cargo(['package', '--locked', ...selections(crateNames), ...(allowDirty ? ['--allow-dirty'] : [])]);
+    const name = 'wechat-calls';
+    const files = execFileSync('tar', ['-tzf', join(root, 'packages/native-client-rust/target/package', `${name}-${policy.version}.crate`)],
+      { encoding: 'utf8' }).trim().split('\n');
+    for (const file of ['README.md', 'LICENSE', 'NOTICE.md', 'LICENSE-OPUS', 'LICENSE-OPUSIC',
+      'src/lib.rs', 'examples/portable_mix.rs', 'examples/tone_roundtrip.rs']) {
+      if (!files.includes(`${name}-${policy.version}/${file}`)) throw new Error(`Missing calling crate distribution file: ${file}`);
+    }
     return;
   }
   if (!['plan', 'publish'].includes(command)) throw new Error('Usage: native-crates.mjs check|package|plan|publish [--allow-dirty]');
@@ -177,17 +210,14 @@ export async function main(command, { root = process.cwd(), allowDirty = false }
       throw new Error('First publication requires CRATES_IO_BOOTSTRAP_TOKEN in the protected native-release environment; configure trusted publishing and revoke it afterward');
     }
     if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT,
-      `pending=${plan.pending.length > 0}\nbootstrap=${plan.bootstrap}\n`);
+      `pending=${plan.pending.length > 0}\nbootstrap=${plan.bootstrap}\ntrusted=${plan.pending.some(name => !plan.newCrates.includes(name))}\n`);
     return console.log(JSON.stringify(plan));
   }
-  if (plan.pending.length) {
-    if (!process.env.CARGO_REGISTRY_TOKEN) throw new Error('A registry publishing token is required');
-    cargo(['publish', '--registry', 'crates-io', '--locked', ...selections(plan.pending)]);
-  }
+  publishPending(plan, { env: process.env, runCargo: cargo });
   // Registry transport errors and uncertain uploads stop the job. A rerun verifies already-published source before continuing.
   const verified = await publicationPlan({ version: policy.version, sourceCommit, checksums });
   if (verified.pending.length) throw new Error('Crate publication has not finished; inspect registry state before retrying');
-  console.log(`Verified all four native crates at ${policy.version} (${sourceCommit})`);
+  console.log(`Verified all five native crates at ${policy.version} (${sourceCommit})`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

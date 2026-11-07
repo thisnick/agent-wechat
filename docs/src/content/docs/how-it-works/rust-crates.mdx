@@ -4,8 +4,8 @@ description: Rust crate responsibilities, dependencies and client adapters.
 ---
 
 The Rust workspace separates WeChat transport, official-profile access, account
-orchestration and client adapters. Four libraries are published; the daemon,
-CLI and supporting runtime crates remain internal.
+orchestration and client adapters. Five libraries are published; the daemon,
+CLI and remaining runtime crates stay internal.
 
 ## Package dependencies
 
@@ -45,7 +45,7 @@ with base64 PCM, while the daemon assembles and paces audio frames.
 | `wechat-media` | Message image/media inspection | Yes |
 | `wechat-profile` | Supported official profile readers and writers | Yes |
 | `wechat-protocol` | WeChat requests, signaling and encrypted transport | Yes |
-| `wechat-calls` | Call sessions, media workers, source tracking, PCM, pacing, mixing and Opus | No |
+| `wechat-calls` | Call sessions, media workers, source tracking, PCM, pacing, mixing and Opus | Yes |
 | `wechat-audio` | Microphone/speaker adapter and resampling | No |
 | `wechat-core` | Account authorization, ownership, call state and workers | No |
 | `wechat-api` | HTTP routes, authenticated control/media sockets and contracts | No |

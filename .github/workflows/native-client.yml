@@ -138,7 +138,7 @@ jobs:
         run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
       - name: Check portable call media for WebAssembly
         if: matrix.suite == 'test' && runner.arch == 'X64'
-        run: cargo check --locked -p wechat-calls --target wasm32-unknown-unknown
+        run: cargo check --locked -p wechat-calls --no-default-features --target wasm32-unknown-unknown
       - if: matrix.suite == 'test'
         run: |
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then
