@@ -1,0 +1,522 @@
+# wx command-line interface. Generated from the clap definition; do not edit.
+# Run `pnpm interfaces` after changing the CLI. Format: ITEM | ATTRIBUTES | HELP
+wx | - | Standalone native WeChat daemon and authenticated client
+wx --account | takes <ACCOUNT>, global | Use an account ID or alias for this command (AGENT_WECHAT_ACCOUNT)
+wx --ca-cert-file | takes <CA_CERT_FILE>, global | Additional trusted CA for this client invocation; TLS verification stays enabled
+wx --config | takes <CLIENT_CONFIG>, alias --client-config, global | Read saved CLI servers and defaults from this file (AGENT_WECHAT_CONFIG)
+wx --data-dir | takes <DATA_DIR>, global | Use this local daemon data directory
+wx --json | switch, global | Print machine-readable JSON, including errors and progress
+wx --listen | takes <LISTEN>, global | Bind the local daemon's HTTP listener to this address
+wx --local-profile | takes <LOCAL_PROFILE>, global | Use this registered stopped local profile for offline reads
+wx --network-listen | takes <NETWORK_LISTEN>, global | Additional HTTPS listener for other machines. Requires both TLS files
+wx --server | takes <URL>, alias --url, global | Use this daemon URL for this command (AGENT_WECHAT_URL)
+wx --server-config | takes <SERVER_CONFIG>, global | Read local daemon settings from this TOML file
+wx --server-name | takes <SERVER_NAME>, global | Use a saved server for this command (AGENT_WECHAT_SERVER)
+wx --tls-cert-file | takes <TLS_CERT_FILE>, global | Read the PEM certificate for the daemon's HTTPS listener
+wx --tls-key-file | takes <TLS_KEY_FILE>, global | Read the private PEM key for the daemon's HTTPS listener
+wx --token-file | takes <TOKEN_FILE>, global | Read the API token from a local private file (AGENT_WECHAT_TOKEN_FILE)
+wx --token-stdin | switch, global | Read this invocation's API key from a private stdin pipe
+wx access-tokens | hidden alias | Alias of wx tokens
+wx account | hidden alias | Alias of wx accounts
+wx accounts | - | Manage accounts and inspect or connect the selected account
+wx accounts alias | - | Rename an account's alias
+wx accounts alias <ALIAS> | position 2, required | New alias for the account
+wx accounts alias <ID> | position 1, required | Account ID or current alias from wx accounts list
+wx accounts capabilities | - | Show features available to the selected account
+wx accounts connect | - | Reconnect the selected account using its saved WeChat session
+wx accounts connect --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx accounts connect --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx accounts create | - | Create an account slot with an ID or alias
+wx accounts create --alias | takes <ALIAS> | Short name you can use in place of the account ID
+wx accounts create <ID> | position 1 | ID for the new account; the daemon picks one if you give only --alias
+wx accounts default | hidden alias | Alias of wx accounts select
+wx accounts disconnect | - | Disconnect the selected account while keeping its saved login
+wx accounts get | - | Show one account by ID or alias, or the selected account
+wx accounts get <ID> | position 1 | Account ID or alias from wx accounts list; omit for the selected account
+wx accounts list | - | List accounts on the selected server
+wx accounts remove | - | Remove a signed-out profile from the hub, retaining its local files
+wx accounts remove --confirm | required, takes <CONFIRM> | Repeat the exact account ID to confirm removal
+wx accounts remove <ID> | position 1, required | Account ID from wx accounts list
+wx accounts select | - | Save the default account for the selected named server
+wx accounts select <ID> | position 1, required | Account ID or alias from wx accounts list
+wx accounts settings | - | Read or update this account's hub-side automatic download policy
+wx accounts settings --auto-download-max-mb | takes <AUTO_DOWNLOAD_MAX_MB> | Maximum automatic download size in MiB (0 keeps thumbnails and voice automatic)
+wx accounts status | - | Show authentication and connection state for the selected account
+wx auth | - | Sign the selected account in or out of WeChat
+wx auth attempts | - | Inspect or cancel a WeChat login attempt
+wx auth attempts cancel | - | Request cancellation of an item by ID
+wx auth attempts cancel <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx auth attempts get | - | Show the current result and state of an item by ID
+wx auth attempts get <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx auth attempts retry | - | Retry an eligible failed item by ID
+wx auth attempts retry --reuse-completed-upload | switch | Reuse a completed file upload whose message submission never started
+wx auth attempts retry <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx auth attempts status | hidden alias | Alias of wx auth attempts get
+wx auth cancel | - | Cancel a login attempt by ID
+wx auth cancel <ID> | position 1, required | Login attempt ID printed by wx auth login
+wx auth disconnect | - | Disconnect while retaining the saved WeChat login
+wx auth forget | - | Forget local authentication material while retaining history
+wx auth forget --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx auth forget --yes | required, switch | Confirm discarding this account's saved login credentials; history is kept
+wx auth login | - | Sign in using saved device trust or a phone-approved QR code
+wx auth login --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx auth login --force-qr | switch, alias --qr | Skip saved device trust and sign in with a QR code
+wx auth login --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx auth login --max-refreshes | takes <MAX_REFRESHES>, default 3 | Most times an expired QR code is replaced automatically (0 to 3)
+wx auth login --no-qr | switch, alias --saved-only | Never show a QR code; sign in only with saved device trust
+wx auth login --official | takes <OFFICIAL> | Use supported stopped Linux files in place; optional absolute path on the daemon host, not the CLI host. macOS/Windows profiles are unverified
+wx auth login --qr-output | takes <QR_OUTPUT>, alias --qr-out | Save the login QR code PNG to this path; later refreshes add a -N suffix
+wx auth login --qr-refresh | takes <QR_REFRESH>, default auto, values auto|manual | Replace an expired, unscanned QR code automatically, or leave it expired
+wx auth login --strategy | takes <STRATEGY>, default auto, values auto|saved-device|qr | Which sign-in method to use; auto tries saved device trust first, then a QR code
+wx auth login --timeout | takes <TIMEOUT>, alias --wait, default 300 | Seconds to allow for the login to finish (30 to 900)
+wx auth logout | - | Sign out of WeChat and disable automatic reconnection
+wx auth logout --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx auth logout --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx auth logout --local | switch | Sign out on the daemon and keep saved credentials, without contacting WeChat
+wx auth logout --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx auth logout-local | hidden | Sign out locally while retaining saved credentials
+wx auth operation | - | Show a login attempt by ID
+wx auth operation <ID> | position 1, required | Login attempt ID printed by wx auth login
+wx auth qr | - | Show or save the QR code for a login attempt
+wx auth qr --output | takes <OUTPUT> | Save the QR code PNG to this path instead of the default folder
+wx auth qr <ID> | position 1, required | Login attempt ID printed by wx auth login
+wx auth status | - | Show the selected account's WeChat login state
+wx calls | - | Observe calls or use this computer's microphone and speakers
+wx calls answer | - | Answer the current offer using this computer's microphone and speakers
+wx calls answer --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls answer --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls answer <CALL_ID> | position 1 | Incoming call ID to answer; omit to answer the current offer
+wx calls conference | - | Start or join a conference with local microphone, mixed playback and participant meters
+wx calls conference join | - | Join a current invitation for this group; never creates a room
+wx calls conference join --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls conference join --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls conference join <GROUP> | position 1, required | Group ID, ending in @chatroom, that has a current conference invitation
+wx calls conference start | - | Start a group voice conference; use i inside the call for later invitations
+wx calls conference start --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls conference start --invite | required, takes <INVITEES>, repeatable | Contact ID to invite; repeat for several
+wx calls conference start --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls conference start <GROUP> | position 1, required | Group ID, ending in @chatroom, to start the conference in
+wx calls devices | - | List local microphone/speaker devices without connecting to a daemon
+wx calls dial | - | Call one contact using this computer's microphone and speakers
+wx calls dial --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls dial --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls dial <CONTACT> | position 1, required | Contact ID to call, from wx contacts list
+wx calls monitor | - | Wait for incoming calls. With --json, observe only without audio devices
+wx calls monitor --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls monitor --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls status | - | Read the daemon's current call state and exit
+wx chats | - | Find chats and change their read state and settings
+wx chats find | - | Find chats matching a name or ID
+wx chats find --kind | takes <KIND> | Only find chats of this kind: direct, group or system
+wx chats find <QUERY> | position 1, required | Name or ID text to search for
+wx chats get | - | Show one chat and its current read-state version
+wx chats get <ID> | position 1, required | Chat ID from wx chats list
+wx chats list | - | List chats with optional pagination and kind filtering
+wx chats list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx chats list --kind | takes <KIND> | Only list chats of this kind: direct, group or system
+wx chats list --limit | takes <LIMIT> | Return at most this many items
+wx chats mute | - | Mute a direct chat or group
+wx chats mute --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx chats mute --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx chats mute --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx chats mute <ID> | position 1, required | Chat ID from wx chats list
+wx chats open | hidden | Retained for compatibility; opening a native GUI is unsupported
+wx chats open <ID> | position 1, required | Chat ID from wx chats list
+wx chats pin | - | Pin an ordinary direct chat or group to the top of the thread list
+wx chats pin --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx chats pin --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx chats pin --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx chats pin <ID> | position 1, required | Chat ID from wx chats list
+wx chats read | - | Mark the whole chat read using its current read-state version
+wx chats read --expected-version | required, takes <EXPECTED_VERSION> | Read-state version from wx chats get; refused if the chat changed since
+wx chats read <ID> | position 1, required | Chat ID from wx chats list
+wx chats unmute | - | Unmute a direct chat or group
+wx chats unmute --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx chats unmute --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx chats unmute --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx chats unmute <ID> | position 1, required | Chat ID from wx chats list
+wx chats unpin | - | Unpin an ordinary direct chat or group
+wx chats unpin --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx chats unpin --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx chats unpin --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx chats unpin <ID> | position 1, required | Chat ID from wx chats list
+wx config | - | Inspect configuration and manage saved servers
+wx config client | - | Show the resolved client endpoint, token-file path and account
+wx config server | hidden alias | Alias of wx config servers
+wx config servers | - | Register servers and select the default server for this CLI
+wx config servers add | - | Save a server URL and the local path to its API token file
+wx config servers add --token-file | required, takes <TOKEN_FILE> | File holding this server's API token
+wx config servers add --url | required, takes <URL> | Daemon URL, such as https://wx.example.com
+wx config servers add <NAME> | position 1, required | Name to save the server under
+wx config servers list | - | List saved servers and the current selection
+wx config servers remove | - | Remove a saved server from this CLI's configuration
+wx config servers remove <NAME> | position 1, required | Saved server name from wx config servers list
+wx config servers select | - | Save the server to use for subsequent commands
+wx config servers select <NAME> | position 1, required | Saved server name from wx config servers list
+wx config servers use | hidden alias | Alias of wx config servers select
+wx config show | - | Show the resolved local daemon configuration
+wx contacts | - | Find contacts and refresh their saved information
+wx contacts --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx contacts --search | takes <SEARCH> | Only list contacts whose name or ID contains this text
+wx contacts avatar | - | Retrieve a saved avatar or request an avatar refresh
+wx contacts avatar --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts avatar --output | takes <OUTPUT> | Save the avatar to this new file (required unless --refresh)
+wx contacts avatar --refresh | switch | Ask WeChat for a fresh avatar instead of reading the saved one
+wx contacts avatar --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts avatar <ID> | position 1, required | ID of the contact whose avatar to retrieve
+wx contacts find | - | Find saved entries matching a name or ID
+wx contacts find <QUERY> | position 1, required | Name or ID text to search for
+wx contacts get | - | Show a saved entry by ID
+wx contacts get <ID> | position 1, required | ID of the contact or group, from the matching list command
+wx contacts list | - | List saved entries with optional pagination
+wx contacts list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx contacts list --limit | takes <LIMIT> | Return at most this many items
+wx contacts lookup | - | Look up one or more known contact IDs on WeChat
+wx contacts lookup <IDS> | position 1, required, repeatable | Contact IDs to look up on WeChat; give one or more
+wx contacts members | hidden | List, inspect or update a group's members
+wx contacts members add | - | Add one or more contacts to a group
+wx contacts members add --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts members add --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts members add --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts members add <ID> | position 1, required | Group ID from wx groups list
+wx contacts members add <MEMBERS> | position 2, required, repeatable | Contact IDs to add; give one or more
+wx contacts members get | - | Show one saved group member
+wx contacts members get <ID> | position 1, required | Group ID from wx groups list
+wx contacts members get <USERNAME> | position 2, required | Member's contact ID, from wx groups members list
+wx contacts members list | - | List saved members of a group
+wx contacts members list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx contacts members list --limit | takes <LIMIT> | Return at most this many items
+wx contacts members list <ID> | position 1, required | Group ID from wx groups list
+wx contacts members refresh | - | Refresh a group's member list from WeChat
+wx contacts members refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts members refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts members refresh <ID> | position 1, required | Group ID from wx groups list
+wx contacts members remove | - | Remove one or more members from a group
+wx contacts members remove --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts members remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts members remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts members remove <ID> | position 1, required | Group ID from wx groups list
+wx contacts members remove <MEMBERS> | position 2, required, repeatable | Member IDs to remove; give one or more
+wx contacts refresh | - | Refresh one entry from WeChat
+wx contacts refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts refresh <ID> | position 1, required | ID of the contact or group, from the matching list command
+wx contacts sync | - | Refresh the catalog from WeChat
+wx contacts sync --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx daemon | - | Start, inspect or stop the local background daemon
+wx daemon logs | - | Read the local daemon log, optionally following new lines
+wx daemon logs --follow | switch | Keep printing new log lines until interrupted
+wx daemon start | - | Start the local daemon in the background and wait until ready
+wx daemon status | - | Show the local managed daemon's state and identity
+wx daemon stop | - | Stop the owned local daemon without logging out of WeChat
+wx daemon stop --timeout | takes <TIMEOUT>, default 30 | Seconds to wait for the daemon to exit (1 to 300); it is never force-killed
+wx events | - | Read account events or watch for new events
+wx events --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx events --watch | switch | Keep printing new events as they arrive instead of listing once
+wx events ack | - | Save a consumer's progress through an event cursor
+wx events ack --consumer | required, takes <CONSUMER> | Name of the consumer whose progress is being saved
+wx events ack --through | required, takes <THROUGH> | Cursor of the last event this consumer has finished handling
+wx events list | - | Read events after a cursor
+wx events list --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx events list --limit | takes <LIMIT>, default 100 | Return at most this many events
+wx events watch | - | Stream new events, optionally saving a resume cursor
+wx events watch --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx events watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
+wx groups | - | Find groups and manage their names, settings and members
+wx groups --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx groups --search | takes <SEARCH> | Only list groups whose name or ID contains this text
+wx groups avatar | hidden | Retrieve a saved avatar or request an avatar refresh
+wx groups avatar --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups avatar --output | takes <OUTPUT> | Save the avatar to this new file (required unless --refresh)
+wx groups avatar --refresh | switch | Ask WeChat for a fresh avatar instead of reading the saved one
+wx groups avatar --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups avatar <ID> | position 1, required | ID of the contact whose avatar to retrieve
+wx groups clear-announcement | - | Clear a group's announcement when permitted
+wx groups clear-announcement --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups clear-announcement --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups clear-announcement --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups clear-announcement <ID> | position 1, required | Group ID from wx groups list
+wx groups create | - | Create a group with two to forty initial members
+wx groups create --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups create --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups create --name | takes <NAME> | Shared name for the new group
+wx groups create --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups create <MEMBERS> | position 1, required, repeatable | Contact IDs of the initial members, from wx contacts list; two to forty
+wx groups find | - | Find saved entries matching a name or ID
+wx groups find <QUERY> | position 1, required | Name or ID text to search for
+wx groups get | - | Show a saved entry by ID
+wx groups get <ID> | position 1, required | ID of the contact or group, from the matching list command
+wx groups leave | - | Leave a group while retaining local history
+wx groups leave --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups leave --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups leave --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups leave <ID> | position 1, required | Group ID from wx groups list
+wx groups list | - | List saved entries with optional pagination
+wx groups list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx groups list --limit | takes <LIMIT> | Return at most this many items
+wx groups lookup | - | Fetch the member roster for a known group ID from WeChat
+wx groups lookup --version | takes <VERSION>, default 0 | Roster version to request from WeChat; the reply shows the current version
+wx groups lookup <ROOM> | position 1, required | Group ID, ending in @chatroom, to fetch the member roster for
+wx groups members | - | List, inspect or update a group's members
+wx groups members add | - | Add one or more contacts to a group
+wx groups members add --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups members add --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups members add --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups members add <ID> | position 1, required | Group ID from wx groups list
+wx groups members add <MEMBERS> | position 2, required, repeatable | Contact IDs to add; give one or more
+wx groups members get | - | Show one saved group member
+wx groups members get <ID> | position 1, required | Group ID from wx groups list
+wx groups members get <USERNAME> | position 2, required | Member's contact ID, from wx groups members list
+wx groups members list | - | List saved members of a group
+wx groups members list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx groups members list --limit | takes <LIMIT> | Return at most this many items
+wx groups members list <ID> | position 1, required | Group ID from wx groups list
+wx groups members refresh | - | Refresh a group's member list from WeChat
+wx groups members refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups members refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups members refresh <ID> | position 1, required | Group ID from wx groups list
+wx groups members remove | - | Remove one or more members from a group
+wx groups members remove --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups members remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups members remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups members remove <ID> | position 1, required | Group ID from wx groups list
+wx groups members remove <MEMBERS> | position 2, required, repeatable | Member IDs to remove; give one or more
+wx groups my-name | - | Change your display name in a group
+wx groups my-name --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups my-name --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups my-name --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups my-name <DISPLAY_NAME> | position 2, required | Your new display name in this group
+wx groups my-name <ID> | position 1, required | Group ID from wx groups list
+wx groups refresh | - | Refresh one entry from WeChat
+wx groups refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups refresh <ID> | position 1, required | ID of the contact or group, from the matching list command
+wx groups rename | - | Change a group's shared name
+wx groups rename --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups rename --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx groups rename --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx groups rename <ID> | position 1, required | Group ID from wx groups list
+wx groups rename <NAME> | position 2, required | New shared name for the group
+wx groups sync | - | Refresh the catalog from WeChat
+wx groups sync --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx groups sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx jobs | - | Inspect background jobs and repair local profile writes
+wx jobs cancel | - | Request cancellation of an item by ID
+wx jobs cancel <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx jobs get | - | Show the current result and state of an item by ID
+wx jobs get <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx jobs repair-writeback | - | Repair local profile writes using saved bytes and receipts
+wx jobs repair-writeback --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx jobs repair-writeback --limit | takes <LIMIT>, default 25 | Repair at most this many saved items in one run (1 to 100)
+wx jobs repair-writeback --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx jobs retry | - | Retry an eligible failed item by ID
+wx jobs retry --reuse-completed-upload | switch | Reuse a completed file upload whose message submission never started
+wx jobs retry <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx jobs status | hidden alias | Alias of wx jobs get
+wx licenses | - | Show bundled third-party license notices
+wx lookup-contacts | hidden | Look up known contact IDs on the selected account
+wx lookup-contacts <IDS> | position 1, required, repeatable | Contact IDs to look up on WeChat; give one or more
+wx lookup-group | hidden | Look up a known group ID on the selected account
+wx lookup-group --version | takes <VERSION>, default 0 | Roster version to request from WeChat; the reply shows the current version
+wx lookup-group <ROOM> | position 1, required | Group ID, ending in @chatroom, to fetch the member roster for
+wx messages | - | Read or send messages and retrieve their attachments
+wx messages get | - | Show a message by local ID, optionally qualified by chat
+wx messages get <ID> | position 2 | Message ID from wx messages list, checked to belong to the chat
+wx messages get <THREAD_OR_ID> | position 1, required | Message ID, or the chat ID when a message ID follows
+wx messages list | - | List messages in a chat
+wx messages list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx messages list --limit | takes <LIMIT> | Return at most this many items
+wx messages list <THREAD> | position 1, required | Chat ID from wx chats list
+wx messages media | - | Retrieve a message attachment or report its availability
+wx messages media --cached-only | switch | Use only a copy the daemon has already saved; never start a download
+wx messages media --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx messages media --output | takes <OUTPUT> | Save the attachment to this new file; an existing file is not overwritten
+wx messages media --quality | takes <QUALITY>, default best, values best|thumbnail|standard|original|full|normal|encoded | Copy to retrieve: images have thumbnail, standard and original; videos normal and original; voice encoded. best picks the best available and full means original
+wx messages media --wait | takes <WAIT>, default 20 | Seconds to wait for the download; it keeps running after the wait ends
+wx messages media <ID> | position 2, required | Message ID from wx messages list
+wx messages media <THREAD> | position 1, required | Chat ID the message belongs to, from wx chats list
+wx messages read | - | Mark a whole chat read using its current read-state version
+wx messages read --expected-version | required, takes <EXPECTED_VERSION> | Read-state version from wx chats get; refused if the chat changed since
+wx messages read <THREAD> | position 1, required | Chat ID from wx chats list
+wx messages recall | - | Recall an own message using its opaque local ID and exact remote ID
+wx messages recall --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx messages recall --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx messages recall --server-id | required, takes <SERVER_ID> | Exact server ID of the message, from wx messages list --json (serverId)
+wx messages recall --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx messages recall <ID> | position 1, required | Message ID from wx messages list --json (the id field)
+wx messages send | - | Send text, a URL share, an image, a file, a video or a voice note
+wx messages send --description | takes <DESCRIPTION> | Description shown on the shared link card
+wx messages send --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx messages send --file | takes <FILE> | Send this file as an attachment
+wx messages send --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx messages send --image | takes <IMAGE> | Send this image file
+wx messages send --mention | takes <MENTION>, repeatable | Mention a group member by account ID; repeat for multiple members
+wx messages send --mention-all | switch | Mention all group members (WeChat enforces the account's permissions)
+wx messages send --quote-message-id | takes <QUOTE_MESSAGE_ID> | Quote a stored message in this chat; also supply its exact server ID
+wx messages send --quote-server-id | takes <QUOTE_SERVER_ID> | Exact server ID of the quoted message; use it with --quote-message-id
+wx messages send --share | takes <SHARE> | Send this URL as a shared link card; --title is required
+wx messages send --text | takes <TEXT> | Send this text message
+wx messages send --thumbnail-url | takes <THUMBNAIL_URL> | Thumbnail image URL shown on the shared link card
+wx messages send --title | takes <TITLE> | Title shown on the shared link card
+wx messages send --video | takes <VIDEO> | Send this MP4 video file
+wx messages send --video-quality | takes <VIDEO_QUALITY>, values normal|original | Prepare normal playback, or include the unchanged original video too
+wx messages send --voice | takes <VOICE> | Send this audio file as a voice message
+wx messages send --wait | takes <WAIT>, default 30 | Seconds to wait for the send to finish (up to 3600 for attachments, 900 otherwise)
+wx messages send <THREAD> | position 1, required | Chat ID to send to, from wx chats list
+wx messages send-status | - | Show an outgoing send by ID
+wx messages send-status <ID> | position 1, required | Send ID printed by wx messages send
+wx messages sends | - | Inspect or cancel sends, or find a send by its idempotency key
+wx messages sends cancel | - | Request cancellation of an outgoing send
+wx messages sends cancel <ID> | position 1, required | Send ID printed by wx messages send
+wx messages sends get | - | Show an outgoing send by ID
+wx messages sends get <ID> | position 1, required | Send ID printed by wx messages send
+wx messages sends lookup | - | Find an outgoing send by its original idempotency key
+wx messages sends lookup --idempotency-key | required, takes <IDEMPOTENCY_KEY> | Key that was given when the send was submitted
+wx messages sync | - | Fetch new messages for the selected account
+wx messages voice | - | Inspect or cancel outgoing voice jobs
+wx messages voice cancel | - | Request cancellation of an item by ID
+wx messages voice cancel <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx messages voice get | - | Show the current result and state of an item by ID
+wx messages voice get <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx messages voice retry | - | Retry an eligible failed item by ID
+wx messages voice retry --reuse-completed-upload | switch | Reuse a completed file upload whose message submission never started
+wx messages voice retry <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx messages voice status | hidden alias | Alias of wx messages voice get
+wx messages watch | - | Stream message events, optionally saving a resume cursor
+wx messages watch --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx messages watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
+wx operations | - | Inspect, cancel or retry account operations
+wx operations cancel | - | Request cancellation of an item by ID
+wx operations cancel <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx operations get | - | Show the current result and state of an item by ID
+wx operations get <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx operations retry | - | Retry an eligible failed item by ID
+wx operations retry --reuse-completed-upload | switch | Reuse a completed file upload whose message submission never started
+wx operations retry <ID> | position 1, required | ID printed when the job, operation or login attempt was started
+wx operations status | hidden alias | Alias of wx operations get
+wx profile | hidden alias | Alias of wx profiles
+wx profiles | - | Register and read stopped local WeChat profiles
+wx profiles add | - | Register the path and optional key file of a stopped local profile
+wx profiles add --account-dir | takes <ACCOUNT_DIR> | Account folder name under --path (or --path/xwechat_files) to use
+wx profiles add --format | takes <FORMAT>, default official-linux | Profile file layout; only official-linux is supported
+wx profiles add --keys-file | takes <KEYS_FILE> | Private file with this profile's database keys, from wx profiles keys export
+wx profiles add --path | required, takes <PATH> | Stopped official profile folder; add --account-dir if it holds several accounts
+wx profiles add <NAME> | position 1, required | Name to save the profile under
+wx profiles avatars | - | Retrieve a saved avatar from a stopped local profile
+wx profiles avatars --allow-plaintext | switch | Permit a deliberately created plaintext export; encrypted sources remain the default
+wx profiles avatars --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx profiles avatars --limit | takes <LIMIT>, default 50 | Return at most this many items (1 to 200)
+wx profiles avatars --output | required, takes <OUTPUT> | Save to this new file outside the profile; an existing file is not overwritten
+wx profiles avatars --raw | switch | Include original typed source fields, which can contain private transport metadata
+wx profiles avatars --search | takes <SEARCH> | Only list chats, contacts, groups or members whose name or ID contains this text
+wx profiles avatars --source-stopped | switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles avatars --username | required, takes <USERNAME> | Username of the contact or group whose saved avatar to export
+wx profiles chats | - | List chats from a stopped local profile
+wx profiles chats --allow-plaintext | switch | Permit a deliberately created plaintext export; encrypted sources remain the default
+wx profiles chats --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx profiles chats --limit | takes <LIMIT>, default 50 | Return at most this many items (1 to 200)
+wx profiles chats --raw | switch | Include original typed source fields, which can contain private transport metadata
+wx profiles chats --search | takes <SEARCH> | Only list chats, contacts, groups or members whose name or ID contains this text
+wx profiles chats --source-stopped | switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles contacts | - | Read contacts from a stopped local profile
+wx profiles contacts --allow-plaintext | switch | Permit a deliberately created plaintext export; encrypted sources remain the default
+wx profiles contacts --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx profiles contacts --limit | takes <LIMIT>, default 50 | Return at most this many items (1 to 200)
+wx profiles contacts --raw | switch | Include original typed source fields, which can contain private transport metadata
+wx profiles contacts --search | takes <SEARCH> | Only list chats, contacts, groups or members whose name or ID contains this text
+wx profiles contacts --source-stopped | switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles groups | - | Read groups and saved members from a stopped local profile
+wx profiles groups --allow-plaintext | switch | Permit a deliberately created plaintext export; encrypted sources remain the default
+wx profiles groups --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx profiles groups --id | takes <ID> | Show only this group, by ID, instead of the whole list
+wx profiles groups --limit | takes <LIMIT>, default 50 | Return at most this many items (1 to 200)
+wx profiles groups --members | switch | List the saved members of the group given by --id
+wx profiles groups --raw | switch | Include original typed source fields, which can contain private transport metadata
+wx profiles groups --search | takes <SEARCH> | Only list chats, contacts, groups or members whose name or ID contains this text
+wx profiles groups --source-stopped | switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles images | - | Retrieve a saved image from a stopped local profile
+wx profiles images --allow-plaintext | switch | Permit a deliberately created plaintext export; encrypted sources remain the default
+wx profiles images --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx profiles images --limit | takes <LIMIT>, default 50 | Return at most this many items (1 to 200)
+wx profiles images --message | required, takes <MESSAGE> | Message observation ID from wx profiles messages
+wx profiles images --output | required, takes <OUTPUT> | Save to this new file outside the profile; an existing file is not overwritten
+wx profiles images --quality | takes <QUALITY>, default best, values best|thumbnail|standard|original|full | Which saved copy to export; best picks the highest quality available (full is original)
+wx profiles images --raw | switch | Include original typed source fields, which can contain private transport metadata
+wx profiles images --search | takes <SEARCH> | Only list chats, contacts, groups or members whose name or ID contains this text
+wx profiles images --source-stopped | switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles inspect | - | Inspect the selected profile's layout and key availability
+wx profiles keys | - | Export profile keys from authorized local key material
+wx profiles keys export | - | Export keys from an authorized password file or agent data directory
+wx profiles keys export --agent-token-file | takes <AGENT_TOKEN_FILE> | Private file with the token that unlocks the agent data; needed for --from-agent-data
+wx profiles keys export --from-agent-data | takes <FROM_AGENT_DATA> | Agent data folder, or its agent.db file, holding saved profile keys
+wx profiles keys export --output | required, takes <OUTPUT> | Write the keys to this new private file outside the profile
+wx profiles keys export --password-file | takes <PASSWORD_FILE> | Private file holding the account password as exactly 32 raw bytes
+wx profiles keys export --session | takes <SESSION> | Key session ID to read; needed only when the agent data has several for this account
+wx profiles keys export --source-stopped | required, switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles keys export <NAME> | position 1 | Profile name from wx profiles list; defaults to the selected profile
+wx profiles list | - | List registered profiles and their selected defaults
+wx profiles messages | - | Read messages from a stopped local profile
+wx profiles messages --allow-plaintext | switch | Permit a deliberately created plaintext export; encrypted sources remain the default
+wx profiles messages --chat | required, takes <CHAT> | Chat ID to read, from wx profiles chats
+wx profiles messages --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx profiles messages --limit | takes <LIMIT>, default 50 | Return at most this many items (1 to 200)
+wx profiles messages --own-username | takes <OWN_USERNAME> | Your WeChat username, used to mark which messages you sent
+wx profiles messages --raw | switch | Include original typed source fields, which can contain private transport metadata
+wx profiles messages --search | takes <SEARCH> | Only list chats, contacts, groups or members whose name or ID contains this text
+wx profiles messages --source-stopped | switch | Confirm that the selected source is stopped or is a consistent snapshot
+wx profiles select | - | Save the default local profile for this CLI or selected server
+wx profiles select <NAME> | position 1, required | Profile name from wx profiles list
+wx profiles use | hidden alias | Alias of wx profiles select
+wx serve | - | Run the daemon in the foreground. Use the supplied service unit for background ownership
+wx status | - | Show the selected server's health and identity
+wx store | - | Offline operations require exclusive ownership; stop the daemon and official client first
+wx store attach | - | Attach a supported stopped official profile in place
+wx store attach --path | required, takes <PATH> | Stopped official profile home or account folder to use in place
+wx store attach --source-stopped | required, switch | Confirm the official client is stopped; wx cannot check this for you
+wx store bind-identity | - | Bind an account to supported stopped profile identity files
+wx store bind-identity --format-key-file | required, takes <FORMAT_KEY_FILE> | Private file holding the 16-byte MMKV format key
+wx store bind-identity --mmkv-store | required, takes <MMKV_STORE> | Official profile's MMKV identity store file, inside the selected profile
+wx store bind-identity --official-client-stopped | required, switch | Confirm the official client is stopped; wx cannot check this for you
+wx store bind-keys | - | Register a verified key file for the selected account
+wx store bind-keys --keys-file | required, takes <KEYS_FILE> | Private key file for this profile, such as one from wx profiles keys export
+wx store create | - | Create an offline account slot
+wx store create <ID> | position 1, required | ID for the new offline account slot
+wx store derive-keys | - | Derive profile keys from an authorized password file
+wx store derive-keys --password-file | required, takes <PASSWORD_FILE> | Private file holding the account password as exactly 32 raw bytes
+wx store derive-keys --profile | required, takes <PROFILE> | Stopped account folder, the one containing db_storage, to derive keys for
+wx store derive-keys --source-stopped | required, switch | Confirm the official client is stopped; wx cannot check this for you
+wx store enable-writes | - | Enable supported official-profile writes for a stopped client
+wx store enable-writes --format-key-file | required, takes <FORMAT_KEY_FILE> | Private file holding the 16-byte MMKV format key
+wx store enable-writes --mmkv-store | required, takes <MMKV_STORE> | Official profile's MMKV identity store file, inside the selected profile
+wx store enable-writes --official-client-stopped | required, switch | Confirm the official client is stopped; wx cannot check this for you
+wx store enable-writes --own-username | required, takes <OWN_USERNAME> | WeChat username of the account; it must match the logged-in account
+wx store export | - | Copy an owned stopped profile to a new destination
+wx store export --allow-incomplete | switch | Copy even when saved changes have not reached the official files; gaps are reported
+wx store export --destination | required, takes <DESTINATION> | New folder to copy the profile into; its parent must exist but it must not
+wx store export --source-stopped | required, switch | Confirm the official client is stopped; wx cannot check this for you
+wx store import | - | Copy a supported stopped profile into the local store
+wx store import --source | required, takes <SOURCE> | Stopped official profile home or account folder to copy into the store
+wx store import --source-stopped | required, switch | Confirm the official client is stopped; wx cannot check this for you
+wx store list | - | List accounts in the local daemon store
+wx store recover-projection | - | Replay saved local profile writes without sending or downloading
+wx store restore-credentials | - | Restore saved credentials from an authorized local file
+wx store restore-credentials --cursor-file | takes <CURSOR_FILE> | Private file with the raw sync cursor to restore along with the login state
+wx store restore-credentials --file | required, takes <FILE> | Private file with the saved login state to restore
+wx store schema | - | Inspect the selected account's official database schemas
+wx sync | - | Fetch new messages for the selected account
+wx sync --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx threads | hidden | List message threads for the selected account
+wx threads --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
+wx threads --limit | takes <LIMIT> | Return at most this many items
+wx tokens | - | Create and revoke API tokens for selected accounts
+wx tokens create | - | Create an API token with account and permission scopes
+wx tokens create --accounts | required, takes <ACCOUNTS>, repeatable | Account ID the token may use, or * for all accounts; repeat for several
+wx tokens create --expires-at | takes <EXPIRES_AT> | Expire the token at this Unix time in seconds; it never expires if omitted
+wx tokens create --scopes | required, takes <SCOPES>, repeatable | Permission to grant: read, media, send, read-state, login, admin or calls; repeat
+wx tokens create <NAME> | position 1, required | Label for the new token
+wx tokens list | - | List API tokens without revealing their secret values
+wx tokens revoke | - | Revoke an API token by ID
+wx tokens revoke <ID> | position 1, required | Token ID from wx tokens list
+wx version | - | Show the CLI version, build target and API capabilities

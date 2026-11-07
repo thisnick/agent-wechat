@@ -1,0 +1,23 @@
+# Public API of the wechat-media crate (default features, x86_64-unknown-linux-gnu). Generated from rustdoc JSON; do not edit.
+# Run `pnpm interfaces` after changing the crate. Format: ITEM | SIGNATURE | DOC SUMMARY
+const wechat_media::MAX_FILE_BYTES | usize | Native ordinary-file plaintext limit, shared by transport and local storage.
+const wechat_media::MAX_IMAGE_BYTES | usize | MISSING DOC
+const wechat_media::MAX_VIDEO_SOURCE_BYTES | usize | Outgoing video source limit, shared by normal preparation and the unchanged original upload. It matches the ordinary-file limit; the prepared normal playback copy keeps its own smaller output limit.
+field wechat_media::DecodedImage::bytes | alloc::vec::Vec<u8> | MISSING DOC
+field wechat_media::DecodedImage::inspection | wechat_media::image::ImageInspection | MISSING DOC
+field wechat_media::ImageInspection::animation_preserved | bool | MISSING DOC
+field wechat_media::ImageInspection::content_type | alloc::string::String | MISSING DOC
+field wechat_media::ImageInspection::frames | u32 | MISSING DOC
+field wechat_media::ImageInspection::height | u32 | MISSING DOC
+field wechat_media::ImageInspection::width | u32 | MISSING DOC
+fn wechat_media::inspect_image | fn(bytes: &[u8]) -> anyhow::Result<wechat_media::image::ImageInspection> | Inspect the retained source. For WXGF, dimensions describe its still preview; `frames` does not establish the source's animation frame count.
+fn wechat_media::inspect_video_container | fn(input: &[u8]) -> anyhow::Result<&'static str> | Check the top-level movie boxes before invoking the MOV-family demuxer. Older QuickTime movies may omit `ftyp`; both layouts still need owned movie metadata and media bytes. This only checks container structure; callers must separately decode and validate streams before sending.
+fn wechat_media::wxgf_preview | fn(bytes: &[u8]) -> anyhow::Result<wechat_media::DecodedImage> | Decode one representative JPEG without changing the WXGF source. This is a still preview, not a reconstruction of source animation timing or alpha.
+impl core::clone::Clone for wechat_media::ImageInspection | impl | -
+impl core::fmt::Debug for wechat_media::DecodedImage | impl | -
+impl core::fmt::Debug for wechat_media::ImageInspection | impl | -
+impl serde_core::de::Deserialize<'de> for wechat_media::ImageInspection | impl<'de> | -
+impl serde_core::ser::Serialize for wechat_media::ImageInspection | impl | -
+mod wechat_media | - | Bounded media inspection shared by native transport and official profiles. Source bytes, including application trailers, are never rewritten here. WXGF inspection decodes a representative still only. Its animation timing, frame count and alpha semantics remain unknown; the original stays WXGF.
+struct wechat_media::DecodedImage | struct { public fields } | MISSING DOC
+struct wechat_media::ImageInspection | struct { public fields } | MISSING DOC

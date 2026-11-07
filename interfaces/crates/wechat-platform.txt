@@ -1,0 +1,40 @@
+# Public API of the wechat-platform crate (default features, x86_64-unknown-linux-gnu). Generated from rustdoc JSON; do not edit.
+# Run `pnpm interfaces` after changing the crate. Format: ITEM | SIGNATURE | DOC SUMMARY
+const wechat_platform::NOFOLLOW | #[cfg(unix)] i32 | MISSING DOC
+fn wechat_platform::OpenOptions::append | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::create | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::create_new | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::custom_flags | fn(&mut self, flags: i32) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::mode | fn(&mut self, mode: u32) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::new | fn() -> Self | MISSING DOC
+fn wechat_platform::OpenOptions::open | fn(&mut self, path: impl core::convert::AsRef<std::path::Path>) -> std::io::error::Result<std::fs::File> | MISSING DOC
+fn wechat_platform::OpenOptions::read | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::truncate | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::OpenOptions::write | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::PrivateTempDir::keep | fn(self) -> std::path::PathBuf | MISSING DOC
+fn wechat_platform::PrivateTempDir::path | fn(&self) -> &std::path::Path | MISSING DOC
+fn wechat_platform::detach | fn(command: &mut std::process::Command) | MISSING DOC
+fn wechat_platform::is_link | fn(metadata: &std::fs::Metadata) -> bool | Includes Windows junctions and other reparse points, not only symlinks.
+fn wechat_platform::local_ipv4_addresses | fn() -> std::io::error::Result<alloc::vec::Vec<core::net::ip_addr::Ipv4Addr>> | MISSING DOC
+fn wechat_platform::owned_path | fn(path: &std::path::Path) -> std::io::error::Result<bool> | MISSING DOC
+fn wechat_platform::path_bytes | fn(path: &std::path::Path) -> alloc::vec::Vec<u8> | MISSING DOC
+fn wechat_platform::private_dir | fn(path: &std::path::Path) -> std::io::error::Result<()> | MISSING DOC
+fn wechat_platform::private_file | fn(file: &std::fs::File) -> std::io::error::Result<bool> | MISSING DOC
+fn wechat_platform::private_path | fn(path: &std::path::Path) -> std::io::error::Result<bool> | MISSING DOC
+fn wechat_platform::private_tempdir | fn(prefix: &str) -> std::io::error::Result<wechat_platform::PrivateTempDir> | MISSING DOC
+fn wechat_platform::private_tempdir_in | fn(parent: &std::path::Path, prefix: &str) -> std::io::error::Result<wechat_platform::PrivateTempDir> | MISSING DOC
+fn wechat_platform::private_tempfile_in | fn(parent: &std::path::Path, prefix: &str) -> std::io::error::Result<tempfile::file::NamedTempFile> | MISSING DOC
+fn wechat_platform::process_identity | fn(pid: u32) -> core::option::Option<(alloc::string::String, std::path::PathBuf)> | PID reuse is excluded by comparing creation time and the canonical executable.
+fn wechat_platform::protect | fn(file: &std::fs::File) -> std::io::error::Result<()> | MISSING DOC
+fn wechat_platform::protect_path | fn(path: &std::path::Path, directory: bool) -> std::io::error::Result<()> | MISSING DOC
+fn wechat_platform::publish_directory | fn(source: &std::path::Path, destination: &std::path::Path) -> std::io::error::Result<()> | Atomically publish a new directory, refusing any existing destination.
+fn wechat_platform::same_file | #[cfg(unix)] fn(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool | MISSING DOC
+fn wechat_platform::same_path_file | fn(path: &std::path::Path, file: &std::fs::File) -> std::io::error::Result<bool> | MISSING DOC
+fn wechat_platform::sync_dir | fn(path: &std::path::Path) -> std::io::error::Result<()> | Windows has no directory fsync equivalent; files are flushed before publication.
+fn wechat_platform::sync_file | fn(path: &std::path::Path) -> std::io::error::Result<()> | MISSING DOC
+fn wechat_platform::user_key | fn() -> alloc::string::String | MISSING DOC
+impl core::default::Default for wechat_platform::OpenOptions | impl | -
+impl core::ops::drop::Drop for wechat_platform::PrivateTempDir | impl | -
+mod wechat_platform | - | OS boundaries shared by the native CLI, daemon and profile storage.
+struct wechat_platform::OpenOptions | struct { private fields } | Files never follow a final symlink/reparse point. Private creation is atomic.
+struct wechat_platform::PrivateTempDir | struct { private fields } | A randomly named scratch directory, owned by this user from creation. Windows' default temporary-directory owner can be Administrators when elevated.
