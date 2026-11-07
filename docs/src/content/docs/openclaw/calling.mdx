@@ -229,6 +229,10 @@ call. Status reports the inviter and effective policy. Owner and read-only calls
 use separate sessions and recaps; old call recaps without a known permission
 level are not reused.
 
+Conferences started by the bot use the group's `toolPolicy`. The
+`ownerInviterToolPolicy` override applies only to incoming invitations; the
+requesting agent session's owner permissions do not transfer into a new call.
+
 ## Models and behavior
 
 All paths below are relative to `calls.voice`.
