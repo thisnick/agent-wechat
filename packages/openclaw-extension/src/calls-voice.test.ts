@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { link, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -205,19 +205,18 @@ test("a continuous model streams without the consult tool and delegates through 
   await assert.rejects(prepared.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal }), /provider unavailable/);
 });
 
-test("opted-in default-agent voice profile uses only bounded identity and persona files", async t => {
+test("shared host voice profile supplies identity, user grounding and persona without agent instructions", async t => {
   const dir = await mkdtemp(join(tmpdir(), "wechat-call-voice-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const workspace = join(dir, "workspace");
   await mkdir(workspace);
   const identity = join(workspace, "IDENTITY.md");
-  const privateFile = join(dir, "unrelated.md");
   await Promise.all([
     writeFile(identity, "- Name: Synthetic Main Voice"),
     writeFile(join(workspace, "SOUL.md"), "Speak with quiet curiosity.\n" + "x".repeat(8000)),
-    writeFile(join(workspace, "USER.md"), "private-user-sentinel"),
+    writeFile(join(workspace, "USER.md"), "The configured user is Synthetic Owner. Address them as Synthetic Nick."),
     writeFile(join(workspace, "AGENTS.md"), "private-workspace-sentinel"),
-    writeFile(privateFile, "private-hardlink-sentinel"),
+    writeFile(join(workspace, "MEMORY.md"), "private-memory-sentinel"),
   ]);
   const voice = { enabled: true, agentId: "main", realtime: { provider: "openai" } };
   const base = resolveWeChatCallsConfig({ voice })!.voice!;
@@ -240,7 +239,7 @@ test("opted-in default-agent voice profile uses only bounded identity and person
     resolveRealtimeVoiceAgentConsultToolsAllow: () => [],
   };
   // Legacy main resolves the host default workspace without an agents.list entry.
-  const cfg = { agents: { defaults: { workspace } } };
+  const cfg = { plugins: { slots: { memory: "none" } }, agents: { defaults: { workspace } } };
   const prepare = (value: typeof base) => prepareOpenClawCallVoice(value, cfg, {} as PluginRuntime,
     { voiceSdk, audioSdk: { createStreamingPcmResampler() {} } });
   async function prompt(prepared: Awaited<ReturnType<typeof prepare>>) {
@@ -251,14 +250,15 @@ test("opted-in default-agent voice profile uses only bounded identity and person
   assert.doesNotMatch(await prompt(await prepare(base)), /Synthetic Main Voice|quiet curiosity/);
   const prepared = await prepare(optedIn);
   const profile = await prompt(prepared);
-  assert.match(profile, /IDENTITY\.md\):\n- Name: Synthetic Main Voice/);
-  assert.match(profile, /SOUL\.md\):\nSpeak with quiet curiosity/);
-  assert.match(profile, /\[truncated\]/);
-  assert.ok(profile.length < 7200);
-  assert.doesNotMatch(profile, /USER\.md|AGENTS\.md|private-/);
-  await unlink(identity);
-  await link(privateFile, identity);
-  assert.doesNotMatch(await prompt(prepared), /private-hardlink-sentinel|Synthetic Main Voice/);
+  assert.match(profile, /### IDENTITY\.md\n- Name: Synthetic Main Voice/);
+  assert.match(profile, /### SOUL\.md\nSpeak with quiet curiosity/);
+  assert.match(profile, /### USER\.md\nThe configured user is Synthetic Owner/);
+  assert.match(profile, /many sessions at once/);
+  assert.match(profile, /truncat/i);
+  assert.ok(profile.length < 8500);
+  assert.doesNotMatch(profile, /AGENTS\.md|MEMORY\.md|private-/);
+  await writeFile(join(workspace, "USER.md"), "Updated user grounding");
+  assert.match(await prompt(prepared), /Updated user grounding/);
 });
 
 test("missing SDK and incompatible provider capabilities fail before creating a bridge", async () => {

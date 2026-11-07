@@ -8,7 +8,7 @@ import type { ResolvedWeChatVoiceCallsConfig } from "./calls-config.ts";
 import { prepareOpenClawCallVoice, type CallBackgroundRunner, type CallBinding, type CallVoiceSession, type PreparedCallVoice } from "./calls-voice.ts";
 import { CallPcmOutput, type CallAudioClearReason } from "./calls-audio.ts";
 import { CallPcmMixer } from "./calls-mixer.ts";
-import { conferenceCallPolicy, directCallPolicy, restrictCallPolicy, type CallToolPolicy, type CallPolicyReason } from "./calls-permissions.ts";
+import { conferenceCallPolicy, directCallPolicy, restrictCallPolicy, isExactCallOwner, type CallToolPolicy, type CallPolicyReason } from "./calls-permissions.ts";
 import { CallContextTracker, resolveCallIdentity, resolveCallParticipant } from "./calls-context.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
@@ -317,7 +317,7 @@ export class NativeCallService {
       ...(inviterId ? { inviter: { contactId: inviterId, name: inviterId } } : {}) } } : { remote: { contactId: peer, name: peer } }) });
     const active: Owned = { key: randomUUID(), peer, groupId, inviterId, context, nameRequests: new Set(), direction, transcript: new CallTranscript(), callId, claimed: false, submitted: false, ready: false, incomingReadinessAttempted: false, claiming: false, abort: new AbortController(), retired: false, attaching: false, endStarted: false };
     if (!groupId) active.policyAtAdmission = this.directPolicy(peer);
-    this.active = active; this.state = "preparing"; return active;
+    this.setContextOwners(active); this.active = active; this.state = "preparing"; return active;
   }
   private directPolicy(peer: string): CallToolPolicy {
     try {
@@ -355,9 +355,15 @@ export class NativeCallService {
       const native = this.account.native;
       if (!native) return;
       const host = await (this.dependencies.host ?? ensureNativeHost)(native);
+      const self = Promise.resolve().then(() => host.client.account(native.accountId)).then(account => {
+        if (this.current(active) && account.id === native.accountId && typeof account.ownUsername === "string" && account.ownUsername.trim() && !/[\s\u0000-\u001f\u007f]/.test(account.ownUsername)) {
+          active.context.setSelf(account.ownUsername); this.scheduleCallContext(active);
+        }
+      }).catch(() => {});
       const identity = await resolveCallIdentity(host.client, native.accountId, active.peer, active.groupId, active.inviterId,
         AbortSignal.any([active.abort.signal, AbortSignal.timeout(RECENT_CONTEXT_WAIT_MS)]));
       if (this.current(active)) { active.context.setIdentity(identity.name, identity.inviterName); this.scheduleCallContext(active); }
+      await self;
     };
     let [{ recentContext, consultContext }] = await Promise.all([
       bounded(this.callContext(active.peer, active.policyAtAdmission), RECENT_CONTEXT_WAIT_MS).catch((): { recentContext?: string; consultContext?: string } => ({})),
@@ -617,10 +623,22 @@ export class NativeCallService {
     } catch { if (this.current(active)) await this.fail(active, "media-attach"); }
     finally { active.attaching = false; }
   }
+  private setContextOwners(active: Owned): void {
+    try {
+      const cfg = (this.runtime.config?.current?.() ?? this.cfg) as OpenClawConfig;
+      const entries = cfg.commands?.ownerAllowFrom;
+      active.context.setConfiguredOwners(Array.isArray(entries) ? entries.flatMap(entry => {
+        if (typeof entry !== "string" || !entry.startsWith("agent-wechat:")) return [];
+        const contactId = entry.slice("agent-wechat:".length);
+        return isExactCallOwner(contactId, entries) ? [contactId] : [];
+      }) : []);
+    } catch { active.context.setConfiguredOwners([]); }
+  }
   /** Directory lookups and coalesced model messages never block control/media.
    * The first connected snapshot is the baseline, not a set of late joins. */
   private scheduleCallContext(active: Owned): void {
     if (!this.current(active) || active.endStarted || active.call?.state !== "connected") return;
+    this.setContextOwners(active);
     const native = this.account.native;
     if (active.groupId && native) for (const person of active.context.snapshot().participants) {
       if (active.nameRequests.has(person.contactId)) continue;

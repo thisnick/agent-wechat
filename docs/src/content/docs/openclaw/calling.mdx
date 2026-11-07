@@ -153,9 +153,15 @@ The voice agent receives the direct caller's identity or the conference invitati
 sender and current call roster. It greets after audio connects and can say hi or
 bye when people join or leave. Names come from cached contacts or group-visible
 member names, with account IDs as a fallback. Group-chat membership is not treated
-as attendance, and the inviter is not necessarily the room creator. Display names
-and roster changes grant no permissions and do not identify who is speaking.
+as attendance, and the inviter is not necessarily the room creator. The direct contact is the conversation partner. In a conference with exactly one
+other joined participant, the agent can address that participant normally. With
+several participants, the roster identifies who is present, while mixed audio
+alone does not identify which person spoke. The bot excludes its own account
+when counting participants; unavailable attendance does not imply a sole caller.
+Display names and roster changes grant no permissions.
 Names that arrive later refresh the roster without announcing another arrival.
+The latest roster takes precedence over older call summaries; earlier summaries
+and recent chat snippets remain available when recent context is enabled.
 The agent can use that roster to say who is present, even though mixed audio
 does not tell it who spoke. Gateway `context` logs show observed updates, name
 lookup results and voice-bridge submissions using counts and message digests;
@@ -208,7 +214,7 @@ All paths below are relative to `calls.voice`.
 | `realtime.provider` | Required in `bidi` mode; `openai` is the supported adapter. |
 | `realtime.model`, `realtime.voice` | Optional speech model/voice overrides; otherwise provider defaults. |
 | `realtime.instructions` | Optional conversation guidance, up to 4,000 characters. |
-| `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include excerpts from the selected agent's `IDENTITY.md` and `SOUL.md`. |
+| `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include the selected agent's `IDENTITY.md`, `USER.md` and `SOUL.md` through OpenClaw's voice-context resolver for direct calls and conferences. |
 | `agentId` | Required. Selects the voice persona, provider authentication and agent for permitted consultations. |
 | `toolPolicy` | `none`, `safe-read-only`, or `owner`. Opting in to session persistence defaults to `safe-read-only`. |
 | `allowConsultSessionPersistence` | Set to `true` to allow consultation in OpenClaw sessions for calls. |
@@ -237,7 +243,7 @@ provider's default, `gpt-realtime-2.1`.
 
 The speech model receives the selected agent's configured identity. When
 workspace context is enabled, the realtime provider also receives bounded
-excerpts of the two persona files. Keep those files suitable for this use.
+profile excerpts from `IDENTITY.md`, `USER.md` and `SOUL.md`, up to 6,000 characters. `USER.md` supplies user grounding; it does not make every caller that user. The regular consultation agent receives its normal workspace instructions, including `AGENTS.md`.
 
 ### Use your agent and TTS
 

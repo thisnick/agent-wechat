@@ -73,6 +73,10 @@ try {
   await build({ entryPoints: [join(root, 'packages/openclaw-extension/test/fixtures/native-conference-model-plugin.ts')], absWorkingDir: root, bundle: true, format: 'esm', platform: 'node', external: ['openclaw', 'ws'], outfile: join(temporary, 'plugin/dist/index.js') });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening'); const nativePort = upstream.address().port;
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
+  await mkdir(join(temporary, 'workspace'), { recursive: true });
+  await writeFile(join(temporary, 'workspace/USER.md'), 'Synthetic voice profile user');
+  await writeFile(join(temporary, 'workspace/SOUL.md'), 'Synthetic voice profile persona');
+  await writeFile(join(temporary, 'workspace/AGENTS.md'), 'private-agents-profile-sentinel');
   const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false },
     commands: { ownerAllowFrom: ['agent-wechat:synthetic-human-owner', 'agent-wechat:synthetic-group@chatroom'] }, tools: { toolSearch: false, codeMode: false, profile: 'coding', alsoAllow: ['conference_owner_probe'] },
     models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 262144, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },

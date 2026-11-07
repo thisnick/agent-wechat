@@ -78,6 +78,7 @@ function voiceFactory() {
 }
 async function until(predicate: () => boolean) { for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(5); } assert.fail("Condition did not become true"); }
 const cachedHost = (async () => ({ client: {
+  account: async () => ({ id: "a", ownUsername: "contact-self" }),
   contact: async () => ({ remark: "Known caller" }),
   group: async () => ({ name: "Public test room", remark: "Private label" }),
   groupMember: async (_account: string, _group: string, contactId: string) => ({ member: { username: contactId, roomDisplayName: `Room ${contactId}` } }),
@@ -859,6 +860,8 @@ test("incoming and outgoing identities greet once only after connected media is 
     await until(() => client.attaches === 1);
     await delay(280); assert.equal(voice.state.updates.length, 0);
     assert.equal(voice.state.contexts[0].callContext?.direction, direction);
+    assert.equal(voice.state.contexts[0].callContext?.selfContactId, "contact-self");
+    assert.equal(voice.state.contexts[0].callContext?.conversationPartner?.contactId, "allowed-peer");
     assert.deepEqual(voice.state.contexts[0].callContext?.remote, { contactId: "allowed-peer", name: "Known caller" });
     release(); await until(() => voice.state.updates.length === 1);
     assert.deepEqual(voice.state.updates[0].change, { initial: true });
@@ -976,4 +979,14 @@ test("a direct owner consultation can hang up without an outbound chat-requester
     sessionKey: voice.state.binding.sessionKey, assertInvocationCurrent() {} };
   registerNativeCallTool({ registerTool(factory: any) { [tool] = factory.create(context); } } as unknown as OpenClawPluginApi, () => service);
   await tool.execute("end", { action: "hangup" }); assert.equal(client.ends, 1);
+});
+
+
+test("call metadata resolves our own account and exact owner matches without changing the tool policy", async t => {
+  const cfg = configuration(); (cfg as any).commands = { ownerAllowFrom: ["agent-wechat:allowed-peer", "agent-wechat:*"] };
+  const { service, client, voice } = await fixture(undefined, cfg); t.after(() => service.stop());
+  client.eventsQueue.push({ type: "call.offered", offer }); await until(() => client.attaches === 1);
+  assert.equal(voice.state.contexts[0].callContext?.remote?.configuredOwner, true);
+  assert.equal(voice.state.contexts[0].callContext?.selfContactId, "contact-self");
+  assert.equal(voice.state.contexts[0].policyAtAdmission, "none", "relationship metadata does not grant tools");
 });

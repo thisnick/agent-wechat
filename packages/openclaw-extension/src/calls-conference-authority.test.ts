@@ -63,7 +63,7 @@ test('group consultation needs both exact grants, uses the group principal and i
   cfg.commands.ownerAllowFrom.push(`agent-wechat:${groupId}`);
   assert.equal(session.binding?.().owner, false, 'a live call must not gain owner authority'); await session.close();
   session = await open(); assert.equal(session.binding?.().owner, true);
-  assert.match(bridge.instructions, /group voice conference/); assert.match(bridge.instructions, /cannot verify which person spoke/);
+  assert.match(bridge.instructions, /group voice conference/); assert.match(bridge.instructions, /All answers are audible to the group/);
   const before = JSON.stringify(cfg);
   await bridge.onToolCall({ name: sdk.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId: 'owner', args: { question: 'Use a synthetic owner action' } });
   await until(() => spoken.length === 2);

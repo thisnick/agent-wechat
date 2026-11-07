@@ -168,7 +168,7 @@ export const callsConfigSchema = {
         voice: { ...nameSchema, description: "Spoken voice; omitted uses the selected provider's default." },
         instructions: { type: "string", maxLength: 4000, description: "Additional conversation guidance; does not grant tool or account-owner authority." },
         agentContext: { type: "object", additionalProperties: false, properties: {
-          enabled: { type: "boolean", default: false, description: "Send bounded excerpts of the selected agent's IDENTITY.md and SOUL.md to the Realtime provider. Configured agent identity is used independently." },
+          enabled: { type: "boolean", default: false, description: "Use OpenClaw's shared voice context to send bounded IDENTITY.md, USER.md and SOUL.md excerpts for direct calls and conferences. Configured agent identity is used independently; normal agent/TTS turns already receive host context." },
         } },
         recentContext: { type: "object", additionalProperties: false, properties: {
           enabled: { type: "boolean", default: false, description: "When a call starts, send the Realtime provider the summaries of the last few calls with this contact and the latest messages of your WeChat chat with them, so the voice model knows what you last talked about." },

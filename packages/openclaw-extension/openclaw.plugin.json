@@ -344,7 +344,7 @@
                       "enabled": {
                         "type": "boolean",
                         "default": false,
-                        "description": "Send bounded excerpts of the selected agent's IDENTITY.md and SOUL.md to the Realtime provider. Configured agent identity is used independently."
+                        "description": "Use OpenClaw's shared voice context to send bounded IDENTITY.md, USER.md and SOUL.md excerpts for direct calls and conferences. Configured agent identity is used independently; normal agent/TTS turns already receive host context."
                       }
                     }
                   },
@@ -856,7 +856,7 @@
                           "enabled": {
                             "type": "boolean",
                             "default": false,
-                            "description": "Send bounded excerpts of the selected agent's IDENTITY.md and SOUL.md to the Realtime provider. Configured agent identity is used independently."
+                            "description": "Use OpenClaw's shared voice context to send bounded IDENTITY.md, USER.md and SOUL.md excerpts for direct calls and conferences. Configured agent identity is used independently; normal agent/TTS turns already receive host context."
                           }
                         }
                       },
