@@ -11,6 +11,7 @@
     "typecheck": "turbo run typecheck",
     "cli": "node packages/cli/scripts/native-launcher.mjs",
     "generate-types": "bash scripts/native-generate-types.sh",
+    "interfaces": "node scripts/interfaces/index.mjs",
     "release": "pnpm build && node scripts/native-release-policy.mjs --check-registry && pnpm changeset publish",
     "version-packages": "pnpm changeset version && node scripts/native-sync-version.mjs && pnpm install --lockfile-only",
     "native:build": "cargo build --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml",

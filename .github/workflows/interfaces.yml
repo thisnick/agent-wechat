@@ -1,0 +1,103 @@
+name: Interfaces
+
+# Keeps interfaces/ in step with the code and reports listing changes on each PR.
+# See interfaces/README.md. The approval check lives in interfaces-approval.yml.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: interfaces-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  listings:
+    name: Interfaces up to date
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'interfaces/**'
+              - 'scripts/interfaces/**'
+              - 'scripts/native-crates.mjs'
+              - 'packages/native-client-rust/**'
+              - 'packages/openclaw-extension/**'
+              - 'packages/shared/**'
+              - 'docs/src/content/docs/openclaw/tools.mdx'
+              - 'rust-toolchain.toml'
+              - 'pnpm-lock.yaml'
+              - 'package.json'
+              - '.github/workflows/interfaces.yml'
+      # Required checks must always report, so unrelated PRs skip the build but still pass.
+      - name: Skip unrelated changes
+        if: github.event_name == 'pull_request' && steps.filter.outputs.relevant != 'true'
+        run: echo "No interface sources changed."
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: pnpm/action-setup@v6
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        id: rust
+        with:
+          toolchain: 1.93.1
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          add-rust-environment-hash-key: false
+          key: interfaces-${{ steps.rust.outputs.cachekey }}
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        name: Check every listing against the code
+        run: pnpm interfaces --check
+      - if: failure()
+        name: Explain a stale listing
+        run: |
+          echo "::error::An interface listing no longer matches the code. Run 'pnpm interfaces', review the diff under interfaces/ and commit it."
+          git status --short interfaces/
+
+  docs:
+    name: Interface docs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Test the review tool
+        run: node --test scripts/interfaces/review.test.mjs
+      - name: Compare listings, update the PR comment and check documentation
+        run: node scripts/interfaces/review.mjs --base "origin/${{ github.base_ref }}" --comment --fail-on-missing-docs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,308 @@
+#!/usr/bin/env node
+// Compares the interface listings between a base commit and the working tree, classifies
+// each change (added, removed, changed, breaking, missing docs) and renders the PR comment.
+// Usage: node scripts/interfaces/review.mjs --base <ref> [--comment] [--fail-on-missing-docs]
+import { execFileSync } from 'node:child_process';
+import { appendFile, readFile, readdir } from 'node:fs/promises';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { upsertComment } from './github.mjs';
+
+export const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
+export const MARKER = '<!-- agent-wechat-interfaces -->';
+export const APPROVAL_LABEL = 'interfaces-approved';
+const MISSING = /^MISSING (HELP|DESCRIPTION|DOC)$/;
+const DIFF_LIMIT = 120;
+
+/** Which interface a listing file describes, and the package whose changeset covers it. */
+export function surface(file) {
+  if (file === 'interfaces/cli/wx.txt') return { kind: 'cli', title: 'wx CLI', packages: ['@agent-wechat/cli'] };
+  if (file.startsWith('interfaces/crates/')) return { kind: 'crate', title: `Rust crate ${file.slice('interfaces/crates/'.length, -4)}`, packages: ['@agent-wechat/rust-crates'] };
+  if (file === 'interfaces/openclaw/tools.txt') return { kind: 'schema', title: 'OpenClaw tools', packages: ['@agent-wechat/agent-wechat'] };
+  if (file === 'interfaces/openclaw/config.txt') return { kind: 'schema', title: 'OpenClaw configuration', packages: ['@agent-wechat/agent-wechat'] };
+  return { kind: 'other', title: file, packages: [] };
+}
+
+/** Parses `ITEM | ATTRIBUTES | DOC` rows into a map keyed by ITEM. */
+export function parseListing(text) {
+  const rows = new Map();
+  for (const line of text.split('\n')) {
+    if (!line.trim() || line.startsWith('#')) continue;
+    const first = line.indexOf(' | ');
+    const second = line.indexOf(' | ', first + 3);
+    if (first < 0 || second < 0) throw new Error(`Malformed listing row: ${line}`);
+    rows.set(line.slice(0, first), { line, attributes: line.slice(first + 3, second), doc: line.slice(second + 3) });
+  }
+  return rows;
+}
+
+const tokens = attributes => (attributes === '-' ? [] : attributes.split(', '));
+const token = (list, name) => list.find(item => item === name || item.startsWith(`${name} `));
+const value = (list, name) => token(list, name)?.slice(name.length + 1);
+const isMissing = doc => MISSING.test(doc);
+
+function parentOf(kind, item) {
+  if (kind === 'cli') return item.includes(' ') ? item.slice(0, item.lastIndexOf(' ')) : undefined;
+  if (kind === 'schema') return item.includes('.') ? item.slice(0, item.lastIndexOf('.')) : undefined;
+  return undefined;
+}
+
+function numeric(list, name) {
+  const found = value(list, name);
+  return found === undefined ? undefined : Number(found);
+}
+
+/** Reasons an attribute change can break existing callers (CLI and schema listings). */
+export function attributeBreaks(kind, before, after) {
+  const old = tokens(before);
+  const now = tokens(after);
+  const reasons = [];
+  if (!token(old, 'required') && token(now, 'required')) reasons.push('now required');
+  const oldValues = value(old, 'values')?.split('|');
+  const newValues = value(now, 'values')?.split('|');
+  if (newValues && (!oldValues || oldValues.some(v => !newValues.includes(v)))) {
+    const removed = oldValues ? oldValues.filter(v => !newValues.includes(v)) : [];
+    reasons.push(oldValues ? `allowed values removed: ${removed.join(', ')}` : 'now limited to fixed values');
+  }
+  if (value(old, 'default') !== value(now, 'default') && value(old, 'default') !== undefined) {
+    reasons.push(`default changed from ${value(old, 'default')} to ${value(now, 'default') ?? 'none'}`);
+  }
+  if (value(old, 'const') !== value(now, 'const') && value(now, 'const') !== undefined) reasons.push('constant value changed');
+  if (kind === 'cli') {
+    for (const name of ['short', 'alias']) {
+      for (const item of old.filter(t => t.startsWith(`${name} `))) if (!now.includes(item)) reasons.push(`${item} removed`);
+    }
+    const shape = list => (token(list, 'takes') ? 'takes a value' : token(list, 'switch') ? 'switch' : token(list, 'count') ? 'count' : 'none');
+    if (shape(old) !== shape(now)) reasons.push(`changed from ${shape(old)} to ${shape(now)}`);
+    if (token(old, 'global') && !token(now, 'global')) reasons.push('no longer global');
+    if (token(old, 'repeatable') && !token(now, 'repeatable')) reasons.push('no longer repeatable');
+    if (value(old, 'position') !== value(now, 'position')) reasons.push(`position changed from ${value(old, 'position')} to ${value(now, 'position')}`);
+  }
+  if (kind === 'schema') {
+    const types = list => list[0] && /^[a-z|]+$/.test(list[0]) && !['required', 'optional', 'secret', 'channel'].includes(list[0]) ? list[0].split('|') : undefined;
+    const oldTypes = types(old);
+    const newTypes = types(now);
+    if (oldTypes && newTypes && oldTypes.some(t => !newTypes.includes(t))) reasons.push(`type changed from ${oldTypes.join('|')} to ${newTypes.join('|')}`);
+    if (old.includes('enabled by default') && now.includes('optional')) reasons.push('tool is no longer enabled by default');
+    for (const [name, narrower] of [['min', (a, b) => b > a], ['min length', (a, b) => b > a], ['min items', (a, b) => b > a],
+      ['max', (a, b) => b < a], ['max length', (a, b) => b < a], ['max items', (a, b) => b < a]]) {
+      const a = numeric(old, name);
+      const b = numeric(now, name);
+      if (b !== undefined && (a === undefined ? true : narrower(a, b))) reasons.push(`${name} narrowed to ${b}`);
+    }
+    if (value(old, 'pattern') !== value(now, 'pattern') && value(now, 'pattern') !== undefined) reasons.push('pattern changed');
+  }
+  return reasons;
+}
+
+/** Classifies the changes between two parsed listings of one interface. */
+export function compareListing(kind, base, head) {
+  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], docChanges: 0 };
+  for (const [item, row] of head) {
+    const old = base?.get(item);
+    if (!old) {
+      result.added.push(item);
+      // Gaps in a listing's first version are its starting debt; only later additions must be documented.
+      if (base && isMissing(row.doc)) result.missingDocs.push(item);
+      const parent = parentOf(kind, item);
+      if (base && parent && base.has(parent) && tokens(row.attributes).includes('required')) {
+        result.breaking.push({ item, reason: kind === 'cli' ? 'new required argument on an existing command' : 'new required field' });
+      }
+      if (base && kind === 'crate') {
+        const [what, path] = item.split(' ');
+        const owner = path?.slice(0, path.lastIndexOf('::'));
+        const ownerRow = owner && [...base.entries()].find(([key]) => key.endsWith(` ${owner}`) && /^(struct|enum|union|trait) /.test(key));
+        if (ownerRow) {
+          const [ownerKey, ownerData] = ownerRow;
+          const exhaustive = !ownerData.attributes.includes('#[non_exhaustive]');
+          if (what === 'field' && exhaustive && ownerData.attributes.includes('{ public fields }')) result.breaking.push({ item, reason: 'new field on a struct that callers can construct' });
+          if (what === 'variant' && exhaustive && ownerKey.startsWith('enum ')) result.breaking.push({ item, reason: 'new variant on an exhaustive enum' });
+          if (what === 'fn' && ownerKey.startsWith('trait ') && row.attributes.startsWith('required ')) result.breaking.push({ item, reason: 'new required trait method' });
+        }
+      }
+      continue;
+    }
+    if (old.line === row.line) continue;
+    const reasons = [];
+    if (old.attributes !== row.attributes) {
+      if (kind === 'crate') reasons.push('signature changed');
+      else reasons.push(...attributeBreaks(kind, old.attributes, row.attributes));
+    }
+    if (old.doc !== row.doc) result.docChanges += 1;
+    if (isMissing(row.doc) && !isMissing(old.doc)) result.missingDocs.push(item);
+    result.changed.push(item);
+    for (const reason of reasons) result.breaking.push({ item, reason });
+  }
+  for (const item of base?.keys() ?? []) {
+    if (head.has(item)) continue;
+    result.removed.push(item);
+    const row = base.get(item);
+    // Removing a hidden alias still breaks scripts that use it, so every removal counts.
+    result.breaking.push({ item, reason: tokens(row.attributes).some(t => t.endsWith('alias')) ? 'alias removed' : 'removed' });
+  }
+  return result;
+}
+
+/** Reads the bump level each changeset in the PR gives each package. */
+export function parseChangesets(texts) {
+  const order = { patch: 1, minor: 2, major: 3 };
+  const bumps = new Map();
+  for (const text of texts) {
+    const front = text.match(/^---\n([\s\S]*?)\n---/);
+    for (const line of front?.[1].split('\n') ?? []) {
+      const match = line.match(/^\s*["']?([^"':]+)["']?\s*:\s*(patch|minor|major)\s*$/);
+      if (match && (order[match[2]] > (order[bumps.get(match[1])] ?? 0))) bumps.set(match[1], match[2]);
+    }
+  }
+  return bumps;
+}
+
+const code = text => `\`${text.replaceAll('`', "'")}\``;
+
+/** A one-paragraph overview of a listing, for the first (baseline) version of a file. */
+export function overview(kind, head) {
+  const items = [...head.keys()];
+  if (kind === 'cli') {
+    const commands = items.filter(item => !/ (--|-[a-zA-Z]$|<)/.test(item) && !head.get(item).attributes.includes('alias'));
+    const groups = new Map();
+    for (const command of commands) {
+      const parts = command.split(' ');
+      if (parts.length < 2) continue;
+      groups.set(parts[1], (groups.get(parts[1]) ?? 0) + (parts.length > 2 ? 1 : 0));
+    }
+    const hidden = commands.filter(command => tokens(head.get(command).attributes).includes('hidden')).length;
+    return `${commands.length} commands${hidden ? ` (${hidden} hidden)` : ''}, ${items.length - commands.length} arguments, flags and aliases. Top-level commands: ${[...groups].map(([name, n]) => (n ? `${name} (${n})` : name)).join(', ')}.`;
+  }
+  if (kind === 'crate') {
+    const counts = new Map();
+    for (const item of items) { const what = item.split(' ')[0]; counts.set(what, (counts.get(what) ?? 0) + 1); }
+    return `Items by kind: ${[...counts].sort((a, b) => b[1] - a[1]).map(([what, n]) => `${what} ${n}`).join(', ')}.`;
+  }
+  if (kind === 'schema') {
+    const tools = items.filter(item => /^tool [^.]+$/.test(item));
+    if (tools.length) return `Tools: ${tools.map(item => `${item.slice(5)}${tokens(head.get(item).attributes).includes('optional') ? ' (optional)' : ''}`).join(', ')}.`;
+    const top = [...new Set(items.map(item => item.split('.')[0]))];
+    return `Top-level entries: ${top.join(', ')}.`;
+  }
+  return '';
+}
+
+/** Renders the PR comment for a set of per-file comparisons. */
+export function renderComment({ reports, changesets, baseline }) {
+  const changed = reports.filter(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);
+  const lines = [MARKER, '## Interface changes', ''];
+  if (!changed.length) {
+    lines.push('No interface listing changed in this PR. No approval is needed.');
+    return lines.join('\n');
+  }
+  const sum = key => changed.reduce((n, r) => n + r.result[key].length, 0);
+  const breaking = changed.flatMap(r => r.result.breaking.map(b => ({ ...b, title: r.surface.title })));
+  const missing = changed.flatMap(r => r.result.missingDocs.map(item => ({ item, title: r.surface.title })));
+  if (baseline) {
+    lines.push(`**Needs your approval.** This PR adds the interface listings for the first time: ${sum('added')} items across ${changed.length} files.`,
+      'There is no earlier listing to compare against, so nothing can be marked breaking. Review the listing files as the new baseline.', '');
+  } else {
+    lines.push(`**Needs your approval.** ${sum('added')} added, ${sum('changed')} changed, ${sum('removed')} removed across ${changed.length} listing${changed.length === 1 ? '' : 's'}.`,
+      breaking.length ? `**${breaking.length} breaking change${breaking.length === 1 ? '' : 's'}.**` : 'No breaking changes detected.', '');
+  }
+  lines.push(`To approve, add the \`${APPROVAL_LABEL}\` label. A later push that changes the listings removes it.`, '');
+
+  const warnings = [];
+  if (missing.length) warnings.push(`${missing.length} new item${missing.length === 1 ? ' has' : 's have'} no documentation. The **Interface docs** check fails until each has help text, a doc comment or a description.`);
+  if (!baseline) {
+    for (const report of changed) {
+      for (const pkg of report.surface.packages) {
+        const bump = changesets.get(pkg);
+        const fixedGroup = ['@agent-wechat/cli', '@agent-wechat/agent-wechat', '@agent-wechat/desktop'];
+        const covered = bump ?? (fixedGroup.includes(pkg) ? fixedGroup.map(p => changesets.get(p)).find(Boolean) : undefined);
+        if (!covered) warnings.push(`${report.surface.title} changed but no changeset names \`${pkg}\`.`);
+        else if (report.result.breaking.length && covered !== 'major') warnings.push(`${report.surface.title} has a breaking change but its changeset is \`${covered}\`, not \`major\`.`);
+      }
+    }
+  }
+  if (warnings.length) lines.push('### Warnings', ...[...new Set(warnings)].map(w => `- ${w}`), '');
+  if (breaking.length) {
+    lines.push('### Breaking changes', ...breaking.slice(0, 60).map(b => `- ${b.title}: ${code(b.item)} — ${b.reason}`));
+    if (breaking.length > 60) lines.push(`- …and ${breaking.length - 60} more`);
+    lines.push('');
+  }
+  if (missing.length) {
+    lines.push('### Missing documentation', ...missing.slice(0, 60).map(m => `- ${m.title}: ${code(m.item)}`));
+    if (missing.length > 60) lines.push(`- …and ${missing.length - 60} more`);
+    lines.push('');
+  }
+  for (const report of changed) {
+    const { result, surface: s, file, head, base } = report;
+    if (report.baseline) {
+      const undocumented = [...head.values()].filter(row => isMissing(row.doc)).length;
+      lines.push(`### ${s.title}`, `New listing ${code(file)}: ${head.size} items${undocumented ? `, ${undocumented} without documentation yet` : ', all documented'}. ${overview(s.kind, head)}`.trim(), '');
+      continue;
+    }
+    lines.push(`### ${s.title}`, `${result.added.length} added, ${result.changed.length} changed${result.docChanges ? ` (${result.docChanges} documentation only or with docs)` : ''}, ${result.removed.length} removed in ${code(file)}.`, '');
+    const diff = [];
+    for (const item of [...result.removed, ...result.changed, ...result.added].sort()) {
+      if (base?.has(item)) diff.push(`- ${base.get(item).line}`);
+      if (head.has(item)) diff.push(`+ ${head.get(item).line}`);
+    }
+    lines.push('```diff', ...diff.slice(0, DIFF_LIMIT), '```');
+    if (diff.length > DIFF_LIMIT) lines.push(`${diff.length - DIFF_LIMIT} more lines; see the Files changed tab.`);
+    lines.push('');
+  }
+  let body = lines.join('\n');
+  if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n…comment truncated; see the Files changed tab.`;
+  return body;
+}
+
+function git(args) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+}
+
+async function headListings(dir = join(root, 'interfaces')) {
+  const files = [];
+  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...await headListings(path));
+    else if (entry.name.endsWith('.txt')) files.push(relative(root, path));
+  }
+  return files;
+}
+
+/** Builds per-file reports comparing `baseRef` with the working tree. */
+export async function review(baseRef) {
+  const mergeBase = git(['merge-base', baseRef, 'HEAD']).trim();
+  const baseFiles = git(['ls-tree', '-r', '--name-only', mergeBase, '--', 'interfaces/']).split('\n').filter(f => f.endsWith('.txt'));
+  const baseline = baseFiles.length === 0;
+  const files = [...new Set([...baseFiles, ...await headListings()])].sort();
+  const reports = [];
+  for (const file of files) {
+    const s = surface(file);
+    const base = baseFiles.includes(file) ? parseListing(git(['show', `${mergeBase}:${file}`])) : undefined;
+    const head = parseListing(await readFile(join(root, file), 'utf8').catch(() => ''));
+    reports.push({ file, surface: s, base, head, baseline: !base, result: compareListing(s.kind, base, head) });
+  }
+  const changesetFiles = git(['diff', '--name-only', '--diff-filter=AM', `${mergeBase}...HEAD`, '--', '.changeset/']).split('\n').filter(f => f.endsWith('.md') && !f.endsWith('README.md'));
+  const changesets = parseChangesets(await Promise.all(changesetFiles.map(f => readFile(join(root, f), 'utf8'))));
+  return { reports, changesets, baseline };
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const argv = process.argv.slice(2);
+  const baseRef = argv[argv.indexOf('--base') + 1];
+  if (!argv.includes('--base') || !baseRef) throw new Error('Usage: review.mjs --base <ref> [--comment] [--fail-on-missing-docs]');
+  const outcome = await review(baseRef);
+  const body = renderComment(outcome);
+  console.log(body);
+  if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${body}\n`);
+  const changed = outcome.reports.some(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);
+  if (argv.includes('--comment')) {
+    await upsertComment({ marker: MARKER, body, createIfMissing: changed }).catch(error => {
+      // Fork PRs get a read-only token; the job summary still carries the report.
+      console.warn(`Could not post the PR comment: ${error.message}`);
+    });
+  }
+  const missing = outcome.reports.flatMap(r => r.result.missingDocs);
+  if (argv.includes('--fail-on-missing-docs') && missing.length) {
+    console.error(`${missing.length} new interface item(s) lack documentation:\n${missing.map(item => `- ${item}`).join('\n')}`);
+    process.exitCode = 1;
+  }
+}
