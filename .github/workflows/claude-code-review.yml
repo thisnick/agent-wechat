@@ -4,26 +4,45 @@ name: Claude Code Review
 # and posts findings as inline comments. Fork PRs are skipped because GitHub
 # withholds secrets from them on a public repository; draft and bot PRs are
 # skipped to save runs.
+#
+# A maintainer can request a review at any time, including a re-review or a
+# review of a fork PR, by commenting a line that starts with `@claude review`.
+# Comment-triggered runs check out the default branch, never the PR's code;
+# the review reads the diff through `gh`.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
-
-concurrency: claude-code-review-${{ github.event.pull_request.number }}
+  issue_comment:
+    types: [created]
 
 jobs:
   review:
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      !github.event.pull_request.draft &&
-      github.event.pull_request.user.type != 'Bot'
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !github.event.pull_request.draft &&
+       github.event.pull_request.user.type != 'Bot') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '@claude review') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency: claude-code-review-${{ github.event.pull_request.number || github.event.issue.number }}
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write # only for the 👀 reaction on a review request
       issues: read
       id-token: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
     steps:
+      - name: Acknowledge review request
+        if: github.event_name == 'issue_comment'
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -32,7 +51,11 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: "https://github.com/anthropics/claude-plugins-official.git"
           plugins: "code-review@claude-plugins-official"
-          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          # A requested review overrides the plugin's skip checks, which would
+          # otherwise stop because Claude has already commented.
+          prompt: >-
+            /code-review:code-review --comment ${{ github.repository }}/pull/${{ env.PR_NUMBER }}
+            ${{ github.event_name == 'issue_comment' && 'A maintainer requested this review with a comment. In step 1, stop only if the pull request is closed; review the current head commit even if Claude has commented on this pull request before. Do not repeat an inline comment that an existing Claude comment already makes for the same lines. If every issue you find is already covered by an earlier Claude comment, post one summary comment saying that the earlier comments still apply, instead of the no-issues message.' || '' }}
           # The inline-comment MCP server only starts when --allowedTools names it.
           claude_args: |
             --model claude-opus-5-5
