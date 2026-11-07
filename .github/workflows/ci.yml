@@ -23,6 +23,9 @@ on:
       - 'scripts/native-release-policy*.mjs'
       - 'scripts/native-release-orchestration*.mjs'
       - 'scripts/native-release-trigger*.mjs'
+      - 'scripts/native-crates*'
+      - 'scripts/native-sync-version*'
+      - '.github/workflows/rust-crates.yml'
       - 'scripts/native-ci-*'
       - 'scripts/native-build-release.test.py'
       - 'scripts/native-release-preflight*.mjs'
@@ -62,7 +65,9 @@ jobs:
               - '.github/workflows/desktop.yml'
             release:
               - 'scripts/native-crates*'
-              - 'scripts/native-sync-version.mjs'
+              - 'scripts/native-sync-version*'
+              - 'packages/rust-crates/**'
+              - 'packages/native-client-rust/**/Cargo.toml'
               - '.github/workflows/rust-crates.yml'
               - '.node-version'
               - '.github/workflows/release.yml'
@@ -107,6 +112,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
+      - run: pnpm install --filter agent-wechat --frozen-lockfile --ignore-scripts
       - run: bash -n scripts/install-ci-npm.sh
       - run: bash scripts/install-ci-npm.sh
       - run: |
@@ -116,7 +122,7 @@ jobs:
           node --test scripts/native-release-policy.test.mjs
           node --test scripts/native-release-orchestration.test.mjs
           node --test scripts/native-release-trigger.test.mjs
-          node --test scripts/native-crates.test.mjs
+          node --test scripts/native-crates*.test.mjs scripts/native-sync-version.test.mjs
           node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
           node scripts/verify-ci-publisher.mjs
 

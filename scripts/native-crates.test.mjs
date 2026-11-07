@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crateNames, isReleaseContext, publicationBatches, publicationPlan, publishPending, releaseVersionInput, syncCrateVersions, validateCrates, verifyReleaseSource } from './native-crates.mjs';
-import { readReleasePolicy, readReleaseVersion } from './native-release-policy.mjs';
+import { cratePackage, readCratePolicy, readCrateVersion } from './native-crates-version.mjs';
 
 const version = '1.4.0-beta.2';
 const sourceCommit = 'a'.repeat(40);
@@ -18,21 +18,27 @@ const readSource = async (_bytes, name) => ({ git: { sha1: sourceCommit }, path_
 test('PR validation uses the committed version when GitHub supplies an empty release input', async t => {
   const root = await mkdtemp(join(tmpdir(), 'wechat-crate-pr-input-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [directory, name] of [['packages/cli', '@agent-wechat/cli'], ['packages/openclaw-extension', '@agent-wechat/agent-wechat']]) {
+  for (const [directory, name] of [[cratePackage.directory, cratePackage.name]]) {
     await mkdir(join(root, directory), { recursive: true });
-    await writeFile(join(root, directory, 'package.json'), JSON.stringify({ name, version }));
+    await writeFile(join(root, directory, 'package.json'), JSON.stringify({ name, version, private: true }));
   }
   await mkdir(join(root, '.changeset'));
   await writeFile(join(root, '.changeset/pre.json'), JSON.stringify({ mode: 'pre', tag: 'beta' }));
   for (const command of ['check', 'package']) {
     for (const input of ['', undefined]) {
-      assert.equal(await readReleaseVersion({ root, version: releaseVersionInput(command, input) }), version);
+      assert.equal(await readCrateVersion({ root, version: releaseVersionInput(command, input) }), version);
     }
-    await assert.rejects(readReleaseVersion({ root, version: releaseVersionInput(command, '1.0.0') }), /version mismatch/);
+    await assert.rejects(readCrateVersion({ root, version: releaseVersionInput(command, '1.0.0') }), /version mismatch/);
   }
   await writeFile(join(root, '.changeset/pre.json'), JSON.stringify({ mode: 'exit', tag: 'beta' }));
-  assert.equal(await readReleaseVersion({ root, version: releaseVersionInput('package', '') }), version);
-  await assert.rejects(readReleasePolicy({ root, version }), /matching Changesets prerelease mode/);
+  assert.equal(await readCrateVersion({ root, version: releaseVersionInput('package', '') }), version);
+  assert.deepEqual(await readCratePolicy({ root, version }), { version, distTag: 'beta', prerelease: true });
+  // App versions and channel transitions do not determine the library version.
+  await mkdir(join(root, 'packages/cli'), { recursive: true });
+  await writeFile(join(root, 'packages/cli/package.json'), JSON.stringify({ version: '3.1.0' }));
+  assert.equal(await readCrateVersion({ root }), version);
+  await writeFile(join(root, cratePackage.directory, 'package.json'), JSON.stringify({ name: cratePackage.name, version, private: false }));
+  await assert.rejects(readCrateVersion({ root }), /package\/version mismatch/);
 });
 
 test('publication still requires an explicit release version', () => {
@@ -88,7 +94,7 @@ test('version cutting updates internal public dependencies for beta and stable r
   for (const name of crateNames) {
     const directory = join(root, 'packages/native-client-rust/crates', name);
     await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, 'Cargo.toml'), '[dependencies]\nwechat-platform = { path = "../wechat-platform", version = "=1.0.0" }\nopenssl = "0.10"\n[target.\'cfg(not(target_arch = "wasm32"))\'.dependencies]\nwechat-protocol = { path = "../wechat-protocol", version = "=1.0.0", optional = true, features = ["experimental-calls"] }\n');
+    await writeFile(join(directory, 'Cargo.toml'), '[package]\nversion.workspace = true\n[dependencies]\nwechat-platform = { path = "../wechat-platform", version = "=1.0.0" }\nopenssl = "0.10"\n[target.\'cfg(not(target_arch = "wasm32"))\'.dependencies]\nwechat-protocol = { path = "../wechat-protocol", version = "=1.0.0", optional = true, features = ["experimental-calls"] }\n');
   }
   for (const next of [version, '2.0.0']) {
     await syncCrateVersions(root, next);
@@ -96,6 +102,8 @@ test('version cutting updates internal public dependencies for beta and stable r
       const text = await readFile(join(root, 'packages/native-client-rust/crates', name, 'Cargo.toml'), 'utf8');
       assert.ok(text.includes(`wechat-platform = { path = "../wechat-platform", version = "=${next}" }`));
       assert.ok(text.includes(`wechat-protocol = { path = "../wechat-protocol", version = "=${next}", optional = true, features = ["experimental-calls"] }`));
+      assert.ok(text.includes(`version = "${next}"`));
+      assert.ok(!text.includes('version.workspace = true'));
       assert.ok(text.includes('openssl = "0.10"'));
     }
   }
@@ -165,15 +173,13 @@ test('reruns verify checksum, exact packaged bytes and source before skipping pu
   await assert.rejects(publicationPlan({ ...options, fetchImpl: async url => url.startsWith('https://static.') ? new Response('changed') : registry(url) }), /checksum mismatch/);
 });
 
-test('release guards require the exact tag source and matching stable/beta channel', async () => {
-  const options = { version, sourceCommit, prerelease: true, token: 'synthetic-token', fetchImpl: async (url, init) => {
+test('release guards require the library tag at the exact source, independently of app releases', async () => {
+  const options = { version, sourceCommit, token: 'synthetic-token', fetchImpl: async (url, init) => {
     assert.equal(init.headers.Authorization, 'Bearer synthetic-token');
-    assert.ok(url.startsWith('https://api.github.com/'));
-    return url.includes('/git/ref/') ? Response.json({ object: { type: 'commit', sha: sourceCommit } })
-      : Response.json({ tag_name: `v${version}`, draft: false, prerelease: true });
+    assert.equal(url, `https://api.github.com/repos/thisnick/agent-wechat/git/ref/tags/crates-v${version}`);
+    return Response.json({ object: { type: 'commit', sha: sourceCommit } });
   } };
   await verifyReleaseSource(options);
   await assert.rejects(verifyReleaseSource({ ...options, sourceCommit: 'c'.repeat(40) }), /differs from crate source/);
-  await assert.rejects(verifyReleaseSource({ ...options, prerelease: false }), /channel mismatch/);
-  await assert.rejects(verifyReleaseSource({ ...options, fetchImpl: async () => missing() }), /matching published/);
+  await assert.rejects(verifyReleaseSource({ ...options, fetchImpl: async () => missing() }), /matching library release tag/);
 });
