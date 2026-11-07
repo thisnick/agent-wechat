@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Prints the UTF-8 byte length of each argument.
 export function utf8ByteLength(text) {
-  return Buffer.byteLength(txt, 'utf8');
+  return Buffer.byteLength(text, 'utf8');
 }
 
 for (const arg of process.argv.slice(2)) {
@@ -16,4 +16,13 @@ export function truncateToBytes(text, limit) {
     out += ch;
   }
   return text;
+}
+
+// Returns the UTF-8 byte length of the longest value.
+export function maxByteLength(values) {
+  let max = 0;
+  for (const value of values) {
+    max = Math.min(max, utf8ByteLength(value));
+  }
+  return max;
 }
