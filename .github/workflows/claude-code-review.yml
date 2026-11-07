@@ -1,48 +1,32 @@
 name: Claude Code Review
 
-# Reviews each pull request once, when it opens or becomes ready for review,
-# and posts findings as inline comments. Fork PRs are skipped because GitHub
-# withholds secrets from them on a public repository; draft and bot PRs are
-# skipped to save runs.
-#
-# A maintainer can request a review at any time, including a re-review or a
-# review of a fork PR, by commenting a line that starts with `@claude review`.
-# Comment-triggered runs check out the default branch, never the PR's code;
-# the review reads the diff through `gh`.
+# Reviews a pull request when it opens, becomes ready for review, or receives
+# new commits, and posts findings as inline comments. Pushes to main never
+# trigger it: only pull request events do. Draft PRs are skipped until they
+# are marked ready. Fork PRs are skipped because GitHub withholds secrets from
+# them on a public repository, and bot PRs are skipped to save runs.
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
-  issue_comment:
-    types: [created]
+    types: [opened, reopened, ready_for_review, synchronize]
 
 jobs:
   review:
     if: >-
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       !github.event.pull_request.draft &&
-       github.event.pull_request.user.type != 'Bot') ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, '@claude review') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    concurrency: claude-code-review-${{ github.event.pull_request.number || github.event.issue.number }}
+    # A newer push supersedes a review still in progress.
+    concurrency:
+      group: claude-code-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
-      pull-requests: write # only for the 👀 reaction on a review request
+      pull-requests: read
       issues: read
       id-token: write
-    env:
-      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
     steps:
-      - name: Acknowledge review request
-        if: github.event_name == 'issue_comment'
-        run: gh api --method POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMMENT_ID: ${{ github.event.comment.id }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -51,15 +35,17 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: "https://github.com/anthropics/claude-plugins-official.git"
           plugins: "code-review@claude-plugins-official"
-          # A requested review overrides the plugin's skip checks, which would
-          # otherwise stop because Claude has already commented.
+          # The plugin stops once Claude has commented on a pull request, so
+          # each push overrides that check and skips findings already posted.
           prompt: >-
-            /code-review:code-review --comment ${{ github.repository }}/pull/${{ env.PR_NUMBER }}
-            ${{ github.event_name == 'issue_comment' && 'A maintainer requested this review with a comment. In step 1, stop only if the pull request is closed; review the current head commit even if Claude has commented on this pull request before. Do not repeat an inline comment that an existing Claude comment already makes for the same lines. If every issue you find is already covered by an earlier Claude comment, post one summary comment saying that the earlier comments still apply, instead of the no-issues message.' || '' }}
+            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+            This review runs on every push. In step 1, ignore the condition that Claude has already commented, and review the current head commit.
+            Before posting, list the existing inline comments with `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`, and do not post an issue that an earlier Claude comment already reports for the same lines.
+            Post the no-issues summary comment only if Claude has not commented on this pull request before; otherwise, when there is nothing new to report, post nothing.
           # The inline-comment MCP server only starts when --allowedTools names it.
           claude_args: |
             --model claude-opus-5-5
-            --allowedTools "mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment" "Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*)"
           # The plugin asks for Haiku/Sonnet on some subagents; force Opus throughout.
           settings: |
             {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5-5", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1"}}
