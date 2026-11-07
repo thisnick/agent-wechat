@@ -62,6 +62,6 @@ pub trait DirectMediaHost {
 }
 
 pub use conference::{
-    run_conference_media, ConferenceMediaHost, ConferenceMediaOptions, ConferenceMediaReport,
-    ConferenceReceiveTrack, ConferenceRoster,
+    run_conference_media, ConferenceMediaHost, ConferenceMediaInputDiagnostics,
+    ConferenceMediaOptions, ConferenceMediaReport, ConferenceReceiveTrack, ConferenceRoster,
 };

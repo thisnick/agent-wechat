@@ -69,3 +69,18 @@ test("source format changes are reported and replacing participant association c
   all(mixer.render(40)!.pcm, 0);
   assert.throws(() => mixer.synchronize({ sendTrack, receiveTracks: [{ ...track(7), format: { ...format, sampleRate: 24000 } }] }), /format/);
 });
+
+
+test("input diagnostics distinguish a paused sender clock from mute and missing tracks without changing playout", () => {
+  const mixer = new CallPcmMixer(format); const tracks = { sendTrack, receiveTracks: [track(7, 1, "a")] };
+  mixer.synchronize(tracks, [member()]); mixer.push(frame(7, 1000), 0); all(mixer.render(40)!.pcm, 1000);
+  for (let now = 60; now <= 5000; now += 20) mixer.render(now);
+  mixer.push(frame(7, 2000, 320, 1, 1), 5005); all(mixer.render(5020)!.pcm, 0);
+  const snapshot = mixer.diagnostics();
+  assert.equal(snapshot.receivedFrames, 2); assert.equal(snapshot.receivedNonzeroFrames, 2);
+  assert.equal(snapshot.acceptedFrames, 1); assert.equal(snapshot.lateFrames, 1); assert.ok(snapshot.maxBehindMs > 4000);
+  mixer.synchronize(tracks, [member(false)]); mixer.push(frame(7, 3000, 80000, 1, 2), 5025);
+  mixer.push(frame(8, 3000, 80000, 1, 2), 5025);
+  assert.equal(snapshot.mutedFrames, 0); assert.equal(mixer.diagnostics().mutedFrames, 1);
+  assert.equal(mixer.diagnostics().missingTrackFrames, 1);
+});

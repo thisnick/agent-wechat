@@ -45,6 +45,7 @@ export type CallVoiceContext = {
   conference?: CallConferenceContext;
   connectedPeer?: () => string | undefined;
   logAudioTrace?: (line: string) => void;
+  logVoiceEvent?: (line: string) => void;
   warnProviderDiagnostic?: () => void;
   /** Fixed diagnostics with counts/digests only, never names, IDs or payloads. */
   logCallContext?: (line: string) => void;
@@ -351,6 +352,9 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
           onReady: () => { if (!closed && !signal.aborted) { ready = true; resolveReady(); } }, onClose: (reason?: unknown) => fail(typeof reason === "string" && /^[a-z_-]{1,32}$/.test(reason) ? `provider-closed:${reason}` : "provider-closed"),
           onError: () => { try { context.warnProviderDiagnostic?.(); context.logAudioTrace?.("[wechat-call-audio] provider diagnostic; awaiting provider readiness or terminal close"); } catch {} },
           onEvent: (event: { direction: string; type: string }) => {
+            if (!closed && !signal.aborted && ["input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped", "conversation.item.input_audio_transcription.completed", "response.created", "response.done", "session.continuity.reset"].includes(event.type)) {
+              try { context.logVoiceEvent?.(`direction=${event.direction === "client" ? "client" : "server"} event=${event.type}`); } catch {}
+            }
             if (event.direction !== "client" || event.type !== "session.continuity.reset" || closed || signal.aborted) return;
             ready = false; providerEpoch++; providerAbort.abort(); providerAbort = new AbortController();
             consults.clear(); forced?.close(); if (alwaysConsult) forced = createForced(scope);

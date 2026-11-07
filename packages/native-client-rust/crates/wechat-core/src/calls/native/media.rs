@@ -95,6 +95,19 @@ pub(super) fn run(
 }
 
 impl ConferenceMediaHost for Host<'_> {
+    fn input_diagnostics(
+        &self,
+        diagnostics: wechat_calls::native_media::ConferenceMediaInputDiagnostics,
+    ) {
+        use std::io::Write as _;
+        if let Ok(json) = serde_json::to_string(&diagnostics) {
+            let trace = nonzero64(self.worker.identity.call_id().as_bytes());
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "[wechat-call-media] trace={trace:016x} {json}"
+            );
+        }
+    }
     fn receive_tracks(&self, tracks: Vec<ConferenceReceiveTrack>) -> Result<()> {
         let (sink, runtime) = self.owner.context("Call owner unavailable")?;
         runtime.block_on(

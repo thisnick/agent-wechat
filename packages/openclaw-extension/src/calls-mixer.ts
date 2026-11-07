@@ -14,6 +14,9 @@ export class CallPcmMixer {
   private readonly sources = new Map<number, Source>();
   private anchor?: { at: number; offset: number };
   private cursor?: number;
+  private readonly counters = { receivedFrames: 0, receivedNonzeroFrames: 0, acceptedFrames: 0,
+    lateFrames: 0, futureFrames: 0, mutedFrames: 0, missingTrackFrames: 0, staleFrames: 0, maxBehindMs: 0, maxAheadMs: 0 };
+  diagnostics() { return { ...this.counters, sources: this.sources.size, mutedSources: [...this.sources.values()].filter(source => source.muted).length }; }
   private readonly slotSamples: number;
   private readonly format: CallAudioFormat;
   constructor(format: CallAudioFormat) {
@@ -44,24 +47,34 @@ export class CallPcmMixer {
     for (const id of this.sources.keys()) if (!current.has(id)) this.sources.delete(id);
   }
   push(frame: NativeCallMediaFrame, now: number): void {
+    this.counters.receivedFrames++;
     const source = this.sources.get(frame.trackId);
-    if (!source || source.track.generation !== frame.generation || source.muted) return;
+    if (!source || source.track.generation !== frame.generation) { this.counters.missingTrackFrames++; return; }
+    if (source.muted) { this.counters.mutedFrames++; return; }
     if (frame.payload.byteLength % 2 || frame.payload.byteLength > 65536 || !frame.payload.byteLength) throw Error("Invalid conference PCM chunk");
+    const view = new DataView(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
+    for (let at = 0; at < frame.payload.byteLength; at += 2) if (Math.abs(view.getInt16(at, true)) > 8) { this.counters.receivedNonzeroFrames++; break; }
     const offset = frame.sampleOffset ?? source.nextOffset;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isFinite(now)) throw Error("Invalid conference PCM clock");
     if (frame.sequence !== undefined) {
       if (!Number.isSafeInteger(frame.sequence) || frame.sequence < 0) throw Error("Invalid conference PCM sequence");
-      if (source.sequence !== undefined && frame.sequence <= source.sequence) return;
+      if (source.sequence !== undefined && frame.sequence <= source.sequence) { this.counters.staleFrames++; return; }
       source.sequence = frame.sequence;
     }
     const count = frame.payload.byteLength / 2;
     source.nextOffset = offset + count;
     if (!Number.isSafeInteger(source.nextOffset)) throw Error("Invalid conference PCM clock");
     if (!this.anchor) this.anchor = { at: now, offset: Math.floor(offset / this.slotSamples) * this.slotSamples };
-    if (this.cursor !== undefined && offset + count <= this.cursor) return;
+    if (this.cursor !== undefined) {
+      const skewMs = (offset - this.cursor) * 1000 / this.format.sampleRate;
+      this.counters.maxBehindMs = Math.max(this.counters.maxBehindMs, Math.round(-skewMs));
+      this.counters.maxAheadMs = Math.max(this.counters.maxAheadMs, Math.round(skewMs));
+      if (offset + count <= this.cursor) { this.counters.lateFrames++; return; }
+    }
     // A remote source cannot make the model accumulate an arbitrary future backlog.
     const horizon = (this.cursor ?? this.anchor.offset) + this.format.sampleRate * 2;
-    if (offset > horizon) return;
+    if (offset > horizon) { this.counters.futureFrames++; return; }
+    this.counters.acceptedFrames++;
     const maxBytes = this.format.sampleRate * 4;
     const skip = Math.max(0, frame.payload.byteLength - maxBytes);
     const pcm = Buffer.from(frame.payload.subarray(skip));
