@@ -766,6 +766,8 @@ export async function pinningAcceptance({
       "touch-sized conversation selection opens and focuses the composer",
     );
     await click("document.querySelector('button[aria-label=\"Back to conversations\"]')");
+    // Back can be a history traversal, which finishes asynchronously.
+    await until("return !document.querySelector('.shell').classList.contains('mobile-chat')", Boolean);
     assert.equal(
       await script(
         `return getComputedStyle(${row(

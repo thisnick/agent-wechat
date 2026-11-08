@@ -162,9 +162,10 @@ function App() {
           return;
         }
         setConnection(value);
-        // A reload keeps the address. Once a hub is open again, the hub picker is not a
-        // place to resume: go to that hub's home instead.
-        if (value && parseRoute(router.hash())?.name === "servers")
+        // A reload keeps the address. Once a hub is open again, neither the hub picker nor
+        // a page of the hub this window left is a place to resume: go to this hub's home.
+        const current = value ? parseRoute(router.hash()) : null;
+        if (value && current && (current.name === "servers" || ("server" in current && current.server !== value.serverId)))
           router.replace(homeRoute(value, value.session.snapshot().accounts));
       })
       .catch((e) => {
@@ -1179,7 +1180,8 @@ function Chats({
     flushSync(() => {
       setInChat("");
       void session.select(id);
-      router[mode](chatRoute(id));
+      // The details panel stays open while switching conversations, as it did before routes.
+      router[mode](view.name === "info" ? { name: "info", ...here, thread: id } : chatRoute(id));
     });
     focusMessage();
   }
