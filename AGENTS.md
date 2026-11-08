@@ -35,6 +35,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Give every new command, flag, public item, tool parameter and config key help text, a doc comment or a description. A new `MISSING` row fails the Interface docs check.
 - Change the account or registry schema only through a new migration and schema version. Never edit an existing migration.
 - In the PR description, name the interface changes and anything the review comment flags as breaking.
+- UI changes are reviewed visually: CI uploads every scene to Argos, and the owner approves the changes there. Add or update a scene in `packages/client-ui/scenes/` when you add or change a screen. Never approve Argos changes yourself.
 - A PR that changes `interfaces/` needs the owner's `interfaces-approved` label. Never add that label yourself, and never merge while the Interface approval check is pending or failing.
 
 ## Documentation site

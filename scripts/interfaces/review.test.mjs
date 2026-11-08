@@ -323,3 +323,9 @@ test('HTTP rows with several SDK types and longer untyped markers are read corre
   const added = compare('http', before, [...before, 'route GET /v1/new | scope read, response untyped JSON or SSE | New']);
   assert.deepEqual(added.gaps.map(g => g.item), ['route GET /v1/new']);
 });
+
+test('removed scenes are coverage warnings, not breaking changes', () => {
+  const scenes = compare('scenes', ['scene chat/direct | route /{server}/{account}/chats/{thread}, viewports desktop | A chat'], []);
+  assert.deepEqual(scenes.breaking, []);
+  assert.deepEqual(scenes.notes.map(n => n.reason), ['scene removed: Argos no longer captures this screen']);
+});

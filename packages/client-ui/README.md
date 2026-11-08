@@ -437,6 +437,36 @@ Group details load all roster pages.
 | Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                   |
 | Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                         |
 
+## Visual review scenes
+
+`scenes/` holds scripted scenes of the UI for visual review: a signed-out account's
+QR code, the account and chat lists, a direct and a group chat, the photo viewer,
+conversation details, contacts, the new chat dialog, settings and the hub picker.
+Each scene runs against a fresh simulator hub with a fixed account, a simulator
+clock that never advances on its own, a fixed browser clock, locale and time zone,
+frozen animations and no network beyond loopback. Screenshots are named
+`<scene>@<viewport>`; `desktop` is 1280x800 and `narrow` is 390x844.
+
+```sh
+pnpm --filter @agent-wechat/client-ui scenes                  # run every scene
+pnpm --filter @agent-wechat/client-ui scenes --grep chat-list
+pnpm --filter @agent-wechat/client-ui scenes:list             # rewrite interfaces/ui/scenes.txt
+```
+
+The run prints its duration and leaves the PNGs in `packages/client-ui/.scenes/screenshots/`
+(gitignored). Nothing is uploaded outside CI. The first run builds the simulator
+(`wx-dev`, or set `WX_DEV_BINARY`) and the SDK, and needs Playwright's Chromium for the
+pinned `@playwright/test`: `npx playwright install chromium`. A copy already in
+`~/.cache/ms-playwright` is used when its revision matches. Install `fonts-noto-cjk` and
+`fonts-noto-color-emoji` to render text as CI does.
+
+In CI, `.github/workflows/ui-screenshots.yml` uploads the screenshots to Argos with
+GitHub Actions OIDC. Argos compares a pull request with the latest `main` build and
+adds a check the owner approves; builds on `main` become the baselines. To add a
+scene, add it to `scenes/scenes.mjs` and run `scenes:list`. Wait for what the screen
+needs by role and text, never by sleeping, and mask what is random (the QR code, the
+hub address). The tests fail when a route has no scene.
+
 ## Verification
 
 ```sh
