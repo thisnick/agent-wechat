@@ -1,0 +1,275 @@
+# Calls WebSocket protocol. Generated from the message types and socket table in crates/wechat-api; do not edit.
+# Run `pnpm interfaces` after changing the call messages or sockets. Format: ITEM | ATTRIBUTES | DOC
+# `client` messages are sent to the daemon, `server` messages come from it. Message items are TYPE[tag], the value of `type`; nested fields use dots and `[]` marks array items.
+# `when kind x` limits a field to one variant of a nested message. `nullable` means JSON null is allowed. Server rows describe what the daemon sends, client rows what it accepts.
+client CallClientHello[call.hello] | message, socket control, rejects unknown fields | Announce the protocol versions this client supports. Send it within five seconds of opening the control socket, before any command.
+client CallClientHello[call.hello].supportedProtocolVersions | array of integer, required, items min 0, items format uint32 | One to eight distinct positive version numbers. The daemon speaks a single version and answers `protocol.error` when the list does not include it.
+client CallCommand[call.answer] | message, socket control, rejects unknown fields | Answer the incoming call. The first client to answer owns the call; others get `already_claimed`.
+client CallCommand[call.answer].callId | string, required | ID of the offered call.
+client CallCommand[call.answer].expectedRevision | integer, required, min 0, format uint32 | The latest offer `revision` you received. A stale revision is rejected.
+client CallCommand[call.answer].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.cancel] | message, socket control, rejects unknown fields | Cancel your outgoing call before the other side picks up.
+client CallCommand[call.cancel].callId | string, required | ID of your outgoing call.
+client CallCommand[call.cancel].expectedRevision | integer, required, min 0, format uint32 | The latest call `revision` you received. A stale revision is rejected.
+client CallCommand[call.cancel].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.clear_audio] | message, socket control, rejects unknown fields | Discard queued outgoing audio, for example to interrupt a reply. This starts a new send generation, announced by `track.updated`.
+client CallCommand[call.clear_audio].callId | string, required | ID of the call.
+client CallCommand[call.clear_audio].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.dial] | message, socket control, rejects unknown fields | Start an outgoing call. The socket becomes the call's owner.
+client CallCommand[call.dial].callType | string, required, values voice|video | Only voice calls are supported.
+client CallCommand[call.dial].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.dial].target | object, required | Who to call.
+client CallCommand[call.dial].target.contactId | string, required, when kind direct | The contact to call. A group ID is not accepted.
+client CallCommand[call.dial].target.groupId | string, required, when kind conference | The group to call, whose ID ends in `@chatroom`.
+client CallCommand[call.dial].target.invitees | array of string, required, when kind conference | Contacts to invite: between 1 and 100.
+client CallCommand[call.dial].target.kind | string, required, values direct|conference | direct: A direct call with one contact; conference: A new conference call in a group
+client CallCommand[call.hangup] | message, socket control, rejects unknown fields | End a call after answering or connecting. In a conference this leaves the call without ending it for the others.
+client CallCommand[call.hangup].callId | string, required | ID of the call.
+client CallCommand[call.hangup].expectedRevision | integer, required, min 0, format uint32 | The latest call `revision` you received. A stale revision is rejected.
+client CallCommand[call.hangup].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.invite] | message, socket control, rejects unknown fields | Invite more contacts into a connected conference call you own. Results arrive as `call.invitation_result`.
+client CallCommand[call.invite].callId | string, required | ID of the conference call.
+client CallCommand[call.invite].contactIds | array of string, required | Contacts to invite: between 1 and 100.
+client CallCommand[call.invite].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.join] | message, socket control, rejects unknown fields | Join a conference call from one of the listed invitations. The socket becomes the call's owner, as with `call.dial`.
+client CallCommand[call.join].invitationId | string, required | The `invitationId` of an entry in `conferenceInvitations`.
+client CallCommand[call.join].invitationRevision | integer, required, min 0, format uint32 | The `revision` of that entry. A stale or used invitation fails with `offer_expired`.
+client CallCommand[call.join].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.mute] | message, socket control, rejects unknown fields | Mute or unmute your outgoing audio. This also clears queued audio and starts a new send generation, announced by `track.updated`.
+client CallCommand[call.mute].callId | string, required | ID of the call.
+client CallCommand[call.mute].muted | boolean, required | True to mute, false to unmute.
+client CallCommand[call.mute].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.ready] | message, socket control, rejects unknown fields | Advertise or withdraw readiness to handle call audio. A new connection is passive until it advertises readiness.
+client CallCommand[call.ready].format | object, required, rejects unknown fields | The PCM format you will send and receive. It must match the daemon's audio format.
+client CallCommand[call.ready].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+client CallCommand[call.ready].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+client CallCommand[call.ready].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+client CallCommand[call.ready].ready | boolean, required | True to advertise readiness, false to withdraw it.
+client CallCommand[call.ready].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.ready].scope | object, nullable | Which calls readiness covers. Omitted means all. Ignored when withdrawing readiness.
+client CallCommand[call.ready].scope.callId | string, required, when kind offer | ID of the pending incoming call.
+client CallCommand[call.ready].scope.expectedRevision | integer, required, min 0, format uint32, when kind offer | The offer revision you expect; a different revision is rejected.
+client CallCommand[call.ready].scope.kind | string, required, values all|outgoing|offer | all: Incoming and outgoing calls; outgoing: Outgoing calls only; offer: One pending incoming call
+client CallCommand[call.reject] | message, socket control, rejects unknown fields | Reject the incoming call.
+client CallCommand[call.reject].callId | string, required | ID of the offered call.
+client CallCommand[call.reject].expectedRevision | integer, required, min 0, format uint32 | The latest offer `revision` you received. A stale revision is rejected.
+client CallCommand[call.reject].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallMediaCommand[audio.chunk] | message, socket media, rejects unknown fields | A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.
+client CallMediaCommand[audio.chunk].generation | integer, required, min 0, format uint32 | The track generation. Chunks for an older generation are discarded.
+client CallMediaCommand[audio.chunk].pcmBase64 | string, required | PCM16 little-endian samples as padded base64. A chunk you send is whole samples, at most 65,536 bytes once decoded.
+client CallMediaCommand[audio.chunk].sampleOffset | integer, nullable, min 0, format uint64 | Position of the chunk in per-channel samples on the shared call timeline. The daemon sets it on chunks it sends; you must not send it.
+client CallMediaCommand[audio.chunk].sequence | integer, nullable, min 0, format uint64 | Order of the chunk within its source. The daemon sets it on chunks it sends; you must not send it.
+client CallMediaCommand[audio.chunk].trackId | integer, required, min 0, format uint32 | The track the audio belongs to.
+client CallMediaCommand[audio.start] | message, socket media, rejects unknown fields | Start sending audio on your track for a generation. Send it before the first chunk, and again after each new generation.
+client CallMediaCommand[audio.start].generation | integer, required, min 0, format uint32 | The generation to start.
+client CallMediaCommand[audio.start].trackId | integer, required, min 0, format uint32 | The send track's ID.
+client CallMediaCommand[media.attach] | message, socket media, rejects unknown fields | Attach the socket to a call you own. Send it first, within five seconds of connecting; the daemon answers `media.ready`.
+client CallMediaCommand[media.attach].clientId | string, required | The `clientId` from the control socket's `hello`.
+client CallMediaCommand[media.attach].ownerToken | string, required | The secret `ownerToken` from the `command.result` that claimed the call. Do not log it.
+client CallMediaCommand[media.attach].supportedProtocolVersions | array of integer, required, items min 0, items format uint32 | The protocol versions you support.
+server CallEvent[call.control] | message, socket control | The other party of a direct call changed a control, such as muting their microphone. It needs no reply.
+server CallEvent[call.control].callId | string, required | ID of the direct call.
+server CallEvent[call.control].control | object, required | The control and its new value.
+server CallEvent[call.control].control.kind | string, required, values microphone | microphone: The participant's microphone
+server CallEvent[call.control].control.muted | boolean, required | True when the microphone is muted.
+server CallEvent[call.control].participantId | string, required | The contact whose control changed.
+server CallEvent[call.error] | message, sockets control|media | A failure that is not tied to a command, such as an invalid message or a missing permission. The daemon then closes the socket, except for `outcome_unknown`, which follows `hello` and leaves it open.
+server CallEvent[call.error].code | string, required, values invalid_request|busy|already_claimed|offer_expired|not_owner|unsupported|media_not_ready|outcome_unknown|capacity|stale|forbidden|closed | What went wrong.
+server CallEvent[call.invitation_result] | message, socket control | The outcome of each invited contact for a create or invite command, sent to the call's owner.
+server CallEvent[call.invitation_result].callId | string, required | ID of the conference call.
+server CallEvent[call.invitation_result].requestId | string, required | The `requestId` of the create or invite command.
+server CallEvent[call.invitation_result].results | array of object, required | One result per invited contact.
+server CallEvent[call.invitation_result].results[] | object | The outcome of inviting one contact. It does not mean the contact joined.
+server CallEvent[call.invitation_result].results[].contactId | string, required | The contact this result is for.
+server CallEvent[call.invitation_result].results[].serviceCode | integer, nullable, min 0, format uint32 | The code the service returned. Omitted when unavailable.
+server CallEvent[call.invitation_result].results[].status | string, required, values submitted|rejected|unknown|uncertain | What happened to the invitation.
+server CallEvent[call.invitation_result].results[].verificationRequired | boolean, required | True when the service asked for a verification step. The event carries no verification link.
+server CallEvent[call.offered] | message, socket control | An incoming call that can be answered or rejected now.
+server CallEvent[call.offered].offer | object, required | The offer. Send its `revision` in `call.answer` or `call.reject`.
+server CallEvent[call.offered].offer.callId | string, required | ID of the offered call.
+server CallEvent[call.offered].offer.callType | string, required, values voice|video | Whether the call is voice or video.
+server CallEvent[call.offered].offer.callerId | string, required | Contact ID of the caller.
+server CallEvent[call.offered].offer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+server CallEvent[call.offered].offer.revision | integer, required, min 0, format uint32 | Increases when the offer changes. Send the latest value as `expectedRevision` when answering or rejecting.
+server CallEvent[call.pending] | message, socket control | An incoming call that cannot be answered yet, or null when none is pending.
+server CallEvent[call.pending].offer | object, required, nullable | The pending call, or null to clear it.
+server CallEvent[call.pending].offer.callId | string, required | ID of the incoming call.
+server CallEvent[call.pending].offer.callType | string, required, values voice|video | Whether the call is voice or video.
+server CallEvent[call.pending].offer.callerId | string, required | Contact ID of the caller.
+server CallEvent[call.pending].offer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+server CallEvent[call.pending].offer.phase | string, required, values waiting_for_ready|preparing | What the call is waiting for.
+server CallEvent[call.pending].offer.revision | integer, required, min 0, format uint32 | Increases when the offer changes.
+server CallEvent[call.state] | message, socket control | The call changed. Sent to every client of the same account.
+server CallEvent[call.state].call | object, required | The call as it is now.
+server CallEvent[call.state].call.callId | string, required | ID of the call.
+server CallEvent[call.state].call.callType | string, required, values voice|video | Whether the call is voice or video.
+server CallEvent[call.state].call.controls | array of object | The latest controls reported by the other party of a direct call, also given to a newly connected observer. Omitted until one is reported.
+server CallEvent[call.state].call.controls[] | object | A control reported by one participant.
+server CallEvent[call.state].call.controls[].control | object, required | The control and its value.
+server CallEvent[call.state].call.controls[].control.kind | string, required, values microphone | microphone: The participant's microphone
+server CallEvent[call.state].call.controls[].control.muted | boolean, required | True when the microphone is muted.
+server CallEvent[call.state].call.controls[].participantId | string, required | The participant the control belongs to. In a direct call this is the contact ID.
+server CallEvent[call.state].call.direction | string, required, values incoming|outgoing | Whether this account placed the call or received it.
+server CallEvent[call.state].call.groupId | string, nullable | The group of a conference call. Omitted for a direct call.
+server CallEvent[call.state].call.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+server CallEvent[call.state].call.ownedByThisClient | boolean, required | True when this connection owns the call. Always false in HTTP snapshots.
+server CallEvent[call.state].call.participants | array of object | The latest conference roster. Omitted for a direct call.
+server CallEvent[call.state].call.participants[] | object | One participant in a conference call.
+server CallEvent[call.state].call.participants[].contactId | string, required | Contact ID of the participant.
+server CallEvent[call.state].call.participants[].membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
+server CallEvent[call.state].call.participants[].microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
+server CallEvent[call.state].call.participants[].participantId | string, required | ID of the participant within this call. It is not a contact ID; use it to match audio tracks to participants.
+server CallEvent[call.state].call.participants[].status | object, nullable | Signaling progress, separate from membership. Omitted until reported.
+server CallEvent[call.state].call.participants[].status.code | integer, required, min 0, format uint32 | The status number the service reported. Keep it for codes `kind` does not name.
+server CallEvent[call.state].call.participants[].status.kind | string, required, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | What the code means.
+server CallEvent[call.state].call.revision | integer, required, min 0, format uint32 | Increases each time the call changes. Send the latest value as `expectedRevision`.
+server CallEvent[call.state].call.state | string, required, values offered|dialing|ringing|connecting|connected|ending|ended|uncertain | Where the call is in its life.
+server CallEvent[calls.availability] | message, socket control | Whether this account is in a call changed.
+server CallEvent[calls.availability].availability | object, required | The new availability.
+server CallEvent[calls.availability].availability.busy | boolean, required | True while this account has a call, including one whose outcome is unresolved, so a new call cannot start.
+server CallEvent[calls.availability].availability.ownedByThisClient | boolean, required | True when this connection owns that call.
+server CallEvent[command.result] | message, socket control | The result of a command, matched to it by `requestId`. Acceptance starts the operation; it does not mean the call connected.
+server CallEvent[command.result].callId | string, required, nullable | The call the command claimed. Null unless it was a dial, answer or join that succeeded.
+server CallEvent[command.result].code | string, required, nullable, values invalid_request|busy|already_claimed|offer_expired|not_owner|unsupported|media_not_ready|outcome_unknown|capacity|stale|forbidden|closed | Why the command failed. Null unless `status` is `error`.
+server CallEvent[command.result].ownerToken | string, required, nullable | Secret token for `media.attach` on the claimed call. Null unless a call was claimed. Do not log it.
+server CallEvent[command.result].requestId | string, required | The `requestId` of the command.
+server CallEvent[command.result].status | string, required, values accepted|replayed|error | Whether the command was accepted, repeated or rejected.
+server CallEvent[conference.invitations] | message, socket control | Replaces the list of conference calls this account can join. An empty list clears it.
+server CallEvent[conference.invitations].invitations | array of object, required | The current invitations.
+server CallEvent[conference.invitations].invitations[] | object | A conference call this account can join. It carries no room credentials.
+server CallEvent[conference.invitations].invitations[].callerId | string, required | Contact ID of the caller.
+server CallEvent[conference.invitations].invitations[].groupId | string, required | The group the conference call is in.
+server CallEvent[conference.invitations].invitations[].invitationId | string, required | Opaque ID for this account. Send it in `call.join`.
+server CallEvent[conference.invitations].invitations[].revision | integer, required, min 0, format uint32 | Revision of the invitation. Send it in `call.join` exactly as listed.
+server CallEvent[hello] | message, socket control | The first event on the control socket: this connection's ID and the current calling state. Check `protocolVersion` before sending commands.
+server CallEvent[hello].audioFormat | object, required | The PCM format used for call audio.
+server CallEvent[hello].audioFormat.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[hello].audioFormat.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[hello].audioFormat.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[hello].availability | object, required | Whether this account is in a call.
+server CallEvent[hello].availability.busy | boolean, required | True while this account has a call, including one whose outcome is unresolved, so a new call cannot start.
+server CallEvent[hello].availability.ownedByThisClient | boolean, required | True when this connection owns that call.
+server CallEvent[hello].capabilities | object, required | Calling operations that are available.
+server CallEvent[hello].capabilities.conferenceAudio | boolean | Audio in conference calls is available.
+server CallEvent[hello].capabilities.conferenceCreate | boolean | Starting a conference call in a group is available.
+server CallEvent[hello].capabilities.conferenceInvite | boolean | Inviting more contacts into a connected conference call is available.
+server CallEvent[hello].capabilities.conferenceJoin | boolean | Joining a conference call from an invitation is available.
+server CallEvent[hello].capabilities.conferenceVideo | boolean | Video in conference calls is available. This version never sets it.
+server CallEvent[hello].capabilities.directAudio | boolean | Direct voice calls with one contact are available.
+server CallEvent[hello].capabilities.directVideo | boolean | Direct video calls are available. This version never sets it.
+server CallEvent[hello].clientId | string, required | ID of this connection. Send it as `clientId` in `media.attach`.
+server CallEvent[hello].conferenceInvitations | array of object, required | Conference calls this account can join.
+server CallEvent[hello].conferenceInvitations[] | object | A conference call this account can join. It carries no room credentials.
+server CallEvent[hello].conferenceInvitations[].callerId | string, required | Contact ID of the caller.
+server CallEvent[hello].conferenceInvitations[].groupId | string, required | The group the conference call is in.
+server CallEvent[hello].conferenceInvitations[].invitationId | string, required | Opaque ID for this account. Send it in `call.join`.
+server CallEvent[hello].conferenceInvitations[].revision | integer, required, min 0, format uint32 | Revision of the invitation. Send it in `call.join` exactly as listed.
+server CallEvent[hello].currentCall | object, required, nullable | The active call, or null.
+server CallEvent[hello].currentCall.callId | string, required | ID of the call.
+server CallEvent[hello].currentCall.callType | string, required, values voice|video | Whether the call is voice or video.
+server CallEvent[hello].currentCall.controls | array of object | The latest controls reported by the other party of a direct call, also given to a newly connected observer. Omitted until one is reported.
+server CallEvent[hello].currentCall.controls[] | object | A control reported by one participant.
+server CallEvent[hello].currentCall.controls[].control | object, required | The control and its value.
+server CallEvent[hello].currentCall.controls[].control.kind | string, required, values microphone | microphone: The participant's microphone
+server CallEvent[hello].currentCall.controls[].control.muted | boolean, required | True when the microphone is muted.
+server CallEvent[hello].currentCall.controls[].participantId | string, required | The participant the control belongs to. In a direct call this is the contact ID.
+server CallEvent[hello].currentCall.direction | string, required, values incoming|outgoing | Whether this account placed the call or received it.
+server CallEvent[hello].currentCall.groupId | string, nullable | The group of a conference call. Omitted for a direct call.
+server CallEvent[hello].currentCall.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+server CallEvent[hello].currentCall.ownedByThisClient | boolean, required | True when this connection owns the call. Always false in HTTP snapshots.
+server CallEvent[hello].currentCall.participants | array of object | The latest conference roster. Omitted for a direct call.
+server CallEvent[hello].currentCall.participants[] | object | One participant in a conference call.
+server CallEvent[hello].currentCall.participants[].contactId | string, required | Contact ID of the participant.
+server CallEvent[hello].currentCall.participants[].membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
+server CallEvent[hello].currentCall.participants[].microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
+server CallEvent[hello].currentCall.participants[].participantId | string, required | ID of the participant within this call. It is not a contact ID; use it to match audio tracks to participants.
+server CallEvent[hello].currentCall.participants[].status | object, nullable | Signaling progress, separate from membership. Omitted until reported.
+server CallEvent[hello].currentCall.participants[].status.code | integer, required, min 0, format uint32 | The status number the service reported. Keep it for codes `kind` does not name.
+server CallEvent[hello].currentCall.participants[].status.kind | string, required, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | What the code means.
+server CallEvent[hello].currentCall.revision | integer, required, min 0, format uint32 | Increases each time the call changes. Send the latest value as `expectedRevision`.
+server CallEvent[hello].currentCall.state | string, required, values offered|dialing|ringing|connecting|connected|ending|ended|uncertain | Where the call is in its life.
+server CallEvent[hello].currentOffer | object, required, nullable | The incoming call that can be answered now, or null.
+server CallEvent[hello].currentOffer.callId | string, required | ID of the offered call.
+server CallEvent[hello].currentOffer.callType | string, required, values voice|video | Whether the call is voice or video.
+server CallEvent[hello].currentOffer.callerId | string, required | Contact ID of the caller.
+server CallEvent[hello].currentOffer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+server CallEvent[hello].currentOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes. Send the latest value as `expectedRevision` when answering or rejecting.
+server CallEvent[hello].currentPendingOffer | object, required, nullable | An incoming call that cannot be answered yet, or null.
+server CallEvent[hello].currentPendingOffer.callId | string, required | ID of the incoming call.
+server CallEvent[hello].currentPendingOffer.callType | string, required, values voice|video | Whether the call is voice or video.
+server CallEvent[hello].currentPendingOffer.callerId | string, required | Contact ID of the caller.
+server CallEvent[hello].currentPendingOffer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+server CallEvent[hello].currentPendingOffer.phase | string, required, values waiting_for_ready|preparing | What the call is waiting for.
+server CallEvent[hello].currentPendingOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes.
+server CallEvent[hello].protocolVersion | integer, required, min 0, format uint32 | The protocol version the daemon speaks on this socket.
+server CallEvent[media.ready] | message, socket media | Sent on the media socket after `media.attach` succeeds: the tracks to use.
+server CallEvent[media.ready].protocolVersion | integer, required, min 0, format uint32 | The protocol version the daemon speaks on the media socket.
+server CallEvent[media.ready].receiveTracks | array of object, required | The tracks for audio you receive, one per source.
+server CallEvent[media.ready].receiveTracks[] | object | One audio stream: the single track you send, or one source you receive.
+server CallEvent[media.ready].receiveTracks[].direction | string, required, values send|receive | Whether you send or receive audio on this track.
+server CallEvent[media.ready].receiveTracks[].format | object, required | The PCM format of the track.
+server CallEvent[media.ready].receiveTracks[].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[media.ready].receiveTracks[].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[media.ready].receiveTracks[].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[media.ready].receiveTracks[].generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
+server CallEvent[media.ready].receiveTracks[].id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[media.ready].receiveTracks[].participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
+server CallEvent[media.ready].sendTrack | object, required | The track for audio you send.
+server CallEvent[media.ready].sendTrack.direction | string, required, values send|receive | Whether you send or receive audio on this track.
+server CallEvent[media.ready].sendTrack.format | object, required | The PCM format of the track.
+server CallEvent[media.ready].sendTrack.format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[media.ready].sendTrack.format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[media.ready].sendTrack.format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[media.ready].sendTrack.generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
+server CallEvent[media.ready].sendTrack.id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[media.ready].sendTrack.participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
+server CallEvent[participant.updated] | message, socket control | A conference participant's membership or microphone changed. A `call.state` with the new roster follows.
+server CallEvent[participant.updated].callId | string, required | ID of the conference call.
+server CallEvent[participant.updated].participant | object, required | The participant as it is now.
+server CallEvent[participant.updated].participant.contactId | string, required | Contact ID of the participant.
+server CallEvent[participant.updated].participant.membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
+server CallEvent[participant.updated].participant.microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
+server CallEvent[participant.updated].participant.participantId | string, required | ID of the participant within this call. It is not a contact ID; use it to match audio tracks to participants.
+server CallEvent[participant.updated].participant.status | object, nullable | Signaling progress, separate from membership. Omitted until reported.
+server CallEvent[participant.updated].participant.status.code | integer, required, min 0, format uint32 | The status number the service reported. Keep it for codes `kind` does not name.
+server CallEvent[participant.updated].participant.status.kind | string, required, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | What the code means.
+server CallEvent[participant.updated].revision | integer, required, min 0, format uint32 | The call revision after this change.
+server CallEvent[protocol.error] | message, sockets control|media | The protocol version could not be agreed. The daemon then closes the socket with WebSocket code 1002.
+server CallEvent[protocol.error].clientVersions | array of integer, required, items min 0, items format uint32 | The versions the client announced. Empty when the list was invalid.
+server CallEvent[protocol.error].code | string, required, values unsupported_protocol_version|invalid_protocol_version | Why the versions were refused.
+server CallEvent[protocol.error].serverVersions | array of integer, required, items min 0, items format uint32 | The versions the daemon supports.
+server CallEvent[track.added] | message, sockets control|media | A receive audio track appeared. Audio for it follows.
+server CallEvent[track.added].callId | string, required | ID of the call.
+server CallEvent[track.added].track | object, required | The new track.
+server CallEvent[track.added].track.direction | string, required, values send|receive | Whether you send or receive audio on this track.
+server CallEvent[track.added].track.format | object, required | The PCM format of the track.
+server CallEvent[track.added].track.format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[track.added].track.format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[track.added].track.format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[track.added].track.generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
+server CallEvent[track.added].track.id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[track.added].track.participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
+server CallEvent[track.removed] | message, sockets control|media | A receive track ended. Audio for that generation stops.
+server CallEvent[track.removed].callId | string, required | ID of the call.
+server CallEvent[track.removed].generation | integer, required, min 0, format uint32 | The generation that ended.
+server CallEvent[track.removed].reason | string, required | Why the track ended. Currently `source_unavailable`.
+server CallEvent[track.removed].trackId | integer, required, min 0, format uint32 | ID of the track that ended.
+server CallEvent[track.updated] | message, socket control | A track moved to a new generation, for example after `call.clear_audio` or a mute change. Send new audio on the new generation.
+server CallEvent[track.updated].callId | string, required | ID of the call.
+server CallEvent[track.updated].track | object, required | The track with its new generation.
+server CallEvent[track.updated].track.direction | string, required, values send|receive | Whether you send or receive audio on this track.
+server CallEvent[track.updated].track.format | object, required | The PCM format of the track.
+server CallEvent[track.updated].track.format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[track.updated].track.format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[track.updated].track.format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[track.updated].track.generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
+server CallEvent[track.updated].track.id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[track.updated].track.participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
+server CallMediaCommand[audio.chunk] | message, socket media | A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.
+server CallMediaCommand[audio.chunk].generation | integer, required, min 0, format uint32 | The track generation. Chunks for an older generation are discarded.
+server CallMediaCommand[audio.chunk].pcmBase64 | string, required | PCM16 little-endian samples as padded base64. A chunk you send is whole samples, at most 65,536 bytes once decoded.
+server CallMediaCommand[audio.chunk].sampleOffset | integer, nullable, min 0, format uint64 | Position of the chunk in per-channel samples on the shared call timeline. The daemon sets it on chunks it sends; you must not send it.
+server CallMediaCommand[audio.chunk].sequence | integer, nullable, min 0, format uint64 | Order of the chunk within its source. The daemon sets it on chunks it sends; you must not send it.
+server CallMediaCommand[audio.chunk].trackId | integer, required, min 0, format uint32 | The track the audio belongs to.
+socket control | path /v1/accounts/{a}/calls/socket, scope calls, protocol 2 | Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello.
+socket media | path /v1/accounts/{a}/calls/{call}/media, scope calls, protocol 2 | Audio for one call you own, as JSON text with base64 PCM. Send media.attach within five seconds of connecting, then wait for media.ready. Binary messages are rejected.

@@ -38,11 +38,104 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Token scope that every calls route requires.
+const CALLS_SCOPE: &str = "calls";
+const CONTROL_PATH: &str = "/v1/accounts/{a}/calls/socket";
+const MEDIA_PATH: &str = "/v1/accounts/{a}/calls/{call}/media";
+
+/// Which variants of a tagged message type a socket side sends.
+#[cfg(test)]
+pub(crate) enum Variants {
+    /// Every variant.
+    All,
+    /// Only the variants with these tag values.
+    Only(&'static [&'static str]),
+    /// Every variant except those with these tag values.
+    Except(&'static [&'static str]),
+}
+
+/// A message type that one side of a socket sends, as a serde enum in
+/// `wechat_core::call_types` tagged by `type`.
+#[cfg(test)]
+pub(crate) struct SocketMessage {
+    pub(crate) type_name: &'static str,
+    pub(crate) variants: Variants,
+}
+
+/// One calls WebSocket. `interfaces/http/calls-websocket.txt` is generated
+/// from this table and the message schemas, so keep it in step with the
+/// handlers below.
+#[cfg(test)]
+pub(crate) struct CallSocket {
+    pub(crate) name: &'static str,
+    /// Route path exactly as registered with the router.
+    pub(crate) path: &'static str,
+    /// Token scope the upgrade request needs.
+    pub(crate) scope: &'static str,
+    pub(crate) protocol_version: u32,
+    pub(crate) doc: &'static str,
+    pub(crate) client: &'static [SocketMessage],
+    pub(crate) server: &'static [SocketMessage],
+}
+
+/// Every calls WebSocket, in the order the listing documents them.
+#[cfg(test)]
+pub(crate) const SOCKETS: &[CallSocket] = &[
+    CallSocket {
+        name: "control",
+        path: CONTROL_PATH,
+        scope: CALLS_SCOPE,
+        protocol_version: CALL_PROTOCOL_VERSION,
+        doc: "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello.",
+        client: &[
+            SocketMessage {
+                type_name: "CallClientHello",
+                variants: Variants::All,
+            },
+            SocketMessage {
+                type_name: "CallCommand",
+                variants: Variants::All,
+            },
+        ],
+        server: &[SocketMessage {
+            type_name: "CallEvent",
+            variants: Variants::Except(&["media.ready"]),
+        }],
+    },
+    CallSocket {
+        name: "media",
+        path: MEDIA_PATH,
+        scope: CALLS_SCOPE,
+        protocol_version: CALL_PROTOCOL_VERSION,
+        doc: "Audio for one call you own, as JSON text with base64 PCM. Send media.attach within five seconds of connecting, then wait for media.ready. Binary messages are rejected.",
+        client: &[SocketMessage {
+            type_name: "CallMediaCommand",
+            variants: Variants::All,
+        }],
+        server: &[
+            SocketMessage {
+                type_name: "CallEvent",
+                variants: Variants::Only(&[
+                    "call.error",
+                    "media.ready",
+                    "protocol.error",
+                    "track.added",
+                    "track.removed",
+                ]),
+            },
+            SocketMessage {
+                type_name: "CallMediaCommand",
+                variants: Variants::Only(&["audio.chunk"]),
+            },
+        ],
+    },
+];
+
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .route("/v1/accounts/{a}/calls/current", get(current))
-        .route("/v1/accounts/{a}/calls/socket", get(control))
-        .route("/v1/accounts/{a}/calls/{call}/media", get(media))
+        .route(CONTROL_PATH, get(control))
+        .route(MEDIA_PATH, get(media))
 }
 
 fn principal(claims: &Claims) -> String {
@@ -70,7 +163,7 @@ async fn current(
     Extension(claims): Extension<Claims>,
     Path(account): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    claims.require(Some(&account), "calls")?;
+    claims.require(Some(&account), CALLS_SCOPE)?;
     ensure_current(&app, &claims).await?;
     app.core.store.account(&account)?;
     let snapshot: CallSnapshot = app
@@ -91,7 +184,7 @@ async fn control(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    claims.require(Some(&account), "calls")?;
+    claims.require(Some(&account), CALLS_SCOPE)?;
     ensure_current(&app, &claims).await?;
     check_origin(&headers)?;
     app.core.store.account(&account)?;
@@ -108,7 +201,7 @@ async fn media(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    claims.require(Some(&account), "calls")?;
+    claims.require(Some(&account), CALLS_SCOPE)?;
     ensure_current(&app, &claims).await?;
     check_origin(&headers)?;
     app.core.store.account(&account)?;
@@ -272,7 +365,7 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
     let Ok(service) = app.core.call_service(&account) else {
         return;
     };
-    let control_allowed = claims.require(Some(&account), "calls").is_ok();
+    let control_allowed = claims.require(Some(&account), CALLS_SCOPE).is_ok();
     let Ok(mut connection) = service
         .connect(&account, &principal(&claims), control_allowed)
         .await
@@ -308,7 +401,7 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
                             break;
                         };
                         let passive = matches!(&command, CallCommand::Ready { ready: false, .. });
-                        if !passive && claims.require(Some(&account), "calls").is_err() {
+                        if !passive && claims.require(Some(&account), CALLS_SCOPE).is_err() {
                             let _ = send_event(&mut sink, &CallEvent::Error { code: CallErrorCode::Forbidden }).await;
                             break;
                         }

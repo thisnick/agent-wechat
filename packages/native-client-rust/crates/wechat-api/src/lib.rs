@@ -2,6 +2,8 @@
 mod actions;
 
 mod calls;
+#[cfg(test)]
+mod calls_interface_tests;
 pub mod contracts;
 mod groups;
 mod media;
