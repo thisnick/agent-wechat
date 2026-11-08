@@ -6,7 +6,13 @@ mod calls;
 mod calls_interface_tests;
 pub mod contracts;
 mod groups;
+#[cfg(test)]
+mod http_interface_tests;
+#[cfg(test)]
+mod http_route_table;
 mod media;
+#[cfg(test)]
+mod schema_listing;
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Extension, Path, Query, Request, State},
@@ -48,6 +54,8 @@ pub struct Version {
     native_login: bool,
     official_database_writes: bool,
 }
+/// Version of the HTTP API, reported by the status route and in the OpenAPI document.
+pub const API_VERSION: u32 = 1;
 pub fn version() -> Version {
     Version {
         product: "agent-wechat",
@@ -55,7 +63,7 @@ pub fn version() -> Version {
         version: env!("CARGO_PKG_VERSION"),
         stage: "supported-profile",
         target: env!("WX_TARGET"),
-        api_version: 1,
+        api_version: API_VERSION,
         capabilities: vec![
             "serve",
             "profile-attach",
@@ -538,16 +546,19 @@ async fn accounts(
     }
     Ok(Json(json!({"items":items})))
 }
-#[derive(Deserialize)]
+/// Request to register a new account.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct CreateAccount {
+struct CreateAccountRequest {
+    /// Account ID. Omit it and the daemon generates one.
     id: Option<String>,
+    /// A friendly name that can be used in place of the ID.
     alias: Option<String>,
 }
 async fn create_account(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
-    Json(input): Json<CreateAccount>,
+    Json(input): Json<CreateAccountRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     c.require(None, "admin")?;
     if c.grant
@@ -691,9 +702,12 @@ async fn qr(
     )
         .into_response())
 }
-#[derive(Deserialize)]
+/// Options for fetching a login QR code.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct QrQuery {
+    /// Only return the QR code if it is still this generation. A newer code
+    /// fails with `login_challenge_superseded`.
     generation: Option<u64>,
 }
 async fn disconnect(
@@ -726,13 +740,19 @@ async fn sync(
         serde_json::to_value(app.core.sync_operation(&a)?).map_err(anyhow::Error::from)?,
     ))
 }
-#[derive(Clone, Deserialize, Default)]
+/// Paging and filter options for list routes.
+#[derive(Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageQuery {
+    /// Items per page, from 1 to 200.
     limit: Option<usize>,
+    /// The `nextCursor` of the previous page, up to 8192 characters. Send it
+    /// with the same query.
     cursor: Option<String>,
+    /// Text to search for, up to 256 characters. The name `query` is accepted too.
     #[serde(alias = "query")]
     search: Option<String>,
+    /// Only list chats of this kind: `direct`, `group` or `system`.
     kind: Option<String>,
 }
 impl PageQuery {
@@ -901,9 +921,11 @@ async fn avatar(
     )
         .into_response())
 }
-#[derive(Deserialize)]
+/// Options for fetching a saved image.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MediaQuery {
+    /// `best` (the default), `original`, `standard` or `thumbnail`.
     quality: Option<String>,
 }
 async fn image(
@@ -942,23 +964,27 @@ async fn image(
     )
         .into_response())
 }
-#[derive(Deserialize)]
+/// Request to look up several contacts.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct LookupRequest {
+struct ContactLookupRequest {
+    /// Contact IDs to look up.
     ids: Vec<String>,
 }
 async fn lookup_contacts(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path(a): Path<String>,
-    Json(input): Json<LookupRequest>,
+    Json(input): Json<ContactLookupRequest>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
     Ok(Json(app.core.lookup_contacts(&a, input.ids).await?))
 }
-#[derive(Deserialize)]
+/// Options for looking up one group.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RoomQuery {
+    /// The member-list version you already know. Defaults to 0.
     #[serde(default)]
     version: u32,
 }
@@ -1036,11 +1062,14 @@ async fn read_state(
         .await?;
     Ok(Json(result))
 }
-#[derive(Deserialize)]
+/// Options for reading the event log or stream.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EventQuery {
+    /// Return events after this cursor, a decimal string. Defaults to 0, the start.
     #[serde(default)]
     after: Option<String>,
+    /// Events per JSON page. Defaults to 100. The stream ignores it.
     limit: Option<usize>,
 }
 fn decimal(value: Option<&str>) -> ApiResult<i64> {
@@ -1097,16 +1126,18 @@ async fn stream(
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response())
 }
-#[derive(Deserialize)]
+/// Request to record how far a consumer has read the events.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Ack {
+struct EventAckRequest {
+    /// The cursor of the last event the consumer has handled, a decimal string.
     cursor: String,
 }
 async fn ack(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, consumer)): Path<(String, String)>,
-    Json(input): Json<Ack>,
+    Json(input): Json<EventAckRequest>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "read")?;
     app.core
@@ -1116,12 +1147,17 @@ async fn ack(
         json!({"cursor":input.cursor,"messageReadStateChanged":false}),
     ))
 }
-#[derive(Deserialize)]
+/// Request to issue an API token.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TokenRequest {
+    /// A label for the token.
     name: String,
+    /// Account IDs the token can use, or `*` for every account.
     accounts: Vec<String>,
+    /// Scopes the token grants: `read`, `send`, `media`, `login`, `calls`, `admin` and so on.
     scopes: Vec<String>,
+    /// Unix time in seconds when the token stops working. Omit it for no expiry.
     expires_at: Option<i64>,
 }
 async fn issue_token(
@@ -1162,6 +1198,37 @@ async fn revoke_token(
     }
     Ok(Json(json!({"revoked":app.core.store.revoke_token(&id)?})))
 }
+/// Registers a route. Test builds also record its path, so a test can prove the
+/// route table behind `interfaces/http/routes.txt` lists every route.
+trait ApiRoute {
+    fn api_route(self, path: &'static str, methods: axum::routing::MethodRouter<App>) -> Self;
+}
+impl ApiRoute for Router<App> {
+    fn api_route(self, path: &'static str, methods: axum::routing::MethodRouter<App>) -> Self {
+        #[cfg(test)]
+        recorded_routes::record(path);
+        self.route(path, methods)
+    }
+}
+#[cfg(test)]
+mod recorded_routes {
+    use std::cell::RefCell;
+    thread_local! {
+        static PATHS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+    pub(crate) fn record(path: &'static str) {
+        PATHS.with(|paths| paths.borrow_mut().push(path));
+    }
+    /// Builds with a clean record and returns the paths registered meanwhile.
+    pub(crate) fn capture<T>(build: impl FnOnce() -> T) -> (T, Vec<&'static str>) {
+        PATHS.with(|paths| paths.borrow_mut().clear());
+        let built = build();
+        (
+            built,
+            PATHS.with(|paths| std::mem::take(&mut *paths.borrow_mut())),
+        )
+    }
+}
 fn call_routes() -> Router<App> {
     calls::routes()
 }
@@ -1171,59 +1238,59 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         token_hash: Sha256::digest(token.as_bytes()).into(),
     };
     let routes = Router::new()
-        .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
-        .route("/v1/status", get(status))
-        .route("/v1/daemon/shutdown", post(shutdown_daemon))
-        .route("/v1/tokens", get(tokens).post(issue_token))
-        .route("/v1/access-tokens", get(tokens).post(issue_token))
-        .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
-        .route(
+        .api_route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .api_route("/v1/status", get(status))
+        .api_route("/v1/daemon/shutdown", post(shutdown_daemon))
+        .api_route("/v1/tokens", get(tokens).post(issue_token))
+        .api_route("/v1/access-tokens", get(tokens).post(issue_token))
+        .api_route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
+        .api_route(
             "/v1/access-tokens/{id}",
             axum::routing::delete(revoke_token),
         )
-        .route("/v1/accounts", get(accounts).post(create_account))
-        .route("/v1/profiles/official", post(prepare_official_profile))
-        .route(
+        .api_route("/v1/accounts", get(accounts).post(create_account))
+        .api_route("/v1/profiles/official", post(prepare_official_profile))
+        .api_route(
             "/v1/accounts/{a}",
             get(account)
                 .patch(actions::update_account)
                 .delete(remove_account),
         )
-        .route("/v1/accounts/{a}/schema", get(schema))
-        .route(
+        .api_route("/v1/accounts/{a}/schema", get(schema))
+        .api_route(
             "/v1/accounts/{a}/projection/recover",
             post(recover_projection),
         )
-        .route("/v1/accounts/{a}/contacts/lookup", post(lookup_contacts))
-        .route("/v1/accounts/{a}/groups/{room}/lookup", get(lookup_room))
-        .route("/v1/accounts/{a}/auth/login", post(login))
-        .route("/v1/accounts/{a}/auth/disconnect", post(disconnect))
-        .route("/v1/accounts/{a}/auth/logout-local", post(local_logout))
-        .route(
+        .api_route("/v1/accounts/{a}/contacts/lookup", post(lookup_contacts))
+        .api_route("/v1/accounts/{a}/groups/{room}/lookup", get(lookup_room))
+        .api_route("/v1/accounts/{a}/auth/login", post(login))
+        .api_route("/v1/accounts/{a}/auth/disconnect", post(disconnect))
+        .api_route("/v1/accounts/{a}/auth/logout-local", post(local_logout))
+        .api_route(
             "/v1/accounts/{a}/operations/{id}",
             get(operation).delete(cancel),
         )
-        .route("/v1/accounts/{a}/operations/{id}/qr", get(qr))
-        .route("/v1/accounts/{a}/sync", post(sync))
-        .route("/v1/accounts/{a}/threads", get(threads))
-        .route("/v1/accounts/{a}/contacts", get(contacts))
-        .route("/v1/accounts/{a}/groups", get(groups))
-        .route("/v1/accounts/{a}/groups/{room}/members", get(members))
-        .route("/v1/accounts/{a}/threads/{thread}/messages", get(messages))
-        .route("/v1/accounts/{a}/messages", get(archive_messages))
-        .route("/v1/accounts/{a}/messages/{id}", get(message))
-        .route("/v1/accounts/{a}/avatars/{id}", get(avatar))
-        .route("/v1/accounts/{a}/messages/{id}/image", get(image))
-        .route("/v1/accounts/{a}/sends", post(media::send))
-        .route("/v1/accounts/{a}/sends/{id}", get(send_status))
-        .route(
+        .api_route("/v1/accounts/{a}/operations/{id}/qr", get(qr))
+        .api_route("/v1/accounts/{a}/sync", post(sync))
+        .api_route("/v1/accounts/{a}/threads", get(threads))
+        .api_route("/v1/accounts/{a}/contacts", get(contacts))
+        .api_route("/v1/accounts/{a}/groups", get(groups))
+        .api_route("/v1/accounts/{a}/groups/{room}/members", get(members))
+        .api_route("/v1/accounts/{a}/threads/{thread}/messages", get(messages))
+        .api_route("/v1/accounts/{a}/messages", get(archive_messages))
+        .api_route("/v1/accounts/{a}/messages/{id}", get(message))
+        .api_route("/v1/accounts/{a}/avatars/{id}", get(avatar))
+        .api_route("/v1/accounts/{a}/messages/{id}/image", get(image))
+        .api_route("/v1/accounts/{a}/sends", post(media::send))
+        .api_route("/v1/accounts/{a}/sends/{id}", get(send_status))
+        .api_route(
             "/v1/accounts/{a}/threads/{thread}/read-state",
             post(read_state),
         )
-        .route("/v1/accounts/{a}/events", get(events))
-        .route("/v1/accounts/{a}/event-log", get(events))
-        .route("/v1/accounts/{a}/events/stream", get(stream))
-        .route("/v1/accounts/{a}/consumers/{consumer}/ack", post(ack))
+        .api_route("/v1/accounts/{a}/events", get(events))
+        .api_route("/v1/accounts/{a}/event-log", get(events))
+        .api_route("/v1/accounts/{a}/events/stream", get(stream))
+        .api_route("/v1/accounts/{a}/consumers/{consumer}/ack", post(ack))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .merge(media::routes())
         .merge(actions::routes())

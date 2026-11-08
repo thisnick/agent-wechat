@@ -1,5 +1,5 @@
 //! Authenticated control and owner-bound PCM sockets. No account keys cross these routes.
-use super::{ApiError, ApiResult, App, Claims};
+use super::{ApiError, ApiResult, ApiRoute, App, Claims};
 use axum::{
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -133,9 +133,9 @@ pub(crate) const SOCKETS: &[CallSocket] = &[
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
-        .route("/v1/accounts/{a}/calls/current", get(current))
-        .route(CONTROL_PATH, get(control))
-        .route(MEDIA_PATH, get(media))
+        .api_route("/v1/accounts/{a}/calls/current", get(current))
+        .api_route(CONTROL_PATH, get(control))
+        .api_route(MEDIA_PATH, get(media))
 }
 
 fn principal(claims: &Claims) -> String {
