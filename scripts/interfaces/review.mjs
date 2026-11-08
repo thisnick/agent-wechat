@@ -276,8 +276,8 @@ export function overview(kind, head) {
   }
   if (kind === 'ws') {
     const sockets = items.filter(item => item.startsWith('socket ')).map(item => item.slice(7));
-    const messages = items.filter(item => /^(client|server) [^.]+\]$/.test(item)).length;
-    return `Sockets: ${sockets.join(', ')}. ${messages} message types.`;
+    const count = side => items.filter(item => new RegExp(`^${side} [^[]+\\[[^\\]]+\\]$`).test(item)).length;
+    return `Sockets: ${sockets.join(', ')}. ${count('client')} message types clients send, ${count('server')} the daemon sends.`;
   }
   if (kind === 'routes') return `Routes: ${items.map(item => item.replace(/^route /, '')).join(', ')}.`;
   if (kind === 'schema') {
