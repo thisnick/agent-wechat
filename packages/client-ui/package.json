@@ -10,7 +10,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
-    "scenes": "node scripts/scenes.mjs"
+    "scenes": "node scripts/scenes.mjs",
+    "scenes:list": "node scripts/scene-listing.mjs"
   },
   "dependencies": {
     "@agent-wechat/shared": "workspace:*",
