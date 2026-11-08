@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 2.1.0
+
+### Patch Changes
+
+- [#420](https://github.com/thisnick/agent-wechat/pull/420) [`7cc33c9`](https://github.com/thisnick/agent-wechat/commit/7cc33c96adaa1998a69d453d88846bd8d8d6dc47) Thanks [@thisnick](https://github.com/thisnick)! - Every `wx` command argument and flag now has `--help` text, and every OpenClaw tool parameter has a description.
+
 ## 2.0.0
 
 ### Major Changes
