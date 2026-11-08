@@ -191,3 +191,51 @@ test('SQL schema listings flag migrations, version bumps and risky column change
   assert.deepEqual(reasons(unversioned), ['schema version: schema changed without a new schema version: existing stores keep the old schema']);
   assert.deepEqual(unversioned.missingDocs, []);
 });
+
+test('WebSocket rules depend on message direction and the protocol version', () => {
+  const before = [
+    'socket control | path /v1/accounts/{a}/calls/control, scope calls, protocol 2 | Call control',
+    'client CallCommand[call.dial] | message | Place a call',
+    'client CallCommand[call.dial].target | object, required | Who to call',
+    'client CallCommand[call.dial].note | string | Optional note',
+    'client CallCommand[call.dial].mode | string, values audio|video | Call mode',
+    'server CallEvent[call.state] | message | Call state changed',
+    'server CallEvent[call.state].state | string, required, values ringing|ended | Current state',
+    'server CallEvent[call.state].reason | string, required | Why it changed',
+    'server CallEvent[call.error] | message | Command failed',
+  ];
+  const result = compare('ws', before, [
+    'socket control | path /v1/accounts/{a}/calls/control, scope calls, protocol 2 | Call control',
+    'client CallCommand[call.dial] | message | Place a call',
+    'client CallCommand[call.dial].target | object, required | Who to call',
+    'client CallCommand[call.dial].note | string, required | Optional note',
+    'client CallCommand[call.dial].mode | string, values audio | Call mode',
+    'client CallCommand[call.dial].priority | integer, required | Priority',
+    'server CallEvent[call.state] | message | Call state changed',
+    'server CallEvent[call.state].state | string, required, values ringing|ended|held | Current state',
+    'server CallEvent[call.state].reason | string | Why it changed',
+    'server CallEvent[call.state].since | integer, required | When',
+    'server CallEvent[call.held] | message | Call held',
+  ]);
+  assert.deepEqual(reasons(result).sort(), [
+    'client CallCommand[call.dial].mode: allowed values removed: video',
+    'client CallCommand[call.dial].note: now required',
+    'client CallCommand[call.dial].priority: new required field',
+    'protocol version: breaking change without a call protocol version bump',
+    'server CallEvent[call.error]: removed from server messages: clients that read it break',
+    'server CallEvent[call.state].reason: may now be absent',
+  ]);
+  assert.deepEqual(result.notes.map(n => `${n.item}: ${n.reason}`).sort(), [
+    'server CallEvent[call.held]: new server message type: clients must ignore types they do not know',
+    'server CallEvent[call.state].state: new values held: clients must handle them',
+  ]);
+  const bumped = compare('ws', before, before.filter(row => !row.startsWith('server CallEvent[call.error]')).map(row => row.replace('protocol 2', 'protocol 3')));
+  assert.deepEqual(reasons(bumped), ['server CallEvent[call.error]: removed from server messages: clients that read it break']);
+  assert.deepEqual(bumped.notes.map(n => n.reason), ['protocol version changed from 2 to 3']);
+});
+
+test('removed UI routes are breaking because links and notifications use them', () => {
+  const result = compare('routes', ['route /{server}/{account}/chats | params server, account | Chat list', 'route /{server}/{account}/chats/{thread} | params server, account, thread | A conversation'],
+    ['route /{server}/{account}/chats | params server, account | Chat list', 'route /{server}/{account}/c/{thread} | params server, account, thread | A conversation']);
+  assert.deepEqual(reasons(result), ['route /{server}/{account}/chats/{thread}: route removed: saved links and notifications that use it stop working']);
+});

@@ -22,6 +22,8 @@ export function surface(file) {
   if (file === 'interfaces/openclaw/config.txt') return { kind: 'schema', title: 'OpenClaw configuration', packages: ['@agent-wechat/agent-wechat'] };
   if (file === 'interfaces/storage/account.txt') return { kind: 'sql', title: 'Account store schema', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/storage/registry.txt') return { kind: 'sql', title: 'Registry schema', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/http/calls-websocket.txt') return { kind: 'ws', title: 'Calls WebSocket', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/ui/routes.txt') return { kind: 'routes', title: 'UI routes', packages: ['@agent-wechat/desktop'] };
   return { kind: 'other', title: file, packages: [] };
 }
 
@@ -46,6 +48,8 @@ const isMissing = doc => MISSING.test(doc);
 function parentOf(kind, item) {
   if (kind === 'cli') return item.includes(' ') ? item.slice(0, item.lastIndexOf(' ')) : undefined;
   if (kind === 'schema') return item.includes('.') ? item.slice(0, item.lastIndexOf('.')) : undefined;
+  // WebSocket fields follow the variant's closing bracket; dots inside the tag are part of its name.
+  if (kind === 'ws') return item.lastIndexOf('.') > item.lastIndexOf(']') ? item.slice(0, item.lastIndexOf('.')) : undefined;
   return undefined;
 }
 
@@ -117,9 +121,32 @@ export function sqlBreaks(item, before, after) {
   return reasons;
 }
 
+/** WebSocket rules depend on direction: the daemon accepts `client` messages and clients read `server` messages. */
+export function wsChanges(item, before, after) {
+  const old = tokens(before);
+  const now = tokens(after);
+  const reasons = [];
+  const notes = [];
+  if (item.startsWith('socket ')) {
+    for (const name of ['path', 'scope']) if (value(old, name) !== value(now, name)) reasons.push(`socket ${name} changed`);
+    if (value(old, 'protocol') !== value(now, 'protocol')) notes.push(`protocol version changed from ${value(old, 'protocol')} to ${value(now, 'protocol')}`);
+    return { reasons, notes };
+  }
+  if (item.startsWith('client ')) return { reasons: attributeBreaks('schema', before, after), notes };
+  const types = list => (list[0] && /^[a-z|]+$/.test(list[0]) && !['required', 'message'].includes(list[0]) ? list[0] : undefined);
+  if (types(old) !== types(now)) reasons.push(`type changed from ${types(old) ?? 'none'} to ${types(now) ?? 'none'}`);
+  if (token(old, 'required') && !token(now, 'required')) reasons.push('may now be absent');
+  const oldValues = value(old, 'values')?.split('|');
+  const added = value(now, 'values')?.split('|').filter(v => oldValues && !oldValues.includes(v)) ?? [];
+  if (added.length) notes.push(`new values ${added.join(', ')}: clients must handle them`);
+  return { reasons, notes };
+}
+
+const protocol = rows => [...(rows?.entries() ?? [])].filter(([item]) => item.startsWith('socket ')).map(([item, row]) => `${item}=${value(tokens(row.attributes), 'protocol')}`).sort().join(',');
+
 /** Classifies the changes between two parsed listings of one interface. */
 export function compareListing(kind, base, head) {
-  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], docChanges: 0 };
+  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], notes: [], docChanges: 0 };
   for (const [item, row] of head) {
     const old = base?.get(item);
     if (!old) {
@@ -127,13 +154,17 @@ export function compareListing(kind, base, head) {
       // Gaps in a listing's first version are its starting debt; only later additions must be documented.
       if (base && isMissing(row.doc)) result.missingDocs.push(item);
       const parent = parentOf(kind, item);
-      if (base && parent && base.has(parent) && tokens(row.attributes).includes('required')) {
+      if (base && parent && base.has(parent) && tokens(row.attributes).includes('required') && !(kind === 'ws' && item.startsWith('server '))) {
         result.breaking.push({ item, reason: kind === 'cli' ? 'new required argument on an existing command' : 'new required field' });
       }
       if (base && kind === 'sql' && /^table [^ .]+\.[^ ]+$/.test(item)) {
         const table = item.slice(0, item.indexOf('.'));
         const parts = row.attributes.split(', ');
         if (base.has(table) && parts.includes('not null') && !parts.some(t => t.startsWith('default '))) result.breaking.push({ item, reason: 'new NOT NULL column without a default on an existing table' });
+      }
+      if (base && kind === 'ws') {
+        const variant = item.match(/^(server [^[]+)\[[^\]]+\]$/);
+        if (variant && [...base.keys()].some(key => key.startsWith(`${variant[1]}[`))) result.notes.push({ item, reason: 'new server message type: clients must ignore types they do not know' });
       }
       if (base && kind === 'crate') {
         const [what, path] = item.split(' ');
@@ -154,6 +185,11 @@ export function compareListing(kind, base, head) {
     if (old.attributes !== row.attributes) {
       if (kind === 'crate') reasons.push('signature changed');
       else if (kind === 'sql') reasons.push(...sqlBreaks(item, old.attributes, row.attributes));
+      else if (kind === 'ws') {
+        const change = wsChanges(item, old.attributes, row.attributes);
+        reasons.push(...change.reasons);
+        result.notes.push(...change.notes.map(reason => ({ item, reason })));
+      }
       else reasons.push(...attributeBreaks(kind, old.attributes, row.attributes));
     }
     if (old.doc !== row.doc) result.docChanges += 1;
@@ -167,7 +203,13 @@ export function compareListing(kind, base, head) {
     const row = base.get(item);
     // Removing a hidden alias still breaks scripts that use it, so every removal counts.
     result.breaking.push({ item, reason: tokens(row.attributes).some(t => t.endsWith('alias')) ? 'alias removed'
-      : kind === 'sql' && item.startsWith('migration ') ? 'existing migration removed' : 'removed' });
+      : kind === 'sql' && item.startsWith('migration ') ? 'existing migration removed'
+      : kind === 'ws' && item.startsWith('client ') ? 'removed from messages clients send: older clients that send it are rejected'
+      : kind === 'ws' && item.startsWith('server ') ? 'removed from server messages: clients that read it break'
+      : kind === 'routes' ? 'route removed: saved links and notifications that use it stop working' : 'removed' });
+  }
+  if (kind === 'ws' && base && result.breaking.length && protocol(base) === protocol(head)) {
+    result.breaking.push({ item: 'protocol version', reason: 'breaking change without a call protocol version bump' });
   }
   if (kind === 'sql' && base) {
     const schemaChanged = [...result.added, ...result.removed, ...result.changed].some(item => item !== 'schema version' && !item.startsWith('migration '));
@@ -220,6 +262,12 @@ export function overview(kind, head) {
     const migrations = items.filter(item => item.startsWith('migration ')).length;
     return `Schema version ${head.get('schema version')?.attributes ?? '?'}: ${tables} tables, ${columns} columns, ${indexes} indexes, ${migrations} migration files.`;
   }
+  if (kind === 'ws') {
+    const sockets = items.filter(item => item.startsWith('socket ')).map(item => item.slice(7));
+    const messages = items.filter(item => /^(client|server) [^.]+\]$/.test(item)).length;
+    return `Sockets: ${sockets.join(', ')}. ${messages} message types.`;
+  }
+  if (kind === 'routes') return `Routes: ${items.map(item => item.replace(/^route /, '')).join(', ')}.`;
   if (kind === 'schema') {
     const tools = items.filter(item => /^tool [^.]+$/.test(item));
     if (tools.length) return `Tools: ${tools.map(item => `${item.slice(5)}${tokens(head.get(item).attributes).includes('optional') ? ' (optional)' : ''}`).join(', ')}.`;
@@ -250,6 +298,7 @@ export function renderComment({ reports, changesets, baseline }) {
   lines.push(`To approve, add the \`${APPROVAL_LABEL}\` label. A later push that changes the listings removes it.`, '');
 
   const warnings = [];
+  for (const report of changed) for (const note of report.result.notes ?? []) warnings.push(`${report.surface.title}: ${code(note.item)} — ${note.reason}`);
   if (missing.length) warnings.push(`${missing.length} new item${missing.length === 1 ? ' has' : 's have'} no documentation. The **Interface docs** check fails until each has help text, a doc comment or a description.`);
   if (!baseline) {
     for (const report of changed) {

@@ -36,6 +36,7 @@ jobs:
               - 'scripts/native-crates.mjs'
               - 'packages/native-client-rust/**'
               - 'packages/openclaw-extension/**'
+              - 'packages/client-ui/**'
               - 'packages/shared/**'
               - 'docs/src/content/docs/openclaw/tools.mdx'
               - 'rust-toolchain.toml'

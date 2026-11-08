@@ -29,7 +29,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 
 ## Public interfaces
 
-`interfaces/` lists every public interface, generated from the code: `wx` commands and flags, the published crates' APIs, the OpenClaw tools and configuration, and the SQL schema of the account and registry stores. See `interfaces/README.md`.
+`interfaces/` lists every public interface, generated from the code: `wx` commands and flags, the published crates' APIs, the OpenClaw tools and configuration, the calls WebSocket messages, the UI's URLs, and the SQL schema of the account and registry stores. See `interfaces/README.md`.
 
 - **Every PR must run `pnpm interfaces`** before it is opened and before each later push, and commit whatever it changes under `interfaces/`. The submitter generates the listings: CI only regenerates them to compare, fails when the committed files differ, and never commits them.
 - Give every new command, flag, public item, tool parameter and config key help text, a doc comment or a description. A new `MISSING` row fails the Interface docs check.
