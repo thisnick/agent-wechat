@@ -188,6 +188,10 @@ pub enum Control {
         self_sent: bool,
         #[serde(default = "yes")]
         notify: bool,
+        /// The contact speaking in a group conversation. Required when `peer` is a
+        /// joined group and refused otherwise; groups carry no sender of their own.
+        #[serde(default)]
+        sender: Option<String>,
     },
     GroupFault {
         account: String,
@@ -224,6 +228,9 @@ pub enum Control {
         account: String,
         peer: String,
         kind: String,
+        /// The contact sending into a group conversation, as for `Inbound`.
+        #[serde(default)]
+        sender: Option<String>,
     },
 }
 fn yes() -> bool {
