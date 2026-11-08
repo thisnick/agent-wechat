@@ -3,31 +3,31 @@ use wechat_core::GroupMutation;
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
-        .route("/v1/accounts/{a}/groups", post(create))
-        .route("/v1/accounts/{a}/groups/{id}", axum::routing::patch(rename))
-        .route("/v1/accounts/{a}/groups/{id}/leave", post(leave))
-        .route(
+        .api_route("/v1/accounts/{a}/groups", post(create))
+        .api_route("/v1/accounts/{a}/groups/{id}", axum::routing::patch(rename))
+        .api_route("/v1/accounts/{a}/groups/{id}/leave", post(leave))
+        .api_route(
             "/v1/accounts/{a}/groups/{room}/members",
             post(add).delete(remove),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/groups/{id}/members/{username}",
             get(member),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/groups/{id}/my-name",
             axum::routing::put(my_name),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/groups/{id}/announcement",
             axum::routing::delete(clear_announcement),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/threads/{id}/notifications",
             axum::routing::put(notifications),
         )
-        .route("/v1/accounts/{a}/threads/{id}/pin", axum::routing::put(pin))
-        .route(
+        .api_route("/v1/accounts/{a}/threads/{id}/pin", axum::routing::put(pin))
+        .api_route(
             "/v1/accounts/{a}/group-mutations/by-idempotency-key",
             get(by_key),
         )
@@ -220,16 +220,18 @@ async fn member(
         .map_err(ApiError::from)?;
     checked::<contracts::NativeGroupMemberLookup>(value)
 }
-#[derive(Deserialize)]
+/// Options for finding a group change by its idempotency key.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Key {
+pub(super) struct GroupMutationKeyQuery {
+    /// The `Idempotency-Key` the group change was submitted with.
     key: String,
 }
 async fn by_key(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path(a): Path<String>,
-    Query(q): Query<Key>,
+    Query(q): Query<GroupMutationKeyQuery>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "admin")?;
     let op = app

@@ -9,9 +9,14 @@ These files list every public interface of agent-wechat, one item per line, gene
 | `openclaw/tools.txt` | OpenClaw agent tools and their parameters, trusted tool policies and gateway HTTP routes | `packages/openclaw-extension/scripts/interface-listing.mjs` |
 | `openclaw/config.txt` | OpenClaw plugin and channel configuration keys | `packages/openclaw-extension/scripts/interface-listing.mjs` |
 | `storage/account.txt` | The SQL schema of each account's `agent/control.sqlite`, plus a hash of every migration file | `packages/native-client-rust/crates/wechat-store/src/schema_interface_tests.rs` |
+| `http/openapi.json` | The same HTTP API as a standard OpenAPI 3.1 document, for integrators and tools | The same `wechat-api` test as `http/routes.txt` |
+| `http/asyncapi.json` | Both calls WebSocket sockets as a standard AsyncAPI 3.0 document | The same `wechat-api` test as `http/calls-websocket.txt` |
+| `http/routes.txt` | Every HTTP route: method, path, token scope, request, query and response types (or `untyped`), plus the fields of each typed payload | `packages/native-client-rust/crates/wechat-api` (a test that also fails when a registered route is missing from the table) |
+| `http/calls-websocket.txt` | Both calls WebSocket sockets: path, token scope and protocol version, and every message type and field each side sends | `packages/native-client-rust/crates/wechat-api` (a test reading the socket table and the message schemas) |
+| `ui/routes.txt` | Every URL the web and desktop UI can open | `packages/client-ui/scripts/interface-listing.mjs` |
 | `storage/registry.txt` | The SQL schema of the daemon's `registry.sqlite`, plus a hash of every migration file | `packages/native-client-rust/crates/wechat-store/src/schema_interface_tests.rs` |
 
-Official WeChat profile databases belong to WeChat, not to this project, so they aren't listed. The daemon's HTTP API and the desktop/web UI aren't listed yet. Their request and response types are checked separately by `scripts/native-generate-types.sh --check`.
+Official WeChat profile databases belong to WeChat, not to this project, so they aren't listed. The event stream's per-kind payloads and the UI's screens aren't listed yet. Their request and response types are checked separately by `scripts/native-generate-types.sh --check`.
 
 ## Update the listings
 
@@ -19,9 +24,19 @@ After changing the CLI, a published crate or the OpenClaw plugin:
 
 ```bash
 pnpm install
-pnpm interfaces          # rewrite every listing
+pnpm interfaces          # rewrite the listings whose sources changed
 git diff interfaces/     # review what changed
 ```
+
+| Command | Runs |
+| --- | --- |
+| `pnpm interfaces` | Only the listings whose sources changed since the merge base with `origin/main`, including uncommitted and untracked files |
+| `pnpm interfaces cli http` | Only the named listings: `cli`, `storage`, `websocket`, `http`, `ui`, `crates`, `openclaw` |
+| `pnpm interfaces --all` | Every listing |
+| `pnpm interfaces --list` | Shows each listing and whether its sources changed |
+| `--check` with any of the above | Compares instead of writing. CI runs `pnpm interfaces --check --all` |
+
+Each run prints how long each listing took. With warm build caches a full run takes about 5 seconds; the first run in a fresh checkout compiles the Rust test and rustdoc builds and takes a few minutes. The Rust listings run as one cargo invocation, and the crate listings use their own target directory (`target/interfaces-rustdoc`), so neither forces the other to rebuild.
 
 `pnpm interfaces --check` fails instead of writing. It needs the pinned Rust toolchain, `cmake` and Node. The CLI and storage listings are also checked by `cargo test`.
 
@@ -38,6 +53,9 @@ tool wechat_history.limit | integer, min 1, max 50, default 20 | Maximum number 
 - **CLI attributes:** `position N`, `required`, `takes <VALUE>`, `switch`, `count`, `repeatable`, `short -x`, `alias --name`, `default X`, `values a|b`, `global`, `hidden`. Global flags are listed once, on `wx`.
 - **Crate rows:** the item kind and path, then its signature. `impl Trait for Type` rows list explicit and derived trait implementations; automatic traits such as `Send` are left out. `#[cfg(...)]` marks platform-specific items.
 - **Storage rows:** `schema version` (SQLite `user_version`), `table T` with its `CREATE` statement, `table T.c` per column (type, `not null`, default, primary-key position), `table T.c foreign key #N`, `index`, `view` and `trigger` definitions, and `migration DIR/FILE | sha256 …` per migration file. Storage rows have no documentation column; explain schema changes in the migration and the PR.
+- **HTTP rows:** `route METHOD PATH | scope …, request …, query …, response …, sdk … | summary`, where each payload is a Rust type name or `untyped` and `sdk` names the TypeScript SDK's type for it. Then `request TYPE.field` and `response TYPE.field` rows for each typed payload.
+- **WebSocket rows:** `socket NAME` with its path, scope and protocol version; `client TYPE[tag]` for each message type the daemon accepts and `server TYPE[tag]` for each it sends, then one row per field (`client TYPE[tag].field`) with its JSON-schema type, `required`, allowed values and limits.
+- **Route rows:** `route PATTERN | params … | description`.
 - **OpenClaw rows:** `tool NAME` and `tool NAME.param`, `plugin.key` and `channel ID.key`, with JSON-schema type, `required`, allowed values, limits and defaults. `enabled by default` or `optional` says whether an agent gets a tool without allowing it.
 
 ## Checks on every PR
@@ -53,6 +71,9 @@ A bot comment on the PR lists the added, changed and removed rows and flags brea
 - **CLI:** a removed command, flag or alias; a new required argument on an existing command; a removed short flag or alias; a changed default or position; removed allowed values; a flag that changes between switch and value.
 - **Crates:** a removed item or changed signature; a new field on a struct with public fields; a new variant on an exhaustive enum; a new required trait method.
 - **OpenClaw:** a removed tool, parameter or key; a newly required parameter; a narrowed type, range or allowed values; a changed default; a tool that is no longer enabled by default.
+- **HTTP API:** everything `oasdiff`, the standard OpenAPI compatibility checker, reports as breaking between the base and head `openapi.json`; its report appears in the comment. The route listing adds: a removed route; a changed token scope or payload type; a new required request field; a response field that was removed, retyped or may now be absent or null. A new route with an `untyped` payload fails the Interface docs check, so new routes are typed from the start.
+- **WebSocket:** for messages clients send, a removed type or field, a new required field, or narrowed values or type; for messages the server sends, a removed type or field, a changed type, or a field that may now be absent; a changed socket path or scope; any of these without a protocol version bump. New server message types and new values are listed as warnings, because clients must handle them.
+- **UI routes:** a removed or renamed route, since saved links and notifications use it.
 - **Storage:** a raised schema version (older releases refuse the store, so downgrades stop working); a schema change without a new schema version; an edited or removed migration file; a removed table or column; a changed column type, primary key or default; a column that became `NOT NULL`; a new `NOT NULL` column without a default.
 
 It also warns when a changed listing has no changeset for its package, or a breaking change has a changeset below `major`.

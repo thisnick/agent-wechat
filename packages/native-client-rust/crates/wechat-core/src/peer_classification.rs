@@ -5,75 +5,122 @@ use serde_json::{json, Value};
 use ts_rs::TS;
 use wechat_profile::{PeerMetadata, ProfileReader};
 
-/// Entity category is independent of conversation shape and contact relationship.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerCategory {
+    /// No category is established. Do not assume a personal account or a friend.
     #[default]
     Unknown,
+    /// A built-in peer such as File Transfer.
     System,
+    /// A group chat.
     Group,
+    /// An official or business account.
     Business,
+    /// A WeCom contact.
     Openim,
+    /// A WeCom customer-service identity.
     OpenimCustomerService,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any
+/// extra actions.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerNamespace {
+    /// An ordinary WeChat ID, including groups ending with `@chatroom`.
     #[default]
     Wechat,
+    /// An ID containing `@openim`, a WeCom contact.
     Openim,
+    /// An ID containing `@kefu.openim`, a WeCom customer-service identity.
     OpenimCustomerService,
+    /// A group ID containing `@im.chatroom`.
     ImChatroom,
+    /// An ID ending with `@qy_u` (a person) or `@qy_g` (a group).
     Qy,
+    /// An ID containing `@weclaw`.
     Weclaw,
+    /// Any other ID containing `@` that matches no known family.
     Other,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Kind of business account, worked out from the numeric `businessType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerBusinessKind {
+    /// An official account (business type 0).
     OfficialAccount,
+    /// A service account (business type 1).
     ServiceAccount,
+    /// An enterprise account (business type 2).
     Enterprise,
+    /// An enterprise child account (business type 3).
     EnterpriseChild,
+    /// A photo account (business type 5).
     PhotoAccount,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// A label in one language.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerWording {
+    /// The language of the text, as the number WeChat stores. Choose the language to show in your
+    /// app.
     pub language_id: i32,
+    /// The label text.
     pub text: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Reference to an account type for one language, from the saved WeCom application data. The label
+/// of the account type is not included.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerApplication {
+    /// The language this entry applies to, as the number WeChat stores.
     pub language_id: i32,
+    /// ID of the account type for this language. Null when none is saved.
     pub account_type_id: Option<String>,
+    /// True when the profile also holds the label for this account type and language. The label
+    /// itself is not returned.
     pub account_type_cached: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Saved WeCom (OpenIM) details for a peer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerOpenIm {
+    /// ID of the WeCom application the peer belongs to. Null when none is saved.
     pub app_id: Option<String>,
+    /// ID of the set of labels in `wordings`. Null when none is saved.
     pub wording_id: Option<String>,
+    /// Localized labels for the peer, one per language.
     pub wordings: Vec<PeerWording>,
+    /// Account type references, one per language.
     pub applications: Vec<PeerApplication>,
 }
 
-/// Derived on each read from the same official-profile view as the resource.
-/// Null metadata does not establish an ordinary person or an unsubscribed peer.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// What kind of peer this is, worked out from the saved profile each time it is read.
+/// Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerClassification {
     pub category: PeerCategory,
     pub namespace: PeerNamespace,
+    /// Numeric service type saved for a business account: 0 official account, 1 service account, 2
+    /// enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved
+    /// values conflict.
     pub business_type: Option<i32>,
     pub business_kind: Option<PeerBusinessKind>,
+    /// Saved WeCom details, present for `openim` and `openim_customer_service` peers when the
+    /// profile has them. Null otherwise.
     pub open_im: Option<PeerOpenIm>,
 }
 

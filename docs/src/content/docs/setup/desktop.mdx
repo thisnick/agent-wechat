@@ -42,6 +42,22 @@ wx --server-name desktop --ca-cert-file /path/to/certificate.pem status
 
 Register the HTTPS address as the saved server URL when connecting over the network.
 
+## Open a view by its address
+
+The browser version gives each view its own address, so reload, Back and bookmarks keep your place. Chats, messages and photos are named by their IDs, URL-encoded. Put `#` in front of these paths:
+
+| To open | Path |
+| --- | --- |
+| Account list | `/{server}/accounts` |
+| Chat list | `/{server}/{account}/chats` |
+| One chat | `/{server}/{account}/chats/{chat}` |
+| A message, highlighted | `/{server}/{account}/chats/{chat}/message/{message}` |
+| Photo or video viewer | `/{server}/{account}/chats/{chat}/media/{message}` |
+| Chat or group details | `/{server}/{account}/chats/{chat}/info` |
+| Contacts, new chat, settings | `/{server}/{account}/contacts`, `/new-chat`, `/settings` |
+
+`{server}` is the hub's server ID; copy it and the account ID from the address bar. If the account is signed out, the app shows sign-in and opens the address afterwards. If a chat or message isn't found, the app opens the chat list or the conversation and says so. In the desktop app, clicking a message notification opens its chat at that message.
+
 <Aside title="Good to know">
 Once configured, the local hub starts whenever you open the app, even when the interface uses a remote hub. Closing the window keeps it running in the tray or menu bar. Choose **Quit AgentWechat** to stop it. Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).
 </Aside>

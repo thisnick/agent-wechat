@@ -38,6 +38,9 @@ pub struct Target {
     server_id: String,
     account_id: String,
     thread_id: String,
+    /// The message that raised the alert, so the window can scroll to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
@@ -525,6 +528,7 @@ async fn alert(
             .context("Missing hub identity")?,
         account_id: account.into(),
         thread_id: thread_id.into(),
+        message_id: Some(id.into()),
     };
     let desktop = app.state::<Desktop>();
     let inner = desktop.inner.lock().await;
@@ -624,20 +628,23 @@ pub async fn notifications_context(
 #[tauri::command]
 pub async fn notifications_take_target(
     state: State<'_, Desktop>,
+    connection_id: Option<String>,
 ) -> Result<Option<Target>, String> {
     let inner = state.inner.lock().await;
-    Ok(state
-        .notifications
-        .pending
-        .lock()
-        .await
-        .take()
-        .filter(|target| {
-            inner.active.as_ref().is_some_and(|active| {
-                active.connection.id == target.connection_id
-                    && active.connection.server_id.as_deref() == Some(target.server_id.as_str())
-            })
-        }))
+    let mut pending = state.notifications.pending.lock().await;
+    // A caller that names its connection leaves another connection's target pending
+    // instead of taking and discarding it.
+    if let (Some(expected), Some(target)) = (connection_id.as_deref(), pending.as_ref()) {
+        if target.connection_id != expected {
+            return Ok(None);
+        }
+    }
+    Ok(pending.take().filter(|target| {
+        inner.active.as_ref().is_some_and(|active| {
+            active.connection.id == target.connection_id
+                && active.connection.server_id.as_deref() == Some(target.server_id.as_str())
+        })
+    }))
 }
 #[tauri::command]
 pub async fn notifications_account_settings(
@@ -755,6 +762,7 @@ mod tests {
             server_id: "server".into(),
             account_id: "one".into(),
             thread_id: "room".into(),
+            message_id: None,
         };
         let focus = Focus {
             connection_id: "hub".into(),

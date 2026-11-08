@@ -249,7 +249,7 @@ try {
       )
       .on("error", reject);
   });
-  if (process.platform === "linux") await notificationsAcceptance(invokeNative);
+  if (process.platform === "linux") await notificationsAcceptance(invokeNative, script);
   try {
     await script(
       "window.__TAURI_INTERNALS__.invoke('desktop_quit'); return true"

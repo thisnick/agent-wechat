@@ -5,15 +5,22 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use ts_rs::TS;
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+/// A file uploaded to the daemon, ready to be sent.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnedMediaSource {
+    /// Source ID. Pass it as `sourceId` when sending.
     pub id: String,
+    /// File name given at upload.
     pub name: String,
+    /// MIME type given at upload.
     pub media_type: String,
+    /// Size of the file in bytes.
     #[ts(type = "number")]
     pub byte_length: u64,
+    /// SHA-256 of the file's bytes, as lowercase hex.
     pub sha256: String,
+    /// When the upload was stored, as an RFC 3339 time.
     pub created_at: String,
 }
 #[derive(Clone)]

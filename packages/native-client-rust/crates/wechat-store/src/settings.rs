@@ -1,9 +1,12 @@
 //! Registry settings are separate from the official operating profile.
 use super::*;
 /// Hub policy; this is never written into an official WeChat profile.
-#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountSettings {
+    /// Largest advertised size in bytes that the daemon downloads automatically for this account,
+    /// from 0 to 536870912. Thumbnails and voice notes are always downloaded, and 0 limits
+    /// automatic downloads to those; the default is 52428800.
     #[ts(type = "number")]
     pub auto_download_max_bytes: u64,
 }

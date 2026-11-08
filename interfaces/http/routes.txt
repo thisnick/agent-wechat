@@ -1,0 +1,801 @@
+# Daemon HTTP routes. Generated from the route table and payload types in crates/wechat-api; do not edit.
+# Run `pnpm interfaces` after changing a route or payload. Format: ITEM | ATTRIBUTES | DOC
+# `route` rows give the token scope, payloads and an SDK type where the TypeScript SDK declares one. A payload is `untyped` when the handler builds JSON by hand.
+# `request` and `response` rows list the fields of each typed payload. A type that the SDK declares but the handler does not return is listed too. Query strings are request fields.
+request AccountSettings | object, rejects unknown fields | Hub policy; this is never written into an official WeChat profile.
+request AccountSettings.autoDownloadMaxBytes | integer, required, min 0, format uint64 | Largest advertised size in bytes that the daemon downloads automatically for this account, from 0 to 536870912. Thumbnails and voice notes are always downloaded, and 0 limits automatic downloads to those; the default is 52428800.
+request ContactLookupRequest | object, rejects unknown fields | Request to look up several contacts.
+request ContactLookupRequest.ids | array of string, required | Contact IDs to look up.
+request ContentQuery | object, rejects unknown fields | Options for fetching media bytes.
+request ContentQuery.representation | string, values original|preview | The file itself or its preview. Defaults to the original.
+request CreateAccountRequest | object, rejects unknown fields | Request to register a new account.
+request CreateAccountRequest.alias | string, nullable | A friendly name that can be used in place of the ID.
+request CreateAccountRequest.id | string, nullable | Account ID. Omit it and the daemon generates one.
+request EventAckRequest | object, rejects unknown fields | Request to record how far a consumer has read the events.
+request EventAckRequest.cursor | string, required | The cursor of the last event the consumer has handled, a decimal string.
+request EventQuery | object, rejects unknown fields | Options for reading the event log or stream.
+request EventQuery.after | string, nullable, default null | Return events after this cursor, a decimal string. Defaults to 0, the start.
+request EventQuery.limit | integer, nullable, min 0, format uint | Events per JSON page. Defaults to 100. The stream ignores it.
+request GroupMutationKeyQuery | object, rejects unknown fields | Options for finding a group change by its idempotency key.
+request GroupMutationKeyQuery.key | string, required | The `Idempotency-Key` the group change was submitted with.
+request LoginRequest | object, rejects unknown fields | Options for signing an account in. Every field is optional.
+request LoginRequest.allowQr | boolean, default true | Whether a QR code may be shown. When false, only a saved login can be used. The default is true.
+request LoginRequest.computerName | string, default agent-wechat | Name this computer gives WeChat while signing in, up to 100 characters. The default is `agent-wechat`.
+request LoginRequest.forceQr | boolean, default false | True to skip the saved login and use a QR code, the same as strategy `qr`. The default is false.
+request LoginRequest.qrRefresh | object, default {"maxRefreshes":3,"mode":"auto"}, rejects unknown fields | How an expired QR code is replaced.
+request LoginRequest.qrRefresh.maxRefreshes | integer, min 0, max 255, format uint8, default 3 | How many times to replace an expired QR code automatically, from 0 to 3. The default is 3.
+request LoginRequest.qrRefresh.mode | string, values auto|manual, default auto | Whether an expired QR code that nobody scanned is replaced automatically. The default is `auto`.
+request LoginRequest.strategy | string, values auto|saved-device|qr, default auto | How to sign in. The default is `auto`.
+request LoginRequest.timeoutSeconds | integer, min 0, format uint64, default 300 | How long to wait for the sign-in to finish, from 10 to 900 seconds. The default is 300.
+request MediaQuery | object, rejects unknown fields | Options for fetching a saved image.
+request MediaQuery.quality | string, nullable | `best` (the default), `original`, `standard` or `thumbnail`.
+request MediaSendRequest | object, rejects unknown fields | Request to send an uploaded file, image, video or voice note. Upload the bytes first, then send with the returned source ID.
+request MediaSendRequest.durationMs | integer, nullable, min 0, format uint32 | Length of a voice note in milliseconds. Optional, because the daemon measures the audio itself.
+request MediaSendRequest.kind | string, required, values image|file|video|voice|sticker | What to send. Stickers cannot be sent.
+request MediaSendRequest.playSeconds | integer, nullable, min 0, format uint32 | Length of a video in seconds, from 1 to 3600. Optional, because the daemon measures the video itself.
+request MediaSendRequest.sourceId | string, required | ID of the uploaded source to send, as returned by the upload route.
+request MediaSendRequest.standardSourceId | string, nullable | ID of an uploaded JPEG to use as the standard-size copy of an image instead of generating one. Only valid for image sends.
+request MediaSendRequest.threadId | string, required | ID of the chat to send to.
+request MediaSendRequest.thumbnailSourceId | string, nullable | ID of an uploaded JPEG to use as the thumbnail instead of generating one. Only valid for image and video sends.
+request MediaSendRequest.videoQuality | string, nullable, values normal|original | How to send a video, `normal` by default or `original`. Only valid for video sends.
+request MediaTransferRequest | object, rejects unknown fields | Request to download an attachment of a message.
+request MediaTransferRequest.assetId | string, nullable | ID of the specific attachment to download. When null, the daemon picks the attachment that matches `quality`.
+request MediaTransferRequest.messageId | string, required | ID of the message to download from. It must match the message ID in the URL.
+request MediaTransferRequest.quality | string, values best|thumbnail|standard|original|normal|encoded, default best | Which copy to download. The default is `best`.
+request NativeAccountRemovalRequest | object, rejects unknown fields | Request to remove a signed-out account.
+request NativeAccountRemovalRequest.confirmAccountId | string, required | Must repeat the account ID from the URL, to confirm the removal.
+request NativeForgetRequest | object, rejects unknown fields | Request to delete the account's saved login credentials.
+request NativeForgetRequest.confirm | boolean, required | Must be true. It confirms that the credentials should be deleted.
+request NativeGroupCreateRequest | object, rejects unknown fields | Request to create a group chat.
+request NativeGroupCreateRequest.members | array of string, required | IDs of the contacts to add, from 2 to 40, without repeats and without this account's own ID.
+request NativeGroupCreateRequest.name | string, nullable, default null | Name for the new group, up to 512 bytes. Optional.
+request NativeGroupMembersRequest | object, rejects unknown fields | Members to add to or remove from a group.
+request NativeGroupMembersRequest.members | array of string, required | IDs of the contacts, from 1 to 40, without repeats and without this account's own ID.
+request NativeGroupMyNameRequest | object, rejects unknown fields | Request to change this account's display name in a group.
+request NativeGroupMyNameRequest.displayName | string, required | The new display name, up to 512 bytes.
+request NativeGroupNameRequest | object, rejects unknown fields | Request to rename a group.
+request NativeGroupNameRequest.name | string, required | The new group name. It must not be blank and can be up to 512 bytes.
+request NativeMediaBatchRequest | object, rejects unknown fields | Messages whose attachments to list without downloading anything.
+request NativeMediaBatchRequest.messageIds | array of string, required | IDs of the messages to look up, from 1 to 40 per request.
+request NativeMediaJobRetryRequest | object, rejects unknown fields | Options for retrying a media job.
+request NativeMediaJobRetryRequest.reuseCompletedUpload | boolean, nullable | True to reuse the upload a send job already finished instead of uploading again. The retry-completed-upload route requires true here.
+request NativeMediaWritebackRequest | object, rejects unknown fields | Request to repair saved media records from bytes the daemon already holds. It never downloads or sends anything.
+request NativeMediaWritebackRequest.limit | integer, required, min 0, format uint | How many saved media records to repair in this request, from 1 to 100.
+request NativeReadRequest | object, rejects unknown fields | Request to mark a chat as read.
+request NativeReadRequest.expectedVersion | string, required | The chat's `readStateVersion` from when you read it. The request is refused if the chat has changed since.
+request NativeRecallRequest | object, rejects unknown fields | Request to recall a message this account sent.
+request NativeRecallRequest.serverId | string, required | The message's `serverId`, copied as a string. The recall is refused if it does not match the message in the URL.
+request NativeTextSendRequest | object, rejects unknown fields | Request to send a text message, optionally as a quote reply or with mentions.
+request NativeTextSendRequest.mentions | object, nullable, rejects unknown fields | Group members to mention. Only allowed when sending to a group.
+request NativeTextSendRequest.mentions.all | boolean | True to mention everyone. Only the group owner and administrators can do this.
+request NativeTextSendRequest.mentions.positions | array of object | Where each mention sits inside `text`, so it shows inline. Without positions the names are placed before the text, and when given, every mentioned member needs at least one position.
+request NativeTextSendRequest.mentions.positions[] | object, rejects unknown fields | UTF-16 offsets into the submitted text, with an exclusive end.
+request NativeTextSendRequest.mentions.positions[].end | integer, required, min 0, format uint32 | UTF-16 offset just past the end of the mention. The mention includes its closing space character (U+2005).
+request NativeTextSendRequest.mentions.positions[].index | integer, required, min 0, format uint32 | Which `userIds` entry this mention stands for, counting from 0. Use 0 when mentioning everyone.
+request NativeTextSendRequest.mentions.positions[].start | integer, required, min 0, format uint32 | UTF-16 offset in the text where the mention starts, at the `@` character.
+request NativeTextSendRequest.mentions.userIds | array of string | IDs of the members to mention, at most 128 and without repeats. Leave out when `all` is true.
+request NativeTextSendRequest.quote | object, nullable, rejects unknown fields | The saved message this text replies to. The token also needs the `read` scope.
+request NativeTextSendRequest.quote.messageId | string, required | ID of the saved message to quote, copied from `id` on the message.
+request NativeTextSendRequest.quote.serverId | string, required | The quoted message's `serverId`, copied as a string. The request is refused if it does not match the saved message.
+request NativeTextSendRequest.text | string, required | The message text. A quote reply can hold up to 16 KiB and other text up to 64 KiB, including mention names.
+request NativeTextSendRequest.threadId | string, required | ID of the chat to send to.
+request NativeThreadNotificationsRequest | object, rejects unknown fields | Request to mute or unmute notifications for a chat.
+request NativeThreadNotificationsRequest.muted | boolean, required | True to mute the chat and false to turn its notifications back on.
+request NativeThreadPinRequest | object, rejects unknown fields | Request to pin or unpin a chat.
+request NativeThreadPinRequest.pinned | boolean, required | True to pin the chat and false to unpin it.
+request OfficialProfileRequest | object, rejects unknown fields | Where to find the stopped official WeChat profile to attach as an account.
+request OfficialProfileRequest.accountId | string, nullable | ID of the account expected to own this profile. The request is refused if the profile is not already attached to that account.
+request OfficialProfileRequest.path | string, nullable | Absolute path on the daemon's host to a home folder containing `xwechat_files`, to that folder, or to one account's folder. When omitted, the daemon searches only its own home folder.
+request PageQuery | object, rejects unknown fields | Paging and filter options for list routes.
+request PageQuery.cursor | string, nullable | The `nextCursor` of the previous page, up to 8192 characters. Send it with the same query.
+request PageQuery.kind | string, nullable | Only list chats of this kind: `direct`, `group` or `system`.
+request PageQuery.limit | integer, nullable, min 0, format uint | Items per page, from 1 to 200.
+request PageQuery.search | string, nullable | Text to search for, up to 256 characters. The name `query` is accepted too.
+request QrQuery | object, rejects unknown fields | Options for fetching a login QR code.
+request QrQuery.generation | integer, nullable, min 0, format uint64 | Only return the QR code if it is still this generation. A newer code fails with `login_challenge_superseded`.
+request RoomQuery | object, rejects unknown fields | Options for looking up one group.
+request RoomQuery.version | integer, min 0, format uint32, default 0 | The member-list version you already know. Defaults to 0.
+request SendKeyQuery | object, rejects unknown fields | Options for finding a send by its idempotency key.
+request SendKeyQuery.key | string, required | The `Idempotency-Key` the send was submitted with, up to 200 characters.
+request ShareSendRequest | object | A share card to send: a link with a title, an optional description and an optional thumbnail address. Nothing is fetched from the linked page.
+request ShareSendRequest.description | string, nullable, default null | Text shown under the title. Optional.
+request ShareSendRequest.kind | string, required, values share | share: Send a link card to a chat
+request ShareSendRequest.threadId | string, required | ID of the chat to send to.
+request ShareSendRequest.thumbnailUrl | string, nullable, default null | Address of a preview image for the card. It must be an http or https address without a port or fragment.
+request ShareSendRequest.title | string, required | Card title. It must not be blank.
+request ShareSendRequest.url | string, required | Address the card opens. It must be an http or https address.
+request TokenRequest | object, rejects unknown fields | Request to issue an API token.
+request TokenRequest.accounts | array of string, required | Account IDs the token can use, or `*` for every account.
+request TokenRequest.expiresAt | integer, nullable, format int64 | Unix time in seconds when the token stops working. Omit it for no expiry.
+request TokenRequest.name | string, required | A label for the token.
+request TokenRequest.scopes | array of string, required | Scopes the token grants: `read`, `send`, `media`, `login`, `calls`, `admin` and so on.
+request UpdateAccountRequest | object, rejects unknown fields | Request to change an account.
+request UpdateAccountRequest.alias | string, nullable | The new alias.
+request UpdateAccountRequest.autoConnect | boolean, nullable | Whether the account connects automatically when the daemon starts.
+response AccountSettings | object | Hub policy; this is never written into an official WeChat profile.
+response AccountSettings.autoDownloadMaxBytes | integer, required, min 0, format uint64 | Largest advertised size in bytes that the daemon downloads automatically for this account, from 0 to 536870912. Thumbnails and voice notes are always downloaded, and 0 limits automatic downloads to those; the default is 52428800.
+response CallSnapshot | object | The state of calling for one account, as returned by the HTTP snapshot route. The `hello` event carries the same fields.
+response CallSnapshot.audioFormat | object, required | The PCM format used for call audio.
+response CallSnapshot.audioFormat.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+response CallSnapshot.audioFormat.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+response CallSnapshot.audioFormat.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+response CallSnapshot.availability | object, required | Whether this account is in a call.
+response CallSnapshot.availability.busy | boolean, required | True while this account has a call, including one whose outcome is unresolved, so a new call cannot start.
+response CallSnapshot.availability.ownedByThisClient | boolean, required | True when this connection owns that call.
+response CallSnapshot.capabilities | object, required | Calling operations that are available.
+response CallSnapshot.capabilities.conferenceAudio | boolean | Audio in conference calls is available.
+response CallSnapshot.capabilities.conferenceCreate | boolean | Starting a conference call in a group is available.
+response CallSnapshot.capabilities.conferenceInvite | boolean | Inviting more contacts into a connected conference call is available.
+response CallSnapshot.capabilities.conferenceJoin | boolean | Joining a conference call from an invitation is available.
+response CallSnapshot.capabilities.conferenceVideo | boolean | Video in conference calls is available. This version never sets it.
+response CallSnapshot.capabilities.directAudio | boolean | Direct voice calls with one contact are available.
+response CallSnapshot.capabilities.directVideo | boolean | Direct video calls are available. This version never sets it.
+response CallSnapshot.conferenceInvitations | array of object, required | Conference calls this account can join.
+response CallSnapshot.conferenceInvitations[] | object | A conference call this account can join. It carries no room credentials.
+response CallSnapshot.conferenceInvitations[].callerId | string, required | Contact ID of the caller.
+response CallSnapshot.conferenceInvitations[].groupId | string, required | The group the conference call is in.
+response CallSnapshot.conferenceInvitations[].invitationId | string, required | Opaque ID for this account. Send it in `call.join`.
+response CallSnapshot.conferenceInvitations[].revision | integer, required, min 0, format uint32 | Revision of the invitation. Send it in `call.join` exactly as listed.
+response CallSnapshot.currentCall | object, required, nullable | The active call, or null.
+response CallSnapshot.currentCall.callId | string, required | ID of the call.
+response CallSnapshot.currentCall.callType | string, required, values voice|video | Whether the call is voice or video.
+response CallSnapshot.currentCall.controls | array of object | The latest controls reported by the other party of a direct call, also given to a newly connected observer. Omitted until one is reported.
+response CallSnapshot.currentCall.controls[] | object | A control reported by one participant.
+response CallSnapshot.currentCall.controls[].control | object, required | The control and its value.
+response CallSnapshot.currentCall.controls[].control.kind | string, required, values microphone | microphone: The participant's microphone
+response CallSnapshot.currentCall.controls[].control.muted | boolean, required | True when the microphone is muted.
+response CallSnapshot.currentCall.controls[].participantId | string, required | The participant the control belongs to. In a direct call this is the contact ID.
+response CallSnapshot.currentCall.direction | string, required, values incoming|outgoing | Whether this account placed the call or received it.
+response CallSnapshot.currentCall.groupId | string, nullable | The group of a conference call. Omitted for a direct call.
+response CallSnapshot.currentCall.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+response CallSnapshot.currentCall.ownedByThisClient | boolean, required | True when this connection owns the call. Always false in HTTP snapshots.
+response CallSnapshot.currentCall.participants | array of object | The latest conference roster. Omitted for a direct call.
+response CallSnapshot.currentCall.participants[] | object | One participant in a conference call.
+response CallSnapshot.currentCall.participants[].contactId | string, required | Contact ID of the participant.
+response CallSnapshot.currentCall.participants[].membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
+response CallSnapshot.currentCall.participants[].microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
+response CallSnapshot.currentCall.participants[].participantId | string, required | ID of the participant within this call. It is not a contact ID; use it to match audio tracks to participants.
+response CallSnapshot.currentCall.participants[].status | object, nullable | Signaling progress, separate from membership. Omitted until reported.
+response CallSnapshot.currentCall.participants[].status.code | integer, required, min 0, format uint32 | The status number the service reported. Keep it for codes `kind` does not name.
+response CallSnapshot.currentCall.participants[].status.kind | string, required, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | What the code means.
+response CallSnapshot.currentCall.revision | integer, required, min 0, format uint32 | Increases each time the call changes. Send the latest value as `expectedRevision`.
+response CallSnapshot.currentCall.state | string, required, values offered|dialing|ringing|connecting|connected|ending|ended|uncertain | Where the call is in its life.
+response CallSnapshot.currentOffer | object, required, nullable | The incoming call that can be answered now, or null.
+response CallSnapshot.currentOffer.callId | string, required | ID of the offered call.
+response CallSnapshot.currentOffer.callType | string, required, values voice|video | Whether the call is voice or video.
+response CallSnapshot.currentOffer.callerId | string, required | Contact ID of the caller.
+response CallSnapshot.currentOffer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+response CallSnapshot.currentOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes. Send the latest value as `expectedRevision` when answering or rejecting.
+response CallSnapshot.currentPendingOffer | object, required, nullable | An incoming call that cannot be answered yet, or null.
+response CallSnapshot.currentPendingOffer.callId | string, required | ID of the incoming call.
+response CallSnapshot.currentPendingOffer.callType | string, required, values voice|video | Whether the call is voice or video.
+response CallSnapshot.currentPendingOffer.callerId | string, required | Contact ID of the caller.
+response CallSnapshot.currentPendingOffer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
+response CallSnapshot.currentPendingOffer.phase | string, required, values waiting_for_ready|preparing | What the call is waiting for.
+response CallSnapshot.currentPendingOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes.
+response MediaAsset | object | One copy of a message's attachment, and whether its bytes have been downloaded and checked.
+response MediaAsset.accountId | string, required | ID of the account the attachment belongs to.
+response MediaAsset.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response MediaAsset.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response MediaAsset.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response MediaAsset.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response MediaAsset.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response MediaAsset.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response MediaAsset.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response MediaAsset.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response MediaAsset.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response MediaAsset.id | string, required | Attachment ID, used to fetch or request this copy.
+response MediaAsset.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response MediaAsset.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response MediaAsset.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response MediaAsset.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response MediaAsset.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response MediaAsset.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response MediaAsset.preview.contentType | string, required | MIME type of the preview.
+response MediaAsset.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response MediaAsset.preview.filename | string, required | File name of the preview.
+response MediaAsset.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response MediaAsset.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response MediaAsset.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response MediaAsset.retryable | boolean, required | True when asking for the download again can still succeed.
+response MediaAsset.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response MediaAsset.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response MediaAsset.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response MediaJob | object | A background upload or download of media, with its progress. Poll it by ID until it finishes.
+response MediaJob.accountId | string, required | ID of the account the job belongs to.
+response MediaJob.assetId | string, required, nullable | ID of the attachment being downloaded. Null for sends.
+response MediaJob.attempts | integer, required, min 0, format uint32 | How many times the job has been started. A failed job can be retried only while this is below 3.
+response MediaJob.cancelRequested | boolean, required | True when a cancel has been requested for the job.
+response MediaJob.completedBytes | integer, required, min 0, format uint64 | Bytes transferred so far.
+response MediaJob.createdAt | string, required | When the job was created, as an RFC 3339 time.
+response MediaJob.id | string, required | Job ID.
+response MediaJob.kind | string, required | `send` for an upload to a chat, or `download` for fetching a received attachment.
+response MediaJob.phase | string, required | Current step: `queued`, `preparing`, `downloading`, `reserving`, `uploading`, `submitting`, `readback` or `completed`.
+response MediaJob.reason | string, required, nullable | Error code of the last failure. Null when there has been none.
+response MediaJob.result | any, required | Details of the outcome. Its fields depend on the job, and it is null until there is something to report.
+response MediaJob.retryable | boolean, required | True when the job can be retried.
+response MediaJob.serverMessageId | string, required, nullable | WeChat's ID of the sent message once WeChat accepted it. Null until then.
+response MediaJob.sourceId | string, required, nullable | ID of the uploaded source being sent. Null for downloads.
+response MediaJob.state | string, required | Where the job stands: `queued`, `running`, `available` (download finished), `accepted` (WeChat took the send), `needs_review` (the outcome is unknown, so check before sending again), `cancelled`, `expired`, `unsupported` or `failed`.
+response MediaJob.threadId | string, required, nullable | ID of the chat a send goes to. Null for downloads.
+response MediaJob.totalBytes | integer, required, nullable, min 0, format uint64 | Total bytes to transfer, when known. Null otherwise.
+response MediaJob.updatedAt | string, required | When the job last changed, as an RFC 3339 time.
+response NativeAccountRemoval | object | Result of removing an account.
+response NativeAccountRemoval.accountId | string, required | ID of the account that was removed.
+response NativeAccountRemoval.filesRetained | boolean, required | True when the account's local files were kept. They are always kept.
+response NativeAccountRemoval.removed | boolean, required | True when the account was removed.
+response NativeContact | object | A contact saved in the account's profile.
+response NativeContact.alias | string, required, nullable | The custom WeChat ID the contact chose, which they can change. Null when none is saved.
+response NativeContact.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeContact.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeContact.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeContact.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeContact.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeContact.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeContact.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeContact.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeContact.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeContact.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeContact.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeContact.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeContact.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeContact.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeContact.classification.openIm.wordings[] | object | A label in one language.
+response NativeContact.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeContact.classification.openIm.wordings[].text | string, required | The label text.
+response NativeContact.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
+response NativeContact.id | string, required | Contact ID. It is the same as `username`.
+response NativeContact.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
+response NativeContact.relation | string, required | Relationship to this account. It currently always reports `unknown`, including for saved friends.
+response NativeContact.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
+response NativeContact.username | string, required | The contact's WeChat username.
+response NativeContactPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
+response NativeContactPage.asOfEventCursor | string, required, nullable | Event cursor that was current when the list was first read. Resume the event stream from it to catch changes made after the read.
+response NativeContactPage.coverage | any, required | Which saved databases the read covered, as `partial` (true when some could not be read) and `databases` (each one with its state). It describes local data, not completeness on WeChat's servers.
+response NativeContactPage.items | array of object, required | The entries on this page, in list order.
+response NativeContactPage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
+response NativeContactPage.items[]<NativeContact> | object | A contact saved in the account's profile.
+response NativeContactPage.items[]<NativeContact>.alias | string, required, nullable | The custom WeChat ID the contact chose, which they can change. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeContactPage.items[]<NativeContact>.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeContactPage.items[]<NativeContact>.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeContactPage.items[]<NativeContact>.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeContactPage.items[]<NativeContact>.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeContactPage.items[]<NativeContact>.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings[] | object | A label in one language.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings[].text | string, required | The label text.
+response NativeContactPage.items[]<NativeContact>.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
+response NativeContactPage.items[]<NativeContact>.id | string, required | Contact ID. It is the same as `username`.
+response NativeContactPage.items[]<NativeContact>.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship to this account. It currently always reports `unknown`, including for saved friends.
+response NativeContactPage.items[]<NativeContact>.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.username | string, required | The contact's WeChat username.
+response NativeContactPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
+response NativeContactPage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.
+response NativeContactPage.items[]<NativeTombstone>.id | string, required | ID of the removed resource.
+response NativeContactPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
+response NativeContactPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
+response NativeContactPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeEvent | object | An entry in the account's event log, which keeps only about the most recent 10,000 events.
+response NativeEvent.createdAt | string, required | When the event was recorded, as an RFC 3339 time.
+response NativeEvent.cursor | string, required | Position of the event in the log, a decimal number written as a string that only increases. Pass the last one you handled as `after` to resume.
+response NativeEvent.data | any, required | Details of the event. The fields depend on `kind`; for example `message.committed` carries `messageId` and `threadId`.
+response NativeEvent.kind | string, required | Kind of event, such as `message.committed`, `thread.updated`, `group.updated`, `operation.updated` or `send.updated`.
+response NativeGroup | object | A group chat saved in the account's profile.
+response NativeGroup.administratorIds | array of string, required, nullable | IDs of the group's administrators. The owner is not listed unless WeChat lists them too, and the field is null when the saved data cannot say.
+response NativeGroup.announcement | string, required, nullable | Text of the group's current announcement. Null when there is none.
+response NativeGroup.canMentionAll | boolean, required, nullable | Whether this account may mention everyone: true for the owner and administrators and false for other members. Null means permission is not established, and older servers omit the field.
+response NativeGroup.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeGroup.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeGroup.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeGroup.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeGroup.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeGroup.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeGroup.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeGroup.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeGroup.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeGroup.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeGroup.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeGroup.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeGroup.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeGroup.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeGroup.classification.openIm.wordings[] | object | A label in one language.
+response NativeGroup.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeGroup.classification.openIm.wordings[].text | string, required | The label text.
+response NativeGroup.displayName | string, required, nullable | Name to show for the group: your remark if set, else the group's name, else the ID.
+response NativeGroup.id | string, required | Group ID, ending with `@chatroom`. It is the same as `roomId`.
+response NativeGroup.isInGroup | boolean, required, nullable | True when this account is still a member of the group and false when it is not. Null when the saved data does not say.
+response NativeGroup.minimized | boolean, required, nullable | True when the group is minimized (folded) in the chat list and false when it is not. Null when the saved data does not say.
+response NativeGroup.muted | boolean, required, nullable | True when notifications for the group are muted and false when they are on. Null when the saved data does not say.
+response NativeGroup.myDisplayName | string, required, nullable | This account's own display name in the group. Null or omitted when it is not known.
+response NativeGroup.name | string, required, nullable | The group's own shared name. Null when none is saved.
+response NativeGroup.ownerId | string, required, nullable | ID of the member who owns the group. Null when the saved data does not say.
+response NativeGroup.remark | string, required, nullable | Your private name for the group. Null when none is saved.
+response NativeGroup.roomId | string, required | Group ID, the same as `id`.
+response NativeGroupMemberLookup | object | Result of looking up one person in a group's saved member list.
+response NativeGroupMemberLookup.coverage | string, required | How the answer was obtained. It is currently always `cached`, meaning saved data only.
+response NativeGroupMemberLookup.groupId | string, required | ID of the group that was searched.
+response NativeGroupMemberLookup.member | object, required, nullable | The member's details when `state` is `present`, otherwise null.
+response NativeGroupMemberLookup.member.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeGroupMemberLookup.member.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeGroupMemberLookup.member.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeGroupMemberLookup.member.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeGroupMemberLookup.member.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeGroupMemberLookup.member.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeGroupMemberLookup.member.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeGroupMemberLookup.member.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeGroupMemberLookup.member.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeGroupMemberLookup.member.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeGroupMemberLookup.member.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeGroupMemberLookup.member.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeGroupMemberLookup.member.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeGroupMemberLookup.member.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeGroupMemberLookup.member.classification.openIm.wordings[] | object | A label in one language.
+response NativeGroupMemberLookup.member.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeGroupMemberLookup.member.classification.openIm.wordings[].text | string, required | The label text.
+response NativeGroupMemberLookup.member.displayName | string, required, nullable | Name to show for the member: your remark, else their name in this group, else their nickname, else their username.
+response NativeGroupMemberLookup.member.id | string, required | Member ID. It is the same as `username`.
+response NativeGroupMemberLookup.member.mentionName | string, nullable | Name used for this member in mention text. It comes from their name in the group or their nickname, never from your private remark, and falls back to the username.
+response NativeGroupMemberLookup.member.roomDisplayName | string, required, nullable | The member's own display name in this group. Null when none is saved.
+response NativeGroupMemberLookup.member.username | string, required | The member's WeChat username.
+response NativeGroupMemberLookup.state | string, required | `present` when the person is in the saved member list and `unconfirmed` when they are not. A missing row does not prove they left, because the saved list can be incomplete.
+response NativeGroupMemberLookup.username | string, required | Username that was looked up.
+response NativeGroupMemberPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
+response NativeGroupMemberPage.asOfEventCursor | string, required, nullable | Event cursor that was current when the list was first read. Resume the event stream from it to catch changes made after the read.
+response NativeGroupMemberPage.coverage | any, required | Which saved databases the read covered, as `partial` (true when some could not be read) and `databases` (each one with its state). It describes local data, not completeness on WeChat's servers.
+response NativeGroupMemberPage.items | array of object, required | The entries on this page, in list order.
+response NativeGroupMemberPage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
+response NativeGroupMemberPage.items[]<NativeGroupMember> | object | A member of a group, as saved in the account's profile.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.wordings[] | object | A label in one language.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.wordings[].text | string, required | The label text.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.displayName | string, required, nullable | Name to show for the member: your remark, else their name in this group, else their nickname, else their username.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.id | string, required | Member ID. It is the same as `username`.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.mentionName | string, nullable | Name used for this member in mention text. It comes from their name in the group or their nickname, never from your private remark, and falls back to the username.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.roomDisplayName | string, required, nullable | The member's own display name in this group. Null when none is saved.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.username | string, required | The member's WeChat username.
+response NativeGroupMemberPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
+response NativeGroupMemberPage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.
+response NativeGroupMemberPage.items[]<NativeTombstone>.id | string, required | ID of the removed resource.
+response NativeGroupMemberPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
+response NativeGroupMemberPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
+response NativeGroupMemberPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeGroupPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
+response NativeGroupPage.asOfEventCursor | string, required, nullable | Event cursor that was current when the list was first read. Resume the event stream from it to catch changes made after the read.
+response NativeGroupPage.coverage | any, required | Which saved databases the read covered, as `partial` (true when some could not be read) and `databases` (each one with its state). It describes local data, not completeness on WeChat's servers.
+response NativeGroupPage.items | array of object, required | The entries on this page, in list order.
+response NativeGroupPage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
+response NativeGroupPage.items[]<NativeGroup> | object | A group chat saved in the account's profile.
+response NativeGroupPage.items[]<NativeGroup>.administratorIds | array of string, required, nullable | IDs of the group's administrators. The owner is not listed unless WeChat lists them too, and the field is null when the saved data cannot say.
+response NativeGroupPage.items[]<NativeGroup>.announcement | string, required, nullable | Text of the group's current announcement. Null when there is none.
+response NativeGroupPage.items[]<NativeGroup>.canMentionAll | boolean, required, nullable | Whether this account may mention everyone: true for the owner and administrators and false for other members. Null means permission is not established, and older servers omit the field.
+response NativeGroupPage.items[]<NativeGroup>.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeGroupPage.items[]<NativeGroup>.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeGroupPage.items[]<NativeGroup>.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeGroupPage.items[]<NativeGroup>.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeGroupPage.items[]<NativeGroup>.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.wordings[] | object | A label in one language.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeGroupPage.items[]<NativeGroup>.classification.openIm.wordings[].text | string, required | The label text.
+response NativeGroupPage.items[]<NativeGroup>.displayName | string, required, nullable | Name to show for the group: your remark if set, else the group's name, else the ID.
+response NativeGroupPage.items[]<NativeGroup>.id | string, required | Group ID, ending with `@chatroom`. It is the same as `roomId`.
+response NativeGroupPage.items[]<NativeGroup>.isInGroup | boolean, required, nullable | True when this account is still a member of the group and false when it is not. Null when the saved data does not say.
+response NativeGroupPage.items[]<NativeGroup>.minimized | boolean, required, nullable | True when the group is minimized (folded) in the chat list and false when it is not. Null when the saved data does not say.
+response NativeGroupPage.items[]<NativeGroup>.muted | boolean, required, nullable | True when notifications for the group are muted and false when they are on. Null when the saved data does not say.
+response NativeGroupPage.items[]<NativeGroup>.myDisplayName | string, required, nullable | This account's own display name in the group. Null or omitted when it is not known.
+response NativeGroupPage.items[]<NativeGroup>.name | string, required, nullable | The group's own shared name. Null when none is saved.
+response NativeGroupPage.items[]<NativeGroup>.ownerId | string, required, nullable | ID of the member who owns the group. Null when the saved data does not say.
+response NativeGroupPage.items[]<NativeGroup>.remark | string, required, nullable | Your private name for the group. Null when none is saved.
+response NativeGroupPage.items[]<NativeGroup>.roomId | string, required | Group ID, the same as `id`.
+response NativeGroupPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
+response NativeGroupPage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.
+response NativeGroupPage.items[]<NativeTombstone>.id | string, required | ID of the removed resource.
+response NativeGroupPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
+response NativeGroupPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
+response NativeGroupPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeMediaBatch | object | Attachments of several messages.
+response NativeMediaBatch.items | array of object, required | One entry for each requested message.
+response NativeMediaBatch.items[] | object | The attachments found for one message.
+response NativeMediaBatch.items[].assets | array of object, required | Attachments of the message. Empty when `error` is set.
+response NativeMediaBatch.items[].assets[] | object | One copy of a message's attachment, and whether its bytes have been downloaded and checked.
+response NativeMediaBatch.items[].assets[].accountId | string, required | ID of the account the attachment belongs to.
+response NativeMediaBatch.items[].assets[].actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response NativeMediaBatch.items[].assets[].advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response NativeMediaBatch.items[].assets[].animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response NativeMediaBatch.items[].assets[].autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response NativeMediaBatch.items[].assets[].byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response NativeMediaBatch.items[].assets[].contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response NativeMediaBatch.items[].assets[].contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response NativeMediaBatch.items[].assets[].expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response NativeMediaBatch.items[].assets[].filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response NativeMediaBatch.items[].assets[].id | string, required | Attachment ID, used to fetch or request this copy.
+response NativeMediaBatch.items[].assets[].jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response NativeMediaBatch.items[].assets[].kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response NativeMediaBatch.items[].assets[].messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response NativeMediaBatch.items[].assets[].officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response NativeMediaBatch.items[].assets[].preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response NativeMediaBatch.items[].assets[].preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response NativeMediaBatch.items[].assets[].preview.contentType | string, required | MIME type of the preview.
+response NativeMediaBatch.items[].assets[].preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response NativeMediaBatch.items[].assets[].preview.filename | string, required | File name of the preview.
+response NativeMediaBatch.items[].assets[].preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response NativeMediaBatch.items[].assets[].preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response NativeMediaBatch.items[].assets[].reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response NativeMediaBatch.items[].assets[].retryable | boolean, required | True when asking for the download again can still succeed.
+response NativeMediaBatch.items[].assets[].sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response NativeMediaBatch.items[].assets[].state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response NativeMediaBatch.items[].assets[].variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response NativeMediaBatch.items[].error | string, required, nullable | Error code when this message's attachments could not be listed, otherwise null.
+response NativeMediaBatch.items[].messageId | string, required | ID of the message that was looked up.
+response NativeMessage | object | A saved message as read from the account's profile. It carries only readable fields and never raw message XML.
+response NativeMessage.accountId | string, required | ID of the account the message belongs to.
+response NativeMessage.appMessageType | integer, required, nullable, format int32 | For app messages (type 49), the app subtype, such as 5 link, 6 file, 8 shared sticker, 19 forwarded chat and 57 quote reply. Null for other messages.
+response NativeMessage.body | string, required, nullable | Readable text of the message, such as the text itself or a summary of a link, location or forwarded chat. Null when there is nothing readable, for example for a photo.
+response NativeMessage.createdAt | string, required, nullable | When the message was created, as an RFC 3339 time. Null when the saved time is missing.
+response NativeMessage.direction | string, required, nullable | `outgoing` when this account sent the message and `incoming` when someone else did. Null for system notices and when it cannot be determined.
+response NativeMessage.id | string, required | Message ID. Pass it back unchanged to routes that take a message ID.
+response NativeMessage.link | object, required, nullable | Link card details when the message is a shared link, article, music or video card, or a Channels post. Null otherwise.
+response NativeMessage.link.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessage.link.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
+response NativeMessage.link.title | string, required, nullable | Card title. Null when there is none.
+response NativeMessage.link.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
+response NativeMessage.location | object, nullable | Pin details when the message is a static location. Omitted for other messages.
+response NativeMessage.location.address | string, required, nullable | Address text supplied with the pin. Null when there is none.
+response NativeMessage.location.coordinateSystem | string, required, values unknown | Coordinate system of the numbers. It is always `unknown`, because coordinates are reported as sent.
+response NativeMessage.location.latitude | number, required, format double | Latitude in degrees, from -90 to 90.
+response NativeMessage.location.longitude | number, required, format double | Longitude in degrees, from -180 to 180.
+response NativeMessage.location.mapType | string, required, nullable | Map type text supplied with the pin, as sent. Null when there is none.
+response NativeMessage.location.name | string, required, nullable | Place name supplied with the pin. Null when there is none.
+response NativeMessage.location.poiId | string, required, nullable | Place identifier supplied with the pin, as sent. Null when there is none.
+response NativeMessage.location.scale | integer, required, nullable, format int32 | Map scale value supplied with the pin, as sent. Null when there is none.
+response NativeMessage.media | array of any, required | Always an empty list today. Use the message's media routes to list its attachments.
+response NativeMessage.mentions | object, required | Which members the message mentions.
+response NativeMessage.mentions.all | boolean, required, nullable | True when the message mentions everyone, false when it does not, and null when the mentions are unknown.
+response NativeMessage.mentions.self | boolean, required, nullable | True when this account is among the mentioned members, false when it is not, and null when the mentions are unknown.
+response NativeMessage.mentions.source | string, required, nullable | Where the mentions were read from, currently `msgsource.atuserlist`. Null when there is no source, for example when `state` is `unknown`.
+response NativeMessage.mentions.state | string, required | `known` when the mention list was read, `unknown` when it is missing or cannot be parsed. When unknown, `userIds` is empty and the flags are null.
+response NativeMessage.mentions.userIds | array of string, required | IDs of the members mentioned by name, not counting the mention-everyone marker (see `all`).
+response NativeMessage.quote | object, required, nullable | The message this one replies to, when it is a quote reply. Null otherwise.
+response NativeMessage.quote.appMessageType | integer, required, nullable, format int32 | App subtype of the quoted message when it is an app message (type 49), such as 5 for a link. Null for other messages.
+response NativeMessage.quote.direction | string, required, nullable | `outgoing` when the quoted message was sent by this account and `incoming` when someone else sent it. Null when that cannot be told.
+response NativeMessage.quote.embeddedImage | boolean, required, nullable | True when the reply carries the quoted image, so it can be downloaded through the reply's media routes.
+response NativeMessage.quote.embeddedLink | object, nullable | Link card of the quoted message when it was a shared link, with the same fields as `link` on a message.
+response NativeMessage.quote.embeddedLink.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessage.quote.embeddedLink.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
+response NativeMessage.quote.embeddedLink.title | string, required, nullable | Card title. Null when there is none.
+response NativeMessage.quote.embeddedLink.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
+response NativeMessage.quote.embeddedSticker | boolean, nullable | True when the quoted message is a sticker. Omitted otherwise.
+response NativeMessage.quote.embeddedText | string, required, nullable | Readable text of the quoted message, taken from the reply. Null when there is none.
+response NativeMessage.quote.senderId | string, required, nullable | ID of the quoted message's sender, when the reply says who it was.
+response NativeMessage.quote.serverId | string, required | WeChat's ID of the quoted message, as a string.
+response NativeMessage.quote.state | string, required, nullable | How much of the quote could be shown: `embedded` when the reply carries readable content, `missing` when it carries none, `unsupported` for a kind of message that cannot be shown as a quote, and `recalled` when the original was recalled and its content is hidden.
+response NativeMessage.quote.type | integer, required, format int32 | WeChat's numeric type of the quoted message, with the same values as `type` on a message.
+response NativeMessage.recall | object, nullable | Recall details. Present only when the message was recalled, in which case `body` is `[Message recalled]`.
+response NativeMessage.recall.observedAt | string, required | When the daemon first saw the recall, as an RFC 3339 time.
+response NativeMessage.recall.recalledAt | string, nullable | When WeChat says the message was recalled, as an RFC 3339 time. Omitted when that time is not known.
+response NativeMessage.recall.replacementText | string, nullable | The notice text WeChat saved in place of the message. Omitted or null when there is none.
+response NativeMessage.senderId | string, required, nullable | ID of the sender. Null for system notices and when the sender cannot be determined.
+response NativeMessage.serverId | string, required, nullable | WeChat's own ID for the message, as a string because it can exceed the largest whole number JavaScript holds exactly. Null when the saved message has none.
+response NativeMessage.threadId | string, required | ID of the chat the message is in.
+response NativeMessage.type | integer, required, format int32 | WeChat's numeric message type, such as 1 text, 3 image, 34 voice, 43 video, 47 sticker, 48 location, 49 app message (links, files, quotes) and 10000 system notice.
+response NativeMessage.version | string, required | Fingerprint of the saved profile data this message was read from. It changes whenever the profile files change, not only when this message changes.
+response NativeMessagePage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
+response NativeMessagePage.asOfEventCursor | string, required, nullable | Event cursor that was current when the list was first read. Resume the event stream from it to catch changes made after the read.
+response NativeMessagePage.coverage | any, required | Which saved databases the read covered, as `partial` (true when some could not be read) and `databases` (each one with its state). It describes local data, not completeness on WeChat's servers.
+response NativeMessagePage.items | array of object, required | The entries on this page, in list order.
+response NativeMessagePage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
+response NativeMessagePage.items[]<NativeMessage> | object | A saved message as read from the account's profile. It carries only readable fields and never raw message XML.
+response NativeMessagePage.items[]<NativeMessage>.accountId | string, required | ID of the account the message belongs to.
+response NativeMessagePage.items[]<NativeMessage>.appMessageType | integer, required, nullable, format int32 | For app messages (type 49), the app subtype, such as 5 link, 6 file, 8 shared sticker, 19 forwarded chat and 57 quote reply. Null for other messages.
+response NativeMessagePage.items[]<NativeMessage>.body | string, required, nullable | Readable text of the message, such as the text itself or a summary of a link, location or forwarded chat. Null when there is nothing readable, for example for a photo.
+response NativeMessagePage.items[]<NativeMessage>.createdAt | string, required, nullable | When the message was created, as an RFC 3339 time. Null when the saved time is missing.
+response NativeMessagePage.items[]<NativeMessage>.direction | string, required, nullable | `outgoing` when this account sent the message and `incoming` when someone else did. Null for system notices and when it cannot be determined.
+response NativeMessagePage.items[]<NativeMessage>.id | string, required | Message ID. Pass it back unchanged to routes that take a message ID.
+response NativeMessagePage.items[]<NativeMessage>.link | object, required, nullable | Link card details when the message is a shared link, article, music or video card, or a Channels post. Null otherwise.
+response NativeMessagePage.items[]<NativeMessage>.link.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.link.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.link.title | string, required, nullable | Card title. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.link.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
+response NativeMessagePage.items[]<NativeMessage>.location | object, nullable | Pin details when the message is a static location. Omitted for other messages.
+response NativeMessagePage.items[]<NativeMessage>.location.address | string, required, nullable | Address text supplied with the pin. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.location.coordinateSystem | string, required, values unknown | Coordinate system of the numbers. It is always `unknown`, because coordinates are reported as sent.
+response NativeMessagePage.items[]<NativeMessage>.location.latitude | number, required, format double | Latitude in degrees, from -90 to 90.
+response NativeMessagePage.items[]<NativeMessage>.location.longitude | number, required, format double | Longitude in degrees, from -180 to 180.
+response NativeMessagePage.items[]<NativeMessage>.location.mapType | string, required, nullable | Map type text supplied with the pin, as sent. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.location.name | string, required, nullable | Place name supplied with the pin. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.location.poiId | string, required, nullable | Place identifier supplied with the pin, as sent. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.location.scale | integer, required, nullable, format int32 | Map scale value supplied with the pin, as sent. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.media | array of any, required | Always an empty list today. Use the message's media routes to list its attachments.
+response NativeMessagePage.items[]<NativeMessage>.mentions | object, required | Which members the message mentions.
+response NativeMessagePage.items[]<NativeMessage>.mentions.all | boolean, required, nullable | True when the message mentions everyone, false when it does not, and null when the mentions are unknown.
+response NativeMessagePage.items[]<NativeMessage>.mentions.self | boolean, required, nullable | True when this account is among the mentioned members, false when it is not, and null when the mentions are unknown.
+response NativeMessagePage.items[]<NativeMessage>.mentions.source | string, required, nullable | Where the mentions were read from, currently `msgsource.atuserlist`. Null when there is no source, for example when `state` is `unknown`.
+response NativeMessagePage.items[]<NativeMessage>.mentions.state | string, required | `known` when the mention list was read, `unknown` when it is missing or cannot be parsed. When unknown, `userIds` is empty and the flags are null.
+response NativeMessagePage.items[]<NativeMessage>.mentions.userIds | array of string, required | IDs of the members mentioned by name, not counting the mention-everyone marker (see `all`).
+response NativeMessagePage.items[]<NativeMessage>.quote | object, required, nullable | The message this one replies to, when it is a quote reply. Null otherwise.
+response NativeMessagePage.items[]<NativeMessage>.quote.appMessageType | integer, required, nullable, format int32 | App subtype of the quoted message when it is an app message (type 49), such as 5 for a link. Null for other messages.
+response NativeMessagePage.items[]<NativeMessage>.quote.direction | string, required, nullable | `outgoing` when the quoted message was sent by this account and `incoming` when someone else sent it. Null when that cannot be told.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedImage | boolean, required, nullable | True when the reply carries the quoted image, so it can be downloaded through the reply's media routes.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink | object, nullable | Link card of the quoted message when it was a shared link, with the same fields as `link` on a message.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.title | string, required, nullable | Card title. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedSticker | boolean, nullable | True when the quoted message is a sticker. Omitted otherwise.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedText | string, required, nullable | Readable text of the quoted message, taken from the reply. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.quote.senderId | string, required, nullable | ID of the quoted message's sender, when the reply says who it was.
+response NativeMessagePage.items[]<NativeMessage>.quote.serverId | string, required | WeChat's ID of the quoted message, as a string.
+response NativeMessagePage.items[]<NativeMessage>.quote.state | string, required, nullable | How much of the quote could be shown: `embedded` when the reply carries readable content, `missing` when it carries none, `unsupported` for a kind of message that cannot be shown as a quote, and `recalled` when the original was recalled and its content is hidden.
+response NativeMessagePage.items[]<NativeMessage>.quote.type | integer, required, format int32 | WeChat's numeric type of the quoted message, with the same values as `type` on a message.
+response NativeMessagePage.items[]<NativeMessage>.recall | object, nullable | Recall details. Present only when the message was recalled, in which case `body` is `[Message recalled]`.
+response NativeMessagePage.items[]<NativeMessage>.recall.observedAt | string, required | When the daemon first saw the recall, as an RFC 3339 time.
+response NativeMessagePage.items[]<NativeMessage>.recall.recalledAt | string, nullable | When WeChat says the message was recalled, as an RFC 3339 time. Omitted when that time is not known.
+response NativeMessagePage.items[]<NativeMessage>.recall.replacementText | string, nullable | The notice text WeChat saved in place of the message. Omitted or null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.senderId | string, required, nullable | ID of the sender. Null for system notices and when the sender cannot be determined.
+response NativeMessagePage.items[]<NativeMessage>.serverId | string, required, nullable | WeChat's own ID for the message, as a string because it can exceed the largest whole number JavaScript holds exactly. Null when the saved message has none.
+response NativeMessagePage.items[]<NativeMessage>.threadId | string, required | ID of the chat the message is in.
+response NativeMessagePage.items[]<NativeMessage>.type | integer, required, format int32 | WeChat's numeric message type, such as 1 text, 3 image, 34 voice, 43 video, 47 sticker, 48 location, 49 app message (links, files, quotes) and 10000 system notice.
+response NativeMessagePage.items[]<NativeMessage>.version | string, required | Fingerprint of the saved profile data this message was read from. It changes whenever the profile files change, not only when this message changes.
+response NativeMessagePage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
+response NativeMessagePage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.
+response NativeMessagePage.items[]<NativeTombstone>.id | string, required | ID of the removed resource.
+response NativeMessagePage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
+response NativeMessagePage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
+response NativeMessagePage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeOperation | object | A background operation such as signing in or out, refreshing contacts or changing a group. Poll it by ID until it finishes.
+response NativeOperation.accountId | string, required | ID of the account the operation belongs to.
+response NativeOperation.createdAt | string, required | When the operation was created, as an RFC 3339 time.
+response NativeOperation.id | string, required | Operation ID.
+response NativeOperation.kind | string, required | What the operation does, such as `login`, `logout`, `sync`, `metadata`, `group_mutation`, `message_recall` or `media-writeback`.
+response NativeOperation.result | any, required | Details of the outcome. Its fields depend on `kind`, and it is empty until the operation has something to report.
+response NativeOperation.state | string, required | Where the operation stands, such as `queued`, `running`, `succeeded`, `failed` or `cancelled`. Some kinds report more states, for example `needs_review`, or `awaiting_scan` and `awaiting_approval` during a login.
+response NativeOperation.updatedAt | string, required | When the operation last changed, as an RFC 3339 time.
+response NativeSendIntent | object | A text or share-card send and how far it got. Media sends are reported as media jobs instead.
+response NativeSendIntent.accountId | string, required | ID of the account that is sending.
+response NativeSendIntent.clientId | string, required, nullable | ID the daemon gave the message when it submitted it to WeChat.
+response NativeSendIntent.createdAt | string, required | When the send was created, as an RFC 3339 time.
+response NativeSendIntent.destination | string, required | ID of the chat the message is sent to.
+response NativeSendIntent.errorCode | string, required, nullable | Why the send failed or needs review. Null otherwise.
+response NativeSendIntent.id | string, required | Send ID, used to look the send up or cancel it.
+response NativeSendIntent.localMessageId | string, required, nullable | ID of the saved message that represents this send, once it appears in the profile. Omitted until then.
+response NativeSendIntent.serverId | string, required, nullable | WeChat's ID of the message once it was accepted, as a string. Null until then.
+response NativeSendIntent.state | string, required | `queued`, `submitting`, `accepted` (WeChat took it), `failed` (WeChat refused it), `needs_review` (the outcome is unknown, so check the chat before sending again) or `cancelled`.
+response NativeStatus | object | Identity and state of the running daemon.
+response NativeStatus.dataDir | string, required | Path of the data directory on the daemon's host.
+response NativeStatus.ownershipGeneration | string, required | Random ID created each time the daemon starts. A shutdown request must repeat it.
+response NativeStatus.pid | integer, required, min 0, format uint32 | Process ID of the daemon.
+response NativeStatus.serverId | string, required | ID of this daemon's data directory. It is created once and kept across restarts.
+response NativeStatus.state | string, required | Daemon state. It is `ready` while the daemon is serving requests.
+response NativeStatus.version | object, required | Identity and build of the daemon.
+response NativeStatus.version.apiVersion | integer, required, min 0, format uint32 | Version of this HTTP API, currently 1.
+response NativeStatus.version.backend | string, required | Backend in use, normally `native`.
+response NativeStatus.version.capabilities | array of string, required | Names of the features this daemon supports, such as `text-send` and `events`.
+response NativeStatus.version.product | string, required | Product name, `agent-wechat`.
+response NativeStatus.version.target | string, required, nullable | Platform the daemon was built for, as a Rust target triple such as `x86_64-unknown-linux-gnu`.
+response NativeStatus.version.version | string, required | Version of the daemon.
+response NativeThread | object | A chat in the chat list: a direct chat, a group or a built-in chat such as File Transfer. Summaries come from saved history and are not refreshed from WeChat.
+response NativeThread.accountId | string, required | ID of the account the chat belongs to.
+response NativeThread.avatarMembers | array of object, required, nullable | Up to four cached group members, for drawing the group's picture. Empty for direct chats or when the member list is unavailable.
+response NativeThread.avatarMembers[] | object | A group member shown in the group's picture.
+response NativeThread.avatarMembers[].displayName | string, required | Name to show for the member.
+response NativeThread.avatarMembers[].id | string, required | Member ID.
+response NativeThread.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeThread.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeThread.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeThread.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeThread.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeThread.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeThread.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeThread.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeThread.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeThread.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeThread.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeThread.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeThread.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeThread.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeThread.classification.openIm.wordings[] | object | A label in one language.
+response NativeThread.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeThread.classification.openIm.wordings[].text | string, required | The label text.
+response NativeThread.displayName | string, required, nullable | Name shown for the chat: your remark if set, else the contact's nickname or the group's name, else the ID.
+response NativeThread.history | any, required | How complete the saved history is. It currently always reports partial coverage and no local message count.
+response NativeThread.id | string, required | Chat ID. For a direct chat it is the contact's username, and for a group it ends with `@chatroom`.
+response NativeThread.kind | string, required | `direct` for a one-to-one chat, `group` for a group, and `system` for a built-in chat such as File Transfer.
+response NativeThread.lastMessage | object, nullable | Preview of the latest message. Omitted when local message data is unavailable, and null when the chat has no messages.
+response NativeThread.lastMessage.createdAt | string, required, nullable | When the message was created, as an RFC 3339 time. Null when unknown.
+response NativeThread.lastMessage.direction | string, required, nullable | `outgoing` when this account sent the message and `incoming` when someone else did. Null when it cannot be determined.
+response NativeThread.lastMessage.id | string, required | ID of the message, the same as `id` on the full message.
+response NativeThread.lastMessage.senderId | string, required, nullable | ID of the sender. Null for system notices and when the sender is unknown.
+response NativeThread.lastMessage.senderName | string, required, nullable | Name of the sender, taken from the group's cached members or your contacts. Null when the message has no sender or the name is unknown.
+response NativeThread.lastMessage.text | string, required | Plain-text preview of up to 160 characters. Media messages use labels such as Photo and Sticker, and a recalled message shows its recall notice.
+response NativeThread.lastMessage.type | integer, required, format int32 | WeChat's numeric message type, with the same values as `type` on a message.
+response NativeThread.muted | boolean, required, nullable | Saved notification preference: true when the chat is muted and false when it is not. Null means the profile cannot establish it.
+response NativeThread.peerId | string, required | ID of the person or group on the other side of the chat. It is the same as `id`.
+response NativeThread.pinned | boolean, required, nullable | Saved pin preference: true when the chat is pinned and false when it is not. Null means the profile cannot establish it.
+response NativeThread.readStateVersion | string, required | Version of the chat's read state. Send it as `expectedVersion` when marking the chat read; the request is refused if the chat changed since.
+response NativeThread.unreadCount | integer, required, nullable, format int64 | Number of unread messages as saved in the profile. Null when the saved data does not say.
+response NativeThreadPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
+response NativeThreadPage.asOfEventCursor | string, required, nullable | Event cursor that was current when the list was first read. Resume the event stream from it to catch changes made after the read.
+response NativeThreadPage.coverage | any, required | Which saved databases the read covered, as `partial` (true when some could not be read) and `databases` (each one with its state). It describes local data, not completeness on WeChat's servers.
+response NativeThreadPage.items | array of object, required | The entries on this page, in list order.
+response NativeThreadPage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
+response NativeThreadPage.items[]<NativeThread> | object | A chat in the chat list: a direct chat, a group or a built-in chat such as File Transfer. Summaries come from saved history and are not refreshed from WeChat.
+response NativeThreadPage.items[]<NativeThread>.accountId | string, required | ID of the account the chat belongs to.
+response NativeThreadPage.items[]<NativeThread>.avatarMembers | array of object, required, nullable | Up to four cached group members, for drawing the group's picture. Empty for direct chats or when the member list is unavailable.
+response NativeThreadPage.items[]<NativeThread>.avatarMembers[] | object | A group member shown in the group's picture.
+response NativeThreadPage.items[]<NativeThread>.avatarMembers[].displayName | string, required | Name to show for the member.
+response NativeThreadPage.items[]<NativeThread>.avatarMembers[].id | string, required | Member ID.
+response NativeThreadPage.items[]<NativeThread>.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
+response NativeThreadPage.items[]<NativeThread>.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
+response NativeThreadPage.items[]<NativeThread>.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
+response NativeThreadPage.items[]<NativeThread>.classification.category | string, required, values unknown|system|group|business|openim|openim_customer_service | What kind of peer this is. It is separate from the chat type and from whether the peer is in your contacts.
+response NativeThreadPage.items[]<NativeThread>.classification.namespace | string, required, values wechat|openim|openim_customer_service|im_chatroom|qy|weclaw|other | The family of IDs a peer's ID belongs to, worked out from the ID itself. It does not grant any extra actions.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm | object, required, nullable | Saved WeCom details, present for `openim` and `openim_customer_service` peers when the profile has them. Null otherwise.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.appId | string, required, nullable | ID of the WeCom application the peer belongs to. Null when none is saved.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.applications | array of object, required | Account type references, one per language.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.applications[] | object | Reference to an account type for one language, from the saved WeCom application data. The label of the account type is not included.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.applications[].accountTypeCached | boolean, required | True when the profile also holds the label for this account type and language. The label itself is not returned.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.applications[].accountTypeId | string, required, nullable | ID of the account type for this language. Null when none is saved.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.applications[].languageId | integer, required, format int32 | The language this entry applies to, as the number WeChat stores.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.wordingId | string, required, nullable | ID of the set of labels in `wordings`. Null when none is saved.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.wordings | array of object, required | Localized labels for the peer, one per language.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.wordings[] | object | A label in one language.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.wordings[].languageId | integer, required, format int32 | The language of the text, as the number WeChat stores. Choose the language to show in your app.
+response NativeThreadPage.items[]<NativeThread>.classification.openIm.wordings[].text | string, required | The label text.
+response NativeThreadPage.items[]<NativeThread>.displayName | string, required, nullable | Name shown for the chat: your remark if set, else the contact's nickname or the group's name, else the ID.
+response NativeThreadPage.items[]<NativeThread>.history | any, required | How complete the saved history is. It currently always reports partial coverage and no local message count.
+response NativeThreadPage.items[]<NativeThread>.id | string, required | Chat ID. For a direct chat it is the contact's username, and for a group it ends with `@chatroom`.
+response NativeThreadPage.items[]<NativeThread>.kind | string, required | `direct` for a one-to-one chat, `group` for a group, and `system` for a built-in chat such as File Transfer.
+response NativeThreadPage.items[]<NativeThread>.lastMessage | object, nullable | Preview of the latest message. Omitted when local message data is unavailable, and null when the chat has no messages.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.createdAt | string, required, nullable | When the message was created, as an RFC 3339 time. Null when unknown.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.direction | string, required, nullable | `outgoing` when this account sent the message and `incoming` when someone else did. Null when it cannot be determined.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.id | string, required | ID of the message, the same as `id` on the full message.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.senderId | string, required, nullable | ID of the sender. Null for system notices and when the sender is unknown.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.senderName | string, required, nullable | Name of the sender, taken from the group's cached members or your contacts. Null when the message has no sender or the name is unknown.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.text | string, required | Plain-text preview of up to 160 characters. Media messages use labels such as Photo and Sticker, and a recalled message shows its recall notice.
+response NativeThreadPage.items[]<NativeThread>.lastMessage.type | integer, required, format int32 | WeChat's numeric message type, with the same values as `type` on a message.
+response NativeThreadPage.items[]<NativeThread>.muted | boolean, required, nullable | Saved notification preference: true when the chat is muted and false when it is not. Null means the profile cannot establish it.
+response NativeThreadPage.items[]<NativeThread>.peerId | string, required | ID of the person or group on the other side of the chat. It is the same as `id`.
+response NativeThreadPage.items[]<NativeThread>.pinned | boolean, required, nullable | Saved pin preference: true when the chat is pinned and false when it is not. Null means the profile cannot establish it.
+response NativeThreadPage.items[]<NativeThread>.readStateVersion | string, required | Version of the chat's read state. Send it as `expectedVersion` when marking the chat read; the request is refused if the chat changed since.
+response NativeThreadPage.items[]<NativeThread>.unreadCount | integer, required, nullable, format int64 | Number of unread messages as saved in the profile. Null when the saved data does not say.
+response NativeThreadPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
+response NativeThreadPage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.
+response NativeThreadPage.items[]<NativeTombstone>.id | string, required | ID of the removed resource.
+response NativeThreadPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
+response NativeThreadPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
+response NativeThreadPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response OfficialProfileSelection | object | The account an official profile is attached to.
+response OfficialProfileSelection.accountId | string, required | ID of the account that uses the profile.
+response OfficialProfileSelection.profilePath | string, required | Path of the attached profile on the daemon's host.
+response OfficialProfileSelection.savedDeviceLoginAvailable | boolean, required | True when the profile holds saved login details that can sign in without a QR code.
+response OfficialProfileSelection.storageMode | string, required | `official`, meaning the profile is used in place and not copied.
+response OwnedMediaSource | object | A file uploaded to the daemon, ready to be sent.
+response OwnedMediaSource.byteLength | integer, required, min 0, format uint64 | Size of the file in bytes.
+response OwnedMediaSource.createdAt | string, required | When the upload was stored, as an RFC 3339 time.
+response OwnedMediaSource.id | string, required | Source ID. Pass it as `sourceId` when sending.
+response OwnedMediaSource.mediaType | string, required | MIME type given at upload.
+response OwnedMediaSource.name | string, required | File name given at upload.
+response OwnedMediaSource.sha256 | string, required | SHA-256 of the file's bytes, as lowercase hex.
+route DELETE /v1/access-tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
+route DELETE /v1/accounts/{a} | scope admin, request NativeAccountRemovalRequest, response NativeAccountRemoval, sdk response NativeAccountRemoval | Unregister a signed-out account. Its local files are kept. The body must repeat the account ID to confirm.
+route DELETE /v1/accounts/{a}/groups/{id}/announcement | scope admin, idempotency key required, response NativeOperation, status 202, sdk response NativeOperation | Clear the announcement of a group.
+route DELETE /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency key required, request NativeGroupMembersRequest, response NativeOperation, status 202, sdk response NativeOperation | Remove members from a group.
+route DELETE /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Cancel a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
+route DELETE /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Ask a background operation to stop. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
+route DELETE /v1/tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
+route GET /health | scope none, response untyped | Report that the daemon is running. This is the only route that needs no token.
+route GET /v1/access-tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.
+route GET /v1/accounts | scope read, response untyped | List the accounts this token can read, with their connection status.
+route GET /v1/accounts/{a} | scope read, response untyped | Show one account and its connection status.
+route GET /v1/accounts/{a}/avatars/{id} | scope media, response image/* | Get the cached avatar picture of a contact or group. It does not download a new one.
+route GET /v1/accounts/{a}/calls/current | scope calls, response CallSnapshot, sdk response CallSnapshot | Show whether the account is in a call, the incoming offer and the available call features.
+route GET /v1/accounts/{a}/calls/socket | scope calls, upgrade websocket, socket control | Open the call control WebSocket for commands and events. See calls-websocket.txt.
+route GET /v1/accounts/{a}/calls/{call}/media | scope calls, upgrade websocket, socket media | Open the call media WebSocket that carries audio for a call you own. See calls-websocket.txt.
+route GET /v1/accounts/{a}/capabilities | scope read, response untyped | List what this daemon can do for the account, such as media limits and group changes.
+route GET /v1/accounts/{a}/contacts | scope read, query PageQuery, response NativeContactPage, sdk response NativePage<NativeContact> | List the saved contacts.
+route GET /v1/accounts/{a}/contacts/{id} | scope read, response NativeContact, sdk response NativeContact | Show one saved contact.
+route GET /v1/accounts/{a}/event-log | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
+route GET /v1/accounts/{a}/events | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
+route GET /v1/accounts/{a}/events/stream | scope read, query EventQuery, response sse NativeEvent, sdk response NativeEvent | Stream events as server-sent events, resuming after a cursor or Last-Event-ID.
+route GET /v1/accounts/{a}/group-mutations/by-idempotency-key | scope admin, query GroupMutationKeyQuery, response NativeOperation, sdk response NativeOperation | Find a group change by the Idempotency-Key it was submitted with.
+route GET /v1/accounts/{a}/groups | scope read, query PageQuery, response NativeGroupPage, sdk response NativePage<NativeGroup> | List the saved groups.
+route GET /v1/accounts/{a}/groups/{id} | scope read, response NativeGroup, sdk response NativeGroup | Show one saved group.
+route GET /v1/accounts/{a}/groups/{id}/members/{username} | scope read, response NativeGroupMemberLookup, sdk response NativeGroupMemberLookup | Show one member of a group.
+route GET /v1/accounts/{a}/groups/{room}/lookup | scope read, query RoomQuery, response untyped | Look up the saved details of one group, optionally at a known member-list version.
+route GET /v1/accounts/{a}/groups/{room}/members | scope read, query PageQuery, response NativeGroupMemberPage, sdk response NativePage<NativeGroupMember> | List the members of a group.
+route GET /v1/accounts/{a}/jobs/{id} | scope varies, response untyped, sdk response MediaJob | Show the state of a media or send job. Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.
+route GET /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Show the state of a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
+route GET /v1/accounts/{a}/login-attempts/{id}/qr | scope login, query QrQuery, response image/png | Get the current QR code of a login attempt as a PNG image.
+route GET /v1/accounts/{a}/media/{id} | scope media, response untyped, sdk response MediaAsset | Show one media asset and whether its bytes are available.
+route GET /v1/accounts/{a}/media/{id}/content | scope media, query ContentQuery, response bytes of the asset's media type | Get the cached bytes of a media asset. It supports Range and If-None-Match, and never starts a download.
+route GET /v1/accounts/{a}/messages | scope read, query PageQuery, response NativeMessagePage, sdk response NativePage<NativeMessage> | Search the saved messages of every chat in the account.
+route GET /v1/accounts/{a}/messages/{id} | scope read, response NativeMessage, sdk response NativeMessage | Show one saved message.
+route GET /v1/accounts/{a}/messages/{id}/image | scope media, query MediaQuery, response image/* | Get a saved image message at the requested quality.
+route GET /v1/accounts/{a}/messages/{id}/media | scope media, response untyped, sdk response MediaAsset | List the media attached to a message and whether each file is available.
+route GET /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Show the state and result of a background operation. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
+route GET /v1/accounts/{a}/operations/{id}/qr | scope login, query QrQuery, response image/png | Get the current QR code of a login operation as a PNG image.
+route GET /v1/accounts/{a}/schema | scope read, response untyped | Describe the layout of the account's saved WeChat profile.
+route GET /v1/accounts/{a}/sends/by-idempotency-key | scope send, query SendKeyQuery, response untyped, sdk response NativeSendIntent|MediaJob | Find a send by the Idempotency-Key it was submitted with.
+route GET /v1/accounts/{a}/sends/{id} | scope send, response untyped, sdk response NativeSendIntent | Show the state of a send, including media sends.
+route GET /v1/accounts/{a}/settings | scope read, response AccountSettings, sdk response AccountSettings | Show the account settings.
+route GET /v1/accounts/{a}/threads | scope read, query PageQuery, response NativeThreadPage, sdk response NativePage<NativeThread> | List the chats, newest activity first.
+route GET /v1/accounts/{a}/threads/{id} | scope read, response NativeThread, sdk response NativeThread | Show one chat.
+route GET /v1/accounts/{a}/threads/{thread}/messages | scope read, query PageQuery, response NativeMessagePage, sdk response NativePage<NativeMessage> | List the saved messages of one chat, newest first.
+route GET /v1/status | scope read, response NativeStatus, sdk response NativeStatus | Show the daemon identity, version, data directory and state.
+route GET /v1/tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.
+route PATCH /v1/accounts/{a} | scope admin, request UpdateAccountRequest, response untyped | Change an account alias or whether it connects automatically when the daemon starts.
+route PATCH /v1/accounts/{a}/groups/{id} | scope admin, idempotency key required, request NativeGroupNameRequest, response NativeOperation, status 202, sdk response NativeOperation | Rename a group.
+route PATCH /v1/accounts/{a}/settings | scope media, request AccountSettings, response AccountSettings, sdk request AccountSettings, sdk response AccountSettings | Replace the account settings, such as the largest file to download automatically.
+route POST /v1/access-tokens | scope owner token, request TokenRequest, response untyped | Create an API token limited to chosen accounts and scopes. The secret token value is returned only in this response.
+route POST /v1/accounts | scope admin, request CreateAccountRequest, response untyped, status 201 | Register a new account, optionally with an ID and alias. The token must cover every account.
+route POST /v1/accounts/{a}/auth/disconnect | scope login, response untyped | Close the connection to WeChat but keep the saved login trust.
+route POST /v1/accounts/{a}/auth/login | scope login, idempotency key optional, request LoginRequest, response NativeOperation, status 202, sdk request LoginRequest, sdk response NativeOperation | Start signing the account in with a saved device or a QR code. Poll the returned operation.
+route POST /v1/accounts/{a}/auth/logout-local | scope login, response untyped | Sign the account out on this daemon only, without asking WeChat to revoke the login.
+route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest avatar of one contact. Poll the returned operation.
+route POST /v1/accounts/{a}/connect | scope login, response untyped, status 202, sdk response NativeOperation | Connect the signed-in account to WeChat. Poll the returned operation.
+route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request EventAckRequest, response untyped | Record how far a named consumer has read the event stream. It never marks messages read.
+route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.
+route POST /v1/accounts/{a}/contacts/lookup | scope read, request ContactLookupRequest, response untyped | Look up the saved details of several contacts by ID.
+route POST /v1/accounts/{a}/contacts/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one contact. Poll the returned operation.
+route POST /v1/accounts/{a}/disconnect | scope login, response untyped | Close the connection to WeChat but keep the saved login trust.
+route POST /v1/accounts/{a}/forget-credentials | scope login, idempotency key required, request NativeForgetRequest, response untyped, status 202, sdk response NativeOperation | Delete the saved login credentials of the account. The body must confirm.
+route POST /v1/accounts/{a}/group-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the group catalog from WeChat. Poll the returned operation.
+route POST /v1/accounts/{a}/groups | scope admin, idempotency key required, request NativeGroupCreateRequest, response NativeOperation, status 202, sdk request NativeGroupCreateRequest, sdk response NativeOperation | Create a group chat with the chosen members. Poll the returned operation.
+route POST /v1/accounts/{a}/groups/{id}/leave | scope admin, idempotency key required, response NativeOperation, status 202, sdk response NativeOperation | Leave a group.
+route POST /v1/accounts/{a}/groups/{id}/members/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest member list of one group. Poll the returned operation.
+route POST /v1/accounts/{a}/groups/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one group. Poll the returned operation.
+route POST /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency key required, request NativeGroupMembersRequest, response NativeOperation, status 202, sdk response NativeOperation | Add members to a group.
+route POST /v1/accounts/{a}/jobs/{id}/cancel | scope varies, response untyped, sdk response MediaJob | Ask a media or send job to stop. Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.
+route POST /v1/accounts/{a}/jobs/{id}/retry | scope varies, request NativeMediaJobRetryRequest (optional), response untyped, status 202, sdk response MediaJob | Retry a failed job from the start. The body is optional and cannot ask to reuse a finished upload. Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.
+route POST /v1/accounts/{a}/jobs/{id}/retry-completed-upload | scope send, request NativeMediaJobRetryRequest, response untyped, status 202, sdk request NativeMediaJobRetryRequest, sdk response MediaJob | Retry a send job but reuse the upload that already finished. The body must set reuseCompletedUpload to true.
+route POST /v1/accounts/{a}/login-attempts | scope login, idempotency key optional, request LoginRequest, response NativeOperation, status 202, sdk request LoginRequest, sdk response NativeOperation | Start signing the account in with a saved device or a QR code. Poll the returned operation.
+route POST /v1/accounts/{a}/login-attempts/{id}/cancel | scope varies, response NativeOperation, sdk response NativeOperation | Cancel a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
+route POST /v1/accounts/{a}/logout | scope login, idempotency key required, response untyped, status 202, sdk response NativeOperation | Sign the account out of WeChat. Poll the returned operation.
+route POST /v1/accounts/{a}/media-writeback/repair | scope media, request NativeMediaWritebackRequest, response untyped, status 202, sdk response NativeOperation | Start repairing saved media records from bytes the daemon already holds. It never resends or downloads.
+route POST /v1/accounts/{a}/media/lookup | scope media, request NativeMediaBatchRequest, response untyped, sdk response NativeMediaBatch | List the media of up to 40 messages in one request, without downloading anything.
+route POST /v1/accounts/{a}/messages/{id}/media-transfers | scope media, request MediaTransferRequest, response untyped, status 202, sdk request MediaTransferRequest, sdk response MediaJob | Start downloading one media file of a message. Poll the returned job.
+route POST /v1/accounts/{a}/messages/{id}/recall | scope send, idempotency key required, request NativeRecallRequest, response NativeOperation, status 202, sdk response NativeOperation | Recall a message you sent, identified by its exact server ID. Poll the returned operation.
+route POST /v1/accounts/{a}/projection/recover | scope admin, response untyped | Repair the account profile from records the daemon already holds. It never resends messages or starts transfers.
+route POST /v1/accounts/{a}/sends | scope varies, idempotency key required, request untyped, response untyped, status 202, sdk request NativeTextSendRequest|ShareSendRequest|MediaSendRequest, sdk response NativeSendIntent|MediaJob | Send a text, share card or staged media message. The body shape follows its kind; the same Idempotency-Key returns the original send. Scope: send, plus read when a text send quotes a message.
+route POST /v1/accounts/{a}/sends/{id}/cancel | scope send, response untyped, sdk response NativeSendIntent|MediaJob | Cancel a send that has not gone out yet.
+route POST /v1/accounts/{a}/sync | scope login, response untyped, sdk response NativeOperation | Start a sync with WeChat. Poll the returned operation.
+route POST /v1/accounts/{a}/threads/{thread}/read-state | scope read-state, request NativeReadRequest, response untyped | Mark a chat as read when its read-state version still matches the one in the body.
+route POST /v1/accounts/{a}/uploads | scope send, request multipart, response untyped, status 201, sdk response OwnedMediaSource | Stage the bytes of one file as a media source that a later send can use.
+route POST /v1/daemon/shutdown | scope owner token, request untyped, response untyped | Stop the daemon. The body repeats the process ID, server ID and ownership generation from the status route, so a stale caller cannot stop a newer daemon.
+route POST /v1/profiles/official | scope admin, request OfficialProfileRequest, response OfficialProfileSelection, sdk request OfficialProfileRequest, sdk response OfficialProfileSelection | Find and attach an official WeChat profile on the daemon host as a new account. The token must cover every account.
+route POST /v1/tokens | scope owner token, request TokenRequest, response untyped | Create an API token limited to chosen accounts and scopes. The secret token value is returned only in this response.
+route PUT /v1/accounts/{a}/groups/{id}/my-name | scope admin, idempotency key required, request NativeGroupMyNameRequest, response NativeOperation, status 202, sdk response NativeOperation | Set your own display name in a group.
+route PUT /v1/accounts/{a}/threads/{id}/notifications | scope admin, idempotency key required, request NativeThreadNotificationsRequest, response NativeOperation, status 202, sdk response NativeOperation | Mute or unmute notifications for a chat.
+route PUT /v1/accounts/{a}/threads/{id}/pin | scope admin, idempotency key required, request NativeThreadPinRequest, response NativeOperation, status 202, sdk response NativeOperation | Pin or unpin a chat.

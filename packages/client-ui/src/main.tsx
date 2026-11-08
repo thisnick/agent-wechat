@@ -18,6 +18,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  NativeApiError,
   type NativeMessage,
   type NativeOperation,
   isNativeTombstone,
@@ -56,6 +57,19 @@ import { NewChat } from "./new-chat.tsx";
 import { QuotedReply } from "./quoted-reply.tsx";
 import { quotedText } from "./quote-preview.ts";
 import { PhotoViewer } from "./photo-viewer.tsx";
+import { router, useHash, useRoute } from "./router.ts";
+import {
+  formatRoute,
+  isAccountRoute,
+  isChatsRoute,
+  isViewRoute,
+  parseRoute,
+  type ChatsRoute,
+  type Route,
+  type ViewRoute,
+} from "./routes.ts";
+import { conversationAvailable } from "./route-targets.ts";
+import { RouteMessage } from "./route-message.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
 import { canReply } from "./reply.ts";
@@ -114,6 +128,15 @@ function useTheme() {
   }, [theme]);
   return [theme, setTheme] as const;
 }
+/** Where a hub opens when the address names nothing usable: the account in use last, else the account list. */
+function homeRoute(connection: Connection, accounts: Account[]): Exclude<Route, { name: "servers" }> {
+  const server = connection.serverId;
+  const last = connection.cache.lastAccount();
+  const returning = accounts.find((account) => account.id === last && account.authenticated === true);
+  return returning
+    ? { name: connection.cache.view(returning.id).section === "contacts" ? "contacts" : "chats", server, account: returning.id }
+    : { name: "accounts", server };
+}
 function ErrorNotice({ children }: { children: ReactNode }) {
   return (
     <div className="connection-error" role="alert">
@@ -125,16 +148,25 @@ function ErrorNotice({ children }: { children: ReactNode }) {
 function App() {
   useEffect(() => desktop ? installDesktopLinks() : undefined, []);
   const [connection, setConnection] = useState<Connection | null>(null);
-  const [changingHub, setChangingHub] = useState(false);
   const [starting, setStarting] = useState(true);
+  // Choosing a hub is a view of the address, so Back returns from it.
+  const changingHub = useRoute()?.name === "servers";
   const [error, setError] = useState("");
   const [theme, setTheme] = useTheme();
   useEffect(() => {
     let cancelled = false;
     void (desktop ? desktopInvoke<DesktopSession | null>("desktop_bootstrap").then((session) => session ? desktopConnect(session) : null) : bootstrap())
       .then((value) => {
-        if (cancelled) value?.close();
-        else setConnection(value);
+        if (cancelled) {
+          value?.close();
+          return;
+        }
+        setConnection(value);
+        // A reload keeps the address. Once a hub is open again, neither the hub picker nor
+        // a page of the hub this window left is a place to resume: go to this hub's home.
+        const current = value ? parseRoute(router.hash()) : null;
+        if (value && current && (current.name === "servers" || ("server" in current && current.server !== value.serverId)))
+          router.replace(homeRoute(value, value.session.snapshot().accounts));
       })
       .catch((e) => {
         if (!cancelled) setError(desktop && typeof e === "string" ? e : readableError(e));
@@ -160,7 +192,10 @@ function App() {
   }, [connection, changingHub]);
   function connected(value: Connection) {
     setConnection(value);
-    setChangingHub(false);
+    const current = parseRoute(router.hash());
+    // Switching hubs on purpose leaves the old hub's address; a link for another hub keeps it.
+    if (current?.name === "servers" || (connection && current && "server" in current && current.server !== value.serverId))
+      router.replace(homeRoute(value, value.session.snapshot().accounts));
   }
   if (starting)
     return (
@@ -176,7 +211,11 @@ function App() {
         error={error}
         onConnect={connected}
         initialEndpoint={connection?.endpoint}
-        onBack={connection ? () => setChangingHub(false) : undefined}
+        onBack={
+          connection
+            ? () => router.back(homeRoute(connection, connection.session.snapshot().accounts))
+            : undefined
+        }
       />
     );
   return (
@@ -187,8 +226,8 @@ function App() {
       setTheme={setTheme}
       onConnect={connected}
       disconnect={() => {
+        router.push({ name: "servers" });
         if (desktop) setConnection(null);
-        else setChangingHub(true);
       }}
     />
   );
@@ -318,74 +357,103 @@ function Client({
   disconnect: () => void;
   onConnect: (connection: Connection) => void;
 }) {
-  const { session, simulator } = connection;
+  const { session, simulator, serverId } = connection;
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
-  const lastAccount = connection.cache.lastAccount();
-  const returning = state.accounts.find(
-    (account) => account.id === lastAccount && account.authenticated === true,
-  );
-  const [screen, setScreen] = useState<
-    "accounts" | "login" | "chats" | "restoring"
-  >(returning ? "restoring" : "accounts");
-  const [loginAccount, setLoginAccount] = useState<Account | null>(null);
+  // The address says what the user wants to see; account state decides what can
+  // be shown. A link for another hub, or no usable link, opens this hub's home.
+  const requested = useRoute();
+  const address = useHash();
+  const own = requested && requested.name !== "servers" && requested.server === serverId ? requested : null;
+  const intent = own ?? homeRoute(connection, state.accounts);
+  const hash = formatRoute(intent);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState<{ text: string; hash: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [signingIn, setSigningIn] = useState<string | null>(null);
   const adding = useRef(false);
   const [managed, setManaged] = useState<string | null>(null);
-  const visibleScreen =
-    state.signInRequired && (screen === "chats" || screen === "restoring")
+  const known = useRef(new Set<string>());
+  for (const item of state.accounts) known.current.add(item.id);
+  const accountsRoute: Route = { name: "accounts", server: serverId };
+  // Leaves an address that can't be shown for one that can, and says why.
+  function fallBack(text: string | null, to: Route = accountsRoute) {
+    if (text) setNotice({ text, hash: formatRoute(to) });
+    router.replace(to);
+  }
+  const account =
+    intent.name !== "accounts" ? state.accounts.find((item) => item.id === intent.account) : undefined;
+  const screen: "accounts" | "login" | "chats" | "opening" =
+    intent.name === "accounts"
       ? "accounts"
-      : screen;
+      : !account
+      ? "opening"
+      : !account.authenticated || signingIn === account.id
+      ? "login"
+      : "chats";
   useEffect(() => {
-    if (!state.signInRequired) return;
-    setScreen((current) =>
-      current === "chats" || current === "restoring" ? "accounts" : current,
-    );
-    setManaged(null);
-    setError("");
-  }, [state.signInRequired]);
+    if (own) return;
+    const home = homeRoute(connection, state.accounts);
+    fallBack(requested && requested.name !== "servers" ? "That link is for a different hub." : null, home);
+  }, [own, address]);
   useEffect(() => {
-    if (!returning) return;
+    if (!desktop) return;
+    return desktopNotifications(connection, (route) => router.push(route));
+  }, [connection]);
+  // The list can be older than the link: check the hub before calling an account unknown.
+  const unknownAccount = intent.name !== "accounts" && !account ? intent.account : null;
+  useEffect(() => {
+    if (!unknownAccount) return;
     let cancelled = false;
     void session
-      .activate(returning.id)
-      .then(() => {
-        if (!cancelled) setScreen("chats");
+      .accounts()
+      .then((items) => {
+        if (cancelled || items.some((item) => item.id === unknownAccount)) return;
+        // An account removed while open is not news.
+        fallBack(known.current.has(unknownAccount) ? null : "That account isn't on this hub.");
       })
       .catch((e) => {
-        if (!cancelled) {
-          setError(readableError(e));
-          setScreen("accounts");
-        }
+        if (cancelled) return;
+        setError(readableError(e));
+        fallBack(null);
       });
     return () => {
       cancelled = true;
     };
-  }, [connection]);
-
+  }, [unknownAccount]);
+  // Keep showing sign-in for an account until it finishes, even once the hub says it is signed in.
   useEffect(() => {
-    document.body.classList.toggle(
-      "onboarding-active",
-      visibleScreen !== "chats" &&
-        !(visibleScreen === "restoring" && state.account),
-    );
-  }, [visibleScreen, state.account]);
-  async function open(account: Account) {
-    setBusy(true);
-    setError("");
-    try {
-      if (!account.authenticated) {
-        setLoginAccount(account);
-        setScreen("login");
-        return;
-      }
-      await session.activate(account.id);
-      setScreen("chats");
-    } catch (e) {
-      setError(readableError(e));
-    } finally {
-      setBusy(false);
+    setSigningIn(screen === "login" && account ? account.id : null);
+  }, [screen, account?.id]);
+  // The sign-in address of an account that is signed in leads to its chats.
+  useEffect(() => {
+    if (intent.name === "login" && screen === "chats")
+      router.replace({ name: "chats", server: serverId, account: intent.account });
+  }, [hash, screen]);
+  const wanted = screen === "chats" && account ? account.id : null;
+  const activation = useRef<string | null>(null);
+  useEffect(() => {
+    if (!wanted) {
+      activation.current = null;
+      return;
     }
+    if (state.account === wanted) {
+      if (connection.cache.lastAccount() !== wanted) connection.cache.rememberAccount(wanted);
+      return;
+    }
+    if (activation.current === wanted) return;
+    activation.current = wanted;
+    void session.activate(wanted, "thread" in intent ? intent.thread : undefined).catch((e) => {
+      setError(readableError(e));
+      fallBack(null);
+    });
+  }, [wanted, state.account]);
+  const showing = screen === "chats" && !!state.account;
+  useEffect(() => {
+    document.body.classList.toggle("onboarding-active", !showing);
+  }, [showing]);
+  function open(item: Account) {
+    setError("");
+    router.push({ name: item.authenticated ? "chats" : "login", server: serverId, account: item.id });
   }
   async function add() {
     if (adding.current) return;
@@ -410,41 +478,53 @@ function Client({
         alias: `account-${number}`,
       });
       await session.accounts();
-      setLoginAccount(result as Account);
-      setScreen("login");
+      known.current.add((result as Account).id);
+      router.push({ name: "login", server: serverId, account: (result as Account).id });
     } catch (e) {
       setError(readableError(e));
-      setScreen("accounts");
+      router.push(accountsRoute);
     } finally {
       adding.current = false;
       setBusy(false);
     }
   }
-  if (visibleScreen === "restoring" && !state.account)
+  function switchAccount(replace = false) {
+    connection.cache.rememberAccount(null);
+    if (replace) router.replace(accountsRoute);
+    else router.push(accountsRoute);
+    void session.accounts();
+  }
+  if (screen === "opening" || (screen === "chats" && !state.account))
     return (
       <Welcome simulator={simulator}>
         <h1>Opening AgentWechat…</h1>
       </Welcome>
     );
-  if (visibleScreen === "login" && loginAccount)
+  if (screen === "login" && account)
     return (
       <Welcome simulator={simulator}>
+        {state.signInRequired === account.id && (
+          <ErrorNotice>WeChat signed out. Sign in again.</ErrorNotice>
+        )}
         <Login
           connection={connection}
-          account={loginAccount.id}
+          account={account.id}
           cancel={() => {
-            setScreen("accounts");
+            setSigningIn(null);
+            router.up(accountsRoute);
             void session.accounts();
           }}
           signedIn={async () => {
-            await session.accounts();
-            await session.activate(loginAccount.id);
-            setScreen("chats");
+            const accounts = await session.accounts();
+            if (!accounts.some((item) => item.id === account.id && item.authenticated === true))
+              throw new NativeApiError(409, "auth_required");
+            setSigningIn(null);
           }}
         />
       </Welcome>
     );
-  if (visibleScreen !== "chats" && visibleScreen !== "restoring")
+  if (screen === "accounts") {
+    const shown = notice?.hash === hash ? notice.text : "";
     return (
       <Welcome simulator={simulator}>
         <div className="welcome-heading">
@@ -462,6 +542,7 @@ function Client({
         {state.signInRequired && (
           <ErrorNotice>WeChat signed out. Sign in again.</ErrorNotice>
         )}
+        {shown && <ErrorNotice>{shown}</ErrorNotice>}
         <div className="login-accounts">
           {state.accounts.map((a) => (
             <div className="profile-row" key={a.id}>
@@ -530,17 +611,18 @@ function Client({
         </button>
       </Welcome>
     );
+  }
   return (
     <Chats
       key={state.account}
       connection={connection}
+      route={isChatsRoute(intent) ? intent : { name: "chats", server: serverId, account: account!.id }}
+      notice={notice?.hash === hash ? notice.text : ""}
+      dismissNotice={() => setNotice(null)}
+      fallBack={fallBack}
       theme={theme}
       setTheme={setTheme}
-      switchAccount={() => {
-        connection.cache.rememberAccount(null);
-        setScreen("accounts");
-        void session.accounts();
-      }}
+      switchAccount={switchAccount}
       addAccount={() => void add()}
       addingAccount={busy}
       onConnect={onConnect}
@@ -786,6 +868,10 @@ function Login({
 }
 function Chats({
   connection,
+  route,
+  notice: shownNotice,
+  dismissNotice,
+  fallBack,
   theme,
   setTheme,
   switchAccount,
@@ -795,9 +881,14 @@ function Chats({
   disconnect,
 }: {
   connection: Connection;
+  route: ChatsRoute;
+  /** Why the address was changed, shown while it is still the address. */
+  notice: string;
+  dismissNotice: () => void;
+  fallBack: (text: string | null, to: Route) => void;
   theme: string;
   setTheme: (t: string) => void;
-  switchAccount: () => void;
+  switchAccount: (replace?: boolean) => void;
   addAccount: () => void;
   addingAccount: boolean;
   onConnect: (connection: Connection) => void;
@@ -806,21 +897,44 @@ function Chats({
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
   const savedView = state.account ? connection.cache.view(state.account) : {};
-  const [section, setSection] = useState<"chats" | "contacts">(
-      savedView.section === "contacts" ? "contacts" : "chats",
-    ),
-    [query, setQuery] = useState(""),
+  const [query, setQuery] = useState(""),
     [filter, setFilter] = useState(
       ["all", "unread", "groups"].includes(savedView.filter ?? "")
         ? savedView.filter!
         : "all",
     );
-  const [mobile, setMobile] = useState(false),
-    [details, setDetails] = useState(false),
-    [settings, setSettings] = useState(false),
-    [accountMenu, setAccountMenu] = useState(false);
-  const [newChat, setNewChat] = useState(false);
-  useEffect(() => desktop ? desktopNotifications(connection, () => { setSection("chats"); setMobile(true); }) : undefined, [connection]);
+  const [accountMenu, setAccountMenu] = useState(false);
+  // What is on screen follows the address. A dialog (settings, new chat) shows
+  // over the view that was open before it.
+  const here = { server: connection.serverId, account: state.account! };
+  const listRoute: Route = { name: "chats", ...here };
+  const chatRoute = (thread: string): Route => ({ name: "chat", ...here, thread });
+  const lastView = useRef<ViewRoute>({ name: "chats", ...here });
+  if (isViewRoute(route)) lastView.current = route;
+  const view = isViewRoute(route) ? route : lastView.current;
+  const section = view.name === "contacts" ? "contacts" : "chats";
+  const routeThread = "thread" in view ? view.thread : null;
+  const mobile = routeThread !== null;
+  const details = view.name === "info";
+  const settings = route.name === "settings";
+  const newChat = route.name === "new-chat";
+  const synced = route.account === state.account;
+  // Back, Forward and links change the conversation; clicking one opens it
+  // directly. Wait for the account to finish opening so a link does not race
+  // the conversation it picks itself.
+  useEffect(() => {
+    if (!routeThread || !synced || state.selected === routeThread || state.loading || state.opening) return;
+    const account = state.account!;
+    let cancelled = false;
+    void conversationAvailable(session.client, account, routeThread, state.threads).then((available) => {
+      if (cancelled) return;
+      if (available) void session.select(routeThread);
+      else fallBack("That chat isn't available.", listRoute);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [routeThread, synced, state.account, state.selected, state.loading, state.opening]);
   useEffect(() => {
     if (!desktop || !connection.desktopId) return;
     const narrow = window.matchMedia("(max-width: 720px)");
@@ -1060,13 +1174,14 @@ function Chats({
     });
     focusMessage();
   }
-  function select(id: string) {
+  function select(id: string, mode: "push" | "replace" = "push") {
     // Commit the selected composer within the click gesture, including on mobile.
     // History continues loading without delaying focus or stealing it later.
     flushSync(() => {
-      setMobile(true);
       setInChat("");
       void session.select(id);
+      // The details panel stays open while switching conversations, as it did before routes.
+      router[mode](view.name === "info" ? { name: "info", ...here, thread: id } : chatRoute(id));
     });
     focusMessage();
   }
@@ -1086,20 +1201,14 @@ function Chats({
         <button
           className={`nav-btn ${section === "chats" ? "active" : ""}`}
           aria-label="Chats"
-          onClick={() => {
-            setSection("chats");
-            setMobile(false);
-          }}
+          onClick={() => router.push(listRoute)}
         >
           <Icon name="chat" />
         </button>
         <button
           className={`nav-btn ${section === "contacts" ? "active" : ""}`}
           aria-label="Contacts"
-          onClick={() => {
-            setSection("contacts");
-            setMobile(false);
-          }}
+          onClick={() => router.push({ name: "contacts", ...here })}
         >
           <Icon name="people" />
         </button>
@@ -1107,7 +1216,7 @@ function Chats({
         <button
           className="nav-btn"
           aria-label="Settings"
-          onClick={() => setSettings(true)}
+          onClick={() => router.push({ name: "settings", ...here })}
         >
           <Icon name="settings" />
         </button>
@@ -1133,9 +1242,7 @@ function Chats({
             <Button
               icon="plus"
               label="New conversation"
-              onClick={() => {
-                setNewChat(true);
-              }}
+              onClick={() => router.push({ name: "new-chat", ...here })}
             />
           </div>
           <label className="search">
@@ -1165,6 +1272,12 @@ function Chats({
             </div>
           )}
         </div>
+        {shownNotice && !routeThread && (
+          <div className="banner route-notice" role="status">
+            {shownNotice}
+            <button onClick={dismissNotice}>Dismiss</button>
+          </div>
+        )}
         <div className="chat-list">
           {section === "chats"
             ? threads.map((t, index) => (
@@ -1190,10 +1303,7 @@ function Chats({
                   <button
                     key={c.id}
                     className="chat-row"
-                    onClick={() => {
-                      select(c.id);
-                      setSection("chats");
-                    }}
+                    onClick={() => select(c.id)}
                   >
                     <HubAvatar
                       connection={connection}
@@ -1233,7 +1343,7 @@ function Chats({
             icon="back"
             label="Back to conversations"
             className="back-btn"
-            onClick={() => setMobile(false)}
+            onClick={() => router.up(listRoute)}
           />
           {state.selected && state.account && (
             <ConversationAvatar
@@ -1271,7 +1381,11 @@ function Chats({
             <Button
               icon="panel"
               label="Conversation details"
-              onClick={() => setDetails(!details)}
+              onClick={() =>
+                details
+                  ? router.up(chatRoute(view.name === "info" ? view.thread : state.selected!))
+                  : state.selected && router.push({ name: "info", ...here, thread: state.selected })
+              }
             />
           </div>
           {find && (
@@ -1306,6 +1420,12 @@ function Chats({
             </button>
           </div>
         )}
+        {shownNotice && routeThread && (
+          <div className="banner route-notice" role="status">
+            {shownNotice}
+            <button onClick={dismissNotice}>Dismiss</button>
+          </div>
+        )}
         {leftGroup && (
           <div className="banner">
             You are no longer in this group. Cached history is still available.
@@ -1314,7 +1434,7 @@ function Chats({
         {account?.authenticated === false && (
           <div className="banner">
             Sign in to WeChat again to send messages.
-            <button onClick={switchAccount}>Sign in</button>
+            <button onClick={() => switchAccount()}>Sign in</button>
           </div>
         )}
         {simulator && (
@@ -1427,7 +1547,34 @@ function Chats({
               },
             }}
           >
-            <PhotoViewer connection={connection}>
+            <PhotoViewer
+              connection={connection}
+              route={{
+                id: route.name === "media" ? route.message : null,
+                open: (message) =>
+                  state.selected &&
+                  router.push({ name: "media", ...here, thread: state.selected, message }),
+                move: (message) =>
+                  state.selected &&
+                  router.replace({ name: "media", ...here, thread: state.selected, message }),
+                close: () => state.selected && router.up(chatRoute(state.selected)),
+                showMessage: (message) =>
+                  state.selected &&
+                  router.replace({ name: "message", ...here, thread: state.selected, message }),
+                missing: () =>
+                  state.selected &&
+                  fallBack("That photo or video isn't available.", chatRoute(state.selected)),
+              }}
+            >
+              {view.name === "message" && state.account && state.selected === view.thread && (
+                <RouteMessage
+                  session={session}
+                  account={state.account}
+                  thread={view.thread}
+                  message={view.message}
+                  missing={() => fallBack("That message isn't in this chat.", chatRoute(view.thread))}
+                />
+              )}
               <div className="body-row">
                 <section className="conversation" aria-label="Conversation">
                   <ConversationScroll
@@ -1436,7 +1583,7 @@ function Chats({
                     )}`}
                     searching={!!(find && inChat.trim())}
                     position={
-                      state.account && state.selected
+                      state.account && state.selected && view.name !== "message"
                         ? {
                             cache: connection.cache,
                             account: state.account,
@@ -1664,10 +1811,8 @@ function Chats({
               }`}
               onClick={() => {
                 setAccountMenu(false);
-                setMobile(false);
-                void (a.authenticated
-                  ? session.activate(a.id)
-                  : Promise.resolve(switchAccount()));
+                if (a.authenticated) router.push({ name: "chats", server: here.server, account: a.id });
+                else switchAccount();
               }}
             >
               <HubAvatar
@@ -1697,7 +1842,7 @@ function Chats({
           </button>
           <button
             className="account-option account-action"
-            onClick={switchAccount}
+            onClick={() => switchAccount()}
           >
             <Icon name="people" /> <span>Choose an account</span>
           </button>
@@ -1708,16 +1853,12 @@ function Chats({
           key={state.account}
           connection={connection}
           account={state.account}
-          close={() => setNewChat(false)}
-          open={(id) => {
-            setSection("chats");
-            setNewChat(false);
-            select(id);
-          }}
+          close={() => router.up(view)}
+          open={(id) => select(id, "replace")}
         />
       )}
       {settings && (
-        <div className="overlay-backdrop" onClick={() => setSettings(false)}>
+        <div className="overlay-backdrop" onClick={() => router.up(view)}>
           <section
             className="modal settings-modal"
             role="dialog"
@@ -1730,7 +1871,7 @@ function Chats({
               <Button
                 icon="close"
                 label="Close settings"
-                onClick={() => setSettings(false)}
+                onClick={() => router.up(view)}
               />
             </div>
             <div className="modal-body">
@@ -1765,7 +1906,7 @@ function Chats({
               )}
               <div className="setting settings-accounts">
                 <span>Accounts</span>
-                <button className="secondary" onClick={switchAccount}>
+                <button className="secondary" onClick={() => switchAccount()}>
                   Manage
                 </button>
               </div>
@@ -1776,14 +1917,12 @@ function Chats({
                   account={account}
                   signedOut={() => {
                     session.deactivate(account.id);
-                    setSettings(false);
-                    switchAccount();
+                    switchAccount(true);
                   }}
                   removed={() => {
                     session.deactivate(account.id);
                     void connection.clearCache(account.id);
-                    setSettings(false);
-                    switchAccount();
+                    switchAccount(true);
                   }}
                 />
               )}

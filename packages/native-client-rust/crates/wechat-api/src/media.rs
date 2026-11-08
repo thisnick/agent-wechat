@@ -18,29 +18,29 @@ fn upload_capacity(current: usize, needed: usize) -> usize {
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
-        .route(
+        .api_route(
             "/v1/accounts/{a}/uploads",
             post(upload).layer(DefaultBodyLimit::max(MAX_SOURCE_BYTES + 64 * 1024)),
         )
-        .route("/v1/accounts/{a}/messages/{id}/media", get(assets))
-        .route(
+        .api_route("/v1/accounts/{a}/messages/{id}/media", get(assets))
+        .api_route(
             "/v1/accounts/{a}/media/lookup",
             post(assets_batch).layer(DefaultBodyLimit::max(384 * 1024)),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/messages/{id}/media-transfers",
             post(transfer),
         )
-        .route("/v1/accounts/{a}/media/{id}", get(asset))
-        .route("/v1/accounts/{a}/media/{id}/content", get(content))
-        .route("/v1/accounts/{a}/jobs/{id}", get(job))
-        .route("/v1/accounts/{a}/jobs/{id}/cancel", post(cancel_job))
-        .route("/v1/accounts/{a}/jobs/{id}/retry", post(retry_job))
-        .route(
+        .api_route("/v1/accounts/{a}/media/{id}", get(asset))
+        .api_route("/v1/accounts/{a}/media/{id}/content", get(content))
+        .api_route("/v1/accounts/{a}/jobs/{id}", get(job))
+        .api_route("/v1/accounts/{a}/jobs/{id}/cancel", post(cancel_job))
+        .api_route("/v1/accounts/{a}/jobs/{id}/retry", post(retry_job))
+        .api_route(
             "/v1/accounts/{a}/jobs/{id}/retry-completed-upload",
             post(retry_completed_upload),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/media-writeback/repair",
             post(repair_writeback),
         )
@@ -353,16 +353,21 @@ fn content_response(
         .body(axum::body::Body::from(body))
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_media_response"))
 }
-#[derive(Default, Deserialize)]
+/// Which bytes of a media asset to return.
+#[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ContentRepresentation {
+    /// The file itself.
     #[default]
     Original,
+    /// The saved preview of the file.
     Preview,
 }
-#[derive(Deserialize, Default)]
+/// Options for fetching media bytes.
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ContentQuery {
+pub(super) struct ContentQuery {
+    /// The file itself or its preview. Defaults to the original.
     #[serde(default)]
     representation: ContentRepresentation,
 }

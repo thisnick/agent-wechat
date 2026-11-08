@@ -13,6 +13,8 @@ import type { HubSession } from "./session.ts";
 const Navigation = createContext<{
   jump: (message: NativeMessage) => Promise<boolean>;
   jumpQuote: (message: NativeMessage) => Promise<boolean>;
+  /** Scrolls to a message of the open conversation by its ID, loading older history if needed. */
+  reveal: (id: string) => Promise<boolean>;
   target: { id: string; sequence: number } | null;
 } | null>(null);
 export const useConversationNavigation = () => useContext(Navigation);
@@ -32,7 +34,7 @@ export function ConversationNavigation({
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
   async function navigate(
-    message: NativeMessage,
+    message: Pick<NativeMessage, "accountId" | "threadId">,
     resolve: (signal: AbortSignal) => Promise<string | undefined>
   ) {
     pending.current?.abort();
@@ -63,8 +65,15 @@ export function ConversationNavigation({
       message,
       async (signal) => (await session.revealQuote(message, signal))?.id
     );
+  const reveal = (id: string) => {
+    const { account, selected } = session.snapshot();
+    return navigate(
+      { accountId: account ?? "", threadId: selected ?? "" },
+      async (signal) => ((await session.revealMessage(id, signal)) ? id : undefined)
+    );
+  };
   return (
-    <Navigation.Provider value={{ jump, jumpQuote, target }}>
+    <Navigation.Provider value={{ jump, jumpQuote, reveal, target }}>
       {children}
     </Navigation.Provider>
   );

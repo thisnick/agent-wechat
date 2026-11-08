@@ -22,6 +22,9 @@ export function surface(file) {
   if (file === 'interfaces/openclaw/config.txt') return { kind: 'schema', title: 'OpenClaw configuration', packages: ['@agent-wechat/agent-wechat'] };
   if (file === 'interfaces/storage/account.txt') return { kind: 'sql', title: 'Account store schema', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/storage/registry.txt') return { kind: 'sql', title: 'Registry schema', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/http/routes.txt') return { kind: 'http', title: 'HTTP API', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/http/calls-websocket.txt') return { kind: 'ws', title: 'Calls WebSocket', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/ui/routes.txt') return { kind: 'routes', title: 'UI routes', packages: ['@agent-wechat/desktop'] };
   return { kind: 'other', title: file, packages: [] };
 }
 
@@ -46,6 +49,8 @@ const isMissing = doc => MISSING.test(doc);
 function parentOf(kind, item) {
   if (kind === 'cli') return item.includes(' ') ? item.slice(0, item.lastIndexOf(' ')) : undefined;
   if (kind === 'schema') return item.includes('.') ? item.slice(0, item.lastIndexOf('.')) : undefined;
+  // WebSocket fields follow the variant's closing bracket; dots inside the tag are part of its name.
+  if (kind === 'ws') return item.lastIndexOf('.') > item.lastIndexOf(']') ? item.slice(0, item.lastIndexOf('.')) : undefined;
   return undefined;
 }
 
@@ -117,9 +122,65 @@ export function sqlBreaks(item, before, after) {
   return reasons;
 }
 
+/** WebSocket rules depend on direction: the daemon accepts `client` messages and clients read `server` messages. */
+export function wsChanges(item, before, after) {
+  const old = tokens(before);
+  const now = tokens(after);
+  const reasons = [];
+  const notes = [];
+  if (item.startsWith('socket ')) {
+    for (const name of ['path', 'scope']) if (value(old, name) !== value(now, name)) reasons.push(`socket ${name} changed`);
+    if (value(old, 'protocol') !== value(now, 'protocol')) notes.push(`protocol version changed from ${value(old, 'protocol')} to ${value(now, 'protocol')}`);
+    return { reasons, notes };
+  }
+  const attributeWord = /^(required|message|nullable|socket|sockets|rejects|when|min|max|format|values|default|pattern|unique)\b/;
+  const typeOf = list => (list[0] && !attributeWord.test(list[0]) ? list[0] : undefined);
+  const sockets = list => (value(list, 'socket') ?? value(list, 'sockets'))?.split('|') ?? [];
+  const lostSockets = sockets(old).filter(name => sockets(now).length && !sockets(now).includes(name));
+  if (typeOf(old) !== typeOf(now)) reasons.push(`type changed from ${typeOf(old) ?? 'none'} to ${typeOf(now) ?? 'none'}`);
+  if (item.startsWith('client ')) {
+    reasons.push(...attributeBreaks('schema', before, after).filter(reason => !reason.startsWith('type changed')));
+    if (old.includes('nullable') && !now.includes('nullable')) reasons.push('null no longer accepted');
+    if (!old.includes('rejects unknown fields') && now.includes('rejects unknown fields')) reasons.push('unknown fields now rejected');
+    for (const name of lostSockets) reasons.push(`no longer accepted on the ${name} socket`);
+    return { reasons: [...new Set(reasons)], notes };
+  }
+  if (token(old, 'required') && !token(now, 'required')) reasons.push('may now be absent');
+  if (!old.includes('nullable') && now.includes('nullable')) reasons.push('may now be null');
+  for (const name of lostSockets) reasons.push(`no longer sent on the ${name} socket`);
+  const oldValues = value(old, 'values')?.split('|');
+  const added = value(now, 'values')?.split('|').filter(v => oldValues && !oldValues.includes(v)) ?? [];
+  if (added.length) notes.push(`new values ${added.join(', ')}: clients must handle them`);
+  for (const name of sockets(now).filter(name => sockets(old).length && !sockets(old).includes(name))) notes.push(`now also sent on the ${name} socket`);
+  return { reasons, notes };
+}
+
+/** HTTP route rows: scope and payload types are part of the contract; `untyped` payloads become typed over time. */
+export function httpRouteChanges(before, after) {
+  const old = tokens(before);
+  const now = tokens(after);
+  const reasons = [];
+  const notes = [];
+  if (value(old, 'scope') !== value(now, 'scope')) reasons.push(`token scope changed from ${value(old, 'scope')} to ${value(now, 'scope')}`);
+  for (const name of ['request', 'query', 'response']) {
+    const a = value(old, name);
+    const b = value(now, name);
+    if (a === b) continue;
+    if (a?.startsWith('untyped') && b && !b.startsWith('untyped')) notes.push(`${name} is now typed as ${b}`);
+    else reasons.push(`${name} changed from ${a ?? 'none'} to ${b ?? 'none'}`);
+  }
+  const sdk = list => list.filter(t => t.startsWith('sdk ')).sort().join('; ');
+  if (sdk(old) !== sdk(now)) notes.push(`SDK types changed from ${sdk(old) || 'none'} to ${sdk(now) || 'none'}`);
+  return { reasons, notes };
+}
+// HTTP request fields behave like messages clients send, response fields like messages the server sends.
+const asDirection = item => item.replace(/^request /, 'client ').replace(/^response /, 'server ');
+
+const protocol = rows => [...(rows?.entries() ?? [])].filter(([item]) => item.startsWith('socket ')).map(([item, row]) => `${item}=${value(tokens(row.attributes), 'protocol')}`).sort().join(',');
+
 /** Classifies the changes between two parsed listings of one interface. */
 export function compareListing(kind, base, head) {
-  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], docChanges: 0 };
+  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], gaps: [], notes: [], docChanges: 0 };
   for (const [item, row] of head) {
     const old = base?.get(item);
     if (!old) {
@@ -127,13 +188,23 @@ export function compareListing(kind, base, head) {
       // Gaps in a listing's first version are its starting debt; only later additions must be documented.
       if (base && isMissing(row.doc)) result.missingDocs.push(item);
       const parent = parentOf(kind, item);
-      if (base && parent && base.has(parent) && tokens(row.attributes).includes('required')) {
+      if (base && parent && base.has(parent) && tokens(row.attributes).includes('required') && !(kind === 'ws' && item.startsWith('server '))) {
         result.breaking.push({ item, reason: kind === 'cli' ? 'new required argument on an existing command' : 'new required field' });
       }
       if (base && kind === 'sql' && /^table [^ .]+\.[^ ]+$/.test(item)) {
         const table = item.slice(0, item.indexOf('.'));
         const parts = row.attributes.split(', ');
         if (base.has(table) && parts.includes('not null') && !parts.some(t => t.startsWith('default '))) result.breaking.push({ item, reason: 'new NOT NULL column without a default on an existing table' });
+      }
+      if (base && kind === 'http' && item.startsWith('route ') && ['request', 'query', 'response'].some(name => value(tokens(row.attributes), name)?.startsWith('untyped'))) {
+        result.gaps.push({ item, reason: 'new route with an untyped payload; give it a Rust request or response type' });
+      }
+      if (base && kind === 'http' && /^request [^.]+\..+/.test(item) && tokens(row.attributes).includes('required') && base.has(item.slice(0, item.lastIndexOf('.')))) {
+        result.breaking.push({ item, reason: 'new required request field' });
+      }
+      if (base && kind === 'ws') {
+        const variant = item.match(/^(server [^[]+)\[[^\]]+\]$/);
+        if (variant && [...base.keys()].some(key => key.startsWith(`${variant[1]}[`))) result.notes.push({ item, reason: 'new server message type: clients must ignore types they do not know' });
       }
       if (base && kind === 'crate') {
         const [what, path] = item.split(' ');
@@ -154,6 +225,11 @@ export function compareListing(kind, base, head) {
     if (old.attributes !== row.attributes) {
       if (kind === 'crate') reasons.push('signature changed');
       else if (kind === 'sql') reasons.push(...sqlBreaks(item, old.attributes, row.attributes));
+      else if (kind === 'ws' || kind === 'http') {
+        const change = kind === 'http' && item.startsWith('route ') ? httpRouteChanges(old.attributes, row.attributes) : wsChanges(kind === 'http' ? asDirection(item) : item, old.attributes, row.attributes);
+        reasons.push(...change.reasons);
+        result.notes.push(...change.notes.map(reason => ({ item, reason })));
+      }
       else reasons.push(...attributeBreaks(kind, old.attributes, row.attributes));
     }
     if (old.doc !== row.doc) result.docChanges += 1;
@@ -167,7 +243,16 @@ export function compareListing(kind, base, head) {
     const row = base.get(item);
     // Removing a hidden alias still breaks scripts that use it, so every removal counts.
     result.breaking.push({ item, reason: tokens(row.attributes).some(t => t.endsWith('alias')) ? 'alias removed'
-      : kind === 'sql' && item.startsWith('migration ') ? 'existing migration removed' : 'removed' });
+      : kind === 'sql' && item.startsWith('migration ') ? 'existing migration removed'
+      : kind === 'ws' && item.startsWith('client ') ? 'removed from messages clients send: older clients that send it are rejected'
+      : kind === 'ws' && item.startsWith('server ') ? 'removed from server messages: clients that read it break'
+      : kind === 'routes' ? 'route removed: saved links and notifications that use it stop working'
+      : kind === 'http' && item.startsWith('route ') ? 'route removed: callers get 404'
+      : kind === 'http' && item.startsWith('request ') ? 'removed from requests the daemon accepts'
+      : kind === 'http' && item.startsWith('response ') ? 'removed from responses: callers that read it break' : 'removed' });
+  }
+  if (kind === 'ws' && base && result.breaking.length && protocol(base) === protocol(head)) {
+    result.breaking.push({ item: 'protocol version', reason: 'breaking change without a call protocol version bump' });
   }
   if (kind === 'sql' && base) {
     const schemaChanged = [...result.added, ...result.removed, ...result.changed].some(item => item !== 'schema version' && !item.startsWith('migration '));
@@ -220,6 +305,17 @@ export function overview(kind, head) {
     const migrations = items.filter(item => item.startsWith('migration ')).length;
     return `Schema version ${head.get('schema version')?.attributes ?? '?'}: ${tables} tables, ${columns} columns, ${indexes} indexes, ${migrations} migration files.`;
   }
+  if (kind === 'ws') {
+    const sockets = items.filter(item => item.startsWith('socket ')).map(item => item.slice(7));
+    const count = side => items.filter(item => new RegExp(`^${side} [^[]+\\[[^\\]]+\\]$`).test(item)).length;
+    return `Sockets: ${sockets.join(', ')}. ${count('client')} message types clients send, ${count('server')} the daemon sends.`;
+  }
+  if (kind === 'http') {
+    const routes = items.filter(item => item.startsWith('route '));
+    const untyped = routes.filter(item => head.get(item).attributes.includes('untyped')).length;
+    return `${routes.length} routes, ${untyped} with at least one untyped payload.`;
+  }
+  if (kind === 'routes') return `Routes: ${items.map(item => item.replace(/^route /, '')).join(', ')}.`;
   if (kind === 'schema') {
     const tools = items.filter(item => /^tool [^.]+$/.test(item));
     if (tools.length) return `Tools: ${tools.map(item => `${item.slice(5)}${tokens(head.get(item).attributes).includes('optional') ? ' (optional)' : ''}`).join(', ')}.`;
@@ -230,7 +326,7 @@ export function overview(kind, head) {
 }
 
 /** Renders the PR comment for a set of per-file comparisons. */
-export function renderComment({ reports, changesets, baseline }) {
+export function renderComment({ reports, changesets, baseline, openapi }) {
   const changed = reports.filter(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);
   const lines = [MARKER, '## Interface changes', ''];
   if (!changed.length) {
@@ -239,7 +335,14 @@ export function renderComment({ reports, changesets, baseline }) {
   }
   const sum = key => changed.reduce((n, r) => n + r.result[key].length, 0);
   const breaking = changed.flatMap(r => r.result.breaking.map(b => ({ ...b, title: r.surface.title })));
-  const missing = changed.flatMap(r => r.result.missingDocs.map(item => ({ item, title: r.surface.title })));
+  // oasdiff is the standard OpenAPI compatibility check; its findings count as breaking changes of the HTTP API.
+  if (openapi?.breaking) {
+    breaking.push({ item: 'openapi.json', reason: 'oasdiff reports breaking changes (see OpenAPI compatibility)', title: 'HTTP API' });
+    const http = changed.find(r => r.surface.kind === 'http');
+    if (http && !http.result.breaking.length) http.result.breaking.push({ item: 'openapi.json', reason: 'oasdiff' });
+  }
+  const missing = changed.flatMap(r => [...r.result.missingDocs.map(item => ({ item, title: r.surface.title, reason: '' })),
+    ...(r.result.gaps ?? []).map(gap => ({ ...gap, title: r.surface.title }))]);
   if (baseline) {
     lines.push(`**Needs your approval.** This PR adds the interface listings for the first time: ${sum('added')} items across ${changed.length} files.`,
       'There is no earlier listing to compare against, so nothing can be marked breaking. Review the listing files as the new baseline.', '');
@@ -250,7 +353,8 @@ export function renderComment({ reports, changesets, baseline }) {
   lines.push(`To approve, add the \`${APPROVAL_LABEL}\` label. A later push that changes the listings removes it.`, '');
 
   const warnings = [];
-  if (missing.length) warnings.push(`${missing.length} new item${missing.length === 1 ? ' has' : 's have'} no documentation. The **Interface docs** check fails until each has help text, a doc comment or a description.`);
+  for (const report of changed) for (const note of report.result.notes ?? []) warnings.push(`${report.surface.title}: ${code(note.item)} — ${note.reason}`);
+  if (missing.length) warnings.push(`${missing.length} new item${missing.length === 1 ? ' has' : 's have'} no documentation or no type. The **Interface docs** check fails until each has help text, a doc comment, a description or a typed payload.`);
   if (!baseline) {
     for (const report of changed) {
       for (const pkg of report.surface.packages) {
@@ -269,9 +373,12 @@ export function renderComment({ reports, changesets, baseline }) {
     lines.push('');
   }
   if (missing.length) {
-    lines.push('### Missing documentation', ...missing.slice(0, 60).map(m => `- ${m.title}: ${code(m.item)}`));
+    lines.push('### Missing documentation or types', ...missing.slice(0, 60).map(m => `- ${m.title}: ${code(m.item)}${m.reason ? ` — ${m.reason}` : ''}`));
     if (missing.length > 60) lines.push(`- …and ${missing.length - 60} more`);
     lines.push('');
+  }
+  if (openapi?.report?.trim()) {
+    lines.push('### OpenAPI compatibility (oasdiff)', openapi.breaking ? 'oasdiff found breaking changes in `interfaces/http/openapi.json`:' : 'oasdiff found no breaking changes in `interfaces/http/openapi.json`.', '', openapi.report.trim(), '');
   }
   for (const report of changed) {
     const { result, surface: s, file, head, base } = report;
@@ -333,7 +440,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const baseRef = argv[argv.indexOf('--base') + 1];
   if (!argv.includes('--base') || !baseRef) throw new Error('Usage: review.mjs --base <ref> [--comment] [--fail-on-missing-docs]');
   const outcome = await review(baseRef);
-  const body = renderComment(outcome);
+  const reportFile = argv.includes('--oasdiff') ? argv[argv.indexOf('--oasdiff') + 1] : undefined;
+  const openapi = reportFile ? { report: await readFile(reportFile, 'utf8').catch(() => ''), breaking: argv.includes('--oasdiff-breaking') } : undefined;
+  const body = renderComment({ ...outcome, openapi });
   console.log(body);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${body}\n`);
   const changed = outcome.reports.some(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);
@@ -343,7 +452,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       console.warn(`Could not post the PR comment: ${error.message}`);
     });
   }
-  const missing = outcome.reports.flatMap(r => r.result.missingDocs);
+  const missing = outcome.reports.flatMap(r => [...r.result.missingDocs, ...(r.result.gaps ?? []).map(gap => `${gap.item} (${gap.reason})`)]);
   if (argv.includes('--fail-on-missing-docs') && missing.length) {
     console.error(`${missing.length} new interface item(s) lack documentation:\n${missing.map(item => `- ${item}`).join('\n')}`);
     process.exitCode = 1;

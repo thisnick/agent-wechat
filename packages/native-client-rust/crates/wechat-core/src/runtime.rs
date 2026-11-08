@@ -149,44 +149,71 @@ pub(crate) struct DownloadPermit {
     _account: tokio::sync::OwnedSemaphorePermit,
     _global: tokio::sync::OwnedSemaphorePermit,
 }
-#[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
+/// Options for signing an account in. Every field is optional.
+#[derive(Clone, Serialize, Deserialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginRequest {
+    /// How to sign in. The default is `auto`.
     #[serde(default)]
     pub strategy: LoginStrategy,
+    /// How an expired QR code is replaced.
     #[serde(default)]
     pub qr_refresh: QrRefresh,
+    /// Whether a QR code may be shown. When false, only a saved login can be used. The default is
+    /// true.
     #[serde(default = "yes")]
     pub allow_qr: bool,
+    /// True to skip the saved login and use a QR code, the same as strategy `qr`. The default is
+    /// false.
     #[serde(default)]
     pub force_qr: bool,
+    /// How long to wait for the sign-in to finish, from 10 to 900 seconds. The default is 300.
     #[serde(default = "deadline")]
     #[ts(type = "number")]
     pub timeout_seconds: u64,
+    /// Name this computer gives WeChat while signing in, up to 100 characters. The default is
+    /// `agent-wechat`.
     #[serde(default = "computer")]
     pub computer_name: String,
 }
-#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+/// How to sign in.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum LoginStrategy {
+    /// Use the saved login if there is one, and fall back to a QR code if it is missing or
+    /// rejected.
     #[default]
     Auto,
+    /// Use only the saved login. If it cannot be used, the attempt ends as `needs_login` without
+    /// showing a QR code.
     SavedDevice,
+    /// Always sign in by scanning a QR code.
     Qr,
 }
-#[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
+/// How an expired QR code is replaced.
+#[derive(Clone, Serialize, Deserialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QrRefresh {
+    /// Whether an expired QR code that nobody scanned is replaced automatically. The default is
+    /// `auto`.
     #[serde(default)]
     pub mode: QrRefreshMode,
+    /// How many times to replace an expired QR code automatically, from 0 to 3. The default is 3.
     #[serde(default = "refreshes")]
     pub max_refreshes: u8,
 }
-#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+/// Whether an expired QR code is replaced automatically.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum QrRefreshMode {
+    /// Replace an expired, unscanned QR code with a new one, up to the refresh limit.
     #[default]
     Auto,
+    /// Do not replace it. An expired QR code ends the attempt as `expired`.
     Manual,
 }
 fn refreshes() -> u8 {

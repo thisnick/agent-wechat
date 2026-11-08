@@ -15,19 +15,29 @@ pub(super) enum SavedDeviceSource {
     State(Box<AccountState>),
 }
 
-#[derive(Clone, Default, Deserialize, Serialize, ts_rs::TS)]
+/// Where to find the stopped official WeChat profile to attach as an account.
+#[derive(Clone, Default, Deserialize, Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficialProfileRequest {
-    // An absolute path on the daemon host. Omission searches its HOME only.
+    /// Absolute path on the daemon's host to a home folder containing `xwechat_files`, to that
+    /// folder, or to one account's folder. When omitted, the daemon searches only its own home
+    /// folder.
     pub path: Option<String>,
+    /// ID of the account expected to own this profile. The request is refused if the profile is not
+    /// already attached to that account.
     pub account_id: Option<String>,
 }
-#[derive(Serialize, ts_rs::TS)]
+/// The account an official profile is attached to.
+#[derive(Serialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OfficialProfileSelection {
+    /// ID of the account that uses the profile.
     pub account_id: String,
+    /// Path of the attached profile on the daemon's host.
     pub profile_path: String,
+    /// `official`, meaning the profile is used in place and not copied.
     pub storage_mode: String,
+    /// True when the profile holds saved login details that can sign in without a QR code.
     pub saved_device_login_available: bool,
 }
 

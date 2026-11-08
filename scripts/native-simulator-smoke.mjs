@@ -108,11 +108,15 @@ async function login(account, scanned = false) {
     await waitFor(`${account} awaiting approval`, async () => (await a.operation(account, operation.id)).state === "awaiting_approval");
   }
   await control({ op: "login", account, status: "approved" });
+  const approvedAt = Date.now();
+  // Completing sign-in derives the profile keys, which is slow in CI's debug builds on
+  // Windows; the wait returns as soon as the operation succeeds.
   await waitFor(`${account} signed in`, async () => {
     const current = await a.operation(account, operation.id);
     if (["failed", "expired", "rejected"].includes(current.state)) throw new Error(JSON.stringify(current));
+    if (current.state === "succeeded") console.error(`${account} signed in after ${((Date.now() - approvedAt) / 1000).toFixed(1)}s`);
     return current.state === "succeeded";
-  });
+  }, 60000);
   await waitFor(`${account} push connected`, async () => (await a.account(account)).incomingTransport === "simulator_push");
   await waitFor(`${account} baseline`, async () => (await a.messages(account, "sim_mei")).items.length === 1);
   assert.ok((await a.contacts(account)).items.some(contact => contact.id === "sim_mei"));
