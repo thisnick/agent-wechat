@@ -1,0 +1,96 @@
+name: UI screenshots
+
+# Captures the UI scenes in packages/client-ui/scenes with Playwright and uploads them
+# to Argos. Argos compares a pull request's screenshots with the latest main build and
+# adds a check the owner approves; builds on main become the baselines. Screenshots are
+# not committed and not made in Docker. Upload uses GitHub Actions OIDC: do not set
+# ARGOS_TOKEN, which would take precedence and skip it. Run the scenes locally with
+# `pnpm --filter @agent-wechat/client-ui scenes`; nothing is uploaded outside CI.
+on:
+  pull_request:
+    paths:
+      - 'packages/client-ui/**'
+      - 'packages/desktop/**'
+      - 'packages/shared/**'
+      - 'packages/native-client-rust/crates/wechat-simulator/**'
+      - 'pnpm-lock.yaml'
+      - '.node-version'
+      - '.github/workflows/ui-screenshots.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/client-ui/**'
+      - 'packages/desktop/**'
+      - 'packages/shared/**'
+      - 'packages/native-client-rust/crates/wechat-simulator/**'
+      - 'pnpm-lock.yaml'
+      - '.node-version'
+      - '.github/workflows/ui-screenshots.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-screenshots-${{ github.ref }}
+  # Every push to main is a baseline; only superseded pull request runs are cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  scenes:
+    name: UI screenshots
+    runs-on: ubuntu-24.04
+    # The first run on a cold Rust cache takes the longest.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+        with:
+          toolchain: 1.93.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          # The automatic hash includes unused preinstalled toolchains, which
+          # differ across runner images. Key the compiler we actually select.
+          add-rust-environment-hash-key: false
+          key: ui-screenshots-${{ steps.rust.outputs.cachekey }}
+      # The fonts decide how text renders, so every run installs the same ones.
+      - name: Install build tools and fonts
+        run: sudo apt-get update && sudo apt-get install -y cmake fonts-noto-cjk fonts-noto-color-emoji
+      - run: pnpm install --frozen-lockfile
+      - name: Build the simulator
+        run: cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator
+      - name: Install Chromium
+        working-directory: packages/client-ui
+        run: npx playwright install --with-deps chromium
+      - name: Build the UI and the SDK it uses
+        run: pnpm --filter "@agent-wechat/client-ui..." build
+      - name: Capture the scenes and upload them to Argos
+        # No ARGOS_TOKEN: the upload authenticates with the job's OIDC token.
+        run: pnpm --filter @agent-wechat/client-ui scenes
+        env:
+          WX_DEV_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/debug/wx-dev
+      - name: Keep the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-scenes-report
+          path: |
+            packages/client-ui/.scenes/report
+            packages/client-ui/.scenes/results
+          if-no-files-found: ignore
+          retention-days: 7
