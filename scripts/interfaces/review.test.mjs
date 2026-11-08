@@ -323,3 +323,11 @@ test('HTTP rows with several SDK types and longer untyped markers are read corre
   const added = compare('http', before, [...before, 'route GET /v1/new | scope read, response untyped JSON or SSE | New']);
   assert.deepEqual(added.gaps.map(g => g.item), ['route GET /v1/new']);
 });
+
+test('removed scenes are coverage warnings, removed desktop commands are breaking', () => {
+  const scenes = compare('scenes', ['scene chat/direct | route /{server}/{account}/chats/{thread}, viewports desktop, modes web|desktop | A chat'], []);
+  assert.deepEqual(scenes.breaking, []);
+  assert.deepEqual(scenes.notes.map(n => n.reason), ['scene removed: Argos no longer captures this screen']);
+  const shell = compare('shell', ['command http_body_chunk | - | Send a body chunk', 'menu tray.quit | label "Quit" | Quit'], ['menu tray.quit | label "Quit" | Quit']);
+  assert.deepEqual(reasons(shell), ['command http_body_chunk: desktop command or event removed: the bundled UI or plugins that use it break']);
+});

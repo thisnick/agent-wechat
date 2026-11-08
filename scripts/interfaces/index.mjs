@@ -35,6 +35,10 @@ export const steps = [
     test: 'http_interface' },
   { name: 'ui', label: 'UI routes', sources: ['packages/client-ui/', 'interfaces/ui/'],
     commands: check => [['node', ['packages/client-ui/scripts/interface-listing.mjs', ...(check ? ['--check'] : [])]]] },
+  { name: 'scenes', label: 'UI scenes', sources: ['packages/client-ui/', 'interfaces/ui/scenes.txt'],
+    commands: check => [['pnpm', ['--filter', '@agent-wechat/client-ui', 'scenes:list', ...(check ? ['--', '--check'] : [])]]] },
+  { name: 'shell', label: 'Desktop shell', sources: ['packages/desktop/', 'interfaces/ui/desktop-shell.txt'],
+    commands: check => [['node', ['packages/desktop/scripts/interface-listing.mjs', ...(check ? ['--check'] : [])]]] },
   { name: 'crates', label: 'Rust crates', sources: ['wechat-platform', 'wechat-media', 'wechat-protocol', 'wechat-profile', 'wechat-calls']
     .map(crate => `${rust}crates/${crate}/`).concat('interfaces/crates/', 'scripts/native-crates.mjs', ...rustShared),
     commands: check => [['node', ['scripts/interfaces/rust-crates.mjs', ...(check ? ['--check'] : [])]]] },
