@@ -239,6 +239,9 @@ export const scenes = [
   {
     name: "hub-picker",
     route: "servers",
+    // The app leaves the hub picker's address when it starts with a hub open, so open
+    // the hub first and then go to the picker in the app, as a user would.
+    start: "accounts",
     description: "The screen for choosing which hub to connect to.",
     viewports: ["desktop", "narrow"],
     setup: async (sim) => {

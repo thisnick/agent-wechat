@@ -114,7 +114,13 @@ for (const scene of scenes) {
         const sim = seeder(stack);
         const world = await scene.setup(sim);
         const route = { name: scene.route, server: stack.hub.serverId, ...scene.target(world) };
-        await page.goto(`${ui.origin}/${formatRoute(route)}`);
+        if (scene.start) {
+          await page.goto(`${ui.origin}/${formatRoute({ name: scene.start, server: stack.hub.serverId, ...scene.target(world) })}`);
+          await page.waitForFunction(() => !!document.querySelector(".shell, .onboarding-shell") && !document.body.innerText.includes("Opening AgentWechat"));
+          await page.evaluate((hash) => { location.hash = hash; }, formatRoute(route));
+        } else {
+          await page.goto(`${ui.origin}/${formatRoute(route)}`);
+        }
         await scene.ready({ page, expect, world });
         await scene.actions?.({ page, expect, world });
         await settle(page, requests, sim.avatarInitials);
