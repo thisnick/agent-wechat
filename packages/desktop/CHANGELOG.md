@@ -1,5 +1,11 @@
 # @agent-wechat/desktop
 
+## 2.1.0
+
+### Minor Changes
+
+- [#423](https://github.com/thisnick/agent-wechat/pull/423) [`4bfc492`](https://github.com/thisnick/agent-wechat/commit/4bfc492675cb8228abe1cf45a71fb624f63d7bff) Thanks [@thisnick](https://github.com/thisnick)! - Every view in the chat window now has its own address. Reloading keeps you on the same chat, Back and Forward move between chats, the account list, settings and the photo viewer, and a link to a chat or message opens it once the account is signed in. A link to a chat or message that no longer exists opens the chat list or the conversation with a note. Clicking a message notification now opens its chat scrolled to that message and highlights it.
+
 ## 2.0.0
 
 ### Minor Changes
