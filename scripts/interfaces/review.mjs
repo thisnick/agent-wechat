@@ -166,10 +166,11 @@ export function httpRouteChanges(before, after) {
     const a = value(old, name);
     const b = value(now, name);
     if (a === b) continue;
-    if (a === 'untyped' && b) notes.push(`${name} is now typed as ${b}`);
+    if (a?.startsWith('untyped') && b && !b.startsWith('untyped')) notes.push(`${name} is now typed as ${b}`);
     else reasons.push(`${name} changed from ${a ?? 'none'} to ${b ?? 'none'}`);
   }
-  if (value(old, 'sdk') !== value(now, 'sdk')) notes.push(`SDK type changed from ${value(old, 'sdk') ?? 'none'} to ${value(now, 'sdk') ?? 'none'}`);
+  const sdk = list => list.filter(t => t.startsWith('sdk ')).sort().join('; ');
+  if (sdk(old) !== sdk(now)) notes.push(`SDK types changed from ${sdk(old) || 'none'} to ${sdk(now) || 'none'}`);
   return { reasons, notes };
 }
 // HTTP request fields behave like messages clients send, response fields like messages the server sends.
@@ -195,7 +196,7 @@ export function compareListing(kind, base, head) {
         const parts = row.attributes.split(', ');
         if (base.has(table) && parts.includes('not null') && !parts.some(t => t.startsWith('default '))) result.breaking.push({ item, reason: 'new NOT NULL column without a default on an existing table' });
       }
-      if (base && kind === 'http' && item.startsWith('route ') && ['request', 'query', 'response'].some(name => value(tokens(row.attributes), name) === 'untyped')) {
+      if (base && kind === 'http' && item.startsWith('route ') && ['request', 'query', 'response'].some(name => value(tokens(row.attributes), name)?.startsWith('untyped'))) {
         result.gaps.push({ item, reason: 'new route with an untyped payload; give it a Rust request or response type' });
       }
       if (base && kind === 'http' && /^request [^.]+\..+/.test(item) && tokens(row.attributes).includes('required') && base.has(item.slice(0, item.lastIndexOf('.')))) {

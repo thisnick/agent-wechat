@@ -311,3 +311,15 @@ test('an oasdiff report adds an OpenAPI section and counts as a breaking HTTP ch
   assert.match(body, /the response property `id` became optional/);
   assert.match(body, /HTTP API has a breaking change but its changeset is `minor`/);
 });
+
+test('HTTP rows with several SDK types and longer untyped markers are read correctly', () => {
+  const before = ['route GET /v1/accounts/{a}/events | scope read, query EventQuery, response untyped JSON or SSE, sdk response NativeEvent | List events'];
+  const typed = compare('http', before, ['route GET /v1/accounts/{a}/events | scope read, query EventQuery, response NativeEventPage, sdk request X, sdk response NativeEventPage | List events']);
+  assert.deepEqual(reasons(typed), []);
+  assert.deepEqual(typed.notes.map(n => n.reason).sort(), [
+    'SDK types changed from sdk response NativeEvent to sdk request X; sdk response NativeEventPage',
+    'response is now typed as NativeEventPage',
+  ]);
+  const added = compare('http', before, [...before, 'route GET /v1/new | scope read, response untyped JSON or SSE | New']);
+  assert.deepEqual(added.gaps.map(g => g.item), ['route GET /v1/new']);
+});
