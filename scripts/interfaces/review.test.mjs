@@ -239,3 +239,30 @@ test('removed UI routes are breaking because links and notifications use them', 
     ['route /{server}/{account}/chats | params server, account | Chat list', 'route /{server}/{account}/c/{thread} | params server, account, thread | A conversation']);
   assert.deepEqual(reasons(result), ['route /{server}/{account}/chats/{thread}: route removed: saved links and notifications that use it stop working']);
 });
+
+test('WebSocket rules read nullability, socket membership and unknown-field handling', () => {
+  const before = [
+    'socket control | path /v1/accounts/{a}/calls/socket, scope calls, protocol 2 | Control',
+    'client CallCommand[call.ready] | message, socket control | Ready',
+    'client CallCommand[call.ready].scope | object, nullable | Which calls',
+    'server CallEvent[track.removed] | message, sockets control|media | Track ended',
+    'server CallEvent[hello].calls[].id | string, required | Call ID',
+    'server CallEvent[hello].calls[].tags | array of string | Tags',
+  ];
+  const result = compare('ws', before, [
+    'socket control | path /v1/accounts/{a}/calls/socket, scope calls, protocol 2 | Control',
+    'client CallCommand[call.ready] | message, socket control, rejects unknown fields | Ready',
+    'client CallCommand[call.ready].scope | object | Which calls',
+    'server CallEvent[track.removed] | message, socket control | Track ended',
+    'server CallEvent[hello].calls[].id | string, required, nullable | Call ID',
+    'server CallEvent[hello].calls[].tags | array of integer | Tags',
+  ]);
+  assert.deepEqual(reasons(result).sort(), [
+    'client CallCommand[call.ready].scope: null no longer accepted',
+    'client CallCommand[call.ready]: unknown fields now rejected',
+    'protocol version: breaking change without a call protocol version bump',
+    'server CallEvent[hello].calls[].id: may now be null',
+    'server CallEvent[hello].calls[].tags: type changed from array of string to array of integer',
+    'server CallEvent[track.removed]: no longer sent on the media socket',
+  ]);
+});

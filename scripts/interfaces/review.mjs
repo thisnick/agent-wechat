@@ -132,13 +132,25 @@ export function wsChanges(item, before, after) {
     if (value(old, 'protocol') !== value(now, 'protocol')) notes.push(`protocol version changed from ${value(old, 'protocol')} to ${value(now, 'protocol')}`);
     return { reasons, notes };
   }
-  if (item.startsWith('client ')) return { reasons: attributeBreaks('schema', before, after), notes };
-  const types = list => (list[0] && /^[a-z|]+$/.test(list[0]) && !['required', 'message'].includes(list[0]) ? list[0] : undefined);
-  if (types(old) !== types(now)) reasons.push(`type changed from ${types(old) ?? 'none'} to ${types(now) ?? 'none'}`);
+  const attributeWord = /^(required|message|nullable|socket|sockets|rejects|when|min|max|format|values|default|pattern|unique)\b/;
+  const typeOf = list => (list[0] && !attributeWord.test(list[0]) ? list[0] : undefined);
+  const sockets = list => (value(list, 'socket') ?? value(list, 'sockets'))?.split('|') ?? [];
+  const lostSockets = sockets(old).filter(name => sockets(now).length && !sockets(now).includes(name));
+  if (typeOf(old) !== typeOf(now)) reasons.push(`type changed from ${typeOf(old) ?? 'none'} to ${typeOf(now) ?? 'none'}`);
+  if (item.startsWith('client ')) {
+    reasons.push(...attributeBreaks('schema', before, after).filter(reason => !reason.startsWith('type changed')));
+    if (old.includes('nullable') && !now.includes('nullable')) reasons.push('null no longer accepted');
+    if (!old.includes('rejects unknown fields') && now.includes('rejects unknown fields')) reasons.push('unknown fields now rejected');
+    for (const name of lostSockets) reasons.push(`no longer accepted on the ${name} socket`);
+    return { reasons: [...new Set(reasons)], notes };
+  }
   if (token(old, 'required') && !token(now, 'required')) reasons.push('may now be absent');
+  if (!old.includes('nullable') && now.includes('nullable')) reasons.push('may now be null');
+  for (const name of lostSockets) reasons.push(`no longer sent on the ${name} socket`);
   const oldValues = value(old, 'values')?.split('|');
   const added = value(now, 'values')?.split('|').filter(v => oldValues && !oldValues.includes(v)) ?? [];
   if (added.length) notes.push(`new values ${added.join(', ')}: clients must handle them`);
+  for (const name of sockets(now).filter(name => sockets(old).length && !sockets(old).includes(name))) notes.push(`now also sent on the ${name} socket`);
   return { reasons, notes };
 }
 
