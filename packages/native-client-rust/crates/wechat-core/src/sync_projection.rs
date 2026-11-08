@@ -382,6 +382,9 @@ impl Core {
         origin: &str,
         download_media: bool,
     ) -> Result<()> {
+        #[cfg(test)]
+        self.projection_command_attempts
+            .fetch_add(1, Ordering::Relaxed);
         if command.id == 4 {
             // Native DelContact handler 0x6228370 calls 0x786f830. Lookup
             // 0x786e260 returning no Contact jumps to 0x786fe54 without mutation.
