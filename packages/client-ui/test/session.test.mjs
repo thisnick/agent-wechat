@@ -2045,3 +2045,29 @@ test("returning to a healthy stream skips full inventories until the history TTL
   assert.equal(inventories, 1);
   assert.equal(reads, 2);
 });
+
+test("activating an account opens the preferred conversation when it is listed, else the first", async (t) => {
+  const thread = (account, id) => ({
+    id,
+    accountId: account,
+    peerId: id,
+    kind: "direct",
+    displayName: id,
+    unreadCount: 0,
+    readStateVersion: "1",
+    history: {},
+  });
+  const overrides = {
+    threads: async (account) => page([thread(account, "peer"), thread(account, "other")]),
+    thread: async (account, id) => thread(account, id),
+  };
+  const preferred = session(t, overrides);
+  await preferred.activate("a", "other");
+  assert.equal(preferred.snapshot().selected, "other");
+  const unlisted = session(t, overrides);
+  await unlisted.activate("a", "stranger");
+  assert.equal(unlisted.snapshot().selected, "peer");
+  const plain = session(t, overrides);
+  await plain.activate("a");
+  assert.equal(plain.snapshot().selected, "peer");
+});
