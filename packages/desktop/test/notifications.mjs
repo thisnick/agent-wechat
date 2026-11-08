@@ -281,6 +281,7 @@ export async function notificationsAcceptance(invoke) {
       serverId,
       accountId: account,
       threadId: thread,
+      messageId: "new",
     });
     await wait(() => window().visible);
     await invoke("notifications_context", { focus: null });

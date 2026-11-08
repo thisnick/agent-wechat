@@ -38,6 +38,9 @@ pub struct Target {
     server_id: String,
     account_id: String,
     thread_id: String,
+    /// The message that raised the alert, so the window can scroll to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
@@ -525,6 +528,7 @@ async fn alert(
             .context("Missing hub identity")?,
         account_id: account.into(),
         thread_id: thread_id.into(),
+        message_id: Some(id.into()),
     };
     let desktop = app.state::<Desktop>();
     let inner = desktop.inner.lock().await;
@@ -755,6 +759,7 @@ mod tests {
             server_id: "server".into(),
             account_id: "one".into(),
             thread_id: "room".into(),
+            message_id: None,
         };
         let focus = Focus {
             connection_id: "hub".into(),
