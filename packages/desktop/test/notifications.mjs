@@ -14,7 +14,7 @@ async function wait(check) {
   }
   throw new Error("Notification acceptance timed out");
 }
-export async function notificationsAcceptance(invoke) {
+export async function notificationsAcceptance(invoke, evaluate) {
   const window = (action = "state") =>
     JSON.parse(
       execFileSync(
@@ -275,14 +275,24 @@ export async function notificationsAcceptance(invoke) {
       "io.github.thisnick.AgentWechat.Test.Click",
       String(first.id),
     ]);
-    const target = await wait(() => invoke("notifications_take_target"));
-    assert.deepEqual(target, {
-      connectionId: connection.id,
-      serverId,
-      accountId: account,
-      threadId: thread,
-      messageId: "new",
+    // The UI takes the clicked target itself and opens its conversation by route. If the
+    // UI isn't listening yet, the target stays pending and is taken here instead.
+    const conversation = `#/${encodeURIComponent(serverId)}/${encodeURIComponent(account)}/chats/${encodeURIComponent(thread)}`;
+    const opened = await wait(async () => {
+      const hash = evaluate ? await evaluate("return location.hash") : "";
+      if (typeof hash === "string" && hash.startsWith(conversation)) return { hash };
+      const target = await invoke("notifications_take_target");
+      return target ? { target } : null;
     });
+    if (opened.target) {
+      assert.deepEqual(opened.target, {
+        connectionId: connection.id,
+        serverId,
+        accountId: account,
+        threadId: thread,
+        messageId: "new",
+      });
+    }
     await wait(() => window().visible);
     await invoke("notifications_context", { focus: null });
     rejectStream = true;
