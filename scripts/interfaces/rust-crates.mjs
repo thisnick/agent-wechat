@@ -244,9 +244,11 @@ export function renderCrate(doc) {
 }
 
 function rustdocJson(name) {
-  const target = process.env.CARGO_TARGET_DIR ?? join(root, 'packages/native-client-rust/target');
+  // RUSTC_BOOTSTRAP is part of cargo's build fingerprint, so these builds get their own target
+  // directory; sharing one would make every later normal build start from scratch.
+  const target = process.env.INTERFACES_RUSTDOC_TARGET_DIR ?? join(root, 'packages/native-client-rust/target/interfaces-rustdoc');
   execFileSync('cargo', ['rustdoc', '--locked', '--quiet', '--manifest-path', manifest, '-p', name, '--lib', '--', '-Z', 'unstable-options', '--output-format', 'json'], {
-    cwd: root, stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, RUSTC_BOOTSTRAP: '1' },
+    cwd: root, stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, RUSTC_BOOTSTRAP: '1', CARGO_TARGET_DIR: target },
   });
   return join(target, 'doc', `${name.replaceAll('-', '_')}.json`);
 }

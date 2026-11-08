@@ -24,9 +24,19 @@ After changing the CLI, a published crate or the OpenClaw plugin:
 
 ```bash
 pnpm install
-pnpm interfaces          # rewrite every listing
+pnpm interfaces          # rewrite the listings whose sources changed
 git diff interfaces/     # review what changed
 ```
+
+| Command | Runs |
+| --- | --- |
+| `pnpm interfaces` | Only the listings whose sources changed since the merge base with `origin/main`, including uncommitted and untracked files |
+| `pnpm interfaces cli http` | Only the named listings: `cli`, `storage`, `websocket`, `http`, `ui`, `crates`, `openclaw` |
+| `pnpm interfaces --all` | Every listing |
+| `pnpm interfaces --list` | Shows each listing and whether its sources changed |
+| `--check` with any of the above | Compares instead of writing. CI runs `pnpm interfaces --check --all` |
+
+Each run prints how long each listing took. With warm build caches a full run takes about 5 seconds; the first run in a fresh checkout compiles the Rust test and rustdoc builds and takes a few minutes. The Rust listings run as one cargo invocation, and the crate listings use their own target directory (`target/interfaces-rustdoc`), so neither forces the other to rebuild.
 
 `pnpm interfaces --check` fails instead of writing. It needs the pinned Rust toolchain, `cmake` and Node. The CLI and storage listings are also checked by `cargo test`.
 

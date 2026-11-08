@@ -72,7 +72,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
         name: Check every listing against the code
-        run: pnpm interfaces --check
+        run: pnpm interfaces --check --all
       - if: failure()
         name: Explain a stale listing
         run: |
@@ -97,7 +97,7 @@ jobs:
         with:
           node-version-file: .node-version
       - name: Test the review tool
-        run: node --test scripts/interfaces/review.test.mjs
+        run: node --test scripts/interfaces/review.test.mjs scripts/interfaces/index.test.mjs
       - name: Check OpenAPI compatibility with oasdiff
         id: oasdiff
         run: |
