@@ -129,6 +129,8 @@ pub struct CoreShared {
         Mutex<BTreeMap<String, (std::time::Instant, wechat_profile::OwnedReaderCache)>>,
     #[cfg(test)]
     pub(crate) profile_snapshot_opens: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) projection_command_attempts: std::sync::atomic::AtomicUsize,
     pub(crate) profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     pub(crate) bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) startup_profiles_recovered: AtomicBool,
@@ -383,6 +385,8 @@ impl Core {
                 profile_readers: Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 profile_snapshot_opens: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                projection_command_attempts: std::sync::atomic::AtomicUsize::new(0),
                 profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
                 bootstrap_leases: Mutex::new(bootstrap_leases),
                 startup_profiles_recovered: AtomicBool::new(false),
@@ -2206,7 +2210,6 @@ impl Core {
                 let _guard = guard;
                 let _ = core.recover_text_projections(&owned)?;
                 if core.refresh_incoming_groups(&owned, true)? > 0 {
-                    core.store.retry_blocked(&owned)?;
                     core.project_pending(&owned)?;
                 }
                 if core.store.pending_sync_count(&owned)? == 0 {
@@ -2229,7 +2232,6 @@ impl Core {
                 };
                 let _ = core.recover_text_projections(&account)?;
                 if core.refresh_incoming_groups(&account, true)? > 0 {
-                    core.store.retry_blocked(&account)?;
                     core.project_pending(&account)?;
                 }
                 if core.store.pending_sync_count(&account)? == 0 {
