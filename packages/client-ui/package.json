@@ -9,7 +9,8 @@
     "connect": "node scripts/connect.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "scenes": "node scripts/scenes.mjs"
   },
   "dependencies": {
     "@agent-wechat/shared": "workspace:*",
@@ -21,6 +22,8 @@
     "react-zoom-pan-pinch": "^4.2.0"
   },
   "devDependencies": {
+    "@argos-ci/playwright": "7.8.0",
+    "@playwright/test": "1.63.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "fake-indexeddb": "6.2.5",
