@@ -325,7 +325,7 @@ test('HTTP rows with several SDK types and longer untyped markers are read corre
 });
 
 test('removed scenes are coverage warnings, removed desktop commands are breaking', () => {
-  const scenes = compare('scenes', ['scene chat/direct | route /{server}/{account}/chats/{thread}, viewports desktop, modes web|desktop | A chat'], []);
+  const scenes = compare('scenes', ['scene chat/direct | route /{server}/{account}/chats/{thread}, viewports desktop | A chat'], []);
   assert.deepEqual(scenes.breaking, []);
   assert.deepEqual(scenes.notes.map(n => n.reason), ['scene removed: Argos no longer captures this screen']);
   const shell = compare('shell', ['command http_body_chunk | - | Send a body chunk', 'menu tray.quit | label "Quit" | Quit'], ['menu tray.quit | label "Quit" | Quit']);

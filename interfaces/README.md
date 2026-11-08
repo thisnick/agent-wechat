@@ -14,7 +14,7 @@ These files list every public interface of agent-wechat, one item per line, gene
 | `http/routes.txt` | Every HTTP route: method, path, token scope, request, query and response types (or `untyped`), plus the fields of each typed payload | `packages/native-client-rust/crates/wechat-api` (a test that also fails when a registered route is missing from the table) |
 | `http/calls-websocket.txt` | Both calls WebSocket sockets: path, token scope and protocol version, and every message type and field each side sends | `packages/native-client-rust/crates/wechat-api` (a test reading the socket table and the message schemas) |
 | `ui/routes.txt` | Every URL the web and desktop UI can open | `packages/client-ui/scripts/interface-listing.mjs` |
-| `ui/scenes.txt` | The screens captured for visual review, each with its route, viewports and modes | `pnpm --filter @agent-wechat/client-ui scenes:list` |
+| `ui/scenes.txt` | The screens captured for visual review, each with its route and viewports | `pnpm --filter @agent-wechat/client-ui scenes:list` |
 | `ui/desktop-shell.txt` | The desktop app's native interface: IPC commands, events, tray menu, windows, permissions and plugins | `packages/desktop/scripts/interface-listing.mjs` |
 | `storage/registry.txt` | The SQL schema of the daemon's `registry.sqlite`, plus a hash of every migration file | `packages/native-client-rust/crates/wechat-store/src/schema_interface_tests.rs` |
 
