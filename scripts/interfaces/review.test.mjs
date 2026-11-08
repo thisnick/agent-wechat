@@ -266,3 +266,37 @@ test('WebSocket rules read nullability, socket membership and unknown-field hand
     'server CallEvent[track.removed]: no longer sent on the media socket',
   ]);
 });
+
+test('HTTP rules cover routes, scopes, payload types and new untyped routes', () => {
+  const before = [
+    'route GET /v1/accounts/{a}/threads | scope read, query untyped, response untyped, sdk NativeThreadPage | List chats',
+    'route POST /v1/access-tokens | scope admin, request TokenRequest, response untyped | Create a token',
+    'route DELETE /v1/accounts/{a} | scope admin, request untyped, response untyped | Remove an account',
+    'request TokenRequest | object | Token request',
+    'request TokenRequest.name | string, required | Token name',
+    'request TokenRequest.scopes | array of string, required | Scopes',
+    'response NativeThreadPage.items | array of object, required | Chats',
+  ];
+  const result = compare('http', before, [
+    'route GET /v1/accounts/{a}/threads | scope read, query ThreadQuery, response untyped, sdk NativeThreadPage | List chats',
+    'route POST /v1/access-tokens | scope login, request TokenRequest, response untyped | Create a token',
+    'route POST /v1/accounts/{a}/pins | scope write, request untyped, response untyped | Pin a chat',
+    'request TokenRequest | object | Token request',
+    'request TokenRequest.name | string, required | Token name',
+    'request TokenRequest.scopes | array of string, required | Scopes',
+    'request TokenRequest.expiresAt | integer, required | Expiry',
+    'response NativeThreadPage.items | array of object | Chats',
+  ]);
+  assert.deepEqual(reasons(result).sort(), [
+    'request TokenRequest.expiresAt: new required request field',
+    'response NativeThreadPage.items: may now be absent',
+    'route DELETE /v1/accounts/{a}: route removed: callers get 404',
+    'route POST /v1/access-tokens: token scope changed from admin to login',
+  ]);
+  assert.deepEqual(result.notes.map(n => `${n.item}: ${n.reason}`), ['route GET /v1/accounts/{a}/threads: query is now typed as ThreadQuery']);
+  assert.deepEqual(result.gaps.map(g => g.item), ['route POST /v1/accounts/{a}/pins']);
+  const file = 'interfaces/http/routes.txt';
+  const body = renderComment({ baseline: false, changesets: new Map([['@agent-wechat/cli', 'major']]),
+    reports: [{ file, surface: surface(file), base: listing(before), head: listing(['route GET /v1/x | scope read, response untyped | X', ...before]), baseline: false, result: compareListing('http', listing(before), listing(['route GET /v1/x | scope read, response untyped | X', ...before])) }] });
+  assert.match(body, /### Missing documentation or types\n- HTTP API: `route GET \/v1\/x` — new route with an untyped payload/);
+});

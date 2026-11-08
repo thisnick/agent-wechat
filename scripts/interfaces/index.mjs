@@ -24,6 +24,8 @@ step('Account and registry schema', () => run('cargo', ['test', '--locked', '--q
   '-p', 'wechat-store', '--lib', 'schema_interface_tests'], check ? {} : { AGENT_WECHAT_UPDATE_INTERFACES: '1' }));
 step('Calls WebSocket', () => run('cargo', ['test', '--locked', '--quiet', '--manifest-path', 'packages/native-client-rust/Cargo.toml',
   '-p', 'wechat-api', '--lib', 'calls_interface'], check ? {} : { AGENT_WECHAT_UPDATE_INTERFACES: '1' }));
+step('HTTP API', () => run('cargo', ['test', '--locked', '--quiet', '--manifest-path', 'packages/native-client-rust/Cargo.toml',
+  '-p', 'wechat-api', '--lib', 'http_interface'], check ? {} : { AGENT_WECHAT_UPDATE_INTERFACES: '1' }));
 step('UI routes', () => run('node', ['packages/client-ui/scripts/interface-listing.mjs', ...flag]));
 step('Rust crates', () => run('node', ['scripts/interfaces/rust-crates.mjs', ...flag]));
 step('OpenClaw plugin', () => {

@@ -22,6 +22,7 @@ export function surface(file) {
   if (file === 'interfaces/openclaw/config.txt') return { kind: 'schema', title: 'OpenClaw configuration', packages: ['@agent-wechat/agent-wechat'] };
   if (file === 'interfaces/storage/account.txt') return { kind: 'sql', title: 'Account store schema', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/storage/registry.txt') return { kind: 'sql', title: 'Registry schema', packages: ['@agent-wechat/cli'] };
+  if (file === 'interfaces/http/routes.txt') return { kind: 'http', title: 'HTTP API', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/http/calls-websocket.txt') return { kind: 'ws', title: 'Calls WebSocket', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/ui/routes.txt') return { kind: 'routes', title: 'UI routes', packages: ['@agent-wechat/desktop'] };
   return { kind: 'other', title: file, packages: [] };
@@ -154,11 +155,31 @@ export function wsChanges(item, before, after) {
   return { reasons, notes };
 }
 
+/** HTTP route rows: scope and payload types are part of the contract; `untyped` payloads become typed over time. */
+export function httpRouteChanges(before, after) {
+  const old = tokens(before);
+  const now = tokens(after);
+  const reasons = [];
+  const notes = [];
+  if (value(old, 'scope') !== value(now, 'scope')) reasons.push(`token scope changed from ${value(old, 'scope')} to ${value(now, 'scope')}`);
+  for (const name of ['request', 'query', 'response']) {
+    const a = value(old, name);
+    const b = value(now, name);
+    if (a === b) continue;
+    if (a === 'untyped' && b) notes.push(`${name} is now typed as ${b}`);
+    else reasons.push(`${name} changed from ${a ?? 'none'} to ${b ?? 'none'}`);
+  }
+  if (value(old, 'sdk') !== value(now, 'sdk')) notes.push(`SDK type changed from ${value(old, 'sdk') ?? 'none'} to ${value(now, 'sdk') ?? 'none'}`);
+  return { reasons, notes };
+}
+// HTTP request fields behave like messages clients send, response fields like messages the server sends.
+const asDirection = item => item.replace(/^request /, 'client ').replace(/^response /, 'server ');
+
 const protocol = rows => [...(rows?.entries() ?? [])].filter(([item]) => item.startsWith('socket ')).map(([item, row]) => `${item}=${value(tokens(row.attributes), 'protocol')}`).sort().join(',');
 
 /** Classifies the changes between two parsed listings of one interface. */
 export function compareListing(kind, base, head) {
-  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], notes: [], docChanges: 0 };
+  const result = { added: [], removed: [], changed: [], breaking: [], missingDocs: [], gaps: [], notes: [], docChanges: 0 };
   for (const [item, row] of head) {
     const old = base?.get(item);
     if (!old) {
@@ -173,6 +194,12 @@ export function compareListing(kind, base, head) {
         const table = item.slice(0, item.indexOf('.'));
         const parts = row.attributes.split(', ');
         if (base.has(table) && parts.includes('not null') && !parts.some(t => t.startsWith('default '))) result.breaking.push({ item, reason: 'new NOT NULL column without a default on an existing table' });
+      }
+      if (base && kind === 'http' && item.startsWith('route ') && ['request', 'query', 'response'].some(name => value(tokens(row.attributes), name) === 'untyped')) {
+        result.gaps.push({ item, reason: 'new route with an untyped payload; give it a Rust request or response type' });
+      }
+      if (base && kind === 'http' && /^request [^.]+\..+/.test(item) && tokens(row.attributes).includes('required') && base.has(item.slice(0, item.lastIndexOf('.')))) {
+        result.breaking.push({ item, reason: 'new required request field' });
       }
       if (base && kind === 'ws') {
         const variant = item.match(/^(server [^[]+)\[[^\]]+\]$/);
@@ -197,8 +224,8 @@ export function compareListing(kind, base, head) {
     if (old.attributes !== row.attributes) {
       if (kind === 'crate') reasons.push('signature changed');
       else if (kind === 'sql') reasons.push(...sqlBreaks(item, old.attributes, row.attributes));
-      else if (kind === 'ws') {
-        const change = wsChanges(item, old.attributes, row.attributes);
+      else if (kind === 'ws' || kind === 'http') {
+        const change = kind === 'http' && item.startsWith('route ') ? httpRouteChanges(old.attributes, row.attributes) : wsChanges(kind === 'http' ? asDirection(item) : item, old.attributes, row.attributes);
         reasons.push(...change.reasons);
         result.notes.push(...change.notes.map(reason => ({ item, reason })));
       }
@@ -218,7 +245,10 @@ export function compareListing(kind, base, head) {
       : kind === 'sql' && item.startsWith('migration ') ? 'existing migration removed'
       : kind === 'ws' && item.startsWith('client ') ? 'removed from messages clients send: older clients that send it are rejected'
       : kind === 'ws' && item.startsWith('server ') ? 'removed from server messages: clients that read it break'
-      : kind === 'routes' ? 'route removed: saved links and notifications that use it stop working' : 'removed' });
+      : kind === 'routes' ? 'route removed: saved links and notifications that use it stop working'
+      : kind === 'http' && item.startsWith('route ') ? 'route removed: callers get 404'
+      : kind === 'http' && item.startsWith('request ') ? 'removed from requests the daemon accepts'
+      : kind === 'http' && item.startsWith('response ') ? 'removed from responses: callers that read it break' : 'removed' });
   }
   if (kind === 'ws' && base && result.breaking.length && protocol(base) === protocol(head)) {
     result.breaking.push({ item: 'protocol version', reason: 'breaking change without a call protocol version bump' });
@@ -279,6 +309,11 @@ export function overview(kind, head) {
     const count = side => items.filter(item => new RegExp(`^${side} [^[]+\\[[^\\]]+\\]$`).test(item)).length;
     return `Sockets: ${sockets.join(', ')}. ${count('client')} message types clients send, ${count('server')} the daemon sends.`;
   }
+  if (kind === 'http') {
+    const routes = items.filter(item => item.startsWith('route '));
+    const untyped = routes.filter(item => head.get(item).attributes.includes('untyped')).length;
+    return `${routes.length} routes, ${untyped} with at least one untyped payload.`;
+  }
   if (kind === 'routes') return `Routes: ${items.map(item => item.replace(/^route /, '')).join(', ')}.`;
   if (kind === 'schema') {
     const tools = items.filter(item => /^tool [^.]+$/.test(item));
@@ -299,7 +334,8 @@ export function renderComment({ reports, changesets, baseline }) {
   }
   const sum = key => changed.reduce((n, r) => n + r.result[key].length, 0);
   const breaking = changed.flatMap(r => r.result.breaking.map(b => ({ ...b, title: r.surface.title })));
-  const missing = changed.flatMap(r => r.result.missingDocs.map(item => ({ item, title: r.surface.title })));
+  const missing = changed.flatMap(r => [...r.result.missingDocs.map(item => ({ item, title: r.surface.title, reason: '' })),
+    ...(r.result.gaps ?? []).map(gap => ({ ...gap, title: r.surface.title }))]);
   if (baseline) {
     lines.push(`**Needs your approval.** This PR adds the interface listings for the first time: ${sum('added')} items across ${changed.length} files.`,
       'There is no earlier listing to compare against, so nothing can be marked breaking. Review the listing files as the new baseline.', '');
@@ -311,7 +347,7 @@ export function renderComment({ reports, changesets, baseline }) {
 
   const warnings = [];
   for (const report of changed) for (const note of report.result.notes ?? []) warnings.push(`${report.surface.title}: ${code(note.item)} — ${note.reason}`);
-  if (missing.length) warnings.push(`${missing.length} new item${missing.length === 1 ? ' has' : 's have'} no documentation. The **Interface docs** check fails until each has help text, a doc comment or a description.`);
+  if (missing.length) warnings.push(`${missing.length} new item${missing.length === 1 ? ' has' : 's have'} no documentation or no type. The **Interface docs** check fails until each has help text, a doc comment, a description or a typed payload.`);
   if (!baseline) {
     for (const report of changed) {
       for (const pkg of report.surface.packages) {
@@ -330,7 +366,7 @@ export function renderComment({ reports, changesets, baseline }) {
     lines.push('');
   }
   if (missing.length) {
-    lines.push('### Missing documentation', ...missing.slice(0, 60).map(m => `- ${m.title}: ${code(m.item)}`));
+    lines.push('### Missing documentation or types', ...missing.slice(0, 60).map(m => `- ${m.title}: ${code(m.item)}${m.reason ? ` — ${m.reason}` : ''}`));
     if (missing.length > 60) lines.push(`- …and ${missing.length - 60} more`);
     lines.push('');
   }
@@ -404,7 +440,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       console.warn(`Could not post the PR comment: ${error.message}`);
     });
   }
-  const missing = outcome.reports.flatMap(r => r.result.missingDocs);
+  const missing = outcome.reports.flatMap(r => [...r.result.missingDocs, ...(r.result.gaps ?? []).map(gap => `${gap.item} (${gap.reason})`)]);
   if (argv.includes('--fail-on-missing-docs') && missing.length) {
     console.error(`${missing.length} new interface item(s) lack documentation:\n${missing.map(item => `- ${item}`).join('\n')}`);
     process.exitCode = 1;
