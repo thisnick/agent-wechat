@@ -1,10 +1,11 @@
 //! Call control contracts. These types are local API messages, not remote wire schemas.
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub const CALL_PROTOCOL_VERSION: u32 = 2;
 
-#[derive(Serialize, Deserialize, TS)]
+#[derive(Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallClientHello {
@@ -15,14 +16,14 @@ pub enum CallClientHello {
     },
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CallProtocolErrorCode {
     UnsupportedProtocolVersion,
     InvalidProtocolVersion,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallCapabilities {
     #[serde(default, skip_serializing_if = "capability_unavailable")]
@@ -51,7 +52,7 @@ fn capability_unavailable(value: &bool) -> bool {
     !value
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallAudioFormat {
     pub sample_rate: u32,
@@ -68,7 +69,7 @@ impl Default for CallAudioFormat {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
 pub enum CallTarget {
@@ -83,7 +84,7 @@ pub enum CallTarget {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallKind {
     Direct,
@@ -91,19 +92,19 @@ pub enum CallKind {
 }
 /// Call identity, independent from membership and the currently negotiated media.
 /// A video call can continue with audio only.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallType {
     Voice,
     Video,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallDirection {
     Incoming,
     Outgoing,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallState {
     Offered,
@@ -116,7 +117,7 @@ pub enum CallState {
     Uncertain,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallOffer {
     pub call_id: String,
@@ -125,7 +126,7 @@ pub struct CallOffer {
     pub call_type: CallType,
     pub caller_id: String,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallPendingPhase {
     WaitingForReady,
@@ -133,7 +134,7 @@ pub enum CallPendingPhase {
 }
 /// Metadata for a candidate that cannot be answered until ringing preparation
 /// succeeds. It contains no room, application or account credentials.
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallPendingOffer {
     pub call_id: String,
@@ -143,7 +144,7 @@ pub struct CallPendingOffer {
     pub caller_id: String,
     pub phase: CallPendingPhase,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
 pub enum CallReadyScope {
@@ -156,7 +157,7 @@ pub enum CallReadyScope {
         expected_revision: u32,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallView {
     pub call_id: String,
@@ -178,7 +179,7 @@ pub struct CallView {
     pub controls: Vec<CallParticipantControl>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallParticipant {
     pub participant_id: String,
@@ -193,7 +194,7 @@ pub struct CallParticipant {
     pub microphone_enabled: Option<bool>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallMembership {
     Joined,
@@ -202,14 +203,14 @@ pub enum CallMembership {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallParticipantStatus {
     pub code: u32,
     pub kind: CallParticipantStatusKind,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallParticipantStatusKind {
     Undefined,
@@ -225,7 +226,7 @@ pub enum CallParticipantStatusKind {
 }
 
 /// A fresh account-bound invitation locator. It carries no room credentials.
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallConferenceInvitation {
     pub invitation_id: String,
@@ -236,25 +237,25 @@ pub struct CallConferenceInvitation {
 
 /// Application-level controls. Native protocol flags and opaque metadata stay
 /// inside the daemon; a microphone update does not renegotiate the audio format.
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
 pub enum CallControl {
     Microphone { muted: bool },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallParticipantControl {
     pub participant_id: String,
     pub control: CallControl,
 }
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallsAvailability {
     pub busy: bool,
     pub owned_by_this_client: bool,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallSnapshot {
     #[serde(default)]
@@ -269,7 +270,7 @@ pub struct CallSnapshot {
 }
 
 /// Owner tokens are capability secrets. Do not log or print complete commands.
-#[derive(Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallCommand {
@@ -378,14 +379,14 @@ impl CallCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallCommandStatus {
     Accepted,
     Replayed,
     Error,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallErrorCode {
     InvalidRequest,
@@ -402,13 +403,13 @@ pub enum CallErrorCode {
     Closed,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallTrackDirection {
     Send,
     Receive,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallAudioTrack {
     pub id: u32,
@@ -420,7 +421,7 @@ pub struct CallAudioTrack {
     pub participant_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallInvitationStatus {
     Submitted,
@@ -429,7 +430,7 @@ pub enum CallInvitationStatus {
     Uncertain,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallInvitationResult {
     pub contact_id: String,
@@ -441,7 +442,7 @@ pub struct CallInvitationResult {
 }
 
 /// Successful owner results include a secret ownerToken. Do not log whole events.
-#[derive(Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallEvent {
@@ -553,7 +554,7 @@ pub enum CallEvent {
 }
 
 /// JSON setup and base64 PCM on the separately authenticated media socket.
-#[derive(Serialize, Deserialize, TS)]
+#[derive(Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
 pub enum CallMediaCommand {
