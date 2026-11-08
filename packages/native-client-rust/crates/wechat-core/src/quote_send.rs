@@ -5,11 +5,15 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use wechat_profile::{ListQuery, Message};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Identifies the saved message that a text reply quotes. The daemon reads the original itself, so
+/// callers never supply its content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuoteSendReference {
+    /// ID of the saved message to quote, copied from `id` on the message.
     pub message_id: String,
-    // Expected unsigned server identity protects against reused local row IDs.
+    /// The quoted message's `serverId`, copied as a string. The request is refused if it does not
+    /// match the saved message.
     pub server_id: String,
 }
 impl QuoteSendReference {

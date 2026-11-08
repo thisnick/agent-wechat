@@ -3010,6 +3010,7 @@ dependencies = [
  "libc",
  "openssl",
  "rusqlite",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",

@@ -6,23 +6,34 @@ use ts_rs::TS;
 use wechat_profile::ListQuery;
 
 /// UTF-16 offsets into the submitted text, with an exclusive end.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextMentionPosition {
+    /// UTF-16 offset in the text where the mention starts, at the `@` character.
     pub start: u32,
+    /// UTF-16 offset just past the end of the mention. The mention includes its closing space
+    /// character (U+2005).
     pub end: u32,
+    /// Which `userIds` entry this mention stands for, counting from 0. Use 0 when mentioning
+    /// everyone.
     pub index: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Which group members a text message mentions. Give either `userIds` or `all: true`, not both.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextMentions {
+    /// IDs of the members to mention, at most 128 and without repeats. Leave out when `all` is
+    /// true.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<String>>", optional)]
     pub user_ids: Vec<String>,
+    /// True to mention everyone. Only the group owner and administrators can do this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[ts(as = "Option<bool>", optional)]
     pub all: bool,
+    /// Where each mention sits inside `text`, so it shows inline. Without positions the names are
+    /// placed before the text, and when given, every mentioned member needs at least one position.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<TextMentionPosition>>", optional)]
     pub positions: Vec<TextMentionPosition>,

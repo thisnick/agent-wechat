@@ -3,22 +3,34 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+/// Coordinate system of a location pin's latitude and longitude.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LocationCoordinateSystem {
+    /// Not established. Coordinates are reported as sent and never converted.
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+/// A static location pin. No map service is contacted and the coordinates are not converted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LocationCard {
+    /// Latitude in degrees, from -90 to 90.
     pub latitude: f64,
+    /// Longitude in degrees, from -180 to 180.
     pub longitude: f64,
+    /// Place name supplied with the pin. Null when there is none.
     pub name: Option<String>,
+    /// Address text supplied with the pin. Null when there is none.
     pub address: Option<String>,
+    /// Map scale value supplied with the pin, as sent. Null when there is none.
     pub scale: Option<i32>,
+    /// Map type text supplied with the pin, as sent. Null when there is none.
     pub map_type: Option<String>,
+    /// Place identifier supplied with the pin, as sent. Null when there is none.
     pub poi_id: Option<String>,
+    /// Coordinate system of the numbers. It is always `unknown`, because coordinates are reported
+    /// as sent.
     pub coordinate_system: LocationCoordinateSystem,
 }
 impl LocationCard {
