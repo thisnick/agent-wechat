@@ -51,7 +51,9 @@ export function notificationRoute(target: NotificationTarget): Route {
 export function desktopNotifications(connection: Connection, open: (route: Route) => void): () => void {
   let stopped = false;
   const take = async () => {
-    const target = await invoke<NotificationTarget | null>("notifications_take_target");
+    // Name this window's connection so a target for another connection stays pending.
+    if (!connection.desktopId) return;
+    const target = await invoke<NotificationTarget | null>("notifications_take_target", { connectionId: connection.desktopId });
     if (!target || stopped || target.connectionId !== connection.desktopId) return;
     open(notificationRoute(target));
   };
