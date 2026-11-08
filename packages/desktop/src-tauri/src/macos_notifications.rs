@@ -1,16 +1,17 @@
 //! macOS alerts through the UserNotifications framework.
 //!
-//! Alerts are grouped by chat, carry what a click or reply needs inside the
-//! notification itself (so they still work after the app restarts), and offer an
-//! inline Reply when the message can be quoted. The framework only works in the
-//! bundled app: check [`available`] before calling anything else here.
+//! Alerts are grouped by chat, carry what a click or action needs inside the
+//! notification itself (so they still work after the app restarts), and offer
+//! Mark as Read, plus an inline Reply when the message can be quoted. The
+//! framework only works in the bundled app: check [`available`] before calling
+//! anything else here.
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread};
 use objc2_foundation::{NSArray, NSBundle, NSDictionary, NSError, NSSet, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
     UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
     UNNotificationContent, UNNotificationDefaultActionIdentifier,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
@@ -23,9 +24,11 @@ use std::sync::{Mutex, Once, OnceLock};
 
 /// Identifier of the inline Reply action.
 pub const REPLY_ACTION: &str = "reply";
-/// Category of alerts without actions.
+/// Identifier of the Mark as Read action.
+pub const MARK_READ_ACTION: &str = "mark-read";
+/// Category of alerts that offer Mark as Read only.
 const CATEGORY: &str = "message";
-/// Category of alerts that offer Reply.
+/// Category of alerts that offer Reply and Mark as Read.
 const REPLY_CATEGORY: &str = "message-reply";
 /// `userInfo` key holding the alert's JSON payload.
 const PAYLOAD_KEY: &str = "agentWechat";
@@ -54,6 +57,8 @@ pub enum Action {
     Open,
     /// Sent this text with the Reply action.
     Reply(String),
+    /// Chose Mark as Read.
+    MarkRead,
     /// Anything else, such as a dismissal.
     Other,
 }
@@ -199,6 +204,7 @@ fn action(identifier: &str, default: &str, text: Option<String>) -> Action {
     match (identifier, text) {
         (id, _) if id == default => Action::Open,
         (REPLY_ACTION, Some(text)) => Action::Reply(text),
+        (MARK_READ_ACTION, _) => Action::MarkRead,
         _ => Action::Other,
     }
 }
@@ -212,15 +218,23 @@ fn categories() -> Retained<NSSet<UNNotificationCategory>> {
         &NSString::from_str("Send"),
         &NSString::from_str("Message"),
     );
+    // Without the foreground option, an action is handled without bringing the app forward.
+    let mark_read = || {
+        UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(MARK_READ_ACTION),
+            &NSString::from_str("Mark as Read"),
+            UNNotificationActionOptions::empty(),
+        )
+    };
     let plain = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
         &NSString::from_str(CATEGORY),
-        &NSArray::new(),
+        &NSArray::from_retained_slice(&[mark_read()]),
         &none,
         UNNotificationCategoryOptions::empty(),
     );
     let replying = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
         &NSString::from_str(REPLY_CATEGORY),
-        &NSArray::from_retained_slice(&[reply.into_super()]),
+        &NSArray::from_retained_slice(&[reply.into_super(), mark_read()]),
         &none,
         UNNotificationCategoryOptions::empty(),
     );
@@ -299,18 +313,21 @@ impl Delegate {
 
 #[cfg(test)]
 mod tests {
-    use super::{action, category, Action, CATEGORY, REPLY_ACTION, REPLY_CATEGORY};
+    use super::{
+        action, category, Action, CATEGORY, MARK_READ_ACTION, REPLY_ACTION, REPLY_CATEGORY,
+    };
 
     const DEFAULT: &str = "com.apple.UNNotificationDefaultActionIdentifier";
 
     #[test]
-    fn a_click_opens_and_only_reply_text_replies() {
+    fn clicks_open_reply_text_replies_and_mark_read_marks_read() {
         assert_eq!(action(DEFAULT, DEFAULT, None), Action::Open);
         assert_eq!(
             action(REPLY_ACTION, DEFAULT, Some("On my way".into())),
             Action::Reply("On my way".into())
         );
         assert_eq!(action(REPLY_ACTION, DEFAULT, None), Action::Other);
+        assert_eq!(action(MARK_READ_ACTION, DEFAULT, None), Action::MarkRead);
         assert_eq!(
             action(
                 "com.apple.UNNotificationDismissActionIdentifier",
