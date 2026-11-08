@@ -201,6 +201,8 @@ jobs:
       - name: Install verified media helpers for simulator sends
         if: inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)
         run: node scripts/native-ci-media-runtime.mjs "$RUNNER_TEMP/native-simulator-media"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Verify the simulator and real hub on this native platform
         if: inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)
         env:

@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { downloadVerified } from "./media-download.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const args = process.argv.slice(2);
 const argument = (name, fallback) =>
@@ -69,14 +70,7 @@ for (const asset of assets.filter(
       bytes = existing;
   } catch {}
   if (!bytes) {
-    const response = await fetch(asset.url, {
-      signal: AbortSignal.timeout(300000),
-    });
-    if (!response.ok)
-      throw new Error(`Cannot download ${asset.name}: HTTP ${response.status}`);
-    bytes = Buffer.from(await response.arrayBuffer());
-    if (createHash("sha256").update(bytes).digest("hex") !== asset.sha256)
-      throw new Error(`Integrity check failed for ${asset.name}`);
+    bytes = await downloadVerified(asset);
     await writeFile(destination, bytes);
   }
   if (binaryName) await chmod(destination, 0o755);

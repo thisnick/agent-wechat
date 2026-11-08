@@ -106,6 +106,8 @@ jobs:
         shell: pwsh
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
       - run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Build desktop executable
         if: runner.os != 'Windows'
         run: pnpm --filter @agent-wechat/desktop app:build --target ${{ matrix.target }} --no-bundle
