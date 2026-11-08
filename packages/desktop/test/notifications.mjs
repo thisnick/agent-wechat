@@ -278,11 +278,15 @@ export async function notificationsAcceptance(invoke, evaluate) {
     // The UI takes the clicked target itself and opens its conversation by route. If the
     // UI isn't listening yet, the target stays pending and is taken here instead.
     const conversation = `#/${encodeURIComponent(serverId)}/${encodeURIComponent(account)}/chats/${encodeURIComponent(thread)}`;
+    let seen = "";
     const opened = await wait(async () => {
       const hash = evaluate ? await evaluate("return location.hash") : "";
+      seen = `hash ${JSON.stringify(hash)}; page ${JSON.stringify(evaluate ? String(await evaluate("return document.body ? document.body.innerText.slice(0, 300) : ''")) : "")}`;
       if (typeof hash === "string" && hash.startsWith(conversation)) return { hash };
       const target = await invoke("notifications_take_target");
       return target ? { target } : null;
+    }).catch((error) => {
+      throw new Error(`${error.message}: expected ${conversation}, last saw ${seen}`);
     });
     if (opened.target) {
       assert.deepEqual(opened.target, {
