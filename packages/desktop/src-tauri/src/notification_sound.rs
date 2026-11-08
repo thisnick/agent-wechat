@@ -7,6 +7,9 @@ use tauri_plugin_notification::NotificationExt;
 
 #[cfg(target_os = "macos")]
 const SOUND_NAME: &str = "AgentWechatSoftPair";
+/// The bundled sound's file name, as the UserNotifications framework looks it up.
+#[cfg(target_os = "macos")]
+const SOUND_FILE: &str = "AgentWechatSoftPair.wav";
 #[cfg(windows)]
 const SOUND_NAME: &str = "Default";
 
@@ -17,6 +20,7 @@ pub async fn show(
     subtitle: Option<&str>,
     body: &str,
     target: Option<Target>,
+    _server_id: Option<String>,
     sound: bool,
 ) -> Result<()> {
     if let Some(subtitle) = subtitle {
@@ -90,7 +94,46 @@ fn show_group(
     Ok(())
 }
 
-/// Shows the alert and opens `target` when it is clicked, including a click on it
+/// Shows the alert and opens `target` when it is clicked.
+///
+/// The bundled app posts through the UserNotifications framework: alerts are grouped
+/// by chat, a click works even after the app restarted, and a quotable message offers
+/// an inline Reply (see `macos_notifications`). Without a bundle, such as under
+/// `tauri dev`, it falls back to `mac-notification-sys`.
+#[cfg(target_os = "macos")]
+pub async fn show(
+    app: &tauri::AppHandle,
+    title: &str,
+    subtitle: Option<&str>,
+    body: &str,
+    target: Option<Target>,
+    server_id: Option<String>,
+    sound: bool,
+) -> Result<()> {
+    if let Some(target) = target
+        .as_ref()
+        .filter(|_| crate::macos_notifications::available())
+    {
+        let payload = crate::notifications::Payload {
+            target: target.clone(),
+            server_id,
+        };
+        crate::macos_notifications::post(&crate::macos_notifications::Alert {
+            request_id: &target.request_id(),
+            thread_key: &target.thread_key(),
+            title,
+            subtitle,
+            body,
+            sound: sound.then_some(SOUND_FILE),
+            payload: &serde_json::to_string(&payload)?,
+            reply: payload.quotable(),
+        });
+        return Ok(());
+    }
+    show_fallback(app, title, subtitle, body, target, sound)
+}
+
+/// Shows the alert outside a bundle and opens `target` on a click, including one
 /// later in Notification Center.
 ///
 /// `notify-rust`'s macOS `wait_for_response`, which the Tauri notification plugin
@@ -99,7 +142,7 @@ fn show_group(
 /// instead: `send` blocks on a thread of its own until the alert is clicked or
 /// dismissed, while the delegate callbacks arrive on Tauri's main run loop.
 #[cfg(target_os = "macos")]
-pub async fn show(
+fn show_fallback(
     app: &tauri::AppHandle,
     title: &str,
     subtitle: Option<&str>,
@@ -196,6 +239,7 @@ pub async fn show(
     subtitle: Option<&str>,
     body: &str,
     target: Option<Target>,
+    _server_id: Option<String>,
     sound: bool,
 ) -> Result<()> {
     use tauri::Manager;
