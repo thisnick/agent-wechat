@@ -98,7 +98,32 @@ jobs:
           node-version-file: .node-version
       - name: Test the review tool
         run: node --test scripts/interfaces/review.test.mjs
+      - name: Check OpenAPI compatibility with oasdiff
+        id: oasdiff
+        run: |
+          base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          if [ ! -f interfaces/http/openapi.json ] || ! git cat-file -e "$base:interfaces/http/openapi.json" 2>/dev/null; then
+            echo "No earlier OpenAPI document to compare."
+            exit 0
+          fi
+          git show "$base:interfaces/http/openapi.json" > "$RUNNER_TEMP/openapi-base.json"
+          version=1.36.0
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oasdiff.tar.gz" "https://github.com/oasdiff/oasdiff/releases/download/v${version}/oasdiff_${version}_linux_amd64.tar.gz"
+          echo "dba65661f6d0f178a3e4884c309f19527a849388bb9df0e81545db76dbb697d6  $RUNNER_TEMP/oasdiff.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/oasdiff.tar.gz" -C "$RUNNER_TEMP" oasdiff
+          set +e
+          "$RUNNER_TEMP/oasdiff" breaking "$RUNNER_TEMP/openapi-base.json" interfaces/http/openapi.json --format markdown --fail-on ERR > "$RUNNER_TEMP/oasdiff.md"
+          status=$?
+          set -e
+          # A failure with no report is a tool error, not a breaking change.
+          if [ "$status" -ne 0 ] && [ ! -s "$RUNNER_TEMP/oasdiff.md" ]; then exit "$status"; fi
+          echo "report=$RUNNER_TEMP/oasdiff.md" >> "$GITHUB_OUTPUT"
+          echo "breaking=$([ "$status" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Compare listings, update the PR comment and check documentation
-        run: node scripts/interfaces/review.mjs --base "origin/${{ github.base_ref }}" --comment --fail-on-missing-docs
+        run: |
+          args=(--base "origin/${{ github.base_ref }}" --comment --fail-on-missing-docs)
+          if [ -n "${{ steps.oasdiff.outputs.report }}" ]; then args+=(--oasdiff "${{ steps.oasdiff.outputs.report }}"); fi
+          if [ "${{ steps.oasdiff.outputs.breaking }}" = true ]; then args+=(--oasdiff-breaking); fi
+          node scripts/interfaces/review.mjs "${args[@]}"
         env:
           GITHUB_TOKEN: ${{ github.token }}

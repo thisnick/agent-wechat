@@ -325,7 +325,7 @@ export function overview(kind, head) {
 }
 
 /** Renders the PR comment for a set of per-file comparisons. */
-export function renderComment({ reports, changesets, baseline }) {
+export function renderComment({ reports, changesets, baseline, openapi }) {
   const changed = reports.filter(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);
   const lines = [MARKER, '## Interface changes', ''];
   if (!changed.length) {
@@ -334,6 +334,12 @@ export function renderComment({ reports, changesets, baseline }) {
   }
   const sum = key => changed.reduce((n, r) => n + r.result[key].length, 0);
   const breaking = changed.flatMap(r => r.result.breaking.map(b => ({ ...b, title: r.surface.title })));
+  // oasdiff is the standard OpenAPI compatibility check; its findings count as breaking changes of the HTTP API.
+  if (openapi?.breaking) {
+    breaking.push({ item: 'openapi.json', reason: 'oasdiff reports breaking changes (see OpenAPI compatibility)', title: 'HTTP API' });
+    const http = changed.find(r => r.surface.kind === 'http');
+    if (http && !http.result.breaking.length) http.result.breaking.push({ item: 'openapi.json', reason: 'oasdiff' });
+  }
   const missing = changed.flatMap(r => [...r.result.missingDocs.map(item => ({ item, title: r.surface.title, reason: '' })),
     ...(r.result.gaps ?? []).map(gap => ({ ...gap, title: r.surface.title }))]);
   if (baseline) {
@@ -369,6 +375,9 @@ export function renderComment({ reports, changesets, baseline }) {
     lines.push('### Missing documentation or types', ...missing.slice(0, 60).map(m => `- ${m.title}: ${code(m.item)}${m.reason ? ` — ${m.reason}` : ''}`));
     if (missing.length > 60) lines.push(`- …and ${missing.length - 60} more`);
     lines.push('');
+  }
+  if (openapi?.report?.trim()) {
+    lines.push('### OpenAPI compatibility (oasdiff)', openapi.breaking ? 'oasdiff found breaking changes in `interfaces/http/openapi.json`:' : 'oasdiff found no breaking changes in `interfaces/http/openapi.json`.', '', openapi.report.trim(), '');
   }
   for (const report of changed) {
     const { result, surface: s, file, head, base } = report;
@@ -430,7 +439,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const baseRef = argv[argv.indexOf('--base') + 1];
   if (!argv.includes('--base') || !baseRef) throw new Error('Usage: review.mjs --base <ref> [--comment] [--fail-on-missing-docs]');
   const outcome = await review(baseRef);
-  const body = renderComment(outcome);
+  const reportFile = argv.includes('--oasdiff') ? argv[argv.indexOf('--oasdiff') + 1] : undefined;
+  const openapi = reportFile ? { report: await readFile(reportFile, 'utf8').catch(() => ''), breaking: argv.includes('--oasdiff-breaking') } : undefined;
+  const body = renderComment({ ...outcome, openapi });
   console.log(body);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${body}\n`);
   const changed = outcome.reports.some(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);

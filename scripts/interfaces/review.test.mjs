@@ -300,3 +300,14 @@ test('HTTP rules cover routes, scopes, payload types and new untyped routes', ()
     reports: [{ file, surface: surface(file), base: listing(before), head: listing(['route GET /v1/x | scope read, response untyped | X', ...before]), baseline: false, result: compareListing('http', listing(before), listing(['route GET /v1/x | scope read, response untyped | X', ...before])) }] });
   assert.match(body, /### Missing documentation or types\n- HTTP API: `route GET \/v1\/x` — new route with an untyped payload/);
 });
+
+test('an oasdiff report adds an OpenAPI section and counts as a breaking HTTP change', () => {
+  const file = 'interfaces/http/routes.txt';
+  const rows = listing(['route GET /v1/x | scope read, response Thing | X']);
+  const report = { file, surface: surface(file), base: rows, head: listing(['route GET /v1/x | scope read, response Thing | Get X']), baseline: false, result: compareListing('http', rows, listing(['route GET /v1/x | scope read, response Thing | Get X'])) };
+  const body = renderComment({ baseline: false, changesets: new Map([['@agent-wechat/cli', 'minor']]), reports: [report],
+    openapi: { report: '| Level | Change |\n| --- | --- |\n| error | the response property `id` became optional |', breaking: true } });
+  assert.match(body, /### OpenAPI compatibility \(oasdiff\)\noasdiff found breaking changes/);
+  assert.match(body, /the response property `id` became optional/);
+  assert.match(body, /HTTP API has a breaking change but its changeset is `minor`/);
+});
