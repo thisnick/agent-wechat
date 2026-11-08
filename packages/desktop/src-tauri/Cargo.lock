@@ -27,6 +27,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "keyring",
+ "mac-notification-sys",
  "notify-rust",
  "rand 0.8.8",
  "rcgen",
